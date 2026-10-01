@@ -151,7 +151,11 @@ func checkNil(_ label: String, _ got: String?) {
 }
 
 checkNil("live, same session → nothing", aged(d("2026-08-14 15:59")))
-checkNil("later the same session → still nothing", aged(d("2026-08-14 16:38")))
+// 40 minutes old is inside the 45-minute grace that keeps a self-refreshing Market tile
+// (20-minute cadence) quiet. Past it, the instant is printed — the intraday case below.
+checkNil("40 min later, inside the grace → still nothing", aged(d("2026-08-14 16:38")))
+check("46 min later → the instant, not silence",
+      aged(d("2026-08-14 16:44")) ?? "<nil>", "As of 3:58 PM ET")
 checkNil("that evening, after the close → still today's numbers",
          aged(d("2026-08-14 21:00"), phase: "closed", server: "Fri close"))
 check("read on Saturday → speaks up", aged(d("2026-08-15 11:00")) ?? "<nil>", "Fri close")
@@ -167,9 +171,250 @@ check("old backend, closed → still warns",
 checkNil("old backend, regular → nothing to say",
          aged(d("2026-08-16 11:00"), sessionDate: nil, phase: "regular", server: nil))
 
+// THE INTRADAY HOLDINGS SNAPSHOT. Holdings cannot refresh itself; the app writes it on
+// foreground only. Opened once at 10:05 on Tuesday and not again, the tile used to show the
+// 10:05 numbers with NO footer all day, then call them "Tue close" on Wednesday — an
+// intraday −1.2% presented as a close that was really −2.7%.
+print("— an intraday snapshot says WHEN, and is never called the close —")
+let morning = d("2026-08-11 10:05")          // a Tuesday, regular session
+func agedMorning(_ now: Date, sessionDate: String = "2026-08-11",
+                 phase: String = "regular") -> String? {
+    WidgetSessionLabel.agedLabel(
+        asOf: morning, sessionDate: sessionDate, marketSession: phase,
+        sessionLabel: "Live 10:05 AM ET", now: now
+    )
+}
+checkNil("15 min later → still current, nothing to say", agedMorning(d("2026-08-11 10:20")))
+check("at 15:55 the same day → the instant",
+      agedMorning(d("2026-08-11 15:55")) ?? "<nil>", "As of 10:05 AM ET")
+check("Wednesday pre-market → the day AND the time, not 'Tue close'",
+      agedMorning(d("2026-08-12 06:50")) ?? "<nil>", "Tue 10:05 AM ET")
+check("Saturday → still names the time",
+      agedMorning(d("2026-08-15 11:00")) ?? "<nil>", "Tue 10:05 AM ET")
+check("a week later → the refresh ask is unchanged",
+      agedMorning(d("2026-08-18 11:00")) ?? "<nil>", "Aug 11 — open Caydex")
+check("displayLabel agrees with agedLabel",
+      WidgetSessionLabel.displayLabel(asOf: morning, sessionDate: "2026-08-11",
+        marketSession: "regular", sessionLabel: "Live 10:05 AM ET",
+        now: d("2026-08-12 06:50")), "Tue 10:05 AM ET")
+// A 09:31 build whose quotes are all still stamped with MONDAY'S session: regular phase,
+// but the numbers ARE Monday's close. Pairing Monday with 9:31 would be a wrong claim.
+check("a regular build stamped with the previous session keeps '<Day> close'",
+      WidgetSessionLabel.agedLabel(asOf: d("2026-08-11 09:31"), sessionDate: "2026-08-10",
+        marketSession: "regular", sessionLabel: "Mon close", now: d("2026-08-11 15:00")) ?? "<nil>",
+      "Mon close")
+check("an after-hours build keeps '<Day> close'",
+      WidgetSessionLabel.agedLabel(asOf: d("2026-08-11 17:02"), sessionDate: "2026-08-11",
+        marketSession: "afterhours", sessionLabel: "After hours 5:02 PM ET",
+        now: d("2026-08-12 06:50")) ?? "<nil>",
+      "Tue close")
+check("a build at 15:58 is the close for every practical purpose",
+      aged(d("2026-08-15 11:00")) ?? "<nil>", "Fri close")
+// A half-day leaves "regular" at 13:00, so a 12:30 build there is honestly intraday.
+check("half-day 12:30 build → the time",
+      WidgetSessionLabel.agedLabel(asOf: d("2026-11-27 12:30"), sessionDate: "2026-11-27",
+        marketSession: "regular", sessionLabel: "Live 12:30 PM ET",
+        now: d("2026-11-28 11:00")) ?? "<nil>",
+      "Fri 12:30 PM ET")
+checkNil("a pre-market snapshot is not aged within its own day",
+         WidgetSessionLabel.agedLabel(asOf: d("2026-08-11 07:31"), sessionDate: "2026-08-11",
+           marketSession: "premarket", sessionLabel: "Pre-market 7:31 AM ET",
+           now: d("2026-08-11 09:00")))
+
+// `isPriorSession` decides whether the cause may still say "today" — a different question
+// from whether the footer speaks (it also speaks for a same-day stale intraday reading).
+print("— isPriorSession —")
+func yes(_ b: Bool) -> String { b ? "true" : "false" }
+check("same day → false",
+      yes(WidgetSessionLabel.isPriorSession(sessionDate: "2026-08-11", now: d("2026-08-11 23:59"))), "false")
+check("next ET day → true",
+      yes(WidgetSessionLabel.isPriorSession(sessionDate: "2026-08-11", now: d("2026-08-12 00:01"))), "true")
+check("no session date (old backend) → false",
+      yes(WidgetSessionLabel.isPriorSession(sessionDate: nil, now: d("2026-08-12 00:01"))), "false")
+check("malformed → false",
+      yes(WidgetSessionLabel.isPriorSession(sessionDate: "garbage", now: d("2026-08-12 00:01"))), "false")
+
+func expect(_ label: String, _ condition: Bool, _ detail: String = "") {
+    if !condition { failures += 1 }
+    print("\(condition ? "  ok" : "FAIL")  \(label)")
+    if !condition && !detail.isEmpty { print("        \(detail)") }
+}
+
+// A PRE-MARKET build dated TODAY: crypto-only Holdings, or a batch with no session stamps (an
+// equity pre-market build is dated the PRIOR session by the backend). Holdings cannot refresh
+// itself, so the 08:30 reading used to sit there unlabelled all day, and the next morning was
+// called "Tue close" — numbers that were never the close.
+print("— a pre-market build dated today ages at the bell, and is never called the close —")
+let pre = d("2026-08-11 08:30")                 // a Tuesday
+func agedPre(_ now: Date) -> String? {
+    WidgetSessionLabel.agedLabel(
+        asOf: pre, sessionDate: "2026-08-11", marketSession: "premarket",
+        sessionLabel: "Pre-market 8:30 AM ET", now: now
+    )
+}
+checkNil("09:29, before the bell → still the latest reading", agedPre(d("2026-08-11 09:29")))
+check("09:30, the bell → the instant", agedPre(d("2026-08-11 09:30")) ?? "<nil>", "As of 8:30 AM ET")
+check("15:00 the same day → the instant, not silence",
+      agedPre(d("2026-08-11 15:00")) ?? "<nil>", "As of 8:30 AM ET")
+check("07:00 the next day → the day AND the time, not 'Tue close'",
+      agedPre(d("2026-08-12 07:00")) ?? "<nil>", "Tue 8:30 AM ET")
+check("an equity pre-market build dated the PRIOR session keeps '<Day> close'",
+      WidgetSessionLabel.agedLabel(asOf: d("2026-08-12 08:30"), sessionDate: "2026-08-11",
+        marketSession: "premarket", sessionLabel: "Tue close", now: d("2026-08-12 15:00")) ?? "<nil>",
+      "Tue close")
+
+// THE LOCK SCREEN'S INLINE LINE. It sheds clauses until one fits, and used to shed the AGE
+// first — a bare "AAPL +2.10%" from last Tuesday. `compactAgedLabel` is the same claim, short
+// enough to keep: the decision is shared with `agedLabel`, only the wording differs.
+print("— compactAgedLabel: the same claim, shorter —")
+func compact(_ asOfS: String, _ sessionDate: String?, _ phase: String, _ nowS: String) -> String {
+    WidgetSessionLabel.compactAgedLabel(
+        asOf: d(asOfS), sessionDate: sessionDate, marketSession: phase, now: d(nowS)
+    ) ?? "<nil>"
+}
+check("live → nothing, like agedLabel",
+      compact("2026-08-14 15:58", "2026-08-14", "regular", "2026-08-14 15:59"), "<nil>")
+check("exactly 45 min → still nothing (the rule is strictly past it)",
+      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:50"), "<nil>")
+check("46 min → the instant, no ET",
+      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:51"), "As of 10:05")
+check("next morning, intraday build → the day and the time",
+      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue 10:05")
+check("a 15:54 build is still intraday",
+      compact("2026-08-11 15:54", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue 3:54")
+check("a 15:55 build is the close",
+      compact("2026-08-11 15:55", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue close")
+check("after-hours build → the close",
+      compact("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-12 06:50"), "Tue close")
+check("five days on → still a weekday",
+      compact("2026-08-14 15:58", "2026-08-14", "regular", "2026-08-19 11:00"), "Fri close")
+check("six days on → the date, without '— open Caydex'",
+      compact("2026-08-14 15:58", "2026-08-14", "regular", "2026-08-20 11:00"), "Aug 14")
+check("…where the full label still asks for a refresh",
+      WidgetSessionLabel.agedLabel(asOf: d("2026-08-14 15:58"), sessionDate: "2026-08-14",
+        marketSession: "regular", sessionLabel: nil, now: d("2026-08-20 11:00")) ?? "<nil>",
+      "Aug 14 — open Caydex")
+// 2026-11-01 is the DST change: the ET wall-clock time of the build must survive it.
+check("across the DST change → the build's ET time",
+      compact("2026-10-30 10:05", "2026-10-30", "regular", "2026-11-02 07:00"), "Fri 10:05")
+check("…and the full label agrees",
+      WidgetSessionLabel.agedLabel(asOf: d("2026-10-30 10:05"), sessionDate: "2026-10-30",
+        marketSession: "regular", sessionLabel: nil, now: d("2026-11-02 07:00")) ?? "<nil>",
+      "Fri 10:05 AM ET")
+check("pre-market build after the bell → the instant",
+      compact("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 15:00"), "As of 8:30")
+check("old backend, closed → the legacy wording, unchanged",
+      compact("2026-08-14 21:00", nil, "closed", "2026-08-16 11:00"), "At the close")
+
+// THE PROPERTY THE INLINE LINE RELIES ON: whenever the full label speaks, the compact one
+// does too (and is no longer). Otherwise the line could fall back to a bare number.
+var disagreement: String? = nil
+let compactFixtures: [(String, String?, String)] = [
+    ("2026-08-11 10:05", "2026-08-11", "regular"),
+    ("2026-08-11 15:58", "2026-08-11", "regular"),
+    ("2026-08-11 08:30", "2026-08-11", "premarket"),
+    ("2026-08-12 08:30", "2026-08-11", "premarket"),
+    ("2026-08-11 17:02", "2026-08-11", "afterhours"),
+    ("2026-08-11 21:00", "2026-08-11", "closed"),
+    ("2026-08-11 10:05", nil, "regular"),
+    ("2026-08-11 21:00", nil, "closed"),
+]
+for (asOfS, sessionDate, phase) in compactFixtures {
+    let built = d(asOfS)
+    var probe = built
+    for _ in 0..<(8 * 24 * 60 / 13) {           // every 13 minutes for eight days
+        let full = WidgetSessionLabel.agedLabel(
+            asOf: built, sessionDate: sessionDate, marketSession: phase, sessionLabel: nil, now: probe
+        )
+        let short = WidgetSessionLabel.compactAgedLabel(
+            asOf: built, sessionDate: sessionDate, marketSession: phase, now: probe
+        )
+        if (full == nil) != (short == nil) {
+            disagreement = "\(asOfS) \(phase) at \(probe): full=\(full ?? "nil") compact=\(short ?? "nil")"
+            break
+        }
+        if let full, let short, short.count > full.count {
+            disagreement = "compact is longer than full at \(probe): \(short) vs \(full)"
+            break
+        }
+        probe = probe.addingTimeInterval(13 * 60)
+    }
+    if disagreement != nil { break }
+}
+expect("compact speaks exactly when the full label does, and is never longer",
+       disagreement == nil, disagreement ?? "")
+
+// A ROUND-THE-CLOCK headline's cause ages by the ET day it was BUILT. The payload's
+// session_date is the equity session: a Saturday build is stamped Friday.
+print("— isPriorETDay —")
+check("Saturday build, read Saturday evening → false",
+      yes(WidgetSessionLabel.isPriorETDay(asOf: d("2026-08-15 11:00"), now: d("2026-08-15 20:00"))), "false")
+check("…where the session date already says 'prior' (why the helper exists)",
+      yes(WidgetSessionLabel.isPriorSession(sessionDate: "2026-08-14", now: d("2026-08-15 20:00"))), "true")
+check("Saturday build, read Sunday 00:01 ET → true",
+      yes(WidgetSessionLabel.isPriorETDay(asOf: d("2026-08-15 11:00"), now: d("2026-08-16 00:01"))), "true")
+check("23:59 ET build, read at ET midnight → true",
+      yes(WidgetSessionLabel.isPriorETDay(asOf: d("2026-08-15 23:59"), now: d("2026-08-16 00:00"))), "true")
+check("a build stamped after now (clock skew) → false",
+      yes(WidgetSessionLabel.isPriorETDay(asOf: d("2026-08-16 10:00"), now: d("2026-08-15 10:00"))), "false")
+
+// THE RENDER THAT TURNS THE LABEL ON. During regular hours the timeline holds one entry
+// before its 20-minute reload, so without this the "As of" line appeared only at a reload
+// built 45+ minutes after the snapshot — late, and indefinitely late if WidgetKit deferred.
+print("— ageBoundary —")
+func showSeconds(_ date: Date?) -> String {
+    guard let date else { return "<nil>" }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = et
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return f.string(from: date)
+}
+func boundary(_ asOfS: String, _ sessionDate: String?, _ phase: String, _ nowS: String) -> String {
+    showSeconds(WidgetSessionLabel.ageBoundary(
+        asOf: d(asOfS), sessionDate: sessionDate, marketSession: phase, now: d(nowS)
+    ))
+}
+check("regular 10:05, now 10:25 → one second past 45 minutes",
+      boundary("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:25"), "2026-08-11 10:50:01")
+check("already past it → nil (the label is already on)",
+      boundary("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:55"), "<nil>")
+check("pre-market 08:30, now 08:40 → the bell",
+      boundary("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 08:40"), "2026-08-11 09:30:00")
+check("pre-market, now past the bell → nil",
+      boundary("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 09:31"), "<nil>")
+check("after-hours → nil (nothing changes wording within the day)",
+      boundary("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 17:10"), "<nil>")
+check("closed → nil",
+      boundary("2026-08-11 21:00", "2026-08-11", "closed", "2026-08-11 21:05"), "<nil>")
+check("a previous session → nil (already aged)",
+      boundary("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-12 06:50"), "<nil>")
+check("old backend → nil",
+      boundary("2026-08-11 10:05", nil, "regular", "2026-08-11 10:25"), "<nil>")
+for (asOfS, phase, nowS) in [("2026-08-11 10:05", "regular", "2026-08-11 10:25"),
+                             ("2026-08-11 08:30", "premarket", "2026-08-11 08:40")] {
+    guard let b = WidgetSessionLabel.ageBoundary(
+        asOf: d(asOfS), sessionDate: "2026-08-11", marketSession: phase, now: d(nowS)
+    ) else {
+        expect("\(phase): a boundary exists", false, "ageBoundary returned nil")
+        continue
+    }
+    let at = WidgetSessionLabel.agedLabel(asOf: d(asOfS), sessionDate: "2026-08-11",
+                                          marketSession: phase, sessionLabel: nil, now: b)
+    let before = WidgetSessionLabel.agedLabel(asOf: d(asOfS), sessionDate: "2026-08-11",
+                                              marketSession: phase, sessionLabel: nil,
+                                              now: b.addingTimeInterval(-1))
+    expect("\(phase): silent one second before the boundary, speaking at it",
+           at != nil && before == nil, "at=\(at ?? "nil") before=\(before ?? "nil")")
+}
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
 SWIFT
 
 swiftc -O -o "$WORK/harness" "$WORK/main.swift" "$SRC"
-"$WORK/harness"
+# Every assertion is in ET and must hold whatever zone the DEVICE is in. `set -e` stops at
+# the first zone that fails.
+for tz in America/New_York Asia/Ho_Chi_Minh Europe/Berlin America/Los_Angeles; do
+    echo "── device time zone: $tz"
+    TZ="$tz" "$WORK/harness"
+done

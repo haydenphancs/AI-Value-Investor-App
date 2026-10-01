@@ -325,9 +325,11 @@ async def test_a_band_only_holdings_group_still_gets_a_tile(monkeypatch):
 
     A holdings group that is entirely SPY/ONEQ/DIA produced `rows=[]` → `ranked=[]` →
     `headline_mover=None`, and every iOS widget family renders `EmptyStateView` for that.
-    The endpoint's market-mode fallback does not catch it: that fires on an empty TICKER
+    Nothing upstream catches it: the endpoint's empty-group branch fires on an empty TICKER
     LIST, and this list is not empty. A self-referential headline is a smaller wrong than
     a blank Home Screen tile, so the exclusion yields when it is the only thing left.
+    (Portfolio mode no longer excludes the band at all — `exclude_band=False` — so this is
+    the market-mode / one-symbol default's guarantee.)
     """
     quotes = {
         "SPY": {"symbol": "SPY", "name": "S&P 500 ETF", "price": 651.0,
@@ -393,3 +395,44 @@ def test_the_attribution_path_spends_the_session_word_it_derived():
         "the word is still being thrown away into a throwaway name"
     )
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other", ["fund", "delisted"])
+async def test_spy_beside_an_unrankable_holding_is_not_an_empty_tile(monkeypatch, other):
+    """The band-only exclusion used to be decided on the REQUESTED symbols. {SPY, VFIAX}
+    kept the band excluded (VFIAX is not band), then VFIAX itself was refused as a fund —
+    and the ranking was empty: the iOS empty state, for a group with a perfectly readable
+    SPY. Same for {SPY, a delisted name} with no quote row at all. The decision is now made
+    on the RANKED output."""
+    quotes = {
+        "SPY": {"symbol": "SPY", "name": "S&P 500 ETF", "price": 651.0,
+                "changePercentage": -1.6, "previousClose": 661.6, "marketCap": 6.0e11,
+                "isFund": False, "isEtf": True},
+    }
+    if other == "fund":
+        quotes["VFIAX"] = {"symbol": "VFIAX", "name": "Vanguard 500 Admiral", "price": 600.0,
+                           "changePercentage": -1.5, "isFund": True, "isEtf": False}
+    held = ["SPY", "VFIAX" if other == "fund" else "DEADCO"]
+    svc = wm.WidgetMoversService.__new__(wm.WidgetMoversService)
+
+    async def _quotes(symbols):
+        return {s: quotes[s] for s in symbols if s in quotes}
+
+    class _Vol:
+        async def get_sigmas_bulk(self, symbols):
+            return {s: 0.008 for s in symbols}
+
+    class _News:
+        async def get_cards(self, tickers):
+            return {}
+
+    monkeypatch.setattr(svc, "_quotes", _quotes)
+    monkeypatch.setattr(wm, "get_volatility_cache_service", lambda: _Vol())
+    monkeypatch.setattr(wm, "get_news_insight_service", lambda: _News())
+
+    ranked, _cards, _ok, index_rows = await svc._rank_and_read(held)
+    assert [m.ticker for m in ranked] == ["SPY"], (
+        f"{held} rendered the empty state although SPY was readable"
+    )
+    assert "SPY" in index_rows

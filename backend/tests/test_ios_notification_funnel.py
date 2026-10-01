@@ -145,7 +145,7 @@ def test_a_stranded_token_is_retried_on_a_healed_session_not_only_a_cold_launch(
     identical problem one line above; the push token had none.
     """
     src = _read(_APP_STATE)
-    body = _balanced(src, "private func onAuthenticated(userId: String? = nil) async {")
+    body = _balanced(src, "private func onAuthenticated(userId: String? = nil, identity: Int) async {")
     healed = body.index("resumeSyncIfNeeded")
     ret = body.index("return", healed)
     assert "flushPendingToken" in body[healed:ret], (

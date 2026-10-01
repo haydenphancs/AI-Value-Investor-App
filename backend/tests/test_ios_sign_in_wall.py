@@ -182,13 +182,24 @@ def test_the_widget_snapshot_is_wiped_when_a_session_ends():
     # source is what closes the loop: the assertion above is a name, this is the behaviour.
     store = _strip_comments(_read(_WIDGET_STORE))
     clear_all = _decl_block(store, "static func clearAll()")
-    assert "removeObject(forKey: WidgetSharedConfig.snapshotKey)" in clear_all, (
-        "clearAll no longer removes the whole envelope"
+    # Since 2026-09-30 each mode has its own key (v2) and the legacy v1 envelope may still be
+    # on disk until the app migrates it. clearAll must take ALL of them: missing the market
+    # key alone puts FMP prices back on a signed-out Home Screen.
+    for key in ("snapshotKey", "snapshotKeyV2Market", "snapshotKeyV2Portfolio"):
+        assert f"removeObject(forKey: WidgetSharedConfig.{key})" in clear_all, (
+            f"clearAll no longer removes WidgetSharedConfig.{key}"
+        )
+    plain_clear = _decl_block(store, "static func clearPortfolio()")
+    assert "removeObject(forKey: WidgetSharedConfig.snapshotKeyV2Portfolio)" in plain_clear, (
+        "`clearPortfolio()` changed shape — re-check that `clearForEndedSession` still needs "
+        "clearAll; this test's whole premise is that the two differ"
     )
-    plain_clear = _decl_block(store, "static func clear()")
-    assert "envelope.portfolio = nil" in plain_clear, (
-        "`clear()` changed shape — re-check that `clearForEndedSession` still needs clearAll; "
-        "this test's whole premise is that the two differ"
+    assert "snapshotKeyV2Market" not in plain_clear and "clearAll" not in plain_clear, (
+        "`clearPortfolio()` now clears the market too — the premise above (the two differ) "
+        "no longer holds, so this guard would stop telling them apart"
+    )
+    assert not re.search(r"\bstatic func clear\(\)", store), (
+        "the old half-wipe `clear()` is back beside `clearPortfolio()` — one name per behaviour"
     )
     discard = _decl_block(
         _strip_comments(_read(_APP_STATE)), "func discardDataForEndedSession()"
@@ -224,6 +235,10 @@ def test_the_sign_in_sheet_does_not_claim_the_app_works_signed_out():
 #     restores the old first-run order. -> test_onboarding_is_gated_on_being_signed_in FAILED ✅
 #  4. `WidgetSnapshotStore.clear()` removed from clearForEndedSession.
 #       -> test_the_widget_snapshot_is_wiped_when_a_session_ends FAILED  ✅
+#  6. (2026-09-30, per-mode keys) On an in-memory COPY of WidgetSnapshotStore.swift:
+#     clearAll's `snapshotKeyV2Market` removal deleted; clearPortfolio given a market removal;
+#     a `static func clear()` re-added. Each -> test_the_widget_snapshot_is_wiped_when_a_
+#     session_ends FAILED ✅
 #  5. Anti-vacuity: the banned sentence written back into a COMMENT in SignInRequiredSheet with
 #     the user-visible string left correct. -> still passed ✅ (the scan reads code, not prose)
 

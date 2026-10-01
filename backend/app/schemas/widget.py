@@ -44,21 +44,36 @@ from pydantic import BaseModel, Field
 
 
 class WidgetIndexResponse(BaseModel):
-    """One index in the market band.
+    """One index in the market band — or one asset in the Market tile's grid.
 
-    Three of these cost ZERO extra calls: they ride the universe batch quote the service
+    The equities cost ZERO extra calls: they ride the universe batch quote the service
     already makes (`get_batch_quotes_bulk` chunks at 300, and the swept universe is 200).
     They previously rode a SEPARATE call that was cached for an hour — see the note on
-    `_CONTEXT_TTL_SECONDS`.
+    `_CONTEXT_TTL_SECONDS`. Bitcoin (`market_assets` only) comes from the Home Market
+    Pulse's own 600 s crypto tile, never a fresh CoinGecko call.
     """
 
     symbol: str
     # The display name is owned by the BACKEND, not the client: an already-installed
-    # widget cannot learn that '^RUT' is "Russell 2000" without an app update.
+    # widget cannot learn that '^RUT' is "Russell 2000" without an app update. It is the
+    # honest fund name ("S&P 500 ETF") and is the one shown beside a PRICE.
     label: str
-    # None ⇒ iOS hides the number. Never 0.0 — same rule as `change_percent` below.
+    # None ⇒ iOS hides the number. Never 0.0 — same rule as `change_percent` below. Also
+    # None when the row's own session stamp is not the payload's session: a number from
+    # one session under another session's label is the "Nasdaq 0.00%" bug.
     change_percent: Optional[float] = None
     price: Optional[float] = None
+    # The cramped-grid label ("S&P 500", "Nasdaq") for Small/Medium, where only the % is
+    # drawn. Never rendered beside a price: an ETF's ~$650 price under "S&P 500" reads as
+    # the index being off by 10x. None ⇒ the client falls back to `label`.
+    short_label: Optional[str] = None
+    # True for a round-the-clock asset (Bitcoin) whose change is a ROLLING 24 h move, not a
+    # session move — the client tags it "24h" so the equity session footer does not govern it.
+    rolling_24h: bool = False
+    # "etf" | "crypto" | "index" | "commodity" | "stock". SERVER-owned for the same reason as
+    # `label`: an installed widget cannot learn an asset's class, and a tap-through that opens
+    # the wrong detail screen (SPY as a stock) is worse than none. None ⇒ unknown, link nowhere.
+    asset_type: Optional[str] = None
 
 
 class WidgetMarketContextResponse(BaseModel):
@@ -88,7 +103,7 @@ class WidgetMarketContextResponse(BaseModel):
 
 
 class WidgetMoverResponse(BaseModel):
-    """The single ticker the widget leads with."""
+    """One mover: the headline, a runner-up, or a top gainer / loser."""
 
     ticker: str
     company_name: Optional[str] = None
@@ -105,6 +120,13 @@ class WidgetMoverResponse(BaseModel):
     cause: "WidgetCauseResponse"
     # The arithmetic beside it — σ multiple, gap split, industry delta.
     context: "WidgetMoveContextResponse"
+    # True for a round-the-clock asset (a CoinGecko-priced crypto pair): its change is its
+    # own rolling 24 h, so the client tags the row "24h" instead of letting the tile's
+    # equity footer ("Fri close") date it.
+    rolling_24h: bool = False
+    # "etf" | "crypto" | "stock", from the batch quote's own `isEtf` flag (no extra call).
+    # None when the quote carried no class — the client then resolves by symbol.
+    asset_type: Optional[str] = None
 
 
 class WidgetBasketResponse(BaseModel):
@@ -149,6 +171,14 @@ class WidgetCauseResponse(BaseModel):
     # One punchy sentence. NEVER empty — the 'none' branch says what it checked and
     # how the move compares with its industry, which is more useful than silence.
     detail: str
+    # The same attribution worded for a reader on a LATER day ("…in Tuesday's news",
+    # "Down 2.7% on Tue"), never "today". `detail` is true at `as_of`, but a Holdings
+    # snapshot built Tuesday is still on the Home Screen Wednesday, where the client ages
+    # the footer to "Tue close" — and a verbatim "today's news" beside it contradicted it.
+    # The client shows this whenever it ages the footer. HEADLINE only. A round-the-clock
+    # (crypto) headline is worded with the build's ET CALENDAR day ("…on Sat"), since its
+    # rolling 24 h move has no equity session to name; the client ages it by as-of day.
+    detail_aged: Optional[str] = None
 
 
 class WidgetMoveContextResponse(BaseModel):
@@ -210,6 +240,18 @@ class WidgetMoverPayload(BaseModel):
     "what is the market doing"; Holdings mode answers "what moved most of mine". Two
     different questions, and conflating them is what made the Market tile a
     biggest-mover list nobody asked for.
+
+    THE TWO MODES RANK DIFFERENTLY, ON PURPOSE. Portfolio mode orders the caller's
+    holdings by ABSOLUTE % move (|%| desc, then z): the tile is "my biggest movers", and a
+    volatility-z order (AAPL −2.7% above ORCL +4.0%, every σ-less holding last) read as
+    random. Market mode keeps the z order over the swept universe for the legacy
+    `headline_mover` / `runners_up`, which the current Market tile no longer renders — it
+    draws `market_assets`, the Home Market Pulse in the same order.
+
+    The portfolio route no longer falls back to MARKET data. An empty group is answered
+    with `mode="portfolio"` and `holdings_count=0`, and an unreadable one with a degraded
+    portfolio payload (`holdings_count=None`): a "My Holdings" tile showing the market was
+    indistinguishable from the user's own holdings.
     """
 
     # 'market' | 'portfolio'.
@@ -243,9 +285,9 @@ class WidgetMoverPayload(BaseModel):
     # compose their own.
     session_label: Optional[str] = None
     # Which universe the movers were drawn from — 'The stocks Caydex tracks',
-    # 'Your holdings'. Needed because an empty active group falls back to market
-    # data at the endpoint, and nothing told the user their "My Holdings" tile
-    # was showing the market.
+    # 'Your holdings'. Introduced when an empty active group fell back to market data at
+    # the endpoint (it no longer does); still sent because installed builds caption a
+    # scope mismatch with it.
     scope_label: Optional[str] = None
 
     # Market mode only, and only when the roll-up is dated to this session. Absent is
@@ -256,14 +298,43 @@ class WidgetMoverPayload(BaseModel):
     # with the mover, exactly as it did before this field existed.
     market_context: Optional[WidgetMarketContextResponse] = None
 
-    # None only when nothing was readable — an empty portfolio falls back to market
-    # mode at the endpoint, so this is absent far less often than it used to be.
+    # None when nothing was rankable: an empty or unpriced group, or a degraded build.
+    # Market mode still sends it (z-ranked) for installed builds; the current Market tile
+    # ignores it. Portfolio mode: the biggest |%| mover among the holdings.
     headline_mover: Optional[WidgetMoverResponse] = None
     # Portfolio mode only, and only when the correlated-move test passes.
     basket: Optional[WidgetBasketResponse] = None
-    # Next few movers, for the large family. The service already reads their cards;
-    # without this the 4x4 tile renders a void.
+    # Next few movers in ranking order (|%| in portfolio mode, z in market mode). The
+    # service already reads their cards; without this the 4x4 tile renders a void.
     runners_up: List[WidgetMoverResponse] = Field(default_factory=list)
+
+    # ── Portfolio mode only. Never set in market mode. ──
+    #
+    # The active group's name; "" is normalised to None, which the client renders as
+    # "My Holdings". Applied by the endpoint AFTER the 60 s cache (the cache key carries
+    # neither the name nor the group id), so a rename shows at once.
+    group_name: Optional[str] = None
+    # How many holdings the tile describes — the valid group tickers BEFORE the 200 cap.
+    #   N    the group's size;
+    #   0    an authoritative empty group ("No holdings in <name> yet");
+    #   None DEGRADED — the holdings or the quote leg were unreadable. The client keeps its
+    #        last good snapshot rather than replacing it with this.
+    holdings_count: Optional[int] = None
+    # Over the ranked current-session rows; flat = |change| < 0.005, exactly the client's
+    # `isFlat` (it rounds to the 2 displayed decimals). The client derives "N no price"
+    # as holdings_count − up − down − flat.
+    up_count: Optional[int] = None
+    down_count: Optional[int] = None
+    flat_count: Optional[int] = None
+    # ≤5 each, the headline excluded. Gainers by change descending, losers ascending.
+    top_gainers: List[WidgetMoverResponse] = Field(default_factory=list)
+    top_losers: List[WidgetMoverResponse] = Field(default_factory=list)
+
+    # ── Market mode only. ──
+    #
+    # The Home Market Pulse in its own order — S&P 500, Nasdaq, Dow, Russell 2000, Gold
+    # ETFs, then Bitcoin. Empty is valid (every leg failed); never fabricated.
+    market_assets: List[WidgetIndexResponse] = Field(default_factory=list)
 
 
 class WidgetTokenResponse(BaseModel):

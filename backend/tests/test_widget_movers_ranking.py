@@ -16,6 +16,15 @@ Two classes of bug this pins:
    the obvious existing helper — `move_score` — is tier-bucket + raw magnitude, so
    it inverts on exactly the case the decision was made for. `test_the_case_move_score_gets_wrong`
    is that inversion, written as a regression.
+
+TWO AXES SINCE 2026-09-30, ONE PER MODE. The volatility-z order (`basis="z"`, the default)
+is MARKET mode's — "the most unusual move among the stocks Caydex tracks" — and the
+one-argument `_rank_and_read` that Ask Cay AI's `attribute_ticker_move` calls. Every
+`rank_movers(...)` call below without a `basis` pins THAT axis. Portfolio mode ranks by
+ABSOLUTE % (`basis="abs_change"`): under z the Holdings tile read AAPL −2.7% above
+ORCL +4.0% and dropped every σ-less holding (outside the top-200 universe, all crypto)
+below the 1+5 cap whatever its move — "random", in the user's word. The
+`── abs_change ──` section pins that axis and the payload's gainer/loser columns.
 """
 
 from __future__ import annotations
@@ -103,7 +112,7 @@ def test_the_case_move_score_gets_wrong():
 
     assert move_score("Notable", 9.0) > move_score("Unusual", 3.0)
 
-    ranked = rank_movers([big_pct, unusual])
+    ranked = rank_movers([big_pct, unusual], basis="z")
     assert [m.ticker for m in ranked] == ["UNUSUAL", "BIGPCT"]
     assert ranked[0].z > ranked[1].z
 
@@ -391,3 +400,562 @@ def test_session_word_is_on_fri_on_a_saturday():
     assert (d, iso, word) == (fri, "2026-09-11", "today")
     # No calendar day supplied (legacy callers / tests) keeps the old behaviour.
     assert WidgetMoversService._session_of([], fri)[2] == "today"
+
+
+# ── abs_change: portfolio mode's axis (2026-09-30) ───────────────────────────
+#
+# The Holdings tile promises "my biggest movers". Under z it led with AAPL −2.7% (z 1.78)
+# over ORCL +4.0% (z 1.38) and cut a σ-less −15% holding entirely — the screenshot's
+# "random" order. These pin the absolute-move axis and the selection built on it.
+
+
+def test_the_default_basis_is_still_z_for_market_mode_and_ask_cay():
+    """`attribute_ticker_move` calls `_rank_and_read(tickers)` with ONE argument and market
+    mode keeps the z order; flipping the default would silently change both."""
+    import inspect
+
+    from app.services.widget_movers_service import WidgetMoversService
+
+    assert inspect.signature(rank_movers).parameters["basis"].default == "z"
+    params = inspect.signature(WidgetMoversService._rank_and_read).parameters
+    assert params["basis"].default == "z"
+    assert params["exclude_band"].default is True
+    assert params["phase"].default is None
+
+
+def test_a_sigma_less_minus_15_headlines_over_a_judged_minus_0_3():
+    rows = [_row("CALM", -0.3, 0.004), _row("OUTSIDER", -15.0, None)]
+    assert [m.ticker for m in rank_movers(rows, basis="abs_change")] == ["OUTSIDER", "CALM"]
+    # CONTROL — the z axis still puts the judged row first; that is market mode's rule.
+    assert [m.ticker for m in rank_movers(rows, basis="z")] == ["CALM", "OUTSIDER"]
+
+
+def test_the_screenshot_case_orders_by_size_of_move():
+    """AAPL −2.7% z≈1.78, ORCL +4.0% z≈1.38, RKLB +1.5% z≈0.61: z said AAPL, ORCL, RKLB."""
+    rows = [
+        _row("AAPL", -2.7, 0.01517),
+        _row("ORCL", 4.0, 0.029),
+        _row("RKLB", 1.5, 0.0246),
+        _row("BTCUSD", 6.2, None),       # crypto never has a cached σ
+    ]
+    assert [m.ticker for m in rank_movers(rows)] == ["AAPL", "ORCL", "RKLB", "BTCUSD"]
+    assert [m.ticker for m in rank_movers(rows, basis="abs_change")] == [
+        "BTCUSD", "ORCL", "AAPL", "RKLB",
+    ]
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "n/a"])
+def test_abs_change_drops_an_unreadable_move_rather_than_ranking_it(bad):
+    """`abs(nan)` sorts arbitrarily and `-inf` would headline the tile."""
+    ranked = rank_movers([_row("GOOD", -1.0, 0.02), _row("BAD", bad, 0.02)], basis="abs_change")
+    assert [m.ticker for m in ranked] == ["GOOD"]
+
+
+def test_abs_change_ties_break_on_z_then_sigma_then_ticker():
+    rows = [
+        _row("NOSIG", 4.0, None),
+        _row("LOWZ", -4.0, 0.04),     # z = 1.0
+        _row("HIGHZ", 4.0, 0.02),     # z = 2.0
+        _row("BBB", -4.0, 0.02),      # z = 2.0, ties HIGHZ on |chg| and z
+    ]
+    first = [m.ticker for m in rank_movers(rows, basis="abs_change")]
+    assert first == ["BBB", "HIGHZ", "LOWZ", "NOSIG"]
+    assert first == [m.ticker for m in rank_movers(list(reversed(rows)), basis="abs_change")], (
+        "equal movers swapped places between refreshes"
+    )
+
+
+def test_abs_change_keeps_negative_zero_and_duplicates():
+    ranked = rank_movers(
+        [_row("FLAT", -0.0, 0.02), _row("AAPL", 2.0, 0.02), _row("AAPL", -5.0, 0.02)],
+        basis="abs_change",
+    )
+    assert [m.ticker for m in ranked] == ["AAPL", "AAPL", "FLAT"]
+    assert ranked[0].change_percent == -5.0
+    assert not (ranked[-1].change_percent or 0) > 0
+
+
+@pytest.mark.parametrize("basis", ["", "abs", "Z", None, "magnitude"])
+def test_an_unknown_basis_raises_rather_than_silently_picking_one(basis):
+    with pytest.raises(ValueError):
+        rank_movers([_row("A", 1.0, 0.02)], basis=basis)
+
+
+# ── selection: headline, runners, gainers, losers, counts ───────────────────
+
+from app.services.widget_movers_service import (  # noqa: E402
+    _FLAT_PCT,
+    _TOP_MOVERS,
+    direction_counts,
+    select_payload_movers,
+)
+
+
+def _abs(*specs):
+    return rank_movers([_row(t, c, s) for t, c, s in specs], basis="abs_change")
+
+
+def test_gainers_and_losers_exclude_the_headline():
+    ranked = _abs(("HEAD", -15.0, None), ("UP1", 3.0, 0.02), ("DN1", -2.0, 0.02),
+                  ("UP2", 1.0, 0.02), ("DN2", -0.5, 0.02))
+    head, runners, gainers, losers = select_payload_movers(ranked)
+    assert head.ticker == "HEAD"
+    assert [m.ticker for m in gainers] == ["UP1", "UP2"]
+    assert [m.ticker for m in losers] == ["DN1", "DN2"], "losers run most-negative first"
+    assert "HEAD" not in {m.ticker for m in runners + gainers + losers}
+
+
+def test_all_one_direction_leaves_the_other_column_empty():
+    up = _abs(("A", 5.0, 0.02), ("B", 3.0, 0.02), ("C", 1.0, 0.02))
+    assert select_payload_movers(up)[3] == []
+    down = _abs(("A", -5.0, 0.02), ("B", -3.0, 0.02), ("C", -1.0, 0.02))
+    assert select_payload_movers(down)[2] == []
+
+
+@pytest.mark.parametrize("chg, flat", [
+    (0.0, True), (-0.0, True), (0.004, True), (-0.004, True), (0.00499, True),
+    (0.005, False), (-0.005, False), (0.0051, False),
+])
+def test_the_flat_line_is_the_clients_two_decimal_rounding(chg, flat):
+    """|chg| < 0.005 DISPLAYS as 0.00%. Counting it "up" would print "▲1" beside a 0.00%
+    badge, and putting it in RISING would list a stock that did not rise."""
+    assert _FLAT_PCT == 0.005
+    ranked = _abs(("HEAD", -9.0, 0.02), ("X", chg, 0.02))
+    up, down, flat_n = direction_counts(ranked)
+    assert flat_n == (1 if flat else 0)
+    assert (up + down + flat_n) == 2
+    _, _, gainers, losers = select_payload_movers(ranked)
+    in_columns = "X" in {m.ticker for m in gainers + losers}
+    assert in_columns is (not flat)
+
+
+def test_counts_are_one_per_ticker_and_cover_every_ranked_row():
+    ranked = _abs(("AAPL", 2.0, 0.02), ("AAPL", 2.0, 0.02), ("MSFT", -1.0, 0.02),
+                  ("KO", 0.001, 0.01), ("BTCUSD", 3.0, None))
+    assert direction_counts(ranked) == (2, 1, 1)
+    assert direction_counts([]) == (0, 0, 0)
+
+
+def test_selection_never_repeats_a_ticker_in_any_column():
+    ranked = _abs(("DUP", -9.0, 0.02), ("DUP", -9.0, 0.02), ("AAA", 5.0, 0.02),
+                  ("AAA", 4.0, 0.02), ("BBB", -3.0, 0.02))
+    head, runners, gainers, losers = select_payload_movers(ranked)
+    for col in (runners, gainers, losers):
+        names = [m.ticker for m in col]
+        assert len(names) == len(set(names)) and "DUP" not in names
+    assert head.ticker == "DUP"
+
+
+def test_an_empty_ranking_selects_nothing():
+    assert select_payload_movers([]) == (None, [], [], [])
+
+
+# ── the portfolio PAYLOAD built on that selection ───────────────────────────
+
+
+def _portfolio(ranked, holdings_count, ctx=None):
+    from app.services.widget_movers_service import WidgetMoversService, _SCOPE_PORTFOLIO
+
+    return WidgetMoversService()._payload(
+        mode="portfolio", ranked=ranked, cards={}, ctx=ctx or _ctx(), basket=None,
+        scope_label=_SCOPE_PORTFOLIO, holdings_count=holdings_count,
+    )
+
+
+def test_one_holding_is_a_headline_and_nothing_else():
+    p = _portfolio(_abs(("TSLA", -3.2, 0.03)), holdings_count=1)
+    assert p.headline_mover.ticker == "TSLA"
+    assert p.runners_up == [] and p.top_gainers == [] and p.top_losers == []
+    assert (p.up_count, p.down_count, p.flat_count) == (0, 1, 0)
+    assert p.holdings_count == 1
+
+
+def test_250_holdings_fill_both_columns_and_count_every_ranked_row():
+    specs = [(f"T{i:03d}", (i + 1) * 0.05 * (1 if i % 2 else -1), 0.02) for i in range(250)]
+    ranked = _abs(*specs)
+    p = _portfolio(ranked, holdings_count=250)
+
+    assert len(p.top_gainers) == _TOP_MOVERS == 5
+    assert len(p.top_losers) == 5
+    assert len(p.runners_up) == 5
+    assert p.up_count + p.down_count + p.flat_count == 250
+    gains = [m.change_percent for m in p.top_gainers]
+    losses = [m.change_percent for m in p.top_losers]
+    assert gains == sorted(gains, reverse=True) and all(g > 0 for g in gains)
+    assert losses == sorted(losses) and all(x < 0 for x in losses)
+    head = p.headline_mover.ticker
+    assert head not in {m.ticker for m in p.top_gainers + p.top_losers + p.runners_up}
+    # The headline is the biggest |%| of all 250 — that is the whole product decision.
+    assert abs(p.headline_mover.change_percent) == max(abs(c) for _, c, _ in specs)
+
+
+def test_a_degraded_portfolio_withholds_the_counts_with_the_count():
+    """`holdings_count=None` (the quote leg failed) must not ship "▲0 ▼0" beside it."""
+    p = _portfolio(_abs(("A", 1.0, 0.02)), holdings_count=None)
+    assert p.holdings_count is None
+    assert (p.up_count, p.down_count, p.flat_count) == (None, None, None)
+
+
+def test_market_mode_never_carries_the_holdings_fields():
+    from app.services.widget_movers_service import WidgetMoversService, _SCOPE_MARKET
+
+    ranked = rank_movers([_row(f"T{i}", -float(i + 1), 0.02) for i in range(8)])
+    p = WidgetMoversService()._payload(
+        mode="market", ranked=ranked, cards={}, ctx=_ctx(), basket=None,
+        scope_label=_SCOPE_MARKET, holdings_count=8,
+    )
+    assert p.group_name is None and p.holdings_count is None
+    assert (p.up_count, p.down_count, p.flat_count) == (None, None, None)
+    assert p.top_gainers == [] and p.top_losers == []
+    # …and the legacy movers installed builds render are still there.
+    assert p.headline_mover is not None and len(p.runners_up) == 5
+
+
+def test_spy_in_holdings_is_counted_but_never_explains_itself(monkeypatch):
+    """Portfolio mode ranks the band like any holding (the tile no longer draws it), so SPY
+    can headline. `ctx.market_change` IS SPY's own change, so without the guard the cause
+    reads "The market fell 1.6% today; SPY moved with it." — a ratio of exactly 1.0."""
+    from datetime import date
+
+    from app.services import widget_movers_service as wm
+
+    live = date(2026, 9, 29)
+    monkeypatch.setattr(wm, "session_trading_date", lambda now=None: live)
+    monkeypatch.setattr(wm, "_et_calendar_day", lambda: live)
+    monkeypatch.setattr(wm, "session_label", lambda now=None: "Live 2:14 PM ET")
+    iso = live.isoformat()
+    ctx = wm._MarketContext(news_available=True).for_tickers(
+        {}, iso, {"SPY": {"symbol": "SPY", "price": 651.0, "changePercentage": -1.6,
+                          "changeSession": iso}},
+    )
+    assert ctx.market_change == -1.6
+    ranked = rank_movers(
+        [{"ticker": "SPY", "change_percent": -1.6, "sigma_daily": 0.008, "change_session": iso},
+         {"ticker": "NVDA", "change_percent": -1.5, "sigma_daily": 0.03, "change_session": iso}],
+        basis="abs_change",
+    )
+    p = _portfolio(ranked, holdings_count=2, ctx=ctx)
+
+    assert p.headline_mover.ticker == "SPY"
+    assert p.headline_mover.cause.kind != "market", p.headline_mover.cause.detail
+    assert "moved with it" not in p.headline_mover.cause.detail
+    assert p.down_count == 2, "SPY is a holding and must be counted"
+    # CONTROL: the guard is SPY-only — NVDA still gets the market leg.
+    nvda = next(m for m in p.top_losers if m.ticker == "NVDA")
+    assert nvda.cause.kind == "market", nvda.cause.detail
+
+
+# ── the portfolio BUILD: degraded vs authoritative, and what it asks for ──────
+
+
+def _portfolio_build(monkeypatch, rank_result, *, phase="premarket"):
+    """A real `_build_portfolio` over a stubbed quote leg. Returns (service, seen)."""
+    from app.services import widget_movers_service as wm
+
+    svc = wm.WidgetMoversService()
+    seen: dict = {}
+
+    async def _rank_and_read(tickers, **kwargs):
+        seen["tickers"] = list(tickers)
+        seen["kwargs"] = kwargs
+        return rank_result
+
+    async def _market_context(tickers, index_rows, session_date):
+        seen["ctx_tickers"] = list(tickers)
+        return wm._MarketContext(news_available=True).for_tickers({}, session_date, index_rows)
+
+    async def _sectors(user_id, tickers):
+        return {}
+
+    async def _head_grades(ranked):
+        seen["grades_for"] = [m.ticker for m in ranked]
+        return None
+
+    monkeypatch.setattr(svc, "_rank_and_read", _rank_and_read)
+    monkeypatch.setattr(svc, "_market_context", _market_context)
+    monkeypatch.setattr(svc, "_sectors", _sectors)
+    monkeypatch.setattr(svc, "_head_grades", _head_grades)
+    monkeypatch.setattr(wm, "session_phase", lambda now=None: phase)
+    return svc, seen
+
+
+_SPY_OK = {"SPY": {"symbol": "SPY", "price": 651.0, "changePercentage": -0.2}}
+
+
+@pytest.mark.asyncio
+async def test_the_portfolio_build_ranks_by_size_includes_the_band_and_passes_the_phase(monkeypatch):
+    svc, seen = _portfolio_build(monkeypatch, ([], {}, True, _SPY_OK), phase="premarket")
+    await svc._build_portfolio("u1", ["AAPL", "SPY"])
+    assert seen["kwargs"] == {"basis": "abs_change", "exclude_band": False, "phase": "premarket"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("index_rows", [
+    {},                                                         # the batch returned nothing
+    {"SPY": {"symbol": "SPY", "price": 651.0, "changePercentage": None}},
+    {"ONEQ": {"symbol": "ONEQ", "price": 80.0, "changePercentage": 0.3}},
+])
+async def test_a_failed_quote_leg_is_degraded_not_no_prices(monkeypatch, index_rows):
+    """"No prices for your 3 holdings today" is a FINDING. Built from an outage it is a lie,
+    and the client would replace a good snapshot with it — so the count is withheld."""
+    svc, _ = _portfolio_build(monkeypatch, ([], {}, True, index_rows))
+    p = await svc._build_portfolio("u1", ["AAPL", "MSFT", "NVDA"])
+    assert p.mode == "portfolio"
+    assert p.holdings_count is None
+    assert (p.up_count, p.down_count, p.flat_count) == (None, None, None)
+    assert p.headline_mover is None
+
+
+@pytest.mark.asyncio
+async def test_unpriced_holdings_with_a_live_tape_are_an_authoritative_no_prices(monkeypatch):
+    """SPY readable, nothing of mine rankable (all funds / delisted / unpriced): the quote
+    leg WORKED, so the count stands and the tile says why it is empty."""
+    svc, _ = _portfolio_build(monkeypatch, ([], {}, True, _SPY_OK))
+    p = await svc._build_portfolio("u1", ["VFIAX", "DEADCO", "FXAIX"])
+    assert p.holdings_count == 3
+    assert (p.up_count, p.down_count, p.flat_count) == (0, 0, 0)
+    assert p.headline_mover is None
+
+
+@pytest.mark.asyncio
+async def test_the_count_is_every_requested_holding_and_the_basket_says_so(monkeypatch):
+    """Four of five holdings priced and fell together; the fifth is a fund that never ranks.
+    The basket used to say "4 of your 4" — a denominator the user can see is wrong."""
+    ranked = rank_movers(
+        [_row(t, c, 0.02) for t, c in (("NVDA", -4.0), ("AMD", -5.0), ("AVGO", -3.5),
+                                        ("MU", -4.5))],
+        basis="abs_change",
+    )
+    svc, _ = _portfolio_build(monkeypatch, (ranked, {}, True, _SPY_OK))
+    p = await svc._build_portfolio("u1", ["NVDA", "amd", "AMD", "AVGO", "MU", "VFIAX"])
+    assert p.holdings_count == 5, "dedup'd and case-folded, unpriced FUND included"
+    assert p.basket is not None
+    assert p.basket.total_count == 5
+    assert "4 of your 5 holdings fell together" in p.basket.text
+    assert p.down_count == 4 and p.up_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_card_read_covers_losers_outside_the_runner_window(monkeypatch):
+    """Under |%| order the top six can all be gainers, so a LOSER rendered in the Falling
+    column sits outside head + runners. Without its card read, the tile would say "could
+    not check the news" about a ticker whose card exists."""
+    from app.services import widget_movers_service as wm
+
+    quotes = {f"G{i}": {"symbol": f"G{i}", "price": 10.0, "changePercentage": 10.0 - i}
+              for i in range(1, 9)}
+    quotes["L1"] = {"symbol": "L1", "price": 10.0, "changePercentage": -0.5}
+    quotes["L2"] = {"symbol": "L2", "price": 10.0, "changePercentage": -0.4}
+    quotes["SPY"] = {"symbol": "SPY", "price": 651.0, "changePercentage": 0.3}
+    asked: list = []
+
+    svc = wm.WidgetMoversService()
+
+    async def _quotes(symbols):
+        return {s: quotes[s] for s in symbols if s in quotes}
+
+    class _Vol:
+        async def get_sigmas_bulk(self, symbols):
+            return {}
+
+    class _News:
+        async def get_cards(self, scopes):
+            asked.extend(scopes)
+            return {}
+
+    monkeypatch.setattr(svc, "_quotes", _quotes)
+    monkeypatch.setattr(wm, "get_volatility_cache_service", lambda: _Vol())
+    monkeypatch.setattr(wm, "get_news_insight_service", lambda: _News())
+
+    ranked, _cards, ok, index_rows = await svc._rank_and_read(
+        list(quotes), basis="abs_change", exclude_band=False,
+    )
+    assert ok is True
+    head, runners, gainers, losers = select_payload_movers(ranked)
+    assert {"L1", "L2"} <= {m.ticker for m in losers}
+    assert "L1" not in {m.ticker for m in [head] + runners}, "the scenario must be outside the window"
+    assert {"L1", "L2"} <= set(asked), f"the Falling column's cards were not read: {asked}"
+    assert len(asked) == len(set(asked)), "one scope per card"
+    assert "SPY" in index_rows
+
+
+# ── the CRYPTO leg is a separate source: its outage is degraded too (R1/R2) ──────────
+#
+# SPY proves only that the EQUITY leg answered. 24/7 pairs are priced by CoinGecko, which
+# `price_service` degrades on its own into "no row" (a 429 on the monthly quota, a 5xx).
+# A group with nothing rankable but coins, while SPY printed, shipped an authoritative
+# "No prices for your 3 holdings today" over the user's good snapshot.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [
+    ["BTCUSD", "ETHUSD"],
+    ["BTCUSD", "ETHUSD", "SOLUSD"],
+    ["btcusd", " ethusd "],                 # case / whitespace as the client may send it
+    ["BTCUSD", "VFIAX"],                    # coin + a fund that can never rank
+    ["BTCUSD", "DEADCO", "VFIAX"],          # coin + delisted + fund
+])
+async def test_a_dark_crypto_leg_is_degraded_not_no_prices(monkeypatch, group):
+    svc, _ = _portfolio_build(monkeypatch, ([], {}, True, _SPY_OK))
+    p = await svc._build_portfolio("u1", group)
+    assert p.holdings_count is None, "a CoinGecko outage reported as a finding"
+    assert (p.up_count, p.down_count, p.flat_count) == (None, None, None)
+    assert p.headline_mover is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [
+    ["BTC", "ETH"],          # BARE tickers are FMP-listed ETFs (Grayscale), not coins
+    ["VFIAX", "DEADCO", "FXAIX"],
+])
+async def test_an_unpriced_group_without_coins_stays_authoritative(monkeypatch, group):
+    """CONTROL: the crypto rule is source-based — a bare BTC is the Grayscale ETF on FMP,
+    whose miss with SPY printing is a real "no price", not an outage."""
+    svc, _ = _portfolio_build(monkeypatch, ([], {}, True, _SPY_OK))
+    p = await svc._build_portfolio("u1", group)
+    assert p.holdings_count == len(group)
+    assert (p.up_count, p.down_count, p.flat_count) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_coin_that_ranked_proves_the_crypto_leg_answered(monkeypatch):
+    """One coin priced, one did not (an unresolvable token): the leg WORKED, so the count
+    stands and the miss is an honest "1 no price"."""
+    ranked = rank_movers([_row("BTCUSD", 2.4)], basis="abs_change")
+    svc, _ = _portfolio_build(monkeypatch, (ranked, {}, True, _SPY_OK))
+    p = await svc._build_portfolio("u1", ["BTCUSD", "NEWCOINUSD"])
+    assert p.holdings_count == 2
+    assert (p.up_count, p.down_count, p.flat_count) == (1, 0, 0)
+    assert p.headline_mover.ticker == "BTCUSD"
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_group_with_equities_ranked_keeps_its_movers(monkeypatch):
+    """Coins dark, equities priced: the tile still shows real movers — only the "no price"
+    figure absorbs the coins. Not degraded (the fix must not blank a working tile)."""
+    ranked = rank_movers([_row("NVDA", -4.0, 0.02), _row("AMD", 1.0, 0.02)],
+                         basis="abs_change")
+    svc, _ = _portfolio_build(monkeypatch, (ranked, {}, True, _SPY_OK))
+    p = await svc._build_portfolio("u1", ["NVDA", "AMD", "BTCUSD"])
+    assert p.holdings_count == 3
+    assert p.headline_mover.ticker == "NVDA"
+
+
+# ── a DEGRADED build is MOVER-LESS (R10) ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_build_carries_no_movers_and_spends_no_grades(monkeypatch):
+    """Screener down, CoinGecko up: the ranking held only BTCUSD, so the degraded payload
+    headlined it as the group's "biggest mover" while NVDA may have fallen 8% — and a
+    payload with a headline is content, so the client replaced its good snapshot."""
+    ranked = rank_movers([_row("BTCUSD", 0.8), _row("ETHUSD", -0.3)], basis="abs_change")
+    svc, seen = _portfolio_build(monkeypatch, (ranked, {}, True, {}))
+    p = await svc._build_portfolio("u1", ["NVDA", "AMD", "AAPL", "MSFT", "BTCUSD", "ETHUSD"])
+    assert p.holdings_count is None
+    assert p.headline_mover is None
+    assert p.runners_up == [] and p.top_gainers == [] and p.top_losers == []
+    assert p.basket is None
+    assert (p.up_count, p.down_count, p.flat_count) == (None, None, None)
+    assert seen["grades_for"] == [], "a paid grades lookup for a headline never drawn"
+    assert seen["ctx_tickers"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_build_never_claims_a_basket_from_the_coins_alone(monkeypatch):
+    """Three coins fell together while the equity leg was down: "3 of your 7 holdings fell
+    together" is a group claim about holdings we could not even read."""
+    ranked = rank_movers([_row("BTCUSD", -6.0), _row("ETHUSD", -7.0), _row("SOLUSD", -8.0)],
+                         basis="abs_change")
+    # CONTROL: the same rows DO make a basket when the build is healthy.
+    from app.services.widget_movers_service import detect_basket
+    assert detect_basket(ranked, {}, holdings_count=7) is not None
+    svc, _ = _portfolio_build(monkeypatch, (ranked, {}, True, {}))
+    p = await svc._build_portfolio(
+        "u1", ["NVDA", "AMD", "AAPL", "MSFT", "BTCUSD", "ETHUSD", "SOLUSD"],
+    )
+    assert p.holdings_count is None
+    assert p.basket is None and p.headline_mover is None
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_build_with_spy_unreadable_and_rows_present_keeps_its_movers(monkeypatch):
+    """CONTROL: something RANKED and the index band answered (SPY's change is merely
+    unreadable) — that is not an outage, so the movers and the count stand."""
+    ranked = rank_movers([_row("NVDA", -4.0, 0.02)], basis="abs_change")
+    rows = {"SPY": {"symbol": "SPY", "price": 651.0, "changePercentage": None}}
+    svc, _ = _portfolio_build(monkeypatch, (ranked, {}, True, rows))
+    p = await svc._build_portfolio("u1", ["NVDA"])
+    assert p.holdings_count == 1 and p.headline_mover.ticker == "NVDA"
+
+
+# ── end to end over the REAL `_rank_and_read`, only the quote batch stubbed ───────────
+
+
+def _real_rank_build(monkeypatch, quotes):
+    from app.services import widget_movers_service as wm
+
+    svc = wm.WidgetMoversService()
+
+    async def _quotes(symbols):
+        return {s: quotes[s] for s in symbols if s in quotes}
+
+    class _Vol:
+        async def get_sigmas_bulk(self, symbols):
+            return {}
+
+    class _News:
+        async def get_cards(self, scopes):
+            return {}
+
+    async def _market_context(tickers, index_rows, session_date):
+        return wm._MarketContext(news_available=True).for_tickers({}, session_date, index_rows)
+
+    async def _sectors(user_id, tickers):
+        return {}
+
+    async def _head_grades(ranked):
+        return None
+
+    monkeypatch.setattr(svc, "_quotes", _quotes)
+    monkeypatch.setattr(svc, "_market_context", _market_context)
+    monkeypatch.setattr(svc, "_sectors", _sectors)
+    monkeypatch.setattr(svc, "_head_grades", _head_grades)
+    monkeypatch.setattr(wm, "get_volatility_cache_service", lambda: _Vol())
+    monkeypatch.setattr(wm, "get_news_insight_service", lambda: _News())
+    monkeypatch.setattr(wm, "session_phase", lambda now=None: "regular")
+    return svc
+
+
+_TAPE = {"SPY": {"symbol": "SPY", "price": 651.0, "changePercentage": -0.2},
+         "ONEQ": {"symbol": "ONEQ", "price": 80.0, "changePercentage": 0.1}}
+
+
+@pytest.mark.asyncio
+async def test_e2e_coingecko_down_and_fmp_up_is_degraded(monkeypatch):
+    svc = _real_rank_build(monkeypatch, dict(_TAPE))      # no coin rows at all
+    p = await svc._build_portfolio("u1", ["BTCUSD", "ETHUSD", "SOLUSD"])
+    assert p.holdings_count is None and p.headline_mover is None
+
+
+@pytest.mark.asyncio
+async def test_e2e_fmp_down_and_coingecko_up_is_mover_less(monkeypatch):
+    svc = _real_rank_build(monkeypatch, {
+        "BTCUSD": {"symbol": "BTCUSD", "price": 112000.0, "changePercentage": 0.8},
+    })
+    p = await svc._build_portfolio("u1", ["NVDA", "AMD", "AAPL", "MSFT", "BTCUSD"])
+    assert p.holdings_count is None
+    assert p.headline_mover is None and p.top_gainers == [] and p.runners_up == []
+
+
+@pytest.mark.asyncio
+async def test_e2e_both_legs_up_is_authoritative(monkeypatch):
+    """CONTROL for the two above: with both sources answering, everything is counted."""
+    quotes = dict(_TAPE)
+    quotes["BTCUSD"] = {"symbol": "BTCUSD", "price": 112000.0, "changePercentage": 6.1}
+    quotes["NVDA"] = {"symbol": "NVDA", "price": 130.0, "changePercentage": -1.0}
+    svc = _real_rank_build(monkeypatch, quotes)
+    p = await svc._build_portfolio("u1", ["NVDA", "BTCUSD"])
+    assert p.holdings_count == 2
+    assert p.headline_mover.ticker == "BTCUSD"
+    assert (p.up_count, p.down_count, p.flat_count) == (1, 1, 0)

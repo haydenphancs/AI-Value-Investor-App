@@ -80,14 +80,53 @@ public enum WidgetAPIConfig {
     /// every authenticated route (`_decode_access_token` allow-lists `type == "access"`). Do
     /// not publish the session token here; it would expire in an hour and the extension cannot
     /// refresh one.
+    ///
+    /// Reloads the tiles: a token arriving is the moment a signed-out tile can become a
+    /// signed-in one. The first refresh after sign-in writes its snapshots BEFORE the token is
+    /// minted, so without this reload the tile kept rendering its signed-out state until
+    /// WidgetKit next woke it on its own schedule.
     public static func publishWidgetToken(_ token: String) {
         WidgetSharedDefaults.store?.set(token, forKey: widgetTokenKey)
+        WidgetSnapshotStore.reloadTimelines()
     }
 
     /// Called by the APP when the session ends. Without this the tile keeps refreshing FMP
     /// prices onto a signed-out device, which End-User Display Rights do not permit.
+    ///
+    /// Reloads too: with no token the provider renders the signed-out state in both modes, so
+    /// the tiles must be asked to redraw even when no snapshot was stored to clear.
     public static func clearWidgetToken() {
         WidgetSharedDefaults.store?.removeObject(forKey: widgetTokenKey)
+        WidgetSnapshotStore.reloadTimelines()
+    }
+
+    /// When the stored widget token expires — its JWT `exp` claim — or nil when there is no
+    /// token or it cannot be read.
+    ///
+    /// Read from the token itself rather than from a second key, so the two can never drift
+    /// apart. The app used to keep this in memory only, so every cold launch re-minted a
+    /// fresh, unrevocable 90-day token; with it, a launch inside the renewal window is free.
+    /// nil means "unknown", and the caller must treat unknown as "mint".
+    ///
+    /// The decoding is `WidgetJWT`'s — a dependency-free file with its own harness
+    /// (`scripts/widget-jwt-check.sh`); keep it there rather than re-deriving it here.
+    public static var widgetTokenExpiry: Date? {
+        guard let token = widgetToken else { return nil }
+        return WidgetJWT.expiry(of: token)
+    }
+
+    /// The `sub` claim of a JWT — the user id the backend signed it for — or nil.
+    ///
+    /// The app stamps the Holdings snapshot with the session's subject so a later account on
+    /// the same device never sees it. This only READS the claim; it verifies nothing, and must
+    /// never be used to decide what the server will accept.
+    public static func jwtSubject(of token: String) -> String? {
+        WidgetJWT.subject(of: token)
+    }
+
+    /// The decoded payload segment of a compact JWT (base64url, unpadded), or nil.
+    static func jwtClaims(of token: String) -> [String: Any]? {
+        WidgetJWT.claims(of: token)
     }
 
     /// Short on purpose. WidgetKit gives a timeline provider a limited budget, and a

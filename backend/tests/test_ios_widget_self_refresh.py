@@ -52,6 +52,8 @@ Comments are stripped before every assertion — the comments beside this change
 §3). `test_the_scanners_are_not_vacuous` proves the helpers bite.
 """
 
+import base64
+import json
 import re
 from pathlib import Path
 
@@ -80,6 +82,12 @@ def _strip_comments(src: str) -> str:
 
 
 def _decl_block(src: str, header: str) -> str:
+    """The brace-balanced body after `header`, comments stripped FIRST.
+
+    Stripping before counting matters: a `{` or `}` inside a `//` comment used to be
+    counted, so a comment could end (or extend) the block the scan believed it was reading.
+    """
+    src = _strip_comments(src)
     start = src.find(header)
     assert start != -1, f"{header!r} not found — this scan has drifted"
     open_brace = src.index("{", start)
@@ -90,7 +98,7 @@ def _decl_block(src: str, header: str) -> str:
         elif src[i] == "}":
             depth -= 1
             if depth == 0:
-                return _strip_comments(src[open_brace : i + 1])
+                return src[open_brace : i + 1]
     pytest.fail(f"unbalanced braces after {header!r}")
 
 
@@ -109,14 +117,59 @@ def test_the_timeline_fetches_instead_of_only_reading_the_stored_blob():
     )
 
 
+# The gate, pinned STRUCTURALLY. Anchored on `if mode == .market ,` running straight into
+# `let fresh = await …fetchMarket()`, so no `||`, `&&` or `!(` can sit between them.
+_FETCH_GATE = re.compile(
+    r"\bif\s+mode\s*==\s*\.market\s*,\s*let\s+fresh\s*=\s*await\s+"
+    r"WidgetMarketFetcher\.fetchMarket\(\)"
+)
+
+
+def _fetch_gate_problems(body: str) -> list[str]:
+    problems = []
+    calls = body.count("WidgetMarketFetcher.fetchMarket()")
+    if calls != 1:
+        problems.append(f"expected exactly ONE fetchMarket() call in timeline(), found {calls}")
+    if not _FETCH_GATE.search(body):
+        problems.append(
+            "the call is not `if mode == .market, let fresh = await "
+            "WidgetMarketFetcher.fetchMarket()` (a guard/switch refactor must update this scan)"
+        )
+    return problems
+
+
 def test_the_fetch_is_gated_on_market_mode():
-    """Holdings needs an identity the extension must never hold."""
+    """Holdings needs an identity the extension must never hold.
+
+    This used to assert only that `mode == .market` appeared somewhere BEFORE the call, which
+    passed with the gate widened to `|| mode == .portfolio`, made a tautology, or joined by a
+    second, ungated call. The mutations below prove the rewrite catches all of those.
+    """
     body = _timeline()
-    call = body[: body.index("WidgetMarketFetcher.fetchMarket()")]
-    assert "mode == .market" in call, (
+    assert _fetch_gate_problems(body) == [], (
         "the fetch is no longer restricted to market mode. Portfolio would need a "
-        "credential in the extension, breaking auth.md §8 and GuestIdentity both."
+        f"credential in the extension, breaking auth.md §8 and GuestIdentity both: "
+        f"{_fetch_gate_problems(body)}"
     )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda b: b.replace("if mode == .market,", "if mode == .market || mode == .portfolio,"),
+        lambda b: b.replace("if mode == .market,", "if true || mode == .market,"),
+        lambda b: b.replace("if mode == .market,", "if !(mode == .market),"),
+        lambda b: b.replace("if mode == .market,", "if mode == .portfolio,"),
+        lambda b: b + "\nlet extra = await WidgetMarketFetcher.fetchMarket()\n",
+    ],
+    ids=["or-portfolio", "or-true", "negated", "wrong-mode", "second-ungated-call"],
+)
+def test_the_fetch_gate_scan_bites(mutate):
+    """MUTATION_LOG, executable: each plausible widening of the gate must turn the scan red."""
+    body = _timeline()
+    mutated = mutate(body)
+    assert mutated != body, "the mutation did not apply — the source moved under this test"
+    assert _fetch_gate_problems(mutated), "a widened fetch gate passed the scan"
 
 
 def test_only_the_market_route_is_ever_called():
@@ -192,6 +245,68 @@ def test_the_schedule_harness_exists_and_is_executable():
     assert "WidgetRefreshSchedule.swift" in src, "the harness no longer compiles the real source"
 
 
+_JWT = _IOS / "Shared/WidgetJWT.swift"
+_JWT_HARNESS = _IOS / "scripts/widget-jwt-check.sh"
+_LABEL_HARNESS = _IOS / "scripts/widget-session-label-check.sh"
+
+
+def _b64url_claims(token: str) -> dict:
+    """The Swift reader's algorithm, in Python: base64url → padding → JSON object."""
+    parts = token.split(".")
+    assert len(parts) == 3, "not a compact JWT"
+    payload = parts[1].replace("-", "+").replace("_", "/")
+    payload += "=" * (-len(payload) % 4)
+    claims = json.loads(base64.b64decode(payload, validate=True))
+    assert isinstance(claims, dict)
+    return claims
+
+
+def test_the_jwt_harness_exists_and_compiles_only_the_reader():
+    """The claim reader has its own harness; it must compile the REAL file, and only it —
+    `WidgetJWT.swift` is dependency-free precisely so it can (see the guard in
+    test_ios_widget_extension_guards.py)."""
+    assert _JWT.exists() and _JWT_HARNESS.exists(), "the JWT reader or its harness is gone"
+    assert _JWT_HARNESS.stat().st_mode & 0o111, "the JWT harness is not executable"
+    src = _JWT_HARNESS.read_text()
+    assert 'SRC="$ROOT/frontend/ios/Shared/WidgetJWT.swift"' in src
+    compile_line = next(line for line in src.splitlines() if line.startswith("swiftc "))
+    assert compile_line.count(".swift") == 1 and '"$WORK/main.swift" "$SRC"' in compile_line, (
+        f"the harness compiles more than WidgetJWT.swift + its main: {compile_line!r}"
+    )
+
+
+def test_the_jwt_fixture_still_matches_what_the_backend_mints():
+    """The harness's REAL-token fixture was minted by `create_widget_token` (with a dummy
+    key). If the backend renames or retypes `sub` / `exp`, the Swift reader silently returns
+    nil — owner-less Holdings snapshots and a token re-mint on every launch. Re-mint here and
+    hold the fixture's claim shape to it, so the two sides cannot drift."""
+    from app.core.security import create_widget_token
+
+    fixture = re.search(r'let real = "([^"]+)"', _JWT_HARNESS.read_text())
+    assert fixture, "the harness lost its real-token fixture"
+    pinned = _b64url_claims(fixture.group(1))
+    fresh = _b64url_claims(create_widget_token("3f2b8c1e-7a4d-4e0b-9c55-0d1e2f3a4b5c"))
+
+    assert set(fresh) == set(pinned), f"claim names drifted: backend {sorted(fresh)} vs fixture {sorted(pinned)}"
+    for claim in fresh:
+        assert type(fresh[claim]) is type(pinned[claim]), f"`{claim}` changed type"
+    assert isinstance(fresh["sub"], str) and fresh["sub"] == "3f2b8c1e-7a4d-4e0b-9c55-0d1e2f3a4b5c"
+    assert isinstance(fresh["exp"], int) and not isinstance(fresh["exp"], bool)
+    # The harness's expectations are the fixture's own claims, not hand-typed guesses.
+    harness = _JWT_HARNESS.read_text()
+    assert f'"{pinned["sub"]}"' in harness and f'"{pinned["exp"]}.0"' in harness
+
+
+def test_the_label_harness_covers_the_new_label_rules():
+    """The pure helpers behind the inline fallback, the 24/7 ageing, the pre-market rule and
+    the age-boundary entry are asserted in `widget-session-label-check.sh` (main session runs
+    it — a swiftc compile); this pins that the cases are still there."""
+    src = _LABEL_HARNESS.read_text()
+    for token in ("compactAgedLabel(", "isPriorETDay(", "ageBoundary(", '"premarket"',
+                  "for tz in "):
+        assert token in src, f"the label harness lost its {token!r} cases"
+
+
 def test_the_cadence_spends_its_budget_in_market_hours():
     src = _strip_comments(_SCHEDULE.read_text())
 
@@ -238,12 +353,86 @@ def test_the_fetcher_has_a_bounded_timeout():
 
 
 def test_the_toggle_writes_an_override_the_provider_prefers():
+    """The choice is recorded per CONFIGURED mode, and only Home Screen tiles follow it.
+
+    It used to be one global value: one tap flipped every tile (Lock Screen included, which
+    has no button to tap back with), beat Edit Widget forever, and outlived the account.
+    """
     intent = _decl_block(_INTENT.read_text(), "func perform() async throws")
-    assert "WidgetModeOverride.set(mode)" in intent
-    resolve = _decl_block(_WIDGET.read_text(), "private func effectiveMode(for configuration:")
-    assert "WidgetModeOverride.current() ?? configuration.mode" in resolve, (
-        "the provider ignores the override, or ignores the configuration. An untouched "
+    assert "WidgetModeOverride.set(mode, for: base)" in intent, (
+        "the toggle no longer records its choice under the tapped tile's configured mode"
+    )
+    resolve = _decl_block(_WIDGET.read_text(), "private func effectiveMode(")
+    assert "WidgetModeOverride.current(for: configuration.mode) ?? configuration.mode" in resolve, (
+        "the provider ignores the override, or reads it for the wrong base. An untouched "
         "install must keep behaving exactly as it did before the toggle existed."
+    )
+    home_arm = resolve[resolve.index("case .systemSmall") : resolve.index("default:")]
+    assert "WidgetModeOverride" in home_arm, "the override is not applied to Home Screen tiles"
+    lock_arm = resolve[resolve.index("default:") :]
+    assert "WidgetModeOverride" not in lock_arm and "return configuration.mode" in lock_arm, (
+        "the Lock Screen families follow the Home Screen toggle again — they cannot tap back"
+    )
+    toggle = _decl_block(_WIDGET.read_text(), "private struct ModeToggle: View")
+    assert "ToggleMoversModeIntent(mode: other, base: base)" in toggle, (
+        "the in-tile button no longer tells the intent which tile was tapped"
+    )
+
+
+def test_the_override_lives_in_the_shared_config_and_dies_with_the_session():
+    store = _strip_comments(_STORE.read_text())
+    assert re.search(r'static let modeOverrideKey = "[^"]+"', store), (
+        "the override key is not in WidgetSharedConfig, so the app cannot clear it"
+    )
+    clear_all = _decl_block(_STORE.read_text(), "public static func clearAll()")
+    assert "removeObject(forKey: WidgetSharedConfig.modeOverrideKey)" in clear_all, (
+        "the toggle's choice survives sign-out and carries over to the next account"
+    )
+    intent = _strip_comments(_INTENT.read_text())
+    assert "WidgetSharedConfig.modeOverrideKey" in intent and '"widget.movers.modeOverride"' not in intent
+
+
+def _gallery_preview_problems(widget_src: str) -> list[str]:
+    body = _decl_block(
+        widget_src, "func snapshot(for configuration: MoversConfigurationIntent, in context: Context)"
+    )
+    preview = _decl_block(body, "if context.isPreview")
+    problems = []
+    if "effectiveMode(" in preview or "WidgetModeOverride" in preview:
+        problems.append("the gallery preview follows the in-tile toggle again")
+    if "configuration.mode" not in preview:
+        problems.append("the gallery preview no longer shows the CONFIGURED mode")
+    after = body[body.index("if context.isPreview") + len(preview) :]
+    if "effectiveMode(for: configuration, family: context.family)" not in after:
+        problems.append("a placed tile's snapshot no longer honours the toggle")
+    return problems
+
+
+def test_the_gallery_preview_shows_the_configured_mode():
+    """2026-09-30 review: one toggle tap made the "add widget" gallery advertise the Holdings
+    sample under the default (Market) configuration. The override is about placed tiles."""
+    assert _gallery_preview_problems(_WIDGET.read_text()) == []
+
+
+def test_the_gallery_preview_scan_bites():
+    src = _WIDGET.read_text()
+    old = "            let previewMode: MoversMode = configuration.mode\n"
+    assert old in src, "the preview's mode line moved — update this mutation"
+    mutated = src.replace(
+        old,
+        "            let previewMode: MoversMode = effectiveMode(for: configuration, family: context.family)\n",
+        1,
+    )
+    assert _gallery_preview_problems(mutated)
+
+
+def test_edit_widget_says_the_toggle_outranks_it():
+    """The override still beats Edit Widget for its base until tapped back (kept on purpose —
+    an expiry would make the tile flip by itself). The one place to say so is the sheet."""
+    intent = _decl_block(_INTENT.read_text(), "static var description: IntentDescription")
+    assert "until you tap it back" in intent, (
+        "Edit Widget no longer says the in-tile switch wins — re-choosing a mode there then "
+        "silently does nothing"
     )
 
 
@@ -265,30 +454,53 @@ def test_the_toggle_never_covers_the_session_footer():
         "the mode toggle is an overlay again; on Small it draws straight through the "
         "session footer"
     )
-    assert "ModeToggle(current: entry.configuredMode)" in block
+    assert "bottomRow(" in block, "the Home Screen families lost their shared bottom row"
+    row = _decl_block(_WIDGET.read_text(), "private func bottomRow(compactToggle: Bool)")
+    assert ".overlay(" not in row
+    assert "ModeToggle(current:" in row and "SessionFooter(" in row, (
+        "the footer and the toggle no longer share ONE row — Small runs out of lines and "
+        "Large loses its footer whenever the market band is absent"
+    )
+    assert row.index("SessionFooter(") < row.index("ModeToggle(current:"), (
+        "the toggle comes first: it would take the width the honesty label needs"
+    )
 
 
 # ── 5. Market mode is a market summary, not a mover list ──────────────
 
 
-def test_market_mode_renders_the_brief_when_there_is_one():
-    src = _strip_comments(_WIDGET.read_text())
-    assert "MarketBriefView(" in src, "the Market tile is back to being a mover list"
-    brief = _decl_block(_WIDGET.read_text(), "private var marketBrief: WidgetMarketBrief?")
-    assert "entry.configuredMode == .market" in brief, (
-        "the brief is no longer gated on market mode and would replace the Holdings "
-        "mover tile, which is the one place the individual name IS the point"
+def test_market_mode_renders_the_market_view():
+    root = _decl_block(_WIDGET.read_text(), "private var homeContent: some View")
+    assert "MarketView(entry: entry)" in root, "the Market tile is back to being a mover list"
+    market_arm = root[root.index("entry.mode == .market") :]
+    market_arm = market_arm[: market_arm.index("} else {")]
+    assert "MarketView(" in market_arm and "HoldingsView(" not in market_arm, (
+        "the market branch is no longer gated on the tile's EFFECTIVE mode — a toggled tile "
+        "would render the wrong layout"
+    )
+    assert root.index("entry.isSignedOut") < root.index("entry.mode == .market"), (
+        "signed out must win over either mode — the stored data is not showable"
     )
 
 
-def test_a_missing_brief_falls_back_to_the_mover_layout():
-    """The backend session-gates the roll-up, so absent is ORDINARY."""
-    src = _strip_comments(_WIDGET.read_text())
-    for family in ("SmallView(entry: entry", "MediumView(entry: entry", "LargeView(entry: entry"):
-        assert family in src, (
-            f"{family} is gone — a market tile whose headline expired would render "
-            "nothing at all, a worse regression than the staleness being fixed"
+def test_a_missing_brief_still_renders_the_market_numbers():
+    """Replaces `test_a_missing_brief_falls_back_to_the_mover_layout`.
+
+    The backend session-gates the brief, so absent is ORDINARY. The old tile fell back to the
+    mover layout; the Market tile never shows a mover now, so the numbers must render on their
+    own — they cannot live inside the brief's `if`.
+    """
+    content = _decl_block(_WIDGET.read_text(), "private func content(_ snap: WidgetMoverSnapshot)")
+    brief = _decl_block(content, "if let brief = snap.marketBrief")
+    for view in ("AssetGrid(", "AssetColumn(", "AssetPriceList("):
+        assert view in content, f"{view} is gone from the Market tile"
+        assert view not in brief, (
+            f"{view} renders only when there is a brief — a tile whose brief expired "
+            "would show a header and nothing else"
         )
+    assert "marketRows" in content, (
+        "the asset rows no longer fall back to the index band for an old backend"
+    )
 
 
 # ── 6. Anti-vacuity ───────────────────────────────────────────────────
@@ -301,6 +513,11 @@ def test_the_scanners_are_not_vacuous():
     fake = "struct X {\n  func timeline(for configuration: A) {\n    A()\n  }\n}\nfunc o() { B() }"
     block = _decl_block(fake, "func timeline(for configuration:")
     assert "A()" in block and "B()" not in block, "_decl_block leaked past the declaration"
+
+    # A stray `}` in a comment must not end the block early, nor a `{` extend it.
+    tricky = "func timeline(for configuration: A) {\n    // closes here }\n    A()\n    // opens {\n}\nB()"
+    block = _decl_block(tricky, "func timeline(for configuration:")
+    assert "A()" in block and "B()" not in block, "_decl_block counted braces inside comments"
 
     for path in (_WIDGET, _INTENT, _FETCHER, _SCHEDULE, _STORE, _APICONFIG, _APPSTATE):
         assert path.exists(), f"{path} moved — every scan above would silently pass"

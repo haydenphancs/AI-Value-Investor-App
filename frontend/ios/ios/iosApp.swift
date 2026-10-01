@@ -108,6 +108,21 @@ struct iosApp: App {
                     // Buffered events would otherwise be lost when iOS suspends us.
                     if phase == .background { Analytics.shared.flushNow() }
                 }
+                // Home Screen widget taps: `caydex://ticker/<SYMBOL>` → that asset's detail.
+                //
+                // PARK ONLY. Never navigate from here. On a cold launch this fires during the
+                // splash, and signed out it fires behind the sign-in wall. `ContentView` opens
+                // the parked link once `DeepLinkRouter.canPresent` allows it, which is the
+                // sign-in gate (auth.md §1a).
+                //
+                // The OAuth callback shares the scheme (`caydex://auth-callback`), but
+                // `ASWebAuthenticationSession` consumes it before it can reach this handler. If
+                // one ever did arrive, `pendingLink(for:)` answers nil for any host but `ticker`,
+                // so this handler never touches it.
+                .onOpenURL { url in
+                    guard let link = DeepLinkRouter.pendingLink(for: url) else { return }
+                    appState.pendingDeepLink = link
+                }
                 .task {
                     guard !isConfigured else { return }
                     isConfigured = true
@@ -272,6 +287,12 @@ struct iosApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                     // Re-lock the app when it backgrounds (if App Lock is enabled).
                     AppLockManager.shared.lockIfEnabled()
+                    // Leaving the app is when the Home Screen tile gets looked at, and the
+                    // extension never fetches Holdings itself — so bring it up to date with
+                    // the session being left (an edit's debounced refresh runs now rather than
+                    // after suspension). Throttled, session-gated and held open by a
+                    // background-task assertion inside the service.
+                    WidgetRefreshService.shared.refreshOnBackground()
                 }
         }
     }

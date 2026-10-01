@@ -120,6 +120,22 @@ final class AppState {
     /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
     var pendingResearchTicker: String?
 
+    /// A Home Screen widget tap (`caydex://ticker/<SYMBOL>`), parked by `iosApp`'s
+    /// `.onOpenURL` and consumed by `ContentView`, which opens that asset's detail screen.
+    ///
+    /// Parked because the URL usually arrives before anything could show it. A cold launch
+    /// delivers it during the splash, and a signed-out tap delivers it behind the sign-in wall
+    /// (`ContentView` does not exist there). Parking is what turns a signed-out tap into "sign
+    /// in, then land on the ticker". See `DeepLinkRouter`.
+    ///
+    /// ⚠️ Deliberately NOT cleared in `discardDataForEndedSession()`, unlike the two intents
+    /// above. A parked tap is the CURRENT holder's request, not the ended account's data. The
+    /// commonest way to reach that funnel with one parked is a widget tap that cold-launches
+    /// on an expired session, which goes restore → dead credential → wall. Clearing it there
+    /// would drop the tap in exactly the flow parking exists for. `PendingDeepLink.maxAge`
+    /// bounds how long it may wait instead.
+    var pendingDeepLink: PendingDeepLink?
+
     /// Bumped when a screen needs everything presented ABOVE the tab bar taken down.
     ///
     /// `pendingResearchTicker` gets the user to the right tab; this is what lets them SEE it.
@@ -283,13 +299,10 @@ final class AppState {
             // `didBecomeActive` covers returning to the foreground but races the first frame
             // on a cold start (verified: a launch-only run produced 20+ requests and ZERO
             // widget fetches), so a freshly installed widget sat on its placeholder until the
-            // user backgrounded and returned. It therefore has to fire at launch — but from
-            // `iosApp` it could only ever fire ALONGSIDE this task, never after the token was
-            // armed, because `configure()` cannot await. That is a real ordering bug, not a
-            // latency one: `/widget/portfolio-mover` is `.guestAllowed`, so a tokenless call
-            // is answered for the per-install guest, whose holdings are empty, which the
-            // backend degrades to the MARKET payload — and market movers were then written
-            // into the "My Holdings" tile on every cold launch of a signed-in user.
+            // user backgrounded and returned. It therefore has to fire at launch — and AFTER
+            // the token is armed, which `iosApp` cannot sequence because `configure()` cannot
+            // await. Both widget routes are `.signInRequired`, so a call made before the arm is
+            // refused by `APIClient` before it leaves the device: a wasted run, not a result.
             //
             // One line later here, that is simply sequenced. `onAuthenticated` still forces a
             // refresh once the identity fully settles, which now also survives landing
@@ -298,8 +311,7 @@ final class AppState {
             // `markCredentialReady()` also releases the gate that suppresses any EARLIER
             // refresh. `UIApplication.didBecomeActiveNotification` is delivered before the
             // root `.task` reaches `configure()`, so `iosApp`'s foreground trigger fires
-            // first on every cold launch — and being `.guestAllowed`, it did not fail, it
-            // succeeded as the guest.
+            // first on every cold launch.
             // Tell the widget extension which backend to call. It cannot use APIConfig
             // (app-target only, and in DEBUG it depends on a localhost probe that lives
             // in this process), so the app publishes the resolved URL into the App
@@ -309,6 +321,17 @@ final class AppState {
             WidgetAPIConfig.publishBaseURL(
                 ServerEnvironmentManager.shared.resolvedBaseURL ?? APIConfig.baseURL
             )
+            // Move a pre-v2 App Group snapshot into the per-mode keys BEFORE the seed writes:
+            // the seed lands in the v2 slots, and an unowned v1 holdings snapshot must not
+            // survive to be shown under whoever signs in next.
+            WidgetSnapshotStore.migrateLegacyIfNeeded()
+            // The widget's SESSION gate opens here only for a stored credential: a signed-out
+            // launch has no session to refresh for. Opened BEFORE the credential gate and the
+            // seed, or the seed would be dropped. A dead credential closes it again (the
+            // dead-refresh discard); a sign-in opens it in `onAuthenticated`.
+            if authService.hasStoredToken {
+                WidgetRefreshService.shared.openSession()
+            }
             WidgetRefreshService.shared.markCredentialReady()
             WidgetRefreshService.shared.refresh(identity: identityGeneration)
 
@@ -454,6 +477,16 @@ final class AppState {
         // is no longer the one this restore was validating.
         let generation = credentialGeneration
         guard let token = authService.getStoredToken() else {
+            // No session here, yet widget state can be: the session token is Keychain
+            // `...ThisDeviceOnly` and never migrates, while the App Group (widget token and
+            // snapshots) is ordinary backed-up data that a restore to a new phone brings along.
+            // No session "ended" on this device, so nothing else would ever clear it, and the
+            // extension would keep refreshing FMP data onto a signed-out phone for up to 90
+            // days (auth.md §8a). Guarded (`hasAnyState` covers the token as well as the
+            // snapshots), so an ordinary signed-out launch does not churn.
+            if WidgetSnapshotStore.hasAnyState {
+                WidgetRefreshService.shared.clearOrphanedState()
+            }
             resolveIdentity(nil)
             auth.status = .unauthenticated   // guest — app still shown
             cancelRestoreBackoff()
@@ -514,6 +547,20 @@ final class AppState {
             // transient refresh outage (offline / 5xx) preserves the token so the
             // next launch can restore.
             if AppError.from(error).isAuthError {
+                // Re-check BEFORE tearing anything down, like every other exit of this method.
+                // This 401 is about the credential THIS restore captured. If a sign-in landed
+                // while the refresh was in flight, the Keychain, the client token and every
+                // store below now belong to that NEW session, and ending it here signed the
+                // user straight back out and wiped their device-global state. A sign-out that
+                // landed instead has already done this teardown itself.
+                //
+                // One check is enough although `setAuthToken(nil)` below suspends again: a
+                // sign-in bumps the counter BEFORE its own network round-trip, so one that
+                // could complete during that hop has already failed this guard.
+                guard generation == credentialGeneration else {
+                    print("ℹ️ [AppState] restore superseded mid-refresh — not ending the newer session")
+                    return
+                }
                 authService.clearToken()
                 await apiClient.setAuthToken(nil)
                 user = UserState()
@@ -526,6 +573,12 @@ final class AppState {
                 // Deliberately NOT done on the two transient branches above/below: those keep the
                 // token because the same user is expected back, and wiping there would throw away
                 // local progress that has not synced yet (an offline learner's work).
+                //
+                // Cleared with the discard, exactly as `endSessionForDeadCredential` does: left
+                // set, the SAME user signing back in hits `onAuthenticated`'s early return and
+                // skips the full fan-out — no re-hydrate of the stores this discard just wiped,
+                // and no rebuild of the widget whose snapshots it just cleared.
+                lastAuthenticatedUserId = nil
                 discardDataForEndedSession()
                 invalidateIdentity(nil)
                 auth.status = .unauthenticated
@@ -540,6 +593,12 @@ final class AppState {
         // Refresh succeeded → retry the profile once.
         do {
             let profile = try await fetchCurrentUserNoRetry()
+            // Same race as the first fetch: a sign-out during the refresh or this read must not
+            // be undone by adopting the ex-user's profile.
+            guard generation == credentialGeneration else {
+                print("ℹ️ [AppState] restore superseded mid-flight — discarding the fetched profile")
+                return
+            }
             applyProfile(profile)
             await establishAuthenticatedSession(userId: profile.id)
         } catch {
@@ -658,10 +717,17 @@ final class AppState {
     /// Callers pass a profile they have ALREADY applied, because `applyProfile` writes
     /// `user.tier`, which is itself observed.
     private func establishAuthenticatedSession(userId: String) async {
+        // The identity this session settles, captured BEFORE the first await and AFTER the
+        // caller's `applyProfile` → `resolveIdentity` (so a real sign-in's own bump, and a heal
+        // from `.restoring`'s re-bump, are already in it). Anything that moves it while the
+        // awaits below and in `onAuthenticated` are suspended — a sign-out, a dead credential,
+        // a newer sign-in — means the widget must not be handed to this session: see
+        // `settleWidgetSession`.
+        let identity = identityGeneration
         await claimGuestDataForIncomingIdentity(userId: userId)
         auth.status = .authenticated
         cancelRestoreBackoff()
-        await onAuthenticated(userId: userId)
+        await onAuthenticated(userId: userId, identity: identity)
     }
 
     /// The one piece of the fan-out that cannot wait until after the status is published.
@@ -680,7 +746,10 @@ final class AppState {
         await claimGuestDataIfNeeded()
     }
 
-    private func onAuthenticated(userId: String? = nil) async {
+    /// - Parameter identity: the `identityGeneration` `establishAuthenticatedSession` captured
+    ///   before its first await. Handed to `settleWidgetSession`, never re-read here: a re-read
+    ///   after the awaits below would launder a sign-out that landed during them.
+    private func onAuthenticated(userId: String? = nil, identity: Int) async {
         // Fire the fan-out only on a real identity TRANSITION.
         //
         // Restore is now re-runnable (launch, foreground, network-restore, backoff, a failed
@@ -720,6 +789,11 @@ final class AppState {
             // Self-gating: a no-op when there is no pending token, so a healthy reconnect
             // still performs zero network calls.
             PushNotificationManager.shared.flushPendingToken()
+            // The widget too, and for a reason of its own: its session gate must be open for
+            // every signed-in user, and this branch is the only one a heal from `.restoring`
+            // reaches. Cheap when nothing moved — the force is suppressed against a run that
+            // already answered under this identity.
+            settleWidgetSession(userId: userId, identity: identity)
             return
         }
         // A different account on the same device: drop the previous session's device-global
@@ -766,16 +840,60 @@ final class AppState {
         // This is the RELIABLE trigger. The cold-launch call in `iosApp` races
         // `restoreSession`, and `didBecomeActive` only fires on re-entry — so without
         // this, a user who signed in (or switched accounts) kept a tile built for the
-        // previous identity, or for the guest partition, for the whole app session. The
-        // account-switch branch above has already cleared the portfolio snapshot, which
-        // otherwise leaves that widget blank until the next foreground.
-        //
+        // previous identity for the whole app session. The account-switch branch above has
+        // already cleared the snapshots, which otherwise leaves that widget blank until the
+        // next foreground. Last, and after that discard, on purpose: see the helper.
+        settleWidgetSession(userId: userId, identity: identity)
+    }
+
+    /// Hand the Home Screen widget to the identity that just settled. Called from BOTH branches
+    /// of `onAuthenticated`.
+    ///
+    /// ⚠️ ORDER. The account-switch discard calls `WidgetRefreshService.clearForEndedSession()`,
+    /// which CLOSES the widget's session gate. Opening it anywhere before that discard is undone
+    /// by it, and the forced refresh below is then dropped — the new account's tile stays blank
+    /// for the whole session.
+    ///
+    /// ⚠️ AND ONLY FOR A SESSION THAT STILL EXISTS. `identity` is what
+    /// `establishAuthenticatedSession` captured before the guest-claim, StoreKit-drain and
+    /// credits awaits. A sign-out tapped during them runs synchronously: it closes the widget
+    /// gate, wipes the App Group and clears the widget token — but `AuthService.signOut` keeps
+    /// the bearer ARMED through two more awaited calls. Reopening the gate here unconditionally
+    /// then forced a run under that bearer: the ex-user's holdings went back onto a signed-out
+    /// Home Screen and a fresh 90-day widget token was minted for a device with no session
+    /// (auth.md §7, §8a), and the gate stayed open for the rest of the process. Every session
+    /// end bumps `identityGeneration` (`invalidateIdentity`, `noteCredentialDisarmed`), as does
+    /// a newer sign-in as someone else (`resolveIdentity`), whose own settle then takes over.
+    private func settleWidgetSession(userId: String?, identity: Int) {
+        guard identity == identityGeneration else {
+            WidgetRefreshService.shared.noteSettleRefused()
+            return
+        }
+        // A holdings snapshot stamped for someone else — or for no one (unowned, or written
+        // before owners existed) — is not this user's. The account-switch discard covers a
+        // switch it can SEE; this covers the one it cannot: `lastAuthenticatedUserId` lives in
+        // memory, so signing in as B from a cold-launch `.restoring` window (A's credential
+        // still unvalidated) skipped that discard and left A's holdings on B's Home Screen.
+        // Only a snapshot that EXISTS can be foreign: an empty slot has nothing to clear, and
+        // `clearPortfolio()` reloads every timeline even then.
+        var ownerMismatch = false
+        if let userId, WidgetSnapshotStore.read()?.portfolio != nil {
+            ownerMismatch = WidgetSnapshotStore.portfolioOwner()?.lowercased() != userId.lowercased()
+        }
+        if ownerMismatch {
+            WidgetSnapshotStore.clearPortfolio()
+        }
+        WidgetRefreshService.shared.openSession()
         // `force` skips the 60s throttle: an identity change is exactly the case where
         // the throttle is wrong, because the previous fetch answered for someone else.
         // `identity:` is what keeps this from being two wasted requests on every launch:
         // the seed refresh in `configure()` already ran under this same armed credential, so
         // the force is only honoured when the identity actually moved (a real sign-in).
-        WidgetRefreshService.shared.refresh(force: true, identity: identityGeneration)
+        // After a cleared slot it carries NO identity: the slot was just emptied, so a run
+        // that already completed under this identity must not suppress the refill.
+        WidgetRefreshService.shared.refresh(
+            force: true, identity: ownerMismatch ? nil : identity
+        )
     }
 
     /// Pull the user's Learn progress down at the auth transition.

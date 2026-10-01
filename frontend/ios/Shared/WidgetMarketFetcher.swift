@@ -33,6 +33,11 @@ public enum WidgetMarketFetcher {
     /// running past its budget — and the caller MUST fall back to the stored snapshot.
     /// A Home Screen tile has no error state, no spinner and no retry button, so an
     /// older-but-real reading beats anything that looks broken.
+    ///
+    /// ⚠️ A NON-NIL RESULT IS NOT PERMISSION TO SHOW IT. The token is checked before the
+    /// request only; the session can end during the up-to-12 s wait, and the 200 still
+    /// arrives. The caller re-checks `WidgetAPIConfig.widgetToken` after the await, and
+    /// `WidgetSnapshotStore.writeFromExtension` re-checks it again right before storing.
     public static func fetchMarket() async -> WidgetMoverSnapshot? {
         // No credential ⇒ do not call. The route answers 401 without one, and WidgetKit grants
         // only a few dozen refreshes a day: spending one on a guaranteed rejection is a refresh
@@ -68,10 +73,15 @@ public enum WidgetMarketFetcher {
             let snapshot = try WidgetSnapshotStore.decoder.decode(
                 WidgetMoverSnapshot.self, from: data
             )
-            // The same refusal the app applies: a degraded 200 with no mover must not
-            // displace a good stored snapshot.
-            guard !snapshot.isEmpty || snapshot.marketBrief != nil else {
-                log.warning("widget fetch: empty payload — keeping the stored snapshot")
+            guard snapshot.mode == "market" else {
+                log.error("widget fetch: market route answered mode \(snapshot.mode, privacy: .public) — ignored")
+                return nil
+            }
+            // The same rule the store applies (`hasContent(for: .market)`): a degraded 200
+            // with nothing renderable must not displace a good stored snapshot. A brief-only
+            // or assets-only payload IS content — the Market tile renders exactly those.
+            guard snapshot.hasContent(for: .market) else {
+                log.warning("widget fetch: payload with no market content — keeping the stored snapshot")
                 return nil
             }
             return snapshot

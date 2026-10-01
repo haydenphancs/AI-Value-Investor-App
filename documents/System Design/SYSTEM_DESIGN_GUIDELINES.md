@@ -365,6 +365,35 @@ skeleton shows until then; the back button is never blocked), then the full resp
 supersedes it with every Overview section. The core endpoint is additive — the shared
 `/overview` contract is unchanged, so blast radius is ~zero.
 
+### 3.6 Home Screen widget — two modes, two fetch paths (reworked 2026-09-30)
+
+The `CaydexWidgets` extension answers two different questions, and each has its own data path:
+
+- **Market** — the state of the tape: the Home Market Pulse assets (S&P 500, Nasdaq, Dow,
+  Russell 2000, Gold, Bitcoin) plus the session-gated `__MARKET__` brief and sector breadth.
+  Never a single stock. The extension fetches `GET /widget/market-mover` itself with the
+  market-scoped widget token (auth.md §8a). The equities ride the payload's own batch quote,
+  and Bitcoin comes from the Home pulse's 600 s crypto tile, never a fresh CoinGecko call.
+- **Holdings** — the user's active group: the biggest ABSOLUTE % mover with its deterministic
+  cause, ▲/▼ counts over every holding, and the top gainers and losers. Only the APP can fetch
+  `GET /widget/portfolio-mover` (`.signInRequired`; the widget token cannot reach it). It
+  writes the result into the App Group, where it is stamped with the owning user id.
+  Ranking is by |%| here; market mode keeps the volatility-z ranking for its legacy movers,
+  which installed builds still render.
+
+The payload's `holdings_count` carries the degrade contract: None means degraded (the
+holdings or a quote leg were unreadable), and the client keeps its last good snapshot; 0 is an
+authoritative empty group; N is the group size. The group name is applied after the 60 s
+cache, so a rename shows at once and the shared cached object is never mutated.
+
+App-side refresh (`WidgetRefreshService`) runs behind a session gate: it is opened only for a
+signed-in identity, closed by every session end, and epoch-fenced so a run that straddles a
+sign-out cannot publish. Triggers are the cold-launch seed, the auth settle, foreground,
+background (under a background-task assertion), and active-group / watchlist / holdings
+changes (debounced). A session end clears both App Group slots, the widget token and the
+in-tile mode override; with no widget token the extension renders a "Sign in" state in both
+modes.
+
 ---
 
 ## 4. State Management Strategy (iOS)

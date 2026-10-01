@@ -543,6 +543,15 @@ final class PortfolioStore: ObservableObject {
             // returns the canonical per-portfolio holdings).
             portfolios[index].items = serverTruth.items
         }
+        // The Home Screen Holdings tile is built server-side from the ACTIVE group, and an
+        // add / remove / reorder posts neither `activeGroupDidChange` nor (from Tracking's
+        // Edit sheet) a watchlist change — so without this the tile kept the old holdings
+        // until the next app visit. Only after the server confirmed, and only for the active
+        // group; the service debounces and is session-gated, so a sign-out mid-request (which
+        // nils `activePortfolioId` in `reset()`) publishes nothing.
+        if portfolioId == activePortfolioId {
+            WidgetRefreshService.shared.contentChanged()
+        }
     }
 }
 

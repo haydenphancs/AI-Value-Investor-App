@@ -40,6 +40,18 @@ struct ContentView: View {
     /// screen a working search and all seven of its sheets.
     @State private var openedPushDestination: AlertDestination?
 
+    /// The two first-run gates `RootView` draws as OVERLAYS (same keys). A cover presents above
+    /// every overlay, so a widget tap opened before they are done would put a ticker screen on
+    /// top of the legal disclaimer, or skip onboarding. The parked link waits for both.
+    @AppStorage("has_acknowledged_disclaimers") private var hasAcknowledgedDisclaimers = false
+    @AppStorage("has_completed_onboarding") private var hasCompletedOnboarding = false
+
+    /// When a parked widget tap may open. See `DeepLinkRouter.canPresent` for the auth half.
+    private var isReadyForDeepLink: Bool {
+        DeepLinkRouter.canPresent(status: appState.auth.status)
+            && hasAcknowledgedDisclaimers && hasCompletedOnboarding
+    }
+
     var body: some View {
         ZStack {
             AppColors.background
@@ -157,6 +169,25 @@ struct ContentView: View {
             selectedTab = .research
             appState.pendingResearchTicker = nil
         }
+        // A Home Screen widget tap (`caydex://ticker/<SYMBOL>`, parked by `iosApp.onOpenURL`) →
+        // that asset's detail screen, in the SAME destination cover a push uses. That cover
+        // has its own `NavigationStack`, so the ticker screen's search and sheets work, and it
+        // dispatches all five asset classes through `NotificationRouteContent`.
+        //
+        // ONE OWNER, consume-and-clear, `initial: true`: the same three rules as the push
+        // handler above, for the same reasons. A cold launch parks the link before this view
+        // exists, and a signed-out tap parks it until the user is through the wall. Keyed on
+        // readiness as well as the link, so a link held by a gate opens the moment the gate
+        // lifts (sign-in, the disclaimer, onboarding) instead of waiting for another tap.
+        .onChange(
+            of: DeepLinkTrigger(link: appState.pendingDeepLink, ready: isReadyForDeepLink),
+            initial: true
+        ) { _, trigger in
+            guard trigger.ready, let parked = trigger.link else { return }
+            appState.pendingDeepLink = nil
+            guard let link = DeepLinkRouter.freshLink(parked) else { return }
+            presentDeepLink(link)
+        }
         .onChange(of: selectedTab) { oldValue, newValue in
             // Which tabs actually get used. `HomeTab` is a fixed 5-case enum, so this
             // is a low-cardinality dimension, not free text.
@@ -215,6 +246,37 @@ struct ContentView: View {
             present()
         }
     }
+
+    /// Open a widget tap's asset, taking down whatever is on screen first.
+    ///
+    /// The teardown is `presentTappedPush`'s, for its reason: a cover cannot present while
+    /// another is up, and SwiftUI QUEUES it rather than failing. A widget tap that lands while
+    /// the user is three covers deep would otherwise appear only after they closed everything
+    /// by hand. Assigning only after the wait matters too: this view's own
+    /// `.onPresentationReset` nils `openedPushDestination` on the bump.
+    private func presentDeepLink(_ link: PendingDeepLink) {
+        let destination = AlertDestination(
+            label: "Open \(link.symbol)",
+            systemImage: "chart.line.uptrend.xyaxis",
+            target: .ticker(symbol: link.symbol, assetType: link.assetType, destination: .default)
+        )
+        guard ModalPresentationProbe.isAnythingPresented else {
+            openedPushDestination = destination
+            return
+        }
+        appState.dismissAllPresentations()
+        Task { @MainActor in
+            _ = await ModalPresentationProbe.waitUntilNothingPresented()
+            openedPushDestination = destination
+        }
+    }
+}
+
+/// What the widget-tap handler observes: the parked link AND whether it may open now. Both in
+/// one value, so either changing re-runs the handler.
+private struct DeepLinkTrigger: Equatable {
+    let link: PendingDeepLink?
+    let ready: Bool
 }
 
 // MARK: - ResearchView with Binding Support

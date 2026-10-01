@@ -174,3 +174,37 @@ def test_the_text_and_the_numbers_can_never_disagree():
     )
     assert f"{b.moved_count} of your {b.total_count}" in b.text
     assert b.factor_label in b.text
+
+
+# ── the denominator is the portfolio the user OWNS (2026-09-30) ───────────────
+#
+# "4 of your 8 holdings" was printed for a 12-holding group: funds, unpriced and
+# prior-session rows never reach `holdings`, so the readable rows were a smaller number
+# than the one on the tile's own header. `holdings_count` is the requested set.
+
+
+def _falling_four():
+    return _holdings(("NVDA", -4.0, 0.03), ("AMD", -5.0, 0.03), ("AVGO", -3.5, 0.03),
+                     ("MU", -4.5, 0.03))
+
+
+def test_the_requested_count_is_the_denominator():
+    b = detect_basket(_falling_four(), {}, holdings_count=12)
+    assert b is not None
+    assert b.total_count == 12
+    assert "4 of your 12 holdings fell together" in b.text
+
+
+@pytest.mark.parametrize("count", [None, 0, 2, 4])
+def test_the_denominator_is_never_below_the_readable_rows(count):
+    """A stale, partial or missing count cannot make the sentence say "4 of your 2"."""
+    b = detect_basket(_falling_four(), {}, holdings_count=count)
+    assert b is not None
+    assert b.total_count == 4
+    assert f"{b.moved_count} of your {b.total_count}" in b.text
+
+
+def test_the_thresholds_still_judge_the_readable_rows_only():
+    """A big `holdings_count` must not turn two readable rows into a group."""
+    h = _holdings(("NVDA", -5.0, 0.03), ("AMD", -6.0, 0.03))
+    assert detect_basket(h, {}, holdings_count=40) is None

@@ -82,6 +82,45 @@ public enum WidgetRefreshSchedule {
         return candidate
     }
 
+    /// The timeline's entry dates: SEVERAL renders of one snapshot before `reload`.
+    ///
+    /// Re-rendering buys no new DATA between fetches; what it buys is an honest LABEL.
+    /// `WidgetSessionLabel` derives the wording at render time, so a tile written at 14:14
+    /// says "Live 2:14 PM ET" now and "As of 2:14 PM ET" an hour later with no network.
+    ///
+    /// ⚠️ THE DAY ROLLOVER IS 00:01 **ET**, NOT DEVICE-LOCAL. The aged label compares ET days,
+    /// so only an entry past ET midnight can turn today's numbers into "Tue close". This used
+    /// `Calendar.current`: for a user in UTC+7 the local 00:01 landed AFTER the 04:00 ET
+    /// reload and was dropped, leaving 00:00-04:00 ET (11:00-15:00 local) with Tuesday's move
+    /// presented as today's; Europe went unlabelled for up to 18 hours.
+    ///
+    /// Pure and clock-injected so `scripts/widget-refresh-schedule-check.sh` can assert it
+    /// under several device time zones.
+    ///
+    /// - Returns: sorted, de-duplicated, starting at `now`, every date before `reload` (a
+    ///   render past the reload is redundant — the reload replaces it).
+    ///
+    /// During regular hours that is `[now]` alone. The one render the snapshot itself calls for
+    /// — the instant its "As of" label starts speaking — is added by the provider once the
+    /// snapshot is known (`WidgetSessionLabel.ageBoundary`), and deliberately NOT capped at the
+    /// reload: it is the render a deferred reload needs.
+    public static func renderDates(now: Date, reload: Date) -> [Date] {
+        var dates: [Date] = [now]
+        for minutes in [20, 60, 180] {
+            let d = now.addingTimeInterval(TimeInterval(minutes * 60))
+            // On a quiet weekend these are the only thing keeping the label moving before
+            // the reload; past it they would be dead weight.
+            if d < reload { dates.append(d) }
+        }
+        if let rollover = easternCalendar.nextDate(
+            after: now, matching: DateComponents(hour: 0, minute: 1),
+            matchingPolicy: .nextTime
+        ), rollover < reload {
+            dates.append(rollover)
+        }
+        return Array(Set(dates)).sorted()
+    }
+
     /// 04:00 ET on the next weekday. Not "tomorrow" — on a Friday evening that is Monday.
     static func nextPremarketOpen(after now: Date, cal: Calendar) -> Date {
         var probe = now

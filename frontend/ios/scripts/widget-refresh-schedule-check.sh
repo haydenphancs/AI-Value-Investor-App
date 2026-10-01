@@ -117,9 +117,66 @@ expect("a trading day stays under 40 requests", requests < 40,
 expect("a trading day asks for at least 20", requests >= 20,
        "asked for only \(requests) — the session would feel frozen")
 
+// THE ENTRY DATES, and the bug they fix: the day-rollover render used `Calendar.current`,
+// so for a device outside US Eastern it landed at LOCAL 00:01. In UTC+7 that is after the
+// 04:00 ET reload, so it was dropped, and from ET midnight to 04:00 the tile showed
+// Tuesday's move with no "Tue close". This binary runs once per device zone (see the loop
+// at the bottom of the script); every expectation below is in ET and must hold in all.
+print("— render dates: the rollover is ET 00:01, whatever the device zone (\(TimeZone.current.identifier)) —")
+func renders(_ s: String) -> String {
+    let now = d(s)
+    let reload = WidgetRefreshSchedule.nextRefresh(after: now)
+    return WidgetRefreshSchedule.renderDates(now: now, reload: reload).map(show).joined(separator: ",")
+}
+check("Tue 20:30 → +20/+60/+180, then ET midnight",
+      renders("2026-08-25 20:30"),
+      "2026-08-25 20:30,2026-08-25 20:50,2026-08-25 21:30,2026-08-25 23:30,2026-08-26 00:01")
+check("Fri 20:30 → Saturday 00:01 ET is inside the weekend's long reload",
+      renders("2026-08-28 20:30"),
+      "2026-08-28 20:30,2026-08-28 20:50,2026-08-28 21:30,2026-08-28 23:30,2026-08-29 00:01")
+check("Saturday noon → Sunday 00:01 ET",
+      renders("2026-08-29 12:00"),
+      "2026-08-29 12:00,2026-08-29 12:20,2026-08-29 13:00,2026-08-29 15:00,2026-08-30 00:01")
+// The age-boundary render ("As of" at asOf + 45 min) is NOT this function's: the provider
+// adds it once the snapshot is known — `WidgetSessionLabel.ageBoundary`, asserted in
+// widget-session-label-check.sh.
+check("mid-session → just now (the 20-minute reload replaces everything after)",
+      renders("2026-08-26 10:00"), "2026-08-26 10:00")
+check("02:00 → no rollover: the next ET 00:01 is after the 04:00 reload",
+      renders("2026-08-26 02:00"), "2026-08-26 02:00,2026-08-26 02:20,2026-08-26 03:00")
+
+var renderProbe = d("2026-08-27 00:00")
+var renderBroken: String? = nil
+for _ in 0..<(4 * 24 * 60 / 7) {             // every 7 minutes for four days, incl. a weekend
+    let reload = WidgetRefreshSchedule.nextRefresh(after: renderProbe)
+    let dates = WidgetRefreshSchedule.renderDates(now: renderProbe, reload: reload)
+    if dates.first != renderProbe { renderBroken = "first entry is not now at \(show(renderProbe))"; break }
+    if zip(dates, dates.dropFirst()).contains(where: { pair in pair.0 >= pair.1 }) {
+        renderBroken = "entries not strictly increasing at \(show(renderProbe))"; break
+    }
+    if dates.dropFirst().contains(where: { $0 >= reload }) {
+        renderBroken = "an entry at or past the reload at \(show(renderProbe))"; break
+    }
+    var etCal = Calendar(identifier: .gregorian)
+    etCal.timeZone = et
+    if let rollover = etCal.nextDate(after: renderProbe, matching: DateComponents(hour: 0, minute: 1),
+                                     matchingPolicy: .nextTime),
+       rollover < reload, !dates.contains(rollover) {
+        renderBroken = "ET 00:01 missing before the reload at \(show(renderProbe))"; break
+    }
+    renderProbe = renderProbe.addingTimeInterval(7 * 60)
+}
+expect("every timeline: starts now, increasing, before the reload, with ET 00:01 when it precedes it",
+       renderBroken == nil, renderBroken ?? "")
+
 if failures == 0 { print("\nall assertions hold") } else { print("\n\(failures) FAILED") }
 exit(failures == 0 ? 0 : 1)
 SWIFT
 
 swiftc -O -o "$WORK/harness" "$WORK/main.swift" "$SRC"
-"$WORK/harness"
+# Every assertion is in ET and must hold whatever zone the DEVICE is in — the rollover bug
+# only existed outside US Eastern. `set -e` stops at the first zone that fails.
+for tz in America/New_York Asia/Ho_Chi_Minh Europe/Berlin America/Los_Angeles; do
+    echo "── device time zone: $tz"
+    TZ="$tz" "$WORK/harness"
+done

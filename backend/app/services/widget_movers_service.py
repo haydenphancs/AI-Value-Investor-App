@@ -44,13 +44,19 @@ or a dated record, the output cannot hallucinate.
 *"Aerospace & Defense fell 1.2%; ACHR moved far more. No clear catalyst in today's
 news."* — which is both true and more useful than any headline available.
 
-RANKING
--------
-By continuous z (`updates_materiality.move_z`), not raw percent and not `move_score`.
-`move_score` is tier-bucket + raw magnitude, so a Notable +9% (z≈1.1) outranks an
-Unusual +3% (z≈2.4) — raw-percent ranking wearing a z-score hat. Rows with no σ cannot
-be placed on that axis and sort *after* every row that has one, rather than being
+RANKING — ONE AXIS PER MODE
+---------------------------
+Market mode ranks by continuous z (`updates_materiality.move_z`), not raw percent and not
+`move_score`. `move_score` is tier-bucket + raw magnitude, so a Notable +9% (z≈1.1)
+outranks an Unusual +3% (z≈2.4) — raw-percent ranking wearing a z-score hat. Rows with no
+σ cannot be placed on that axis and sort *after* every row that has one, rather than being
 silently treated as z=0.
+
+Portfolio mode ranks by ABSOLUTE % move (`basis="abs_change"`; z only breaks ties). The
+Holdings tile is "my biggest movers", and z there reproduced the user-reported "random"
+order exactly — AAPL −2.67% (z 1.78) above ORCL +4.01% (z 1.38) — while every holding
+outside the σ-cached top-200 universe, and every crypto pair, always sorted last and was
+cut by the payload cap however far it moved.
 
 MARKET MODE RANKS INSIDE THE SWEPT UNIVERSE, ON PURPOSE
 -------------------------------------------------------
@@ -66,9 +72,10 @@ import asyncio
 import logging
 import math
 import time
+from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import date, datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
@@ -99,6 +106,8 @@ from app.services.updates_materiality import classify_move, finite, move_z
 from app.services.volatility_cache_service import get_volatility_cache_service
 from app.utils.market_hours import (
     ET,
+    SESSION_REGULAR,
+    previous_trading_day,
     session_label,
     session_phase,
     session_trading_date,
@@ -151,9 +160,10 @@ _BASKET_SECTOR_SHARE = 2.0 / 3.0
 
 _MEM_TTL_SECONDS = 60
 
-# Which universe the movers were drawn from. Sent so the tile can SAY it: an empty
-# active group falls back to market data at the endpoint, and nothing used to tell the
-# user their "My Holdings" widget was showing the market.
+# Which universe the movers were drawn from. Sent so the tile can SAY it. It was added
+# when an empty active group fell back to market data at the endpoint; that fallback is
+# gone (an empty group is now an explicit `holdings_count=0` portfolio payload), but
+# installed builds still caption a scope mismatch with it.
 _SCOPE_MARKET = "The stocks Caydex tracks"
 _SCOPE_PORTFOLIO = "Your holdings"
 
@@ -172,6 +182,40 @@ _CACHE_MAX_ENTRIES = 2000
 # many scopes it is handed.
 _RUNNERS_UP = 6
 
+# Portfolio mode's top gainers / top losers: at most this many per side, the headline
+# excluded. The Large Holdings tile renders two columns of five; Medium shows one of each.
+_TOP_MOVERS = 5
+
+# A change below this DISPLAYS as 0.00% — the client's `isFlat`, which rounds to the two
+# decimals it prints. It is the line between "up", "down" and "flat" in the portfolio
+# counts, so the counts can never disagree with the badges drawn beside them.
+_FLAT_PCT = 0.005
+
+# The Market tile's short labels — Small/Medium draw only the %, in a 2×3 grid where
+# "Russell 2000 ETF" does not fit. Kept beside, not inside, `_INDEX_SYMBOLS` (2-tuples a
+# test pins) and the Home pulse list (whose `name` is the honest fund name, used next to
+# a PRICE). A short label is never drawn beside a price: "S&P 500 · $651" reads as the
+# index being off by 10x.
+_MARKET_ASSET_SHORT_LABELS: Dict[str, str] = {
+    "SPY": "S&P 500",
+    "ONEQ": "Nasdaq",
+    "DIA": "Dow",
+    "IWM": "Russell 2000",
+    "GLD": "Gold",
+    "BTCUSD": "Bitcoin",
+}
+
+# Ceiling on reading the Bitcoin pulse tile. It is served from the Home strip's 600 s
+# cache; on a miss it is a CoinGecko quote plus a sparkline, and a hung upstream must not
+# hold the whole Market payload (and every caller deduped behind it) for the 30 s httpx
+# timeout. The read is SHIELDED, so a slow fetch still fills the cache for the next build.
+_CRYPTO_TILE_TIMEOUT_SECONDS = 5.0
+
+# How many sessions' contexts `_ctx_cache` keeps. Two sessions coexist only around a
+# rollover (a pre-market build still describing yesterday beside a fresh one), so a few
+# slots stop the two builds evicting each other without growing without bound.
+_CTX_CACHE_MAX_SESSIONS = 3
+
 # The universe-wide snapshots change at most once a day, so an hour of reuse is generous
 # and still costs at most 24 calls/day for the whole product.
 #
@@ -180,6 +224,11 @@ _RUNNERS_UP = 6
 # each minute — see `_fetch_market_context`, where the indices now ride the universe
 # batch quote instead.
 _CONTEXT_TTL_SECONDS = 3600
+
+# FMP's SILENT row cap on `earnings-calendar`: a larger answer is cut, NEWEST dates kept.
+# The same number as `earnings_window_service._TRUNCATION_ROWS` (a test pins them equal).
+# A single-day response this large is probably truncated too, so it is logged as an ERROR.
+_EARNINGS_TRUNCATION_ROWS = 4000
 
 
 # ── Pure helpers (no I/O — exhaustively testable) ─────────────────────
@@ -271,8 +320,17 @@ class _MarketContext:
 
         `index_rows` likewise: they come from the CALLER'S batch quote, so they are as
         fresh as the payload rather than as old as the hourly cache.
+
+        ⚠️ AND THEY ARE SESSION-GATED HERE, like the sectors below. One batch can carry two
+        sessions (`drop_prior_session_movers`), and the index rows were the only rows that
+        escaped every gate: pre-market, SPY could print Tuesday's −0.18% beside ONEQ's
+        sub-cent drift off Tuesday's stored close, stamped WEDNESDAY, under one "Tue close"
+        label — the screenshot's "Nasdaq 0.00%" — and the same SPY row is the "moved with
+        the market" denominator. A row stamped with another session keeps its price and
+        loses its change (so `market_available` goes False for a mismatched SPY). An
+        UNSTAMPED row (the profile fallback) fails open, the same rule the movers follow.
         """
-        rows = index_rows or {}
+        rows = _session_gated_index_rows(index_rows or {}, session_date)
         head = rows.get(MARKET_INDEX_SYMBOL) or {}
         market_change = finite(head.get("changePercentage"))
         # Sector breadth is served from the hourly context cache with no date on the
@@ -349,6 +407,8 @@ class RankedMover:
     # ISO date of the session `change_percent` describes (`price_service` stamps it as
     # `changeSession`). None on a row without a change or from an older shape.
     change_session: Optional[str] = None
+    # "etf" | "crypto" | "stock" from the quote's own flags; None when the quote had none.
+    asset_type: Optional[str] = None
 
 
 @dataclass
@@ -380,19 +440,32 @@ class MoveExplanation:
     session_date: Optional[str] = None
 
 
-def rank_movers(rows: Sequence[Dict[str, Any]]) -> List[RankedMover]:
-    """Order candidates by how unusual the move is for each ticker.
+_RANK_BASES = ("z", "abs_change")
+
+
+def rank_movers(rows: Sequence[Dict[str, Any]], *, basis: str = "z") -> List[RankedMover]:
+    """Order candidates — by how unusual the move is (`basis="z"`, the default), or by
+    how big it is (`basis="abs_change"`, portfolio mode).
 
     A row whose change is missing or non-finite is DROPPED, not ranked as 0.0 —
     an unreadable quote is not a flat day, and this repo has shipped that exact
     confusion more than once (NaN reaching `max()` and winning).
 
-    Rows with a usable σ sort first, by z descending. Rows without σ follow, by
+    `"z"`: rows with a usable σ sort first, by z descending. Rows without σ follow, by
     absolute change descending, because they cannot be placed on the z axis at all
     and pretending otherwise would let an unjudgeable ticker outrank a measured
-    one. Ties break on ticker ascending so the widget does not flip between two
+    one.
+
+    `"abs_change"`: |change| descending, then z descending (σ-less rows last among
+    equal moves), so a σ-less −15% holding leads a σ-judged −0.3% one. This is what
+    the Holdings tile promises — "my biggest movers" — and the z order there read as
+    random (module header, RANKING).
+
+    Either way, ties break on ticker ascending so the widget does not flip between two
     equal movers on consecutive refreshes.
     """
+    if basis not in _RANK_BASES:
+        raise ValueError(f"rank_movers: unknown basis {basis!r} (expected one of {_RANK_BASES})")
     ranked: List[RankedMover] = []
     for row in rows:
         ticker = str(row.get("ticker") or "").upper().strip()
@@ -416,8 +489,21 @@ def rank_movers(rows: Sequence[Dict[str, Any]]) -> List[RankedMover]:
                 previous_close=finite(row.get("previous_close")),
                 change_session=(str(row.get("change_session"))[:10] or None)
                 if row.get("change_session") else None,
+                asset_type=(str(row.get("asset_type")) or None)
+                if row.get("asset_type") else None,
             )
         )
+
+    if basis == "abs_change":
+        ranked.sort(
+            key=lambda m: (
+                -abs(m.change_percent or 0.0),         # biggest move first
+                0 if m.z is not None else 1,           # then σ-judged rows
+                -(m.z if m.z is not None else 0.0),    # then most unusual
+                m.ticker,                              # then stable
+            )
+        )
+        return ranked
 
     ranked.sort(
         key=lambda m: (
@@ -437,6 +523,43 @@ def _parsed_session(stamp: Optional[str]) -> Optional[date]:
         return date.fromisoformat(str(stamp)[:10])
     except ValueError:
         return None
+
+
+def _off_session(row: Dict[str, Any], session_date: Optional[str]) -> bool:
+    """True when `row` carries a readable `changeSession` that is NOT `session_date`.
+
+    Fails OPEN on an unstamped (or unreadable) row — the profile fallback carries no stamp,
+    and the movers keep such rows too — and on an unknown payload session.
+    """
+    stamp = _parsed_session(row.get("changeSession"))
+    want = _parsed_session(session_date)
+    return stamp is not None and want is not None and stamp != want
+
+
+def _session_gated_index_rows(
+    rows: Dict[str, Dict[str, Any]], session_date: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    """`rows` with the change blanked on every row stamped with another session.
+
+    Pure, and never mutates its input: the rows are the caller's batch-quote dicts. The
+    price is kept — it is a real, current price — and only the session-relative number is
+    withheld, which iOS already renders as the label alone (`change_percent` None).
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for sym, row in rows.items():
+        if isinstance(row, dict) and _off_session(row, session_date):
+            logger.info(
+                "widget: index row %s is stamped %s but the payload describes %s — its "
+                "change is withheld (price kept)",
+                sym, row.get("changeSession"), session_date,
+            )
+            gated = dict(row)
+            gated["changePercentage"] = None
+            gated["change"] = None
+            out[sym] = gated
+        else:
+            out[sym] = row
+    return out
 
 
 def _is_round_the_clock(ticker: str) -> bool:
@@ -465,21 +588,45 @@ def newest_session(ranked: Sequence[RankedMover]) -> Optional[date]:
 
 def drop_prior_session_movers(
     ranked: Sequence[RankedMover],
+    *,
+    phase: Optional[str] = None,
 ) -> Tuple[List[RankedMover], List[RankedMover]]:
-    """Split `ranked` into (current-session rows, rows stamped with an OLDER session).
+    """Split `ranked` into (rows of the tile's session, rows stamped with ANOTHER session).
 
     One batch of quotes can legitimately carry two sessions: `price_service` stamps a
     row with the stored close's date whenever the quote still equals that close — a
     halted ticker, or one that has not printed yet — and with the live session
-    otherwise. Ranking is by z alone, so a Friday −10% halted name could head Monday's
+    otherwise. Ranking ignores the stamp, so a Friday −10% halted name could head Monday's
     tile above Monday's real movers, and the ONE `session_label` / `session_word` the
-    payload carries would then mislabel every runner. A row whose stamp is older than
-    the newest stamp in the batch is not this session's mover; it is dropped here and
-    named in the log. Rows without a stamp (older wire shape) are kept.
+    payload carries would then mislabel every runner. A row stamped with another session
+    is not this session's mover; it is dropped here and named in the log. Rows without a
+    stamp (older wire shape) are kept.
+
+    WHICH session is the tile's depends on `phase` (`market_hours.session_phase()`, passed
+    in by the builders — this function never reads the clock):
+
+    * `None` or `"regular"` — the NEWEST stamp wins, as it always has. With the tape open,
+      one live print is real news and every older stamp is a halted / unprinted name.
+    * any other phase (pre-market, after hours, closed) — the newest stamp wins only when
+      it covers at least half of the stamped rows; otherwise the PLURALITY session does
+      (ties to the newer). Pre-market the screener still reports yesterday's close, and a
+      single row whose price drifted a sub-cent off its stored close is stamped TODAY —
+      under newest-wins that one ~0% row evicted every real prior-session mover and the
+      tile headlined it as "Pre-market". Rows NEWER than the chosen session are dropped
+      too: `_session_of` re-derives the session from the rows that survive, so one
+      surviving Wednesday row would relabel all of Tuesday's movers as the live session.
     """
-    newest = newest_session(ranked)
-    if newest is None:
+    sessions = [
+        _parsed_session(m.change_session)
+        for m in ranked if not _is_round_the_clock(m.ticker)
+    ]
+    counts = Counter(d for d in sessions if d is not None)
+    if not counts:
         return list(ranked), []
+    chosen = max(counts)
+    if phase is not None and phase != SESSION_REGULAR:
+        if counts[chosen] * 2 < sum(counts.values()):
+            chosen = max(counts, key=lambda d: (counts[d], d))
     current: List[RankedMover] = []
     stale: List[RankedMover] = []
     for m in ranked:
@@ -488,8 +635,68 @@ def drop_prior_session_movers(
             current.append(m)
             continue
         stamped = _parsed_session(m.change_session)
-        (stale if stamped is not None and stamped < newest else current).append(m)
+        (stale if stamped is not None and stamped != chosen else current).append(m)
     return current, stale
+
+
+def select_payload_movers(
+    ranked: Sequence[RankedMover],
+) -> Tuple[Optional[RankedMover], List[RankedMover], List[RankedMover], List[RankedMover]]:
+    """(headline, runners-up, top gainers, top losers) — the ONE selection rule.
+
+    Shared by `_payload`, which renders these, and `_rank_and_read`, which reads their
+    news cards, so a mover can never be rendered without the card read that backs its
+    "no company news" claim (an unread card is UNCHECKED, and says so).
+
+    * ONE ROW PER TICKER, and the headline never repeats below itself. `rank_movers`
+      keeps duplicates ("dedup is the caller's job"), and iOS renders these with
+      `ForEach(id: \\.ticker)` — duplicate ids are undefined behaviour in SwiftUI, on a
+      Home Screen, with no way for the user to recover.
+    * Runners-up keep the ranking order, `_RUNNERS_UP - 1` of them.
+    * Gainers: change > 0 and not flat, largest first; losers: change < 0 and not flat,
+      most negative first; ≤ `_TOP_MOVERS` each, headline excluded, ties by ticker.
+    """
+    unique: List[RankedMover] = []
+    seen: set = set()
+    for m in ranked:
+        if m.ticker in seen:
+            continue
+        seen.add(m.ticker)
+        unique.append(m)
+    if not unique:
+        return None, [], [], []
+    head, rest = unique[0], unique[1:]
+    priced = [m for m in rest if m.change_percent is not None]
+    gainers = sorted(
+        (m for m in priced if m.change_percent > 0 and not _is_flat(m.change_percent)),
+        key=lambda m: (-m.change_percent, m.ticker),
+    )[:_TOP_MOVERS]
+    losers = sorted(
+        (m for m in priced if m.change_percent < 0 and not _is_flat(m.change_percent)),
+        key=lambda m: (m.change_percent, m.ticker),
+    )[:_TOP_MOVERS]
+    return head, rest[: _RUNNERS_UP - 1], gainers, losers
+
+
+def _is_flat(change: float) -> bool:
+    return abs(change) < _FLAT_PCT
+
+
+def direction_counts(ranked: Sequence[RankedMover]) -> Tuple[int, int, int]:
+    """(up, down, flat) over the ranked rows, one per ticker. Flat is `_FLAT_PCT`."""
+    up = down = flat = 0
+    seen: set = set()
+    for m in ranked:
+        if m.ticker in seen or m.change_percent is None:
+            continue
+        seen.add(m.ticker)
+        if _is_flat(m.change_percent):
+            flat += 1
+        elif m.change_percent > 0:
+            up += 1
+        else:
+            down += 1
+    return up, down, flat
 
 
 def deterministic_reason(
@@ -623,8 +830,19 @@ def _classified_today_news(
       finding and may be stated.
     * `checked=True, had_news=True` — news exists; whether it explains the move is the
       classifier's business.
+
+    A card generated AFTER the session is the fourth case, and it is `checked=False`.
+    Pre-market the payload describes yesterday's session, while the sweeper's news pass
+    (04:00 onwards) has already REPLACED yesterday's card with this morning's (one row per
+    scope). That newer card says nothing about yesterday, and yesterday's is gone — so
+    "No company news on Tue." would be a confident negative about a day we can no longer
+    see. ISO dates compare correctly as strings.
     """
     if not isinstance(card, dict):
+        return [], False, False
+    card_day = _et_date(card.get("generated_at"))
+    if card_day is not None and card_day > today_et:
+        # Newer than the session described — unchecked, not a negative (docstring).
         return [], False, False
     if _et_date(card.get("generated_at")) != today_et:
         # Covered, nothing from today's session — a genuine negative.
@@ -645,6 +863,30 @@ def _classified_today_news(
         )
         return [], True, True
     return ([(tag, headline)] if tag else []), True, True
+
+
+def _classified_rolling_news(
+    card: Optional[Dict[str, Any]], calendar_iso: str
+) -> tuple[list, bool, bool]:
+    """`_classified_today_news` for a ROUND-THE-CLOCK row — gated on `calendar_iso`, the ET
+    calendar day its rolling 24 h window ends, never on the EQUITY session.
+
+    An asset that never closes has no equity session to be checked against. On a Saturday
+    the payload's session is Friday while the crypto off-hours news pass has already
+    written Saturday's BTCUSD card: the equity gate saw a card NEWER than the session,
+    called it unchecked, and the catalyst in it was never classified — "Today's news could
+    not be checked." beside a live move all weekend, and every weekday pre-market hour.
+
+    Same three states, one stricter rule: a card from any OTHER day — older (at 00:30 ET
+    last evening's card still sits inside the rolling 24 h), newer (clock skew) or
+    undated — is UNCHECKED, never the confident negative "No company news today". Only a
+    card from that very day is classified, by the one shared classifier.
+    """
+    if not isinstance(card, dict):
+        return [], False, False
+    if _et_date(card.get("generated_at")) != calendar_iso:
+        return [], False, False
+    return _classified_today_news(card, calendar_iso)
 
 
 def build_market_context(
@@ -679,6 +921,8 @@ def build_market_context(
                 label=label,
                 change_percent=round(chg, 2) if chg is not None else None,
                 price=round(price, 2) if price is not None else None,
+                # Every band symbol is an entitled ETF proxy (see `_INDEX_SYMBOLS`).
+                asset_type="etf",
             )
         )
 
@@ -730,6 +974,115 @@ def build_market_context(
     )
 
 
+def _stamp_only_movers(index_rows: Dict[str, Dict[str, Any]]) -> List[RankedMover]:
+    """Session-stamp carriers for `_session_of` when no mover was ranked. Pure.
+
+    Never ranked, never rendered — only `change_session` and `ticker` are read, by
+    `newest_session`. Rows without a stamp contribute nothing.
+    """
+    out: List[RankedMover] = []
+    for sym, row in (index_rows or {}).items():
+        stamp = row.get("changeSession") if isinstance(row, dict) else None
+        if not stamp:
+            continue
+        out.append(RankedMover(
+            ticker=str(sym).upper(), change_percent=None, price=None, company_name=None,
+            sigma_daily=None, z=None, tier=None, change_session=str(stamp)[:10],
+        ))
+    return out
+
+
+def _quote_asset_type(symbol: str, quote: Dict[str, Any]) -> Optional[str]:
+    """The holding's class from the batch quote's OWN flags — no extra call, no name guess.
+
+    `price_service` shapes every row with an `isEtf` boolean, so its absence means the row
+    came from somewhere that does not classify; that answers None rather than "stock".
+    """
+    if _is_round_the_clock(symbol):
+        return "crypto"
+    if not isinstance(quote, dict) or "isEtf" not in quote:
+        return None
+    return "etf" if quote.get("isEtf") else "stock"
+
+
+def build_market_assets(
+    index_rows: Dict[str, Dict[str, Any]],
+    session_date: Optional[str],
+    crypto_tile: Optional[Any] = None,
+) -> List[WidgetIndexResponse]:
+    """The Market tile's grid: the Home Market Pulse, in the Home strip's order. Pure.
+
+    The equities are `home_dashboard_service._PULSE_SYMBOLS`, imported rather than copied
+    so the widget and Home can never list different assets or call them different names;
+    their quotes ride the batch `_rank_and_read` already makes (free). Bitcoin comes last,
+    from the pulse's own crypto tile (`HomeDashboardService.get_crypto_pulse_tile`).
+
+    The same honesty rules as the band: a change stamped with a session other than
+    `session_date` is withheld (the price is kept), a non-finite one is withheld, and an
+    unmeasured crypto change (`change_known=False`) is None — never the 0.0 the pulse
+    keeps on the wire for its shipped builds. An asset with neither a price nor a change
+    is omitted rather than drawn as a blank.
+    """
+    # Function-local: the pulse list lives in a heavyweight module, and the widget only
+    # needs it here.
+    from app.services.home_dashboard_service import _PULSE_SYMBOLS
+
+    out: List[WidgetIndexResponse] = []
+    for cfg in _PULSE_SYMBOLS:
+        sym = str(cfg.get("symbol") or "").upper()
+        row = index_rows.get(sym) if sym else None
+        if not isinstance(row, dict):
+            continue
+        price = finite(row.get("price"))
+        if price is not None and price <= 0:
+            price = None
+        chg = finite(row.get("changePercentage"))
+        if chg is not None and _off_session(row, session_date):
+            chg = None
+        if price is None and chg is None:
+            continue
+        out.append(
+            WidgetIndexResponse(
+                symbol=sym,
+                label=str(cfg.get("name") or sym),
+                # `+ 0.0` collapses −0.0, as the pulse does: "-0.00%" in green otherwise.
+                change_percent=(round(chg, 2) + 0.0) if chg is not None else None,
+                price=round(price, 2) if price is not None else None,
+                short_label=_MARKET_ASSET_SHORT_LABELS.get(sym),
+                asset_type=(str(cfg.get("type")) or None) if cfg.get("type") else None,
+            )
+        )
+
+    if crypto_tile is not None:
+        sym = str(getattr(crypto_tile, "symbol", "") or "").upper()
+        price = finite(getattr(crypto_tile, "price", None))
+        if price is not None and price <= 0:
+            price = None
+        chg = (
+            finite(getattr(crypto_tile, "change_percent", None))
+            if getattr(crypto_tile, "change_known", True) else None
+        )
+        if sym and (price is not None or chg is not None):
+            out.append(
+                WidgetIndexResponse(
+                    symbol=sym,
+                    label=str(getattr(crypto_tile, "name", "") or sym),
+                    change_percent=(round(chg, 2) + 0.0) if chg is not None else None,
+                    price=round(price, 2) if price is not None else None,
+                    short_label=_MARKET_ASSET_SHORT_LABELS.get(sym),
+                    # Its change is a rolling 24 h — no session to gate on, none to label.
+                    rolling_24h=True,
+                    asset_type=str(getattr(crypto_tile, "type", "") or "crypto"),
+                )
+            )
+    return out
+
+
+def _market_payload_is_cacheable(payload: WidgetMoverPayload) -> bool:
+    """A Market payload worth reusing for the 60 s TTL: it has assets or a brief."""
+    return bool(payload.market_assets) or payload.market_brief is not None
+
+
 def _better_earnings_row(candidate: Dict[str, Any], incumbent: Dict[str, Any]) -> bool:
     """Prefer the row that actually REPORTED, then the more recent one.
 
@@ -754,7 +1107,10 @@ def _moved(m: RankedMover) -> bool:
 
 
 def detect_basket(
-    holdings: Sequence[RankedMover], sectors: Dict[str, Optional[str]]
+    holdings: Sequence[RankedMover],
+    sectors: Dict[str, Optional[str]],
+    *,
+    holdings_count: Optional[int] = None,
 ) -> Optional[WidgetBasketResponse]:
     """The correlated-move case: several holdings moving together for one reason.
 
@@ -778,10 +1134,19 @@ def detect_basket(
     A mover whose sector is unknown counts toward breadth but never toward a sector
     claim — bucketing unknowns together and reporting "all Other moved" would
     manufacture a factor out of missing data.
+
+    `holdings_count` is the size of the portfolio the user OWNS — the requested tickers,
+    when the caller knows it. "4 of your 8 holdings" was printed for a 12-holding group
+    because funds, unpriced and prior-session rows never reach `holdings`; the sentence
+    states a count the user can see is wrong. The thresholds above still judge the
+    readable rows only. Without it the denominator is the readable rows, as before.
     """
     usable = [m for m in holdings if m.change_percent is not None]
     if len(usable) < _BASKET_MIN_HOLDINGS:
         return None
+    # Never below the readable rows: a caller's stale or partial count cannot make the
+    # sentence say "5 of your 3".
+    denominator = max(holdings_count or 0, len(usable))
 
     movers = [m for m in usable if _moved(m)]
     if len(movers) < _BASKET_MIN_MOVERS:
@@ -819,19 +1184,20 @@ def detect_basket(
     verb = "rose" if direction == "up" else "fell"
     if factor_label:
         text = (
-            f"{len(group)} of your {len(usable)} holdings {verb} together — "
+            f"{len(group)} of your {denominator} holdings {verb} together — "
             f"mostly {factor_label}, averaging {avg:+.1f}%."
         )
     else:
         text = (
-            f"{len(group)} of your {len(usable)} holdings {verb} together, "
+            f"{len(group)} of your {denominator} holdings {verb} together, "
             f"averaging {avg:+.1f}% — no single sector driving it."
         )
 
     return WidgetBasketResponse(
         direction=direction,
         moved_count=len(group),
-        total_count=len(usable),
+        # The SAME number the sentence prints, so the two can never disagree.
+        total_count=denominator,
         factor_kind=factor_kind,
         factor_label=factor_label,
         average_change_percent=round(avg, 2),
@@ -869,12 +1235,19 @@ class WidgetMoversService:
     def __init__(self) -> None:
         self._cache: Dict[str, Tuple[float, WidgetMoverPayload]] = {}
         self._inflight: Dict[str, asyncio.Future] = {}
-        self._ctx_cache: Optional[Tuple[float, _MarketContext]] = None
+        # session ISO date -> (monotonic stamp, context). Keyed by SESSION because the
+        # earnings window is a function of it — see `_market_context`.
+        self._ctx_cache: Dict[str, Tuple[float, _MarketContext]] = {}
 
     # ── public ───────────────────────────────────────────────────────
 
     async def get_market_mover(self) -> WidgetMoverPayload:
-        return await self._cached("market", self._build_market)
+        # A payload with neither assets nor a brief is the Market tile with nothing to draw
+        # — every leg failed. Pinning that for 60 s would serve a blank tile to every
+        # WidgetKit wake in the window; the next caller retries instead.
+        return await self._cached(
+            "market", self._build_market, cacheable=_market_payload_is_cacheable,
+        )
 
     async def get_portfolio_mover(self, user_id: str, tickers: Sequence[str]) -> WidgetMoverPayload:
         # KEYED ON THE USER, not just the ticker set.
@@ -941,17 +1314,38 @@ class WidgetMoversService:
         # ET Monday that is MONDAY, while the screener is still reporting Friday's close,
         # so the news and earnings detectors were queried for a day the move did not happen
         # on and returned the confident negative "no company news today".
+        cal_day = _et_calendar_day()
         today, today_iso, session_word = self._session_of(
-            [m], session_trading_date(), _et_calendar_day(),
+            [m], session_trading_date(), cal_day,
         )
+        # ⚠️ NOT for the market proxy itself. `ctx.market_change` IS
+        # `index_rows[MARKET_INDEX_SYMBOL]["changePercentage"]` — the very quote
+        # `m.change_percent` came from — so for SPY the ratio is exactly 1.0 and
+        # `detect_group_move` answers "The market fell 1.6% today; SPY moved with it."
+        # Ask Cay AI renders that verbatim. Passing None lets it fall through to a real
+        # catalyst or an honest CauseKind.NONE. (The single-symbol path reaches the
+        # band at all because `_rank_and_read(["SPY"])` is an all-band list, which the
+        # ranking exclusion deliberately yields on rather than return nothing.)
+        market_leg_off = sym.upper() == MARKET_INDEX_SYMBOL.upper()
         # A 24/7 asset's move is always its own rolling 24 hours — the same per-row
-        # override `_build_mover` applies on the widget path.
-        if _is_round_the_clock(sym):
+        # override `_build_mover` applies on the widget path, ALL of it: the word, the
+        # market leg (a closed equity session cannot be what a live coin "moved with"),
+        # and the news gate (the coin's own ET calendar day, never the equity session —
+        # on a Saturday that is Friday, and Saturday's card read as unchecked).
+        rolling = _is_round_the_clock(sym)
+        if rolling:
+            if session_word != "today":
+                market_leg_off = True
             session_word = "today"
         ctx = await self._market_context([sym], index_rows, today_iso)
-        classified, had_news, card_checked = _classified_today_news(
-            cards.get(sym), today_iso
-        )
+        if rolling:
+            classified, had_news, card_checked = _classified_rolling_news(
+                cards.get(sym), cal_day.isoformat()
+            )
+        else:
+            classified, had_news, card_checked = _classified_today_news(
+                cards.get(sym), today_iso
+            )
         industry = ctx.industry_for(sym)
         a = attribute(
             ticker=sym,
@@ -969,17 +1363,8 @@ class WidgetMoversService:
             previous_close=m.previous_close,
             industry_name=industry[0],
             industry_change_percent=industry[1],
-            # ⚠️ NOT for the market proxy itself. `ctx.market_change` IS
-            # `index_rows[MARKET_INDEX_SYMBOL]["changePercentage"]` — the very quote
-            # `m.change_percent` came from — so for SPY the ratio is exactly 1.0 and
-            # `detect_group_move` answers "The market fell 1.6% today; SPY moved with it."
-            # Ask Cay AI renders that verbatim. Passing None lets it fall through to a real
-            # catalyst or an honest CauseKind.NONE. (The single-symbol path reaches the
-            # band at all because `_rank_and_read(["SPY"])` is an all-band list, which the
-            # ranking exclusion deliberately yields on rather than return nothing.)
-            market_change_percent=(
-                None if sym.upper() == MARKET_INDEX_SYMBOL.upper() else ctx.market_change
-            ),
+            # SPY itself, or a 24/7 row beside a closed equity session — see above.
+            market_change_percent=None if market_leg_off else ctx.market_change,
             earnings_row=ctx.earnings_for(sym),
             # `grades` is 402 under the Order Form, so the analyst detector is inert.
             # Passing None is honest; `_head_grades` would spend a guaranteed failure.
@@ -1007,7 +1392,12 @@ class WidgetMoversService:
 
     # ── cache plumbing ───────────────────────────────────────────────
 
-    async def _cached(self, key: str, build) -> WidgetMoverPayload:
+    async def _cached(
+        self,
+        key: str,
+        build,
+        cacheable: Optional[Callable[[WidgetMoverPayload], bool]] = None,
+    ) -> WidgetMoverPayload:
         hit = self._cache.get(key)
         if hit and (time.monotonic() - hit[0]) < _MEM_TTL_SECONDS:
             return hit[1]
@@ -1020,8 +1410,16 @@ class WidgetMoversService:
         self._inflight[key] = fut
         try:
             payload = await build()
-            self._evict_expired()
-            self._cache[key] = (time.monotonic(), payload)
+            # Joiners of THIS build still share it either way; `cacheable` only decides
+            # whether the next caller in the TTL gets it too (default: always).
+            if cacheable is None or cacheable(payload):
+                self._evict_expired()
+                self._cache[key] = (time.monotonic(), payload)
+            else:
+                logger.warning(
+                    "widget: %s payload not cached — nothing renderable was built "
+                    "(every leg failed); the next refresh rebuilds", key.split(":", 1)[0],
+                )
             if not fut.done():
                 fut.set_result(payload)
             return payload
@@ -1063,17 +1461,84 @@ class WidgetMoversService:
 
     async def _build_market(self) -> WidgetMoverPayload:
         tickers = await self._swept_universe()
-        ranked, cards, news_ok, index_rows = await self._rank_and_read(tickers)
-        _, session_iso, _ = self._session_of(ranked, session_trading_date())
+        # The legacy z-ranked universe movers stay: every INSTALLED build renders
+        # `headline_mover` / `runners_up` in Market mode. The current tile draws
+        # `market_assets` instead, which ride the same batch quote (`index_rows`).
+        ranked, cards, news_ok, index_rows = await self._rank_and_read(
+            tickers, phase=session_phase(),
+        )
+        # A failed universe read leaves `ranked` empty, and `_session_of` then falls back to
+        # the LIVE session — pre-market that is TODAY, while every band and pulse row is still
+        # stamped with yesterday's close, so `build_market_assets` withheld every change and
+        # the grid drew bare prices under "Pre-market". Date it by those rows' own stamps.
+        # The same plurality rule the movers get: one ETF row already stamped with the next
+        # session must not re-date the four still on yesterday's close.
+        session_basis = list(ranked) or drop_prior_session_movers(
+            _stamp_only_movers(index_rows), phase=session_phase(),
+        )[0]
+        _, session_iso, _ = self._session_of(session_basis, session_trading_date())
         ctx = await self._market_context([m.ticker for m in ranked], index_rows, session_iso)
         ctx = replace(ctx, news_available=news_ok)
-        grades = await self._head_grades(ranked)
+        # Three independent best-effort reads, concurrently: each already degrades to
+        # None on its own, and none should add its latency to the others.
+        grades, market_card, crypto_tile = await asyncio.gather(
+            self._head_grades(ranked),
+            self._market_card(),
+            self._crypto_tile(),
+            return_exceptions=True,
+        )
+        if isinstance(grades, BaseException):
+            logger.warning("widget: grades read failed: %s: %s", type(grades).__name__, grades)
+            grades = None
+        if isinstance(market_card, BaseException):
+            logger.warning(
+                "widget: market roll-up read failed: %s: %s",
+                type(market_card).__name__, market_card,
+            )
+            market_card = None
+        if isinstance(crypto_tile, BaseException):
+            logger.warning(
+                "widget: Bitcoin tile read failed: %s: %s",
+                type(crypto_tile).__name__, crypto_tile,
+            )
+            crypto_tile = None
         return self._payload(
             mode="market", ranked=ranked, cards=cards, ctx=ctx,
             basket=None, head_grades=grades,
             scope_label=_SCOPE_MARKET,
-            market_card=await self._market_card(),
+            market_card=market_card,
+            crypto_tile=crypto_tile,
+            session_basis=session_basis,
         )
+
+    async def _crypto_tile(self) -> Optional[Any]:
+        """The Home Market Pulse's Bitcoin tile, for the Market tile's grid — or None.
+
+        ⚠️ NEVER `price_service` directly. CoinGecko Basic is 100k calls/MONTH, and the Home
+        strip deliberately serves this tile from its own 600 s cache for exactly that
+        reason (see `home_dashboard_service._PULSE_SYMBOLS`); a widget path quoting BTC on
+        its own 60 s cycle would be a second consumer of the same budget. Market mode only.
+        """
+        from app.services.home_dashboard_service import get_home_dashboard_service
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(get_home_dashboard_service().get_crypto_pulse_tile()),
+                timeout=_CRYPTO_TILE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "widget: Bitcoin tile not ready within %.0fs — omitted from the Market "
+                "tile this build (the fetch continues and fills the shared cache)",
+                _CRYPTO_TILE_TIMEOUT_SECONDS,
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                "widget: Bitcoin tile unavailable (%s: %s) — omitted from the Market tile",
+                type(e).__name__, e,
+            )
+            return None
 
     async def _market_card(self) -> Optional[Dict[str, Any]]:
         """The `__MARKET__` roll-up behind the Market tile's headline.
@@ -1097,13 +1562,55 @@ class WidgetMoversService:
     async def _build_portfolio(
         self, user_id: str, tickers: Sequence[str]
     ) -> WidgetMoverPayload:
-        ranked, cards, news_ok, index_rows = await self._rank_and_read(tickers)
-        symbols = [m.ticker for m in ranked]
-        _, session_iso, _ = self._session_of(ranked, session_trading_date())
+        # The tile's denominator — every holding asked about, whether or not it prices.
+        requested = len({str(t).upper().strip() for t in tickers if t and str(t).strip()})
+        # |%| ranking, and the market band ranks like any holding: the Holdings tile no
+        # longer draws the band, and the counts must cover EVERY holding — a user who holds
+        # SPY wants to see SPY. The self-attribution guard lives in `_build_mover`.
+        ranked, cards, news_ok, index_rows = await self._rank_and_read(
+            tickers, basis="abs_change", exclude_band=False, phase=session_phase(),
+        )
+        # DEGRADED, as opposed to "your holdings have no price today": the quote leg failed.
+        # `index_rows` rides the same batch as the holdings, so a batch that returned no
+        # index row at all is an outage (the same tell `attribute_ticker_move` uses); an
+        # empty ranking with SPY also unreadable is one too. The client keeps its last good
+        # snapshot over a degraded one, and must never be told "no prices" by an outage.
+        spy_change = finite((index_rows.get(MARKET_INDEX_SYMBOL) or {}).get("changePercentage"))
+        # ⚠️ SPY proves only that the EQUITY leg answered. 24/7 pairs are priced by a
+        # SEPARATE source (CoinGecko), which `price_service` degrades on its own and folds
+        # into "no row" — a 429 on the monthly quota, a 5xx. So a group with nothing
+        # rankable but coins, while SPY prints, shipped an authoritative "No prices for
+        # your 3 holdings today" over the user's good snapshot for as long as the quota
+        # stayed exhausted. A requested coin with NO coin in the ranking is that outage.
+        # (Accepted cost: a coin CoinGecko cannot resolve reads as degraded — the last good
+        # snapshot is kept — rather than as "no price". The safer wrong answer.)
+        crypto_requested = any(
+            _is_round_the_clock(str(t).upper().strip()) for t in tickers if t
+        )
+        crypto_dark = crypto_requested and not any(
+            _is_round_the_clock(m.ticker) for m in ranked
+        )
+        degraded = (not index_rows) or (not ranked and (spy_change is None or crypto_dark))
+        if degraded:
+            logger.warning(
+                "widget: portfolio quote leg degraded for user=%s (%d holdings, %d ranked, "
+                "index rows %s, crypto leg dark=%s) — movers and holdings_count withheld",
+                user_id, requested, len(ranked), sorted(index_rows)[:6], crypto_dark,
+            )
+        # A DEGRADED build is MOVER-LESS. With the equity leg down and CoinGecko up, the
+        # ranking still held the coins, so the payload headlined BTCUSD +0.8% as the group's
+        # "biggest mover" while NVDA may have fallen 8% — and a payload with a headline is
+        # content, so the client replaced its good snapshot with it. No headline and no
+        # count is the shape every build (installed ones too) refuses over a good snapshot.
+        movers: List[RankedMover] = [] if degraded else list(ranked)
+        symbols = [m.ticker for m in movers]
+        _, session_iso, _ = self._session_of(movers, session_trading_date())
         ctx, sectors, grades = await asyncio.gather(
             self._market_context(symbols, index_rows, session_iso),
             self._sectors(user_id, symbols),
-            self._head_grades(ranked),
+            # `_head_grades([])` returns before any call — no paid lookup for a headline
+            # that will not be drawn.
+            self._head_grades(movers),
             return_exceptions=True,
         )
         if isinstance(ctx, BaseException):
@@ -1118,9 +1625,14 @@ class WidgetMoversService:
         ctx = replace(ctx, news_available=news_ok)
 
         return self._payload(
-            mode="portfolio", ranked=ranked, cards=cards, ctx=ctx,
-            basket=detect_basket(ranked, sectors), head_grades=grades,
+            mode="portfolio", ranked=movers, cards=cards, ctx=ctx,
+            basket=(
+                None if degraded
+                else detect_basket(movers, sectors, holdings_count=requested)
+            ),
+            head_grades=None if degraded else grades,
             scope_label=_SCOPE_PORTFOLIO,
+            holdings_count=None if degraded else requested,
         )
 
     # ── same-day context (the whole cost story) ──────────────────────
@@ -1136,12 +1648,29 @@ class WidgetMoversService:
         Cached for an hour because none of it changes intraday in a way that would
         alter an attribution: an industry's daily % drifts, and today's earnings
         calendar is fixed by the opening bell.
+
+        Cached PER SESSION. The earnings window is `previous_trading_day(session)..session`,
+        so a context fetched for Tuesday is the wrong answer for Wednesday: one shared slot
+        filled at 04:01 Wednesday (window Tue..Wed) served pre-market builds describing
+        TUESDAY for an hour, and Monday's after-close print — the cause of Tuesday's move —
+        was never even fetched.
         """
-        hit = self._ctx_cache
+        session_day = _parsed_session(session_date)
+        if session_day is None:
+            # Never expected: every caller passes `_session_of`'s ISO date. The gates in
+            # `for_tickers` still compare against `session_date` itself (and so fail
+            # closed); only the earnings window needs a day, so name the substitute loudly.
+            session_day = session_trading_date()
+            logger.warning(
+                "widget: unreadable session %r for the market context — earnings window "
+                "taken from the live session %s", session_date, session_day,
+            )
+        key = session_day.isoformat()
+        hit = self._ctx_cache.get(key)
         if hit and (time.monotonic() - hit[0]) < _CONTEXT_TTL_SECONDS:
             shared = hit[1]
         else:
-            shared = await self._fetch_market_context()
+            shared = await self._fetch_market_context(session_day)
             # Do NOT pin a context in which every leg failed. Caching it turns one bad
             # minute upstream into a full hour of "no clear catalyst in today's news" —
             # a confident negative produced entirely by an outage.
@@ -1150,10 +1679,15 @@ class WidgetMoversService:
                 or shared.earnings_available
                 or shared.sector_available
             ):
-                self._ctx_cache = (time.monotonic(), shared)
+                self._ctx_cache[key] = (time.monotonic(), shared)
+                if len(self._ctx_cache) > _CTX_CACHE_MAX_SESSIONS:
+                    # Oldest SESSION first — the live one is always the newest key.
+                    for old in sorted(self._ctx_cache)[: len(self._ctx_cache) - _CTX_CACHE_MAX_SESSIONS]:
+                        self._ctx_cache.pop(old, None)
             else:
                 logger.warning(
-                    "widget: every market-context leg failed — not caching, will retry"
+                    "widget: every market-context leg failed for session %s — not "
+                    "caching, will retry", key,
                 )
 
         # The ticker→industry map is per-request (it depends on which tickers we are
@@ -1201,13 +1735,19 @@ class WidgetMoversService:
                 return ind
         return None
 
-    async def _fetch_market_context(self) -> "_MarketContext":
+    async def _fetch_market_context(self, session_day: date) -> "_MarketContext":
         fmp = get_fmp_client()
-        # The SESSION being attributed, so the earnings window matches the day the
-        # detectors gate on. With the wall clock, a Saturday build fetched Fri..Sat while
-        # `attribute()` was gating on Friday — so a Thursday-evening report, which is
-        # inside the t-1 window for a Friday session, was never even fetched.
-        today = session_trading_date()
+        # The SESSION being attributed (the payload's, from `_session_of`), so the earnings
+        # window matches the day the detectors gate on. It used to be the wall clock's
+        # `session_trading_date()`, which is right on a Saturday but wrong every pre-market:
+        # at 06:50 Wednesday the payload describes TUESDAY while the window was Tue..Wed, so
+        # Monday's after-close print never arrived. Trading days, not calendar days: a
+        # Monday session needs Friday's after-close row (Sun..Mon held nothing).
+        today = session_day
+        window_start = previous_trading_day(session_day)
+        # (Before either fix: with the raw wall clock, a Saturday build fetched Fri..Sat
+        # while `attribute()` was gating on Friday — so a Thursday-evening report, inside
+        # the t-1 window for a Friday session, was never even fetched.)
 
         async def _industry_perf():
             rows = await get_market_movers_service().get_industry_performance()
@@ -1249,17 +1789,64 @@ class WidgetMoversService:
             return out, dates
 
         async def _earnings():
-            rows = await fmp.get_earnings_calendar(
-                (today - timedelta(days=1)).isoformat(), today.isoformat()
+            # ONE CALL PER TRADING DAY, never one multi-day window. FMP cuts an
+            # `earnings-calendar` answer at 4,000 rows and keeps the NEWEST dates, so on a
+            # peak-season Monday a Fri..Mon request dropped Friday — the after-close prints
+            # that explain Monday's moves, i.e. exactly the rows this window exists to read.
+            # A day missing is a missed cause; it never becomes an invented one.
+            days = list(dict.fromkeys((window_start, today)))
+            answers = await asyncio.gather(
+                *(
+                    fmp.get_earnings_calendar(
+                        from_date=d.isoformat(), to_date=d.isoformat()
+                    )
+                    for d in days
+                ),
+                return_exceptions=True,
             )
             out: Dict[str, Dict[str, Any]] = {}
-            for r in rows or []:
-                sym = str(r.get("symbol") or "").upper()
-                if not sym:
+            failures: List[BaseException] = []
+            for d, rows in zip(days, answers):
+                iso = d.isoformat()
+                if rows is None:
+                    rows = []
+                if isinstance(rows, BaseException) or not isinstance(rows, list):
+                    err = (
+                        rows if isinstance(rows, BaseException)
+                        else TypeError(
+                            f"earnings calendar for {iso} returned "
+                            f"{type(rows).__name__}, not a list"
+                        )
+                    )
+                    failures.append(err)
+                    logger.warning(
+                        "widget: earnings calendar for %s failed (%s: %s) — that day's "
+                        "prints are missing from the context",
+                        iso, type(err).__name__, err,
+                    )
                     continue
-                prior = out.get(sym)
-                if prior is None or _better_earnings_row(r, prior):
-                    out[sym] = r
+                if len(rows) >= _EARNINGS_TRUNCATION_ROWS:
+                    logger.error(
+                        "widget: earnings calendar for %s returned %d rows — at FMP's "
+                        "silent cap, so it is probably TRUNCATED (newest kept) and some "
+                        "of that day's prints are missing",
+                        iso, len(rows),
+                    )
+                for r in rows:
+                    # Only under its own date: a lenient upstream (or a fake) that answers
+                    # with other days must not leak them into this one.
+                    if not isinstance(r, dict) or str(r.get("date") or "")[:10] != iso:
+                        continue
+                    sym = str(r.get("symbol") or "").upper()
+                    if not sym:
+                        continue
+                    prior = out.get(sym)
+                    if prior is None or _better_earnings_row(r, prior):
+                        out[sym] = r
+            if failures and len(failures) == len(days):
+                # EVERY day failed: raise, so `earnings_available` stays False and the
+                # empty dict is never mistaken for "nobody reported".
+                raise failures[-1]
             return out
 
         # NOTE: there is deliberately NO index leg here any more.
@@ -1400,21 +1987,46 @@ class WidgetMoversService:
         ctx: "_MarketContext",
         today: date,
         today_iso: str,
+        calendar_day: date,
         grade_rows: Optional[Sequence[Dict[str, Any]]] = None,
         session_word: str = "today",
+        aged: bool = False,
     ) -> WidgetMoverResponse:
+        # `calendar_day` is the ET calendar day of the build (clock-injected by `_payload`):
+        # the day a 24/7 row's rolling window ends, which gates its news card and names its
+        # aged wording. An equity row never reads it — `today` is its session.
+        #
+        # ⚠️ NOT for the market proxy itself — the same guard `attribute_ticker_move`
+        # applies. `ctx.market_change` IS SPY's own change, so a SPY row (portfolio mode
+        # ranks the band like any holding) would read "The market fell 1.6% today; SPY
+        # moved with it." None lets it fall through to a real catalyst or an honest NONE.
+        market_leg = (
+            None if m.ticker.upper() == MARKET_INDEX_SYMBOL.upper() else ctx.market_change
+        )
         # PER-ROW session word. A round-the-clock asset's move is always its own rolling
         # 24 hours, whatever session the equities in the same batch are reporting — and
         # equally, an equity row keeps the equity word even when the tile's HEAD is a
         # crypto pair. One word for the whole tile made one of those two wrong.
-        if _is_round_the_clock(m.ticker):
+        rolling = _is_round_the_clock(m.ticker)
+        if rolling:
+            if session_word != "today":
+                # The equity leg describes a CLOSED session (a weekend, overnight): a live
+                # rolling 24 h move cannot have "moved with the market" that is not open,
+                # and the sentence would say so with the word "today".
+                market_leg = None
             session_word = "today"
-        classified, had_news, card_checked = _classified_today_news(
-            cards.get(m.ticker), today_iso
-        )
+            # ITS OWN news gate: the ET calendar day the rolling window ends, not the equity
+            # session — on a Saturday that is Friday, and Saturday's card read as unchecked.
+            classified, had_news, card_checked = _classified_rolling_news(
+                cards.get(m.ticker), calendar_day.isoformat()
+            )
+        else:
+            classified, had_news, card_checked = _classified_today_news(
+                cards.get(m.ticker), today_iso
+            )
         industry = ctx.industry_for(m.ticker)
 
-        a = attribute(
+        inputs: Dict[str, Any] = dict(
             ticker=m.ticker,
             change_percent=m.change_percent,
             today=today,
@@ -1423,7 +2035,7 @@ class WidgetMoversService:
             previous_close=m.previous_close,
             industry_name=industry[0],
             industry_change_percent=industry[1],
-            market_change_percent=ctx.market_change,
+            market_change_percent=market_leg,
             earnings_row=ctx.earnings_for(m.ticker),
             grade_rows=grade_rows,
             classified_news=classified,
@@ -1431,11 +2043,27 @@ class WidgetMoversService:
             # Both must hold: the batched read has to have succeeded AND this particular
             # ticker has to have an insight row behind it.
             news_checked=ctx.news_available and card_checked,
-            session_word=session_word,
         )
+        a = attribute(**inputs, session_word=session_word)
         # `attribute` returns None only for an unreadable move, which `rank_movers`
         # has already filtered out — but degrade rather than crash if that changes.
         mc = a.context if a else None
+
+        # The SAME attribution, worded for a reader on a later day. Pure and I/O-free, so
+        # the second pass costs nothing; HEADLINE only (the one line the tile spells out).
+        #
+        # A 24/7 row gets one too, named for the ET CALENDAR day of the build — never the
+        # equity session (Monday pre-market that is Friday, and "on Fri" would mislabel a
+        # live Monday move). Without it a crypto headline on Tuesday's snapshot, still on
+        # the Home Screen Wednesday, fell back to the "today"-worded `detail` under a
+        # "Tue close" footer — and the |%| ranking makes coins the most common headline.
+        detail_aged: Optional[str] = None
+        if aged:
+            aged_word = f"on {(calendar_day if rolling else today).strftime('%a')}"
+            b = attribute(**inputs, session_word=aged_word)
+            detail_aged = (
+                b.detail if b else deterministic_reason(m.change_percent, m.z, aged_word)
+            )
         return WidgetMoverResponse(
             ticker=m.ticker,
             company_name=m.company_name,
@@ -1450,6 +2078,7 @@ class WidgetMoversService:
                     a.detail if a
                     else deterministic_reason(m.change_percent, m.z, session_word)
                 ),
+                detail_aged=detail_aged,
             ),
             context=WidgetMoveContextResponse(
                 change_percent=m.change_percent or 0.0,
@@ -1468,6 +2097,8 @@ class WidgetMoversService:
                     round(ctx.market_change, 2) if ctx.market_change is not None else None
                 ),
             ),
+            rolling_24h=rolling,
+            asset_type=m.asset_type,
         )
 
     @staticmethod
@@ -1525,7 +2156,14 @@ class WidgetMoversService:
         head_grades: Optional[Sequence[Dict[str, Any]]] = None,
         scope_label: Optional[str] = None,
         market_card: Optional[Dict[str, Any]] = None,
+        holdings_count: Optional[int] = None,
+        crypto_tile: Optional[Any] = None,
+        session_basis: Optional[Sequence[RankedMover]] = None,
     ) -> WidgetMoverPayload:
+        """Assemble the payload. `holdings_count` (portfolio: the requested holdings, None
+        when the build is DEGRADED) and `crypto_tile` (market: the Home pulse's Bitcoin
+        tile) are each read by one mode only. `session_basis` dates the payload when
+        `ranked` cannot (market mode after a failed universe read); default: `ranked`."""
         # The SESSION date, not the wall clock. Every detector below is gated on this:
         # earnings rows, analyst grades and news cards are all stamped with a trading
         # day. Using `datetime.now(ET).date()` meant that on a Saturday — when the quotes
@@ -1533,41 +2171,49 @@ class WidgetMoversService:
         # went dark AND the tile still asserted "No company news today." A confident
         # negative produced by asking about the wrong day.
         live_session = session_trading_date()
-        today, today_iso, session_word = self._session_of(ranked, live_session, _et_calendar_day())
+        # Read ONCE and handed down: the session wording and every 24/7 row's news gate and
+        # aged wording must agree on what day it is, even across a midnight mid-build.
+        calendar_day = _et_calendar_day()
+        today, today_iso, session_word = self._session_of(
+            ranked if session_basis is None else session_basis,
+            live_session, calendar_day,
+        )
+
+        portfolio = mode == "portfolio"
+        # ONE ROW PER TICKER, the headline never repeating below itself — see
+        # `select_payload_movers`, the rule `_rank_and_read`'s card read also follows.
+        head_m, runner_ms, gainer_ms, loser_ms = select_payload_movers(ranked)
+
+        def _mover(m: RankedMover) -> WidgetMoverResponse:
+            # Everything except the per-ticker grades lookup, which is the only paid call
+            # in the chain and is spent on the headline alone.
+            return self._build_mover(
+                m, cards=cards, ctx=ctx, today=today, today_iso=today_iso,
+                calendar_day=calendar_day, session_word=session_word,
+            )
 
         head: Optional[WidgetMoverResponse] = None
-        runners: List[WidgetMoverResponse] = []
-        if ranked:
+        if head_m is not None:
             head = self._build_mover(
-                ranked[0], cards=cards, ctx=ctx, today=today,
-                today_iso=today_iso, grade_rows=head_grades, session_word=session_word,
+                head_m, cards=cards, ctx=ctx, today=today,
+                today_iso=today_iso, calendar_day=calendar_day,
+                grade_rows=head_grades, session_word=session_word,
+                aged=True,
             )
-            # ONE ROW PER TICKER, and the headline never repeats below itself.
-            #
-            # `rank_movers` deliberately keeps duplicates ("dedup is the caller's job"),
-            # and `_swept_universe` trusts the RPC to be unique. That contract ends here:
-            # iOS renders these with `ForEach(id: \.ticker)`, and duplicate ids are
-            # undefined behaviour in SwiftUI — on a Home Screen, with no way for the user
-            # to recover. Cheap to guarantee, so guarantee it.
-            seen = {ranked[0].ticker}
-            deduped = []
-            for m in ranked[1:]:
-                if m.ticker in seen:
-                    continue
-                seen.add(m.ticker)
-                deduped.append(m)
-                if len(deduped) >= _RUNNERS_UP - 1:
-                    break
+        runners = [_mover(m) for m in runner_ms]
 
-            # Runners-up get everything except the per-ticker grades lookup, which is
-            # the only paid call in the chain and is spent on the headline alone.
-            runners = [
-                self._build_mover(
-                    m, cards=cards, ctx=ctx, today=today, today_iso=today_iso,
-                    session_word=session_word,
-                )
-                for m in deduped
-            ]
+        # Portfolio only: the counts and the two columns. Never in market mode, which
+        # describes a universe, not the reader's holdings.
+        gainers: List[WidgetMoverResponse] = []
+        losers: List[WidgetMoverResponse] = []
+        up = down = flat = None
+        if portfolio:
+            gainers = [_mover(m) for m in gainer_ms]
+            losers = [_mover(m) for m in loser_ms]
+            if holdings_count is not None:
+                # Withheld on a DEGRADED build along with the count they are read
+                # against: "0 up, 0 down" from an outage is not a finding.
+                up, down, flat = direction_counts(ranked)
 
         return WidgetMoverPayload(
             mode=mode,
@@ -1593,6 +2239,16 @@ class WidgetMoversService:
             headline_mover=head,
             basket=basket,
             runners_up=runners,
+            holdings_count=holdings_count if portfolio else None,
+            up_count=up,
+            down_count=down,
+            flat_count=flat,
+            top_gainers=gainers,
+            top_losers=losers,
+            market_assets=(
+                build_market_assets(ctx.index_rows, today_iso, crypto_tile)
+                if mode == "market" else []
+            ),
         )
 
     # ── data access (all best-effort; a widget degrades, never 500s) ──
@@ -1620,18 +2276,53 @@ class WidgetMoversService:
         return [t for t in rows if t != MARKET_SCOPE]
 
     async def _rank_and_read(
-        self, tickers: Sequence[str]
+        self,
+        tickers: Sequence[str],
+        *,
+        basis: str = "z",
+        exclude_band: bool = True,
+        phase: Optional[str] = None,
     ) -> Tuple[List[RankedMover], Dict[str, Optional[Dict[str, Any]]], bool, Dict[str, Dict[str, Any]]]:
-        symbols = [t.upper() for t in dict.fromkeys(tickers) if t]
+        """Quote, rank and card-read `tickers`: (ranked, cards, news_available, index_rows).
+
+        `basis` is `rank_movers`'; `exclude_band=False` lets SPY/ONEQ/DIA rank like any
+        holding (portfolio mode — the Holdings tile no longer draws the band); `phase` is
+        `drop_prior_session_movers`' (the builders pass `session_phase()`; None keeps
+        newest-wins). The one-argument form is `attribute_ticker_move`'s and must keep
+        working with these defaults.
+
+        `index_rows` carries the band AND the Home pulse equities (IWM, GLD), quoted in the
+        SAME batch: `build_market_context` reads the band, `build_market_assets` the pulse.
+        """
+        symbols = [s for s in dict.fromkeys(str(t).upper().strip() for t in tickers if t) if s]
+        # The Home Market Pulse equities, imported so the Market tile can never list
+        # different assets from Home. Function-local: a heavyweight module.
+        from app.services.home_dashboard_service import _PULSE_SYMBOLS
+
+        index_syms = [s for s, _ in _INDEX_SYMBOLS]
+        extra_syms = list(dict.fromkeys(
+            index_syms + [str(cfg.get("symbol") or "").upper() for cfg in _PULSE_SYMBOLS]
+        ))
+        extra_syms = [s for s in extra_syms if s]
+
         if not symbols:
-            return [], {}, True, {}
+            # A failed universe read must not cost the band and the Market grid too: they
+            # do not depend on the universe. One batch of the ETFs alone, best-effort.
+            try:
+                quotes = await self._quotes(extra_syms)
+            except Exception as e:
+                logger.warning(
+                    "widget: index-only quote failed: %s: %s — no band, no market assets",
+                    type(e).__name__, e,
+                )
+                quotes = {}
+            return [], {}, True, {s: quotes[s] for s in extra_syms if quotes.get(s)}
 
         # The indices ride along on the SAME request — `batch-quote` chunks at 300 and the
-        # universe is capped at 200, so this is free. They are excluded from ranking
-        # below; an index is not a "mover" the widget can attribute.
-        index_syms = [s for s, _ in _INDEX_SYMBOLS]
+        # universe is capped at 200, so this is free. In market mode they are excluded from
+        # ranking below; an index is not a "mover" the market tile can attribute.
         quotes, sigmas = await asyncio.gather(
-            self._quotes(symbols + [s for s in index_syms if s not in symbols]),
+            self._quotes(symbols + [s for s in extra_syms if s not in symbols]),
             get_volatility_cache_service().get_sigmas_bulk(symbols),
             return_exceptions=True,
         )
@@ -1642,41 +2333,22 @@ class WidgetMoversService:
             logger.warning("widget: sigma read failed: %s: %s", type(sigmas).__name__, sigmas)
             sigmas = {}
 
-        rows = []
+        # The "Nasdaq 0.00%" investigation: a band ETF reading ~0 is either a genuinely
+        # flat session or `price_service`'s close-equality denominator picking the wrong
+        # base after a sub-cent drift. Log the three inputs that tell them apart.
+        for s in index_syms:
+            q = quotes.get(s) or {}
+            chg = finite(q.get("changePercentage"))
+            if chg is not None and abs(chg) < _FLAT_PCT:
+                logger.info(
+                    "widget: band ETF %s reports a ~0%% change (%r): price=%r "
+                    "previousClose=%r changeSession=%r",
+                    s, chg, q.get("price"), q.get("previousClose"), q.get("changeSession"),
+                )
+
+        candidates: List[Dict[str, Any]] = []
         funds: List[str] = []
-        # ONLY when something else can carry the tile. Excluding the band unconditionally
-        # emptied the widget for a holdings group that is entirely SPY/ONEQ/DIA: `rows`
-        # came back empty, `ranked` was empty, and `_payload` produced
-        # `headline_mover=None` — which every iOS family renders as `EmptyStateView`. The
-        # endpoint's market-mode fallback does NOT catch it either, because that fires on
-        # an empty TICKER LIST and this list is not empty. A self-referential headline is
-        # a smaller wrong than a blank tile, so the exclusion yields when it is the only
-        # thing left.
-        index_set = {s.upper() for s in index_syms}
-        if not any(s.upper() not in index_set for s in symbols):
-            logger.info(
-                "widget: every requested symbol is a market-band index (%s) — ranking "
-                "them rather than serving an empty tile",
-                ", ".join(sorted(symbols))[:120],
-            )
-            index_set = set()
         for sym in symbols:
-            if sym.upper() in index_set:
-                # THE MARKET BAND CANNOT ALSO BE THE MOVER. The comment on the batch above
-                # promises this ("excluded from ranking below; an index is not a 'mover'
-                # the widget can attribute") and it held only for the symbols APPENDED for
-                # quoting — a user who watchlists SPY put it into `symbols`, where it
-                # ranked like anything else.
-                #
-                # `market_change` is literally `index_rows[MARKET_INDEX_SYMBOL]`'s own
-                # change, so a SPY headline attributes SPY's move to itself: "The market
-                # fell 1.6% today; SPY moved with it." And the whole band is the row the
-                # tile already draws above the headline, so any of them headlining prints
-                # the same number twice. On a market-driven day the index proxy also has
-                # the highest z of a small portfolio BY CONSTRUCTION — σ is smaller for
-                # the index than for its constituents — so in portfolio mode this is
-                # systematic, not rare.
-                continue
             q = quotes.get(sym) or {}
             if q.get("isFund"):
                 # An open-end mutual fund prints ONE NAV a day and can never be "today's
@@ -1686,7 +2358,7 @@ class WidgetMoversService:
                 # being dropped as prior-session. Refused here, on the flag, not the name.
                 funds.append(sym)
                 continue
-            rows.append(
+            candidates.append(
                 {
                     "ticker": sym,
                     "change_session": q.get("changeSession"),
@@ -1697,45 +2369,77 @@ class WidgetMoversService:
                     "sigma_daily": sigmas.get(sym),
                     "open": q.get("open"),
                     "previous_close": q.get("previousClose"),
+                    "asset_type": _quote_asset_type(sym, q),
                 }
             )
-
         if funds:
             logger.info(
                 "widget: %d open-end fund row(s) excluded from the ranking (no intraday "
                 "print): %s", len(funds), ", ".join(funds[:10]),
             )
-        ranked, stale = drop_prior_session_movers(rank_movers(rows))
+
+        def _rank(rows: List[Dict[str, Any]]) -> Tuple[List[RankedMover], List[RankedMover]]:
+            return drop_prior_session_movers(rank_movers(rows, basis=basis), phase=phase)
+
+        # THE MARKET BAND CANNOT ALSO BE THE MOVER — in market mode, and in the single-
+        # symbol attribution path that shares this default. `market_change` is literally
+        # `index_rows[MARKET_INDEX_SYMBOL]`'s own change, so a SPY headline attributes SPY's
+        # move to itself ("The market fell 1.6% today; SPY moved with it."), and the band is
+        # the row the tile already draws, so any of them headlining prints the same number
+        # twice. (Portfolio mode passes `exclude_band=False`: its tile no longer draws the
+        # band, and `_build_mover` withholds the market leg from SPY instead.)
+        band = {s.upper() for s in index_syms} if exclude_band else set()
+        ranked, stale = _rank([r for r in candidates if r["ticker"] not in band])
+        if not ranked and any(r["ticker"] in band for r in candidates):
+            # ONLY when something else can carry the tile — and decided on the RANKED
+            # output, not on the requested symbols. Deciding on symbols emptied the widget
+            # for {SPY, a mutual fund} or {SPY, a delisted name}: the other symbol kept the
+            # band excluded, then was itself dropped as a fund / an unpriced row, and
+            # `headline_mover=None` renders every iOS family's empty state. A
+            # self-referential headline is a smaller wrong than a blank tile.
+            logger.info(
+                "widget: nothing outside the market band is rankable (%s) — ranking the "
+                "band rather than serving an empty tile",
+                ", ".join(sorted(symbols))[:120],
+            )
+            ranked, stale = _rank(candidates)
         if stale:
             logger.warning(
-                "widget: %d row(s) stamped with a PRIOR session dropped from the ranking "
-                "(halted / not yet printed): %s",
+                "widget: %d row(s) stamped with a session other than the tile's dropped "
+                "from the ranking (halted / not yet printed / outside the pre-market "
+                "plurality): %s",
                 len(stale),
                 ", ".join(f"{m.ticker}@{m.change_session}" for m in stale[:10]),
             )
-        # Only the head needs a card today, but reading the top few keeps the door
-        # open for a large-family widget listing runners-up without a second round
-        # trip — and `get_cards` is one batched select regardless.
+
+        # Cards for exactly the movers the payload can render — headline, runners-up and
+        # the portfolio gainer / loser columns, by the SAME selection rule `_payload`
+        # uses. A rendered mover without its card read would be UNCHECKED ("could not
+        # check the news") although a card exists. `get_cards` is one batched select
+        # regardless of how many scopes it is handed.
         #
         # BEST-EFFORT. This read is the least important thing on the tile and it used to
         # be the most dangerous: unwrapped, one Supabase hiccup propagated to the route's
         # catch-all and returned the EMPTY payload — discarding the mover, the price, the
         # σ multiple and the industry comparison that were all already in hand. A widget
         # whose news lookup failed should lose its news line, not its contents.
+        head_m, runner_ms, gainer_ms, loser_ms = select_payload_movers(ranked)
+        card_syms = list(dict.fromkeys(
+            m.ticker for m in ([head_m] if head_m else []) + runner_ms + gainer_ms + loser_ms
+        ))
         cards: Dict[str, Optional[Dict[str, Any]]] = {}
         news_available = True
-        try:
-            cards = await get_news_insight_service().get_cards(
-                [m.ticker for m in ranked[:_RUNNERS_UP + 1]]
-            )
-        except Exception as e:
-            news_available = False
-            logger.warning(
-                "widget: news cards unavailable (%s: %s) — the tile will say it could "
-                "not check, not that there was nothing",
-                type(e).__name__, e,
-            )
-        index_rows = {s: (quotes.get(s) or {}) for s in index_syms if quotes.get(s)}
+        if card_syms:
+            try:
+                cards = await get_news_insight_service().get_cards(card_syms)
+            except Exception as e:
+                news_available = False
+                logger.warning(
+                    "widget: news cards unavailable (%s: %s) — the tile will say it could "
+                    "not check, not that there was nothing",
+                    type(e).__name__, e,
+                )
+        index_rows = {s: (quotes.get(s) or {}) for s in extra_syms if quotes.get(s)}
         return ranked, cards, news_available, index_rows
 
     async def _quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:

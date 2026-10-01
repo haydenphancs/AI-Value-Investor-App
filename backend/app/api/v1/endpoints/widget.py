@@ -26,17 +26,25 @@ DEGRADE, NEVER ERROR
 A widget that renders an error message is worse than one rendering yesterday's
 close — the user cannot retry it, cannot see why, and it sits on their Home Screen
 looking broken. So every failure path here returns a valid payload with whatever
-was resolvable (usually the market story) rather than raising. No new `ErrorCode`.
+was resolvable rather than raising. No new `ErrorCode`.
+
+The portfolio route degrades WITHIN its own mode. It used to answer an empty group
+(and, via a swallowed read failure, a database outage) with the MARKET payload, so a
+"My Holdings" tile showed the market's movers as if they were the user's — and the
+client could not tell "no holdings" from "the read failed". Now an empty group is an
+explicit `mode="portfolio"` payload with `holdings_count=0`, and an unreadable one is
+`_empty("portfolio")` (`holdings_count=None`), which the client keeps its last good
+snapshot over.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import create_widget_token, widget_token_expires_at
 from app.dependencies import (
-    StandardRateLimit,
+    UserIdRateLimitChecker,
     WidgetRateLimit,
     get_current_user,
     get_current_user_id,
@@ -90,13 +98,24 @@ widget_client_router = APIRouter(dependencies=[Depends(get_widget_caller)])
 # to add most recently, and `basket.total_count` then stated a denominator that was not
 # their portfolio. Neither is detectable from the tile.
 #
-# 200 costs nothing extra. `get_batch_quotes_bulk` chunks at 300, so the whole set plus
-# the index symbols is still ONE request — market mode already ranks 200 this way. It
-# also matches `_MAX_UNIVERSE`, so neither mode can be asked about a wider scope than
-# the other.
-_MAX_HOLDINGS = 200
+# 500 = `settings.WATCHLIST_MAX_ITEMS`, the most holdings a user can have, so in practice
+# nothing is truncated. That matters since the tile states COUNTS ("▲ 8 ▼ 5 · 13
+# holdings", "N no price"): at the old 200 a 250-holding group reported its 50
+# unranked names as unpriced. It costs no upstream call — `price_service.get_quotes`
+# reads the one cached screener sweep — and the σ read degrading only drops the z
+# tie-breaker, because portfolio mode ranks by |%| first.
+_MAX_HOLDINGS = 500
 
 _MAX_SCOPE_LEN = 32
+
+# The portfolio tile's OWN per-account window, not `StandardRateLimit`. That one is shared
+# with a dozen browsing routes, so a burst on Updates or a detail screen followed by a
+# foreground inside the same minute 429'd the widget refresh — and a 429 is the one answer
+# here that bypasses "degrade, never error". The app asks at most ~2 times per foreground
+# behind a 60 s throttle, so 30/min is never reached by the app itself. The bucket name must
+# stay distinct from every other limiter's (`widget` is `WidgetRateLimitChecker`'s key space).
+# Keyed on the token's user id (`get_current_user_id`) — the route is account-only anyway.
+WidgetPortfolioRateLimit = Depends(UserIdRateLimitChecker("widget_portfolio", 30, 60))
 
 
 def _valid_ticker(t: str) -> bool:
@@ -106,7 +125,12 @@ def _valid_ticker(t: str) -> bool:
 
 
 def _empty(mode: str) -> WidgetMoverPayload:
-    """Last-resort payload. Renders as the widget's empty state, not an error."""
+    """Last-resort payload. Renders as the widget's empty state, not an error.
+
+    In portfolio mode it is the DEGRADED answer (`holdings_count` None), which the client
+    never writes over a good snapshot; the authoritative empty group is this plus
+    `holdings_count=0`.
+    """
     from datetime import datetime, timezone
 
     from app.utils.market_hours import (
@@ -141,8 +165,11 @@ async def get_market_mover(_rate_limit=WidgetRateLimit) -> WidgetMoverPayload:
     `WidgetRateLimit`, not `StandardRateLimit`: the latter would bucket every widget on Earth
     under one shared guest key. See `WidgetRateLimitChecker`.
 
-    Ranked by volatility-relative z, not raw percent — so a 3% day on a normally
-    calm name outranks 3% on one that moves that much routinely.
+    The current Market tile renders `market_assets` (the Home Market Pulse: S&P 500, Nasdaq,
+    Dow, Russell 2000, Gold ETFs and Bitcoin), the session-gated brief and sector breadth. The
+    legacy `headline_mover` / `runners_up` are still sent for installed builds, ranked by
+    volatility-relative z, not raw percent — so a 3% day on a normally calm name outranks 3%
+    on one that moves that much routinely.
     """
     try:
         return await get_widget_movers_service().get_market_mover()
@@ -192,43 +219,79 @@ async def issue_widget_token(user: dict = Depends(get_current_user)) -> WidgetTo
 
 @router.get("/portfolio-mover", response_model=WidgetMoverPayload)
 async def get_portfolio_mover(
-    # Watchlist identity, not the shared guest sentinel — these are the caller's own
-    # holdings and must resolve to the same per-install partition the watchlist routes
-    # write (migration 108). Reading the shared bucket would show a signed-out user
-    # someone else's positions.
+    # ACCOUNT-ONLY: the strict router's `get_current_user_id`, then this — which delegates
+    # to `get_current_user` (a real `public.users` row) and never resolves a guest. A
+    # signed-out caller never reaches here; iOS refuses the call before it leaves the device
+    # (`.signInRequired`).
     user: dict = Depends(get_watchlist_identity),
-    _rate_limit=StandardRateLimit,
+    _rate_limit=WidgetPortfolioRateLimit,
 ) -> WidgetMoverPayload:
-    """The caller's biggest mover, plus a combined reason when holdings moved together.
+    """The caller's biggest movers — ranked by absolute % move — plus a combined reason when
+    holdings moved together.
 
     Follows the ACTIVE GROUP (migration 126) rather than the master watchlist, so the
-    widget, the Updates pills, Home and Tracking all describe the same set of tickers.
+    widget, the Updates pills, Home and Tracking all describe the same set of tickers. A
+    user with no group at all falls back to the master watchlist.
+
+    Every branch answers in PORTFOLIO mode (module docstring, DEGRADE):
+
+    * a non-empty group → the service build, with the group's name and the real holdings
+      count applied AFTER the 60 s cache, on a copy — the cache key carries neither the
+      name nor the group id, so a rename shows at once, and the cached object (shared by
+      every caller in the window) is never mutated;
+    * an empty group → `holdings_count=0` and the name ("No holdings in <name> yet");
+    * an unreadable group or watchlist → `_empty("portfolio")`, `holdings_count=None`.
     """
     user_id = user["id"]
     try:
-        tickers: List[str] = []
+        group_name: Optional[str] = None
         try:
             group = await get_active_group(user_id)
         except ActiveGroupUnavailable as e:
+            # NOT the master watchlist: a "Tech" tile rebuilt from every holding the user
+            # owns, labelled as their holdings, is a silent scope swap. Degrade instead.
             logger.warning(
-                "widget: active group unreadable for user=%s (%s) — falling back to "
-                "the master watchlist",
+                "widget: active group unreadable for user=%s (%s) — serving the degraded "
+                "portfolio payload; the client keeps its last good snapshot",
                 user_id, e,
             )
-            group = None
+            return _empty("portfolio")
 
         if group is not None:
+            # "" (or whitespace) is no name: the client renders "My Holdings" for None.
+            group_name = (group.name or "").strip() or None
             tickers = [t.upper() for t in group.tickers if _valid_ticker(t.upper())]
         else:
+            # RAISES on a read failure — caught below as degraded, never as "no holdings".
             tickers = await _watchlist_tickers(user_id)
 
-        tickers = list(dict.fromkeys(tickers))[:_MAX_HOLDINGS]
+        tickers = list(dict.fromkeys(tickers))
+        # Counted BEFORE the cap: the header says how many holdings the user has, not how
+        # many were ranked.
+        precap_n = len(tickers)
         if not tickers:
-            # No holdings is a legitimate state, not a failure: the widget shows the
-            # market story and an invitation to add something.
-            return await get_widget_movers_service().get_market_mover()
+            # An AUTHORITATIVE empty group — a state to show ("No holdings in Tech yet"),
+            # never the market's movers wearing the "My Holdings" label.
+            return _empty("portfolio").model_copy(
+                update={"group_name": group_name, "holdings_count": 0}
+            )
+        if precap_n > _MAX_HOLDINGS:
+            logger.info(
+                "widget: user=%s has %d holdings — ranking the first %d",
+                user_id, precap_n, _MAX_HOLDINGS,
+            )
 
-        return await get_widget_movers_service().get_portfolio_mover(user_id, tickers)
+        payload = await get_widget_movers_service().get_portfolio_mover(
+            user_id, tickers[:_MAX_HOLDINGS]
+        )
+        # A COPY. `payload` may be the cached object every caller in the TTL shares.
+        return payload.model_copy(
+            update={
+                "group_name": group_name,
+                # The service withholds the count on a DEGRADED build; keep it withheld.
+                "holdings_count": precap_n if payload.holdings_count is not None else None,
+            }
+        )
     except Exception as e:
         logger.error(
             "widget portfolio-mover failed for user=%s: %s: %s",
@@ -238,6 +301,12 @@ async def get_portfolio_mover(
 
 
 async def _watchlist_tickers(user_id: str) -> List[str]:
+    """The master watchlist's valid tickers, newest first.
+
+    RAISES on a read failure. It used to log and return `[]`, which the route then served as
+    "no holdings" — the outage-equals-empty conflation `active_group_service` says must
+    never happen. The caller turns a raise into the degraded payload.
+    """
     import asyncio
 
     from app.database import get_supabase
@@ -257,11 +326,12 @@ async def _watchlist_tickers(user_id: str) -> List[str]:
     try:
         rows = await asyncio.to_thread(_read)
     except Exception as e:
-        logger.error(
-            "widget: watchlist read failed for user=%s: %s: %s",
-            user_id, type(e).__name__, e, exc_info=True,
+        # Context here; the route's catch-all logs the stack and degrades.
+        logger.warning(
+            "widget: watchlist read failed for user=%s: %s: %s — re-raising as degraded",
+            user_id, type(e).__name__, e,
         )
-        return []
+        raise
     return [
         str(r["ticker"]).upper()
         for r in rows

@@ -1210,6 +1210,15 @@ class HomeDashboardService:
             pulse.append(crypto_res)
         return pulse
 
+    async def get_crypto_pulse_tile(self) -> Optional[MarketPulseItemResponse]:
+        """The Bitcoin pulse tile for OTHER surfaces — the widget's Market tile.
+
+        A public door onto the SAME 600 s cache, so a second surface never becomes a second
+        CoinGecko consumer: the Basic plan's monthly quota is the reason this tile has its
+        own TTL at all (see `_PULSE_SYMBOLS`). Never raises; None means "omit the tile".
+        """
+        return await self._get_crypto_pulse_tile()
+
     async def _get_crypto_pulse_tile(self) -> Optional[MarketPulseItemResponse]:
         """The BTC tile, cached for `_CRYPTO_PULSE_TTL_SECONDS` independently of the strip.
 

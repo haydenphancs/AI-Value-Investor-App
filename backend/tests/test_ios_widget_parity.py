@@ -193,6 +193,10 @@ def _swift_coding_keys(struct: str) -> set[str]:
         ("WidgetMoveContext", "WidgetMoveContextResponse"),
         ("WidgetMarketContext", "WidgetMarketContextResponse"),
         ("WidgetIndex", "WidgetIndexResponse"),
+        # Both were missing until 2026-09-30: `WidgetCause` had no CodingKeys at all (the
+        # scanner asserted on them), and `WidgetMarketBrief` was simply never listed.
+        ("WidgetCause", "WidgetCauseResponse"),
+        ("WidgetMarketBrief", "WidgetMarketBriefResponse"),
     ],
 )
 def test_swift_decodes_every_field_the_backend_sends(swift_struct, pydantic_model):
@@ -275,3 +279,57 @@ def test_every_optional_payload_key_is_decoded_leniently():
             f"`{wire_name}` (.{swift_case}) is not read with decodeIfPresent — a backend "
             f"that omits it would fail the WHOLE decode and blank the widget"
         )
+
+
+# The 2026-09-30 contract: what the Holdings tile (name, counts, gainers / losers) and the
+# Market tile (the Home pulse assets) are drawn from. Pinned in BOTH directions — the subset
+# test above lets Swift silently ignore a field, which for these would leave the tile
+# rendering "My Holdings" with no counts while the backend sends everything.
+_CONTRACT_KEYS = {
+    ("WidgetMoverSnapshot", "WidgetMoverPayload"): {
+        "group_name", "holdings_count", "up_count", "down_count", "flat_count",
+        "top_gainers", "top_losers", "market_assets",
+    },
+    ("WidgetIndex", "WidgetIndexResponse"): {"short_label", "rolling_24h"},
+    ("WidgetMover", "WidgetMoverResponse"): {"rolling_24h"},
+    ("WidgetCause", "WidgetCauseResponse"): {"detail_aged"},
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_CONTRACT_KEYS), ids=lambda p: p[0])
+def test_the_new_contract_keys_are_on_both_sides(pair):
+    swift_struct, pydantic_model = pair
+    wanted = _CONTRACT_KEYS[pair]
+    missing_backend = wanted - _pydantic_fields(pydantic_model)
+    assert not missing_backend, f"{pydantic_model} does not send {sorted(missing_backend)}"
+    missing_swift = wanted - _swift_coding_keys(swift_struct)
+    assert not missing_swift, (
+        f"{swift_struct} does not decode {sorted(missing_swift)} — the backend sends them and "
+        f"the tile renders without them, silently"
+    )
+
+
+def test_the_snapshot_arrays_decode_lossily():
+    """One malformed element must cost that element, not the tile.
+
+    A strict `[WidgetMover]` failed the array on one bad row, the array failed the snapshot,
+    and `read()` returned nil — the whole Home Screen tile fell back to its placeholder.
+    """
+    src = _strip_swift_comments(_swift_source())
+    m = re.search(r"struct\s+WidgetMoverSnapshot\s*:.*?\n\}\n", src, re.S)
+    assert m, "WidgetMoverSnapshot not found"
+    for case, element in (
+        ("runnersUp", "WidgetMover"), ("topGainers", "WidgetMover"),
+        ("topLosers", "WidgetMover"), ("marketAssets", "WidgetIndex"),
+    ):
+        assert re.search(
+            rf"decodeIfPresent\(LossyArray<{element}>\.self,\s*forKey:\s*\.{case}\)",
+            m.group(0),
+        ), f".{case} is not decoded through LossyArray<{element}>"
+    ctx = re.search(r"struct\s+WidgetMarketContext\s*:.*?\n\}\n", src, re.S)
+    assert ctx and re.search(
+        r"decodeIfPresent\(LossyArray<WidgetIndex>\.self,\s*forKey:\s*\.indices\)", ctx.group(0)
+    ), "WidgetMarketContext.indices is decoded strictly again"
+    assert not re.search(r"decodeIfPresent\(\[", src), (
+        "a strict array decode (`decodeIfPresent([T].self, …)`) is back in the wire model"
+    )

@@ -45,14 +45,20 @@ _PAYLOAD_KEYS = {
     # trading session the numbers describe. Keeping them separate is what lets the tile
     # re-derive "Fri close" on a Sunday instead of presenting Friday's move as today's.
     "session_date", "session_label",
-    # Which universe the movers came from — an empty active group falls back to market
-    # data, and nothing used to tell the user their "My Holdings" tile showed the market.
+    # Which universe the movers came from. Added when an empty active group fell back to
+    # market data (it no longer does); installed builds still caption a mismatch with it.
     "scope_label",
     # How the market itself did — the band the tile leads with.
     "market_context",
     # The one-sentence read on the whole market, for the Market tile. Absent whenever
     # the __MARKET__ roll-up is not dated to this session — see _MARKET_BRIEF_KEYS.
     "market_brief",
+    # Portfolio mode only (the Holdings tile's header, counts and two columns). An
+    # authoritative empty group is `holdings_count=0`; a DEGRADED build is None.
+    "group_name", "holdings_count", "up_count", "down_count", "flat_count",
+    "top_gainers", "top_losers",
+    # Market mode only: the Home Market Pulse grid (S&P 500 … Gold, then Bitcoin).
+    "market_assets",
 }
 _MARKET_BRIEF_KEYS = {"headline", "sentiment", "generated_at"}
 _MARKET_CONTEXT_KEYS = {
@@ -61,12 +67,18 @@ _MARKET_CONTEXT_KEYS = {
     "lagging_sector", "lagging_sector_change_percent",
     "text",
 }
-_INDEX_KEYS = {"symbol", "label", "change_percent", "price"}
+# `short_label` is the cramped-grid name (never drawn beside a price); `rolling_24h`
+# tags Bitcoin's change as a rolling 24 h move rather than a session move.
+_INDEX_KEYS = {
+    "symbol", "label", "change_percent", "price", "short_label", "rolling_24h", "asset_type",
+}
 _MOVER_KEYS = {
     "ticker", "company_name", "change_percent", "price", "tier", "z",
-    "cause", "context",
+    "cause", "context", "rolling_24h", "asset_type",
 }
-_CAUSE_KEYS = {"kind", "tag", "detail"}
+# `detail_aged` — the headline's cause worded for a LATER day ("…on Tue"), shown when the
+# client ages the footer. None on every non-headline mover and on a 24/7 row.
+_CAUSE_KEYS = {"kind", "tag", "detail", "detail_aged"}
 _CONTEXT_KEYS = {
     "change_percent", "z", "gap_percent", "intraday_percent", "gap_dominant",
     "industry_name", "industry_change_percent", "market_change_percent",
@@ -117,6 +129,19 @@ def _full_payload() -> WidgetMoverPayload:
             text="3 of your 5 holdings fell together.",
         ),
         runners_up=[_mover("JOBY")],
+        group_name="Tech",
+        holdings_count=12,
+        up_count=4,
+        down_count=6,
+        flat_count=1,
+        top_gainers=[_mover("NVDA")],
+        top_losers=[_mover("AMD")],
+        market_assets=[
+            WidgetIndexResponse(symbol="SPY", label="S&P 500 ETF", short_label="S&P 500",
+                                change_percent=-0.18, price=651.2),
+            WidgetIndexResponse(symbol="BTCUSD", label="Bitcoin", short_label="Bitcoin",
+                                change_percent=1.4, price=112000.0, rolling_24h=True),
+        ],
         market_brief=WidgetMarketBriefResponse(
             headline="AI, Fed Speech Drive Market Cautious Tone",
             sentiment="Neutral",
@@ -146,6 +171,48 @@ def test_every_documented_key_is_present_at_the_documented_level():
     assert set(d["runners_up"][0]) == _MOVER_KEYS
     assert set(d["market_context"]) == _MARKET_CONTEXT_KEYS
     assert set(d["market_context"]["indices"][0]) == _INDEX_KEYS
+    # The Holdings columns are full movers; the Market grid is index rows.
+    assert set(d["top_gainers"][0]) == _MOVER_KEYS
+    assert set(d["top_losers"][0]) == _MOVER_KEYS
+    assert set(d["top_gainers"][0]["cause"]) == _CAUSE_KEYS
+    assert set(d["market_assets"][0]) == _INDEX_KEYS
+
+
+def test_every_new_field_is_optional_or_defaulted():
+    """Additive contract: an OLD backend's payload (none of the new keys) and a NEW
+    payload read by an installed build must both decode. On the backend side that means
+    every new field validates when absent and defaults to the client's "absent" value —
+    None for the counts/name (None ≠ 0: 0 is the authoritative empty group), [] for the
+    lists, False for the 24h flag, None for the aged cause."""
+    old = {
+        "mode": "portfolio", "as_of": "2026-09-29T20:05:00Z", "market_session": "closed",
+        "headline_mover": {
+            "ticker": "AAPL", "cause": {"kind": "none", "detail": "x"},
+            "context": {"change_percent": -2.7},
+        },
+        "market_context": {"indices": [{"symbol": "SPY", "label": "S&P 500 ETF"}]},
+    }
+    p = WidgetMoverPayload.model_validate(old)
+    assert p.group_name is None
+    assert p.holdings_count is None
+    assert (p.up_count, p.down_count, p.flat_count) == (None, None, None)
+    assert p.top_gainers == [] and p.top_losers == [] and p.market_assets == []
+    assert p.headline_mover.rolling_24h is False
+    assert p.headline_mover.cause.detail_aged is None
+    assert p.market_context.indices[0].short_label is None
+    assert p.market_context.indices[0].rolling_24h is False
+
+
+def test_holdings_count_zero_survives_the_wire_as_zero_not_null():
+    """0 = an authoritative empty group ("No holdings in Tech yet"); None = degraded (the
+    client keeps its last good snapshot). A serialiser that dropped falsy ints would turn
+    the empty state into the degraded one and freeze the tile forever."""
+    d = WidgetMoverPayload(
+        mode="portfolio", as_of="2026-09-29T20:05:00Z", market_session="closed",
+        group_name="Tech", holdings_count=0,
+    ).model_dump(mode="json")
+    assert d["holdings_count"] == 0
+    assert d["group_name"] == "Tech"
 
 
 def test_field_names_stay_snake_case():
@@ -154,7 +221,10 @@ def test_field_names_stay_snake_case():
                   "changePercent", "companyName", "gapPercent", "intradayPercent",
                   "gapDominant", "industryName", "industryChangePercent",
                   "marketChangePercent", "movedCount", "totalCount",
-                  "factorKind", "factorLabel", "averageChangePercent"):
+                  "factorKind", "factorLabel", "averageChangePercent",
+                  "groupName", "holdingsCount", "upCount", "downCount", "flatCount",
+                  "topGainers", "topLosers", "marketAssets", "shortLabel",
+                  "rolling24h", "rolling24H", "detailAged"):
         assert camel not in blob, f"{camel} would not decode — CodingKeys expect snake_case"
 
 

@@ -129,6 +129,15 @@ def configured(monkeypatch):
     monkeypatch.setattr(rs, "SEND_SPACING_SECONDS", 0.0)
     monkeypatch.setattr(rs, "_rate_limited_until", 0.0)
     monkeypatch.setattr(main_mod, "_telegram_secret_unset_logged", False)
+    # Every platform publishes (and so gets Approve/Reject buttons) unless a test says otherwise —
+    # the preview tests below narrow it.
+    from app.schemas.marketing import POST_PLATFORMS
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: list(POST_PLATFORMS))
+    # …and the web publisher can send (no "approving will not send it" warning) and every platform
+    # can delete — the tests below that exercise those warnings narrow these again.
+    monkeypatch.setattr(settings, "MARKETING_ENABLED", True)
+    monkeypatch.setattr(settings, "MARKETING_DRY_RUN", False)
+    monkeypatch.setattr(rs.outlets, "retract_capable", lambda _platform: True)
 
 
 @pytest.fixture
@@ -993,56 +1002,64 @@ async def test_the_bot_token_never_reaches_a_log_record_or_an_exception(ledger, 
 # ── the publisher loop runs the sweep ─────────────────────────────────────────
 
 
+def _stub_steps(monkeypatch, calls, *, fail=()):
+    """Every step of the publisher tick replaced by a recorder (a name in `fail` raises)."""
+    def make(name, result):
+        async def step():
+            calls.append(name)
+            if name in fail:
+                raise RuntimeError(f"{name} exploded")
+            return result
+        return step
+
+    monkeypatch.setattr(pub, "_expire_step", make("expire", {"expired": 0, "runs_closed": 0}))
+    monkeypatch.setattr(pub, "retract_cycle", make("retract", {"retracted": 0}))
+    monkeypatch.setattr(pub, "reconcile_cycle", make("reconcile", {"checked": 0}))
+    monkeypatch.setattr(pub, "publish_cycle", make("publish", {"approved_waiting": 0, "published": 0}))
+    monkeypatch.setattr(pub.review_service, "review_cycle",
+                        make("review", {"pending": 0, "sent": 0, "failed": 0, "rate_limited": 0}))
+    monkeypatch.setattr(pub.publish_feed, "feed_cycle", make("feed", {"posted": 0}))
+
+
 @pytest.mark.asyncio
-async def test_the_tick_sweeps_even_with_publishing_off(monkeypatch):
+async def test_the_tick_order_and_its_switches(monkeypatch):
+    """expire → retract always; reconcile → publish only with MARKETING_ENABLED; the Telegram
+    review sweep and feed only when the bot is configured — and publishing BEFORE Telegram, so a
+    slow Telegram never delays a post."""
     calls = []
-
-    async def sweep():
-        calls.append("review")
-        return {"pending": 0, "sent": 0, "stamped": 0, "videos": 0, "failed": 0, "rate_limited": 0}
-
-    async def publish():
-        calls.append("publish")
-        return {"approved_waiting": 0, "published": 0, "failed": 0, "skipped": 0}
-
+    _stub_steps(monkeypatch, calls)
     monkeypatch.setattr(pub.review_service, "is_configured", lambda: True)
-    monkeypatch.setattr(pub.review_service, "review_cycle", sweep)
-    monkeypatch.setattr(pub, "publish_cycle", publish)
     monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", False)
     await pub.publisher_tick()
-    assert calls == ["review"]
+    assert calls == ["expire", "retract", "review", "feed"]
+    calls.clear()
     monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", True)
     await pub.publisher_tick()
-    assert calls == ["review", "review", "publish"]
+    assert calls == ["expire", "retract", "reconcile", "publish", "review", "feed"]
+    calls.clear()
     monkeypatch.setattr(pub.review_service, "is_configured", lambda: False)
     await pub.publisher_tick()
-    assert calls[-1] == "publish" and calls.count("review") == 2
+    assert calls == ["expire", "retract", "reconcile", "publish"]
 
 
 @pytest.mark.asyncio
-async def test_a_failing_sweep_never_stops_publishing(monkeypatch, caplog):
+@pytest.mark.parametrize("failing", ["expire", "retract", "reconcile", "publish", "review", "feed"])
+async def test_a_failing_step_never_stops_the_others(monkeypatch, caplog, failing):
     calls = []
-
-    async def sweep():
-        raise RuntimeError("sweep exploded")
-
-    async def publish():
-        calls.append("publish")
-        return {"approved_waiting": 0, "published": 0, "failed": 0, "skipped": 0}
-
+    _stub_steps(monkeypatch, calls, fail=(failing,))
     monkeypatch.setattr(pub.review_service, "is_configured", lambda: True)
-    monkeypatch.setattr(pub.review_service, "review_cycle", sweep)
-    monkeypatch.setattr(pub, "publish_cycle", publish)
     monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", True)
     caplog.set_level(logging.ERROR)
     await pub.publisher_tick()
-    assert calls == ["publish"]
-    assert any("marketing review sweep failed" in r.getMessage() and r.exc_info for r in caplog.records)
+    assert calls == ["expire", "retract", "reconcile", "publish", "review", "feed"]
+    assert any(f"marketing publisher step {failing} failed" in r.getMessage() and r.exc_info
+               for r in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_the_loop_keeps_running_across_ticks(monkeypatch):
     ticks = []
+    waits = []
 
     async def tick():
         ticks.append(1)
@@ -1052,11 +1069,26 @@ async def test_the_loop_keeps_running_across_ticks(monkeypatch):
     async def no_sleep(_s):
         return None
 
+    async def no_wait(timeout):
+        waits.append(timeout)
+        return False
+
     monkeypatch.setattr(pub, "publisher_tick", tick)
     monkeypatch.setattr(pub.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(pub.publisher_wake, "wait", no_wait)
+    monkeypatch.setattr(pub.settings, "MARKETING_PUBLISHER_INTERVAL_SECONDS", 600)
     with pytest.raises(asyncio.CancelledError):
         await pub.run_marketing_publisher_loop()
-    assert len(ticks) == 3
+    assert len(ticks) == 3 and waits == [600, 600]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_cuts_the_wait_short_and_is_consumed():
+    from app.services.marketing import publisher_wake
+    assert await publisher_wake.wait(0.01) is False          # nothing pending: times out
+    publisher_wake.wake()
+    assert await asyncio.wait_for(publisher_wake.wait(30), timeout=1) is True
+    assert await publisher_wake.wait(0.01) is False          # one wake → one early tick
 
 
 # ── startup registration ──────────────────────────────────────────────────────
@@ -1103,3 +1135,566 @@ def test_the_lifespan_registers_the_webhook_once_in_production_only():
     assert spawns.get("marketing_telegram_webhook") == "review_service.register_webhook()"
     assert "marketing_telegram_webhook" in main_mod._ONE_SHOT_TASKS  # a one-shot, not a dead loop
     assert spawns.get("marketing_publisher") == "run_marketing_publisher_loop()"
+
+
+# ══ Phase 5 (design doc §12.10): new verbs, previews, retract / unknown-outcome taps ══════════
+#
+# Imports for this section only (kept here so the Phase-4 block above stays as it was).
+import copy  # noqa: E402
+
+from app.integrations import bluesky as bluesky_api  # noqa: E402
+from app.integrations import x_api  # noqa: E402
+from app.services.marketing import outlets  # noqa: E402
+
+#: The REAL predicate, captured before any fixture replaces it (the `configured` fixture enables
+#: every platform; the preview tests narrow it, one test uses the real thing).
+_REAL_ENABLED_PLATFORMS = outlets.enabled_platforms
+
+_ALL_VERBS = [("a", "approve"), ("r", "reject"), ("d", "retract"), ("k", "confirm_retract"),
+              ("c", "cancel_retract"), ("l", "live"), ("n", "not_posted")]
+_X_ID = "1840000000000000001"
+_X_URL = f"https://x.com/i/web/status/{_X_ID}"
+_BSKY_URI = "at://did:plc:abcdefghijklmnopqrstuvwx/app.bsky.feed.post/3l6oveex3ii2l"
+_BSKY_URL = "https://bsky.app/profile/did:plc:abcdefghijklmnopqrstuvwx/post/3l6oveex3ii2l"
+
+
+@pytest.mark.parametrize("verb, decision", _ALL_VERBS)
+def test_every_verb_parses_and_round_trips_within_64_bytes(verb, decision):
+    data = rs.callback_data(decision, _PID)
+    assert data == f"{verb}:{_PID}"
+    assert len(data.encode("utf-8")) <= 64
+    assert rs.parse_callback_data(data) == (decision, _PID)
+    with pytest.raises(ValueError):
+        rs.callback_data(decision, _PID.upper())   # only a canonical uuid makes a button
+
+
+@pytest.mark.parametrize("data", [
+    f"x:{_PID}", f"X:{_PID}",                                   # never an `x` verb, any case
+    f"D:{_PID}", f"K:{_PID}", f"C:{_PID}", f"L:{_PID}", f"N:{_PID}",
+    f"approve:{_PID}", f"retract:{_PID}", f"live:{_PID}",
+    f"d:{_PID.upper()}", f"k:{_PID.upper()}", f"c:{_PID.upper()}", f"l:{_PID.upper()}", f"n:{_PID.upper()}",
+    f"dk:{_PID}", f"kd:{_PID}", f"d:k:{_PID}",
+    f"b:{_PID}", f"e:{_PID}", f"-:{_PID}", f"]:{_PID}", f"^:{_PID}",   # not verbs (and not regex holes)
+    f"d:{_PID}\n", f"k:{_PID} ", f" n:{_PID}", f"l;{_PID}", f"c:{_PID[:-1]}",
+    "d:", "k", "d:" + "f" * 100,
+])
+def test_the_new_verbs_are_just_as_strict(data):
+    assert rs.parse_callback_data(data) is None
+
+
+@pytest.mark.parametrize("build, decisions", [
+    (rs.review_keyboard, ["approve", "reject"]),
+    (rs.retract_keyboard, ["retract"]),
+    (rs.confirm_retract_keyboard, ["confirm_retract", "cancel_retract"]),
+    (rs.unknown_outcome_keyboard, ["live", "not_posted"]),
+])
+def test_every_keyboard_button_round_trips_to_its_post(build, decisions):
+    datas = [b["callback_data"] for row in build(_PID)["inline_keyboard"] for b in row]
+    assert [rs.parse_callback_data(d) for d in datas] == [(dec, _PID) for dec in decisions]
+    assert all(len(d.encode("utf-8")) <= 64 for d in datas)
+    with pytest.raises(ValueError):
+        build("not-a-uuid")
+
+
+# ── previews: a platform that cannot publish gets no buttons ──────────────────
+
+
+def _set_created(svc, pid: str, ts: str) -> None:
+    _post(svc, pid).update({"created_at": ts, "updated_at": ts})
+
+
+@pytest.mark.asyncio
+async def test_unwired_platforms_get_a_read_only_preview_stamped_apart(ledger, tg, monkeypatch):
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: [])
+    _seed_run(ledger, video_id=None)
+    pids = {p: _seed_post(ledger, platform=p, fmt="text", title=None, caption=f"{p} words")
+            for p in ("x", "bluesky", "threads")}
+    counters = await rs.review_cycle()
+    assert counters == {"pending": 3, "sent": 3, "stamped": 3, "videos": 0, "failed": 0, "rate_limited": 0}
+    msgs = tg.of("sendMessage")
+    assert len(msgs) == 3
+    for msg, p in zip(msgs, pids):
+        assert "reply_markup" not in msg
+        assert msg["text"] == f"{p.upper()} · text · run 2026-09-28 · preview — {p} not wired yet\n\n{p} words"
+        assert "parse_mode" not in msg
+    for pid in pids.values():
+        row = _post(ledger, pid)
+        assert row["status"] == "pending_review"
+        assert row["metadata"]["review_preview_at"] and "review_notified_at" not in row["metadata"]
+        assert isinstance(row["metadata"]["review_message_id"], int)
+        assert row["metadata"]["dry_run"] is False
+    tg.calls.clear()
+    assert (await rs.review_cycle())["pending"] == 0 and tg.calls == []   # a preview is sent once
+
+
+@pytest.mark.asyncio
+async def test_a_preview_says_dry_run_before_preview(ledger, tg, monkeypatch):
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: [])
+    _seed_run(ledger, video_id=None)
+    _seed_post(ledger, platform="x", fmt="text", meta={"dry_run": True})
+    await rs.review_cycle()
+    assert tg.of("sendMessage")[0]["text"].splitlines()[0] == \
+        "X · text · run 2026-09-28 · DRY RUN · preview — x not wired yet"
+
+
+@pytest.mark.asyncio
+async def test_a_previewed_post_gets_its_buttons_once_its_platform_is_enabled(ledger, tg, monkeypatch):
+    enabled: List[str] = []
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: list(enabled))
+    _seed_run(ledger, video_id=None)
+    x = _seed_post(ledger, platform="x", fmt="text", title=None, caption="x words")
+    b = _seed_post(ledger, platform="bluesky", fmt="text", title=None, caption="b words")
+    await rs.review_cycle()
+    previewed_at = _post(ledger, x)["metadata"]["review_preview_at"]
+    preview_mid = _post(ledger, x)["metadata"]["review_message_id"]
+    tg.calls.clear()
+
+    enabled.append("x")
+    counters = await rs.review_cycle()
+    assert counters["sent"] == 1 and counters["stamped"] == 1
+    (msg,) = tg.of("sendMessage")
+    assert msg["text"] == "X · text · run 2026-09-28\n\nx words"
+    assert msg["reply_markup"] == rs.review_keyboard(x)
+    meta_x, meta_b = _post(ledger, x)["metadata"], _post(ledger, b)["metadata"]
+    assert meta_x["review_notified_at"] and meta_x["review_preview_at"] == previewed_at
+    # The Approve message is the one a later "Posted" reply threads under, not the preview.
+    assert isinstance(meta_x["review_message_id"], int) and meta_x["review_message_id"] != preview_mid
+    assert "review_notified_at" not in meta_b and meta_b["review_preview_at"]
+    tg.calls.clear()
+    assert (await rs.review_cycle())["pending"] == 0 and tg.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_post_sent_with_buttons_is_never_re_sent_as_a_preview(ledger, tg, monkeypatch):
+    enabled = ["x"]
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: list(enabled))
+    _seed_run(ledger, video_id=None)
+    x = _seed_post(ledger, platform="x", fmt="text")
+    await rs.review_cycle()
+    enabled.clear()                                     # X switched off after the buttons went out
+    tg.calls.clear()
+    assert (await rs.review_cycle())["pending"] == 0 and tg.calls == []
+    assert "review_preview_at" not in _post(ledger, x)["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_the_real_enabled_predicate_decides_preview_vs_buttons(ledger, tg, monkeypatch):
+    """Listed AND configured: Bluesky (both) gets buttons; X is listed but has no credentials;
+    Threads is not listed — both of those are previews."""
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", _REAL_ENABLED_PLATFORMS)
+    monkeypatch.setattr(settings, "MARKETING_PUBLISH_PLATFORMS", " X ,bluesky,bluesky")
+    for name in ("MARKETING_X_CONSUMER_KEY", "MARKETING_X_CONSUMER_SECRET", "MARKETING_X_ACCESS_TOKEN",
+                 "MARKETING_X_ACCESS_TOKEN_SECRET"):
+        monkeypatch.setattr(settings, name, None)
+    monkeypatch.setattr(settings, "MARKETING_X_MONTHLY_BUDGET_USD", 2.0)
+    monkeypatch.setattr(settings, "MARKETING_BLUESKY_HANDLE", "caydex.bsky.social")
+    monkeypatch.setattr(settings, "MARKETING_BLUESKY_APP_PASSWORD", "abcd-efgh-ijkl-mnop")
+    assert outlets.enabled_platforms() == ["bluesky"]
+    _seed_run(ledger, video_id=None)
+    pids = {p: _seed_post(ledger, platform=p, fmt="text") for p in ("x", "bluesky", "threads")}
+    await rs.review_cycle()
+    by_header = {m["text"].split(" · ", 1)[0]: m for m in tg.of("sendMessage")}
+    assert by_header["BLUESKY"]["reply_markup"] == rs.review_keyboard(pids["bluesky"])
+    assert "preview" not in by_header["BLUESKY"]["text"].splitlines()[0]
+    for p in ("x", "threads"):
+        assert "reply_markup" not in by_header[p.upper()]
+        assert by_header[p.upper()]["text"].splitlines()[0].endswith(f"· preview — {p} not wired yet")
+        assert _post(ledger, pids[p])["metadata"]["review_preview_at"]
+    assert _post(ledger, pids["bluesky"])["metadata"]["review_notified_at"]
+
+
+@pytest.mark.asyncio
+async def test_previews_never_starve_the_button_query(ledger, tg, monkeypatch):
+    """60 OLDER pending posts of an unwired platform must not keep a NEW post of an enabled
+    platform from getting its Approve buttons in the same sweep — the two in-query reads exist
+    exactly so neither kind can starve the other."""
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["x"])
+    _seed_run(ledger, video_id=None)
+    for i in range(60):
+        _set_created(ledger, _seed_post(ledger, platform="bluesky", fmt="text"),
+                     f"2026-09-28T09:{i // 60:02d}:{i % 60:02d}.000000+00:00")
+    wired = _seed_post(ledger, platform="x", fmt="text", caption="the wired one")
+    _set_created(ledger, wired, "2026-09-28T11:00:00.000000+00:00")
+    await rs.review_cycle()
+    assert _post(ledger, wired)["metadata"].get("review_notified_at")
+    assert any(m.get("reply_markup") == rs.review_keyboard(wired) for m in tg.of("sendMessage"))
+
+
+@pytest.mark.asyncio
+async def test_an_older_wired_post_is_sent_alongside_a_preview_backlog(ledger, tg, monkeypatch):
+    """The non-starving half that holds today: a wired post OLDER than the preview backlog."""
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["x"])
+    _seed_run(ledger, video_id=None)
+    wired = _seed_post(ledger, platform="x", fmt="text")
+    _set_created(ledger, wired, "2026-09-28T08:00:00.000000+00:00")
+    for i in range(60):
+        _set_created(ledger, _seed_post(ledger, platform="bluesky", fmt="text"),
+                     f"2026-09-28T09:00:{i:02d}.000000+00:00")
+    counters = await rs.review_cycle()
+    assert counters["sent"] == rs.SCAN_LIMIT
+    assert tg.of("sendMessage")[0]["reply_markup"] == rs.review_keyboard(wired)
+    assert _post(ledger, wired)["metadata"]["review_notified_at"]
+
+
+# ── retract and unknown-outcome taps through the real webhook route ───────────
+
+
+@pytest.fixture
+def wakes(monkeypatch):
+    calls: List[int] = []
+    monkeypatch.setattr(rs.publisher_wake, "wake", lambda: calls.append(1))
+    return calls
+
+
+@pytest.fixture
+def platform_apis(monkeypatch):
+    """X and Bluesky clients that RECORD every request: the webhook must never call a platform
+    (rules/marketing.md §2 — only the publisher loop does)."""
+    seen: List[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url}")
+        return httpx.Response(500, json={"error": "the webhook must not call a platform"})
+
+    monkeypatch.setattr(x_api, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(bluesky_api, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    # REAL credentials-shaped settings, so a call from the webhook would actually reach the recording
+    # transport — with none set, x_api/bluesky raise NotConfigured BEFORE the transport and this
+    # guard passed whatever the webhook did (review 2026-09-30, mutation-checked).
+    for name, value in (("MARKETING_X_CONSUMER_KEY", "ck_test_consumer_key_0001"),
+                        ("MARKETING_X_CONSUMER_SECRET", "cs_test_consumer_secret_0002"),
+                        ("MARKETING_X_ACCESS_TOKEN", "1234567890-at_test_access_token_0003"),
+                        ("MARKETING_X_ACCESS_TOKEN_SECRET", "ats_test_access_secret_0004"),
+                        ("MARKETING_X_MONTHLY_BUDGET_USD", 2.0),
+                        ("MARKETING_BLUESKY_HANDLE", "caydex-test.bsky.social"),
+                        ("MARKETING_BLUESKY_APP_PASSWORD", "abcd-efgh-ijkl-mnop"),
+                        ("MARKETING_BLUESKY_SERVICE", "https://bsky.social")):
+        monkeypatch.setattr(settings, name, value)
+    from app.services.marketing import outlet_bluesky, outlets
+    outlet_bluesky._reset_state()   # no cached session / back-off can short-circuit before the transport
+    # And the adapter layer itself: any send / reconcile / retract from the webhook is recorded too.
+    for platform, adapter in list(outlets.ADAPTERS.items()):
+        for method in ("send", "reconcile", "retract"):
+            async def _recorded(*_a, _p=platform, _m=method, **_k):
+                seen.append(f"adapter {_p}.{_m}")
+                raise AssertionError(f"the webhook called {_p}.{_m}")
+            monkeypatch.setattr(adapter, method, _recorded)
+    yield seen
+    outlet_bluesky._reset_state()
+
+
+def _seed_published(svc, platform: str = "x", *, status: str = "published",
+                    meta_extra: Optional[Dict[str, Any]] = None, external: bool = True) -> str:
+    meta: Dict[str, Any] = {
+        "dry_run": False, "review_notified_at": "2026-09-28T10:00:00+00:00", "review_message_id": 500,
+        "review": {"decision": "approved", "by": f"telegram:{OWNER}", "at": "2026-09-28T10:05:00+00:00"},
+        "publish": {"state": "published", "attempt": 1},
+        "posted_notified_at": "2026-09-28T12:01:00+00:00", "posted_message_id": 555,
+    }
+    meta.update(meta_extra or {})
+    pid = _seed_post(svc, platform=platform, fmt="text", title=None, status=status, meta=meta)
+    if external:
+        ext = (_X_ID, _X_URL) if platform == "x" else (_BSKY_URI, _BSKY_URL)
+        _post(svc, pid).update({"external_id": ext[0], "external_url": ext[1], "attempts": 1,
+                                "published_at": "2026-09-28T12:00:00+00:00"})
+    return pid
+
+
+def _snap(svc, pid) -> Dict[str, Any]:
+    return copy.deepcopy(_post(svc, pid))
+
+
+def _answers(tg) -> List[str]:
+    return [a.get("text") for a in tg.of("answerCallbackQuery")]
+
+
+@pytest.mark.parametrize("platform", ["x", "bluesky"])
+def test_retract_asks_for_confirmation_and_writes_nothing(client, ledger, tg, wakes, platform_apis, platform):
+    pid = _seed_published(ledger, platform)
+    before = _snap(ledger, pid)
+    r = _post_hook(client, _tap(pid, "d"))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert tg.of("editMessageReplyMarkup") == [{"chat_id": OWNER, "message_id": 555,
+                                                "reply_markup": rs.confirm_retract_keyboard(pid)}]
+    assert _answers(tg) == ["Confirm the delete"]
+    assert tg.of("editMessageText") == [] and tg.of("sendMessage") == []
+    assert _post(ledger, pid) == before
+    assert wakes == [] and platform_apis == []
+
+
+@pytest.mark.parametrize("how", ["edit_refused", "no_message_id"])
+def test_retract_offers_the_confirmation_on_a_new_message_when_it_cannot_edit(client, ledger, tg, wakes, how):
+    pid = _seed_published(ledger)
+    before = _snap(ledger, pid)
+    if how == "edit_refused":
+        tg.script["editMessageReplyMarkup"] = [(400, {"ok": False, "description": "Bad Request: message can't be edited"})]
+        _post_hook(client, _tap(pid, "d"))
+        assert len(tg.of("editMessageReplyMarkup")) == 1
+    else:
+        _post_hook(client, _tap(pid, "d", message_id=None))
+        assert tg.of("editMessageReplyMarkup") == []
+    (msg,) = tg.of("sendMessage")
+    assert msg["text"] == f"Delete the X post? {_X_URL}"
+    assert msg["reply_markup"] == rs.confirm_retract_keyboard(pid)
+    assert "parse_mode" not in msg
+    assert _post(ledger, pid) == before and wakes == []
+
+
+@pytest.mark.parametrize("platform", ["x", "bluesky"])
+def test_confirm_records_the_request_wakes_the_publisher_and_calls_no_platform(client, ledger, tg, wakes,
+                                                                               platform_apis, platform):
+    pid = _seed_published(ledger, platform)
+    before = _snap(ledger, pid)
+    r = _post_hook(client, _tap(pid, "k", text="✅ Posted on X · run 2026-09-28\nhttps://x.com/i/web/status/1"))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    row = _post(ledger, pid)
+    assert row["status"] == "published"
+    meta = row["metadata"]
+    assert meta["retract_requested_at"]
+    assert meta["retract"] == {"requested_at": meta["retract_requested_at"], "by": f"telegram:{OWNER}",
+                               "attempts": 0, "state": "requested"}
+    for key, value in before["metadata"].items():          # the request MERGES
+        assert meta[key] == value, key
+    for col in ("external_id", "external_url", "cost_micros", "attempts", "published_at"):
+        assert row[col] == before[col], col
+    assert wakes == [1]
+    assert platform_apis == [], "the webhook called a platform"
+    assert _answers(tg) == ["Deleting…"]
+    (edit,) = tg.of("editMessageText")
+    assert edit["message_id"] == 555 and edit["reply_markup"] == {"inline_keyboard": []}
+    assert re.fullmatch(r"✅ Posted on X · run 2026-09-28\nhttps://x\.com/i/web/status/1\n\n"
+                        r"🗑 Retract requested \d\d:\d\d ET", edit["text"])
+
+
+def test_a_second_confirm_is_already_being_deleted_and_writes_nothing(client, ledger, tg, wakes, platform_apis):
+    pid = _seed_published(ledger)
+    _post_hook(client, _tap(pid, "k"))
+    after_first = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, "k"))         # a second tap, or Telegram replaying the update
+    assert _post(ledger, pid) == after_first
+    assert _answers(tg) == ["Deleting…", "Already being deleted"]
+    assert tg.of("editMessageText")[1]["text"].endswith("\n\nAlready being deleted")
+    assert wakes == [1] and platform_apis == []
+    # …and a fresh Retract tap on the old keyboard says so instead of asking again.
+    _post_hook(client, _tap(pid, "d"))
+    assert _answers(tg)[-1] == "Nothing to do — the post retract already requested"
+    assert tg.of("editMessageReplyMarkup") == []
+
+
+def test_a_closed_retract_may_be_requested_again(client, ledger, tg, wakes):
+    """A request that ENDED without a delete (gave up / by hand — `retract_closed_at`) can be made
+    again once the owner fixed what made it fail; the new request clears the closed marker."""
+    pid = _seed_published(ledger, meta_extra={
+        "retract_requested_at": "2026-09-28T13:00:00+00:00", "retract_closed_at": "2026-09-28T13:20:00+00:00",
+        "retract": {"requested_at": "2026-09-28T13:00:00+00:00", "by": f"telegram:{OWNER}", "attempts": 3,
+                    "state": "gave_up", "error": "x delete_post: HTTP 403"},
+        "alert_kind": "retract_failed", "alert_notified_at": "2026-09-28T13:21:00+00:00"})
+    _post_hook(client, _tap(pid, "d"))
+    assert _answers(tg) == ["Confirm the delete"] and len(tg.of("editMessageReplyMarkup")) == 1
+    _post_hook(client, _tap(pid, "k"))
+    meta = _post(ledger, pid)["metadata"]
+    assert "retract_closed_at" not in meta
+    assert meta["retract"]["state"] == "requested" and meta["retract"]["attempts"] == 0
+    assert meta["retract_requested_at"] != "2026-09-28T13:00:00+00:00"
+    assert _answers(tg)[-1] == "Deleting…" and wakes == [1]
+
+
+def test_cancel_restores_the_retract_button_and_writes_nothing(client, ledger, tg, wakes, platform_apis):
+    pid = _seed_published(ledger)
+    before = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, "c"))
+    assert tg.of("editMessageReplyMarkup") == [{"chat_id": OWNER, "message_id": 555,
+                                                "reply_markup": rs.retract_keyboard(pid)}]
+    assert _answers(tg) == ["Kept"]
+    assert _post(ledger, pid) == before and wakes == [] and platform_apis == []
+
+
+@pytest.mark.parametrize("status", ["pending_review", "approved", "queued", "failed", "retracted", "skipped",
+                                    "rejected"])
+@pytest.mark.parametrize("verb", ["d", "k"])
+def test_retract_taps_on_a_post_that_is_not_published_decide_nothing(client, ledger, tg, wakes, platform_apis,
+                                                                      status, verb):
+    pid = _seed_published(ledger, status=status)
+    before = _snap(ledger, pid)
+    assert _post_hook(client, _tap(pid, verb)).status_code == 200
+    assert _post(ledger, pid) == before
+    assert wakes == [] and platform_apis == []
+    assert tg.of("editMessageReplyMarkup") == []
+    expected = f"Nothing to do — the post is {status}" if verb == "d" else f"Not deleted — the post is {status}"
+    assert _answers(tg) == [expected]
+
+
+@pytest.mark.parametrize("verb", ["d", "k", "l", "n"])
+def test_a_tap_on_an_unknown_post_is_not_found(client, ledger, tg, wakes, verb):
+    assert _post_hook(client, _tap(_PID, verb)).status_code == 200
+    assert _answers(tg) == ["Post not found"]
+    assert wakes == [] and tg.of("editMessageReplyMarkup") == []
+
+
+def test_a_ledger_failure_on_confirm_asks_for_another_tap(client, ledger, tg, wakes):
+    pid = _seed_published(ledger)
+    before = _snap(ledger, pid)
+    ledger.fake.tables[mrs.POSTS].fail_updates.append(RuntimeError("PostgREST 520"))
+    assert _post_hook(client, _tap(pid, "k")).status_code == 200
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageText") == [] and wakes == []
+
+
+def test_a_confirm_that_keeps_losing_its_fence_is_busy_not_requested(client, ledger, tg, wakes, monkeypatch):
+    pid = _seed_published(ledger)
+    before = _snap(ledger, pid)
+
+    async def lost_fence(*a, **k):
+        return None
+
+    monkeypatch.setattr(ledger, "transition_post", lost_fence)
+    _post_hook(client, _tap(pid, "k"))
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageText") == [] and wakes == []      # the buttons stay for another tap
+
+
+def _seed_escalated(svc, *, publish: Any = "__escalated__", status: str = "queued") -> str:
+    meta: Dict[str, Any] = {
+        "dry_run": False, "review_notified_at": "2026-09-28T10:00:00+00:00", "review_message_id": 500,
+        "alert_kind": "unknown", "alert_text": "⚠️ X post — outcome UNKNOWN",
+        "alert_notified_at": "2026-09-28T16:00:00+00:00", "alert_message_id": 777,
+    }
+    if publish == "__escalated__":
+        meta["publish"] = {"state": "escalated", "escalated_at": "2026-09-28T16:00:00+00:00", "attempt": 1}
+    elif publish is not None:
+        meta["publish"] = publish
+    pid = _seed_post(svc, platform="x", fmt="text", title=None, status=status, meta=meta)
+    _post(svc, pid)["attempts"] = 1
+    return pid
+
+
+def test_its_live_publishes_an_escalated_post_and_wakes_the_publisher(client, ledger, tg, wakes, platform_apis):
+    pid = _seed_escalated(ledger)
+    _post_hook(client, _tap(pid, "l", message_id=777, text="⚠️ X post — outcome UNKNOWN"))
+    row = _post(ledger, pid)
+    assert row["status"] == "published" and row["published_at"]
+    assert row["last_error"] == "owner confirmed it is live; the platform id is unknown"
+    assert row.get("external_id") is None                      # never invented
+    meta = row["metadata"]
+    assert meta["owner_outcome"]["decision"] == "live" and meta["owner_outcome"]["by"] == f"telegram:{OWNER}"
+    assert meta["publish"]["state"] == "published"
+    assert meta["publish"]["escalated_at"] == "2026-09-28T16:00:00+00:00"   # merged, not replaced
+    assert meta["alert_message_id"] == 777 and meta["review_message_id"] == 500
+    assert wakes == [1] and platform_apis == []
+    assert re.fullmatch(r"✅ Marked live \d\d:\d\d ET", _answers(tg)[0])
+    (edit,) = tg.of("editMessageText")
+    assert edit["message_id"] == 777 and edit["reply_markup"] == {"inline_keyboard": []}
+    assert re.search(r"\n\n✅ Marked live \d\d:\d\d ET$", edit["text"])
+
+
+def test_not_posted_fails_an_escalated_post_and_wakes_the_publisher(client, ledger, tg, wakes, platform_apis):
+    pid = _seed_escalated(ledger)
+    _post_hook(client, _tap(pid, "n", message_id=777))
+    row = _post(ledger, pid)
+    assert row["status"] == "failed" and row["last_error"] == "owner confirmed it was not posted"
+    assert row["metadata"]["publish"]["state"] == "owner_not_posted"
+    assert row["metadata"]["owner_outcome"]["decision"] == "not_posted"
+    assert wakes == [1] and platform_apis == []
+    assert re.fullmatch(r"❌ Marked not posted \d\d:\d\d ET", _answers(tg)[0])
+
+
+@pytest.mark.parametrize("publish", [{"state": "unknown"}, {"state": "sending"}, {"state": "published"},
+                                     None, "escalated", ["escalated"]])
+@pytest.mark.parametrize("verb", ["l", "n"])
+def test_an_answer_on_a_post_that_is_not_escalated_decides_nothing(client, ledger, tg, wakes, publish, verb):
+    pid = _seed_escalated(ledger, publish=publish)
+    before = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, verb))
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Nothing to decide any more"] and wakes == []
+
+
+@pytest.mark.parametrize("status", ["published", "failed", "approved", "retracted"])
+def test_an_answer_after_the_outcome_is_known_says_already(client, ledger, tg, wakes, status):
+    pid = _seed_escalated(ledger, status=status)
+    before = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, "l"))
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == [f"Already {status}"] and wakes == []
+
+
+def test_a_double_its_live_writes_once(client, ledger, tg, wakes):
+    pid = _seed_escalated(ledger)
+    _post_hook(client, _tap(pid, "l"))
+    after_first = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, "n"))           # a late "Not posted" cannot flip it
+    assert _post(ledger, pid) == after_first
+    assert _answers(tg)[1] == "Already published" and wakes == [1]
+
+
+def test_approve_wakes_the_publisher_once_and_reject_does_not(client, ledger, tg, wakes):
+    approved, rejected = _seed_post(ledger), _seed_post(ledger)
+    _post_hook(client, _tap(approved, "a"))
+    assert wakes == [1]
+    _post_hook(client, _tap(approved, "a"))      # "Already approved" — no second wake
+    _post_hook(client, _tap(rejected, "r"))
+    assert wakes == [1]
+    assert _post(ledger, approved)["status"] == "approved" and _post(ledger, rejected)["status"] == "rejected"
+
+
+@pytest.mark.parametrize("kw", [{"from_id": OWNER + 1}, {"chat_id": OWNER + 1}, {"from_id": str(OWNER)},
+                                {"drop": ("message",)}])
+@pytest.mark.parametrize("verb", ["d", "k", "c", "l", "n"])
+def test_every_new_verb_respects_the_owner_allow_list(client, ledger, tg, wakes, platform_apis, verb, kw):
+    pid = _seed_escalated(ledger) if verb in ("l", "n") else _seed_published(ledger)
+    before = _snap(ledger, pid)
+    assert _post_hook(client, _tap(pid, verb, **kw)).status_code == 200
+    assert _post(ledger, pid) == before
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Not allowed"}]
+    assert tg.of("editMessageReplyMarkup") == [] and tg.of("editMessageText") == [] and tg.of("sendMessage") == []
+    assert wakes == [] and platform_apis == []
+
+
+@pytest.mark.parametrize("data", ["D:{pid}", "k:{PID}", "retract:{pid}", "x:{pid}", "K:{pid}", "kk:{pid}"])
+def test_malformed_new_verbs_through_the_webhook_decide_nothing(client, ledger, tg, wakes, data):
+    pid = _seed_published(ledger)
+    before = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, data=data.format(pid=pid, PID=pid.upper())))
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Unknown action"] and wakes == []
+
+
+# ── review 2026-09-30: an Approve that cannot send says so; a Retract that cannot delete says so ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch, value, phrase", [
+    ("MARKETING_ENABLED", False, "publishing is OFF on the web"),
+    ("MARKETING_DRY_RUN", True, "the web is in DRY RUN"),
+])
+async def test_a_live_post_says_when_approving_will_not_send_it(ledger, tg, monkeypatch, switch, value, phrase):
+    monkeypatch.setattr(settings, switch, value)
+    _seed_run(ledger, RUN_A)
+    _seed_post(ledger, RUN_A, "x", "text", title=None, caption="Live words")
+    await rs.review_cycle()
+    (msg,) = tg.of("sendMessage")
+    assert msg["text"].startswith(f"X · text · run 2026-09-28 · ⚠️ {phrase}: approving will not send it")
+    assert msg["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith("a:")
+
+
+def test_approving_while_the_web_cannot_send_warns_in_the_toast_and_the_message(client, ledger, tg, monkeypatch):
+    monkeypatch.setattr(settings, "MARKETING_DRY_RUN", True)
+    pid = _seed_post(ledger)
+    assert _post_hook(client, _tap(pid)).status_code == 200
+    assert _post(ledger, pid)["status"] == "approved"            # the decision is still recorded
+    toast = tg.of("answerCallbackQuery")[0]["text"]
+    assert "DRY RUN" in toast and "nothing will be sent" in toast
+    assert "NOT sent" in tg.of("editMessageText")[0]["text"]
+
+
+def test_retract_on_a_platform_that_cannot_delete_records_nothing(client, ledger, tg, monkeypatch, platform_apis):
+    monkeypatch.setattr(rs.outlets, "retract_capable", lambda _platform: False)
+    pid = _seed_published(ledger, "x")
+    before = copy.deepcopy(_post(ledger, pid))
+    for verb in ("d", "k"):
+        assert _post_hook(client, _tap(pid, verb)).status_code == 200
+    assert _post(ledger, pid) == before
+    assert any("remove it by hand" in m["text"] for m in tg.of("editMessageText"))
+    assert platform_apis == []

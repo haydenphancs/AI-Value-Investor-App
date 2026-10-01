@@ -24,6 +24,14 @@ Two halves, both in the WEB process (the only one holding the bot token; the wor
 
 The bot is OFF unless all three MARKETING_TELEGRAM_* settings are set (`is_configured`).
 
+Phase 5 (design doc §12.10): a post whose platform cannot publish yet (`outlets.enabled_platforms()`
+does not include it) arrives as a READ-ONLY PREVIEW — the same text, labelled "preview — <platform>
+not wired yet", with no buttons (stamped `metadata.review_preview_at`); it gets its buttons on the
+next sweep after its platform is enabled. Taps other than Approve/Reject — Retract (two steps:
+🗑 → Confirm / Keep), "It's live" / "Not posted" on an escalated unknown outcome — only RECORD the
+decision (`run_service.request_retract` / `resolve_unknown`) and wake the publisher; the webhook never
+calls a platform (rules/marketing.md §2). The "Posted …" feed and the alerts are `publish_feed.py`.
+
 Plain text only: no `parse_mode` anywhere, so a caption (model text) can never be read as markup.
 """
 
@@ -49,6 +57,7 @@ from app.integrations.telegram import (
     TelegramRateLimitException,
     TelegramRequestError,
 )
+from app.services.marketing import outlets, publisher_wake
 from app.services.marketing.run_service import (
     POSTS,
     _exec,
@@ -78,7 +87,15 @@ SEND_SPACING_SECONDS = 1.1
 _WEBHOOK_REGISTER_TIMEOUT_SECONDS = 20.0
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-_CALLBACK_RE = re.compile(rf"(a|r):({_UUID})", re.ASCII)
+#: Callback verbs (one letter + ":" + uuid = 38 bytes, inside Telegram's 64). Never `x` (a test
+#: pins `x:<uuid>` as invalid).
+_VERBS = {
+    "a": "approve", "r": "reject",                                   # review
+    "d": "retract", "k": "confirm_retract", "c": "cancel_retract",   # published post
+    "l": "live", "n": "not_posted",                                  # escalated unknown outcome
+}
+_VERB_LETTER = {name: letter for letter, name in _VERBS.items()}
+_CALLBACK_RE = re.compile(rf"([{''.join(_VERBS)}]):({_UUID})", re.ASCII)
 _STATUS_WORD_RE = re.compile(r"[a-z_]{1,32}", re.ASCII)
 _KEYBOARD_REMOVED: Dict[str, Any] = {"inline_keyboard": []}
 
@@ -165,7 +182,7 @@ def canonical_post_id(value: Any) -> Optional[str]:
 
 
 def callback_data(decision: str, post_id: str) -> str:
-    verb = {"approve": "a", "reject": "r"}[decision]
+    verb = _VERB_LETTER[decision]
     data = f"{verb}:{post_id}"
     if parse_callback_data(data) != (decision, post_id):
         # Only a canonical uuid round-trips; a button that could never be parsed back is refused
@@ -175,20 +192,39 @@ def callback_data(decision: str, post_id: str) -> str:
 
 
 def parse_callback_data(data: Any) -> Optional[Tuple[str, str]]:
-    """`a:<uuid>` → ("approve", uuid); `r:<uuid>` → ("reject", uuid); anything else → None.
+    """`a:<uuid>` → ("approve", uuid); `r:` reject; `d:` retract; `k:` confirm_retract;
+    `c:` cancel_retract; `l:` live; `n:` not_posted; anything else → None.
     Strict: canonical lowercase uuid only, ≤ 64 bytes, a FULL match (no trailing newline)."""
     if not isinstance(data, str) or len(data.encode("utf-8", "replace")) > MAX_CALLBACK_DATA_BYTES:
         return None
     match = _CALLBACK_RE.fullmatch(data)
     if match is None:
         return None
-    return ("approve" if match.group(1) == "a" else "reject"), match.group(2)
+    return _VERBS[match.group(1)], match.group(2)
 
 
 def review_keyboard(post_id: str) -> Dict[str, Any]:
     return {"inline_keyboard": [
         [{"text": "✅ Approve", "callback_data": callback_data("approve", post_id)}],
         [{"text": "❌ Reject", "callback_data": callback_data("reject", post_id)}],
+    ]}
+
+
+def retract_keyboard(post_id: str) -> Dict[str, Any]:
+    return {"inline_keyboard": [[{"text": "🗑 Retract", "callback_data": callback_data("retract", post_id)}]]}
+
+
+def confirm_retract_keyboard(post_id: str) -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [{"text": "🗑 Yes, delete it", "callback_data": callback_data("confirm_retract", post_id)}],
+        [{"text": "Keep it", "callback_data": callback_data("cancel_retract", post_id)}],
+    ]}
+
+
+def unknown_outcome_keyboard(post_id: str) -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [{"text": "✅ It's live", "callback_data": callback_data("live", post_id)}],
+        [{"text": "❌ Not posted", "callback_data": callback_data("not_posted", post_id)}],
     ]}
 
 
@@ -211,11 +247,34 @@ def _run_date(run: Optional[Dict[str, Any]], post: Dict[str, Any]) -> str:
     return key.split(":", 1)[0][:10] if ":" in key else "?"
 
 
-def compose_post_text(post: Dict[str, Any], run_date: str, media: List[Tuple[str, str]]) -> str:
-    """Header, blank line, title (if any), the EXACT caption, then the post's media links."""
+def web_send_blocker(post: Dict[str, Any]) -> Optional[str]:
+    """Why an approved LIVE post would not be sent right now by the web publisher, or None. Read at
+    notify time AND at tap time (the switches can change in between): an Approve must never look
+    like "it will go out" when publishing is off, in web dry-run, or the platform is not enabled."""
+    if is_rehearsal(post):
+        return None   # a rehearsal row says "DRY RUN" already
+    if not settings.MARKETING_ENABLED:
+        return "publishing is OFF on the web"
+    if settings.MARKETING_DRY_RUN:
+        return "the web is in DRY RUN"
+    if str(post.get("platform")) not in outlets.enabled_platforms():
+        return f"{post.get('platform')} is not enabled"
+    return None
+
+
+def compose_post_text(post: Dict[str, Any], run_date: str, media: List[Tuple[str, str]],
+                      *, preview: bool = False) -> str:
+    """Header, blank line, title (if any), the EXACT caption, then the post's media links. A
+    `preview` (its platform cannot publish yet) says so in the header and carries no buttons."""
     header = f"{str(post.get('platform') or '?').upper()} · {post.get('format') or '?'} · run {run_date}"
     if is_rehearsal(post):
         header += " · DRY RUN"
+    if preview:
+        header += f" · preview — {post.get('platform') or '?'} not wired yet"
+    else:
+        blocker = web_send_blocker(post)
+        if blocker:
+            header += f" · ⚠️ {blocker}: approving will not send it"
     parts = [header]
     title = post.get("title")
     if isinstance(title, str) and title.strip():
@@ -284,17 +343,38 @@ class _Pacer:
 
 
 async def _pending_unnotified(svc: Any) -> List[Dict[str, Any]]:
+    """Two in-query reads (filters before the LIMIT, so neither kind can starve the other):
+    pending posts of ENABLED platforms not yet sent with buttons, and pending posts of every other
+    platform not yet sent as a preview. Oldest first."""
+    enabled = outlets.enabled_platforms()
+    buttons: List[Dict[str, Any]] = []
+    if enabled:
+        query = (
+            svc.sb.table(POSTS).select("*")
+            .eq("status", "pending_review")
+            .is_("metadata->>review_notified_at", "null")
+            .in_("platform", enabled)
+            .order("created_at")
+            .limit(SCAN_LIMIT)
+        )
+        res = await _exec(query, op="review_pending_posts", status="pending_review")
+        buttons.extend(r for r in (getattr(res, "data", None) or []) if isinstance(r, dict) and not _notified(r))
     query = (
         svc.sb.table(POSTS).select("*")
         .eq("status", "pending_review")
         .is_("metadata->>review_notified_at", "null")
-        .order("created_at")
-        .limit(SCAN_LIMIT)
+        .is_("metadata->>review_preview_at", "null")
     )
-    res = await _exec(query, op="review_pending_posts", status="pending_review")
-    rows = list(getattr(res, "data", None) or [])
-    # Belt and braces behind the query filter (a row stamped between the read and now).
-    return [r for r in rows if isinstance(r, dict) and not _notified(r)]
+    if enabled:
+        query = query.not_.in_("platform", enabled)
+    res = await _exec(query.order("created_at").limit(SCAN_LIMIT), op="review_preview_posts",
+                      status="pending_review")
+    previews = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict) and not _notified(r)]
+    # Posts that can be approved come FIRST; previews only fill the room left, so no number of
+    # unwired posts can push an approvable one out of the sweep.
+    rows = buttons[:SCAN_LIMIT] + previews[: max(SCAN_LIMIT - len(buttons), 0)]
+    rows.sort(key=lambda r: str(r.get("created_at") or ""))
+    return rows
 
 
 def _pick_video(run_id: str, run: Dict[str, Any], assets: List[Dict[str, Any]],
@@ -370,10 +450,12 @@ async def _send_run_video(svc: Any, chat_id: int, run_id: str, run_date: str, vi
         return await _send_video_link(chat_id, caption, url, pacer, run_id=run_id)
 
 
-async def _stamp_notified(svc: Any, post_id: str, message_ids: List[Optional[int]]) -> bool:
+async def _stamp_notified(svc: Any, post_id: str, message_ids: List[Optional[int]],
+                          *, key: str = "review_notified_at") -> bool:
     """Record that the owner has been told — only while the post is STILL pending_review and
     unchanged since we read it (fenced on status AND updated_at), so a decision that landed
-    meanwhile is never overwritten and no other metadata is lost."""
+    meanwhile is never overwritten and no other metadata is lost. `key` is `review_preview_at` for a
+    read-only preview (which must not count as "sent with buttons")."""
     try:
         fresh = await svc.get_post(post_id)
         if fresh is None:
@@ -385,7 +467,7 @@ async def _stamp_notified(svc: Any, post_id: str, message_ids: List[Optional[int
             return False
         meta = dict(fresh["metadata"]) if isinstance(fresh.get("metadata"), dict) else {}
         now = _now_iso()
-        meta["review_notified_at"] = now
+        meta[key] = now
         meta["review_message_id"] = message_ids[-1] if message_ids else None
         if len(message_ids) > 1:
             meta["review_message_ids"] = list(message_ids)
@@ -489,12 +571,13 @@ async def _notify_post(svc: Any, chat_id: int, post: Dict[str, Any], run_date: s
                      post.get("id"))
         counters["failed"] += 1
         return
-    text = compose_post_text(post, run_date, _post_media(svc, post, assets))
+    preview = str(post.get("platform")) not in outlets.enabled_platforms()
+    text = compose_post_text(post, run_date, _post_media(svc, post, assets), preview=preview)
     chunks = split_message(text)
     message_ids: List[Optional[int]] = []
     try:
         for i, chunk in enumerate(chunks):
-            markup = review_keyboard(post_id) if i == len(chunks) - 1 else None
+            markup = review_keyboard(post_id) if (i == len(chunks) - 1 and not preview) else None
             await pacer.wait()
             message_ids.append(_message_id(await telegram.send_message(chat_id, chunk, reply_markup=markup)))
     except TelegramRateLimitException:
@@ -513,9 +596,11 @@ async def _notify_post(svc: Any, chat_id: int, post: Dict[str, Any], run_date: s
         counters["failed"] += 1
         return
     counters["sent"] += 1
-    logger.info("marketing review: notified post_id=%s platform=%s run_date=%s message_id=%s chunks=%d",
-                post_id, post.get("platform"), run_date, message_ids[-1] if message_ids else None, len(chunks))
-    if await _stamp_notified(svc, post_id, message_ids):
+    logger.info("marketing review: notified post_id=%s platform=%s run_date=%s message_id=%s chunks=%d preview=%s",
+                post_id, post.get("platform"), run_date, message_ids[-1] if message_ids else None, len(chunks),
+                preview)
+    if await _stamp_notified(svc, post_id, message_ids,
+                             key="review_preview_at" if preview else "review_notified_at"):
         counters["stamped"] += 1
 
 
@@ -590,6 +675,9 @@ async def handle_update(update: Any) -> Dict[str, Any]:
         await _answer(cq_id, "Unknown action")
         return {"ok": True, "refused": "unknown_action"}
     decision, post_id = parsed
+    if decision not in ("approve", "reject"):
+        return await _handle_post_action(decision, post_id, cq_id=cq_id, chat_id=chat_id, message=message,
+                                         by=f"telegram:{from_id}")
 
     try:
         outcome, row = await get_marketing_run_service().review_post(
@@ -606,9 +694,109 @@ async def handle_update(update: Any) -> Dict[str, Any]:
     toast, line = _verdict(outcome, row)
     logger.info("marketing review webhook: post_id=%s decision=%s outcome=%s by=telegram:%s",
                 post_id, decision, outcome, from_id)
+    if outcome == "approved":
+        publisher_wake.wake()   # publish within seconds, not at the next 10-minute tick
+        blocker = web_send_blocker(row or {})
+        if blocker:
+            toast = f"Approved — but {blocker}: nothing will be sent"   # telegram caps a toast at 200
+            line = f"{line} — ⚠️ {blocker}: NOT sent (it expires after its day)"
     await _answer(cq_id, toast, post_id=post_id)
     await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), line), post_id=post_id)
     return {"ok": True, "outcome": outcome, "post_id": post_id}
+
+
+async def _set_keyboard(chat_id: int, message: Dict[str, Any], keyboard: Dict[str, Any], *, post_id: str,
+                        fallback_text: str) -> None:
+    """Swap the tapped message's keyboard; if it cannot be edited (too old, deleted), send the
+    keyboard on a new message instead so the owner can still act."""
+    message_id = message.get("message_id")
+    try:
+        if not _is_int(message_id):
+            raise TelegramRequestError("no message_id to edit", method="editMessageReplyMarkup")
+        await telegram.edit_message_reply_markup(chat_id, message_id, keyboard)
+        return
+    except asyncio.CancelledError:
+        raise
+    except TelegramException as e:
+        logger.info("marketing review: keyboard edit failed post_id=%s (%s) — sending a new message", post_id, e)
+    try:
+        await telegram.send_message(chat_id, fallback_text, reply_markup=keyboard)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("marketing review: could not offer the keyboard for post_id=%s (%s: %s)", post_id,
+                       type(e).__name__, e)
+
+
+async def _handle_post_action(decision: str, post_id: str, *, cq_id: str, chat_id: int,
+                              message: Dict[str, Any], by: str) -> Dict[str, Any]:
+    """Retract (two steps) and the answers to an escalated unknown outcome. Each RECORDS a decision
+    (a conditional UPDATE) and wakes the publisher — the platform call happens in the publisher loop,
+    never here (rules/marketing.md §2)."""
+    svc = get_marketing_run_service()
+    try:
+        if decision in ("retract", "confirm_retract"):
+            row = await svc.get_post(post_id)
+            if row is not None and row.get("status") == "published" and not outlets.retract_capable(row.get("platform")):
+                # No delete possible from here (no API, or its credentials are not set): never record a
+                # request that would wait silently.
+                text = (f"{str(row.get('platform')).upper()} cannot be deleted from here (no delete API or no "
+                        f"credentials) — remove it by hand: {row.get('external_url') or '(no link)'}")
+                await _answer(cq_id, "Remove it by hand", post_id=post_id)
+                await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), text),
+                            post_id=post_id)
+                return {"ok": True, "outcome": "manual", "post_id": post_id}
+        if decision == "retract":
+            row = await svc.get_post(post_id)
+            meta = (row or {}).get("metadata") if isinstance((row or {}).get("metadata"), dict) else {}
+            if row is None:
+                await _answer(cq_id, "Post not found", post_id=post_id)
+                return {"ok": True, "outcome": "not_found", "post_id": post_id}
+            pending = bool(meta.get("retract_requested_at")) and not meta.get("retract_closed_at")
+            if row.get("status") != "published" or pending:
+                state = "retract already requested" if pending else f"is {row.get('status')}"
+                await _answer(cq_id, f"Nothing to do — the post {state}", post_id=post_id)
+                return {"ok": True, "outcome": "noop", "post_id": post_id}
+            await _set_keyboard(chat_id, message, confirm_retract_keyboard(post_id), post_id=post_id,
+                                fallback_text=f"Delete the {str(row.get('platform')).upper()} post? "
+                                              f"{row.get('external_url') or ''}".strip())
+            await _answer(cq_id, "Confirm the delete", post_id=post_id)
+            return {"ok": True, "outcome": "confirm_asked", "post_id": post_id}
+        if decision == "cancel_retract":
+            await _set_keyboard(chat_id, message, retract_keyboard(post_id), post_id=post_id,
+                                fallback_text="Kept. Tap Retract to delete it later.")
+            await _answer(cq_id, "Kept", post_id=post_id)
+            return {"ok": True, "outcome": "kept", "post_id": post_id}
+        if decision == "confirm_retract":
+            outcome, _row = await svc.request_retract(post_id, by=by)
+            if outcome == "requested":
+                publisher_wake.wake()
+            toast = {"requested": "Deleting…", "already_requested": "Already being deleted",
+                     "not_found": "Post not found", "busy": "Could not record that — tap again"}.get(
+                outcome, f"Not deleted — the post {outcome.replace('already_', 'is ')}")
+            line = (f"🗑 Retract requested {_et_clock()}" if outcome == "requested" else toast)
+            await _answer(cq_id, toast, post_id=post_id)
+            if outcome != "busy":
+                await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), line),
+                            post_id=post_id)
+            return {"ok": True, "outcome": outcome, "post_id": post_id}
+        # live / not_posted
+        outcome, _row = await svc.resolve_unknown(post_id, decision, by=by)
+        if outcome in ("published", "failed"):
+            publisher_wake.wake()
+        line = {"published": f"✅ Marked live {_et_clock()}", "failed": f"❌ Marked not posted {_et_clock()}",
+                "not_escalated": "Nothing to decide any more", "not_found": "Post not found"}.get(
+            outcome, f"Already {outcome.replace('already_', '')}")
+        await _answer(cq_id, line, post_id=post_id)
+        await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), line), post_id=post_id)
+        return {"ok": True, "outcome": outcome, "post_id": post_id}
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("marketing review webhook: %s FAILED post_id=%s (%s: %s) — the buttons stay; tap again",
+                     decision, post_id, type(e).__name__, e, exc_info=True)
+        await _answer(cq_id, "Could not record that — tap again", post_id=post_id)
+        return {"ok": True, "outcome": "error", "post_id": post_id}
 
 
 async def register_webhook() -> bool:

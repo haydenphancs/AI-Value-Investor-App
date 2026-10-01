@@ -1536,3 +1536,156 @@ def test_the_render_key_changes_with_every_input_that_changes_the_bytes():
                    {"words": [{"w": "hi", "s": 0.0, "e": 0.5, "line": 0}]}, {"max_seconds": 60.0},
                    {"layout_engine": "basic"}):
         assert rd.render_key(**{**base, **change}) != k, change
+
+
+# ── no social secret reaches the worker (Phase 5, rules/marketing.md §2) ──────────────────────
+# The media worker holds NO social secret: only the publisher (web process) calls a platform and
+# only the web process runs the Telegram bot. A worker that NAMES one of those settings has been
+# given (or is about to be given) a credential it must never hold.
+
+_SOCIAL_SETTING = re.compile(r"MARKETING_(?:X|BLUESKY|UPLOAD_POST|TELEGRAM)_[A-Z0-9_]*")
+#: A setting name built at run time (`f"MARKETING_{p}_TOKEN"`, `"MARKETING_" + p`) cannot be
+#: checked, so it fails closed. `"MARKETING_"` on its own (a prefix test) is fine: it reads the
+#: worker's own environment, which holds none of these.
+_DYNAMIC_PREFIX = "MARKETING_"
+
+
+def _docstring_ids(tree: ast.AST) -> set:
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                out.add(id(body[0].value))
+    return out
+
+
+def social_setting_names(src: str) -> List[tuple]:
+    """(line, name) for every social-outlet setting the CODE of one worker file names: string
+    literals (f-string parts and bytes included) and identifiers (names, attributes, keywords,
+    arguments, definitions, import aliases). Comments are not code — the AST drops them — and a
+    docstring is prose, so the explanatory text next to a rule can neither trip nor satisfy it."""
+    tree = ast.parse(src)
+    docs = _docstring_ids(tree)
+    found: List[tuple] = []
+    for node in ast.walk(tree):
+        texts: List[str] = []
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)) and id(node) not in docs:
+            texts.append(node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value)
+        elif isinstance(node, ast.Name):
+            texts.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            texts.append(node.attr)
+        elif isinstance(node, ast.keyword) and node.arg:
+            texts.append(node.arg)
+        elif isinstance(node, ast.arg):
+            texts.append(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            texts.append(node.name)
+        elif isinstance(node, ast.alias):
+            texts.append(node.asname or node.name)
+        elif isinstance(node, ast.JoinedStr):
+            head = node.values[0] if node.values else None
+            if (isinstance(head, ast.Constant) and isinstance(head.value, str)
+                    and head.value.endswith(_DYNAMIC_PREFIX) and len(node.values) > 1):
+                found.append((node.lineno, f"{head.value}<dynamic>"))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+            left = node.left
+            if (isinstance(left, ast.Constant) and isinstance(left.value, str)
+                    and (left.value.endswith(_DYNAMIC_PREFIX) or left.value.startswith(_DYNAMIC_PREFIX + "%"))):
+                found.append((node.lineno, f"{left.value}<dynamic>"))
+        for text in texts:
+            found.extend((getattr(node, "lineno", 0), m.group(0)) for m in _SOCIAL_SETTING.finditer(text))
+    return found
+
+
+def _non_comment_lines(text: str) -> str:
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _social_hits(root: Path = _PKG) -> List[str]:
+    hits = [f"{py.relative_to(root)}:{line}: {name}" for py in _worker_files(root)
+            for line, name in social_setting_names(py.read_text(encoding="utf-8"))]
+    for cfg in ("Dockerfile", "railway.toml"):   # an ENV / variables line would hand it over too
+        path = root / cfg
+        if path.exists():
+            hits += [f"{cfg}: {m.group(0)}" for m in _SOCIAL_SETTING.finditer(_non_comment_lines(path.read_text()))]
+    return hits
+
+
+def test_no_worker_file_names_a_social_outlet_setting():
+    files = _worker_files()
+    assert _SCRIPT in files and len(files) >= 5, files
+    assert _social_hits() == [], "the media worker must hold no X / Bluesky / Upload-Post / Telegram secret"
+    # Anti-vacuity: the same scan DOES see the worker's own settings in the code it reads.
+    general = re.compile(r"MARKETING_[A-Z0-9_]+")
+    seen = {m.group(0) for node in ast.walk(ast.parse(_SCRIPT.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            for m in general.finditer(node.value)}
+    assert {"MARKETING_WORKER_TOKEN", "MARKETING_API_BASE_URL"} <= seen, seen
+
+
+def test_the_family_covers_every_social_setting_the_web_declares():
+    """A new outlet's settings must fall in the guarded families, or the guard silently misses
+    them (this is what to extend when Upload-Post or another outlet lands)."""
+    from app.config import Settings
+
+    social = [n for n in Settings.model_fields
+              if n.startswith("MARKETING_") and any(k in n for k in ("_X_", "BLUESKY", "UPLOAD_POST", "TELEGRAM"))]
+    assert {"MARKETING_X_ACCESS_TOKEN", "MARKETING_X_CONSUMER_SECRET", "MARKETING_BLUESKY_APP_PASSWORD",
+            "MARKETING_TELEGRAM_BOT_TOKEN"} <= set(social), social
+    assert all(_SOCIAL_SETTING.fullmatch(n) for n in social), social
+
+
+@pytest.mark.parametrize("src", [
+    "import os\ntoken = os.environ['MARKETING_X_ACCESS_TOKEN']\n",
+    "import os\ndef f():\n    return os.getenv('MARKETING_BLUESKY_APP_PASSWORD', '')\n",
+    "KEY = f\"MARKETING_TELEGRAM_BOT_TOKEN={1}\"\n",
+    "x = b'MARKETING_UPLOAD_POST_API_KEY'\n",
+    "MARKETING_X_CONSUMER_KEY = None\n",
+    "def run(*, MARKETING_TELEGRAM_REVIEW_CHAT_ID=0):\n    pass\n",
+    "settings.MARKETING_X_ACCESS_TOKEN_SECRET\n",
+    "import os\nname = f'MARKETING_{platform}_TOKEN'\n",
+    "import os\nname = 'MARKETING_' + platform.upper() + '_TOKEN'\n",
+    "import os\nname = 'MARKETING_%s_TOKEN' % platform\n",
+])
+def test_the_social_setting_scanner_flags(src):
+    assert social_setting_names(src), src
+
+
+@pytest.mark.parametrize("src", [
+    "# reads MARKETING_X_ACCESS_TOKEN? never — the publisher does\nx = 1\n",
+    '"""The worker never holds MARKETING_TELEGRAM_BOT_TOKEN."""\nx = 1\n',
+    'def f():\n    """No MARKETING_BLUESKY_APP_PASSWORD here."""\n    return 1\n',
+    "import os\nt = os.environ.get('MARKETING_WORKER_TOKEN')\n",
+    "import os\nmine = {k for k in os.environ if k.startswith('MARKETING_')}\n",
+    "x = 'MARKETING_XRAY_MODE'\n",   # not the X family: no underscore after X
+])
+def test_the_social_setting_scanner_passes(src):
+    assert social_setting_names(src) == [], src
+
+
+def test_a_social_setting_in_a_copy_of_the_real_tree_is_caught(tmp_path):
+    """Mutation check on a COPY of what ships (never the real tree): the real-tree guard must
+    turn red the moment a worker file reads one of these settings, in a stage function or in the
+    Dockerfile, and a comment saying the same thing must not."""
+    copy = tmp_path / "marketing"
+    shutil.copytree(_PKG, copy, ignore=_copy_ignore(_PKG))   # what `COPY . marketing/` ships, Dockerfile included
+    assert (copy / "Dockerfile").exists() and _social_hits(copy) == []
+    main = copy / "main.py"
+    clean = main.read_text(encoding="utf-8")
+    main.write_text(clean + "\n# MARKETING_X_ACCESS_TOKEN lives on the web service only\n", encoding="utf-8")
+    assert _social_hits(copy) == []
+    main.write_text(clean + "\n\ndef _leak():\n    return os.environ.get(\"MARKETING_TELEGRAM_BOT_TOKEN\")\n",
+                    encoding="utf-8")
+    assert [h for h in _social_hits(copy) if "MARKETING_TELEGRAM_BOT_TOKEN" in h and h.startswith("main.py:")]
+    main.write_text(clean, encoding="utf-8")
+    voice = copy / "voice.py"
+    voice.write_text(voice.read_text(encoding="utf-8") + "\nKEY = 'MARKETING_BLUESKY_APP_PASSWORD'\n",
+                     encoding="utf-8")
+    assert any(h.startswith("voice.py:") for h in _social_hits(copy))
+    voice.write_text((_PKG / "voice.py").read_text(encoding="utf-8"), encoding="utf-8")
+    docker = copy / "Dockerfile"
+    docker.write_text(docker.read_text() + "\nENV MARKETING_X_CONSUMER_SECRET=\"\"\n")
+    assert _social_hits(copy) == ["Dockerfile: MARKETING_X_CONSUMER_SECRET"]

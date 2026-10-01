@@ -75,17 +75,37 @@ _DSN_RE = re.compile(r"(?i)\b(postgres(?:ql)?://[^:@\s]+:)[^@\s]+(@)")
 # is still covered.
 _TELEGRAM_TOKEN_RE = re.compile(r"(?<!\d)(\d{5,16}):[A-Za-z0-9_-]{30,}")
 
+# The marketing publisher's platform credentials (Phase 5, design doc §12.10). None of them is in
+# a URL, but a header or a request body can still reach a log line or a frame variable:
+#  * X OAuth 1.0a — `Authorization: OAuth oauth_consumer_key="…", oauth_token="…",
+#    oauth_signature="…"` (and the same names as form/query parameters). `token=` above never
+#    matches `oauth_token=` (it is anchored on a separator, and `_` is not one).
+#  * Upload-Post — `Authorization: Apikey <key>` (a space, not `=`).
+#  * Bluesky app passwords — `xxxx-xxxx-xxxx-xxxx` of [a-z0-9]. Bounded on both sides by anything
+#    but a letter, digit or hyphen, so a UUID (8-4-4-4-12), a date or an idempotency key
+#    (`2026-09-29:x:text`) never matches.
+_OAUTH_PARAM_RE = re.compile(
+    r"(?i)\b(oauth_(?:token|token_secret|signature|consumer_key|consumer_secret|nonce|verifier)"
+    r"\s*=\s*\"?)[^\"&,\s]+"
+)
+_APIKEY_HEADER_RE = re.compile(r"(?i)\b(apikey\s+)[A-Za-z0-9._\-]{8,}")
+_APP_PASSWORD_RE = re.compile(r"(?<![A-Za-z0-9-])[a-z0-9]{4}(?:-[a-z0-9]{4}){3}(?![A-Za-z0-9-])")
+
 
 def redact_secrets(text: Any) -> str:
     """Return ``str(text)`` with secrets and no-diagnostic-value PII replaced by ``***``.
 
     Covers: secret query params (``apikey=``…), email addresses, bearer tokens, bare JWTs,
-    inline Postgres DSN passwords, and Telegram bot tokens (in a URL path or bare). Does NOT touch `user_id` UUIDs — see the module
+    inline Postgres DSN passwords, Telegram bot tokens (in a URL path or bare), OAuth 1.0a
+    parameters, ``Apikey <key>`` headers and Bluesky app passwords. Does NOT touch `user_id` UUIDs — see the module
     docstring for why.
     """
     try:
         s = str(text)
         s = _TELEGRAM_TOKEN_RE.sub(r"\1:***", s)
+        s = _OAUTH_PARAM_RE.sub(r"\1***", s)
+        s = _APIKEY_HEADER_RE.sub(r"\1***", s)
+        s = _APP_PASSWORD_RE.sub("***", s)
         s = _SECRET_QS_RE.sub(_qs_sub, s)
         s = _SECRET_KV_RE.sub(r"\1***\4", s)
         s = _DSN_RE.sub(r"\1***\2", s)
@@ -275,7 +295,9 @@ _CREDENTIAL_KEYS = {
     "code", "otp", "secret", "api_key", "apikey", "authorization", "nonce",
     "supabase_access_token", "signed_transaction", "signed_payload",
 }
-_CREDENTIAL_SUBSTRINGS = ("password", "token", "secret", "apikey", "api_key")
+# `jwt`: Bluesky's session fields are `accessJwt` / `refreshJwt` (a frame local holding the
+# session dict must not carry them in the clear, even though the JWT pattern catches the value).
+_CREDENTIAL_SUBSTRINGS = ("password", "token", "secret", "apikey", "api_key", "jwt")
 
 
 def _scrub_request_body(event: dict) -> None:

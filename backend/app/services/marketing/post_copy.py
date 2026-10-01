@@ -202,24 +202,51 @@ def _plain_typo(span: str) -> bool:
     return _is_abbreviation_run(span.lower())
 
 
+def _domain_spans(token: str) -> List[Tuple[int, int]]:
+    """The (start, end) spans of `token` X autolinks as a bare domain ("investor.gov"), without
+    overlaps. A glued abbreviation whose tail is known not to be a TLD ("U.S.dollar", "e.g.the")
+    is text, not a link (`_plain_typo`)."""
+    spans = sorted(m.span() for rx in DOMAIN_SHAPE_RES for m in rx.finditer(token)
+                   if not _plain_typo(m.group(0)))
+    out: List[Tuple[int, int]] = []
+    covered = [False] * len(token)
+    for start, end in spans:
+        if any(covered[start:end]):
+            continue  # the other pattern already counted this domain
+        covered[start:end] = [True] * (end - start)
+        out.append((start, end))
+    return out
+
+
 def _weigh_with_bare_domains(token: str) -> int:
     """X autolinks a bare domain ("investor.gov") too and counts it as 23 whatever its length.
     The validators reject a domain in a body (`link`) EXCEPT a glued abbreviation whose tail is
     known not to be a TLD (`compliance._is_abbreviation_run`: "U.S.dollar", "e.g.the"); those
     are counted as text (`_plain_typo`), every other domain-shaped span as a URL."""
-    spans = [m.span() for rx in DOMAIN_SHAPE_RES for m in rx.finditer(token)
-             if not _plain_typo(m.group(0))]
+    spans = _domain_spans(token)
     if not spans:
         return sum(_x_char_weight(c) for c in token)
     covered = [False] * len(token)
-    domains = 0
-    for start, end in sorted(spans):
-        if any(covered[start:end]):
-            continue  # the other pattern already counted this domain
+    for start, end in spans:
         covered[start:end] = [True] * (end - start)
-        domains += 1
     rest = sum(_x_char_weight(c) for c, inside in zip(token, covered) if not inside)
-    return rest + domains * _X_URL_WEIGHT
+    return rest + len(spans) * _X_URL_WEIGHT
+
+
+def x_link_tokens(text: str) -> List[str]:
+    """Every span X would turn into a link — a scheme URL token or a bare domain — in the order
+    they appear. The SAME definition `x_weighted_length` counts at 23, so the publisher's
+    publish-time URL guard (a post with a URL costs $0.20 instead of $0.015 on X) and the length
+    counter can never disagree about what a link is."""
+    out: List[str] = []
+    for token in _WS_SPLIT_RE.split(text or ""):
+        if not token or token.isspace():
+            continue
+        if token.startswith(("http://", "https://")):
+            out.append(token)
+            continue
+        out.extend(token[start:end] for start, end in _domain_spans(token))
+    return out
 
 
 def measured_length(field: str, text: str) -> int:

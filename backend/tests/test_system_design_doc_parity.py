@@ -470,7 +470,7 @@ def test_every_real_table_the_doc_mentions_is_curated() -> None:
 # that — every one of their file counts had drifted 20-70% before this pass.
 EXPECTED = {
     "middleware_registered": 5,   # CORS, GZip, _security_headers, cap_json_body, add_process_time  (§8.3, §10)
-    "integrations": 13,           # app/integrations/*.py excluding __init__     (§2)
+    "integrations": 15,           # app/integrations/*.py excluding __init__     (§2)
 }
 
 

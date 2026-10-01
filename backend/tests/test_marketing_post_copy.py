@@ -566,3 +566,102 @@ def test_every_budget_plus_its_suffix_fits_the_platform_and_never_hits_the_floor
 ])
 def test_x_weights_a_bare_domain_as_a_url(text, expected):
     assert pc.x_weighted_length(text) == expected
+
+
+# ── x_link_tokens: ONE definition of a link for the length counter and the publish guard ──────
+# (Phase 5: X charges $0.20 instead of $0.015 for a post with a URL, so the publisher refuses any
+# link token before the claim; the counter weighs each one at 23. If the two ever disagreed, a
+# caption could pass the length check while carrying a link the guard misses, or vice versa.)
+
+_LINK_TABLE = [
+    ("", []),
+    ("plain words", []),
+    ("U.S.dollar", []), ("e.g.the", []), ("vs.the", []), ("U.S.Economy", []), ("e.g.,the", []),
+    ("U.S. e.g. i.e. 3.14 v2.0", []),
+    ("AI-assisted. Caydex", []),
+    ("Learn.Money", ["Learn.Money"]),
+    ("Learn.Money.", ["Learn.Money"]),
+    ("investor.gov", ["investor.gov"]),
+    ("investor.gov.", ["investor.gov"]),
+    ("see investor.gov.", ["investor.gov"]),
+    ("caydex.com", ["caydex.com"]), ("CAYDEX.COM", ["CAYDEX.COM"]), ("www.caydex.com", ["www.caydex.com"]),
+    ("U.S.markets", ["U.S.markets"]), ("e.g.bank", ["e.g.bank"]),
+    ("https://caydexinvest.com/go/x", ["https://caydexinvest.com/go/x"]),
+    ("http://a.co", ["http://a.co"]),
+    ("https://", ["https://"]),
+    ("abc\nhttps://caydexinvest.com/go/x", ["https://caydexinvest.com/go/x"]),
+    ("https://caydexinvest.com/go/x\nabc", ["https://caydexinvest.com/go/x"]),
+    ("https://a.co tail", ["https://a.co"]),
+    # a scheme glued to text is still a link (the domain inside it)
+    ("readhttps://caydex.com", ["caydex.com"]),
+    ("see:https://caydex.com/x", ["caydex.com"]),
+    ("(https://caydex.com)", ["caydex.com"]),
+    ("two: a.co and https://b.co/x", ["a.co", "https://b.co/x"]),
+    ("U.S.dollar e.g.the investor.gov", ["investor.gov"]),
+    ("日本 investor.gov \U0001F4C8", ["investor.gov"]),
+    ("a.co b.co", ["a.co", "b.co"]),
+]
+
+
+def _weight(text: str) -> int:
+    return sum(pc._x_char_weight(c) for c in text)
+
+
+@pytest.mark.parametrize("text, links", _LINK_TABLE)
+def test_x_link_tokens_finds_exactly_the_links(text, links):
+    assert pc.x_link_tokens(text) == links
+
+
+@pytest.mark.parametrize("text", [t for t, _ in _LINK_TABLE] + list(BODIES.values()) + [None])
+def test_x_link_tokens_agrees_with_the_weighted_length(text):
+    """x_weighted_length == every character's weight, minus each link's characters, plus 23 a link —
+    exactly when the guard and the counter agree on WHERE every link is."""
+    links = pc.x_link_tokens(text)
+    rest = text or ""
+    pos = 0
+    for tok in links:   # each token is a substring, in order, never overlapping the previous one
+        i = rest.find(tok, pos)
+        assert i >= 0, (text, tok)
+        pos = i + len(tok)
+    expected = _weight(text or "") - sum(_weight(t) for t in links) + pc._X_URL_WEIGHT * len(links)
+    assert pc.x_weighted_length(text) == expected
+
+
+def test_x_link_tokens_agrees_with_the_counter_on_every_real_draft_and_composed_caption():
+    corpus = json.loads((BACKEND / "tests" / "data" / "marketing_real_drafts_2026_09_24.json").read_text())
+    texts = [row[2] for row in corpus["honest"] if isinstance(row, list) and len(row) > 2]
+    assert len(texts) > 1000   # anti-vacuity: the corpus is really read
+    for allow in (False, True):
+        for platform in COMPUTED:
+            texts.append(pc.compose(platform, BODIES, category="mastery", run_date=DATE,
+                                    allow_x_url=allow).caption)
+    for text in texts:
+        links = pc.x_link_tokens(text)
+        expected = _weight(text) - sum(_weight(t) for t in links) + pc._X_URL_WEIGHT * len(links)
+        assert pc.x_weighted_length(text) == expected, text
+
+
+def _real_bodies(field: str):
+    corpus = json.loads((BACKEND / "tests" / "data" / "marketing_real_drafts_2026_09_24.json").read_text())
+    bodies = [row[2] for row in corpus["honest"] if isinstance(row, list) and len(row) > 2 and row[1] == field]
+    assert len(bodies) >= 20, field   # anti-vacuity: the real X / Bluesky bodies are really there
+    return bodies
+
+
+@pytest.mark.parametrize("category", CATEGORIES)
+def test_the_composed_x_caption_carries_no_link(category):
+    """allow_x_url=False is the shipped setting: no CTA link, so nothing the publisher's URL guard
+    would refuse comes from the code-owned suffix, and no real body adds one."""
+    for body in _real_bodies("x"):
+        post = pc.compose("x", {**BODIES, "x": body}, category=category, run_date=DATE)
+        assert pc.x_link_tokens(post.caption) == [], post.caption
+        assert "caydexinvest.com" not in post.caption
+
+
+@pytest.mark.parametrize("category", CATEGORIES)
+def test_the_composed_bluesky_caption_has_exactly_one_go_link_and_no_hashtag(category):
+    for body in _real_bodies("bluesky"):
+        post = pc.compose("bluesky", {**BODIES, "bluesky": body}, category=category, run_date=DATE)
+        assert pc.x_link_tokens(post.caption) == [f"{pc.LINK_BASE_URL}/bluesky"], post.caption
+        assert post.caption.count("https://") == 1 and post.caption.count("/go/") == 1
+        assert not re.search(r"(?<!\S)#\w", post.caption), post.caption

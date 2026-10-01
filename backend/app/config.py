@@ -1020,8 +1020,10 @@ class Settings(BaseSettings):
     # (every worker call then answers 403). The two switches are independent on purpose —
     # the worker can rehearse (dry-run rows, no publishing) with the publisher still off.
     MARKETING_ENABLED: bool = False
-    # Dry run: the publisher logs what it WOULD send and touches no external API. The worker
-    # sends the same flag on its run row so a dry-run day is visible in marketing_runs.
+    # Dry run: the publisher makes no NEW post — it logs what it WOULD send. Two things still
+    # reach a platform: reconcile checks posts that were already claimed live (billed X timeline
+    # reads; it never resends under dry run), and a Retract the owner confirmed still deletes. The
+    # worker sends the same flag on its run row so a dry-run day is visible in marketing_runs.
     MARKETING_DRY_RUN: bool = True
     # New marketing_posts rows are born `pending_review` and need a reviewer's Approve (the
     # Telegram review bot → `run_service.review_post`); True makes media-less TEXT posts
@@ -1089,6 +1091,43 @@ class Settings(BaseSettings):
     # Public origin of THIS web service — where Telegram delivers the review webhook
     # (`<base>/marketing/telegram/webhook`, registered at startup). Must be https.
     MARKETING_PUBLIC_BASE_URL: str = "https://caydexinvest.com"
+
+    # ── Phase 5: the platform adapters (services/marketing/outlets.py, design doc §12.10) ──────
+    # Every credential below lives on the WEB service only — the worker never holds a social
+    # secret (rules/marketing.md §2). A platform publishes only when it is LISTED here AND its
+    # credentials are complete (`outlets.enabled_platforms()`); the same predicate decides whether
+    # the Telegram review message carries Approve/Reject buttons or is a read-only preview.
+    # Comma-separated platform names, e.g. "bluesky,x". Empty = no platform publishes (fail-closed).
+    MARKETING_PUBLISH_PLATFORMS: str = ""
+    # X (API v2, pay-per-use). OAuth 1.0a USER context of the brand account that owns the developer
+    # app (console-minted; no callback). ALL FOUR must be set, and MARKETING_X_MONTHLY_BUDGET_USD
+    # must be > 0, or X is OFF.
+    MARKETING_X_CONSUMER_KEY: Optional[str] = None
+    MARKETING_X_CONSUMER_SECRET: Optional[str] = None
+    MARKETING_X_ACCESS_TOKEN: Optional[str] = None
+    MARKETING_X_ACCESS_TOKEN_SECRET: Optional[str] = None
+    # Monthly X spend ceiling in USD, enforced by OUR ledger (every create attempt, read and delete
+    # is journaled in marketing_posts.metadata.charges). X's own console cap and prepaid balance
+    # have failed to hold for other developers (2026), so this is the real limit. 0 = X off.
+    MARKETING_X_MONTHLY_BUDGET_USD: float = 0.0
+    # Sends POST /2/tweets `made_with_ai: true` (rules/marketing.md §1: set the platform AI flags).
+    # X documents it for AI media; its effect on a text-only post is untested — the go-live post
+    # shows it. Set False if X refuses it.
+    MARKETING_X_MADE_WITH_AI: bool = True
+    # Bluesky (atproto). The handle (e.g. caydex.bsky.social) and an APP PASSWORD (Settings → App
+    # Passwords — never the account password). Both must be set or Bluesky is OFF.
+    MARKETING_BLUESKY_HANDLE: Optional[str] = None
+    MARKETING_BLUESKY_APP_PASSWORD: Optional[str] = None
+    # Where createSession goes. The account's own PDS is then read from the session's DID document.
+    MARKETING_BLUESKY_SERVICE: str = "https://bsky.social"
+    # A publish that definitely never reached the platform (connect error, 429, 401) goes back to
+    # `approved` with a back-off; after this many attempts it is `failed` (and the owner is told).
+    MARKETING_PUBLISH_MAX_ATTEMPTS: int = 3
+    # A `queued` row whose outcome is unknown (a timeout after sending, a crash between the claim
+    # and the call) is reconciled against the platform once it is this old. Well above
+    # 2 × the 120 s ledger statement bound plus the client timeouts, so a slow but live publish is
+    # never "reconciled" while its own write is still in flight.
+    MARKETING_PUBLISH_RECONCILE_AFTER_SECONDS: int = 600
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

@@ -85,7 +85,8 @@ _SWEEPABLE_RUN_STATUSES = ("in_progress", "planned")
 #: tests/test_marketing_run_service.py::test_one_sweep_closes_at_most_the_limit_and_the_oldest_first.
 _SWEEP_LIMIT = 20
 
-# Columns the publisher may write through `mark_post`. A whitelist, so an adapter result dict
+# Columns a post write may set (`transition_post` uses this minus `metadata`, which it only ever
+# MERGES; the legacy `mark_post` takes it whole). A whitelist, so an adapter result dict
 # can never smuggle a column (or a typo that PostgREST would 400 on) into the ledger.
 _POST_WRITABLE = frozenset({
     "external_id", "external_url", "attempts", "last_error", "cost_micros", "metrics",
@@ -295,6 +296,53 @@ def idempotency_key_for(run_date: date, platform: str, fmt: str) -> str:
     if fmt not in POST_FORMATS:
         raise ValueError(f"unknown format {fmt!r}")
     return f"{run_date.isoformat()}:{platform}:{fmt}"
+
+
+#: Post statuses that are not yet final — a run is never closed while one remains.
+_OPEN_POST_STATUSES = frozenset({"pending_review", "approved", "queued"})
+
+
+def post_run_date(post: Dict[str, Any]) -> Optional[date]:
+    """The run day a post belongs to, from its idempotency key (`<run_date>:<platform>:<format>`,
+    written by `create_posts`). None when the key is malformed — such a post is never fresh."""
+    key = str(post.get("idempotency_key") or "")
+    try:
+        return date.fromisoformat(key[:10])
+    except ValueError:
+        return None
+
+
+def is_fresh(post: Dict[str, Any], today: date) -> bool:
+    """May this post still go out? Only on its run day or the next (ET) — the owner's expiry rule
+    (2026-09-30), the same window a worker may claim (`claim_window_ok`)."""
+    run_day = post_run_date(post)
+    return run_day is not None and claim_window_ok(run_day, today)
+
+
+def month_start_utc(now: Optional[datetime] = None) -> datetime:
+    """00:00:00 UTC on the first day of `now`'s UTC month — the X spend cap's window."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def charges_since(post: Dict[str, Any], since: datetime) -> int:
+    """Sum of a post's `metadata.charges` entries dated at or after `since` (micro-dollars). An
+    entry whose time cannot be read is COUNTED — an over-count can only pause X early."""
+    meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    total = 0
+    for entry in meta.get("charges") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            micros = int(entry.get("micros") or 0)
+        except (TypeError, ValueError):
+            continue
+        at = _parse_ts(entry.get("at"))
+        if at is None or at >= since:
+            total += micros
+    return total
 
 
 def decide_claim(
@@ -1370,7 +1418,7 @@ class MarketingRunService:
         """A human's verdict on a `pending_review` post: `approve` → `approved` (approved_at /
         approved_by), `reject` → `rejected`. ONE conditional UPDATE on `status = pending_review`,
         so a double tap, a second reviewer or a race with anything else that moves the row can
-        never flip a decided post (the unconditional `mark_post` is the publisher's, not this).
+        never flip a decided post (the publisher's writes are the fenced `transition_post`).
 
         Returns (outcome, row): `approved` / `rejected` when this call decided it,
         `already_<status>` when the post was no longer pending, `not_found` when it does not exist.
@@ -1402,21 +1450,40 @@ class MarketingRunService:
                     updated.get("platform"), reviewed_by)
         return status, updated
 
-    async def claim_post(self, post_id: str) -> Optional[Dict[str, Any]]:
+    async def claim_post(
+        self, post_id: str, *, observed: Optional[Dict[str, Any]] = None,
+        publish: Optional[Dict[str, Any]] = None, charge: Optional[Tuple[str, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """approved → queued, atomically. None means another tick took it (or an admin
-        rejected it between the list and the claim)."""
-        now = _now_iso()
-        return _one(
-            await _exec(
-                self.sb.table(POSTS)
-                .update({"status": "queued", "claimed_at": now, "updated_at": now})
-                .eq("id", post_id)
-                .eq("status", "approved"),
-                op="claim_post", post_id=post_id,
+        rejected it between the list and the claim).
+
+        With `observed` (the publisher's path since Phase 5) the claim IS the write-ahead: ONE
+        conditional UPDATE, fenced on `status = approved` AND the observed `updated_at`, that also
+        bumps `attempts`, charges the attempt's cost (`charge`) and merges `publish` into
+        `metadata.publish` (state `sending`, the text hash, a Bluesky record key …). So a crash
+        after the claim leaves a row that SAYS a send may have started — reconcile treats it as
+        an unknown outcome — and two containers can never both claim it."""
+        if observed is None:
+            now = _now_iso()
+            return _one(
+                await _exec(
+                    self.sb.table(POSTS)
+                    .update({"status": "queued", "claimed_at": now, "updated_at": now})
+                    .eq("id", post_id)
+                    .eq("status", "approved"),
+                    op="claim_post", post_id=post_id,
+                )
             )
+        return await self.transition_post(
+            post_id, expect_status="approved", observed=observed, status="queued",
+            publish=publish, charge=charge, retries=0,
+            claimed_at=_now_iso(), attempts=int(observed.get("attempts") or 0) + 1,
         )
 
     async def mark_post(self, post_id: str, status: str, **fields: Any) -> Dict[str, Any]:
+        """LEGACY — no caller since Phase 5. Unconditional, and a `metadata=` field REPLACES the whole
+        document (the review record, the dry-run flag, the cost journal the X cap sums). Every
+        publisher write goes through `transition_post`; do not use this for a publish outcome."""
         if status not in POST_STATUSES:
             raise ValueError(f"unknown post status {status!r}")
         unknown = set(fields) - _POST_WRITABLE
@@ -1429,6 +1496,312 @@ class MarketingRunService:
         if updated is None:
             raise MarketingRunError(f"mark_post: post {post_id} not found")
         return updated
+
+    # publisher ledger (Phase 5, design doc §12.10) ---------------------------------------------
+    # Every publisher write is a FENCED, MERGING transition: conditional on the status (and the
+    # updated_at) it observed, and it merges into `metadata` instead of replacing it — the
+    # unconditional, metadata-replacing `mark_post` dropped `review` / `review_notified_at` /
+    # `dry_run` and could overwrite a concurrent transition.
+
+    @staticmethod
+    def _merged_post_patch(
+        row: Dict[str, Any], *, status: Optional[str], meta: Optional[Dict[str, Any]],
+        publish: Optional[Dict[str, Any]], unset: Tuple[str, ...], charge: Optional[Tuple[Any, ...]],
+        fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        now = _now_iso()
+        merged = dict(row["metadata"]) if isinstance(row.get("metadata"), dict) else {}
+        for key in unset:
+            merged.pop(key, None)
+        if meta:
+            merged.update(meta)
+        if publish:
+            current = merged.get("publish")
+            pub = dict(current) if isinstance(current, dict) else {}
+            pub.update(publish)
+            merged["publish"] = pub
+        patch: Dict[str, Any] = {"metadata": merged, "updated_at": now, **fields}
+        if charge is not None:
+            # (op, micros) or (op, micros, at): a refund or correction is dated at the charge it
+            # REVERSES, so a reversal written just after 00:00 UTC on the 1st lands in the same month
+            # as its charge — otherwise the new month would start below zero.
+            op, micros = charge[0], charge[1]
+            at = charge[2] if len(charge) > 2 and charge[2] else now
+            journal = merged.get("charges")
+            journal = list(journal) if isinstance(journal, list) else []
+            journal.append({"at": at, "op": str(op), "micros": int(micros)})
+            merged["charges"] = journal
+            patch["cost_micros"] = int(row.get("cost_micros") or 0) + int(micros)
+        if status is not None:
+            patch["status"] = status
+        return patch
+
+    async def transition_post(
+        self, post_id: str, *, expect_status: Any, observed: Optional[Dict[str, Any]] = None,
+        status: Optional[str] = None, meta: Optional[Dict[str, Any]] = None,
+        publish: Optional[Dict[str, Any]] = None, unset: Tuple[str, ...] = (),
+        charge: Optional[Tuple[Any, ...]] = None, retries: int = 1, **fields: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Move a post (or just annotate it) ONLY while it is still in `expect_status` (a status or
+        a tuple of them) and unchanged since it was read: one UPDATE fenced on `status` AND the
+        observed `updated_at`.
+
+        * `meta` merges top-level keys into `metadata`; `publish` merges into `metadata.publish`;
+          `unset` removes top-level keys first. Everything else in `metadata` is kept.
+        * `charge=(op, micros)` appends `{at, op, micros}` to `metadata.charges` (the cost journal
+          the X spend cap sums) and adds `micros` to `cost_micros` in the same write;
+          `charge=(op, micros, at)` dates a reversal at the charge it reverses.
+        * `fields` are columns from `_POST_WRITABLE`.
+
+        Returns the updated row, or None when the post is gone or no longer in `expect_status`.
+        A lost fence (someone wrote in between) re-reads and retries up to `retries` times —
+        each retry re-derives the patch from the FRESH row. Ledger errors raise
+        `MarketingRunError`."""
+        # `metadata` is written ONLY through the merge (`meta` / `publish` / `charge`): a raw
+        # `metadata=` field would replace the whole document — the review record, the dry-run flag
+        # and the cost journal the X cap sums.
+        unknown = set(fields) - (_POST_WRITABLE - {"metadata"})
+        if unknown:
+            raise ValueError(f"transition_post: not writable: {sorted(unknown)}")
+        if status is not None and status not in POST_STATUSES:
+            raise ValueError(f"unknown post status {status!r}")
+        if charge is not None and "cost_micros" in fields:
+            raise ValueError("transition_post: pass a charge OR cost_micros, not both")
+        expected = (expect_status,) if isinstance(expect_status, str) else tuple(expect_status)
+        row = observed
+        for attempt in range(max(retries, 0) + 1):
+            if row is None or attempt > 0:
+                row = await self.get_post(post_id)
+            if row is None or row.get("status") not in expected:
+                return None
+            patch = self._merged_post_patch(row, status=status, meta=meta, publish=publish,
+                                            unset=tuple(unset), charge=charge, fields=fields)
+            query = self.sb.table(POSTS).update(patch).eq("id", post_id).eq("status", row["status"])
+            if row.get("updated_at"):
+                query = query.eq("updated_at", _ts_filter(row["updated_at"]))
+            else:
+                query = query.is_("updated_at", "null")
+            updated = _one(await _exec(query, op="transition_post", post_id=post_id,
+                                       to=status or row.get("status")))
+            if updated is not None:
+                return updated
+        return None
+
+    async def spend_since(self, platform: str, since: datetime) -> int:
+        """Micro-dollars charged to `platform` posts since `since` — the X spend cap's input.
+        Sums the timestamped `metadata.charges` journal (not `cost_micros`, which also holds
+        last month's charges). Any charge bumps the row's `updated_at`, so reading only rows
+        touched since `since` loses nothing. A journal entry with an unreadable time counts
+        (fail-closed: an over-count can only pause X early)."""
+        res = await _exec(
+            self.sb.table(POSTS).select("id,cost_micros,metadata,updated_at")
+            .eq("platform", platform).gte("updated_at", _ts_filter(since)).limit(1000),
+            op="spend_since", platform=platform,
+        )
+        return sum(charges_since(r, since) for r in (getattr(res, "data", None) or []) if isinstance(r, dict))
+
+    async def any_post_with_meta(self, platform: str, key: str, value: str) -> bool:
+        """Does any `platform` post carry `metadata.<key> = value`? (The once-a-month X cap alert
+        marker survives restarts this way.)"""
+        res = await _exec(
+            self.sb.table(POSTS).select("id").eq("platform", platform)
+            .eq(f"metadata->>{key}", value).limit(1),
+            op="any_post_with_meta", platform=platform, key=key,
+        )
+        return bool(getattr(res, "data", None))
+
+    async def expire_stale_posts(self, today: date, *, limit: int = 100) -> int:
+        """Close `approved` / `pending_review` posts whose run day is neither today nor yesterday
+        (ET) as `skipped` (`metadata.skip_reason = expired`) — the owner's rule: a post goes out
+        on its day or the next, never as part of a backlog. Oldest first and bounded, so a large
+        backlog is drained over a few ticks. `queued` rows are never expired (their outcome may
+        be live on a platform — reconcile owns them). Returns how many were closed."""
+        res = await _exec(
+            self.sb.table(POSTS).select("*").in_("status", ["approved", "pending_review"])
+            .order("created_at").limit(limit),
+            op="expire_stale_posts.list",
+        )
+        closed = 0
+        for row in getattr(res, "data", None) or []:
+            if not isinstance(row, dict) or is_fresh(row, today):
+                continue
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            patch_meta: Dict[str, Any] = {"skip_reason": "expired", "expired_at": _now_iso()}
+            unset: Tuple[str, ...] = ()
+            if row.get("status") == "approved" and meta.get("dry_run") is False:
+                # A post the owner APPROVED that never went out: say so in Telegram (the publish feed
+                # sends `alert_*`), never close it silently.
+                pub = meta.get("publish") if isinstance(meta.get("publish"), dict) else {}
+                why = pub.get("category") or row.get("last_error") or "publishing was off, dry-run, capped or not wired"
+                patch_meta.update({
+                    "alert_kind": "expired",
+                    "alert_text": (f"⏰ {str(row.get('platform')).upper()} post expired UNPUBLISHED (run "
+                                   f"{str(row.get('idempotency_key') or '')[:10]}) — it was approved but never "
+                                   f"went out ({str(why)[:200]})."),
+                    "alert_at": _now_iso(),
+                })
+                unset = ("alert_notified_at",)
+            try:
+                updated = await self.transition_post(
+                    str(row["id"]), expect_status=("approved", "pending_review"), observed=row,
+                    status="skipped", meta=patch_meta, unset=unset, retries=0,
+                )
+            except MarketingRunError as e:
+                # One row's ledger error must not stop the rows behind it (the next tick retries).
+                logger.error("marketing post expiry NOT recorded post_id=%s (%s)", row.get("id"), e)
+                continue
+            if updated is not None:
+                closed += 1
+                logger.info("marketing post EXPIRED post_id=%s platform=%s key=%s was=%s",
+                            row["id"], row.get("platform"), row.get("idempotency_key"), row.get("status"))
+        return closed
+
+    async def demote_auto_approved(self, *, limit: int = 50) -> int:
+        """Send every `approved_by = "auto"` post back to `pending_review` (approval cleared), so the
+        review sweep shows it with buttons. While the semantic judge misses its gate a human approves
+        every post; with MARKETING_AUTO_PUBLISH flipped by mistake, auto-approved text posts would
+        otherwise never reach Telegram, be refused by the publisher and expire unseen."""
+        res = await _exec(
+            self.sb.table(POSTS).select("*").eq("status", "approved").eq("approved_by", "auto")
+            .order("created_at").limit(limit),
+            op="demote_auto_approved.list",
+        )
+        moved = 0
+        for row in getattr(res, "data", None) or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                updated = await self.transition_post(
+                    str(row["id"]), expect_status="approved", observed=row, status="pending_review",
+                    meta={"auto_demoted_at": _now_iso()}, retries=0, approved_by=None, approved_at=None,
+                )
+            except MarketingRunError as e:
+                logger.error("marketing post auto-demotion NOT recorded post_id=%s (%s)", row.get("id"), e)
+                continue
+            if updated is not None:
+                moved += 1
+                logger.warning("marketing post AUTO-APPROVED → back to review post_id=%s platform=%s "
+                               "(human approval is required while the judge misses its gate)",
+                               row.get("id"), row.get("platform"))
+        return moved
+
+    async def request_retract(self, post_id: str, *, by: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Record the owner's confirmed Retract on a `published` post — nothing else: the publisher
+        loop performs the delete (rules/marketing.md §2: only the publisher calls a platform).
+        Returns `requested`, `already_requested`, `already_<status>` or `not_found`."""
+        for _ in range(2):
+            row = await self.get_post(post_id)
+            if row is None:
+                return "not_found", None
+            if row.get("status") != "published":
+                return f"already_{row.get('status')}", row
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if meta.get("retract_requested_at") and not meta.get("retract_closed_at"):
+                return "already_requested", row
+            # A request that ENDED without a delete (gave up / by hand — `retract_closed_at`) may be
+            # made again: the owner retrying after fixing what made the delete fail.
+            now = _now_iso()
+            updated = await self.transition_post(
+                post_id, expect_status="published", observed=row, retries=0,
+                meta={"retract_requested_at": now,
+                      "retract": {"requested_at": now, "by": by, "attempts": 0, "state": "requested"}},
+                unset=("retract_closed_at",),
+            )
+            if updated is not None:
+                logger.info("marketing post RETRACT REQUESTED post_id=%s platform=%s by=%s",
+                            post_id, row.get("platform"), by)
+                return "requested", updated
+        row = await self.get_post(post_id)
+        return ("not_found", None) if row is None else ("busy", row)
+
+    async def resolve_unknown(self, post_id: str, decision: str, *, by: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """The owner's answer to an ESCALATED unknown outcome (a post whose publish could not be
+        confirmed or refuted automatically). `live` → `published` (its id may be unknown);
+        `not_posted` → `failed`. There is deliberately no "retry": it is the one answer that could
+        double-post. Returns the new status, `not_escalated`, `already_<status>` or `not_found`."""
+        if decision not in ("live", "not_posted"):
+            raise ValueError(f"unknown resolution {decision!r}")
+        row = await self.get_post(post_id)
+        if row is None:
+            return "not_found", None
+        if row.get("status") != "queued":
+            return f"already_{row.get('status')}", row
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        publish = meta.get("publish") if isinstance(meta.get("publish"), dict) else {}
+        if publish.get("state") != "escalated":
+            return "not_escalated", row
+        now = _now_iso()
+        outcome = {"decision": decision, "by": by, "at": now}
+        if decision == "live":
+            updated = await self.transition_post(
+                post_id, expect_status="queued", observed=row, status="published", retries=1,
+                meta={"owner_outcome": outcome}, publish={"state": "published"},
+                published_at=now, last_error="owner confirmed it is live; the platform id is unknown",
+            )
+        else:
+            updated = await self.transition_post(
+                post_id, expect_status="queued", observed=row, status="failed", retries=1,
+                meta={"owner_outcome": outcome}, publish={"state": "owner_not_posted"},
+                last_error="owner confirmed it was not posted",
+            )
+        if updated is None:
+            again = await self.get_post(post_id)
+            return (f"already_{(again or {}).get('status')}" if again else "not_found"), again
+        logger.info("marketing post RESOLVED BY OWNER post_id=%s decision=%s by=%s", post_id, decision, by)
+        return str(updated.get("status")), updated
+
+    async def list_posts_filtered(
+        self, *, status: str, order: str = "updated_at", limit: int = 20,
+        not_null: Tuple[str, ...] = (), null: Tuple[str, ...] = (),
+        platforms: Optional[List[str]] = None, not_platforms: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Posts in `status`, with JSON-path / column NULL filters applied IN the query (before
+        the LIMIT — the starvation lesson of `list_posts`), oldest `order` first."""
+        query = self.sb.table(POSTS).select("*").eq("status", status)
+        for col in not_null:
+            query = query.not_.is_(col, "null")
+        for col in null:
+            query = query.is_(col, "null")
+        if platforms is not None:
+            if not platforms:
+                return []
+            query = query.in_("platform", list(platforms))
+        if not_platforms:
+            query = query.not_.in_("platform", list(not_platforms))
+        res = await _exec(query.order(order).limit(limit), op="list_posts_filtered", status=status)
+        return [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+
+    async def close_finished_runs(self, today: date, *, limit: int = 50) -> int:
+        """Close `media_ready` runs dated BEFORE yesterday (ET) whose posts are all terminal:
+        `published` if any post reached a platform (published or later retracted), otherwise
+        `skipped`. Only outside the claim window, so it can never meet `decide_claim`; never
+        `failed`; never while a post is still pending, approved or queued. One compare-and-swap
+        per run on its status and updated_at."""
+        res = await _exec(
+            self.sb.table(RUNS).select("*").eq("status", "media_ready")
+            .lt("run_date", (today - timedelta(days=1)).isoformat()).order("run_date").limit(limit),
+            op="close_finished_runs.list",
+        )
+        closed = 0
+        for run in getattr(res, "data", None) or []:
+            if not isinstance(run, dict):
+                continue
+            posts = await _exec(self.sb.table(POSTS).select("status").eq("run_id", run["id"]),
+                                op="close_finished_runs.posts", run_id=run["id"])
+            statuses = [str(p.get("status")) for p in (getattr(posts, "data", None) or [])]
+            if any(s in _OPEN_POST_STATUSES for s in statuses):
+                continue
+            final = "published" if any(s in ("published", "retracted") for s in statuses) else "skipped"
+            now = _now_iso()
+            query = self.sb.table(RUNS).update({"status": final, "finished_at": now, "updated_at": now}) \
+                .eq("id", run["id"]).eq("status", "media_ready")
+            if run.get("updated_at"):
+                query = query.eq("updated_at", _ts_filter(run["updated_at"]))
+            if _one(await _exec(query, op="close_finished_runs.update", run_id=run["id"])) is not None:
+                closed += 1
+                logger.info("marketing run CLOSED run_id=%s run_date=%s status=%s posts=%s",
+                            run["id"], run.get("run_date"), final, statuses)
+        return closed
 
 
     # scripts (migration 173) --------------------------------------------------

@@ -455,3 +455,42 @@ def test_the_sentry_init_scrubs_transactions():
     assert len(calls) == 1
     kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
     assert kw.get("before_send_transaction") == "scrub_sentry_transaction"
+
+
+# ── the marketing publisher's platform credentials (Phase 5) ───────────────────
+
+
+def test_x_oauth1_header_parameters_are_redacted_but_the_header_stays_legible():
+    header = ('OAuth oauth_consumer_key="ck_9f8e7d6c5b4a", oauth_nonce="b1946ac92492d2347c", '
+              'oauth_signature="hCtSmYh%2BiHYCEqBWrE7C7hYmtUk%3D", oauth_signature_method="HMAC-SHA1", '
+              'oauth_timestamp="1318622958", oauth_token="1234567890-AbCdEfGhIjKl", oauth_version="1.0"')
+    out = redact_secrets(f"x_api create_post failed Authorization={header}")
+    for secret in ("ck_9f8e7d6c5b4a", "b1946ac92492d2347c", "hCtSmYh", "1234567890-AbCdEfGhIjKl"):
+        assert secret not in out
+    # Non-secret parameters survive, so a signing bug is still diagnosable.
+    assert 'oauth_signature_method="HMAC-SHA1"' in out and 'oauth_timestamp="1318622958"' in out
+    # The form/query spelling too.
+    assert redact_secrets("oauth_token=abc123&oauth_verifier=zzz") == "oauth_token=***&oauth_verifier=***"
+
+
+def test_an_upload_post_apikey_header_is_redacted():
+    out = redact_secrets("headers={'Authorization': 'Apikey up_live_8f7e6d5c4b3a2910'}")
+    assert "up_live_8f7e6d5c4b3a2910" not in out and "Apikey ***" in out
+
+
+def test_a_bluesky_app_password_is_redacted_but_uuids_dates_and_keys_are_not():
+    assert redact_secrets("createSession password abcd-ef12-gh34-ij56 refused") == \
+        "createSession password *** refused"
+    keep = (f"post_id={_UUID} run 2026-09-29 key=2026-09-29:bluesky:text "
+            "rkey=3lbxy2ab4cd2e at 2026-10-01T03:17:28+00:00 card 1234-5678")
+    assert redact_secrets(keep) == keep
+
+
+def test_bluesky_session_fields_are_credential_keys_in_frames():
+    event = {"exception": {"values": [{"stacktrace": {"frames": [{"vars": {
+        "session": {"accessJwt": "opaque-access", "refreshJwt": "opaque-refresh", "did": "did:plc:abc"},
+    }}]}}]}}
+    out = scrub_sentry_event(event)
+    session = out["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]["session"]
+    assert session["accessJwt"] == "[redacted]" and session["refreshJwt"] == "[redacted]"
+    assert session["did"] == "did:plc:abc"

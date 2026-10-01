@@ -43,6 +43,12 @@ Bot API facts this module relies on — VERIFIED against https://core.telegram.o
     Internet"; caption "0-1024 characters after entities parsing"; supports_streaming. Sending
     Files: by URL "5 MB max size for photos and 20 MB max for other types of content".
   * editMessageText(chat_id, message_id, text 1-4096, reply_markup: InlineKeyboardMarkup).
+  * (VERIFIED 2026-09-30) sendMessage takes `reply_parameters` (a ReplyParameters object:
+    `message_id` — "Identifier of the message that will be replied to in the current chat";
+    `allow_sending_without_reply` — "Pass True if the message should be sent even if the specified
+    message to be replied to is not found"); there is no `reply_to_message_id` parameter any more.
+    editMessageReplyMarkup(chat_id, message_id, reply_markup): "edit only the reply markup of
+    messages. Returns the edited Message".
   * answerCallbackQuery(callback_query_id, text "0-200 characters"); clients show a progress
     bar until it is called, so every callback is answered, even a refused one.
   * InlineKeyboardButton.callback_data: "1-64 bytes".
@@ -279,14 +285,20 @@ async def send_message(
     *,
     reply_markup: Optional[Dict[str, Any]] = None,
     disable_web_page_preview: bool = True,
+    reply_to_message_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """sendMessage, PLAIN text (never `parse_mode`). `disable_web_page_preview` maps to the
-    current `link_preview_options.is_disabled` (the old field is no longer documented)."""
+    current `link_preview_options.is_disabled` (the old field is no longer documented).
+    `reply_to_message_id` threads the message under an earlier one (`reply_parameters`), and is
+    sent anyway if that message is gone (`allow_sending_without_reply`)."""
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
     if disable_web_page_preview:
         payload["link_preview_options"] = {"is_disabled": True}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+    if reply_to_message_id is not None:
+        payload["reply_parameters"] = {"message_id": reply_to_message_id,
+                                       "allow_sending_without_reply": True}
     return await _call("sendMessage", payload)
 
 
@@ -321,6 +333,16 @@ async def edit_message_text(
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     return await _call("editMessageText", payload)
+
+
+async def edit_message_reply_markup(
+    chat_id: int,
+    message_id: int,
+    reply_markup: Dict[str, Any],
+) -> Dict[str, Any]:
+    """editMessageReplyMarkup — swap only the inline keyboard (Retract → Confirm / Cancel)."""
+    payload: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
+    return await _call("editMessageReplyMarkup", payload)
 
 
 async def answer_callback_query(callback_query_id: str, text: Optional[str] = None) -> Dict[str, Any]:

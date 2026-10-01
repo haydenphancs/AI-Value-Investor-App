@@ -311,6 +311,12 @@ class ErrorCode(str, Enum):
     # a Telegram failure classified anywhere is never mislabelled FMP_RATE_LIMITED ("429" in
     # the message) or FMP_UNAVAILABLE ("timeout").
     MARKETING_REVIEW_BOT_UNAVAILABLE = "MARKETING_REVIEW_BOT_UNAVAILABLE"
+    # A social platform the marketing PUBLISHER talks to (X, Bluesky, Upload-Post — design doc
+    # §12.10) failed or refused. WEB-SIDE ONLY, like the review bot's code: raised inside the
+    # publisher loop, which records the outcome on the post row and never returns it to a client,
+    # so it has no AppError branch on purpose. It exists so a platform failure classified anywhere
+    # is never mislabelled FMP_RATE_LIMITED ("429") or FMP_UNAVAILABLE ("timeout").
+    MARKETING_PUBLISHER_UNAVAILABLE = "MARKETING_PUBLISHER_UNAVAILABLE"
 
 
 # Default user-facing copy per code. Endpoints can override per-call.
@@ -335,6 +341,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ),
     ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: (
         "The Telegram review bot could not reach Telegram; the review sweep retries on its next cycle."
+    ),
+    ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE: (
+        "A social platform could not be reached or refused the post; the publisher records the outcome on the post."
     ),
     ErrorCode.EMAIL_NOT_CONFIRMED: (
         "Please confirm your email address first. Check your inbox for the "
@@ -704,6 +713,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.MARKETING_REQUEST_INVALID: 422,
     ErrorCode.MARKETING_JUDGE_NOT_ENFORCED: 409,
     ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: 503,
+    ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE: 503,
 }
 
 
@@ -851,6 +861,10 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
         return ErrorCode.MARKETING_NOT_FOUND, _DEFAULT_STATUS[ErrorCode.MARKETING_NOT_FOUND]
     if "marketingrunerror" in cls:
         return ErrorCode.MARKETING_LEDGER_ERROR, _DEFAULT_STATUS[ErrorCode.MARKETING_LEDGER_ERROR]
+    if "marketingpublishrefused" in cls:
+        # outlet_base.MarketingPublishRefused: a post the publisher's own guard refused before any
+        # platform call (a URL on X, two cashtags, over the length) — the same post can never pass.
+        return ErrorCode.MARKETING_REQUEST_INVALID, _DEFAULT_STATUS[ErrorCode.MARKETING_REQUEST_INVALID]
     if "marketingjudge" in cls:
         # judge.MarketingJudgeUnavailable: the compliance judge answered with no usable verdict
         # (blocked / cut off / not JSON). A writer failure — the script is simply not ready; its
@@ -868,6 +882,19 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
         return (
             ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE,
             _DEFAULT_STATUS[ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE],
+        )
+
+    # ── Marketing publisher platforms (app/integrations/x_api.py, bluesky.py, upload_post.py) ──
+    # By NAME for the same reason as Telegram: a 429 or a timeout here is the social platform, not
+    # FMP. A refusal (a definite 4xx, a bad credential, a missing setting, exhausted X credits) is
+    # permanent for that request → 502; anything transient or of unknown outcome → 503.
+    if cls.startswith(("xapi", "bluesky", "uploadpost")):
+        if any(word in cls for word in ("refused", "auth", "notconfigured", "forbidden", "credits",
+                                        "duplicate", "invalidswap", "expiredtoken")):
+            return ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE, 502
+        return (
+            ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE,
+            _DEFAULT_STATUS[ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE],
         )
 
     # ── Watchlist datastore unreadable (tracking_service) ─────────────

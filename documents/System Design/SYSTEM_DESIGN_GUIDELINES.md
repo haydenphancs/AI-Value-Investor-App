@@ -167,9 +167,10 @@ rather than an unfinished feature.
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **13** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **15** modules): `fmp`, `gemini`, `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
-`openai_compat`, `telegram` (the marketing review bot, §12.9).
+`openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api` and `bluesky` (the marketing
+publisher's platforms, §12.10).
 Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_stock_news` /
 `get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top.
 `openai_compat` is the switchable second provider for the NEWS features only (per-article sentiment
@@ -1125,7 +1126,7 @@ whether any of it runs:
 | news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
 | Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
-| marketing publisher (+ the Telegram review sweep, §12.9) / link-hit flush | 10 min / 60 s | publishing: `MARKETING_ENABLED` (**off**); the review sweep: the `MARKETING_TELEGRAM_*` settings (unset = off) / — |
+| marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep and feed: the `MARKETING_TELEGRAM_*` settings (unset = off) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
@@ -2059,7 +2060,7 @@ What follows is the set with no other home.
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
-| The marketing engine renders and records posts but does not yet publish | Phases 1-4 are built: the ledger and the worker/publisher split (§12.2), class-A content and its validators and judge (§12.5), the smart link and landing page (§12.6), the narration (§12.7), the render and the day's posts (§12.8), and the Telegram review bot (§12.9). `PUBLISHERS` in `app/services/marketing/publisher_service.py` is still an empty registry, so an approved post is never sent (Phase 5). The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off and a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review` | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run. Migrations 170, 173 and 176 are applied. The Railway worker service has not been created yet, so no run has ever executed in production — the first cron tick is also the first Linux measurement of memory and render time. |
+| The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have no adapter yet (Upload-Post, Stage 2), so their posts reach Telegram as read-only previews and expire. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s, Kokoro peak 1.65 GB of a 3.8 GB limit). |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -2199,7 +2200,8 @@ and class-A content — selection, writer, validators, server-authored captions,
 and the landing page (Phase 2, 2026-09-23; §12.5-12.6) — then, on 2026-09-26, the semantic
 compliance judge (§12.5), the caller-claim fence and asset read-back (§12.2) and the narration
 with word timings (Phase 3, §12.7); and on 2026-09-29 the render and the day's posts (Phase 4,
-§12.8) and the Telegram review bot (§12.9). Nothing is published yet: no platform adapter exists.
+§12.8) and the Telegram review bot (§12.9); and on 2026-09-30 the first publishing stage — X and
+Bluesky text posts, with reconciliation, retraction and a Telegram feed (§12.10).
 
 ### 12.1 The content is gated by licence and regulation, not by tooling
 
@@ -2352,10 +2354,14 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     judge flagged — so a day run under `shadow`/`off` is voiced and rendered but never becomes a
     post; the worker closes it `skipped` (`judge_not_enforced`). That guard, not a second switch,
     is what makes turning auto-publish on later safe.
-  - a post leaves `pending_review` only through `review_post`: ONE conditional UPDATE on
-    `status = pending_review` that records who decided (`approved_by`, `metadata.review`), so a
-    double tap or two reviewers can never flip a decided post. Its only caller is the Telegram
-    review bot (§12.9); `mark_post` stays the publisher's.
+  - a post leaves `pending_review` only through `review_post` (a human's decision): ONE
+    conditional UPDATE on `status = pending_review` that records who decided (`approved_by`,
+    `metadata.review`), so a double tap or two reviewers can never flip a decided post — or
+    through the publisher's fenced expiry (`expire_stale_posts`, §12.10). `review_post`'s only
+    caller is the Telegram review bot (§12.9). Every publisher write is `transition_post` (fenced,
+    merging); the older unconditional `mark_post`, which replaces `metadata` wholesale, has no
+    caller and must not be used for a publisher outcome — it would drop the cost journal the X cap
+    sums.
   - the day's script is generated only for a HELD run — `in_progress`, dated today or
     yesterday ET, claim touched within `MARKETING_RUN_STALE_SECONDS`; otherwise the kick
     answers 409 `MARKETING_RUN_NOT_HELD` and spends nothing. The worker treats that code as
@@ -2388,12 +2394,17 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   compare-and-swap: a run killed on its last in-window or resume tick is never claimed again,
   so nothing else would ever close it.
 - **Publishing is claim-before-send**, the `PushDispatchService.claim_send` discipline (§11.1):
-  dry-run is decided BEFORE the claim (a rehearsal touches no row), `approved → queued` is one
-  conditional UPDATE, `idempotency_key` (`<run_date>:<platform>:<format>`) is the key the
-  Phase-5 adapters present to the outlet, and a ledger failure AFTER the outlet accepted the
-  post leaves the row `queued` for reconciliation — never `failed`, which a retry would
-  double-post. A run's own `dry_run` flag rides on every post it records, so a rehearsal can
-  never be auto-approved by a different service's switch.
+  dry-run is decided BEFORE the claim (a rehearsal touches no row), and `approved → queued` is
+  ONE conditional UPDATE fenced on the status and the observed `updated_at` that is also the
+  write-ahead (the attempt, its cost, `metadata.publish.state = sending`). Idempotency is per
+  platform (§12.10): Bluesky derives its record key from `idempotency_key`
+  (`<run_date>:<platform>:<format>`) and writes only if nothing is there; X takes no key at all,
+  so an X post whose outcome is unknown is reconciled against our own timeline and never resent.
+  An outcome that is not certain — a timeout after sending, a 5xx, a ledger failure AFTER the
+  outlet accepted the post, a crash after the claim — leaves the row `queued` for
+  reconciliation, never `failed`. A run's own `dry_run` flag rides on every post it records, so a
+  rehearsal can never be auto-approved by a different service's switch, and the publisher
+  refuses an auto-approved row while the judge misses its gate.
 - **Every switch defaults closed**: `MARKETING_ENABLED=False`, `MARKETING_DRY_RUN=True`,
   `MARKETING_AUTO_PUBLISH=False`, `MARKETING_WORKER_TOKEN` unset → 403.
 
@@ -2853,8 +2864,70 @@ passkey domain), and a chat app renders the text and plays the video without any
 - **Setup** is three settings on the web service (`MARKETING_TELEGRAM_BOT_TOKEN`,
   `MARKETING_TELEGRAM_REVIEW_CHAT_ID`, `MARKETING_TELEGRAM_WEBHOOK_SECRET`); the webhook registers
   itself at startup. A Telegram failure is `MARKETING_REVIEW_BOT_UNAVAILABLE` (worker- and
-  iOS-invisible, like the other `MARKETING_*` codes) and never changes a decision. When
-  auto-publish comes, the same channel becomes a "posted: link" feed.
+  iOS-invisible, like the other `MARKETING_*` codes) and never changes a decision. Since Phase 5
+  the same chat is also the publish feed (§12.10): a post whose platform cannot publish yet
+  arrives as a read-only preview (no buttons), and every publish, retract and alert follows.
+
+### 12.10 Publishing (Phase 5, 2026-09-30): X and Bluesky, reconciliation, retract
+
+The publisher loop (`app/services/marketing/publisher_service.py`) is the ONLY code that calls a
+platform. Each platform is a thin client (`app/integrations/x_api.py`, `app/integrations/bluesky.py`)
+and an adapter (`app/services/marketing/outlet_x.py`, `app/services/marketing/outlet_bluesky.py`)
+registered in `app/services/marketing/outlets.py`. A platform publishes only when it is listed in
+`MARKETING_PUBLISH_PLATFORMS` AND its credentials are complete — one predicate that also decides
+whether its posts get Approve buttons in Telegram or arrive as a read-only preview.
+
+- **One tick:** expire (posts outside their run day or the next, ET, close `skipped`; finished runs
+  dated before yesterday close `published`/`skipped`) → retract → (with `MARKETING_ENABLED`)
+  reconcile → publish → the review sweep → the publish feed (`app/services/marketing/publish_feed.py`).
+  Each step is isolated, and publishing runs before the Telegram I/O. An Approve or a confirmed
+  Retract wakes the loop (`app/services/marketing/publisher_wake.py`, in-process: one uvicorn worker).
+- **The state machine needs no migration** (`retracted` was in migration 170's CHECK): approved →
+  queued (the write-ahead claim) → published | back to approved (provably NOT sent: a connect error,
+  a 429, a bad credential; with a back-off, `failed` after `MARKETING_PUBLISH_MAX_ATTEMPTS`) |
+  failed (a definite refusal) | stays queued (AMBIGUOUS — anything that may have reached the
+  platform). Every later write is `run_service.transition_post`: fenced on the status and
+  `updated_at`, merging into `metadata` (the older `mark_post` replaced it), and journaling every
+  cost into `metadata.charges` with its time.
+- **Reconcile** looks at a queued row once it is `MARKETING_PUBLISH_RECONCILE_AFTER_SECONDS` old
+  (a crash between the claim and the call counts as ambiguous). Bluesky is exactly-once: the
+  record key is a TID derived from the idempotency key, the record is stored in the write-ahead and
+  written with `putRecord` and `swapRecord: null`, so `getRecord` settles any doubt and an absent
+  record is resent byte-identical. X has no idempotency key and its "duplicate content" 403 proves
+  nothing either way, so an unknown X outcome is checked by reading our own timeline (owned reads)
+  on a schedule and then ESCALATED to the owner ("It's live" / "Not posted"); there is no automatic
+  resend of an X post and no retry button.
+- **X spending** is capped by our own ledger (`MARKETING_X_MONTHLY_BUDGET_USD`, 0 = X off): each
+  create attempt is charged at the claim (refused 403s too — X bills them), reads and deletes
+  before the call, and the month's journaled charges must stay within the budget before any claim.
+  X's console cap and prepaid balance have failed to hold for other developers, so ours is the limit.
+  A post with any URL — including a bare domain — is refused before the claim unless
+  `MARKETING_X_ALLOW_URLS` (it would cost $0.20 instead of $0.015). New pay-per-use apps often get a
+  generic 403 on every post (X anti-spam); it is never retried. The account needs X's "Automated"
+  label (X staff, 2026-09-15, for exactly this human-approved design).
+- **Retract** is two taps in Telegram (Retract → Confirm). The webhook only records the request
+  (`run_service.request_retract`); the publisher deletes it on the platform — even with publishing
+  switched off — and marks the row `retracted`. A delete that keeps failing, or a platform with no
+  delete API, becomes an alert to remove the post by hand.
+- **The feed** (`app/services/marketing/publish_feed.py`): "Posted on X · run <date>" with the link
+  and a Retract button, the retract confirmation, and alerts (a refusal, attempts exhausted, a bad
+  credential, the X cap, an escalated unknown outcome, an approved post that expired unpublished,
+  a retract that must be done by hand). Each is stamped at least once and never changes a post's
+  status; an "outcome unknown" alert the owner already answered is marked handled, never re-sent.
+- **Nothing is lost silently** (adversarial review 2026-09-30): an `approved_by = "auto"` row is put
+  back to `pending_review` by the always-on housekeeping (a human approves every post); an Approve
+  tapped while the web publisher cannot send (off, web dry run, platform not enabled) says so in the
+  toast and the message; a Retract on a platform that cannot delete answers "remove it by hand"
+  instead of recording a request that would wait; every scan filters in the query (escalated rows,
+  closed retracts, previews behind approvable posts); and one row's failure never stops the rows
+  behind it. A failed read of the X spend is not the cap: reconcile waits for the next tick.
+- **Bluesky asks only the account's own PDS**: an ambiguous put records the account and its PDS;
+  a reconcile with none recorded logs in to learn them, and answers UNKNOWN rather than trusting an
+  entryway or AppView mirror (a lagging "not found" could close a live post or license a resend).
+- **What it does not do yet:** Upload-Post (TikTok, YouTube, Instagram, Facebook, LinkedIn, Threads)
+  is Stage 2; Bluesky has no AI-content flag (the caption's disclaimer is the disclosure); X's
+  `made_with_ai` is sent (`MARKETING_X_MADE_WITH_AI`) though X documents it for media; the X go-live
+  gate is one real post plus a retract, by the owner.
 ---
 
 ## Appendix A: Where things live
@@ -2882,7 +2955,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 23 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 13 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 15 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/

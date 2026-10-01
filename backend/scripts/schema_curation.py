@@ -428,10 +428,12 @@ CURATION: dict[str, TableDoc] = {
     "public.marketing_posts": T("marketing",
         key=("run_id", "platform", "format", "status", "idempotency_key", "external_url",
              "cost_micros"),
-        note="pending_review → approved (admin / MARKETING_AUTO_PUBLISH) → queued (claimed by the "
-             "publisher loop before the first external call) → published | failed. "
-             "idempotency_key is the key presented to the outlet, so a restart cannot double-post; "
-             "cost_micros is micro-dollars (X bills $0.015 per post)."),
+        note="pending_review → approved (a human, in Telegram) → queued (the publisher's write-ahead "
+             "claim before the first external call) → published | failed | retracted; stale posts "
+             "expire to skipped. Idempotency is per platform: Bluesky's record key derives from "
+             "idempotency_key; X takes no key, so an unknown X outcome is reconciled and escalated, "
+             "never resent. cost_micros + metadata.charges journal every billed call (micro-dollars; "
+             "X: $0.015 per post, $0.20 with a URL)."),
     "public.podcast_episodes": T("marketing",
         key=("guid", "title", "mp3_path", "duration_seconds", "published_at"),
         note="Apple/Spotify have no upload API: they poll GET /podcast/feed.xml, which is rendered "

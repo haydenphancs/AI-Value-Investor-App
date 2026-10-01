@@ -420,6 +420,9 @@ async def test_the_universe_stamps_the_live_session_when_the_price_has_moved(
     from datetime import date
 
     monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 15))
+    # Intraday (Tue 14:00 ET). Pinned: pre-market no price can be a later session
+    # (`_no_session_since_close`), so the real clock at 04:00-09:30 ET would flip the rows.
+    monkeypatch.setattr(ps, "session_phase", lambda now=None: "regular")
     snap = {"close": 122.6, "previous_close": 120.0, "trade_date": "2026-09-14"}
     _wire(monkeypatch, [_screener("NVDA", price)], {"NVDA": snap})
     row = (await MarketMoversService().get_universe())["NVDA"]
@@ -440,6 +443,7 @@ async def test_the_group_mode_follows_the_live_stamp_intraday(monkeypatch):
     from datetime import date
 
     monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 15))
+    monkeypatch.setattr(ps, "session_phase", lambda now=None: "regular")   # intraday
     rows = [_screener(f"S{i}", 101.0 + i, sector="Technology") for i in range(6)]
     closes = {f"S{i}": {"close": 100.0, "previous_close": 99.0, "trade_date": "2026-09-14"}
               for i in range(6)}

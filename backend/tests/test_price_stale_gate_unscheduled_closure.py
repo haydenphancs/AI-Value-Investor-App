@@ -43,12 +43,18 @@ def test_the_stored_close_survives_the_morning_after_an_unscheduled_closure(monk
     friday_0900 = datetime(2026, 9, 18, 9, 0, tzinfo=ZoneInfo("America/New_York"))
     monkeypatch.setattr("app.services.price_service.session_trading_date",
                         lambda now=None: date(2026, 9, 18))
+    friday_1100 = datetime(2026, 9, 18, 11, 0, tzinfo=ZoneInfo("America/New_York"))
     snap = {"close": 100.0, "previous_close": 99.0, "trade_date": "2026-09-16"}
     # Before the closure is known: Wednesday's row is one session short → stale → None.
-    assert PriceService._pick_denominator(101.0, snap) is None
+    assert PriceService._pick_denominator(101.0, snap, now=friday_0900) is None
+    assert PriceService._pick_denominator(101.0, snap, now=friday_1100) is None
     # The ingest walk observed Thursday had no US session.
     mh.register_market_closure(date(2026, 9, 17))
-    assert PriceService._pick_denominator(101.0, snap) == 100.0
+    # Intraday Friday, a price off Wednesday's close is Friday's: that close is the base.
+    assert PriceService._pick_denominator(101.0, snap, now=friday_1100) == 100.0
+    # 09:00 is PRE-MARKET: Friday has not opened, so the gap is drift and the change is
+    # Wednesday's own move (`_no_session_since_close` walks back over the closure too).
+    assert PriceService._pick_denominator(101.0, snap, now=friday_0900) == 99.0
 
 
 @pytest.mark.asyncio

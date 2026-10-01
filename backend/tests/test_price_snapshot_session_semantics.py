@@ -177,6 +177,7 @@ def test_a_price_still_at_the_stored_close_is_stamped_with_that_close_date(monke
 
 def test_a_price_that_moved_off_the_close_is_stamped_with_the_live_session(monkeypatch):
     monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 14))
+    monkeypatch.setattr(ps, "session_phase", lambda now=None: "regular")   # intraday: see _no_session_since_close
     q = PriceService._from_screener(
         {"symbol": "NVDA", "companyName": "NVIDIA", "price": 103.0, "marketCap": 3e12},
         _snap(100.0, 105.0, "2026-09-11"),
@@ -192,6 +193,7 @@ def test_a_flat_close_row_is_not_stamped_with_the_live_session(monkeypatch):
     stamped with the LIVE session because `prev == close`, and `newest_session` then took
     that as the batch session and evicted every real Friday mover pre-market."""
     monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 14))
+    monkeypatch.setattr(ps, "session_phase", lambda now=None: "regular")   # intraday: see _no_session_since_close
     flat = _snap(10.0, 10.0, "2026-09-11")            # close == previous_close
     q = PriceService._from_screener(
         {"symbol": "SPAC", "companyName": "Blank Check", "price": 10.0, "marketCap": 3e8}, flat,
@@ -364,6 +366,7 @@ async def test_the_universe_stamps_the_live_session_once_the_price_has_moved(mon
     from app.services import market_movers_service as mm
     mm._cache.clear()
     monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 14))
+    monkeypatch.setattr(ps, "session_phase", lambda now=None: "regular")   # intraday: see _no_session_since_close
 
     class _PS:
         async def _get_universe(self):

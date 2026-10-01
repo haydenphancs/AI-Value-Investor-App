@@ -548,3 +548,102 @@ def test_no_output_anywhere_contains_a_multi_day_window_phrase():
     for a in samples:
         low = a.detail.lower()
         assert not any(b in low for b in banned), a.detail
+
+
+# ── Earnings are TRADING-day aware (2026-09-30) ────────────────────────────────────────
+#
+# "Last night" is the previous TRADING day's close. A calendar-day gate rejected a Friday
+# after-close print on Monday (3 days) and on the Tuesday after a Monday holiday (4 days),
+# so the headline fell through to "No clear catalyst" on exactly the days a weekend print
+# moves a stock most.
+
+MON = date(2026, 9, 28)
+FRI = date(2026, 9, 25)
+TUE_AFTER_LABOR_DAY = date(2026, 9, 8)
+
+
+def _row(day, time=None, actual=1.47, est=1.30):
+    r = {"date": day.isoformat(), "epsActual": actual, "epsEstimated": est}
+    if time is not None:
+        r["time"] = time
+    return r
+
+
+@pytest.mark.parametrize("session_word", ["today", "on Mon"])
+def test_a_friday_after_close_print_explains_monday(session_word):
+    a = detect_earnings("ORCL", 9.0, _row(FRI, "amc"), MON, session_word=session_word)
+    assert a is not None and a.kind is CauseKind.EARNINGS
+    assert "after Friday's close" in a.detail
+    assert "yesterday" not in a.detail, "Friday is not yesterday on a Monday"
+
+
+@pytest.mark.parametrize("time", [None, "", "bmo", "dmh", "--", "pre-market"])
+def test_across_a_weekend_only_an_explicit_after_close_print_counts(time):
+    """FMP's `time` is often blank, and a blank Friday row may be a before-open print the
+    Friday tape already priced. A fabricated cause is worse than a missed one."""
+    assert detect_earnings("ORCL", 9.0, _row(FRI, time), MON) is None
+
+
+def test_after_a_monday_holiday_fridays_after_close_print_explains_tuesday():
+    a = detect_earnings("AVGO", -6.0, _row(date(2026, 9, 4), "amc", actual=1.0, est=1.2),
+                        TUE_AFTER_LABOR_DAY)
+    assert a is not None and a.tag == "Earnings Miss"
+    assert "after Friday's close" in a.detail
+
+
+@pytest.mark.parametrize("day", [date(2026, 9, 24), date(2026, 9, 23)])
+def test_a_print_two_trading_days_back_is_still_not_mondays_cause(day):
+    """Thursday's after-close print moved FRIDAY's tape, not Monday's."""
+    assert detect_earnings("ORCL", 9.0, _row(day, "amc"), MON) is None
+
+
+def test_thursday_amc_is_not_the_cause_after_a_monday_holiday_either():
+    assert detect_earnings("AVGO", -6.0, _row(date(2026, 9, 3), "amc"), TUE_AFTER_LABOR_DAY) is None
+
+
+def test_the_ordinary_overnight_print_is_unchanged():
+    """The calendar-day-before case keeps its old rule (not-BEFORE_OPEN) and wording."""
+    tue = date(2026, 9, 29)
+    live = detect_earnings("ORCL", 9.0, _row(MON, None), tue)
+    assert live is not None and "after yesterday's close" in live.detail
+    stamped = detect_earnings("ORCL", 9.0, _row(MON, "amc"), tue, session_word="on Tue")
+    assert stamped is not None and "after the prior close" in stamped.detail
+
+
+# ── A flat stock did not "go the other way" ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("chg", [0.0, -0.0, 0.004, -0.004, 0.00499])
+@pytest.mark.parametrize("ind", [1.2, -1.2])
+def test_a_flat_stock_is_described_as_flat(chg, ind):
+    """A move that DISPLAYS as 0.00% has no direction. The sign test read 0.0 (and
+    −0.004) as the opposite of a rising industry — a sentence contradicting the flat badge
+    printed right beside it."""
+    from app.services.daily_move_attribution import MoveContext
+
+    text = describe_no_cause(
+        "KO", MoveContext(change_percent=chg, industry_name="Beverages",
+                          industry_change_percent=ind), had_news=False,
+    )
+    assert "the other way" not in text and "far more" not in text, text
+    verb = "rose" if ind > 0 else "fell"
+    assert f"KO was flat while Beverages {verb} 1.2%." in text, text
+
+
+@pytest.mark.parametrize("chg", [-0.005, -0.3])
+def test_a_real_counter_move_still_goes_the_other_way(chg):
+    """CONTROL at the line: |chg| = 0.005 displays as ±0.01%, which has a direction."""
+    from app.services.daily_move_attribution import MoveContext
+
+    text = describe_no_cause(
+        "KO", MoveContext(change_percent=chg, industry_name="Beverages",
+                          industry_change_percent=1.2), had_news=False,
+    )
+    assert "went the other way" in text and "was flat" not in text
+
+
+def test_a_flat_stock_through_attribute_never_claims_a_direction():
+    a = _attr(change_percent=0.0, sigma_daily=0.01, industry_name="Beverages",
+              industry_change_percent=-2.1, had_news=False)
+    assert a.kind is CauseKind.NONE
+    assert "the other way" not in a.detail and "was flat while Beverages fell 2.1%" in a.detail

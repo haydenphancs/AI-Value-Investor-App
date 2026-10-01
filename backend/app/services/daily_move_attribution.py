@@ -81,12 +81,18 @@ _GAP_DOMINANT_SHARE = 0.6
 # …and the gap itself has to be big enough to notice.
 _MIN_GAP_PCT = 1.0
 
-# Earnings land the evening before or the morning of. Anything older is not today's news.
+# Earnings land the evening before or the morning of. Anything older is not today's news —
+# where "the evening before" means the previous TRADING day's close, so a Friday
+# after-close print still explains Monday (see `detect_earnings`).
 _EARNINGS_MAX_AGE_DAYS = 1
 # An analyst action is "today's" only on the session date itself. A three-month-old
 # rating is not why the stock moved this morning — ACHR's most recent action was
 # 2026-05-12 while it fell 5% on 08-14, and treating that as causal would be a lie.
 _GRADE_MAX_AGE_DAYS = 1
+
+# Below this a move DISPLAYS as 0.00%, the client's `isFlat` (it rounds to the two decimals
+# it prints). A sentence must not call such a stock "went the other way" beside a 0.00% badge.
+_FLAT_PCT = 0.005
 
 
 class CauseKind(str, Enum):
@@ -264,11 +270,25 @@ def detect_earnings(
     already use its presence as the "has reported" test. FMP's `time` field is free-form
     and often blank, so it is a useful *secondary* guard and a wording input, never the
     primary gate.
+
+    TRADING-DAY AWARE. "Last night" is the previous TRADING day's close, not the calendar
+    day before: a Friday after-close print is what moved Monday, and the Tuesday after a
+    Monday holiday follows Friday. A calendar-day gate rejected both and let the tile fall
+    through to "No clear catalyst" on the headline. Across such a gap the print must be
+    EXPLICITLY after the close — FMP's `time` is often blank, and a blank Friday row may be
+    a before-open print the Friday tape already priced; a fabricated cause is worse than a
+    missed one.
     """
     if not isinstance(earnings_row, dict):
         return None
     when = _parse_day(earnings_row.get("date"))
-    if when is None or (today - when).days > _EARNINGS_MAX_AGE_DAYS or when > today:
+    if when is None or when > today:
+        return None
+    # Pure: the holiday table, no clock. Imported lazily like the timing helpers below.
+    from app.utils.market_hours import previous_trading_day
+
+    gap_days = (today - when).days
+    if gap_days > _EARNINGS_MAX_AGE_DAYS and when != previous_trading_day(today):
         return None
 
     actual = _finite(earnings_row.get("epsActual"))
@@ -308,7 +328,15 @@ def detect_earnings(
         # PREVIOUS session's move, not this one.
         if timing == BEFORE_OPEN:
             return None
-        when_word = "after yesterday's close" if live_session else "after the prior close"
+        if gap_days > 1:
+            # Across a weekend / holiday: only an explicit after-close print (docstring).
+            if timing != AFTER_CLOSE:
+                return None
+            # "yesterday" would be false on a Monday — name the day the print landed.
+            day = when.strftime("%a")
+            when_word = f"after {_DAY_NAMES.get(day, day)}'s close"
+        else:
+            when_word = "after yesterday's close" if live_session else "after the prior close"
 
     beat: Optional[bool] = None
     surprise: Optional[float] = None
@@ -466,7 +494,14 @@ def describe_no_cause(
     ind = _finite(ctx.industry_change_percent)
     if ind is not None and ctx.industry_name and abs(ind) >= 0.1:
         same_dir = (ind > 0) == (ctx.change_percent > 0)
-        if same_dir and abs(ctx.change_percent) > abs(ind) * _SECTOR_INLINE_HIGH:
+        if abs(ctx.change_percent) < _FLAT_PCT:
+            # A move that displays as 0.00% has no direction. The sign test below read
+            # 0.0 (and −0.004) as "the other way" from a rising industry — a sentence
+            # contradicting the flat badge printed beside it.
+            parts.append(
+                f"{ticker} was flat while {ctx.industry_name} {_dir_word(ind)} {_pct(ind)}."
+            )
+        elif same_dir and abs(ctx.change_percent) > abs(ind) * _SECTOR_INLINE_HIGH:
             parts.append(
                 f"{ctx.industry_name} {_dir_word(ind)} {_pct(ind)}; "
                 f"{ticker} moved far more."

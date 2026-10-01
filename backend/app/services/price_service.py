@@ -59,7 +59,13 @@ from app.integrations.fmp import FMPRateLimitException, FMPUnavailableException,
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import detect_asset_class, uses_coingecko_price
-from app.utils.market_hours import previous_trading_day, session_trading_date, register_market_closure
+from app.utils.market_hours import (
+    SESSION_PREMARKET,
+    previous_trading_day,
+    register_market_closure,
+    session_phase,
+    session_trading_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -403,10 +409,56 @@ class PriceService:
             return True
         return stored >= previous_trading_day(session_trading_date(now))
 
+    @staticmethod
+    def _no_session_since_close(
+        snap: Optional[Dict[str, Any]], now: Optional[datetime] = None
+    ) -> bool:
+        """True when no regular session has opened since the stored close's `trade_date`.
+
+        Then the live price cannot belong to a later session, whatever it reads.
+
+        ⚠️ The screener price does not equal the official `batch-eod` close for about
+        one symbol in seven. Measured 2026-09-30 21:29 ET, with Wednesday's close stored:
+        1,051 of 7,071 rows differed (510 by under half a cent, e.g. ACWI 158.765 vs
+        158.76, and some by much more, e.g. ABBV 261.79 vs 261.59). The test "has the
+        price moved off the stored close" read that drift as a later session, so the
+        row divided by its OWN session's close and showed about +0.00% instead of that
+        session's move. Pre-market it was also stamped with the day that had not opened
+        yet: the widget's "Nasdaq 0.00%" (ONEQ) beside SPY's "Tue close -0.18%" at
+        06:50 ET Wednesday.
+
+        Two windows count as "no later session":
+        - the stored close IS the session the numbers describe (`session_trading_date`):
+          from the close ingest until 04:00 ET, plus weekends and holidays;
+        - PRE-MARKET, when `session_trading_date` already names today but its regular
+          session has not opened. The screener still carries the previous close then
+          (SPY's "Tue close" stamp at 06:50 means its price sat exactly on that close).
+          The first window alone would have missed the reported case.
+
+        A row without a readable `trade_date` (a pre-158 shape) answers False, which
+        keeps the price comparison exactly as before.
+        """
+        if not snap:
+            return False
+        raw = snap.get("trade_date")
+        if not raw:
+            return False
+        try:
+            stored = date.fromisoformat(str(raw)[:10])
+        except ValueError:
+            return False
+        current = session_trading_date(now)
+        if stored >= current:
+            return True
+        return (
+            session_phase(now) == SESSION_PREMARKET
+            and stored >= previous_trading_day(current)
+        )
+
     @classmethod
     def _change_session(
         cls, prev: Optional[float], snap: Optional[Dict[str, Any]],
-        price: Optional[float] = None,
+        price: Optional[float] = None, now: Optional[datetime] = None,
     ) -> Optional[str]:
         """WHICH SESSION a change computed against `prev` describes (ISO date), or None.
 
@@ -423,6 +475,9 @@ class PriceService:
         used to be stamped with the LIVE session while every other untraded row carried
         `trade_date`; `widget_movers.newest_session` takes the max stamp, so one flat
         row evicted every real prior-session mover from the pre-market tile.
+
+        A price off the close counts only while a later session can exist
+        (`_no_session_since_close`), the same gate `_pick_denominator` applies.
         """
         if prev is None or not snap:
             return None
@@ -430,8 +485,9 @@ class PriceService:
         if (
             close is not None and price is not None
             and abs(price - close) > max(abs(close), 1.0) * 1e-9
+            and not cls._no_session_since_close(snap, now)
         ):
-            return session_trading_date().isoformat()
+            return session_trading_date(now).isoformat()
         return str(snap.get("trade_date") or "")[:10] or None
 
     _stale_snapshot_dates: set = set()
@@ -481,7 +537,8 @@ class PriceService:
 
     @staticmethod
     def _pick_denominator(
-        price: Optional[float], snap: Optional[Dict[str, Any]]
+        price: Optional[float], snap: Optional[Dict[str, Any]],
+        now: Optional[datetime] = None,
     ) -> Optional[float]:
         """The close of the session BEFORE the one this price belongs to.
 
@@ -499,7 +556,7 @@ class PriceService:
         """
         if snap is None or price is None:
             return None
-        if not PriceService._snapshot_is_current(snap):
+        if not PriceService._snapshot_is_current(snap, now):
             # A stale row cannot be "yesterday's close". Unknown beats a multi-session
             # move labelled as today's (invariant 1). The batch callers count these and
             # report them (`_report_stale_snapshots`) — a majority of a batch being stale
@@ -513,7 +570,14 @@ class PriceService:
         # A price that has moved off the stored close belongs to a LATER session, so that
         # close is the right denominator. Compared with a relative epsilon because these
         # are floats round-tripped through JSON and Postgres NUMERIC.
-        if abs(price - close) > max(abs(close), 1.0) * 1e-9:
+        #
+        # But only while a later session can exist. Once the stored close's session is
+        # the one the numbers describe (or pre-market, before the next one opens), a gap
+        # is screener-vs-official drift, not a new session (`_no_session_since_close`).
+        if (
+            abs(price - close) > max(abs(close), 1.0) * 1e-9
+            and not PriceService._no_session_since_close(snap, now)
+        ):
             return close
         return prev
 

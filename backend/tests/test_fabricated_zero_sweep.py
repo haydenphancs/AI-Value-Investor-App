@@ -208,7 +208,9 @@ async def test_a_close_map_outage_is_not_cached_for_the_ttl(monkeypatch):
     monkeypatch.setattr(mm.time, "time", lambda: t0 + mm._DEGRADED_UNIVERSE_TTL + 1)
     second = await svc.get_universe()
     assert calls["n"] == 2, "the outage was cached past its window — the close map was never retried"
-    assert second["AAPL"]["changePercentage"] == pytest.approx((100.0 / 95.0 - 1) * 100)
+    # The stored close IS the current session's (`_LATEST_SESSION`), so no later session
+    # exists and the base is the close before it, whatever the price reads.
+    assert second["AAPL"]["changePercentage"] == pytest.approx((100.0 / 90.0 - 1) * 100)
     mm._cache.clear()
 
 

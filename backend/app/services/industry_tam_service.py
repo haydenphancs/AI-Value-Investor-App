@@ -298,8 +298,8 @@ async def fred_tam_for_series(
 
     Public-ish helper so callers outside this module (industry_dossier_service
     for sector / all-industry fallback) can reuse the snapshot → TAM logic
-    without duplicating the millions-to-billions normalization and the 5y
-    CAGR computation.
+    without duplicating the millions-to-billions normalization and the CAGR
+    computation (over the whole fetched window — see below).
     """
     client = get_fred_client()
     if not client.is_configured:
@@ -324,15 +324,27 @@ async def fred_tam_for_series(
     except (AttributeError, ValueError, IndexError):
         return None
 
-    cagr_decimal = 0.0
-    if len(obs) >= 6 and obs[5].value > 0:
-        cagr_decimal = (latest.value / obs[5].value) ** (1.0 / 5) - 1.0
-    elif len(obs) >= 2 and obs[-1].value > 0:
-        years = len(obs) - 1
-        cagr_decimal = (latest.value / obs[-1].value) ** (1.0 / years) - 1.0
+    # CAGR over the WHOLE fetched window — the oldest valid observation, 2018 →
+    # 2025 as of 2026-10 (7 years) — not `obs[5]`. A 5-year window ending 2025
+    # starts at the 2020 COVID trough and overstated growth by 1-9 points
+    # (Restaurants read 12.4% against ~6.4% from 2019; owner decision
+    # 2026-10-01). Seven years also matches the Census tier's 2017→2024 span.
+    # The span comes from the observation DATES, so a gap in a series cannot
+    # mis-annualize the rate. No valid base → no CAGR (None), never a fake 0.0.
+    cagr_decimal: Optional[float] = None
+    for base in reversed(obs[1:]):
+        if not math.isfinite(base.value) or base.value <= 0:
+            continue
+        try:
+            years = int(current_year) - int(base.date.split("-", 1)[0])
+        except (AttributeError, ValueError, IndexError):
+            continue
+        if years > 0:
+            cagr_decimal = (latest.value / base.value) ** (1.0 / years) - 1.0
+            break
 
     current_b = latest.value / 1000.0
-    future_b = _project_5y(current_b, cagr_decimal)
+    future_b = _project_5y(current_b, cagr_decimal or 0.0)
 
     return IndustryTAM(
         current_tam=round(current_b, 1),
@@ -340,7 +352,7 @@ async def fred_tam_for_series(
         current_year=current_year,
         future_year=str(int(current_year) + 5),
         source_label=source_label or _fred_source_label(series_id),
-        cagr_5y_pct=round(cagr_decimal * 100, 1),
+        cagr_5y_pct=round(cagr_decimal * 100, 1) if cagr_decimal is not None else None,
     )
 
 

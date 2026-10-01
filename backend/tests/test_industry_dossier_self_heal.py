@@ -288,8 +288,9 @@ class _FakeFRED:
 
     is_configured = True
     SERIES = {
-        "USELCEQAPMANNGSP": [87100, 82300, 78500, 69600, 61200, 57700, 60100],
-        "USMANNGSP": [2930097, 2882537, 2797562, 2668223, 2417675, 2156754, 2268790],
+        # 2025 → 2018, live values (2026-10-01); FRED returns newest first.
+        "USELCEQAPMANNGSP": [87100, 82300, 78500, 69600, 61200, 57700, 60100, 59751],
+        "USMANNGSP": [2930097, 2882537, 2797562, 2668223, 2417675, 2156754, 2268790, 2261819],
     }
 
     def __init__(self) -> None:
@@ -326,8 +327,8 @@ async def test_end_to_end_census_down_falls_back_to_bea_naics_335_not_all_manufa
     d = await IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials")
     assert fred.series_calls == ["USELCEQAPMANNGSP"]
     assert d.current_tam == 87.1                 # not 2930.1 (all of US manufacturing)
-    assert d.future_tam == pytest.approx(131.5, abs=0.1)
-    assert d.cagr_5y_pct == 8.6
+    assert d.future_tam == pytest.approx(114.0, abs=0.1)
+    assert d.cagr_5y_pct == 5.5                  # 2018→2025, not 8.6 from the 2020 trough
     assert d.source_grain == "industry"
     assert d.source_label.startswith("BEA ") and "via FRED" in d.source_label
 

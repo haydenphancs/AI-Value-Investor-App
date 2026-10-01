@@ -363,5 +363,4 @@ These were found in the 2026-09-25 sweep and deliberately not changed. The last 
 - Moat card TAM / CAGR (2026-10-01):
   - About 120 industries show "—" because no figure specific to the industry exists. Mapping them to narrower BEA series is a follow-up.
   - BEA figures are value added, lower than sales.
-  - The Census CAGR covers 2017 → the latest year (7 years) under a "5Yr" label.
-  - FRED CAGRs start at the 2020 low, which overstates them by 1–9 points.
+  - Both CAGRs cover 7 years under the card's "5Yr" label: Census 2017 → 2024, FRED 2018 → 2025. Until 2026-10-01 the FRED window started at the 2020 COVID low, which overstated growth by 1–9 points (your decision: no 2020 baseline). Changing the label means an iOS build.

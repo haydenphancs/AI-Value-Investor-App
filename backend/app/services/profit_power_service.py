@@ -18,7 +18,12 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services._earnings_common import next_pending_earnings_date
+from app.services._earnings_common import (
+    CALENDAR_UNKNOWN,
+    EarningsStamp,
+    next_earnings_stamp,
+    stamp_is_persistable,
+)
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
@@ -58,7 +63,12 @@ _DEGRADED_CACHE_TTL = 60
 # whose legacy benchmark key names another calendar quarter (a Jan 1-7 Q4) has no peer
 # value, and a failed benchmark lookup is `degraded` — a v2 row (e.g. written by a local
 # run of the first pass against the shared database) can hold either defect.
-_PP_PAYLOAD_VERSION = 4  # 4: quarterly peers from calendar-quarter rows (2026-09-30)
+# v4 (2026-09-30): quarterly peers from calendar-quarter rows. v5 (2026-10-01, P20): the
+# earnings calendar is fetched with raise_errors=True and a failed fetch is never
+# persisted, so a NULL `next_earnings_date` now means "no pending announcement"; an older
+# row's NULL may be a swallowed calendar 429 (no report-day bound), so it is rebuilt.
+# Growth copies this table's column WITHOUT a version check, so this bump does not reach it.
+_PP_PAYLOAD_VERSION = 5
 _VERSION_KEY = "payload_version"
 
 
@@ -373,12 +383,6 @@ def _build_margin_points(
     return results
 
 
-def _find_next_earnings_date_simple(ec_records: List[Dict[str, Any]]) -> Optional[str]:
-    """Next pending earnings date (yyyy-MM-dd) — includes TODAY's pending report and
-    skips a stale reschedule row. Shared rule: ``_earnings_common.next_pending_earnings``."""
-    return next_pending_earnings_date(ec_records)
-
-
 # ── Service ───────────────────────────────────────────────────────
 
 class ProfitPowerService:
@@ -429,6 +433,12 @@ class ProfitPowerService:
                     "Profit power NOT persisted for %s (degraded: %s) — will rebuild after "
                     "the %ds in-memory TTL",
                     ticker, ", ".join(degraded), _DEGRADED_CACHE_TTL,
+                )
+            elif next_earnings is CALENDAR_UNKNOWN:
+                # Complete values (the calendar feeds none), but no report-day bound.
+                logger.warning(
+                    "Profit power NOT persisted for %s (earnings calendar unavailable — no "
+                    "report-day bound for the 24h row); served from memory", ticker,
                 )
             else:
                 asyncio.get_running_loop().run_in_executor(
@@ -516,11 +526,18 @@ class ProfitPowerService:
         self,
         ticker: str,
         result: ProfitPowerResponse,
-        next_earnings: Optional[str],
+        next_earnings: EarningsStamp,
     ) -> None:
         """Upsert to Supabase cache — safe wrapper that logs and swallows errors.
         This is a synchronous method — call via run_in_executor().
         """
+        if not stamp_is_persistable(next_earnings):
+            # Belt-and-braces: the getter already refuses a CALENDAR_UNKNOWN build.
+            logger.warning(
+                "Profit power upsert REFUSED for %s — next_earnings_date %r is not a date "
+                "(an unread earnings calendar is never persisted)", ticker, next_earnings,
+            )
+            return
         if result.degraded:
             # Belt-and-braces: the caller already gates on the build's degraded list.
             logger.warning(
@@ -547,10 +564,12 @@ class ProfitPowerService:
 
     async def _build_profit_power(
         self, ticker: str
-    ) -> Tuple[ProfitPowerResponse, Optional[str], list]:
+    ) -> Tuple[ProfitPowerResponse, EarningsStamp, list]:
         """Fetch income + cash flow, compute margins, look up sector benchmarks.
         Returns (response, next_earnings_date, degraded) — ``degraded`` is also carried on
         ``response.degraded`` so every consumer of the served value can see it.
+        ``next_earnings_date`` is CALENDAR_UNKNOWN when the calendar fetch failed: the
+        response is complete, but the getter never persists it.
         """
 
         # Phase 1: parallel fetch — profile + income + cash flow + earnings calendar (6 FMP calls)
@@ -567,7 +586,9 @@ class ProfitPowerService:
             self.fmp.get_income_statement(ticker, period="quarter", limit=80),
             self.fmp.get_cash_flow_statement(ticker, period="annual", limit=16),
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=80),
-            self.fmp.get_earning_calendar_full(ticker),
+            # raise_errors=True: the default swallows a 429 / 5xx / non-list body into
+            # [] ("no announcements"), and the row was persisted with no report-day bound.
+            self.fmp.get_earning_calendar_full(ticker, raise_errors=True),
             return_exceptions=True,
         )
 
@@ -598,9 +619,11 @@ class ProfitPowerService:
             logger.error(f"Quarterly cash flow fetch failed for {ticker}: {quarterly_cashflow}")
             quarterly_cashflow = []
             degraded.append("quarterly_cashflow")
-        if isinstance(ec_raw, Exception):
-            logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
-            ec_raw = []
+        # The calendar is not a leg (it feeds no served value): its only use is the cache
+        # row's next-earnings stamp. A failed fetch is CALENDAR_UNKNOWN, never `degraded`;
+        # the getter serves that build from memory and never persists it.
+        next_earnings = next_earnings_stamp(ec_raw, ticker=ticker, service="profit_power")
+        ec_raw = []
 
         # Phase 2: get sector from profile
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
@@ -746,11 +769,7 @@ class ProfitPowerService:
             degraded=list(degraded),
         )
 
-        # Phase 6: extract next earnings date for cache invalidation
-        next_earnings = _find_next_earnings_date_simple(
-            ec_raw if isinstance(ec_raw, list) else []
-        )
-
+        # `next_earnings` was stamped from the calendar slot right after the gather.
         return response, next_earnings, degraded
 
 

@@ -15,14 +15,21 @@ import logging
 import math
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services._earnings_common import next_pending_earnings_date
+from app.services._earnings_common import (
+    CALENDAR_UNKNOWN,
+    EarningsStamp,
+    next_earnings_stamp,
+    stamp_is_persistable,
+)
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
 from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
+from app.services.asset_class import profile_is_fund
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
@@ -41,8 +48,52 @@ _CACHE_TTL = 300  # 5 minutes
 # 3 (2026-09-30, round 2): the Z insight prints 2 dp (it printed "3.0" beside "Safe");
 #     a barely-positive ROE / IC / D/E median is no benchmark (`_MIN_USABLE_MEDIAN`); a
 #     balance-sheet equity of 0 beside a positive D/E no longer makes ROE "N/M".
-_HC_PAYLOAD_VERSION = 3
+# 4 (2026-10-01, P20): the earnings calendar is fetched with raise_errors=True and a
+#     failed fetch is never persisted, so a NULL `next_earnings_date` now means "no
+#     pending announcement". An older row's NULL may be a swallowed calendar 429 (no
+#     report-day bound for up to 24h), so those rows are rebuilt.
+_HC_PAYLOAD_VERSION = 4
 _HC_VERSION_KEY = "payload_version"
+
+# ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────
+# A fund (VB, SPY …) that reaches this card has no ratios, ROE or balance-sheet metrics, so
+# its build scores nothing and is marked `no_metrics` — which the writer refuses as a
+# possible outage (a 429'd leg coerced to [] looks the same), so every view of a fund
+# rebuilt it from FMP every 5 min. The ONE degraded shape the cache admits is that build,
+# and only when a POSITIVE fund flag on the FMP profile fetched in the SAME build says so
+# (`asset_class.profile_is_fund`), the ratios-TTM, key-metrics-TTM, balance-sheet and
+# income legs each answered a RAW list (checked before the builder coerces an error dict
+# to {} / [] without a reason), and `no_metrics` is the build's ONLY reason — never
+# inferred from the empty answer itself. The row carries `security_kind: "fund"`; the
+# reader admits a degraded row only with that marker and only in that shape. The response
+# is unchanged: it still says `degraded == ["no_metrics"]`, so health_snapshot, the report
+# collector and iOS treat it exactly as before. No payload_version bump: no existing row
+# carries the marker, and an older reader refuses a marked row (it is degraded).
+# This is the ONE degraded build written to health_check_cache: the `HealthCheckResponse.
+# degraded` comment and SYSTEM_DESIGN_GUIDELINES "A partial build is served, never stored"
+# must name it too (tests/test_fund_shape_caching_soc_hc.py pins both).
+_SECURITY_KIND_KEY = "security_kind"
+_SECURITY_KIND_FUND = "fund"
+_FUND_SHAPE_DEGRADED = ["no_metrics"]
+
+
+def _is_fund_shape(resp: Any) -> bool:
+    """True for exactly the build a fund produces: no metric, and `no_metrics` as the ONLY
+    degraded reason (every leg answered, the peer lookup did not fail)."""
+    return (
+        list(getattr(resp, "degraded", None) or []) == _FUND_SHAPE_DEGRADED
+        and not getattr(resp, "metrics", None)
+    )
+
+
+@dataclass
+class _HcBuild:
+    """`_build_health_check_full`'s answer. ``fund_shape`` is True only for a fund's
+    empty build (see the block above)."""
+
+    response: HealthCheckResponse
+    next_earnings: EarningsStamp
+    fund_shape: bool = False
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -100,12 +151,6 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
         return f
     except (ValueError, TypeError):
         return None
-
-
-def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
-    """Next pending earnings date (yyyy-MM-dd) — includes TODAY's pending report and
-    skips a stale reschedule row. Shared rule: ``_earnings_common.next_pending_earnings``."""
-    return next_pending_earnings_date(ec_records)
 
 
 def _clamp(val: float, lo: float, hi: float) -> float:
@@ -1065,7 +1110,11 @@ class HealthCheckService:
 
         try:
             logger.info(f"Health check cache MISS for {ticker} — fetching from FMP")
-            result, next_earnings = await self._build_health_check(ticker)
+            build = await self._build_health_check_full(ticker)
+            result, next_earnings = build.response, build.next_earnings
+            # A fund's empty build (see `_HcBuild`) is its permanent answer, not an outage.
+            # Re-checked against what is actually served.
+            fund_shape = build.fund_shape and _is_fund_shape(result)
 
             # NEVER persist a degraded build. Every FMP exception in the fan-out is
             # converted to [] / {} by `return_exceptions=True`, so a single 429 on one
@@ -1079,20 +1128,35 @@ class HealthCheckService:
             # D/E, P/E, CR, IC and QR but leaves ROE and Z, so a 2-metric "Excellent
             # [2/2]" was persisted for 24h. `degraded` now names every failed leg, and it
             # rides on the response so health_snapshot (and iOS) can see it too.
+            #
+            # The one exception is a fund's empty build (`fund_shape`): `no_metrics` is what
+            # a fund IS, so it is persisted, marked, and still served as `no_metrics`.
             hc_degraded = list(getattr(result, "degraded", None) or [])
-            if hc_degraded:
+            if hc_degraded and not fund_shape:
                 logger.warning(
                     "Health check NOT persisted for %s (degraded: %s) — will rebuild "
                     "after the in-memory TTL", ticker, ", ".join(hc_degraded),
                 )
+            elif next_earnings is CALENDAR_UNKNOWN:
+                # The values are complete — the calendar feeds none of them — but the row
+                # would carry no report-day bound and could outlive a release by up to 24h.
+                logger.warning(
+                    "Health check NOT persisted for %s (earnings calendar unavailable — no "
+                    "report-day bound for the 24h row); served from memory, rebuilt after "
+                    "the in-memory TTL", ticker,
+                )
             else:
-                # Persist to Supabase in background (fire-and-forget)
+                if fund_shape:
+                    logger.info("[fund-shape] ticker=%s step=%s", ticker, "health_check_write")
+                # Persist to Supabase in background (fire-and-forget). `fund_shape` is
+                # POSITIONAL: `run_in_executor` forwards no keywords.
                 asyncio.get_running_loop().run_in_executor(
                     None,
                     self._upsert_supabase_cache_safe,
                     ticker,
                     result,
                     next_earnings,
+                    fund_shape,
                 )
 
             _cache_set(cache_key, result)
@@ -1151,21 +1215,28 @@ class HealthCheckService:
             # "Deep distress" Z, a negative-equity ROE read as "Exceptional") carry no
             # field this code could test for. They are rebuilt on their next read.
             version = json_data.pop(_HC_VERSION_KEY, 1)
+            # Not a response field either (see `_SECURITY_KIND_KEY`).
+            security_kind = json_data.pop(_SECURITY_KIND_KEY, None)
             if version != _HC_PAYLOAD_VERSION:
                 logger.info(
                     "Health check Supabase cache STALE for %s (payload_version=%r, want %d) "
                     "— recomputing", ticker, version, _HC_PAYLOAD_VERSION,
                 )
                 return None
-            if json_data.get("degraded"):
-                # Never written by this code (the writer refuses a degraded build), so
-                # a row that has it was written by hand or by a bug — do not serve it.
-                logger.warning(
-                    "Health check Supabase row for %s carries degraded=%r — ignoring it",
-                    ticker, json_data.get("degraded"),
-                )
-                return None
-            return HealthCheckResponse(**json_data)
+            resp = HealthCheckResponse(**json_data)
+            if resp.degraded:
+                # The writer refuses every degraded build but a fund's empty one, which it
+                # marks. Anything else that has reasons was written by hand or by a bug —
+                # do not serve it; nor a marked row that is not exactly the fund shape.
+                if security_kind != _SECURITY_KIND_FUND or not _is_fund_shape(resp):
+                    logger.warning(
+                        "Health check Supabase row for %s carries degraded=%r "
+                        "(security_kind=%r, %d metric(s)) — ignoring it",
+                        ticker, resp.degraded, security_kind, len(resp.metrics),
+                    )
+                    return None
+                logger.info("[fund-shape] ticker=%s step=%s", ticker, "health_check_read")
+            return resp
 
         except Exception as e:
             logger.warning(
@@ -1178,14 +1249,37 @@ class HealthCheckService:
         self,
         ticker: str,
         result: HealthCheckResponse,
-        next_earnings: Optional[str],
+        next_earnings: EarningsStamp,
+        fund_shape: bool = False,
     ) -> None:
+        """``fund_shape`` is the getter's verdict (`_HcBuild.fund_shape`); it stamps the
+        `security_kind: "fund"` marker the reader needs to admit the `no_metrics` build —
+        and only onto a result that really is the fund shape."""
+        if not stamp_is_persistable(next_earnings):
+            # Belt-and-braces: the getter already refuses a CALENDAR_UNKNOWN build.
+            logger.warning(
+                "Health check upsert REFUSED for %s — next_earnings_date %r is not a date "
+                "(an unread earnings calendar is never persisted)", ticker, next_earnings,
+            )
+            return
         try:
+            response_json: Dict[str, Any] = {
+                **result.model_dump(), _HC_VERSION_KEY: _HC_PAYLOAD_VERSION,
+            }
+            if fund_shape:
+                if _is_fund_shape(result):
+                    response_json[_SECURITY_KIND_KEY] = _SECURITY_KIND_FUND
+                else:
+                    logger.warning(
+                        "[fund-shape-refused] ticker=%s step=health_check_write: a fund "
+                        "verdict came with a build that is not the fund shape (degraded=%r, "
+                        "%d metric(s)) — written WITHOUT the fund marker",
+                        ticker, result.degraded, len(result.metrics),
+                    )
             self.supabase.table("health_check_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": {**result.model_dump(),
-                                      _HC_VERSION_KEY: _HC_PAYLOAD_VERSION},
+                    "response_json": response_json,
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -1201,7 +1295,14 @@ class HealthCheckService:
 
     async def _build_health_check(
         self, ticker: str
-    ) -> Tuple[HealthCheckResponse, Optional[str]]:
+    ) -> Tuple[HealthCheckResponse, EarningsStamp]:
+        """``(response, next_earnings_date)``. A thin adapter over
+        `_build_health_check_full` (which also carries the fund verdict the getter needs);
+        the 2-tuple is kept because callers unpack it."""
+        build = await self._build_health_check_full(ticker)
+        return build.response, build.next_earnings
+
+    async def _build_health_check_full(self, ticker: str) -> _HcBuild:
         # Phase 1: parallel FMP fetch. TTM endpoints for ratios + key-metrics
         # so D/E, P/E, ROE reflect the trailing twelve months instead of an
         # up-to-12-months-stale fiscal year-end. Balance sheet uses the latest
@@ -1212,17 +1313,30 @@ class HealthCheckService:
             self.fmp.get_company_profile(ticker),
             self.fmp.get_ratios_ttm(ticker),
             self.fmp.get_key_metrics_ttm(ticker),
-            self.fmp.get_earning_calendar_full(ticker),
+            # raise_errors=True: the default swallows a 429 / 5xx / non-list body into
+            # [] ("no announcements"), and the row was persisted with no report-day bound.
+            self.fmp.get_earning_calendar_full(ticker, raise_errors=True),
             self.fmp.get_balance_sheet(ticker, period="quarter", limit=1),
             self.fmp.get_income_statement(ticker, period="quarter", limit=4),
             return_exceptions=True,
+        )
+
+        # Fund-shape inputs (`_HcBuild.fund_shape`), read from the RAW answers before the
+        # substitutions below: a leg that raised (even a permanent not-entitled one) or
+        # answered an error dict (coerced to {} / [] further down WITHOUT a reason) is never
+        # a fund's empty answer. The profile must be a dict that POSITIVELY says fund.
+        raw_profile_is_fund = profile_is_fund(profile)
+        raw_legs_answered_lists = all(
+            isinstance(leg, list) for leg in (ratios_list, key_metrics_list, bs_raw, inc_raw)
         )
 
         # Every leg that failed TRANSIENTLY. Each one is replaced by an empty default and
         # the build still renders, which is exactly why it must not reach the 24h tier
         # (see get_health_check). A permanent FMPNotEntitledException is not degradation:
         # that slice will not come back on retry, so the build without it is the answer.
-        # The earnings calendar only feeds the cache's next-earnings stamp: optional.
+        # The earnings calendar is not a leg: it feeds no served value, only the cache
+        # row's next-earnings stamp. A failed calendar is CALENDAR_UNKNOWN (below), which
+        # the getter serves from memory but never persists.
         degraded: List[str] = []
         for leg_name, leg in (
             ("profile", profile), ("ratios", ratios_list), ("key_metrics", key_metrics_list),
@@ -1243,9 +1357,9 @@ class HealthCheckService:
                 f"{type(key_metrics_list).__name__}: {key_metrics_list}"
             )
             key_metrics_list = []
-        if isinstance(ec_raw, Exception):
-            logger.warning(f"Earnings calendar failed for {ticker}: {type(ec_raw).__name__}: {ec_raw}")
-            ec_raw = []
+        # The calendar's only use: the cache row's next-earnings stamp (or CALENDAR_UNKNOWN).
+        next_earnings = next_earnings_stamp(ec_raw, ticker=ticker, service="health_check")
+        ec_raw = []
         if isinstance(bs_raw, Exception):
             logger.warning(f"Balance sheet fetch failed for {ticker}: {type(bs_raw).__name__}: {bs_raw}")
             bs_raw = []
@@ -1596,12 +1710,21 @@ class HealthCheckService:
             degraded=degraded,
         )
 
-        # Phase 6: next earnings for cache invalidation
-        next_earnings = _find_next_earnings_date(
-            ec_raw if isinstance(ec_raw, list) else []
+        fund_shape = bool(
+            raw_profile_is_fund and raw_legs_answered_lists and degraded == _FUND_SHAPE_DEGRADED
         )
+        if raw_profile_is_fund and not metrics and not fund_shape:
+            # Diagnosable from logs alone: the profile says fund, but the empty build is
+            # NOT admitted — a leg failed, answered a non-list, or another reason is set.
+            logger.info(
+                "[fund-shape-refused] ticker=%s step=fund_check: the profile says fund but the "
+                "empty build is not admitted (legs answered lists: %s, degraded=%r) — it "
+                "stays unpersisted",
+                ticker, raw_legs_answered_lists, degraded,
+            )
 
-        return response, next_earnings
+        # `next_earnings` was stamped from the calendar slot right after the gather.
+        return _HcBuild(response=response, next_earnings=next_earnings, fund_shape=fund_shape)
 
 
 # ── Singleton ─────────────────────────────────────────────────────

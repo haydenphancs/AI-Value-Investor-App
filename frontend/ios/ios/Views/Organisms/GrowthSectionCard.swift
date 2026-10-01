@@ -99,7 +99,7 @@ struct GrowthSectionCard: View {
             }
 
             // Metric chips — only metrics that have data. Composed from the chip atom
-            // directly (GrowthMetricSelector lists every metric, even ones with no data).
+            // directly (never GrowthMetricType.allCases, which would offer empty metrics).
             metricChips
 
             // Period toggle (Annual / Quarterly) — only when the metric has both.

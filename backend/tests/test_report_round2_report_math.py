@@ -316,8 +316,10 @@ def test_the_pdf_prints_a_dash_for_an_unmeasured_share_count():
 def test_a_measured_zero_newest_quarter_is_kept():
     """R25 + R47: the SoC service already trims a newest quarter whose cash-flow row has
     not landed, so a newest all-zero point that reaches the report is MEASURED (buybacks
-    paused) and must be shown — even when `cash_flow_row` flags an INTERIOR gap. The
-    report used to trim it a second time and drop a real quarter."""
+    paused) and must be shown — even when the build carries `cash_flow_row` (which, since
+    P19, names only that already-trimmed newest edge; an interior gap sets no reason and
+    ships its point `cash_flow_reported=False`). The report used to trim it a second time
+    and drop a real quarter."""
     points = [
         _dp("Q3 '25", shares=1000.0),
         _dp("Q4 '25", shares=990.0),

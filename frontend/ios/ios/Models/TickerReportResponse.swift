@@ -925,16 +925,9 @@ extension TickerReportAPIResponse {
             },
             ownershipNote: insiderData.ownershipNote,
             capitalAllocation: insiderData.capitalAllocation.map { (c: CapitalAllocationDTO) -> ReportCapitalAllocation in
-                let points: [SignalOfConfidenceDataPoint]? = c.dataPoints?.map { p in
-                    SignalOfConfidenceDataPoint(
-                        period: p.period,
-                        dividendYield: p.dividendYield,
-                        buybackYield: p.buybackYield,
-                        dividendAmount: p.dividendAmount,
-                        buybackAmount: p.buybackAmount,
-                        sharesOutstanding: p.sharesOutstanding
-                    )
-                }
+                // The DTO's own mapping (shared with the Financials tab), so a quarter with
+                // no cash-flow filing keeps its `cashFlowReported == false` here too.
+                let points: [SignalOfConfidenceDataPoint]? = c.dataPoints?.map { $0.toDisplayPoint() }
                 // The wire flag when present; else the SoC rule over the points carried.
                 let known: Bool = c.shareCountChangeKnown
                     ?? ReportCapitalAllocation.isShareCountChangeMeasured(points: points)

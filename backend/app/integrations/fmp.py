@@ -211,6 +211,21 @@ class FMPClient:
     _MAX_RETRIES = 2            # 3 attempts total
     _RETRY_BASE_DELAY = 0.5     # seconds; exponential backoff (0.5s, 1.0s)
 
+    # Per-endpoint timeout overrides, keyed on `normalize_path(endpoint)`. Every other
+    # endpoint uses the client default (`HTTP_TIMEOUT_SECONDS`, 30 s per read).
+    #
+    # `batch-eod` is the whole market's close in one response (~12 MB / ~65k rows, ~10 s
+    # nominal), and FMP builds it before sending a byte. On 2026-09-30 22:29-23:56 UTC it
+    # sent nothing for 30 s on every attempt of three hourly cycles, then answered normally
+    # at 00:56 — a slow upstream, not a dead one. Its only caller is the hourly background
+    # ingest (`price_service.refresh_close_snapshot`), so a longer wait costs nothing on a
+    # request path. httpx's read timeout is PER SOCKET READ: the bound is ~6 min per fetch
+    # when FMP sends nothing (3 attempts × 120 s) and ~15 min per cycle with the 429
+    # backoff; a slow trickle has no total bound, exactly as before.
+    _ENDPOINT_TIMEOUTS: Dict[str, httpx.Timeout] = {
+        "batch-eod": httpx.Timeout(settings.HTTP_TIMEOUT_SECONDS, read=120.0),
+    }
+
     _unpredicted_402: set = set()
 
     @classmethod
@@ -325,10 +340,17 @@ class FMPClient:
             params = {}
         params["apikey"] = self.api_key
 
+        # Only passed when an override exists: `timeout=None` would DISABLE the timeout
+        # in httpx, and every other endpoint keeps the client default untouched.
+        timeout = self._ENDPOINT_TIMEOUTS.get(normalize_path(endpoint))
+
         for attempt in range(self._MAX_RETRIES + 1):
             try:
                 client = await self._get_client()
-                response = await client.get(url, params=params)
+                if timeout is not None:
+                    response = await client.get(url, params=params, timeout=timeout)
+                else:
+                    response = await client.get(url, params=params)
 
                 # Log rate limit info when headers are present
                 remaining = response.headers.get("X-RateLimit-Remaining")
@@ -864,15 +886,22 @@ class FMPClient:
         `/api/v3/earning_calendar?symbol=X` to `/stable/earnings?symbol=X`
         (returns BOTH historical and upcoming records in one call). The
         new endpoint ships `epsActual`/`revenueActual` instead of the
-        legacy `eps`/`revenue`; we normalize here so the 4 downstream
-        helpers (`_find_next_earnings_date(_simple)`) keep working
-        unchanged.
+        legacy `eps`/`revenue`; we normalize here (keeping both names) so
+        callers that still read the legacy keys keep working. The next-date
+        rule (`_earnings_common.next_pending_earnings`, reached by the cache
+        stamp `next_earnings_stamp`, revenue-breakdown's wrapper and the
+        earnings card) reads `epsActual` / `eps` / `revenueActual`
+        (`_earnings_common.has_reported_actual`).
 
         ``raise_errors``: by default a failure (429, 5xx, a non-list body) degrades to
         ``[]``, which is indistinguishable from "this ticker has no announcements".
-        ``earnings_service`` and ``revenue_breakdown_service`` pass True so a failed fetch
-        marks their build DEGRADED instead of being cached for 24h as a real "no
-        announcements" answer. The other callers keep the swallowing default.
+        All five callers pass True. ``earnings_service`` and ``revenue_breakdown_service``
+        mark a failed fetch DEGRADED; ``health_check_service``, ``profit_power_service``
+        and ``signal_of_confidence_service`` use the calendar only for their cache row's
+        next-earnings stamp, so a failure there becomes ``_earnings_common.CALENDAR_UNKNOWN``
+        and that build is served from memory but never persisted for 24h with no
+        report-day bound. ``tests/test_financials_calendar_failure_not_persisted.py`` pins
+        the flag on every call in those five services.
         """
         symbol = ticker.upper()
         try:

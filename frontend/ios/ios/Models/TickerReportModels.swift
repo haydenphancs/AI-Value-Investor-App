@@ -763,6 +763,10 @@ struct ReportCapitalAllocation {
     /// "$0" white when it didn't — a plain spend figure, distinct from the
     /// net-dilution verdict (which lives on Share Count).
     var newestBuybackText: String {
+        // No cash-flow filing on record for the newest quarter: its 0.0 is a placeholder,
+        // not "bought back nothing". Defensive — the server trims an unmeasured newest
+        // quarter today, so this fires only if that ever changes.
+        if dataPoints.last?.cashFlowReported == false { return "—" }
         guard let amt = dataPoints.last?.buybackAmount, amt.isFinite, amt > 0 else { return "$0" }
         // amt is $ millions. One rule with both SoC charts (SignalOfConfidenceFormat), so
         // the report header and the Financials tab print the same figure for a quarter;
@@ -771,7 +775,9 @@ struct ReportCapitalAllocation {
         return SignalOfConfidenceFormat.money(millions: amt)
     }
     var newestBuybackColor: Color {
-        (dataPoints.last?.buybackAmount ?? 0) > 0
+        // An unreported newest quarter reads a neutral "—", never the buyback green.
+        if dataPoints.last?.cashFlowReported == false { return AppColors.textPrimary }
+        return (dataPoints.last?.buybackAmount ?? 0) > 0
             ? AppColors.confidenceBuybacks   // green, matches the buyback bars
             : AppColors.textPrimary          // white "$0", like the dividend yield
     }

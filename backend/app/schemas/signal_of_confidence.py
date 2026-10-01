@@ -37,6 +37,19 @@ class SignalOfConfidenceDataPointSchema(BaseModel):
     shares_outstanding: Optional[float] = Field(
         None, description="Weighted-average shares outstanding (millions); None if unreported"
     )
+    # P19 (2026-10-01): False when the vendor has NO cash-flow row for this quarter (an
+    # interior or leading-edge history hole; the newest edge is trimmed instead). The point
+    # stays because its share count is real, but the four cash fields above are then 0.0
+    # PLACEHOLDERS — they cannot be null, shipped iOS decodes them as non-Optional `Double`
+    # in a DTO the report reuses — never a measured zero. Defaulted True so a payload built
+    # before the key existed (a cached report, an older backend) keeps its old meaning.
+    cash_flow_reported: bool = Field(
+        True,
+        description=(
+            "False when the vendor has no cash-flow row for this quarter; the four cash "
+            "fields are then 0.0 placeholders, non-Optional on shipped iOS, not measurements"
+        ),
+    )
 
 
 class SignalOfConfidenceSummarySchema(BaseModel):

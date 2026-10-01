@@ -17,6 +17,7 @@ Hermetic: FMP and Supabase are both stubbed.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 from typing import Any, Dict, List
 
@@ -46,6 +47,14 @@ def _forget_learned_closures():
     yield
     market_hours._OBSERVED_CLOSURES.clear()
     market_hours._OBSERVED_CLOSURES.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_failure_streak(monkeypatch):
+    """The ingest's failed-cycle streak is process-wide, and its count decides WARNING vs
+    ERROR — a failing test left behind would turn a later test's first failure into an
+    ERROR."""
+    monkeypatch.setattr(ps_module, "_eod_failed_cycles", 0)
 
 
 def _screener_row(symbol: str, price: float, **over: Any) -> Dict[str, Any]:
@@ -702,7 +711,7 @@ async def test_a_persistent_rate_limit_gives_up_rather_than_spinning(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_a_non_rate_limit_error_is_not_retried(monkeypatch):
+async def test_a_non_rate_limit_error_is_not_retried(monkeypatch, caplog):
     """Backoff is for a transient burst limit; a real error must fail fast."""
     calls = {"n": 0}
 
@@ -714,8 +723,173 @@ async def test_a_non_rate_limit_error_is_not_retried(monkeypatch):
     _install(monkeypatch, _Broken({}))
     monkeypatch.setattr(PriceService, "_upsert_closes",
                         staticmethod(lambda p: pytest.fail("must not write")))
-    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+    with caplog.at_level(logging.INFO, logger=ps_module.logger.name):
+        assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
     assert calls["n"] == 1, "a hard error must not be retried"
+    # An UNEXPECTED error stays loud on its first occurrence, with its stack — only the
+    # known-transient upstream failures are demoted to WARNING.
+    errors = [r for r in caplog.records
+              if r.levelno == logging.ERROR and "batch-eod failed" in r.getMessage()]
+    assert len(errors) == 1 and errors[0].exc_info, "an unexpected error must log ERROR + stack"
+
+
+# ── a transient upstream failure is a WARNING until it is sustained ────────────────
+#
+# Found in production 2026-09-30: FMP sent nothing for 30 s on every attempt of three
+# hourly cycles (`ReadTimeout` → `FMPUnavailableException`), then answered normally at the
+# next hour. Each cycle was a redundant refresh of a session already stored, nothing was
+# written, and the loop healed itself — but the failure logged at ERROR and paged. A
+# sustained run must still escalate before day changes go stale at 04:00 ET.
+
+def _records(caplog, level, needle):
+    return [r for r in caplog.records if r.levelno == level and needle in r.getMessage()]
+
+
+class _UnavailableOn(_SessionFMP):
+    """batch-eod raising `FMPUnavailableException` for the dates in `down`."""
+
+    def __init__(self, sessions, down):
+        super().__init__(sessions)
+        self.down = set(down)
+
+    async def get_batch_eod(self, trade_date):
+        from app.integrations.fmp import FMPUnavailableException
+
+        self.requested.append(trade_date)
+        if trade_date in self.down:
+            raise FMPUnavailableException(
+                "FMP request to batch-eod failed after 3 attempts: ReadTimeout"
+            )
+        return self.sessions.get(trade_date, [])
+
+
+def _two_sessions():
+    return {
+        "2026-09-04": _session("2026-09-04"),
+        "2026-09-03": _session("2026-09-03"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_transient_latest_failure_is_a_warning_and_writes_nothing(monkeypatch, caplog):
+    fake = _install(monkeypatch, _UnavailableOn(_two_sessions(), down={"2026-09-04"}))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail("must not write")))
+    with caplog.at_level(logging.INFO, logger=ps_module.logger.name):
+        assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+
+    assert fake.requested == ["2026-09-04"], (
+        "no in-process retry and no lookback past a FAILED fetch — the client already "
+        f"made its attempts; got {fake.requested}"
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "one transient failure that the hourly loop retries must not page"
+    )
+    assert _records(caplog, logging.WARNING, "NOT refreshed: latest batch-eod fetch for 2026-09-04")
+    assert not _records(caplog, logging.WARNING, "no batch-eod session found"), (
+        "a failed fetch is not an absent session — the old line said it was"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sustained_latest_failure_escalates_to_error(monkeypatch, caplog):
+    _install(monkeypatch, _UnavailableOn(_two_sessions(), down={"2026-09-04"}))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail("must not write")))
+    svc = PriceService()
+    levels = []
+    for _ in range(4):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=ps_module.logger.name):
+            assert await svc.refresh_close_snapshot("2026-09-04") == 0
+        line = [r for r in caplog.records if "NOT refreshed" in r.getMessage()]
+        assert len(line) == 1
+        levels.append(line[0].levelno)
+    assert levels == [logging.WARNING, logging.WARNING, logging.ERROR, logging.ERROR], (
+        "WARNING for the first two cycles, then ERROR from the third ON — `>=`, not `==`"
+    )
+
+
+@pytest.mark.parametrize("prior_error", ["unavailable", "rate_limit_exhausted"])
+@pytest.mark.asyncio
+async def test_a_sustained_prior_session_failure_escalates_to_error(
+    monkeypatch, caplog, prior_error,
+):
+    """🔴 The case a PER-CALL count never escalates: the latest fetch succeeds every cycle
+    and only the prior one fails. A streak reset by any successful call went 0 → 1 every
+    hour forever, so a prior-session outage — the exact shape of the 2026-09-07 incident —
+    would have logged WARNING until day changes went stale. Counted per CYCLE instead."""
+    from app.integrations.fmp import FMPRateLimitException, FMPUnavailableException
+
+    class _PriorDown(_SessionFMP):
+        async def get_batch_eod(self, trade_date):
+            self.requested.append(trade_date)
+            if trade_date == "2026-09-03":
+                if prior_error == "unavailable":
+                    raise FMPUnavailableException("FMP request to batch-eod failed: ReadTimeout")
+                raise FMPRateLimitException("burst limit")
+            return self.sessions.get(trade_date, [])
+
+    _install(monkeypatch, _PriorDown(_two_sessions()))
+    monkeypatch.setattr(ps_module, "_RATE_LIMIT_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail(
+                            "must not write — this would null previous_close on every row"
+                        )))
+    svc = PriceService()
+    levels = []
+    for _ in range(3):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=ps_module.logger.name):
+            assert await svc.refresh_close_snapshot("2026-09-04") == 0
+        line = [r for r in caplog.records if "NOT refreshed: prior" in r.getMessage()]
+        assert len(line) == 1, [r.getMessage() for r in caplog.records]
+        levels.append(line[0].levelno)
+        # The cycle line is the ONLY thing that may log ERROR: not the transient give-up
+        # (mutation-tested — a narrower match let the generic arm's ERROR through), and
+        # not the empty-prior-session abort, which a FAILED prior fetch must not reach.
+        other_errors = [r.getMessage() for r in caplog.records
+                        if r.levelno >= logging.ERROR and "NOT refreshed" not in r.getMessage()]
+        assert not other_errors, other_errors
+    assert levels == [logging.WARNING, logging.WARNING, logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_a_successful_write_resets_the_failure_streak(monkeypatch, caplog):
+    fake = _install(monkeypatch, _UnavailableOn(_two_sessions(), down={"2026-09-04"}))
+    captured: List[Dict[str, Any]] = []
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: captured.extend(p) or len(p)))
+    svc = PriceService()
+    for _ in range(2):
+        assert await svc.refresh_close_snapshot("2026-09-04") == 0
+    assert ps_module._eod_failed_cycles == 2
+
+    fake.down.clear()                                   # FMP recovers
+    assert await svc.refresh_close_snapshot("2026-09-04") == 2
+    assert ps_module._eod_failed_cycles == 0
+
+    fake.down.add("2026-09-04")                         # and fails again
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=ps_module.logger.name):
+        assert await svc.refresh_close_snapshot("2026-09-04") == 0
+    line = [r for r in caplog.records if "NOT refreshed" in r.getMessage()]
+    assert len(line) == 1 and line[0].levelno == logging.WARNING, (
+        "a new streak starts at 1 — without the reset this third failure would page"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_non_write_abort_does_not_reset_the_streak(monkeypatch):
+    """Only a successful WRITE ends a streak. A cycle that aborts for another reason (here:
+    no US session inside the lookback) neither proves FMP healthy for the ingest nor
+    refreshes the snapshot, so it must not hide a run of failed fetches."""
+    monkeypatch.setattr(ps_module, "_eod_failed_cycles", 2)
+    _install(monkeypatch, _SessionFMP({}))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail("must not write")))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+    assert ps_module._eod_failed_cycles == 2
 
 
 @pytest.mark.asyncio

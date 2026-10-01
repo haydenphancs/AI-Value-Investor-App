@@ -66,7 +66,11 @@ _DEGRADED_CACHE_TTL = 60
 #     path — the matched announcement (it used to show the filed GAAP EPS) and the
 #     just-reported quarter (it used to ship a "-90% miss"); a late release with an
 #     earlier still-unreported estimate quarter goes to a quarter only on evidence.
-_EARNINGS_PAYLOAD_VERSION = 3
+#   4 (2026-10-01, P16): a proven reschedule leftover no longer becomes
+#     next_earnings_date; the projection (or None) replaces it
+#     (`_reschedule_leftovers`). A v3 row keyed on the leftover served "Expected
+#     <leftover>" until that date passed.
+_EARNINGS_PAYLOAD_VERSION = 4
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -472,6 +476,96 @@ def _late_release_owner(
     if vote == "this" or later:
         return "this"
     return None
+
+
+# ── Reschedule leftovers (the next-date card) ──────────────────────
+# A company that reports EARLIER than first announced can leave the original date in the
+# feed as a pending row. The shared ``next_pending_earnings`` rule compares dates only, so
+# a LONE such row (no later pending row to prefer) came back as the next report: the card
+# read "Expected <leftover>" with the leftover's own timing, the AI chat context quoted it,
+# and the projection never ran. The pairing above already knows which fiscal period each
+# reported release belongs to, and it assumes no quarter releases within
+# ``_MIN_ANNOUNCE_LAG_DAYS`` of its own period end. So a pending row dated within
+# ``STALE_RESCHEDULE_DAYS`` after a release of period P, and before P's NEXT period end +
+# that lag, cannot be any later quarter's release: it is proven to be the leftover.
+# Without period evidence for the release (no income row, no synthesized quarter) nothing
+# is dropped — the shared rule still shows such a row, unconfirmed.
+
+
+def _reschedule_leftover_evidence(
+    ec_records: Any,
+    release_periods: Optional[Dict[str, str]],
+    period_end_keys: Any,
+    today_str: str,
+) -> Dict[str, Tuple[str, str, str]]:
+    """Pending rows (dated today or later) proven to be a reschedule's leftover →
+    ``(release date, its period end P, the next period end)`` of the reported row that
+    proves it. The next period end is the earliest known one (filed or estimated) more
+    than ``_COVERED_TOLERANCE_DAYS`` and at most ``_MAX_QUARTER_SPAN_DAYS`` after P, else
+    P + ``_IMPLIED_QUARTER_DAYS``. Input order and junk rows do not matter."""
+    if not isinstance(release_periods, dict) or not release_periods:
+        return {}
+    if not isinstance(ec_records, list):
+        return {}
+    today = _parse_day(today_str)
+    if today is None:
+        return {}
+    keys = period_end_keys if isinstance(period_end_keys, (list, tuple, set)) else []
+    period_ends = sorted({d for d in (_parse_day(k) for k in keys) if d is not None})
+
+    dated = [
+        (rec, dd) for rec, dd in (
+            (r, _parse_day(r.get("date"))) for r in ec_records if isinstance(r, dict)
+        )
+        if dd is not None
+    ]
+    # Each reported release whose fiscal period is known, nearest-first for the log.
+    releases: List[Tuple[datetime, datetime, datetime]] = []
+    for rec, dd in dated:
+        if not has_reported_actual(rec):
+            continue
+        pe = _parse_day(release_periods.get(_row_key(rec)))
+        if pe is None:
+            continue
+        nxt = next(
+            (
+                e for e in period_ends
+                if _COVERED_TOLERANCE_DAYS < (e - pe).days <= _MAX_QUARTER_SPAN_DAYS
+            ),
+            pe + timedelta(days=_IMPLIED_QUARTER_DAYS),
+        )
+        releases.append((dd, pe, nxt))
+    releases.sort(reverse=True)
+
+    out: Dict[str, Tuple[str, str, str]] = {}
+    for rec, when in dated:
+        key = _row_key(rec)
+        if when < today or key in out or has_reported_actual(rec):
+            continue
+        for rd, pe, nxt in releases:
+            if (
+                0 <= (when - rd).days <= STALE_RESCHEDULE_DAYS
+                and (when - nxt).days < _MIN_ANNOUNCE_LAG_DAYS
+            ):
+                out[key] = (
+                    rd.strftime("%Y-%m-%d"), pe.strftime("%Y-%m-%d"),
+                    nxt.strftime("%Y-%m-%d"),
+                )
+                break
+    return out
+
+
+def _reschedule_leftovers(
+    ec_records: Any,
+    release_periods: Optional[Dict[str, str]],
+    period_end_keys: Any,
+    today_str: str,
+) -> set:
+    """Dates of the pending rows proven to be a reschedule's leftover (see
+    ``_reschedule_leftover_evidence``). Empty without period evidence."""
+    return set(_reschedule_leftover_evidence(
+        ec_records, release_periods, period_end_keys, today_str,
+    ))
 
 
 def _claim_ambiguous_release(
@@ -1318,6 +1412,12 @@ class EarningsService:
             income_sorted, ec_sorted, est_by_date, ticker=ticker,
         )
         consumed = {_row_key(r) for r in assignments.values()}
+        # Reported release date → the fiscal period end it reported (Phase A2 adds its
+        # own below). Only the next-date card reads it: a pending row this evidence
+        # proves is a reschedule's leftover is not the next report (_reschedule_leftovers).
+        release_periods: Dict[str, str] = {
+            _row_key(r): pe for pe, r in assignments.items() if has_reported_actual(r)
+        }
         # This ticker's own release lag (period end → announcement), for projecting a
         # next date when the feed lists none.
         announce_lags: List[int] = []
@@ -1515,6 +1615,7 @@ class EarningsService:
                 if ann_dt is not None and pe_dt is not None:
                     announce_lags.append((ann_dt - pe_dt).days)
                 consumed.add(_row_key(rec))
+                release_periods[_row_key(rec)] = pe_key
                 used_fiscal_dates.add(pe_key)
                 self._append_price_point(ticker, label, pe_key, price_lookup, price_history)
 
@@ -1606,6 +1707,8 @@ class EarningsService:
             announce_lag_days=(
                 int(round(statistics.median(announce_lags))) if announce_lags else None
             ),
+            release_periods=release_periods,
+            ticker=ticker,
         )
 
         logger.info(
@@ -1664,6 +1767,9 @@ class EarningsService:
         today_str: str,
         reported_through: Optional[str] = None,
         announce_lag_days: Optional[int] = None,
+        *,
+        release_periods: Optional[Dict[str, str]] = None,
+        ticker: str = "",
     ) -> Optional[NextEarningsDateSchema]:
         """Find the next earnings date.
 
@@ -1674,6 +1780,16 @@ class EarningsService:
         is kept but shown unconfirmed). Uses the shared timing parser so the returned
         ``timing`` matches what the alert card shows for the same event.
 
+        Before that rule runs, a pending row PROVEN to be a reschedule's leftover is
+        dropped (``_reschedule_leftovers``): ``release_periods`` (reported release date →
+        the fiscal period end the pairing gave it) shows it sits within
+        ``STALE_RESCHEDULE_DAYS`` after that release and before the next period end +
+        ``_MIN_ANNOUNCE_LAG_DAYS``, so it is no later quarter's release. A lone leftover
+        used to come back as "Expected <leftover>" — and as the earnings_cache key — and
+        the projection below never ran. Only the unreported row is dropped (a reported
+        twin on the same date stays). Without ``release_periods`` (the default) nothing
+        is dropped: a suspect row with no period evidence keeps the shared rule.
+
         Fallback (no pending row in the feed): an analyst estimate is dated at the
         fiscal PERIOD END, not the release, so the projection is period end + this
         ticker's median announcement lag, unconfirmed. It used to return the bare period
@@ -1681,16 +1797,46 @@ class EarningsService:
         quarter ahead past the pending report. An ended-but-unreported quarter is
         therefore still a candidate, and only a STRICTLY future projection is returned:
         a past/today date would read stale on the card and invalidate the Supabase row
-        on every read. With no lag history there is no honest projection → None.
+        on every read. With no lag history there is no honest projection → None. After a
+        dropped leftover the projection is always later than it (next period end + a lag
+        of at least ``_MIN_ANNOUNCE_LAG_DAYS``), or None — never the leftover.
         """
-        pending = next_pending_earnings(ec_records, today_str)
+        ec_rows = ec_records
+        leftovers = _reschedule_leftover_evidence(
+            ec_records,
+            release_periods,
+            list(used_fiscal_dates or ())
+            + [_row_key(e) for e in estimates_sorted if isinstance(e, dict)],
+            today_str,
+        )
+        if leftovers:
+            for left, (released, period, next_period) in sorted(leftovers.items()):
+                logger.warning(
+                    "earnings %s step=next_date: pending row %s is a reschedule leftover — "
+                    "period %s already reported on %s (%sd before it), and no later "
+                    "quarter (next period end %s) releases before %sd past its end; "
+                    "dropped from the next date",
+                    ticker, left, period, released,
+                    (_parse_day(left) - _parse_day(released)).days,
+                    next_period, _MIN_ANNOUNCE_LAG_DAYS,
+                )
+            ec_rows = [
+                r for r in ec_records
+                if not (
+                    isinstance(r, dict)
+                    and not has_reported_actual(r)
+                    and _row_key(r) in leftovers
+                )
+            ]
+
+        pending = next_pending_earnings(ec_rows, today_str)
         if pending is not None:
-            # A lone pending row dated just after a reported one is returned rather than
-            # dropped, but it may be a reschedule's leftover for the quarter that already
-            # reported — so it is shown, never as "Confirmed".
+            # A lone pending row dated just after a reported one that the pairing could
+            # NOT prove a leftover (above) is returned rather than dropped, but it may
+            # still be one — so it is shown, never as "Confirmed".
             return NextEarningsDateSchema(
                 date=_row_key(pending),
-                is_confirmed=not within_reschedule_window(pending, ec_records),
+                is_confirmed=not within_reschedule_window(pending, ec_rows),
                 timing=timing_display(parse_fmp_timing(pending.get("time"))),
             )
 

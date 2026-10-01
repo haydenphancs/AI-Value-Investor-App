@@ -957,9 +957,23 @@ signal of confidence) returns a `degraded: [str]` list naming the upstream legs 
 — a 429 on one FMP leg, an earnings-feed outage, a benchmark lookup whose DB call failed
 (`sector_benchmark_lookup.BenchmarkLookupFailed`, so a failure is not mistaken for "no
 peer group"). A degraded build lives ~60 s in Tier 1 and is never written to its Supabase
-table; the iOS repository does not cache it; the report collector drops that section
+table, except a fund's: Health Check's `no_metrics` build and Signal of Confidence's empty
+build (no data points, `degraded == []`) are written marked `security_kind: "fund"` — only
+on a positive `isEtf`/`isFund` on the FMP profile fetched in the same build, with every
+statement leg a raw list — and the readers admit that shape only with the marker (Revenue
+Breakdown's placeholder card the same way; the Overview fundamentals bundle waives
+`key_metrics` for a fund; the profitability snapshot memoises a fund's empty build 5 min),
+so a fund no longer re-fans-out to FMP on every view. The iOS repository does not cache a
+degraded build; the report collector drops that section
 instead of freezing it into a report, and a collection or report missing a section is not
-written to `ticker_data_cache` or `ticker_report_cache` (it is still delivered). The
+written to `ticker_data_cache` or `ticker_report_cache` (it is still delivered). An
+earnings-calendar FAILURE (a 429 or 5xx, never an empty answer) in Health Check, Profit
+Power or Signal of Confidence adds nothing to `degraded` — the calendar only stamps
+`next_earnings_date`, the row's report-day invalidation key — but blocks that build's
+Supabase write (`_earnings_common.CALENDAR_UNKNOWN`), so a row is never stored without its
+key. A Signal of Confidence quarter whose cash-flow row is missing ships
+`cash_flow_reported: false` (its cash fields are 0.0 placeholders that iOS prints as "—");
+`cash_flow_row` in `degraded` now means only "the newest quarter's row has not landed". The
 earnings, growth, profit-power, health-check, revenue-breakdown and SoC rows carry a
 `payload_version` inside their JSON, bumped whenever a field or a FORMULA changes, so rows
 written by the previous code are rebuilt on first read. A plausibility REPAIR (the earnings

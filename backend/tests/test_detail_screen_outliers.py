@@ -841,7 +841,12 @@ def test_a_degraded_fundamentals_bundle_is_not_pinned_for_24h():
         l for l in inspect.getsource(M).splitlines() if not l.strip().startswith("#")
     )
     assert '"stock_historical": bool(data.get("stock_historical"))' in code
-    assert '"key_metrics": bool(data.get("key_metrics"))' in code
+    # key_metrics stays essential; the only waiver (2026-10-01) is a fund whose profile in
+    # THIS bundle says fund AND whose key-metrics leg answered a raw list.
+    assert 'key_metrics_ok = bool(data.get("key_metrics"))' in code
+    assert '"key_metrics": key_metrics_ok or fund_waived,' in code
+    assert 'and "key_metrics" in answered_lists' in code
+    assert 'and profile_is_fund(data.get("profile"))' in code
 
 
 def test_the_stream_meta_frame_carries_the_normalized_user_message():

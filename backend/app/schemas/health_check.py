@@ -36,6 +36,10 @@ class HealthCheckResponse(BaseModel):
     # Why this build is partial: the FMP legs that failed transiently ("ratios",
     # "key_metrics", "balance_sheet", "income", "profile"), "benchmarks" when the peer
     # lookup raised, "no_metrics" when nothing survived. A degraded build is served from
-    # the 5-minute memory tier only, never written to health_check_cache, so this always
-    # describes the payload actually served. Additive: shipped iOS builds ignore it.
+    # the 5-minute memory tier only and never written to health_check_cache, with ONE
+    # exception: a fund's build whose `degraded` is exactly ["no_metrics"] (a positive fund
+    # flag on the profile fetched in the same build, every statement leg a raw list) is
+    # written with a `security_kind: "fund"` marker; the reader strips the marker and admits
+    # only that exact shape. So this always describes the payload actually served.
+    # Additive: shipped iOS builds ignore it.
     degraded: List[str] = Field(default_factory=list)

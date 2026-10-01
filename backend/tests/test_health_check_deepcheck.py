@@ -401,8 +401,10 @@ async def test_z_status_uses_the_two_decimal_score(monkeypatch, raw, status):
     (_answers(), RuntimeError("supabase 520"), ["benchmarks"], False),
     # A permanent entitlement refusal is not transient: the build without it IS the answer.
     (_answers(ratios=FMPNotEntitledException("402")), None, [], True),
-    # The earnings calendar only stamps the cache's invalidation date.
-    (_answers(calendar=FMPRateLimitException("429")), None, [], True),
+    # The earnings calendar only stamps the cache's invalidation date, so a failed one is
+    # NOT degraded (every value is complete) — but it is NOT persisted either: the 24h row
+    # would carry no report-day bound (P20, 2026-10-01; this case used to pin `True`).
+    (_answers(calendar=FMPRateLimitException("429")), None, [], False),
     # Negative control.
     (_answers(), None, [], True),
 ])

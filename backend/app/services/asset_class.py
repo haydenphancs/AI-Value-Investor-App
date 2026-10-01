@@ -23,7 +23,7 @@ to be a stock. A stored value is honoured when it is meaningful; otherwise the
 symbol decides.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 # FMP's USD-suffixed commodity codes. Checked BEFORE the crypto heuristic below:
 # the generic `endswith("USD")` test would otherwise swallow GCUSD/CLUSD/... and
@@ -259,3 +259,18 @@ def canonical_stored_symbol(symbol: Optional[str], asset_type: Optional[str] = N
         if s in SYMBOL_TO_COINGECKO_ID:
             return f"{s}USD"
     return s
+
+
+def profile_is_fund(profile: Any) -> bool:
+    """True only when an FMP company profile POSITIVELY says the symbol is a fund.
+
+    The Financials services use this to tell a fund's genuinely empty statements (a
+    cacheable company-shape answer) from an operating company's empty response (a
+    possible outage the writer must refuse). So it trusts nothing but a real ``True``
+    on ``isEtf`` / ``isFund`` of a dict profile: a missing key, ``None``, the string
+    ``"true"``, ``1``, a list or an exception instance all read as NOT a fund, and the
+    caller keeps its refusal.
+    """
+    if not isinstance(profile, dict):
+        return False
+    return profile.get("isEtf") is True or profile.get("isFund") is True

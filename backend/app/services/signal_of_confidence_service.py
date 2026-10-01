@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.services._earnings_common import next_pending_earnings_date
+from app.services._earnings_common import (
+    CALENDAR_UNKNOWN,
+    EarningsStamp,
+    next_earnings_stamp,
+    stamp_is_persistable,
+)
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
@@ -34,6 +39,7 @@ from app.schemas.signal_of_confidence import (
     SignalOfConfidenceResponse,
     SignalOfConfidenceSummarySchema,
 )
+from app.services.asset_class import profile_is_fund
 from app.services.corporate_actions_service import (
     corporate_actions_source,
     window_for_range,
@@ -92,7 +98,20 @@ logger = logging.getLogger(__name__)
 #:     build `cash_flow` (blocking), not the ignorable `cash_flow_row`; a statement that
 #:     answered but matched no displayed quarter is `cash_flow_statement_missing`
 #:     (`cash_flow` stays for a leg that raised or answered a non-list).
-_PAYLOAD_VERSION = 9
+#: 10 → (2026-10-01) bumped for:
+#:     - P20: the earnings calendar is fetched with raise_errors=True and a failed fetch is
+#:       never persisted, so a NULL `next_earnings_date` now means "no pending
+#:       announcement"; an older row's NULL may be a swallowed calendar 429 (no report-day
+#:       bound for up to 24h).
+#:     - P19: each data point carries `cash_flow_reported`; a quarter with no cash-flow row
+#:       (an interior or leading-edge vendor gap) ships False with 0.0 placeholders and no
+#:       longer sets `cash_flow_row` (which now names only the trimmed newest edge), so the
+#:       build persists. A v9 row would decode the flag as True and show its $0 as reported.
+#:     - P19 fix pass: a summary with fewer than four known quarters in its window (an
+#:       interior gap, a late-starting cash-flow history, a company listed under a year) is
+#:       annualised (sum x 4/N) instead of read as a year — a v9 row of a young company
+#:       persisted 3.0% "High" for a 4.0% "Very High" repurchaser, and v10 refuses it.
+_PAYLOAD_VERSION = 10
 
 #: How many newest quarters the cash-flow statement may LAG the income statement by
 #: before the trim stops being "the row has not landed yet" (round-2 R47) and becomes a
@@ -107,6 +126,50 @@ _CF_STALE_MAX_DAYS = 200
 #: A build that `degraded` names is never persisted; it lives this long in memory — long
 #: enough to absorb a retry storm, short enough that the next refresh rebuilds it.
 _DEGRADED_CACHE_TTL = 60
+
+# ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────
+# A fund (VB, SPY …) that reaches this card has no income or cash-flow statement: FMP
+# answers both with a genuine 200 []. The build then has no data points, which the getter
+# refuses as a possible outage (a 429 on the income leg looks the same once coerced) — so
+# every view of a fund rebuilt it from FMP every 60 s. The ONE extra shape the cache admits
+# is that empty build, and only when a POSITIVE fund flag on the FMP profile fetched in the
+# SAME build says so (`asset_class.profile_is_fund`), both statement legs answered exactly
+# `[]` (checked on the RAW answers, before `_as_list` turns an error dict into []), and no
+# leg is degraded — never inferred from the empty answer itself. The row carries
+# `security_kind: "fund"`; the reader admits an empty-build row only with that marker. The
+# response is unchanged: iOS still sees `data_points == []`, `degraded == []`.
+# No payload_version bump: no existing row carries the marker, and an older reader serves a
+# marked row exactly as it serves the live build today.
+# `SignalOfConfidenceResponse.degraded` ("non-empty means never written") stays true because
+# this row's `degraded` is []; SYSTEM_DESIGN_GUIDELINES "A partial build is served, never
+# stored" must still name this empty build (tests/test_fund_shape_caching_soc_hc.py).
+_SECURITY_KIND_KEY = "security_kind"
+_SECURITY_KIND_FUND = "fund"
+
+
+def _is_empty_build(resp: Any) -> bool:
+    """True for the shape EVERY build with no data points has: no points, and
+    `_build_summary`'s empty branch, which always says the share count was not measured
+    (``share_count_change_known=False``). The getter never persists that shape unless the
+    build is fund-shaped, so the reader refuses it without the fund marker."""
+    summary = getattr(resp, "summary", None)
+    return (
+        not getattr(resp, "data_points", None)
+        and getattr(summary, "share_count_change_known", True) is False
+    )
+
+
+@dataclass
+class _SocBuild:
+    """`_build_signal_of_confidence_full`'s answer. ``fund_shape`` is True only for a
+    fund's empty build (see the block above): the raw profile positively says fund, the
+    raw quarterly income and cash-flow answers were both exactly ``[]``, the raw annual
+    ratios answer was a list, no data point survived and nothing is degraded."""
+
+    response: SignalOfConfidenceResponse
+    next_earnings: EarningsStamp
+    degraded: List[str]
+    fund_shape: bool = False
 
 #: Four cash-flow rows make a trailing twelve months only when they are CONSECUTIVE
 #: quarters. Each step between period ends must be a real quarter: at least 8 weeks (a
@@ -326,19 +389,35 @@ def _day(date_str: str) -> Optional[datetime]:
         return None
 
 
+def _cash_known(dp: Any, missing: Set[str]) -> bool:
+    """True when this point's cash was MEASURED: its label is not in the builder's
+    ``missing`` set AND the point does not say ``cash_flow_reported=False`` (P19). Both,
+    because a caller without the diagnostics (tests, older call sites) still holds the
+    point's own flag, and a 0.0 placeholder summed as a measured zero dropped a steady
+    repurchaser's T12M by a quarter."""
+    return (
+        getattr(dp, "period", None) not in missing
+        and getattr(dp, "cash_flow_reported", True) is not False
+    )
+
+
 @dataclass
 class _QuarterDiagnostics:
     """What `_build_quarters` could NOT measure, for the builder's degraded gate.
 
-    The points themselves stay non-Optional numbers (shipped iOS decodes them as
-    `Double`), so a gap has to travel beside them rather than inside them.
+    The points' cash fields stay non-Optional numbers (shipped iOS decodes them as
+    `Double`), so a gap travels beside them: here for the builder's gate, and on the
+    point itself as `cash_flow_reported=False` (P19) for every reader of the wire.
     """
 
     #: Labels of quarters with no cash-flow row for their period end: the newest edge,
-    #: TRIMMED from the series (round-2 R47), and interior gaps, which keep their point
-    #: (charted as $0 / 0.00% — a gap, not a measurement — and skipped by the summary).
+    #: TRIMMED from the series (round-2 R47), and interior / leading-edge gaps, which keep
+    #: their point (0.0 placeholders flagged `cash_flow_reported=False`, skipped by the
+    #: summary and the verdicts).
     missing_cash_flow_periods: List[str] = field(default_factory=list)
-    #: True when one of those is trimmed or among the newest `_TRAILING_POINTS`.
+    #: True only when the newest edge was TRIMMED (the row has not landed yet). An interior
+    #: or leading-edge gap never sets it (P19): it is a vendor history hole that may never
+    #: close, flagged on its point, and must not keep the build out of the 24h tier.
     missing_cash_flow_recent: bool = False
     #: Labels that returned capital but had no usable market cap (yield charted 0.00%).
     unpriced_periods: List[str] = field(default_factory=list)
@@ -347,19 +426,14 @@ class _QuarterDiagnostics:
     #: Period end (yyyy-MM-dd) of the oldest displayed quarter, or None.
     oldest_period_end: Optional[str] = None
     #: False when NO displayed quarter has a cash-flow row: the statement is missing, not
-    #: lagging, and every bar is an unknown charted as $0. The builder flags
+    #: lagging, and every point is an unknown (`cash_flow_reported=False`, 0.0
+    #: placeholders) with nothing measured to show. The builder flags
     #: `cash_flow_statement_missing` (a 200 with nothing usable, possibly permanent).
     cash_flow_rows_found: bool = True
     #: True when the trimmed newest edge is longer than `_MAX_CF_LAG_QUARTERS` or the kept
     #: series ends more than `_CF_STALE_MAX_DAYS` before the newest income quarter: the
     #: cash-flow feed is STALE, not lagging one filing. The builder flags `cash_flow`.
     cash_flow_stale: bool = False
-
-
-def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
-    """Next pending earnings date (yyyy-MM-dd) — includes TODAY's pending report and
-    skips a stale reschedule row. Shared rule: ``_earnings_common.next_pending_earnings``."""
-    return next_pending_earnings_date(ec_records)
 
 
 # ── Service ───────────────────────────────────────────────────────
@@ -398,7 +472,16 @@ class SignalOfConfidenceService:
 
         try:
             logger.info(f"Signal of confidence cache MISS for {ticker} — fetching from FMP")
-            result, next_earnings, degraded_slices = await self._build_signal_of_confidence(ticker)
+            build = await self._build_signal_of_confidence_full(ticker)
+            result, next_earnings, degraded_slices = (
+                build.response, build.next_earnings, build.degraded,
+            )
+            # A fund's empty build (see `_SocBuild`) is its permanent answer, not an
+            # outage. Re-checked against what is actually served, so a verdict can never
+            # carry a build that has points or reasons.
+            fund_shape = (
+                build.fund_shape and not degraded_slices and _is_empty_build(result)
+            )
 
             # NEVER persist a degraded build. A single FMP 429 on the quarterly income
             # call is turned into `[]` by `return_exceptions=True`, `_build_data_points`
@@ -416,7 +499,12 @@ class SignalOfConfidenceService:
             #
             # A degraded build also lives in memory for `_DEGRADED_CACHE_TTL` only, and
             # carries its reasons in `result.degraded` so the client skips its own cache.
-            soc_degraded = not getattr(result, "data_points", None) or bool(degraded_slices)
+            #
+            # The one exception is a fund's empty build (`fund_shape`): no data points is
+            # what a fund IS, so it is persisted (marked) and kept for the normal TTL.
+            soc_degraded = (
+                not getattr(result, "data_points", None) and not fund_shape
+            ) or bool(degraded_slices)
             if soc_degraded:
                 logger.warning(
                     "Signal of confidence NOT persisted for %s (degraded: %s) — held in "
@@ -425,14 +513,32 @@ class SignalOfConfidenceService:
                     ", ".join(degraded_slices) if degraded_slices else "no data points survived the build",
                     _DEGRADED_CACHE_TTL,
                 )
+            elif next_earnings is CALENDAR_UNKNOWN:
+                # Complete values (the calendar feeds none), but the 24h row would carry no
+                # report-day bound. Not degraded: the memory tier keeps its normal TTL.
+                if fund_shape:
+                    logger.info(
+                        "[fund-shape] ticker=%s step=%s", ticker, "signal_of_confidence_memory",
+                    )
+                logger.warning(
+                    "Signal of confidence NOT persisted for %s (earnings calendar "
+                    "unavailable — no report-day bound for the 24h row); served from memory",
+                    ticker,
+                )
             else:
-                # Persist to Supabase in background
+                if fund_shape:
+                    logger.info(
+                        "[fund-shape] ticker=%s step=%s", ticker, "signal_of_confidence_write",
+                    )
+                # Persist to Supabase in background. `fund_shape` is POSITIONAL:
+                # `run_in_executor` forwards no keywords.
                 asyncio.get_running_loop().run_in_executor(
                     None,
                     self._upsert_supabase_cache_safe,
                     ticker,
                     result,
                     next_earnings,
+                    fund_shape,
                 )
 
             _cache_set(cache_key, result, ttl=_DEGRADED_CACHE_TTL if soc_degraded else None)
@@ -524,12 +630,31 @@ class SignalOfConfidenceService:
                     "recomputing", ticker, json_data.get("degraded"),
                 )
                 return None
-            # Not a response field; strip it so the model never sees it. (Pydantic v2
+            security_kind = json_data.get(_SECURITY_KIND_KEY)
+            # Not response fields; strip them so the model never sees them. (Pydantic v2
             # ignores extras by default, but relying on that would break the moment
             # someone sets `extra="forbid"`.)
-            json_data = {k: v for k, v in json_data.items() if k != "payload_version"}
+            json_data = {
+                k: v for k, v in json_data.items()
+                if k not in ("payload_version", _SECURITY_KIND_KEY)
+            }
 
-            return SignalOfConfidenceResponse(**json_data)
+            resp = SignalOfConfidenceResponse(**json_data)
+            # The empty build (no data points) is persisted ONLY for a fund, and then
+            # marked. An unmarked one was written by hand or by a bug and could be the
+            # fabricated "returns nothing to shareholders" verdict — refuse it.
+            if _is_empty_build(resp):
+                if security_kind != _SECURITY_KIND_FUND:
+                    logger.warning(
+                        "Supabase cache row for %s is an EMPTY build (no data points) "
+                        "without the fund marker (security_kind=%r) — refusing it and "
+                        "recomputing", ticker, security_kind,
+                    )
+                    return None
+                logger.info(
+                    "[fund-shape] ticker=%s step=%s", ticker, "signal_of_confidence_read",
+                )
+            return resp
 
         except Exception as e:
             logger.warning(f"Supabase cache check failed for {ticker}: {e}")
@@ -539,15 +664,40 @@ class SignalOfConfidenceService:
         self,
         ticker: str,
         result: SignalOfConfidenceResponse,
-        next_earnings: Optional[str],
+        next_earnings: EarningsStamp,
+        fund_shape: bool = False,
     ) -> None:
-        """Upsert to Supabase cache — safe wrapper that logs and swallows errors."""
+        """Upsert to Supabase cache — safe wrapper that logs and swallows errors.
+
+        ``fund_shape`` is the getter's verdict (`_SocBuild.fund_shape`); it stamps the
+        `security_kind: "fund"` marker the reader needs to admit an empty build — and only
+        onto a result that really is one."""
+        if not stamp_is_persistable(next_earnings):
+            # Belt-and-braces: the getter already refuses a CALENDAR_UNKNOWN build.
+            logger.warning(
+                "Signal of confidence upsert REFUSED for %s — next_earnings_date %r is not "
+                "a date (an unread earnings calendar is never persisted)",
+                ticker, next_earnings,
+            )
+            return
         try:
+            response_json: Dict[str, Any] = {
+                **result.model_dump(), "payload_version": _PAYLOAD_VERSION,
+            }
+            if fund_shape:
+                if _is_empty_build(result) and not result.degraded:
+                    response_json[_SECURITY_KIND_KEY] = _SECURITY_KIND_FUND
+                else:
+                    logger.warning(
+                        "[fund-shape-refused] ticker=%s step=signal_of_confidence_write: a fund "
+                        "verdict came with a build that is not the empty fund shape (%d data "
+                        "point(s), degraded=%r) — written WITHOUT the fund marker",
+                        ticker, len(result.data_points or []), result.degraded,
+                    )
             self.supabase.table("signal_of_confidence_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": {**result.model_dump(),
-                                      "payload_version": _PAYLOAD_VERSION},
+                    "response_json": response_json,
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -560,13 +710,24 @@ class SignalOfConfidenceService:
 
     async def _build_signal_of_confidence(
         self, ticker: str
-    ) -> Tuple[SignalOfConfidenceResponse, Optional[str], List[str]]:
+    ) -> Tuple[SignalOfConfidenceResponse, EarningsStamp, List[str]]:
         """Fetch FMP data, compute per-quarter shareholder yield, build response.
 
         Returns ``(response, next_earnings_date, degraded)`` — ``degraded`` names the
         upstream slices that RAISED and were substituted with an empty default; the
         caller refuses to persist such a build (see `get_signal_of_confidence`).
+        ``next_earnings_date`` is CALENDAR_UNKNOWN when the calendar fetch failed: the
+        response is complete (not degraded), but the getter never persists it.
+
+        A thin adapter over `_build_signal_of_confidence_full` (which also carries the
+        fund verdict the getter needs); the 3-tuple is kept because callers unpack it.
         """
+        build = await self._build_signal_of_confidence_full(ticker)
+        return build.response, build.next_earnings, build.degraded
+
+    async def _build_signal_of_confidence_full(self, ticker: str) -> _SocBuild:
+        """The build behind `_build_signal_of_confidence`, plus its fund verdict
+        (`_SocBuild.fund_shape`)."""
         degraded: List[str] = []
 
         # Phase 1: parallel FMP fetch (6 calls). historical-market-cap covers
@@ -594,7 +755,9 @@ class SignalOfConfidenceService:
             self.fmp.get_financial_ratios(
                 ticker, period="annual", limit=_ANNUAL_DIVIDEND_YEARS
             ),
-            self.fmp.get_earning_calendar_full(ticker),
+            # raise_errors=True: the default swallows a 429 / 5xx / non-list body into
+            # [] ("no announcements"), and the row was persisted with no report-day bound.
+            self.fmp.get_earning_calendar_full(ticker, raise_errors=True),
             self.fmp.get_historical_market_cap(
                 ticker, from_date=mcap_from, to_date=mcap_to, limit=2000
             ),
@@ -612,6 +775,19 @@ class SignalOfConfidenceService:
             self.fmp.get_company_profile(ticker),
             return_exceptions=True,
         )
+
+        # Fund-shape inputs (`_SocBuild.fund_shape`), read from the RAW answers before any
+        # substitution or `_as_list` coercion: a leg that raised, or answered an error dict
+        # (silently coerced to [] below), is a failure — never a fund's empty answer. The
+        # profile must be a dict that POSITIVELY says fund. The annual ratios still feed a
+        # fund's card (`dividend_info`'s per-share history), so that leg must have answered
+        # a list too (rows allowed): an error dict there is coerced to [] with no reason.
+        raw_profile_is_fund = profile_is_fund(profile_raw)
+        raw_income_answered_empty = isinstance(quarterly_income, list) and not quarterly_income
+        raw_cashflow_answered_empty = (
+            isinstance(quarterly_cashflow, list) and not quarterly_cashflow
+        )
+        raw_ratios_answered_list = isinstance(annual_ratios, list)
 
         # Handle failures gracefully
         if isinstance(quarterly_cashflow, Exception):
@@ -634,9 +810,13 @@ class SignalOfConfidenceService:
             )
             annual_ratios = []
             degraded.append("annual_ratios")
-        if isinstance(ec_raw, Exception):
-            logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
-            ec_raw = []
+        # The calendar is not a slice (it feeds no served value): its only use is the
+        # cache row's next-earnings stamp. A failed fetch is CALENDAR_UNKNOWN, never
+        # `degraded`; the getter serves that build from memory and never persists it.
+        next_earnings = next_earnings_stamp(
+            ec_raw, ticker=ticker, service="signal_of_confidence"
+        )
+        ec_raw = []
         if isinstance(ex_dividend_dates, Exception):
             logger.warning(
                 "Ex-dividend date derivation failed for %s (%s: %s) — the date row is "
@@ -686,7 +866,6 @@ class SignalOfConfidenceService:
         quarterly_cashflow = _as_list(quarterly_cashflow)
         quarterly_income = _as_list(quarterly_income)
         annual_ratios = _as_list(annual_ratios)
-        ec_raw = _as_list(ec_raw)
         hist_mcap_raw = _as_list(hist_mcap_raw)
 
         # Phase 2: build per-quarter data points
@@ -759,11 +938,14 @@ class SignalOfConfidenceService:
             and "cash_flow_statement_missing" not in degraded
         ):
             degraded.append("cash_flow_statement_missing")
-        # A cash-flow row that has not landed yet (or never will) for one of the newest
-        # four quarters is a hole in the T12M summary (the newest edge is trimmed, an
-        # interior gap is skipped). Skip this when the whole cash-flow leg failed, is
-        # stale, or matched nothing — "cash_flow" / "cash_flow_statement_missing" already
-        # say so.
+        # `cash_flow_row` names ONLY a trimmed newest edge: the newest quarter's cash-flow
+        # row has not landed yet, so the build stays out of the 24h tier until it does. An
+        # interior or leading-edge gap emits NO reason (P19, 2026-10-01): it is a vendor
+        # history hole that may never close, so it must not keep the ticker out of the
+        # cache for up to four quarters; its point ships `cash_flow_reported=False` and is
+        # skipped by the summary and the verdicts. Skip this when the whole cash-flow leg
+        # failed, is stale, or matched nothing — "cash_flow" /
+        # "cash_flow_statement_missing" already say so.
         if diag.missing_cash_flow_recent and not (
             {"cash_flow", "cash_flow_statement_missing"} & set(degraded)
         ):
@@ -774,7 +956,7 @@ class SignalOfConfidenceService:
         fallback_x4 = set(diag.ttm_fallback_periods)
         summary = self._build_summary(
             data_points, current_market_cap, missing_cash_flow_periods=missing_cf,
-            ttm_fallback_periods=fallback_x4,
+            ttm_fallback_periods=fallback_x4, ticker=ticker,
         )
 
         # A spin-off inside the window makes every pre-spin historical cap too small
@@ -816,8 +998,7 @@ class SignalOfConfidenceService:
             ticker=ticker,
         )
 
-        # Phase 5: extract next earnings date for cache invalidation
-        next_earnings = _find_next_earnings_date(ec_raw)
+        # Phase 5: `next_earnings` was stamped from the calendar slot right after the gather.
 
         response = SignalOfConfidenceResponse(
             symbol=ticker,
@@ -827,7 +1008,32 @@ class SignalOfConfidenceService:
             degraded=list(degraded),
         )
 
-        return response, next_earnings, degraded
+        fund_shape = bool(
+            raw_profile_is_fund
+            and raw_income_answered_empty
+            and raw_cashflow_answered_empty
+            and raw_ratios_answered_list
+            and not data_points
+            and not degraded
+        )
+        if raw_profile_is_fund and not data_points and not fund_shape:
+            # Diagnosable from logs alone: the profile says fund, but the empty build is
+            # NOT admitted — a leg failed or answered something other than [].
+            logger.info(
+                "[fund-shape-refused] ticker=%s step=fund_check: the profile says fund but the "
+                "empty build is not admitted (income answered []: %s, cash flow answered "
+                "[]: %s, annual ratios answered a list: %s, degraded=%r) — it stays "
+                "unpersisted",
+                ticker, raw_income_answered_empty, raw_cashflow_answered_empty,
+                raw_ratios_answered_list, degraded,
+            )
+
+        return _SocBuild(
+            response=response,
+            next_earnings=next_earnings,
+            degraded=degraded,
+            fund_shape=fund_shape,
+        )
 
     async def _spinoff_in_window(self, ticker: str, oldest_period_end: str) -> Optional[bool]:
         """TRI-STATE: True when an adjustment the classifier could not name as a split (a
@@ -1099,8 +1305,9 @@ class SignalOfConfidenceService:
         # reader agrees: the series ends at the last quarter that HAS a cash-flow row, and
         # the window still holds eight quarters when the history has them. The labels stay
         # in `missing_cash_flow_periods` (logged; `cash_flow_row` keeps the build out of
-        # the 24h tier until the row lands). Interior gaps keep their point — the share
-        # line must stay continuous — and are skipped by the summary instead.
+        # the 24h tier until the row lands). Interior and leading-edge gaps keep their
+        # point — the share line must stay continuous — flagged `cash_flow_reported=False`
+        # and skipped by the summary and the verdicts; they set no reason (P19).
         # Only while an older quarter HAS a row: with none at all there is no edge to trim
         # to (the statement is missing, not lagging) and the builder flags
         # `cash_flow_statement_missing`. A trim longer than one filing is a stale feed
@@ -1184,7 +1391,7 @@ class SignalOfConfidenceService:
         interior_missing: List[str] = []
         fell_back_to_current = 0
         missing_line_for_payer = 0
-        for position, (date, label, rec) in enumerate(recent):
+        for date, label, rec in recent:
             # Shares outstanding from income statement (weighted average)
             # 0.0 is a SENTINEL here, not a share count — no listed company has zero
             # weighted-average shares. FMP does return `weightedAverageShsOut: 0` on real
@@ -1209,16 +1416,17 @@ class SignalOfConfidenceService:
                     # rather than dropping the quarter silently.
                     missing_line_for_payer += 1
             else:
-                # An INTERIOR quarter with no cash-flow row (the newest edge was trimmed
-                # above), or every quarter when the statement returned nothing usable.
-                # The share count is real, so the point stays; its cash is UNKNOWN —
-                # recorded so the summary skips it and the builder refuses to persist a
-                # T12M with a hole in it.
+                # An INTERIOR or LEADING-EDGE quarter with no cash-flow row (the newest
+                # edge was trimmed above), or every quarter when the statement returned
+                # nothing usable. The share count is real, so the point stays; its cash is
+                # UNKNOWN — the point ships `cash_flow_reported=False` with 0.0
+                # placeholders, and the label is recorded so the summary and the verdicts
+                # skip it. It sets NO degraded reason (P19): a vendor history hole may never
+                # close, and `cash_flow_row` (which kept the build out of the 24h tier) now
+                # names only the trimmed newest edge.
                 dividend, buyback = None, 0.0
                 diag.missing_cash_flow_periods.append(label)
                 interior_missing.append(f"{label} {date}")
-                if position >= len(recent) - _TRAILING_POINTS:
-                    diag.missing_cash_flow_recent = True
 
             dividend_amount = round(dividend / 1_000_000, 2) if dividend else 0.0
             buyback_amount = round(buyback / 1_000_000, 2) if buyback else 0.0
@@ -1271,6 +1479,7 @@ class SignalOfConfidenceService:
                 dividend_amount=dividend_amount,
                 buyback_amount=buyback_amount,
                 shares_outstanding=shares_outstanding,
+                cash_flow_reported=has_cash_flow,
             ))
 
         if fell_back_to_current:
@@ -1289,9 +1498,10 @@ class SignalOfConfidenceService:
             )
         if interior_missing:
             logger.warning(
-                "[soc-cashflow-row-missing] %s: no cash-flow row for %d/%d displayed "
-                "quarter(s) (%s)%s — their dividends and buybacks are unknown, charted 0 "
-                "and left out of the T12M summary",
+                "[soc-cashflow-row-missing] ticker=%s step=cash_flow: no cash-flow row for "
+                "%d/%d displayed quarter(s) (%s)%s — their dividends and buybacks are "
+                "unknown: flagged cash_flow_reported=false (rendered '—'), left out of the "
+                "T12M and the verdicts",
                 tag, len(interior_missing), len(results), ", ".join(interior_missing),
                 "" if cf_by_date else " (the cash-flow statement returned no rows at all)",
             )
@@ -1382,15 +1592,28 @@ class SignalOfConfidenceService:
         current_market_cap: Optional[float],
         missing_cash_flow_periods: Optional[Set[str]] = None,
         ttm_fallback_periods: Optional[Set[str]] = None,
+        ticker: Optional[str] = None,
     ) -> SignalOfConfidenceSummarySchema:
         """Build T12M summary from the most recent 4 quarters that HAVE a cash-flow row.
 
-        A quarter in ``missing_cash_flow_periods`` carries $0 because its cash is
-        unknown, not because nothing was returned; summing it dropped a steady
-        repurchaser's T12M by a quarter (4.0% "Very High" → 3.0% "High"). It is skipped.
+        A quarter in ``missing_cash_flow_periods`` — or one whose point says
+        ``cash_flow_reported=False`` (P19) — carries $0 because its cash is unknown, not
+        because nothing was returned; summing it dropped a steady repurchaser's T12M by a
+        quarter (4.0% "Very High" → 3.0% "High"). It is skipped.
+
+        FEWER than four known quarters (an interior gap inside the newest four, a
+        cash-flow history that starts late, a company listed under a year) are
+        ANNUALISED — their sum x 4/N over the current cap — never summed as if they were a
+        year: three steady $1B quarters on a $100B cap read 3.0% "High" for a 4.0% "Very
+        High" repurchaser, one read 1.0% "Moderate" (fix pass, 2026-10-01). Since P19 such
+        a build persists (a vendor hole sets no reason), so the estimate is logged under
+        [soc-ttm-partial]. Today's cap, not each point's own: it is the denominator of the
+        four-quarter sum too, and a point-in-time yield from two years back would carry the
+        whole re-rating since.
 
         ``ttm_fallback_periods`` (labels whose yield is the single quarter x4) matters only
         on the no-current-cap fallback below, which reads a point's own yield.
+        ``ticker`` only tags the log line.
         """
 
         if not data_points:
@@ -1406,7 +1629,7 @@ class SignalOfConfidenceService:
             )
 
         missing = missing_cash_flow_periods or set()
-        cash_points = [dp for dp in data_points if dp.period not in missing]
+        cash_points = [dp for dp in data_points if _cash_known(dp, missing)]
         # Last 4 measured quarters (or fewer if not enough data)
         last_4 = cash_points[-_TRAILING_POINTS:]
 
@@ -1418,9 +1641,25 @@ class SignalOfConfidenceService:
         if not last_4:
             t12m_div_yield = t12m_bb_yield = 0.0
         elif current_market_cap and current_market_cap > 0:
+            # Fewer than four known quarters are annualised (x 4/N), never read as a year.
+            # `x * 4 / N` is exact for N == 4 (a power-of-two scale), so the full-window
+            # answer is bit-for-bit unchanged.
+            known = len(last_4)
+            if known < _TRAILING_POINTS:
+                logger.warning(
+                    "[soc-ttm-partial] ticker=%s step=summary known=%d: only %d quarter(s) "
+                    "with a cash-flow row in the trailing window (%s of %d displayed) — the "
+                    "T12M is their sum x %d/%d over the current cap, an annualised estimate, "
+                    "not a reported year",
+                    ticker or "?", known, known,
+                    ", ".join(dp.period for dp in last_4), len(data_points),
+                    _TRAILING_POINTS, known,
+                )
+            annual_div_amount = total_div_amount * _TRAILING_POINTS / known
+            annual_bb_amount = total_bb_amount * _TRAILING_POINTS / known
             # Convert millions back to raw for division
-            t12m_div_yield = round(total_div_amount * 1_000_000 / current_market_cap * 100, 2)
-            t12m_bb_yield = round(total_bb_amount * 1_000_000 / current_market_cap * 100, 2)
+            t12m_div_yield = round(annual_div_amount * 1_000_000 / current_market_cap * 100, 2)
+            t12m_bb_yield = round(annual_bb_amount * 1_000_000 / current_market_cap * 100, 2)
         elif last_4[-1].period not in (ttm_fallback_periods or set()):
             # Fallback: the newest measured point. Its yields are ALREADY a trailing twelve
             # months (see `_build_quarters`) — averaging four of them, as the x4 points once
@@ -1618,7 +1857,8 @@ class SignalOfConfidenceService:
         """``(newest, baseline)`` — the two sides of the relative dividend verdict.
 
         ``newest`` is the newest point whose cash is KNOWN (a quarter with no cash-flow row
-        is skipped); ``baseline`` the known points at least `_TRAILING_POINTS` older than
+        — in ``missing_cash_flow_periods`` or flagged ``cash_flow_reported=False`` — is
+        skipped); ``baseline`` the known points at least `_TRAILING_POINTS` older than
         it, so their trailing windows never overlap the newest one — minus any x4-fallback
         point (round-2 R48): a lumpy single quarter x4 is not a trailing twelve months, and
         an annual payer's x4 Q2 (4x its yield) and Q3 (0%) dragged a flat payer's baseline
@@ -1629,9 +1869,7 @@ class SignalOfConfidenceService:
         """
         missing = missing_cash_flow_periods or set()
         fallback = ttm_fallback_periods or set()
-        points = [
-            dp for dp in (data_points or []) if getattr(dp, "period", None) not in missing
-        ]
+        points = [dp for dp in (data_points or []) if _cash_known(dp, missing)]
         if not points:
             return None, []
         baseline = [
@@ -1657,8 +1895,8 @@ class SignalOfConfidenceService:
     ) -> Optional[DividendInfoSchema]:
         """Build DividendInfo for a company that actually pays a dividend.
 
-        ``missing_cash_flow_periods`` (labels whose cash is unknown) are left out of every
-        average below. ``ttm_fallback_periods`` (labels whose yield is the single quarter
+        ``missing_cash_flow_periods`` (labels whose cash is unknown), and any point flagged
+        ``cash_flow_reported=False`` (P19), are left out of every average below. ``ttm_fallback_periods`` (labels whose yield is the single quarter
         x4) are left out of the verdict's baseline, and a fallback NEWEST point refuses the
         relative verdict (round-2 R48). ``spinoff_in_window`` refuses it too: before a spin-off
         FMP's historical cap is back-computed from the spin-adjusted prices, so it is too
@@ -1747,9 +1985,7 @@ class SignalOfConfidenceService:
         # DTO, but it is a trailing average over whatever history we hold, and
         # `avg_yield_window` now says how much ("8Q"), so the card stops claiming "5Y".
         missing = missing_cash_flow_periods or set()
-        points = [
-            dp for dp in (data_points or []) if getattr(dp, "period", None) not in missing
-        ]
+        points = [dp for dp in (data_points or []) if _cash_known(dp, missing)]
         five_year_avg_yield = 0.0
         avg_yield_window: Optional[str] = None
         if len(points) >= 4:

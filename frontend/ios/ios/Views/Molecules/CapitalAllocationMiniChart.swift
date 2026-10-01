@@ -120,6 +120,10 @@ struct CapitalAllocationMiniChart: View {
 
     // MARK: - Marks
 
+    /// Every point draws its bars — a quarter with no cash-flow filing on record
+    /// (`cashFlowReported == false`) included, as a zero-height bar. Never filter these:
+    /// the tap hit-test, the x ticks and the popup all key on the period's column, and a
+    /// skipped period would drop its category from the axis. The "—" lives in the popup.
     @ChartContentBuilder
     private var barMarks: some ChartContent {
         ForEach(dataPoints) { dp in
@@ -218,10 +222,16 @@ struct CapitalAllocationMiniChart: View {
                 .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textPrimary)
             HStack(spacing: AppSpacing.sm) {
+                // "—" for both cash metrics when no cash-flow filing is on record for the
+                // quarter: its 0.0 values are placeholders, not a measured "paid nothing".
                 popupMetric(AppColors.confidenceDividends,
-                            viewType == .yield ? String(format: "%.2f%%", dp.dividendYield) : formatMoney(dp.dividendAmount))
+                            dp.cashFlowReported
+                                ? (viewType == .yield ? String(format: "%.2f%%", dp.dividendYield) : formatMoney(dp.dividendAmount))
+                                : "—")
                 popupMetric(AppColors.confidenceBuybacks,
-                            viewType == .yield ? String(format: "%.2f%%", dp.buybackYield) : formatMoney(dp.buybackAmount))
+                            dp.cashFlowReported
+                                ? (viewType == .yield ? String(format: "%.2f%%", dp.buybackYield) : formatMoney(dp.buybackAmount))
+                                : "—")
                 // "—" rather than "0M": the filing did not report it.
                 popupMetric(AppColors.confidenceSharesOutstanding,
                             dp.sharesOutstanding.map(formatShares) ?? "—")
@@ -370,6 +380,12 @@ struct CapitalAllocationMiniChart: View {
                 selectedPeriod: $selected
             )
             SignalOfConfidenceLegendView()
+            // Interior cash-flow gap: tap Q4 '24 — the popup reads "—" for both cash
+            // metrics, never "0.00%" / "$0M".
+            CapitalAllocationMiniChart(
+                dataPoints: SignalOfConfidenceSectionData.sampleInteriorCashFlowGap.dataPoints,
+                selectedPeriod: $selected
+            )
         }
         .padding()
     }

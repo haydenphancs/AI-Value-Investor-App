@@ -164,7 +164,13 @@ struct SignalOfConfidenceChartView: View {
                     .lineStyle(StrokeStyle(lineWidth: 0.5))
             }
 
-            // Dividend bars
+            // Dividend bars. EVERY point draws, including a quarter with no cash-flow
+            // filing on record (`cashFlowReported == false`, 0.0 placeholders → a
+            // zero-height bar, exactly how a measured zero looks). Never filter these
+            // ForEach loops: with no `.chartXScale(domain:)`, Swift Charts orders the
+            // category axis by first appearance, so a skipped period would move its column
+            // behind the shares line and every index-positioned label row below would
+            // drift off its bar. The "—" lives in the label rows instead.
             ForEach(dataPoints) { dataPoint in
                 BarMark(
                     x: .value("Period", dataPoint.period),
@@ -406,9 +412,13 @@ struct SignalOfConfidenceChartView: View {
             let columnWidth = chartWidth / CGFloat(dataPoints.count)
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
-                Text(viewType == .yield
-                     ? String(format: "%.2f%%", dataPoint.dividendYield)
-                     : formatLargeNumber(dataPoint.dividendAmount))
+                // "—" rather than "0.00%" / "$0M": no cash-flow filing is on record for the
+                // quarter, so its 0.0 is a placeholder, not a measured "paid nothing".
+                Text(dataPoint.cashFlowReported
+                     ? (viewType == .yield
+                        ? String(format: "%.2f%%", dataPoint.dividendYield)
+                        : formatLargeNumber(dataPoint.dividendAmount))
+                     : "—")
                     .font(.system(size: 11, weight: .semibold))
                     // Text-safe sibling of the series token: a readable number needs 4.5
                     // and `confidenceDividends` is a 3:1 graphic (4.27:1 on the dark card,
@@ -431,9 +441,12 @@ struct SignalOfConfidenceChartView: View {
             let columnWidth = chartWidth / CGFloat(dataPoints.count)
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
-                Text(viewType == .yield
-                     ? String(format: "%.2f%%", dataPoint.buybackYield)
-                     : formatLargeNumber(dataPoint.buybackAmount))
+                // "—" for a quarter with no cash-flow filing on record (see dividendLabels).
+                Text(dataPoint.cashFlowReported
+                     ? (viewType == .yield
+                        ? String(format: "%.2f%%", dataPoint.buybackYield)
+                        : formatLargeNumber(dataPoint.buybackAmount))
+                     : "—")
                     .font(.system(size: 11, weight: .semibold))
                     // Text-safe sibling of `confidenceBuybacks` (3.30:1 light card).
                     .foregroundColor(AppColors.gain)
@@ -561,6 +574,22 @@ struct SignalOfConfidenceChartView: View {
                 .foregroundColor(AppColors.textPrimary)
             SignalOfConfidenceChartView(
                 dataPoints: SignalOfConfidenceChartPreviewData.newestSharesMissing,
+                viewType: .capital
+            )
+
+            // An INTERIOR quarter (Q4 '24) has no cash-flow filing on record: its bars
+            // are zero-height in place, its dividend and buyback cells read "—" (never
+            // "0.00%" / "$0M"), and every column stays under its own labels.
+            Text("Interior cash-flow gap — Yield")
+                .foregroundColor(AppColors.textPrimary)
+            SignalOfConfidenceChartView(
+                dataPoints: SignalOfConfidenceSectionData.sampleInteriorCashFlowGap.dataPoints,
+                viewType: .yield
+            )
+            Text("Interior cash-flow gap — Capital")
+                .foregroundColor(AppColors.textPrimary)
+            SignalOfConfidenceChartView(
+                dataPoints: SignalOfConfidenceSectionData.sampleInteriorCashFlowGap.dataPoints,
                 viewType: .capital
             )
         }

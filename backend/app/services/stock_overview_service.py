@@ -57,7 +57,7 @@ from app.utils.market_hours import (
     session_trading_date,
 )
 from app.integrations.fmp_entitlements import is_blocked_symbol
-from app.services.asset_class import uses_coingecko_price
+from app.services.asset_class import profile_is_fund, uses_coingecko_price
 from app.services.price_service import price_source
 from app.services.market_movers_service import get_market_movers_service
 # The close-cycle boundary every close-aligned cache in the app shares (weekday 18:00 ET).
@@ -84,6 +84,20 @@ _SP_HIST_KEY_PREFIX = "spy_hist_full:"
 # Stamped into the fundamentals bundle: the settled-session date its two histories were
 # cut at. See `_bundle_is_current`.
 _SETTLED_THROUGH_KEY = "history_settled_through"
+# INTERNAL key `_fetch_fundamentals` adds and `_get_fundamentals` pops before anything is
+# cached or returned: the names of the list slices whose RAW upstream answer was a list
+# (checked before `_list` turns a failure or a non-list body into []). It is what tells a
+# fund's genuine 200 [] key-metrics answer from a failed leg (see the fund waiver in
+# `_get_fundamentals`). A missing key (a replaced `_fetch_fundamentals`) means no waiver.
+_ANSWERED_LISTS_KEY = "_answered_lists"
+# The LIVE price fields of `/stable/profile`. Never kept in either fundamentals tier
+# (price_service invariant 2: never persist a live price). `_build_full_response` falls
+# back to the profile's price / change / % when the quote leg fails (`_get_volatile`
+# folds that failure to `{}`), so a cached copy of them was served up to 24 h later as
+# a live header price with `change_known=True`. Stripped, a cache hit with a failed
+# quote reaches the "no usable price" FMPUnavailableException instead. Only the request
+# that fetched the bundle (profile seconds old) still falls back to them.
+_LIVE_PROFILE_PRICE_FIELDS = ("price", "change", "changePercentage", "changesPercentage")
 # The six sector medians the degraded Price card scores against (`build_price_snapshot`).
 _VALUATION_BENCH_METRICS = (
     "pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield",
@@ -169,6 +183,29 @@ def _bundle_is_current(
     if cached_at < cycle_start:
         return False
     return bundle.get(_SETTLED_THROUGH_KEY) == cycle_start.astimezone(ET).date().isoformat()
+
+
+def _without_live_price(bundle: Any) -> Any:
+    """The fundamentals bundle as it may be CACHED: its `profile` without the live price
+    fields (`_LIVE_PROFILE_PRICE_FIELDS`).
+
+    A shallow copy with a new `profile` dict when there is something to drop — the
+    caller's bundle is never mutated, so the request that fetched it still returns the
+    full profile. A bundle with nothing to drop (or a non-dict bundle / profile) comes
+    back as the SAME object.
+    """
+    if not isinstance(bundle, dict):
+        return bundle
+    profile = bundle.get("profile")
+    if not isinstance(profile, dict) or not any(
+        k in profile for k in _LIVE_PROFILE_PRICE_FIELDS
+    ):
+        return bundle
+    stripped = dict(bundle)
+    stripped["profile"] = {
+        k: v for k, v in profile.items() if k not in _LIVE_PROFILE_PRICE_FIELDS
+    }
+    return stripped
 
 
 def _fundamentals_mem_get(key: str) -> Optional[Dict[str, Any]]:
@@ -750,12 +787,22 @@ class StockOverviewService:
         # /overview/core "fast paint" the detail screen fires alongside it.
         db_data = await asyncio.to_thread(self._check_fundamentals_db, ticker)
         if db_data is not None:
+            # Stripped on READ too: a row written before the live price fields were kept
+            # out of the tier still carries them until its 24 h ceiling / close cycle.
+            db_data = _without_live_price(db_data)
             _cache_set(mem_key, db_data)
             return db_data
 
         # Miss: fetch from FMP + short-interest integration
         logger.info(f"Fundamentals MISS for {ticker} — fetching from APIs")
         data = await self._fetch_fundamentals(ticker)
+        # Popped FIRST, so the internal set never reaches either cache tier or the caller.
+        answered_raw = data.pop(_ANSWERED_LISTS_KEY, None) if isinstance(data, dict) else None
+        answered_lists = (
+            frozenset(answered_raw)
+            if isinstance(answered_raw, (set, frozenset, list, tuple))
+            else frozenset()
+        )
 
         # Only cache a *usable* result. A transient FMP failure degrades the
         # profile call to {} (see _fetch_fundamentals' _safe/_list defaults); if
@@ -771,12 +818,26 @@ class StockOverviewService:
         # performance periods and the benchmark comparison on the Overview tab. Require
         # the slices the screen actually needs, not just the one that names the company.
         profile_ok = isinstance(data.get("profile"), dict) and bool(data["profile"])
+        # Fund waiver (2026-10-01): a fund (VB, SPY …) has no key metrics — FMP answers a
+        # genuine 200 [] — so the gate below refused its bundle on every build and the
+        # overview re-ran all ~15 FMP calls (a full daily history among them) on each view.
+        # Waived ONLY when the profile in THIS bundle positively says fund AND the
+        # key-metrics leg answered a raw list (`_ANSWERED_LISTS_KEY`): a leg that raised or
+        # answered an error dict is still a failure. Profile and history stay required.
+        key_metrics_ok = bool(data.get("key_metrics"))
+        fund_waived = (
+            not key_metrics_ok
+            and "key_metrics" in answered_lists
+            and profile_is_fund(data.get("profile"))
+        )
         essential = {
             "profile": profile_ok,
             "stock_historical": bool(data.get("stock_historical")),
-            "key_metrics": bool(data.get("key_metrics")),
+            "key_metrics": key_metrics_ok or fund_waived,
         }
         missing = [k for k, ok in essential.items() if not ok]
+        if fund_waived and not missing:
+            logger.info("[fund-shape] ticker=%s step=%s", ticker, "overview_fundamentals")
         if missing:
             logger.warning(
                 "Fundamentals NOT cached for %s — degraded slices: %s. Serving this "
@@ -785,11 +846,16 @@ class StockOverviewService:
                 ticker, ", ".join(missing),
             )
         else:
-            _cache_set(mem_key, data)
+            # Both tiers get the copy WITHOUT the profile's live price fields; this request
+            # still returns `data` whole (its profile price is seconds old). A later hit
+            # whose quote fails then raises "no usable price" rather than serving this
+            # price as live (`_LIVE_PROFILE_PRICE_FIELDS`).
+            cacheable = _without_live_price(data)
+            _cache_set(mem_key, cacheable)
             # The heaviest of the three: `response_json` carries `stock_historical` AND
             # `spy_historical`, up to 5,000 rows each, so this is a multi-MB serialize +
             # HTTP POST. Off the loop.
-            await asyncio.to_thread(self._upsert_fundamentals_db, ticker, data)
+            await asyncio.to_thread(self._upsert_fundamentals_db, ticker, cacheable)
 
         return data
 
@@ -871,6 +937,17 @@ class StockOverviewService:
 
         stock_hist = settled_bars(_parse_historical(_safe(12)), settled_through)
 
+        # Which list slices' RAW answers were lists (not an exception, not an error dict) —
+        # `_list` hides the difference. Internal: `_get_fundamentals` pops it.
+        list_slices = {
+            "key_metrics": 1, "fin_ratios": 2, "income_annual": 3, "balance_annual": 4,
+            "cashflow_annual": 5, "analyst_est": 6, "income_quarterly": 9,
+            "sector_perf": 11, "industry_perf": 13,
+        }
+        answered_lists = frozenset(
+            name for name, i in list_slices.items() if isinstance(results[i], list)
+        )
+
         return {
             "profile": _safe(0),
             "key_metrics": _list(1),
@@ -888,6 +965,7 @@ class StockOverviewService:
             "spy_historical": spy_hist,
             "industry_perf": _list(13),
             _SETTLED_THROUGH_KEY: settled_through,
+            _ANSWERED_LISTS_KEY: answered_lists,
         }
 
     def _check_fundamentals_db(self, ticker: str) -> Optional[Dict[str, Any]]:
@@ -1458,14 +1536,14 @@ class StockOverviewService:
         # is internally consistent on screen (35.90 × 8.73 = $313.40, the price
         # shown directly above it).
         #
-        # ⚠️ ONE QUALIFICATION on "this is the live one": `price` at :889 is
-        # `quote.price` OR `profile.price`, and `profile` comes from
-        # `company_profile_cache` (24h). `_get_volatile` degrades `quote` to {}
-        # on any exception — so when the live quote FAILS, this P/E is computed
-        # from a price up to 24 hours old, and the header price above it is the
-        # same stale value, so it still LOOKS internally consistent. That is a
-        # separate defect from the one documented here; do not read this comment
-        # as a claim that the quote always succeeded.
+        # ⚠️ ONE QUALIFICATION on "this is the live one": `price` in
+        # `_build_full_response` is `quote.price` OR `profile.price`, and `profile`
+        # is the fundamentals bundle's. `_get_volatile` degrades `quote` to {} on
+        # any exception. The bundle's two cache tiers (`stock_fundamentals_cache`,
+        # 24h) no longer keep the profile's price fields (`_without_live_price`),
+        # so on a cache hit a failed quote raises "no usable price" instead of
+        # computing this P/E from a price up to 24 hours old. Only the request
+        # that fetched the bundle falls back to its seconds-old profile price.
         #
         # ── P/E (TTM): price / EPS ──
         #

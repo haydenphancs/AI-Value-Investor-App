@@ -130,19 +130,24 @@ def test_card_shows_a_lone_suspect_row_unconfirmed():
     assert nd.is_confirmed is False
 
 
-@pytest.mark.parametrize(
-    "module, name",
-    [
-        ("app.services.health_check_service", "_find_next_earnings_date"),
-        ("app.services.signal_of_confidence_service", "_find_next_earnings_date"),
-        ("app.services.profit_power_service", "_find_next_earnings_date_simple"),
-        ("app.services.revenue_breakdown_service", "_find_next_earnings_date_simple"),
-    ],
-)
-def test_the_four_financials_services_key_on_the_real_next_report(module, name):
-    """Their Supabase rows are invalidated on this date: it must be the real release."""
-    import importlib
+def _financials_cache_keys():
+    """What each of the four services stamps as its row's report-day invalidation key.
+    Health Check, Profit Power and Signal of Confidence stamp through
+    `_earnings_common.next_earnings_stamp` (P20, 2026-10-01); Revenue Breakdown still
+    through its own wrapper."""
+    import functools
 
-    fn = getattr(importlib.import_module(module), name)
+    from app.services._earnings_common import next_earnings_stamp
+    from app.services.revenue_breakdown_service import _find_next_earnings_date_simple
+
+    return [
+        pytest.param(functools.partial(next_earnings_stamp, ticker="T", service=s), id=s)
+        for s in ("health_check", "signal_of_confidence", "profit_power")
+    ] + [pytest.param(_find_next_earnings_date_simple, id="revenue_breakdown")]
+
+
+@pytest.mark.parametrize("fn", _financials_cache_keys())
+def test_the_four_financials_services_key_on_the_real_next_report(fn):
+    """Their Supabase rows are invalidated on this date: it must be the real release."""
     rows = [{"date": _d(-10), "epsActual": 0.2}, {"date": _d(34)}, {"date": _d(125)}]
     assert fn(rows) == _d(34)

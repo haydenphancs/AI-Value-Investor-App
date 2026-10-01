@@ -543,9 +543,11 @@ _FROZEN_FINANCIALS_IGNORABLE: Dict[str, frozenset] = {
     # A newest quarter whose cash-flow row has not landed yet is a data LAG, not a failed
     # fetch (T12M is computed from the quarters that have one); every other SoC reason is
     # a failed leg (cash flow, income, ratios, profile, market cap) that skews the yields.
-    # The lagging quarter's "$0" cash is trimmed from the report's capital-allocation
-    # block instead (`_build_capital_allocation_block`), so it is never shown as a measured
-    # "Buybacks: $0".
+    # `cash_flow_row` names ONLY that lagging newest edge, and the SoC service itself
+    # trims it from the series, so it never reaches the report as a "Buybacks: $0". An
+    # interior or leading-edge gap emits no reason at all (P19, 2026-10-01): its point
+    # is kept for the share line and ships `cash_flow_reported=False` (0.0 placeholders,
+    # forwarded by `model_dump()` in `_build_capital_allocation_block`), never a measured $0.
     "signal_of_confidence": frozenset({"cash_flow_row"}),
     # Refusing a breakdown whose SEGMENT feed failed sends the Revenue Engine down the
     # failed-fetch path (rebuild from raw segments) instead of freezing the income-only
@@ -3779,11 +3781,13 @@ def _trim_unmeasured_cash_tail(soc: SignalOfConfidenceResponse) -> Tuple[List[An
     """(kept points, trimmed points) — now always (all points, []).
 
     The Signal of Confidence service itself trims a newest quarter whose cash-flow row has
-    not landed (`signal_of_confidence_service._build_data_points`, the `unmeasured_tail`),
-    so every point that reaches the report has a cash-flow row: a newest all-zero point is
-    a MEASURED zero (a company that paused buybacks), never an unknown. Trimming it again
-    here dropped real quarters whenever `cash_flow_row` was set (an INTERIOR gap also sets
-    it). Kept as a seam so `_build_capital_allocation_block` stays unchanged.
+    not landed (`signal_of_confidence_service._build_quarters`, the `unmeasured_tail`), so
+    the NEWEST point that reaches the report always has a cash-flow row: a newest all-zero
+    point is a MEASURED zero (a company that paused buybacks), never an unknown. An
+    interior or leading-edge quarter with no row keeps its point (the share line) flagged
+    `cash_flow_reported=False`, and that flag rides through `model_dump()` — it is not
+    trimmed here. Trimming the tail again here dropped real quarters. Kept as a seam so
+    `_build_capital_allocation_block` stays unchanged.
     """
     return list(soc.data_points or []), []
 

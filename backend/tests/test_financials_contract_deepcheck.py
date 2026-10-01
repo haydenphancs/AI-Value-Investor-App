@@ -48,6 +48,7 @@ from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import (
     DividendInfoSchema,
+    SignalOfConfidenceDataPointSchema,
     SignalOfConfidenceResponse,
     SignalOfConfidenceSummarySchema,
 )
@@ -281,6 +282,9 @@ _NEW_FIELDS = [
     (SignalOfConfidenceSummarySchema, "share_count_change_known",
      "SignalOfConfidenceSummaryDTO", "shareCountChangeKnown", "Bool"),
     (DividendInfoSchema, "avg_yield_window", "DividendInfoDTO", "avgYieldWindow", "String"),
+    # P19: False = no cash-flow row for the quarter (0.0 placeholders, not a measured $0).
+    (SignalOfConfidenceDataPointSchema, "cash_flow_reported", "SignalOfConfidenceDataPointDTO",
+     "cashFlowReported", "Bool"),
 ]
 
 

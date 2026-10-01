@@ -557,10 +557,16 @@ async def assemble_api(companies: Sequence[Mapping[str, Any]], stakes: Sequence[
     })
     cls = svc_mod.TrillionClubService
     saved = (svc_mod.get_supabase, settings.TRILLION_CLUB_ENABLED, cls._group_cache,
-             cls._detail_cache, cls._invalidated_at)
+             cls._detail_cache, cls._invalidated_at, svc_mod._now_utc, svc_mod._today_et)
     svc_mod.get_supabase = lambda: db
     settings.TRILLION_CLUB_ENABLED = True
     cls._group_cache, cls._detail_cache, cls._invalidated_at = {}, {}, 0.0
+    # The service judges staleness (membership > 7 days, a member's own evidence) on its
+    # OWN clock. The rows above are stamped at `now`, so the service must read the same
+    # instant — on the wall clock a preview run for a past `now` (the test's frozen
+    # Thursday) hid the whole section once a week had passed.
+    svc_mod._now_utc = lambda: now.astimezone(timezone.utc)
+    svc_mod._today_et = lambda: now.astimezone(ET).date()
     try:
         service = cls()
         group = await service.get_group()
@@ -580,7 +586,7 @@ async def assemble_api(companies: Sequence[Mapping[str, Any]], stakes: Sequence[
         # Every global touched above goes back exactly as it was (the preview is one
         # process, but this function is also driven from a test).
         (svc_mod.get_supabase, settings.TRILLION_CLUB_ENABLED, cls._group_cache,
-         cls._detail_cache, cls._invalidated_at) = saved
+         cls._detail_cache, cls._invalidated_at, svc_mod._now_utc, svc_mod._today_et) = saved
     return {"group": group.model_dump(mode="json"), "details": details,
             "note": "whales rows are not available offline, so the Berkshire card has no whale_id"}
 

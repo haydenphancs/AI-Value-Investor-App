@@ -335,8 +335,10 @@ def test_a_majority_stale_batch_warns_once_per_newest_date(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger=ps.logger.name):
         PriceService._report_stale_snapshots({"AAPL": "2026-09-11", "MSFT": "2026-09-11", "NVDA": "2026-09-10"}, 4)
         PriceService._report_stale_snapshots({"AAPL": "2026-09-11", "MSFT": "2026-09-11"}, 3)   # same newest date: silent
-    warn = [r for r in caplog.records if r.levelno == logging.WARNING and "STALE" in r.getMessage()]
-    assert len(warn) == 1 and "3 of 4" in warn[0].getMessage() and "2026-09-11" in warn[0].getMessage()
+    # ERROR, not WARNING: this is the moment users see "unknown" day changes, and the
+    # only alarm that survives a restart (the ingest's failure streak does not).
+    err = [r for r in caplog.records if r.levelno == logging.ERROR and "STALE" in r.getMessage()]
+    assert len(err) == 1 and "3 of 4" in err[0].getMessage() and "2026-09-11" in err[0].getMessage()
     PriceService._stale_snapshot_dates.clear()
 
 

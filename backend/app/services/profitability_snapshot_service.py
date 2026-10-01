@@ -22,6 +22,7 @@ from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.services.asset_class import profile_is_fund
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
@@ -96,6 +97,32 @@ def _degraded_of(key: str, value: Any) -> Optional[List[str]]:
     if entry is None or entry[0] is not value:
         return None
     return list(entry[1])
+
+
+# ── Fund-shape verdict of a build (2026-10-01) ────────────────────
+# A fund (VB, SPY …) has no margins, ROE or ROA, so its build measures nothing and takes the
+# all-absent branch of the gate below — which, for an operating company, deliberately keeps
+# the build out of BOTH tiers so the next request retries a possible outage. For a fund that
+# is the permanent answer, and every overview / chat / collector call re-ran three FMP legs.
+# `_compute_with_status` notes here, by identity (the `_degraded_by_key` pattern; its
+# 2-tuple return is unpacked and replaced by tests), that the build's OWN profile leg
+# positively said fund and that the key-metrics-TTM and ratios-TTM legs answered raw lists.
+# The gate pops it. Only a True verdict is noted; a missing entry means "not a fund".
+_fund_shape_by_key: Dict[str, Any] = {}
+
+
+def _note_fund_shape(key: str, value: Any) -> None:
+    _fund_shape_by_key.pop(key, None)
+    _fund_shape_by_key[key] = value
+    if len(_fund_shape_by_key) > _CACHE_MAX_ENTRIES:
+        for _old in list(_fund_shape_by_key.keys())[: len(_fund_shape_by_key) - _CACHE_MAX_ENTRIES]:
+            _fund_shape_by_key.pop(_old, None)
+
+
+def _pop_fund_shape(key: str, value: Any) -> bool:
+    """True only when the build noted for ``key`` is exactly ``value`` (identity)."""
+    noted = _fund_shape_by_key.pop(key, None)
+    return noted is not None and noted is value
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -317,6 +344,9 @@ class ProfitabilitySnapshotService:
         try:
             logger.info(f"Profitability snapshot cache MISS for {ticker} — computing")
             result, degraded = await self._compute_with_status(ticker)
+            # Read (and drop) the build's fund verdict at once: a replaced
+            # `_compute_with_status` notes nothing, which reads as "not a fund".
+            fund_shape = _pop_fund_shape(cache_key, result)
 
             # ── Degradation gate ────────────────────────────────────────────────
             # `_profitability_score(None, ...)` returns the sentinel 3 ("neutral if no
@@ -333,6 +363,18 @@ class ProfitabilitySnapshotService:
                 m for m in (result.metrics or [])
                 if getattr(m, "value", None) not in (None, "", "—")
             ]
+            if not _measured and fund_shape and not degraded:
+                # A fund: nothing to measure is its permanent answer, not an outage. Keep it
+                # in MEMORY for the normal 5 min so a burst of views makes no FMP call — but
+                # never in Supabase (a Tier-2 hit notes [], which would freeze the 3/5
+                # sentinel into a report), and its status still says `no_values`.
+                logger.info("[fund-shape] ticker=%s step=%s", ticker, "profitability_snapshot")
+                _cache_set(cache_key, result)
+                _note_degraded(cache_key, result, [*degraded, "no_values"])
+                if not future.done():
+                    future.set_result(result)
+                return result
+
             if not _measured:
                 logger.warning(
                     "Profitability snapshot NOT cached for %s — every metric is absent, "
@@ -679,6 +721,15 @@ class ProfitabilitySnapshotService:
             full_report_available=True,
             weighted_score=round(weighted, 3),
         )
+        # Fund verdict for the gate (see `_fund_shape_by_key`): the RAW profile leg is a dict
+        # that positively says fund, and both TTM metric legs answered raw lists — a leg that
+        # raised or answered an error dict is a failure, never a fund's empty answer.
+        if (
+            profile_is_fund(results[2])
+            and isinstance(results[1], list)
+            and isinstance(results[3], list)
+        ):
+            _note_fund_shape(f"prof_snapshot:{ticker}", snapshot)
         return snapshot, degraded
 
 

@@ -387,7 +387,11 @@ def _cached(version):
 
 
 def test_round_two_rows_are_evicted():
-    assert es._EARNINGS_PAYLOAD_VERSION == 3
+    # 4 since 2026-10-01 (P16: a proven reschedule leftover is no longer the next date —
+    # tests/test_earnings_p16_reschedule_leftover.py). Rows of every older version,
+    # including round 3's, are rebuilt on their next read.
+    assert es._EARNINGS_PAYLOAD_VERSION == 4
     assert _svc(None, _FakeSupabase([_cached(2)]))._check_supabase_cache("AVGO") is None
-    hit = _svc(None, _FakeSupabase([_cached(3)]))._check_supabase_cache("AVGO")
+    assert _svc(None, _FakeSupabase([_cached(3)]))._check_supabase_cache("AVGO") is None
+    hit = _svc(None, _FakeSupabase([_cached(4)]))._check_supabase_cache("AVGO")
     assert hit is not None and hit.symbol == "AVGO"

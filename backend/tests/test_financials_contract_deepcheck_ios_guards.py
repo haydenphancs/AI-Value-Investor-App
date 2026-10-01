@@ -260,7 +260,10 @@ def test_an_empty_health_check_or_signal_of_confidence_is_no_card():
     # The SCORED count (R15): a lone not-meaningful row is "[0/0] Mix" too.
     assert "self.healthCheckData = model.totalCount == 0 ? nil : model" in hc
     soc = _block(vm, "private func fetchSignalOfConfidence(_ ticker: String, generation: Int) async -> FinancialsFailure? {")
-    assert "self.signalOfConfidenceData = dto.dataPoints.isEmpty ? nil : dto.toDisplayModel()" in soc
+    # Still no card for an empty payload; since P19 (2026-10-01) also none when the
+    # cash-flow FETCH failed (pinned in full by test_soc_p19_interior_cash_gap_ios.py).
+    assert ("self.signalOfConfidenceData = (dto.dataPoints.isEmpty || dto.cashFlowLegFailed)"
+            " ? nil : dto.toDisplayModel()") in soc
 
 
 # ── #91: the Phase-2 flags always settle ──────────────────────────────────────

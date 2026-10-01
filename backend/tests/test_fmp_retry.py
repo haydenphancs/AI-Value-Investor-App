@@ -153,3 +153,68 @@ def test_non_retryable_4xx_is_not_retried():
 def test_classifier_maps_fmp_unavailable():
     code, _status = classify_exception(FMPUnavailableException("boom"))
     assert code == ErrorCode.FMP_UNAVAILABLE
+
+
+# ── batch-eod's own read timeout ─────────────────────────────────────────────────
+#
+# Found in production 2026-09-30: the whole-market `batch-eod` dump (~12 MB, ~10 s
+# nominal) got no first byte inside the shared 30 s read timeout on every attempt of three
+# hourly cycles, then answered normally an hour later. It now waits 120 s per read, and
+# ONLY it: a real AsyncClient over MockTransport proves the override reaches the request
+# AND that the client default is untouched for the next one.
+
+def _mock_transport_client(handler):
+    c = FMPClient()
+    c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=c.timeout)
+    return c
+
+
+def test_batch_eod_gets_a_long_read_timeout_and_nothing_else_does():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.extensions["timeout"]))
+        if request.url.path.endswith("/batch-eod"):
+            return httpx.Response(200, json=[{"symbol": "AAPL", "close": 1.0}])
+        return httpx.Response(200, json=[{"symbol": "AAPL"}])
+
+    async def _run():
+        c = _mock_transport_client(handler)
+        try:
+            rows = await c.get_batch_eod("2026-09-29")
+            await c.get_company_profile("AAPL")
+        finally:
+            await c._client.aclose()
+        return c, rows
+
+    c, rows = asyncio.run(_run())
+    assert rows == [{"symbol": "AAPL", "close": 1.0}]
+    (eod_path, eod_timeout), (profile_path, profile_timeout) = seen
+    assert eod_path.endswith("/batch-eod") and profile_path.endswith("/profile")
+    assert eod_timeout["read"] == 120.0
+    # connect / write / pool stay on the global setting — only the read wait is longer
+    for key in ("connect", "write", "pool"):
+        assert eod_timeout[key] == c.timeout
+    # the override must not leak into the client: the next request is back on the default
+    assert profile_timeout == {"connect": c.timeout, "read": c.timeout,
+                               "write": c.timeout, "pool": c.timeout}
+    assert None not in eod_timeout.values(), "timeout=None would DISABLE the timeout in httpx"
+
+
+def test_a_batch_eod_read_timeout_still_degrades_after_three_attempts():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadTimeout("no first byte", request=request)
+
+    async def _run():
+        c = _mock_transport_client(handler)
+        try:
+            await c.get_batch_eod("2026-09-29")
+        finally:
+            await c._client.aclose()
+
+    with pytest.raises(FMPUnavailableException, match="after 3 attempts: ReadTimeout"):
+        asyncio.run(_run())
+    assert calls["n"] == 3

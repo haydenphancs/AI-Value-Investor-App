@@ -72,6 +72,18 @@ struct SignalOfConfidenceDataPoint: Identifiable {
     /// made the summary read a flat -100% share-count change (a spectacular fake
     /// buyback). Same reasoning, and the same fix, as ProfitPower's `Double?` margins.
     let sharesOutstanding: Double?
+    /// False when no cash-flow figures are on hand for this quarter: the vendor has no
+    /// cash-flow filing on record for it (an interior or leading-edge hole in the history)
+    /// or — for the whole series — the cash-flow fetch failed (`degraded` carries
+    /// "cash_flow"), so nothing user-facing may name the cause. The four cash fields above
+    /// are then 0.0 PLACEHOLDERS — non-Optional on the wire, because shipped builds decode them as
+    /// `Double` — not a measured "paid nothing": every text rendering of them prints "—".
+    /// The bars still draw (a zero-height bar is what a measured zero already looks like),
+    /// so every column stays aligned with its index-positioned label rows.
+    ///
+    /// The LAST stored property, defaulted, so every memberwise init and preview compiles
+    /// unchanged; the DTO maps a missing key (older backend, cached payload) to true.
+    var cashFlowReported: Bool = true
 
     /// Total shareholder yield (dividend + buyback)
     var totalYield: Double {
@@ -370,6 +382,12 @@ struct SignalOfConfidenceSectionData {
         let maxShares = (shares.max() ?? 1) * 1.05
         return (minShares, maxShares)
     }
+
+    /// True when at least one quarter has no cash-flow figures (`cashFlowReported == false`),
+    /// so its dividend and buyback cells read "—". Drives the card's one-line key for that dash.
+    var hasUnreportedCashFlow: Bool {
+        dataPoints.contains { !$0.cashFlowReported }
+    }
 }
 
 // MARK: - Sample Data
@@ -426,6 +444,29 @@ extension SignalOfConfidenceSectionData {
         ),
         dividendInfo: .sample
     )
+
+    /// Preview-only: the sample series with an INTERIOR cash-flow gap — Q4 '24 has no
+    /// cash-flow filing on record, so it carries the server's 0.0 placeholders with
+    /// `cashFlowReported == false`. Sample shapes, not market data.
+    static var sampleInteriorCashFlowGap: SignalOfConfidenceSectionData {
+        let points = sampleData.dataPoints.map { point -> SignalOfConfidenceDataPoint in
+            guard point.period == "Q4 '24" else { return point }
+            return SignalOfConfidenceDataPoint(
+                period: point.period,
+                dividendYield: 0,
+                buybackYield: 0,
+                dividendAmount: 0,
+                buybackAmount: 0,
+                sharesOutstanding: point.sharesOutstanding,
+                cashFlowReported: false
+            )
+        }
+        return SignalOfConfidenceSectionData(
+            dataPoints: points,
+            summary: sampleData.summary,
+            dividendInfo: sampleData.dividendInfo
+        )
+    }
 }
 
 // MARK: - Signal of Confidence Info Item

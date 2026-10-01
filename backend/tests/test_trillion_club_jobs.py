@@ -1959,6 +1959,29 @@ async def test_preview_reproduces_the_m1_acceptance_figures_from_the_fixtures(tm
     from app.services import trillion_club_service as svc
     assert settings.TRILLION_CLUB_ENABLED is False
     assert svc.get_supabase is database.get_supabase
+    assert svc._now_utc.__name__ == "_now_utc" and svc._today_et.__name__ == "_today_et"
+
+
+@pytest.mark.asyncio
+async def test_preview_api_reads_the_preview_clock_not_the_wall_clock(tmp_path, capsys, monkeypatch):
+    """The assembly stamps membership at the preview's `now`; the service must judge its
+    7-day staleness against that same instant. On the wall clock this preview (pinned to
+    2026-09-24) went empty from 2026-10-01, and so would any preview of a past day."""
+    from app.services import trillion_club_service as svc
+
+    class _WallClockAYearOn(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (NOW + timedelta(days=400)).astimezone(tz) if tz else NOW + timedelta(days=400)
+
+    monkeypatch.setattr(svc, "datetime", _WallClockAYearOn)
+    code = await P.run_preview(_preview_args(tmp_path), fmp=FixtureFMP(), actions=FakeActions(),
+                               secret=None, now=NOW)
+    capsys.readouterr()
+    assert code == 0
+    payload = json.loads((tmp_path / "preview.json").read_text())
+    slugs = {c["slug"] for c in payload["api"]["group"]["companies"]}
+    assert {"nvidia", "alphabet", "amazon", "amd"} <= slugs, "the wall clock hid the section"
 
 
 @pytest.mark.asyncio

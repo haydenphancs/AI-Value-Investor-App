@@ -910,8 +910,15 @@ class TickerDetailViewModel: ObservableObject {
             // No quarter at all means the summary is the server's all-zero placeholder —
             // "0.0% yield, share count unchanged", a fabricated returns-nothing verdict on
             // the card and in Cay AI's context. No card instead.
-            self.signalOfConfidenceData = dto.dataPoints.isEmpty ? nil : dto.toDisplayModel()
+            // A FAILED cash-flow fetch ("cash_flow" in degraded) ships every quarter with
+            // `cash_flow_reported: false`: a card of dashes over an all-zero "Low" summary.
+            // That is an outage, not a fact about the company — no card, and a Try Again.
+            self.signalOfConfidenceData = (dto.dataPoints.isEmpty || dto.cashFlowLegFailed) ? nil : dto.toDisplayModel()
             print("✅ TickerDetailVM: Got signal of confidence for \(ticker) — \(dto.dataPoints.count) quarters")
+            if dto.cashFlowLegFailed {
+                print("⚠️ TickerDetailVM: Signal of confidence for \(ticker) lost its cash-flow leg (\(dto.degraded ?? [])) — offering a retry")
+                return FinancialsFailure(section: "Signal of Confidence", message: nil)
+            }
             // No quarter BECAUSE a data leg failed (income, cash flow): an outage, so the
             // tab's notice names it with a Try Again instead of the card silently vanishing.
             let failedLegs = Self.failedDataLegs(dto.degraded)

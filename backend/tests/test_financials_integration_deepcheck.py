@@ -138,19 +138,23 @@ def test_a_non_finite_actual_counts_as_not_reported():
     assert next_pending_earnings_date(rows, "2026-10-01") == "2026-10-01"
 
 
-@pytest.mark.parametrize(
-    "module, name",
-    [
-        ("app.services.health_check_service", "_find_next_earnings_date"),
-        ("app.services.signal_of_confidence_service", "_find_next_earnings_date"),
-        ("app.services.profit_power_service", "_find_next_earnings_date_simple"),
-        ("app.services.revenue_breakdown_service", "_find_next_earnings_date_simple"),
-    ],
-)
-def test_the_four_financials_services_keep_todays_pending_report(module, name):
-    import importlib
+def _financials_cache_keys():
+    """The function each service stamps its report-day invalidation key with: Health
+    Check, Profit Power and Signal of Confidence through `next_earnings_stamp` (P20),
+    Revenue Breakdown through its own wrapper."""
+    import functools
 
-    fn = getattr(importlib.import_module(module), name)
+    from app.services._earnings_common import next_earnings_stamp
+    from app.services.revenue_breakdown_service import _find_next_earnings_date_simple
+
+    return [
+        pytest.param(functools.partial(next_earnings_stamp, ticker="T", service=s), id=s)
+        for s in ("health_check", "signal_of_confidence", "profit_power")
+    ] + [pytest.param(_find_next_earnings_date_simple, id="revenue_breakdown")]
+
+
+@pytest.mark.parametrize("fn", _financials_cache_keys())
+def test_the_four_financials_services_keep_todays_pending_report(fn):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     assert fn([{"date": today, "epsActual": None}, {"date": "2999-01-01"}]) == today
 

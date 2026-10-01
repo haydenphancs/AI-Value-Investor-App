@@ -16,6 +16,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
+from app.services._earnings_common import (
+    CALENDAR_UNKNOWN,
+    EarningsStamp,
+    stamp_is_persistable,
+)
 from app.utils.period_labels import (
     annual_benchmark_key,
     annual_fiscal_year,
@@ -569,6 +574,11 @@ class GrowthService:
                     "5-min in-memory TTL",
                     ticker, ", ".join(degraded),
                 )
+            elif next_earnings is CALENDAR_UNKNOWN:
+                logger.warning(
+                    "Growth NOT persisted for %s (next-earnings lookup failed — no "
+                    "report-day bound for the 24h row); served from memory", ticker,
+                )
             else:
                 loop.run_in_executor(
                     None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
@@ -660,12 +670,18 @@ class GrowthService:
             logger.warning(f"Growth Supabase cache check failed for {ticker}: {e}")
             return None
 
-    def _next_earnings_date_safe(self, ticker: str) -> Optional[str]:
+    def _next_earnings_date_safe(self, ticker: str) -> EarningsStamp:
         """Reuse the profit-power cache's next-earnings date when present.
 
         Growth doesn't fetch the earnings calendar itself (it would be an 11th
         FMP call); the sibling cache for the same ticker already stores it, so
         read it opportunistically. None just means "expire on the 24h TTL".
+
+        CALENDAR_UNKNOWN when the lookup itself RAISED: the getter then serves the
+        build from memory and does not persist it. An ABSENT profit_power row is still
+        None (the documented 24h fallback) — so a cold ticker during an earnings-calendar
+        outage, when profit_power stops writing, still gets a 24h row with no report-day
+        bound (accepted residual, P20).
 
         The date must be TODAY or later. profit_power writes the next PENDING
         report date (``_earnings_common.next_pending_earnings_date``), which is
@@ -703,16 +719,28 @@ class GrowthService:
                         ticker, candidate,
                     )
         except Exception as e:
-            logger.warning(f"Growth next-earnings lookup failed for {ticker}: {e}")
+            logger.warning(
+                "[growth-next-earnings-unavailable] ticker=%s step=next_earnings_lookup: "
+                "%s: %s — this build is served from memory, NOT persisted",
+                ticker, type(e).__name__, e,
+            )
+            return CALENDAR_UNKNOWN
         return None
 
     def _upsert_supabase_cache_safe(
         self,
         ticker: str,
         result: GrowthResponse,
-        next_earnings: Optional[str],
+        next_earnings: EarningsStamp,
     ) -> None:
         """Write-through to the Supabase tier. Best-effort: logged, never fatal."""
+        if not stamp_is_persistable(next_earnings):
+            # Belt-and-braces: the getter already refuses a CALENDAR_UNKNOWN build.
+            logger.warning(
+                "Growth upsert REFUSED for %s — next_earnings_date %r is not a date "
+                "(a failed next-earnings lookup is never persisted)", ticker, next_earnings,
+            )
+            return
         try:
             self.supabase.table("growth_cache").upsert(
                 {

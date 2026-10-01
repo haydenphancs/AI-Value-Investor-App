@@ -2550,6 +2550,12 @@ struct SignalOfConfidenceDataPointDTO: Codable {
     /// Optional: FMP genuinely returns `weightedAverageShsOut: 0` on some rows, and the
     /// backend now sends null rather than passing a sentinel off as a measurement.
     let sharesOutstanding: Double?
+    /// False when no cash-flow figures are on hand for this quarter (no cash-flow filing on
+    /// record for it, or the whole cash-flow fetch failed — see `cashFlowLegFailed`): the four
+    /// cash fields above are then 0.0 placeholders (they stay non-Optional so shipped builds
+    /// keep decoding), not measurements. Optional: an older backend, a device-cached DTO or
+    /// a stored report has no key, and nil means reported — today's behaviour.
+    let cashFlowReported: Bool?
 
     enum CodingKeys: String, CodingKey {
         case period
@@ -2558,6 +2564,22 @@ struct SignalOfConfidenceDataPointDTO: Codable {
         case dividendAmount = "dividend_amount"
         case buybackAmount = "buyback_amount"
         case sharesOutstanding = "shares_outstanding"
+        case cashFlowReported = "cash_flow_reported"
+    }
+
+    /// The ONE DTO → display mapping, shared by the Financials-tab card
+    /// (`SignalOfConfidenceResponseDTO.toDisplayModel`) and the report's capital-allocation
+    /// block (`TickerReportResponse`), so the flag cannot be dropped on one path only.
+    func toDisplayPoint() -> SignalOfConfidenceDataPoint {
+        SignalOfConfidenceDataPoint(
+            period: period,
+            dividendYield: dividendYield,
+            buybackYield: buybackYield,
+            dividendAmount: dividendAmount,
+            buybackAmount: buybackAmount,
+            sharesOutstanding: sharesOutstanding,
+            cashFlowReported: cashFlowReported ?? true
+        )
     }
 }
 
@@ -2657,17 +2679,19 @@ struct SignalOfConfidenceResponseDTO: Codable, FinancialsCacheable {
         dataPoints.isEmpty
     }
 
+    /// The quarterly cash-flow FETCH failed (an FMP 429/5xx or a malformed answer — the
+    /// server's "cash_flow" reason). Every point then arrives with `cash_flow_reported:
+    /// false` and 0.0 placeholders, and the summary is a fabricated 0% / "Low" verdict,
+    /// even though `dataPoints` is not empty: an outage to retry, not a card to draw.
+    /// EXACTLY "cash_flow" — never "cash_flow_row" / "cash_flow_statement_missing", which
+    /// describe what the company has filed (a retry returns the same answer), and never any
+    /// other leg ("market_cap", "annual_ratios" still leave a valid chart).
+    var cashFlowLegFailed: Bool {
+        (degraded ?? []).contains("cash_flow")
+    }
+
     func toDisplayModel() -> SignalOfConfidenceSectionData {
-        let points = dataPoints.map {
-            SignalOfConfidenceDataPoint(
-                period: $0.period,
-                dividendYield: $0.dividendYield,
-                buybackYield: $0.buybackYield,
-                dividendAmount: $0.dividendAmount,
-                buybackAmount: $0.buybackAmount,
-                sharesOutstanding: $0.sharesOutstanding
-            )
-        }
+        let points = dataPoints.map { $0.toDisplayPoint() }
 
         var summaryModel = SignalOfConfidenceSummary(
             totalYield: summary.totalYield,

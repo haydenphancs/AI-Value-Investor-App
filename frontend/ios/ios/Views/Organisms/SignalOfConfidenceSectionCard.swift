@@ -50,6 +50,20 @@ struct SignalOfConfidenceSectionCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // The key for the chart's "—" dividend/buyback cells, in BOTH views (the label
+            // rows print it in Yield and Capital alike) and only when some quarter has no
+            // cash-flow figures — otherwise there is no dash to explain. It names its two
+            // rows, because the shares row prints its own "—" for an unreported share
+            // count, and it names no CAUSE: the flag is false both for a quarter missing
+            // from the filing history and for a series whose cash-flow fetch failed, so
+            // "no filing on record" would be a false claim about the company in the second.
+            if signalData.hasUnreportedCashFlow {
+                Text("— in Dividends/Buybacks = cash-flow figures unavailable for that quarter")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // Legend
             SignalOfConfidenceLegendView()
                 .frame(maxWidth: .infinity)
@@ -129,10 +143,19 @@ struct SignalOfConfidenceSectionCard: View {
             .ignoresSafeArea()
 
         ScrollView {
-            SignalOfConfidenceSectionCard(
-                signalData: SignalOfConfidenceSectionData.sampleData,
-                onDetailTapped: {}
-            )
+            VStack(spacing: AppSpacing.lg) {
+                SignalOfConfidenceSectionCard(
+                    signalData: SignalOfConfidenceSectionData.sampleData,
+                    onDetailTapped: {}
+                )
+
+                // Interior cash-flow gap (Q4 '24): its cells read "—" and the card adds the
+                // one-line key for that dash.
+                SignalOfConfidenceSectionCard(
+                    signalData: SignalOfConfidenceSectionData.sampleInteriorCashFlowGap,
+                    onDetailTapped: {}
+                )
+            }
             .padding()
         }
     }

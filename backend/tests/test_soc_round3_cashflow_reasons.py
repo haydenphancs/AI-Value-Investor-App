@@ -75,7 +75,7 @@ class _FMP:
     async def get_financial_ratios(self, ticker, period="annual", limit=10):
         return [{"date": "2025-12-31", "fiscalYear": "2025", "dividendPerShare": 0}]
 
-    async def get_earning_calendar_full(self, ticker):
+    async def get_earning_calendar_full(self, ticker, raise_errors=False):
         return []
 
     async def get_historical_market_cap(self, ticker, from_date=None, to_date=None, limit=2000):

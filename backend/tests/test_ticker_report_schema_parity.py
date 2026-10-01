@@ -725,9 +725,10 @@ def test_capital_allocation_block_forwards_data_points():
     """The Insider & Management capital-allocation card now carries the
     per-quarter `data_points` series so iOS can draw the dilution mini-chart
     and label the share-count window. The block must forward each point with
-    the exact 6 keys the iOS SignalOfConfidenceDataPointDTO decodes, preserve
-    oldest→newest order, and validate against CapitalAllocationResponse — drift
-    here is a JSONDecoder crash on the report screen."""
+    the exact 7 keys the iOS SignalOfConfidenceDataPointDTO decodes (P19 added
+    `cash_flow_reported`), preserve oldest→newest order, and validate against
+    CapitalAllocationResponse — drift here is a JSONDecoder crash on the report
+    screen."""
     block = _build_capital_allocation_block(_make_signal_of_confidence())
 
     assert block is not None
@@ -740,9 +741,14 @@ def test_capital_allocation_block_forwards_data_points():
     expected_keys = {
         "period", "dividend_yield", "buyback_yield",
         "dividend_amount", "buyback_amount", "shares_outstanding",
+        "cash_flow_reported",
     }
     for dp in dps:
         assert set(dp.keys()) == expected_keys
+        # The cash fields stay non-null floats: shipped iOS decodes them as `Double`.
+        for key in ("dividend_yield", "buyback_yield", "dividend_amount", "buyback_amount"):
+            assert isinstance(dp[key], float), (key, dp[key])
+        assert dp["cash_flow_reported"] is True
     # oldest → newest preserved (drives the window label + chart x-axis)
     assert dps[0]["period"] == "Q2 '23"
     assert dps[-1]["period"] == "Q2 '25"
@@ -751,6 +757,40 @@ def test_capital_allocation_block_forwards_data_points():
     model = CapitalAllocationResponse.model_validate(block)
     assert len(model.data_points) == 2
     assert model.data_points[-1].shares_outstanding == 1037.0
+
+
+def test_capital_allocation_block_forwards_a_flagged_interior_point():
+    """P19: a quarter with no cash-flow row (an interior vendor gap) keeps its point for
+    the share line, with 0.0 PLACEHOLDERS (non-null: shipped iOS decodes `Double`) and
+    `cash_flow_reported: False` — the block must forward the flag, not drop or flip it."""
+    soc = _make_signal_of_confidence()
+    gap = SignalOfConfidenceDataPointSchema(
+        period="Q2 '24",
+        dividend_yield=0.0,
+        buyback_yield=0.0,
+        dividend_amount=0.0,
+        buyback_amount=0.0,
+        shares_outstanding=1020.0,
+        cash_flow_reported=False,
+    )
+    soc = soc.model_copy(update={"data_points": [soc.data_points[0], gap, soc.data_points[1]]})
+    block = _build_capital_allocation_block(soc)
+
+    dps = block["data_points"]
+    assert [d["period"] for d in dps] == ["Q2 '23", "Q2 '24", "Q2 '25"]
+    assert [d["cash_flow_reported"] for d in dps] == [True, False, True]
+    flagged = dps[1]
+    for key in ("dividend_yield", "buyback_yield", "dividend_amount", "buyback_amount"):
+        assert flagged[key] == 0.0 and isinstance(flagged[key], float), (key, flagged[key])
+    assert flagged["shares_outstanding"] == 1020.0
+    # The newest point (the report's "Buybacks" header) is untouched.
+    assert dps[-1]["buyback_amount"] == 500.0
+
+    model = CapitalAllocationResponse.model_validate(block)
+    assert [p.cash_flow_reported for p in model.data_points] == [True, False, True]
+    # Round-trip through JSON (the stored-report path) keeps the flag.
+    again = CapitalAllocationResponse.model_validate_json(model.model_dump_json())
+    assert again.data_points[1].cash_flow_reported is False
 
 
 def test_capital_allocation_block_none_when_no_signal():

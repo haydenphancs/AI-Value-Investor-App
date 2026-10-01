@@ -133,6 +133,45 @@ _MIN_PREV_SESSION_COVERAGE = 0.5
 _US_SESSION_BELLWETHERS = ("AAPL", "MSFT", "SPY")
 _US_SESSION_QUORUM = 2
 
+# A batch-eod fetch that fails upstream (FMP slow / down, a 429 that outlasts the backoff)
+# leaves the stored snapshot exactly as it was, and the hourly loop retries — so ONE
+# failed cycle is a WARNING. On 2026-09-30 FMP sent nothing for 30 s on three cycles in a
+# row, each a redundant refresh of a session already stored; logged at ERROR, a blip that
+# healed itself at the next hour paged like a bug.
+#
+# Counted per CYCLE, not per call: a cycle fetches the latest session and then the prior
+# one, and a per-call count reset by the latest's success would never escalate a prior-
+# session outage. Three failed cycles (~3 h) is still ~5 h inside the window between the
+# first ingest of a session (00:00 UTC, `_last_trading_day`) and the moment
+# `_snapshot_is_current` stops accepting the previous one (04:00 ET). Reset only by a
+# successful write.
+#
+# ⚠️ Process memory: a redeploy resets the count. The restart-proof alarm is the read
+# side — `_report_stale_snapshots` logs ERROR once day changes have actually gone stale.
+_EOD_FAILED_CYCLES_ESCALATE_AT = 3
+_eod_failed_cycles = 0
+
+
+def _record_failed_fetch_cycle(which: str, target: str) -> None:
+    """One ingest cycle ended on a failed batch-eod fetch: WARNING, then ERROR once sustained."""
+    global _eod_failed_cycles
+    _eod_failed_cycles += 1
+    log = (
+        logger.error if _eod_failed_cycles >= _EOD_FAILED_CYCLES_ESCALATE_AT
+        else logger.warning
+    )
+    log(
+        "price_service: close snapshot NOT refreshed: %s batch-eod fetch for %s failed — "
+        "stored snapshot kept, the hourly loop retries (failed cycle %d in a row)",
+        which, target, _eod_failed_cycles,
+    )
+
+
+def _reset_failed_fetch_cycles() -> None:
+    global _eod_failed_cycles
+    _eod_failed_cycles = 0
+
+
 _cache: Dict[str, Tuple[float, Any]] = {}
 _inflight: Dict[str, asyncio.Future] = {}
 
@@ -502,8 +541,13 @@ class PriceService:
 
         `stale` maps symbol → its stale `trade_date`. A handful of stale rows in a batch
         is an INFO line (illiquid listings whose last close is old); a majority is the
-        signature of an ingest that missed a session, and that is a WARNING — once per
+        signature of an ingest that missed a session, and that is an ERROR — once per
         distinct newest stale date, so a missed session cannot page on every 30 s poll.
+
+        ERROR because this is the moment users see it: every batch day change reads as
+        unknown. It is the alarm that survives a restart — the ingest's own failure streak
+        (`_record_failed_fetch_cycle`) lives in process memory and a redeploy resets it —
+        and it catches every abort cause (fetch failure, coverage guard, upsert failure).
         """
         if not stale or total <= 0:
             return
@@ -521,7 +565,7 @@ class PriceService:
         if newest in cls._stale_snapshot_dates:
             return
         cls._stale_snapshot_dates.add(newest)
-        logger.warning(
+        logger.error(
             "price: market_close_snapshot is STALE for %d of %d symbols (newest trade_date=%s; "
             "e.g. %s) — every batch day change reads as unknown until the close-snapshot "
             "ingest catches up",
@@ -560,8 +604,8 @@ class PriceService:
             # A stale row cannot be "yesterday's close". Unknown beats a multi-session
             # move labelled as today's (invariant 1). The batch callers count these and
             # report them (`_report_stale_snapshots`) — a majority of a batch being stale
-            # is the read-side trace of a missed ingest, whose only other signal is the
-            # job's own ERROR hours earlier.
+            # is the read-side trace of a missed ingest, logged at ERROR there. The job's
+            # own early warning (`_record_failed_fetch_cycle`) does not survive a restart.
             return None
         close = _finite(snap.get("close"))
         prev = _finite(snap.get("previous_close"))
@@ -1130,6 +1174,10 @@ class PriceService:
         make an index chart work; buy the package instead.
         """
         latest_date, latest = await self._fetch_latest_session(trade_date)
+        if latest is None:
+            # A FAILED fetch, not an absent session — the stored snapshot stays as it was.
+            _record_failed_fetch_cycle("latest", latest_date)
+            return 0
         if not latest:
             logger.warning("price_service: no batch-eod session found to ingest")
             return 0
@@ -1139,6 +1187,12 @@ class PriceService:
         prev_date, prev_rows = await self._fetch_latest_session(
             self._step_back(latest_date)
         )
+        if prev_rows is None:
+            # Skipped for the same reason as the empty-prior abort below — writing without
+            # the prior session nulls `previous_close` on every row — but this one is an
+            # upstream failure the next cycle retries, so its severity follows the streak.
+            _record_failed_fetch_cycle("prior", prev_date)
+            return 0
         prev_by_symbol = {
             (r.get("symbol") or "").upper(): _finite(r.get("close"))
             for r in prev_rows
@@ -1233,6 +1287,8 @@ class PriceService:
                          latest_date, type(e).__name__, e, exc_info=True)
             return 0
 
+        _reset_failed_fetch_cycles()        # only a successful write ends a failure streak
+
         with_prev = sum(1 for r in payload if r["previous_close"] is not None)
         logger.info(
             "price_service: stored %d closes for %s (prev session %s on %d of them; "
@@ -1280,19 +1336,22 @@ class PriceService:
 
     async def _fetch_latest_session(
         self, start_date: Optional[str] = None
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+    ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
         """Walk back from `start_date` to the first date `batch-eod` actually has rows for.
 
         Weekday arithmetic alone is not enough: a market holiday is a weekday with no
         session, and today — Labor Day — is exactly that. Rather than carry a holiday
         calendar, ask the data. Bounded so a persistent upstream outage cannot spin.
+
+        Rows are None when the FETCH failed (already logged), and `[]` when no US session
+        was found inside the lookback — the caller logs those two differently.
         """
         target = start_date or self._last_trading_day()
         fmp = get_fmp_client()
         for _ in range(_MAX_SESSION_LOOKBACK):
             rows = await self._batch_eod_with_backoff(fmp, target)
             if rows is None:
-                return target, []          # hard failure, already logged
+                return target, None        # fetch failed, already logged
             if self._is_us_session(rows):
                 return target, rows
             logger.info(
@@ -1321,6 +1380,11 @@ class PriceService:
         correctly while EVERY `previous_close` came back NULL, leaving the day change
         unknown across the whole app. Measured: the limit clears in seconds, so a short
         backoff turns a guaranteed daily failure into a non-event.
+
+        A TRANSIENT give-up (a 429 that outlasts the backoff, `FMPUnavailableException`) is
+        a WARNING here: nothing is written and the hourly loop retries, and the caller's
+        `_record_failed_fetch_cycle` escalates a sustained run to ERROR. Anything else is
+        unexpected and stays ERROR with its stack.
         """
         delay = _RATE_LIMIT_BACKOFF_SECONDS
         for attempt in range(_RATE_LIMIT_RETRIES + 1):
@@ -1328,7 +1392,7 @@ class PriceService:
                 return await fmp.get_batch_eod(target)
             except FMPRateLimitException as e:
                 if attempt == _RATE_LIMIT_RETRIES:
-                    logger.error(
+                    logger.warning(
                         "price_service: batch-eod for %s still rate-limited after %d "
                         "retries: %s", target, _RATE_LIMIT_RETRIES, e,
                     )
@@ -1339,6 +1403,14 @@ class PriceService:
                 )
                 await asyncio.sleep(delay)
                 delay *= 2
+            except FMPUnavailableException as e:
+                # No retry here: the client already made its attempts, and an FMP slowdown
+                # outlasts any in-process wait (2026-09-30: ~2 h). The hourly loop retries.
+                logger.warning(
+                    "price_service: batch-eod for %s unavailable (%s: %s) — stored snapshot "
+                    "kept, the hourly loop retries", target, type(e).__name__, e,
+                )
+                return None
             except Exception as e:
                 logger.error("price_service: batch-eod failed for %s: %s: %s",
                              target, type(e).__name__, e, exc_info=True)

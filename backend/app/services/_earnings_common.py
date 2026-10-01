@@ -13,7 +13,7 @@ Financials tab.
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +203,101 @@ def next_pending_earnings_date(
     """``next_pending_earnings`` as a ``yyyy-MM-dd`` string (or None)."""
     rec = next_pending_earnings(ec_records, today_str)
     return str(rec.get("date"))[:10] if rec else None
+
+
+# ── The cache row's report-day stamp, when the calendar itself failed ──
+#
+# Health Check, Profit Power and Signal of Confidence fetch the per-symbol earnings
+# calendar ONLY to stamp their 24h Supabase row with ``next_earnings_date`` — the reader
+# drops the row once ``today >= next_earnings_date``, which is what rebuilds the card on
+# report day. They used to call it with the swallowing default, so a 429 / 5xx / non-list
+# body came back as ``[]`` ("no announcements"), the stamp read None and a clean 24h row
+# was written with NO report-day bound. The calendar feeds no served value, so a failed
+# fetch is not `degraded` (the response is complete); it is CALENDAR_UNKNOWN, and the
+# getter keeps that build in memory but never writes it to the 24h tier.
+
+class _CalendarUnknown:
+    """Sentinel type for "the earnings calendar could not be read". Deliberately NOT a
+    ``str`` subclass: a string sentinel would be stored in ``next_earnings_date`` and
+    ``today >= '<sentinel>'`` compares the wrong way, so that row would never go stale."""
+
+    __slots__ = ()
+    _instance: Optional["_CalendarUnknown"] = None
+
+    def __new__(cls) -> "_CalendarUnknown":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "CALENDAR_UNKNOWN"
+
+    # Identity survives copy / deepcopy / pickle, so `is CALENDAR_UNKNOWN` never misses.
+    def __copy__(self) -> "_CalendarUnknown":
+        return self
+
+    def __deepcopy__(self, _memo: Any) -> "_CalendarUnknown":
+        return self
+
+    def __reduce__(self) -> str:
+        return "CALENDAR_UNKNOWN"
+
+
+CALENDAR_UNKNOWN = _CalendarUnknown()
+
+#: What a Financials build hands its getter for the cache row's ``next_earnings_date``:
+#: a ``yyyy-MM-dd`` string, None ("no pending announcement" — cacheable), or
+#: CALENDAR_UNKNOWN (the calendar failed — never persisted).
+EarningsStamp = Union[str, None, _CalendarUnknown]
+
+
+def stamp_is_persistable(next_earnings: Any) -> bool:
+    """True when ``next_earnings`` may be written to a ``next_earnings_date`` column:
+    a date string or None. CALENDAR_UNKNOWN (or anything else) may not."""
+    return next_earnings is None or isinstance(next_earnings, str)
+
+
+def next_earnings_stamp(ec_raw: Any, *, ticker: str, service: str) -> EarningsStamp:
+    """The cache row's ``next_earnings_date`` from a calendar gather slot fetched with
+    ``get_earning_calendar_full(ticker, raise_errors=True)``.
+
+    * a list → ``next_pending_earnings_date`` (``[]``, history-only and malformed rows
+      all give a real, cacheable answer: None or the next pending date);
+    * ``FMPNotEntitledException`` → None: permanent, so the build without the stamp IS
+      the answer (the row keeps its plain 24h TTL rather than never being cached);
+    * any other exception — including a ``CancelledError`` INSTANCE that
+      ``gather(return_exceptions=True)`` put in the slot — or a non-list body →
+      CALENDAR_UNKNOWN, which the getter refuses to persist.
+    """
+    # Imported here: this module is shared by light callers (tracking, the report
+    # collector) that should not pull the FMP client in at import time.
+    from app.integrations.fmp import FMPException, FMPNotEntitledException
+
+    if isinstance(ec_raw, list):
+        return next_pending_earnings_date(ec_raw)
+    if isinstance(ec_raw, FMPNotEntitledException):
+        logger.warning(
+            "[%s-calendar-not-entitled] ticker=%s step=earnings_calendar: %s: %s — no "
+            "next-earnings bound; the build is persisted on the plain 24h TTL",
+            service, ticker, type(ec_raw).__name__, ec_raw,
+        )
+        return None
+    if isinstance(ec_raw, BaseException):
+        logger.warning(
+            "[%s-calendar-unavailable] ticker=%s step=earnings_calendar: %s: %s — values "
+            "unaffected; served from memory, NOT persisted",
+            service, ticker, type(ec_raw).__name__, ec_raw,
+            # A typed FMP failure is expected and self-describing; anything else (a bug,
+            # a cancellation) gets its stack.
+            exc_info=None if isinstance(ec_raw, FMPException) else ec_raw,
+        )
+        return CALENDAR_UNKNOWN
+    logger.warning(
+        "[%s-calendar-unavailable] ticker=%s step=earnings_calendar: expected a list, got "
+        "%s — values unaffected; served from memory, NOT persisted",
+        service, ticker, type(ec_raw).__name__,
+    )
+    return CALENDAR_UNKNOWN
 
 
 # ── Dropped / added digit in a feed EPS actual ─────────────────────

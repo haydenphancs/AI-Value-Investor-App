@@ -11,10 +11,12 @@ import logging
 import math
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.services._earnings_common import next_pending_earnings_date
+from app.services.asset_class import profile_is_fund
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPUnavailableException, get_fmp_client
@@ -208,9 +210,49 @@ def _is_placeholder_only(resp: RevenueBreakdownResponse) -> bool:
     )
 
 
-def _is_cacheable(resp: RevenueBreakdownResponse) -> bool:
-    """The Supabase tier stores only complete builds (see `RevenueBreakdownResponse.degraded`)."""
-    return not resp.degraded and not _is_placeholder_only(resp)
+# ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────
+# A fund (VB, SPY …) that reaches this card has no income statement and no product
+# segmentation: FMP answers both with a genuine 200 []. That build is the placeholder card
+# marked `income_statement_empty`, which the gates below refuse — correct for an operating
+# company (the empty answer may be an outage), but for a fund it is the permanent answer,
+# so every view of a fund rebuilt it from FMP every 60 s. The ONE extra shape the cache
+# admits is that exact empty card, and only when a POSITIVE fund flag on the FMP profile,
+# fetched for this build, says so — never inferred from the empty answer itself. The row
+# carries `security_kind: "fund"`; a reader admits the shape only with that marker, so an
+# unmarked placeholder row (whoever wrote it) is still refused. The response itself is
+# unchanged: iOS still sees `degraded == ["income_statement_empty"]`.
+_SECURITY_KIND_KEY = "security_kind"
+_SECURITY_KIND_FUND = "fund"
+_FUND_SHAPE_DEGRADED = ["income_statement_empty"]
+
+
+def _is_fund_shape(resp: RevenueBreakdownResponse) -> bool:
+    """True for exactly the card a fund builds: the placeholder bar, and no degraded reason
+    but `income_statement_empty` (so the segmentation and calendar legs both answered)."""
+    return list(resp.degraded) == _FUND_SHAPE_DEGRADED and _is_placeholder_only(resp)
+
+
+def _is_cacheable(resp: RevenueBreakdownResponse, fund_shape: bool = False) -> bool:
+    """The Supabase tier stores only complete builds (see `RevenueBreakdownResponse.degraded`).
+
+    ``fund_shape`` (the build's profile positively says fund, or the stored row carries the
+    fund marker) admits ONE more shape: the empty fund card (`_is_fund_shape`). It never
+    admits any other degraded or placeholder build."""
+    if not resp.degraded and not _is_placeholder_only(resp):
+        return True
+    return bool(fund_shape) and _is_fund_shape(resp)
+
+
+@dataclass
+class _RevenueBuild:
+    """`_build_revenue_breakdown_full`'s answer. ``statements_answered_empty`` is True only
+    when the RAW income-statement AND product-segmentation answers were both exactly ``[]``
+    (checked before `_as_list` drops junk rows: a list of junk rows is malformed upstream
+    data, not a fund)."""
+
+    response: RevenueBreakdownResponse
+    next_earnings: Optional[str]
+    statements_answered_empty: bool = False
 
 
 def _explicit_eliminations(record: Dict[str, Any]) -> float:
@@ -439,9 +481,14 @@ class RevenueBreakdownService:
         try:
             # ── Cache miss: build from FMP ──
             logger.info(f"Revenue breakdown cache MISS for {ticker} — fetching from FMP")
-            result, next_earnings = await self._build_revenue_breakdown(ticker)
+            build = await self._build_revenue_breakdown_full(ticker)
+            result, next_earnings = build.response, build.next_earnings
+            # Only an empty build pays for the profile call; one with income rows makes none.
+            fund_shape = await self._is_fund_build(ticker, build)
 
-            if _is_cacheable(result):
+            if _is_cacheable(result, fund_shape=fund_shape):
+                if fund_shape and not _is_cacheable(result):
+                    logger.info("[fund-shape] ticker=%s step=%s", ticker, "revenue_breakdown_write")
                 # Persist to Supabase in background thread (truly fire-and-forget)
                 asyncio.get_running_loop().run_in_executor(
                     None,
@@ -449,6 +496,7 @@ class RevenueBreakdownService:
                     ticker,
                     result,
                     next_earnings,
+                    fund_shape,
                 )
                 _cache_set(cache_key, result)
             else:
@@ -523,13 +571,22 @@ class RevenueBreakdownService:
                             (json_data or {}).get(_VERSION_KEY) if isinstance(json_data, dict) else None,
                             _RB_PAYLOAD_VERSION, ticker)
                 return None
-            resp = RevenueBreakdownResponse(**json_data)
+            # Copy before popping (never mutate the SDK's row); the marker is storage-only
+            # and never reaches the model.
+            body = dict(json_data)
+            security_kind = body.pop(_SECURITY_KIND_KEY, None)
+            fund_shape = security_kind == _SECURITY_KIND_FUND
+            resp = RevenueBreakdownResponse(**body)
             # Read-side backstop for the write gate: a partial or "no data at all" card is
-            # never served from the 24 h tier, whoever wrote it.
-            if not _is_cacheable(resp):
-                logger.warning("Supabase cache REFUSED for %s: degraded=%s placeholder_only=%s",
-                               ticker, resp.degraded, _is_placeholder_only(resp))
+            # never served from the 24 h tier, whoever wrote it — except the empty fund
+            # card, and only on a row the writer marked as a fund.
+            if not _is_cacheable(resp, fund_shape=fund_shape):
+                logger.warning("Supabase cache REFUSED for %s: degraded=%s placeholder_only=%s "
+                               "security_kind=%r", ticker, resp.degraded,
+                               _is_placeholder_only(resp), security_kind)
                 return None
+            if fund_shape and not _is_cacheable(resp):
+                logger.info("[fund-shape] ticker=%s step=%s", ticker, "revenue_breakdown_read")
             return resp
 
         except Exception as e:
@@ -541,20 +598,29 @@ class RevenueBreakdownService:
         ticker: str,
         result: RevenueBreakdownResponse,
         next_earnings: Optional[str],
+        fund_shape: bool = False,
     ) -> None:
         """Upsert to Supabase cache — safe wrapper that logs and swallows errors.
         This is a synchronous method — call via run_in_executor().
+
+        ``fund_shape`` is the entry point's verdict (`_is_fund_build`); it is what lets the
+        empty fund card through, and it is stamped into the row so the reader can tell it
+        from an unmarked placeholder.
         """
-        if not _is_cacheable(result):
+        if not _is_cacheable(result, fund_shape=fund_shape):
             # Write-side backstop: `get_revenue_breakdown` already skips the call for these.
             logger.warning("revenue_breakdown %s: refusing to persist a degraded=%s / "
-                           "placeholder-only build", ticker, result.degraded)
+                           "placeholder-only build (fund_shape=%s)", ticker, result.degraded,
+                           fund_shape)
             return
+        response_json: Dict[str, Any] = {**result.model_dump(), _VERSION_KEY: _RB_PAYLOAD_VERSION}
+        if fund_shape and not _is_cacheable(result):
+            response_json[_SECURITY_KIND_KEY] = _SECURITY_KIND_FUND
         try:
             self.supabase.table("revenue_breakdown_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": {**result.model_dump(), _VERSION_KEY: _RB_PAYLOAD_VERSION},
+                    "response_json": response_json,
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -563,6 +629,36 @@ class RevenueBreakdownService:
         except Exception as e:
             logger.warning(f"Supabase upsert failed for {ticker}: {e}")
 
+    # ── Fund check ────────────────────────────────────────────────
+
+    async def _is_fund_build(self, ticker: str, build: _RevenueBuild) -> bool:
+        """True when ``build`` is the empty fund card AND the FMP profile positively says
+        the symbol is a fund (`asset_class.profile_is_fund`).
+
+        The profile is fetched ONLY for a build whose raw income and segmentation answers
+        were both exactly ``[]`` and whose sole degraded reason is
+        ``income_statement_empty`` — a build with income rows, a failed side feed or junk
+        rows makes no extra call. A profile that fails, or that does not say fund, keeps
+        today's refusal (logged by the caller's degraded-build warning)."""
+        if not build.statements_answered_empty or not _is_fund_shape(build.response):
+            return False
+        try:
+            profile = await self.fmp.get_company_profile(ticker)
+        except Exception as e:
+            logger.warning(
+                "[fund-shape] ticker=%s step=fund_check: profile fetch failed (%s: %s) — "
+                "treating it as NOT a fund; the empty card stays unpersisted",
+                ticker, type(e).__name__, e,
+            )
+            return False
+        is_fund = profile_is_fund(profile)
+        if not is_fund:
+            logger.info(
+                "revenue_breakdown %s: empty statements but the profile does not say fund "
+                "(step=fund_check) — the empty card stays unpersisted", ticker,
+            )
+        return is_fund
+
     # ── Builder ───────────────────────────────────────────────────
 
     async def _build_revenue_breakdown(
@@ -570,8 +666,14 @@ class RevenueBreakdownService:
     ) -> Tuple[RevenueBreakdownResponse, Optional[str]]:
         """
         Fetch FMP data and assemble the response.
-        Returns (response, next_earnings_date).
+        Returns (response, next_earnings_date) — the shape callers and tests unpack; the
+        entry point uses `_build_revenue_breakdown_full` for the raw-answer verdict too.
         """
+        build = await self._build_revenue_breakdown_full(ticker)
+        return build.response, build.next_earnings
+
+    async def _build_revenue_breakdown_full(self, ticker: str) -> _RevenueBuild:
+        """`_build_revenue_breakdown` plus whether both statement legs answered exactly []."""
         # Parallel FMP calls
         seg_raw, income_raw, ec_raw = await asyncio.gather(
             self.fmp.get_revenue_product_segmentation(ticker, period="annual"),
@@ -611,6 +713,14 @@ class RevenueBreakdownService:
             raise FMPUnavailableException(
                 f"income statement for {ticker} returned {type(income_raw).__name__}, not a list"
             )
+
+        # Exactly [] on BOTH statement legs, read BEFORE any coercion: a non-list body is
+        # turned into [] below and a list of junk rows is emptied by `_as_list` — neither
+        # is a fund's answer (see `_RevenueBuild`).
+        statements_answered_empty = (
+            isinstance(income_raw, list) and len(income_raw) == 0
+            and isinstance(seg_raw, list) and len(seg_raw) == 0
+        )
 
         # The other two are NOT the spine: a failed segment feed still leaves an honest
         # income-only Total Revenue card, and a failed calendar only loses the freshness
@@ -786,7 +896,11 @@ class RevenueBreakdownService:
             degraded=degraded,
         )
 
-        return response, next_earnings
+        return _RevenueBuild(
+            response=response,
+            next_earnings=next_earnings,
+            statements_answered_empty=statements_answered_empty,
+        )
 
 
 # ── Singleton ─────────────────────────────────────────────────────

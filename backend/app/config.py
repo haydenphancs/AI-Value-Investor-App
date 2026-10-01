@@ -1120,6 +1120,16 @@ class Settings(BaseSettings):
     MARKETING_BLUESKY_APP_PASSWORD: Optional[str] = None
     # Where createSession goes. The account's own PDS is then read from the session's DID document.
     MARKETING_BLUESKY_SERVICE: str = "https://bsky.social"
+    # Upload-Post (Stage 2: TikTok, YouTube, Instagram, Facebook, LinkedIn, Threads through one
+    # middleman API — design doc §12.10). The API key (`Authorization: Apikey`) and the Upload-Post
+    # PROFILE name (`user`) the social accounts are connected to; both must be set or every
+    # Upload-Post platform is OFF. Facebook posts only to a Page and LinkedIn would otherwise post to
+    # the member's PERSONAL profile, so each of those two is off until its page id is set
+    # (fail-closed). The LinkedIn value is the organization URN (urn:li:organization:N) or its id.
+    MARKETING_UPLOAD_POST_API_KEY: Optional[str] = None
+    MARKETING_UPLOAD_POST_USER: Optional[str] = None
+    MARKETING_UPLOAD_POST_FACEBOOK_PAGE_ID: Optional[str] = None
+    MARKETING_UPLOAD_POST_LINKEDIN_PAGE_ID: Optional[str] = None
     # A publish that definitely never reached the platform (connect error, 429, 401) goes back to
     # `approved` with a back-off; after this many attempts it is `failed` (and the owner is told).
     MARKETING_PUBLISH_MAX_ATTEMPTS: int = 3

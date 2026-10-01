@@ -24,7 +24,11 @@ social secrets live, is the ONLY thing that ever calls a platform (rules/marketi
 
 Outcome rules (outlet_base): PUBLISHED → `published`; NOT_SENT (provably never left) → back to
 `approved` with a back-off, `failed` after MARKETING_PUBLISH_MAX_ATTEMPTS; REFUSED (a definite 4xx)
-→ `failed`; AMBIGUOUS → stays `queued` for reconcile. A ledger failure AFTER a platform accepted a
+→ `failed`; AMBIGUOUS → stays `queued` for reconcile; SUBMITTED (a middleman accepted the job —
+Upload-Post) → stays `queued` (state `submitted`) and reconcile polls it. Reconcile ends FOUND →
+`published`, FAILED (the platform said so) → `failed` + alert, PENDING → checked again (and polled
+past the schedule while still processing, up to 24 h), ABSENT → resent only by an adapter that
+proves it safe, otherwise the owner decides. A ledger failure AFTER a platform accepted a
 post leaves the row `queued`/`sending` — reconcile finds the post; nothing is ever re-sent on a
 guess. Every write is a fenced, merging `run_service.transition_post`.
 
@@ -43,14 +47,17 @@ from app.services.marketing import outlets, publish_feed, publisher_wake, review
 from app.services.marketing.outlet_base import (
     ABSENT,
     AMBIGUOUS,
+    FAILED,
     FOUND,
     GAVE_UP,
     MANUAL,
     NOT_SENT,
+    PENDING,
     PUBLISHED,
     REFUSED,
     RETRACTED,
     RETRY,
+    SUBMITTED,
     Adapter,
     MarketingPublishRefused,
     Outcome,
@@ -80,6 +87,12 @@ MAX_RETRACT_ATTEMPTS = 3
 RETRACT_BACKOFF_SECONDS = 300
 #: Cap on the per-post history kept in `metadata.publish.history`.
 HISTORY_MAX = 10
+
+#: A job a middleman still reports as PROCESSING when the schedule runs out keeps being polled (its
+#: reads are free) every PENDING_REPOLL, up to PENDING_CEILING after the send, before the owner is
+#: asked — "Not posted" on a job that later publishes would record a live post as failed.
+PENDING_REPOLL = timedelta(hours=2)
+PENDING_CEILING = timedelta(hours=24)
 
 #: In-memory: escalated posts already logged today (one ERROR per post per day, not per tick).
 _escalation_logged: Dict[str, str] = {}
@@ -202,7 +215,7 @@ async def _send(adapter: Adapter, post: Dict[str, Any], prepared: Prepared) -> O
 async def record_outcome(svc: Any, adapter: Adapter, row: Dict[str, Any], outcome: Outcome,
                          *, reserve_micros: int = 0) -> str:
     """Write one send's outcome onto a `queued` row (fenced on queued). Returns the resulting state
-    (`published` / `approved` / `failed` / `queued`). Never raises: a ledger failure is logged with
+    (`published` / `submitted` / `approved` / `failed` / `queued`). Never raises: a ledger failure is logged with
     every id — after a PUBLISHED outcome it is the line someone reconciles by hand from."""
     post_id, platform, key = str(row["id"]), row.get("platform"), row.get("idempotency_key")
     now = _now()
@@ -268,6 +281,18 @@ async def record_outcome(svc: Any, adapter: Adapter, row: Dict[str, Any], outcom
             logger.error("marketing post REFUSED post_id=%s platform=%s key=%s category=%s: %s",
                          post_id, platform, key, outcome.category, outcome.error)
             return "failed"
+        if outcome.kind == SUBMITTED:
+            # A middleman accepted the job: not published until its result says so. Stays queued;
+            # reconcile polls the job by our own request id.
+            await svc.transition_post(
+                post_id, expect_status="queued", observed=row, retries=1,
+                publish={"state": "submitted", "category": "", "error": None, "history": _history(row, entry),
+                         **outcome.publish_meta},
+                last_error=None,
+            )
+            logger.info("marketing post SUBMITTED post_id=%s platform=%s key=%s — waiting for the platform result",
+                        post_id, platform, key)
+            return "submitted"
         # AMBIGUOUS — the platform may have it. Stays queued; reconcile decides.
         await svc.transition_post(
             post_id, expect_status="queued", observed=row, retries=1,
@@ -309,8 +334,8 @@ async def _refuse(svc: Any, post: Dict[str, Any], err: MarketingPublishRefused) 
 async def publish_cycle() -> Dict[str, int]:
     """One publish pass. Returns counters for the tick's log line (and tests)."""
     svc = get_marketing_run_service()
-    counters = {"approved_waiting": 0, "published": 0, "failed": 0, "skipped": 0, "retry": 0,
-                "unknown": 0, "capped": 0}
+    counters = {"approved_waiting": 0, "published": 0, "submitted": 0, "failed": 0, "skipped": 0,
+                "retry": 0, "unknown": 0, "capped": 0}
     platforms = outlets.enabled_platforms()
     if not platforms:
         approved = await svc.list_posts("approved", limit=PUBLISH_SCAN_LIMIT)
@@ -421,6 +446,8 @@ async def publish_cycle() -> Dict[str, int]:
         state = await record_outcome(svc, adapter, claimed, outcome, reserve_micros=prepared.reserve_micros)
         if outcome.kind == PUBLISHED:
             counters["published"] += 1
+        elif state == "submitted":
+            counters["submitted"] += 1
         elif state == "failed":
             counters["failed"] += 1
         elif state == "approved":
@@ -529,9 +556,22 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
         n = len(adapter.reconcile_schedule)   # corrupt counter: go straight to the owner
     schedule = adapter.reconcile_schedule
     if n >= len(schedule):
-        await _escalate(svc, row, f"{n} checks could not confirm it")
-        return "escalated"
-    if now < started + max(timedelta(seconds=schedule[n]), after):
+        last_result, last_error = rec.get("last_result"), rec.get("error")
+        if last_result == PENDING and now - started < PENDING_CEILING:
+            last_at = _parse_ts(rec.get("last_at")) or started
+            if now < last_at + PENDING_REPOLL:
+                return None
+            # …and fall through to one more (free) check of the still-processing job.
+        else:
+            if last_result == PENDING:
+                reason = (f"still processing on the platform's side after {int(PENDING_CEILING.total_seconds() // 3600)} h "
+                          f"— it may still go live; {scrub(last_error or '')}")
+            else:
+                reason = f"{n} checks could not confirm it" + (
+                    f"; last check: {last_result} — {scrub(last_error or 'no detail')}" if last_result else "")
+            await _escalate(svc, row, reason)
+            return "escalated"
+    elif now < started + max(timedelta(seconds=schedule[n]), after):
         return None
     platform = str(row.get("platform"))
     reserve = int(adapter.reconcile_reserve_micros or 0)
@@ -580,6 +620,16 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
         logger.info("marketing reconcile FOUND post_id=%s platform=%s key=%s external_id=%s", row.get("id"),
                     platform, row.get("idempotency_key"), result.external_id)
         return ("checked", "found")
+    if result.kind == FAILED:
+        await svc.transition_post(
+            str(row["id"]), expect_status="queued", observed=checking, status="failed", retries=1,
+            charge=charge, publish={"state": "failed_on_platform", "reconcile": rec_meta, **result.publish_meta},
+            meta=_alert("failed", f"❌ {platform.upper()} did not publish the post: {result.error or 'no reason given'}"),
+            unset=("alert_notified_at",), last_error=result.error or "the platform reported a failure",
+        )
+        logger.error("marketing reconcile FAILED ON PLATFORM post_id=%s platform=%s key=%s: %s", row.get("id"),
+                     platform, row.get("idempotency_key"), result.error)
+        return ("checked", "failed")
     if result.kind == ABSENT and result.resend_safe and adapter.resend_safe:
         if not is_fresh(checking, today):
             await svc.transition_post(
@@ -618,6 +668,8 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
             return ("checked", "resent")
     await svc.transition_post(str(row["id"]), expect_status="queued", observed=checking, retries=1,
                               charge=charge, publish={"reconcile": rec_meta})
+    if result.kind == PENDING:
+        return ("checked", "pending")
     return ("checked", "absent") if result.kind == ABSENT else ("checked",)
 
 

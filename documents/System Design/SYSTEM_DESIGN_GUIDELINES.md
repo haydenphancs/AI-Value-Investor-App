@@ -167,10 +167,10 @@ rather than an unfinished feature.
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **15** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **16** modules): `fmp`, `gemini`, `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
-`openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api` and `bluesky` (the marketing
-publisher's platforms, §12.10).
+`openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
+(the marketing publisher's platforms, §12.10).
 Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_stock_news` /
 `get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top.
 `openai_compat` is the switchable second provider for the NEWS features only (per-article sentiment
@@ -2060,7 +2060,7 @@ What follows is the set with no other home.
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
-| The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have no adapter yet (Upload-Post, Stage 2), so their posts reach Telegram as read-only previews and expire. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s, Kokoro peak 1.65 GB of a 3.8 GB limit). |
+| The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have adapters (Upload-Post, Stage 2) but none is listed or configured, so their posts reach Telegram as read-only previews and expire until the owner's Free-tier checks pass. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s, Kokoro peak 1.65 GB of a 3.8 GB limit). |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -2924,10 +2924,28 @@ whether its posts get Approve buttons in Telegram or arrive as a read-only previ
 - **Bluesky asks only the account's own PDS**: an ambiguous put records the account and its PDS;
   a reconcile with none recorded logs in to learn them, and answers UNKNOWN rather than trusting an
   entryway or AppView mirror (a lagging "not found" could close a live post or license a resend).
-- **What it does not do yet:** Upload-Post (TikTok, YouTube, Instagram, Facebook, LinkedIn, Threads)
-  is Stage 2; Bluesky has no AI-content flag (the caption's disclaimer is the disclosure); X's
+- **Stage 2 — Upload-Post** (`app/integrations/upload_post.py`, `app/services/marketing/outlet_upload_post.py`,
+  2026-10-01): one middleman API for TikTok, YouTube and Instagram (the day's verified MP4, fetched by
+  its public URL) and Facebook, LinkedIn and Threads (text) — one adapter per platform, one request
+  per post row. An accepted request is only SUBMITTED (the row stays `queued`); reconcile polls the
+  job (status for progress, history for the verdict; by Upload-Post's own id when it answered one,
+  kept apart as `poll_id`) and marks it `published` only with a post URL or a platform post id; a
+  definitive platform failure, or a TikTok post that landed as an inbox draft, ends `failed` with an
+  alert. A job still processing when the check schedule is spent is re-polled every 2 h and goes to
+  the owner only after 24 h. `request_id` is also the Idempotency-Key (24 h), one per post for 20 h
+  (never overwritten), so a job Upload-Post never acknowledged is resent only within 20 h of the
+  first send; an acknowledged job that later reads "not found" is never resent — the owner decides.
+  Plan, quota, not-connected and reconnect-needed answers are refusals with an alert. Delete
+  works for Facebook, YouTube and LinkedIn; Instagram, TikTok and Threads are removed by hand.
+  TikTok is sent public, direct-post, with no inbox fallback and the "Your brand" and AI labels;
+  Instagram Reels carry the AI label; YouTube Shorts are public and marked synthetic. Facebook and
+  LinkedIn stay off until their Page / organization ids are set (LinkedIn would otherwise post to
+  the member's personal profile). Each submit records Upload-Post's usage before and after — the
+  Free tier's quota counting is undocumented.
+- **Limits:** Bluesky has no AI-content flag (the caption's disclaimer is the disclosure); X's
   `made_with_ai` is sent (`MARKETING_X_MADE_WITH_AI`) though X documents it for media; the X go-live
-  gate is one real post plus a retract, by the owner.
+  gate is one real post plus a retract, by the owner; the Upload-Post free-tier checks (YouTube lands
+  public, the bucket URL is fetched, the quota count) are the owner's, before paying for TikTok.
 ---
 
 ## Appendix A: Where things live
@@ -2955,7 +2973,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 23 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 15 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 16 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/

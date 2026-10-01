@@ -7,7 +7,7 @@ publisher's query and the Telegram review sweep both read it, so a platform that
 never gets Approve buttons (its posts arrive as a read-only preview) and a listed platform with a
 missing credential is simply off — fail-closed, never half-on.
 
-Stage 2 (Upload-Post) adds its adapter here: one import, one dict entry.
+Stage 2 added the six Upload-Post platforms (`outlet_upload_post.ADAPTERS`).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 from app.config import settings
 from app.services.marketing.outlet_base import Adapter
 from app.services.marketing.outlet_bluesky import ADAPTER as BLUESKY_ADAPTER
+from app.services.marketing.outlet_upload_post import ADAPTERS as UPLOAD_POST_ADAPTERS
 from app.services.marketing.outlet_x import ADAPTER as X_ADAPTER
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,9 @@ logger = logging.getLogger(__name__)
 ADAPTERS: Dict[str, Adapter] = {
     X_ADAPTER.platform: X_ADAPTER,
     BLUESKY_ADAPTER.platform: BLUESKY_ADAPTER,
+    # Stage 2: TikTok, YouTube, Instagram (video) and Facebook, LinkedIn, Threads (text) through
+    # Upload-Post — one adapter instance per platform.
+    **UPLOAD_POST_ADAPTERS,
 }
 
 _unknown_logged: set = set()

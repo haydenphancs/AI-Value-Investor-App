@@ -30,6 +30,7 @@ from app.integrations.openfda import close_openfda_client
 from app.integrations.telegram import close_telegram_client
 from app.integrations.x_api import close_x_client
 from app.integrations.bluesky import close_bluesky_client
+from app.integrations.upload_post import close_upload_post_client
 from app.integrations.uspto import close_uspto_client
 from app.log_redaction import scrub_sentry_event, scrub_sentry_transaction, SecretRedactingFilter
 from app.utils.supabase_async import sb_exec
@@ -569,6 +570,7 @@ async def lifespan(app: FastAPI):
     await close_telegram_client()
     await close_x_client()
     await close_bluesky_client()
+    await close_upload_post_client()
     await close_health_client()
     logger.info("Shutting down")
 

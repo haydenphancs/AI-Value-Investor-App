@@ -1230,6 +1230,13 @@ class MarketingRunService:
         logger.info("marketing asset READY id=%s path=%s", asset_id, path)
         return updated
 
+    async def get_asset(self, asset_id: str) -> Optional[Dict[str, Any]]:
+        """One asset row by id (the publisher resolves a video post's verified MP4 by it)."""
+        return _one(
+            await _exec(self.sb.table(ASSETS).select("*").eq("id", asset_id).limit(1),
+                        op="get_asset", asset_id=asset_id)
+        )
+
     async def list_assets(self, run_id: str) -> List[Dict[str, Any]]:
         res = await _exec(self.sb.table(ASSETS).select("*").eq("run_id", run_id), op="list_assets", run_id=run_id)
         return list(getattr(res, "data", None) or [])

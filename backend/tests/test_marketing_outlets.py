@@ -1475,11 +1475,13 @@ def nothing_configured(monkeypatch):
     monkeypatch.setattr(outlets.settings, "MARKETING_BLUESKY_APP_PASSWORD", None)
 
 
-def test_registry_holds_exactly_x_and_bluesky_under_their_own_names():
-    assert set(outlets.ADAPTERS) == {"x", "bluesky"}
+def test_registry_holds_every_outlet_under_its_own_name():
+    # Stage 1: X + Bluesky direct; Stage 2: the six Upload-Post platforms.
+    assert set(outlets.ADAPTERS) == {"x", "bluesky", "tiktok", "youtube", "instagram", "facebook",
+                                     "linkedin", "threads"}
     for name, adapter in outlets.ADAPTERS.items():
         assert adapter.platform == name and outlets.adapter_for(name) is adapter
-    assert outlets.adapter_for("tiktok") is None and outlets.adapter_for(None) is None
+    assert outlets.adapter_for("mastodon") is None and outlets.adapter_for(None) is None
     assert outlets.adapter_for("") is None
 
 
@@ -1501,15 +1503,15 @@ def test_listed_platforms_parsing(monkeypatch, fresh_unknown_log, raw, expected)
 
 def test_an_unknown_platform_name_is_logged_once_and_ignored(monkeypatch, fresh_unknown_log, caplog):
     caplog.set_level(logging.ERROR, logger=outlets.__name__)
-    monkeypatch.setattr(outlets.settings, "MARKETING_PUBLISH_PLATFORMS", "x,TikTok,tiktok, tiktok ")
+    monkeypatch.setattr(outlets.settings, "MARKETING_PUBLISH_PLATFORMS", "x,Mastodon,mastodon, mastodon ")
     assert outlets.listed_platforms() == ["x"]
     assert outlets.listed_platforms() == ["x"]
     errors = [r for r in caplog.records if r.name == outlets.__name__ and r.levelno == logging.ERROR]
-    assert len(errors) == 1 and "tiktok" in errors[0].getMessage()
-    monkeypatch.setattr(outlets.settings, "MARKETING_PUBLISH_PLATFORMS", "threads,x,tiktok")
+    assert len(errors) == 1 and "mastodon" in errors[0].getMessage()
+    monkeypatch.setattr(outlets.settings, "MARKETING_PUBLISH_PLATFORMS", "pinterest,x,mastodon")
     assert outlets.listed_platforms() == ["x"]
     errors = [r for r in caplog.records if r.name == outlets.__name__ and r.levelno == logging.ERROR]
-    assert len(errors) == 2 and "threads" in errors[1].getMessage()
+    assert len(errors) == 2 and "pinterest" in errors[1].getMessage()
 
 
 def test_enabled_platforms_needs_a_listing_and_credentials(monkeypatch, fresh_unknown_log, nothing_configured):

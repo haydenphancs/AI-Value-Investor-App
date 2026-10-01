@@ -311,7 +311,7 @@ async def test_no_enabled_platform_only_observes(env, caplog):
     env.seed(platform="bluesky")
     before = env.snapshot()
     counters = await pub.publish_cycle()
-    assert counters == {"approved_waiting": 2, "published": 0, "failed": 0, "skipped": 0, "retry": 0,
+    assert counters == {"approved_waiting": 2, "published": 0, "submitted": 0, "failed": 0, "skipped": 0, "retry": 0,
                         "unknown": 0, "capped": 0}
     assert env.posts.rows == before
     assert env.x.prepare_ids == [] and env.bsky.prepare_ids == [] and env.x.sends == []
@@ -1524,3 +1524,260 @@ async def test_an_absent_post_whose_day_has_passed_closes_with_an_alert(env):
     row = env.row(pid)
     assert row["status"] == "skipped" and row["metadata"]["alert_kind"] == "expired"
     assert env.bsky.sends == []
+
+
+# ── Stage 2 (Upload-Post): SUBMITTED / PENDING / FAILED and the same-request-id resend ───────────
+#
+# Upload-Post is a MIDDLEMAN: its 200 only means it accepted the job — SUBMITTED, the row stays
+# `queued` with `publish.state = submitted`. Reconcile then polls the job and ends it FOUND
+# (published), FAILED (failed + alert), PENDING (ask again; after the schedule, the owner) or ABSENT
+# inside the idempotency window (resent with the SAME request id, which is the Idempotency-Key).
+# These drive the publisher with the scriptable FakeAdapter registered as an Upload-Post platform;
+# where the request id matters, `prepare` is the REAL Upload-Post adapter's, so the id a resend
+# reuses is exactly the one production would send.
+
+from app.services.marketing import outlet_upload_post  # noqa: E402
+from app.services.marketing.outlet_base import FAILED, PENDING, SUBMITTED  # noqa: E402
+
+UP_SCHEDULE = (600, 1200, 1800)
+
+
+class _RealPrepareFake(FakeAdapter):
+    """Scripted send / reconcile; `prepare` delegates to the real Upload-Post adapter."""
+
+    def prepare(self, post: Dict[str, Any]) -> Prepared:
+        self.prepare_ids.append(str(post.get("id")))
+        prepared = outlet_upload_post.UploadPostAdapter(self.platform).prepare(post)
+        self.prepared.append(prepared)
+        return prepared
+
+
+def _up_adapter(env: Env, monkeypatch, platform: str = "tiktok", *, cls: type = FakeAdapter,
+                schedule: tuple = UP_SCHEDULE) -> FakeAdapter:
+    adapter = cls(platform, resend_safe=True, retractable=False, schedule=schedule)
+    monkeypatch.setitem(outlets.ADAPTERS, platform, adapter)
+    env.enabled = [*env.enabled, platform]
+    return adapter
+
+
+def _backdate(env: Env, pid: str, seconds: float) -> None:
+    env.raw(pid)["metadata"]["publish"]["started_at"] = (_now() - timedelta(seconds=seconds)).isoformat()
+
+
+def _up_meta(**extra: Any) -> Dict[str, Any]:
+    return {"request_id": "2026-10-01:tiktok:video:a1", "first_sent_at": "2026-10-01T13:00:00+00:00",
+            "usage_before": {"count": 3, "limit": 10}, "usage_after": {"count": 4, "limit": 10}, **extra}
+
+
+@pytest.mark.asyncio
+async def test_a_submitted_outcome_stays_queued_and_is_never_resent_by_publish(env, monkeypatch, caplog):
+    up = _up_adapter(env, monkeypatch)
+    pid = env.seed(platform="tiktok", meta=_review_meta(alert_kind="failed", alert_notified_at=REVIEW_AT))
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    counters = await pub.publish_cycle()
+    assert counters["submitted"] == 1
+    assert counters["published"] == counters["unknown"] == counters["failed"] == counters["retry"] == 0
+    row = env.row(pid)
+    assert row["status"] == "queued" and row["attempts"] == 1
+    assert row.get("external_id") is None and row.get("published_at") is None and row["last_error"] is None
+    p = row["metadata"]["publish"]
+    assert p["state"] == "submitted" and p["category"] == "" and p["error"] is None
+    assert p["upload_post"] == _up_meta() and p["started_at"]
+    assert p["history"][-1]["kind"] == SUBMITTED and p["history"][-1]["attempt"] == 1
+    assert row["metadata"]["alert_notified_at"] == REVIEW_AT       # no new alert: nothing went wrong
+    _assert_review_kept(row)
+    assert any(pid in m for m in _messages(caplog, "SUBMITTED", logging.INFO))
+
+    for _ in range(2):                                             # publish never touches it again
+        await pub.publish_cycle()
+    assert len(up.sends) == 1 and env.row(pid)["metadata"]["publish"]["state"] == "submitted"
+
+    await pub.reconcile_cycle()                                    # not before the reconcile delay
+    assert up.reconciles == []
+
+
+@pytest.mark.asyncio
+async def test_a_submitted_post_is_published_when_reconcile_finds_it(env, monkeypatch):
+    up = _up_adapter(env, monkeypatch)
+    pid = env.seed(platform="tiktok")
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    await pub.publish_cycle()
+    _backdate(env, pid, 660)
+    url = "https://www.tiktok.com/@caydex/video/7412000000000000001"
+    up.reconcile_results = [ReconcileResult(
+        FOUND, external_id="7412000000000000001", external_url=url, published_at="2026-10-01T14:03:00Z",
+        publish_meta={"upload_post": _up_meta(platform_post_id="7412000000000000001")})]
+    counters = await pub.reconcile_cycle()
+    assert counters["checked"] == 1 and counters["found"] == 1
+    # The adapter polled the row as the SUBMITTED write left it.
+    assert up.reconciles[0]["metadata"]["publish"]["state"] == "submitted"
+    row = env.row(pid)
+    assert row["status"] == "published" and row["external_id"] == "7412000000000000001"
+    assert row["external_url"] == url and row["published_at"] == "2026-10-01T14:03:00Z"
+    p = row["metadata"]["publish"]
+    assert p["state"] == "published" and p["reconcile"]["last_result"] == FOUND
+    assert p["upload_post"]["platform_post_id"] == "7412000000000000001"
+    assert p["upload_post"]["request_id"] == "2026-10-01:tiktok:video:a1"
+    assert row["last_error"] is None and len(up.sends) == 1
+    _assert_review_kept(row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, last_error, in_alert", [
+    ("tiktok: reconnect the account in Upload-Post (account_reauth_required) — token expired",
+     "tiktok: reconnect the account in Upload-Post (account_reauth_required) — token expired",
+     "reconnect the account in Upload-Post"),
+    (None, "the platform reported a failure", "no reason given"),
+])
+async def test_reconcile_failed_closes_the_post_with_an_alert(env, monkeypatch, caplog, error, last_error, in_alert):
+    up = _up_adapter(env, monkeypatch)
+    pid = env.seed_queued(platform="tiktok", started_ago=700, state="submitted")
+    env.raw(pid)["metadata"]["alert_notified_at"] = REVIEW_AT       # an earlier alert was already sent
+    up.reconcile_results = [ReconcileResult(FAILED, error=error)]
+    counters = await pub.reconcile_cycle()
+    assert counters["checked"] == 1 and counters["failed"] == 1 and counters.get("escalated", 0) == 0
+    row = env.row(pid)
+    meta = row["metadata"]
+    assert row["status"] == "failed" and row["last_error"] == last_error
+    assert meta["publish"]["state"] == "failed_on_platform"
+    assert meta["publish"]["reconcile"]["last_result"] == FAILED and meta["publish"]["reconcile"]["error"] == error
+    assert meta["alert_kind"] == "failed" and "TIKTOK did not publish the post" in meta["alert_text"]
+    assert in_alert in meta["alert_text"]
+    assert "alert_notified_at" not in meta                          # the feed sends the new alert
+    assert up.sends == [] and up.prepare_ids == []                  # a failure is never resent
+    _assert_review_kept(row)
+    assert any(pid in m for m in _messages(caplog, "FAILED ON PLATFORM", logging.ERROR))
+    await pub.reconcile_cycle()
+    assert len(up.reconciles) == 1                                  # closed: never polled again
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_records_each_check_then_escalates_after_the_schedule(env, monkeypatch, caplog):
+    up = _up_adapter(env, monkeypatch)                               # schedule 600 / 1200 / 1800 s
+    pid = env.seed_queued(platform="tiktok", started_ago=700, state="submitted")
+    up.reconcile_results = [ReconcileResult(PENDING) for _ in range(5)]
+
+    counters = await pub.reconcile_cycle()
+    assert counters["checked"] == 1 and counters["pending"] == 1 and counters["escalated"] == 0
+    row = env.row(pid)
+    rec = row["metadata"]["publish"]["reconcile"]
+    assert row["status"] == "queued" and rec["n"] == 1 and rec["last_result"] == PENDING
+    assert row["metadata"]["publish"]["state"] == "submitted"       # still waiting on Upload-Post
+    await pub.reconcile_cycle()                                      # check 2 is due only at +1200 s
+    assert len(up.reconciles) == 1
+
+    _backdate(env, pid, 2000)
+    for n in (2, 3):
+        counters = await pub.reconcile_cycle()
+        assert counters["pending"] == 1 and len(up.reconciles) == n
+        assert env.row(pid)["metadata"]["publish"]["reconcile"]["n"] == n
+        assert env.row(pid)["status"] == "queued"
+
+    # The schedule is spent but the job is still PROCESSING: no escalation yet (review 2026-10-01 —
+    # "Not posted" on a job that later publishes would record a live post as failed).
+    counters = await pub.reconcile_cycle()
+    assert counters.get("escalated", 0) == 0 and len(up.reconciles) == 3
+    env.raw(pid)["metadata"]["publish"]["reconcile"]["last_at"] = (
+        _now() - pub.PENDING_REPOLL - timedelta(minutes=1)).isoformat()
+    counters = await pub.reconcile_cycle()                           # one more free poll, 2 h later
+    assert counters["pending"] == 1 and len(up.reconciles) == 4
+    _backdate(env, pid, pub.PENDING_CEILING.total_seconds() + 60)    # past the 24 h ceiling → the owner
+    counters = await pub.reconcile_cycle()
+    assert counters["escalated"] == 1 and len(up.reconciles) == 4
+    row = env.row(pid)
+    meta = row["metadata"]
+    assert row["status"] == "queued" and meta["publish"]["state"] == "escalated" and meta["escalated_at"]
+    assert meta["alert_kind"] == "unknown" and "still processing" in meta["alert_text"]
+    assert up.sends == [] and up.prepare_ids == []
+    _assert_review_kept(row)
+    snapshot = env.row(pid)
+    await pub.reconcile_cycle()                                      # escalated: left alone
+    assert len(up.reconciles) == 4 and env.row(pid) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_spent_on_unknown_results_escalates_with_the_last_reason(env, monkeypatch):
+    up = _up_adapter(env, monkeypatch)
+    pid = env.seed_queued(platform="tiktok", started_ago=5000, state="submitted")
+    rec = {"n": 3, "last_at": _now().isoformat(), "last_result": UNKNOWN, "error": "tiktok: job status completed with no platform result yet"}
+    env.raw(pid)["metadata"]["publish"]["reconcile"] = rec
+    counters = await pub.reconcile_cycle()
+    meta = env.row(pid)["metadata"]
+    assert counters["escalated"] == 1 and up.reconciles == []
+    assert "3 checks could not confirm it" in meta["alert_text"] and "no platform result yet" in meta["alert_text"]
+
+
+@pytest.mark.asyncio
+async def test_a_resend_safe_absent_resends_with_the_same_request_id(env, monkeypatch):
+    up = _up_adapter(env, monkeypatch, "threads", cls=_RealPrepareFake)
+    pid = env.seed(platform="threads")
+    key = env.raw(pid)["idempotency_key"]
+    up.outcomes = [Outcome(AMBIGUOUS, "server", error="upload-post upload_text: HTTP 503")]
+    counters = await pub.publish_cycle()
+    assert counters["unknown"] == 1
+    written = env.row(pid)["metadata"]["publish"]["upload_post"]     # the claim's write-ahead
+    assert written["request_id"] == f"{key}:a1"
+
+    def submitted(_post):
+        # What the real adapter returns on an async ack: the prepared meta plus the submit time.
+        meta = dict(up.prepared[-1].publish_meta["upload_post"])
+        up.outcomes.append(Outcome(SUBMITTED, publish_meta={"upload_post": {**meta, "submitted_at": _now().isoformat()}}))
+
+    up.on_send = submitted
+    _backdate(env, pid, 660)
+    up.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["checked"] == 1 and counters["resent"] == 1
+
+    first, again = up.prepared
+    assert first.payload["request_id"] == again.payload["request_id"] == f"{key}:a1"
+    assert again.publish_meta["upload_post"]["first_sent_at"] == first.publish_meta["upload_post"]["first_sent_at"]
+    assert again.text_sha256 == first.text_sha256
+    sent_post, sent_prepared = up.sends[1]
+    assert sent_prepared is again                                    # exactly what prepare built
+    assert sent_post["status"] == "queued"
+    sp = sent_post["metadata"]["publish"]
+    assert sp["state"] == "sending" and sp["resends"] == 1 and sp["upload_post"]["request_id"] == f"{key}:a1"
+
+    row = env.row(pid)
+    p = row["metadata"]["publish"]
+    assert row["status"] == "queued" and p["state"] == "submitted" and p["resends"] == 1
+    assert p["upload_post"]["request_id"] == f"{key}:a1"
+    assert p["upload_post"]["first_sent_at"] == written["first_sent_at"]   # the window never slides
+    assert row["attempts"] == 1                                      # a resend is not a new attempt
+    _assert_review_kept(row)
+    await pub.publish_cycle()                                        # still queued: publish never resends
+    assert len(up.sends) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_absent_job_outside_the_window_is_not_resent(env, monkeypatch):
+    """The adapter offers a resend only inside 20 h (`resend_safe=True`); an ABSENT without it is
+    re-checked on the schedule like any other, never resent — even on a resend-safe outlet."""
+    up = _up_adapter(env, monkeypatch, "threads", cls=_RealPrepareFake)
+    pid = env.seed_queued(platform="threads", started_ago=700, state="unknown")
+    up.reconcile_results = [ReconcileResult(ABSENT, resend_safe=False)]
+    counters = await pub.reconcile_cycle()
+    assert counters["absent"] == 1 and counters["resent"] == 0
+    assert up.sends == [] and up.prepare_ids == []
+    row = env.row(pid)
+    assert row["status"] == "queued" and row["metadata"]["publish"]["reconcile"]["last_result"] == ABSENT
+
+
+@pytest.mark.asyncio
+async def test_a_lost_submitted_write_leaves_the_request_id_for_reconcile(env, monkeypatch, caplog):
+    """The ledger fails while recording SUBMITTED: the claim's write-ahead already holds the request
+    id, so reconcile can still poll the job — the row is never lost and never resent blindly."""
+    up = _up_adapter(env, monkeypatch, "threads", cls=_RealPrepareFake)
+    pid = env.seed(platform="threads")
+    key = env.raw(pid)["idempotency_key"]
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": {"request_id": f"{key}:a1"}})]
+    up.on_send = lambda _post: env.posts.fail_updates.append(RuntimeError("PostgREST 520"))
+    counters = await pub.publish_cycle()
+    assert counters["submitted"] == 0 and counters["unknown"] == 1
+    row = env.row(pid)
+    p = row["metadata"]["publish"]
+    assert row["status"] == "queued" and p["state"] == "sending" and p["upload_post"]["request_id"] == f"{key}:a1"
+    assert any(pid in m for m in _messages(caplog, "outcome submitted NOT RECORDED", logging.ERROR))
+    await pub.publish_cycle()
+    assert len(up.sends) == 1

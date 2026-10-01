@@ -890,7 +890,8 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # permanent for that request → 502; anything transient or of unknown outcome → 503.
     if cls.startswith(("xapi", "bluesky", "uploadpost")):
         if any(word in cls for word in ("refused", "auth", "notconfigured", "forbidden", "credits",
-                                        "duplicate", "invalidswap", "expiredtoken")):
+                                        "duplicate", "invalidswap", "expiredtoken", "plan", "quota",
+                                        "notconnected", "reauth")):
             return ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE, 502
         return (
             ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE,

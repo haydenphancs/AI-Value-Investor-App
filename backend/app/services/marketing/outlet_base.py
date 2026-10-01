@@ -32,11 +32,16 @@ PUBLISHED = "published"
 NOT_SENT = "not_sent"
 REFUSED = "refused"
 AMBIGUOUS = "ambiguous"
+#: A middleman (Upload-Post) ACCEPTED the job; the platform result comes later. The row stays
+#: `queued` (state `submitted`) and reconcile polls the job — never "published" on the ack alone.
+SUBMITTED = "submitted"
 
 #: Reconcile kinds.
 FOUND = "found"          # the platform has the post → published
 ABSENT = "absent"        # the platform definitely does not have it
 UNKNOWN = "unknown"      # could not tell this time (an error, a read blocked by the cap)
+PENDING = "pending"      # a submitted job is still being processed — ask again later
+FAILED = "failed"        # the platform / middleman reports a DEFINITIVE failure → `failed` + alert
 
 #: Retract kinds.
 RETRACTED = "retracted"  # gone from the platform (or was already gone)
@@ -98,7 +103,8 @@ class Prepared:
 
 @dataclass(frozen=True)
 class Outcome:
-    """What one `send` ended in. `kind` is one of PUBLISHED / NOT_SENT / REFUSED / AMBIGUOUS."""
+    """What one `send` ended in. `kind` is one of PUBLISHED / NOT_SENT / REFUSED / AMBIGUOUS /
+    SUBMITTED (a middleman accepted the job; the platform result comes later)."""
 
     kind: str
     #: transport | rate_limited | auth | credits | forbidden | duplicate | invalid | server | bug | guard
@@ -120,7 +126,8 @@ class Outcome:
 
 @dataclass(frozen=True)
 class ReconcileResult:
-    """What a platform says about a post whose outcome was unknown. `kind` is FOUND / ABSENT / UNKNOWN."""
+    """What a platform says about a post whose outcome was unknown (or a submitted job). `kind` is
+    FOUND / ABSENT / UNKNOWN / PENDING (still processing) / FAILED (a definitive platform failure)."""
 
     kind: str
     external_id: Optional[str] = None

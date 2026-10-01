@@ -973,8 +973,15 @@ out to compute peer medians per request:
   UNIQUE key. `industry = ''` is the **SECTOR aggregate** (the fallback); `industry = <name>`
   is an **INDUSTRY aggregate** whose `sector` is its parent. The lookup prefers the industry
   row for a `(metric, period)` and falls back to the sector row **per cell**.
-- **Three `period_type` kinds:**
-  - `annual` + `quarterly` — fiscal **history** (the chart lines + the growth series).
+- **Three live `period_type` kinds:**
+  - `annual` + `calendar_quarter` — **history** (the chart lines + the growth series). Annual rows
+    are keyed by the year of the period end. Quarterly rows are keyed by the **calendar quarter
+    the period ends in** (`period_labels.calendar_quarter_label`, `"Q3'25"` = Jul-Sep 2025; an end
+    on day 1-7 counts as the previous month, for 52/53-week filers), and every quarterly reader
+    joins a company quarter with the same helper. So Microsoft's fiscal Q1 (Jul-Sep) sits next to
+    peers' Jul-Sep, and Nvidia's Nov-Jan quarter next to peers' Jan-Mar, not a quarter 6-10
+    months away. The legacy `quarterly` rows (FISCAL quarter number + end-date year, finding
+    #34, 2026-09-30) are never read; migration 185 deletes them after the first recompute.
   - `ttm` — one **trailing-twelve-month current snapshot** median per `(peer group, metric)`
     (`period_label = 'TTM'`). This is what the single-value "vs avg" comparison reads, computed
     on the **same TTM basis as the company's own card** (apples-to-apples) so it never spikes
@@ -995,7 +1002,7 @@ out to compute peer medians per request:
 
 | Job | Cadence | Writes | Why separate |
 |-----|---------|--------|--------------|
-| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~04:00 UTC | `annual` + `quarterly` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
+| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~04:00 UTC | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
 | TTM refresh | Weekly — Sunday 06:00 UTC | `ttm` rows + the `''` sector aggregate for the TTM period | price ÷ TTM earnings drifts daily for every company, so the current-snapshot median goes stale as a whole |
 
 Operational invariants:
@@ -1007,6 +1014,9 @@ Operational invariants:
   weekly TTM write would spoof the quarterly fiscal job into skipping every sector.
 - Background upserts **fail loudly**: a failed batch raises so the per-sector guard aborts *before*
   stamping the sector "fresh", and the sector is retried next run (no silent partial coverage).
+  The one exception is the code-before-migration window: if the database still refuses
+  `calendar_quarter` (migration 184 unapplied), those rows are skipped for the run with an ERROR
+  and `calendar_quarter_blocked: true` in the summary, while the annual rows are still written.
 - Both jobs **survive a redeploy inside their window** (2026-09-18). Each phase of the quarterly
   chain (dossier → competitor intel → IP intel → moat → benchmarks) and the weekly TTM run holds
   its own durable, day-keyed claim in `notification_job_state` (migration 147's
@@ -2846,7 +2856,8 @@ backend/
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase
 ├── marketing/                    # the marketing MEDIA WORKER — a SECOND Railway service (cron), §12
 │   ├── Dockerfile                #   its image; the web service keeps backend/Dockerfile
-│   ├── railway.toml              #   its config-as-code; the web service keeps backend/railway.toml
+│   ├── railway.toml              #   RECORD of its dashboard settings (Railway does not read it: no
+│   │                             #   config-as-code for services created after 2026-08-28)
 │   ├── main.py                   #   entrypoint (`python -m marketing.main`) — nothing here imports app.*
 │   └── assets/fonts/             #   vendored OFL fonts for the caption burn
 ├── scripts/

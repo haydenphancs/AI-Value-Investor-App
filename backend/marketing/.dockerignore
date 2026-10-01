@@ -1,0 +1,9 @@
+# The worker image's build context is backend/marketing/ (Root Directory /backend/marketing).
+# Local-only artefacts never ship: previews, a local model cache, bytecode.
+out/
+models/
+.cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+.DS_Store

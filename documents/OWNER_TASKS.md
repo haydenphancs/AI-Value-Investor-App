@@ -59,8 +59,8 @@ admin recomputes, and marketing script generation.
 - **Web service** (`backend/railway.toml`):
   - Builds from the Dockerfile; health check `/health/pdf`.
   - Restarts on failure at most 5 times. After that, every loop stays down until you redeploy.
-- **Marketing worker** (`backend/marketing/railway.toml`), **not created yet**:
-  - Cron `15 * * * *` (UTC); starts a day's run from 16:00 ET.
+- **Marketing worker** (service `marketing-worker`, created 2026-09-30). Its settings live in the DASHBOARD — Railway lets no new service use a config file — and `backend/marketing/railway.toml` records them:
+  - Root Directory `/backend/marketing` (Railway auto-detects that folder's `Dockerfile`; a custom Dockerfile path is ignored), Cron `15 * * * *` (UTC), Restart Policy Never, no health check, Watch Paths `/backend/marketing/**`, Memory 4 GB. Starts a day's run from 16:00 ET.
   - Stays dry-run unless `MARKETING_DRY_RUN` is changed.
   - Phase 4 (2026-09-29): it narrates the script (Kokoro voice, baked into the image), renders one 9:16 video (brand-colour cards, word-timed captions, the disclaimer card at the end), records the day's posts for review, and closes the run `media_ready`. Give the service **4 GB of memory**; the voice step peaks near 2 GB, and the render runs after it has exited.
 
@@ -99,7 +99,7 @@ admin recomputes, and marketing script generation.
 
 - [x] **Railway variables** (verified 2026-09-25 against deploy 95ea9b25):
   - `ENVIRONMENT=production`; all 25 loops started.
-  - Deploys use root `/backend` and config `/backend/railway.toml`.
+  - Deploys use root `/backend` and config `/backend/railway.toml`. ⚠️ **Before 2026-12-01** move these settings into the dashboard: Railway's notice says config-as-code (railway.toml) stops working then. The ones that matter: Dockerfile builder, health check `/health/pdf` (timeout 300), restart On Failure ×5.
   - `SENTRY_DSN` is set and the SDK starts.
   - APNs keys are set, `APNS_ENV=production`, `PUSH_DRY_RUN` is unset.
 - [ ] **Sentry quota:** the DSN is fine, but Sentry received no backend events after 2026-09-04. Check the Sentry project's quota and rate-limit page.
@@ -185,6 +185,13 @@ admin recomputes, and marketing script generation.
   - To go back: `NEWS_LLM_PROVIDER=gemini` and delete `NEWS_LLM_MODEL` (or set it to `gemini-2.5-flash-lite`). A leftover non-Gemini model name is ignored — Gemini flash-lite is used, with one ERROR in the log. Labels record the model that made them (`news_sentiment_log.model`).
   - An exhausted provider account (OpenAI `insufficient_quota` 429, DeepSeek 402 "Insufficient Balance", Qwen 400 "Arrearage") is an ERROR and pauses the news model for 15 minutes; three such pauses with no success between them log one more ERROR (latched until a call succeeds). One burst of rate-limit 429s is NOT an outage. All ERRORs reach Sentry.
   - A provider's content moderation refusing an article (DeepSeek "Content Exists Risk", Qwen `data_inspection_failed`) leaves THAT article unsummarised and unlabelled (logged once per article at ERROR); the rest of its batch is still summarised.
+- [ ] **Calendar-quarter peer benchmarks go-live** (Financials-tab finding #34, built 2026-09-30). Quarterly sector/industry medians were keyed by FISCAL quarter, so Microsoft, Apple, Nvidia and the Jan-year-end retailers showed a quarterly "vs industry" line from the wrong peer quarter (up to 10 months ahead). They are now stored under `period_type = 'calendar_quarter'`, keyed by the calendar quarter each period ends in, and every reader uses only those rows. The old `'quarterly'` rows are never read again.
+  1. Apply migration 184 (`backend/database/migrations/184_calendar_quarter_benchmarks.sql`) in Studio, then its VERIFY query (the definition lists `calendar_quarter`). Do this **before** step 2. If it fails with a lock timeout, run it again.
+  2. Deploy the backend. If the code goes out first, the recompute logs one ERROR naming migration 184, writes the annual rows and skips the quarterly ones (its summary line says `calendar_quarter_blocked: True`). Apply 184, then run step 3.
+  3. Recompute the medians (**⚠️ PROD**, about 1–3 h of FMP calls): `POST /api/v1/admin/refresh-industry-benchmarks?skip_recent_hours=0` with `X-Admin-Token`. The local alternative is `./venv/bin/python -m scripts.recompute_industry_benchmarks --skip-recent-hours 0`. If 184 and the deploy are both live before **Sun 2026-10-04 04:00 UTC**, the quarterly chain does this by itself (phase 5, base + 120 min) and you can skip this step. **Until it has run, no quarterly peer line shows** (Growth, Profit Power, the report drill-down) and the index P/E is blank. Nothing wrong is shown in the meantime.
+  4. Check it: the Railway log line `industry_benchmark complete:` shows `calendar_quarter_blocked: False` and `sectors_done` 11. In Studio, the BEFORE query in migration 185 shows `calendar_quarter` with a row count close to the old `quarterly` count. Then ask Claude to spot-check MSFT, NVDA and KO in the app.
+  5. Then apply migration 185 (`backend/database/migrations/185_drop_legacy_quarterly_benchmarks.sql`, **destructive**). It deletes the superseded `'quarterly'` rows. Run its two BEFORE queries first. It refuses to run, and changes nothing, if any sector has not finished its calendar-quarter recompute. The deleted rows come back only from a backup, so take one first if you want to keep them.
+  6. Then re-dump the schema (the period_type CHECK changed): `./scripts/dump_schema.sh`, then `generate_schema_doc.py`.
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
   - Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template
   - publish the Google OAuth consent screen
@@ -248,7 +255,7 @@ admin recomputes, and marketing script generation.
 - **Marketing go-live, when you decide:**
   1. ~~Apply 176~~ (done, verified 2026-09-26).
   2. Commit and **deploy the web service FIRST** (the Phase 4 worker needs the web's new object checks, the video read-back and the review bot). Set `MARKETING_WORKER_TOKEN` on it. Leave `MARKETING_JUDGE_MODE` unset (the default is `enforce`; under `shadow` or `off` a day is voiced and rendered but never becomes a post — it closes `skipped` with `judge_not_enforced`).
-  3. Create the Railway worker service: root `/backend`, **Config File `/backend/marketing/railway.toml`**, **4 GB memory**. ⚠️ Without that Config File, Railway reads the web's `backend/railway.toml` instead — it would build the WEB image with a health check and no cron (and, with copied variables, run a second web process that starts every background loop twice).
+  3. ✅ Done 2026-09-30 — the worker service `marketing-worker`, configured in the dashboard (see §1B for the exact settings). ⚠️ Lessons: Railway ignored the Config File (config-as-code is closed to services created after 2026-08-28) AND a custom Dockerfile path, and built the WEB image until the Root Directory was set to `/backend/marketing`; the web image crashes at once there (the worker holds none of the web's secrets), so the misconfiguration was loud and harmless.
   4. Set the same `MARKETING_WORKER_TOKEN` on the worker, plus `MARKETING_API_BASE_URL=https://caydexinvest.com` (the public URL — Railway private networking is not a drop-in: the web listens on IPv4 only) and `MARKETING_RUN_HOUR_ET` (default 16). Optional: `MARKETING_TTS_VOICE` (default `af_heart`), `MARKETING_TTS_SPEED`, `MARKETING_TTS_THREADS`, `MARKETING_RENDER_THREADS`, `MARKETING_MAX_VIDEO_SECONDS` (default 75).
   5. Keep `MARKETING_DRY_RUN=true` and `MARKETING_AUTO_PUBLISH=false`. The semantic judge does not yet meet its own calibration bar (it misses present-tense restatements of a past deal price), so you approve every post.
   6. **Telegram review bot** (so you review from your phone):

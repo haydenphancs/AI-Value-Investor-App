@@ -83,7 +83,7 @@ def _worker_files(root: Path = _PKG) -> List[Path]:
 
 def _copy_ignore(root: Path):
     """`shutil.copytree` ignore callable with the same anchored rule (plus the root `assets/`,
-    which holds fonts, no code) — the copy must be what `COPY marketing/ marketing/` ships."""
+    which holds fonts, no code) — the copy must be what `COPY . marketing/` ships."""
     def ignore(src: str, names: List[str]) -> set:
         rel = Path(src).relative_to(root).parts
         return {n for n in names if _untracked_dir(rel + (n,)) or (not rel and n == "assets")}
@@ -346,11 +346,16 @@ def test_a_nested_models_package_importing_app_is_flagged(tmp_path):
 def test_worker_package_is_self_contained_for_docker():
     """The Dockerfile COPYs only `marketing/`; the run command and the fonts path must agree."""
     docker = (_PKG / "Dockerfile").read_text()
-    assert 'COPY marketing/ marketing/' in docker and '"-m", "marketing.main"' in docker
+    # The build context is the package itself (Root Directory /backend/marketing), so every COPY
+    # lands under /app/marketing and nothing outside the package can be copied in.
+    assert 'COPY . marketing/' in docker and '"-m", "marketing.main"' in docker
     copies = [l for l in docker.splitlines() if l.startswith("COPY ")]
-    assert copies and all(l.split()[1].startswith("marketing/") for l in copies), copies
+    assert copies and all(l.split()[-1] == "marketing/" for l in copies), copies
+    assert not any(".." in part for l in copies for part in l.split()[1:]), copies
+    ignore = (_PKG / ".dockerignore").read_text().split()
+    assert {"out/", "models/", ".cache/"} <= set(ignore), ignore
     toml = (_PKG / "railway.toml").read_text()
-    assert 'dockerfilePath = "marketing/Dockerfile"' in toml
+    assert 'dockerfilePath = "Dockerfile"' in toml and "RAILWAY DOES NOT READ THIS FILE" in toml
     assert 'startCommand = "python -m marketing.main"' in toml
 
 
@@ -385,7 +390,7 @@ def test_every_worker_package_is_pinned_and_the_dockerfile_applies_the_pins():
     docker = (_PKG / "Dockerfile").read_text()
     install = next(l for l in docker.splitlines() if "-r marketing/requirements.txt" in l)
     assert "-c marketing/constraints.txt" in install, install
-    assert re.search(r"^COPY marketing/requirements\.txt marketing/constraints\.txt marketing/$", docker, re.M)
+    assert re.search(r"^COPY requirements\.txt constraints\.txt marketing/$", docker, re.M)
     # torch comes from the CPU index at the SAME version the constraints pin.
     assert f"torch=={cons['torch']}" in docker
 

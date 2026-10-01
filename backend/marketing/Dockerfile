@@ -1,7 +1,11 @@
 # marketing/Dockerfile — the marketing-engine MEDIA WORKER (design doc §12).
 #
-# A SECOND Railway service on this same repo (root directory /backend — the build context —
-# config file /backend/marketing/railway.toml, cron schedule). It is NOT the web app and never
+# A SECOND Railway service on this same repo, Root Directory `/backend/marketing` — so the BUILD
+# CONTEXT is this folder and Railway auto-detects THIS file as the service's `Dockerfile`. (A custom
+# Dockerfile path — RAILWAY_DOCKERFILE_PATH or a config file — was ignored for this service on
+# 2026-09-30: the builder kept loading backend/Dockerfile, the web app; and Railway no longer lets a
+# service created after 2026-08-28 use a config file at all. The service's cron schedule, restart
+# policy and watch path are set in the dashboard; marketing/railway.toml records them.) It is NOT the web app and never
 # runs it: the entrypoint is `python -m marketing.main`, and nothing under marketing/ imports
 # app.* — so no
 # lifespan loop starts twice and no Supabase key is needed in this container. It talks to the
@@ -30,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY marketing/requirements.txt marketing/constraints.txt marketing/
+COPY requirements.txt constraints.txt marketing/
 # torch from the CPU index FIRST (see requirements.txt), then the rest under constraints.txt —
 # every transitive package at the version the 2026-09-26 spike measured, so the first build does
 # not pick up whatever PyPI serves that day — then prove no CUDA wheel crept in.
@@ -46,9 +50,11 @@ ENV HF_HOME=/app/models
 RUN python -c "import json, pathlib; from kokoro import KPipeline; p = KPipeline(lang_code='a', repo_id='hexgrad/Kokoro-82M'); list(p('Warm up the voice.', voice='af_heart')); import spacy; spacy.load('en_core_web_sm'); from huggingface_hub import scan_cache_dir; revs = [{'repo': r.repo_id, 'revision': rev.commit_hash} for r in scan_cache_dir().repos for rev in r.revisions]; pathlib.Path('/app/models/revisions.json').write_text(json.dumps(revs))" \
     && cat /app/models/revisions.json
 
-# Only the worker package. The web app's source is deliberately NOT copied: the worker must
-# stay importable without app.config (see marketing/__init__.py).
-COPY marketing/ marketing/
+# Only the worker package — the build context IS the package (Root Directory /backend/marketing),
+# so the web app's source cannot be copied in even by mistake: the worker must stay importable
+# without app.config (see marketing/__init__.py). `.dockerignore` keeps the local-only out/,
+# models/ and .cache/ out of the image.
+COPY . marketing/
 
 # HF_HUB_OFFLINE: the baked weights are the ONLY weights — a missing file fails loudly instead
 # of silently pulling from the network on a cron tick.

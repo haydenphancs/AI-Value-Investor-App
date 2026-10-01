@@ -19,9 +19,11 @@ The worker half of the marketing engine (design doc §12). It is its **own Railw
 | `assets/fonts/` | Inter Bold (static, OFL) for the cards, the caption burn and measuring |
 | `assets/brand/` | the Caydex logo for the brand and disclaimer cards (the image copies only `marketing/`) |
 
-Railway setup: service on this repo with **Root Directory `/backend`** and **Config File
-`/backend/marketing/railway.toml`** (without it Railway reads the web's `backend/railway.toml`),
-**4 GB of memory** (the voice child peaks near 2 GB; the render runs after it has exited).
+Railway setup (service `marketing-worker`, all in the DASHBOARD — Railway lets no new service use a
+config file, and it ignored a custom Dockerfile path): **Root Directory `/backend/marketing`** (the
+build context; Railway auto-detects this folder's `Dockerfile`), **Cron `15 * * * *`**, **Restart
+Policy Never**, no health check, Watch Paths `/backend/marketing/**`, **4 GB of memory** (the voice
+child peaks near 2 GB; the render runs after it has exited). `railway.toml` records these values.
 Environment: `MARKETING_API_BASE_URL` (the web's public URL, `https://caydexinvest.com`),
 `MARKETING_WORKER_TOKEN`, `MARKETING_RUN_HOUR_ET`, `MARKETING_DRY_RUN` (optionally
 `SUPABASE_PUBLISHABLE_KEY`) — and **no** Supabase secret, **no** social or bot token. Knobs, all

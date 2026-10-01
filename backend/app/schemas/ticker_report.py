@@ -9,7 +9,7 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 from pydantic import BaseModel, Field
 
 from app.schemas.dcf_fair_value import DcfFairValueResponse
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Literal, Optional, List
 
 from app.schemas.growth import GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
@@ -113,12 +113,28 @@ class RevenueProjectionResponse(BaseModel):
     revenue_analyst_count: Optional[int] = None
     eps_analyst_count: Optional[int] = None
     is_forecast: bool
+    # Earnings Timeline (`annual_timeline`) rows only — None on `projections` and on
+    # reports generated before these existed (iOS decodes both as Optional).
+    # `period_end`: the fiscal period's END date ("yyyy-MM-dd"). `period` is the FISCAL
+    # year, which is not the calendar year for an off-calendar filer (NVDA's "2025" runs
+    # Feb 2024 – Jan 2025), so the price overlay places each close by period window.
+    period_end: Optional[str] = None
+    # "gaap" (reported `epsDiluted`) on actual years, "consensus" (analyst `epsAvg`,
+    # adjusted for most filers) on forecast years. The first forecast year's EPS YoY is
+    # None because it would compare the two bases.
+    eps_basis: Optional[str] = None
 
 
 class EarningsTrackRecordPointResponse(BaseModel):
     period: str  # e.g. "Q1 '24"
     surprise_percent: float  # signed beat (+) / miss (−) vs estimate, %
+    # Kept for shipped builds: True only for a beat. A MET quarter is False here and
+    # "met" in `result`, which the current build reads.
     beat: bool
+    # "beat" | "miss" | "met" from the raw actual vs estimate (the Financials tab's rule).
+    # None on reports generated before the field existed — iOS then falls back to `beat`.
+    # Declared here because the model's default extra="ignore" would drop it otherwise.
+    result: Optional[Literal["beat", "miss", "met"]] = None
 
 
 class TimelinePricePointResponse(BaseModel):
@@ -166,7 +182,8 @@ class RevenueForecastResponse(BaseModel):
     # Earnings beat/miss track record — last ~6 reported quarters vs estimate.
     # Empty list + None summary on older cached reports / no earnings data.
     earnings_track_record: List[EarningsTrackRecordPointResponse] = []
-    beat_summary: Optional[str] = None  # e.g. "Beat 6 of 8"
+    # e.g. "Beat 6 of 8" — a met quarter counts in the 8, not the 6, and adds " · 1 met".
+    beat_summary: Optional[str] = None
 
 
 # ── Deep Dive: Insider & Management ───────────────────────────────────────────
@@ -189,6 +206,10 @@ class CapitalAllocationResponse(BaseModel):
     buyback_yield: float
     total_yield: float
     share_count_change: float  # % (negative = shrinking via buybacks)
+    # False when fewer than two quarters report a share count: `share_count_change` is
+    # then a placeholder 0.0 (non-Optional on shipped iOS), never a measured "flat".
+    # None on reports built before 2026-09-30 (iOS derives it from data_points).
+    share_count_change_known: Optional[bool] = None
     # Per-quarter series (same data the Financials-tab chart uses) so the
     # Insider & Management card can render a compact dilution mini-chart and
     # label the share-count window. Empty when Signal of Confidence is
@@ -290,10 +311,18 @@ class RevenueSegmentResponse(BaseModel):
 
 class RevenueEngineResponse(BaseModel):
     segments: List[RevenueSegmentResponse]
+    # The share denominator, in millions: REPORTED revenue when the income statement has
+    # it (the Financials tab's basis), else the segment sum. Every segment's
+    # `total_revenue` repeats it.
     total_revenue: float
-    revenue_unit: str
-    period: str
+    revenue_unit: str  # the unit of every value here — always "Millions"
+    period: str  # "FY 2025" (the breakdown's fiscal year), "" when unknown
     analysis_note: Optional[str] = None
+    # Millions, positive: the intersegment sales a GROSS segment stack includes and
+    # consolidation removes (INTC FY2025: 70.5B of segments vs 52.9B of revenue → 17.7B).
+    # Set only for a gross stack; with it the shares of reported revenue add to 100%.
+    # None otherwise and on older reports (iOS decodes it as Optional).
+    intersegment_eliminations: Optional[float] = None
 
 
 # ── Deep Dive: Moat & Competition ─────────────────────────────────────────────

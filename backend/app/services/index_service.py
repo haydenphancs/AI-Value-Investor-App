@@ -35,6 +35,7 @@ from app.schemas.index import (
 )
 from app.database import get_supabase
 from app.utils.postgrest_paging import fetch_all_rows
+from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
 from app.utils.market_hours import ET, market_status_fields, to_utc_instant
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.price_service import price_source
@@ -458,8 +459,12 @@ def _compute_index_pe_from_sectors() -> Optional[float]:
     Compute aggregate index P/E from sector benchmark medians.
 
     Queries the sector_benchmarks table for pe_ratio entries,
-    picks the most recent quarterly period that has >= 8 sectors,
+    picks the most recent CALENDAR quarter that has >= 8 sectors,
     and returns the simple average across all sectors.
+
+    Reads period_type CALENDAR_QUARTER_PERIOD_TYPE, never the legacy 'quarterly' rows:
+    those pooled each company by its FISCAL quarter number, so a sector's "Q1" median
+    mixed Microsoft's Jul-Sep quarter with everyone else's Jan-Mar.
 
     ⚠️ TWO things this read must do, and did not until 2026-09-12:
 
@@ -490,7 +495,7 @@ def _compute_index_pe_from_sectors() -> Optional[float]:
             lambda: supabase.table("sector_benchmarks")
             .select("sector, period_type, period_label, median_value")
             .eq("metric_name", "pe_ratio")
-            .eq("period_type", "quarterly")
+            .eq("period_type", CALENDAR_QUARTER_PERIOD_TYPE)
             .eq("industry", ""),
             order_by="id",
             what="index P/E: sector benchmark medians",

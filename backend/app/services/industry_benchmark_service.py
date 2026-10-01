@@ -21,14 +21,16 @@ import asyncio
 import json
 import logging
 import math
+import re
 import statistics
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
+from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
 from app.services.sector_benchmark_service import (
     SectorBenchmarkService,
     METRIC_CONFIGS,
@@ -40,8 +42,10 @@ from app.services.sector_benchmark_service import (
     FMP_QUARTERLY_LIMIT_BACKFILL,
     COMPUTED_RATIO_FLOOR,
     COMPUTED_RATIO_CEIL,
+    STORED_PERIOD_TYPE,
     _winsorize,
 )
+from app.utils.supabase_errors import is_check_violation
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,57 @@ from app.services.universe_data import BENCHMARK_UNIVERSE, load_universe, univer
 # FMP cost + memory. Most industries above the $500M floor have fewer than this.
 TOP_TICKERS_PER_INDUSTRY = 300
 DEFAULT_SKIP_IF_FRESH_HOURS = 24
+
+# The CHECK constraint that lists the allowed `sector_benchmarks.period_type` values.
+# Migration 184 adds CALENDAR_QUARTER_PERIOD_TYPE to it; until it is applied every
+# calendar-quarter row is refused with 23514 (see `_upsert`).
+_PERIOD_TYPE_CHECK = "sector_benchmarks_period_type_check"
+
+# A calendar quarter is not WRITTEN until it ended at least this many days before the
+# run. Rows are keyed by the calendar quarter a period ENDS in, so a few days after a
+# quarter closes its cells hold only the off-calendar filers whose quarter ended inside
+# it and who have already reported (Jan-FY retailers, Nvidia/Cisco/Salesforce, the
+# Aug-quarter Oracle/Nike/FedEx/Micron) — no calendar filer has reported yet. At sector
+# level that cohort easily reaches the n>=20 maturity floor, so the readers' hold-back
+# passed it as mature and it stood as the quarter's "Industry/Sector Avg" until the next
+# quarterly run. 75 days clears the 40/45-day 10-Q deadlines; on the scheduled cadence
+# (first Sunday of Jan/Apr/Jul/Oct) the just-closed quarter is skipped and the one
+# before (~95 days old) is written complete. The newest quarter's peer value stays
+# blank until then — never drawn from the early-reporter cohort.
+CALENDAR_QUARTER_MIN_AGE_DAYS = 75
+
+_CALENDAR_QUARTER_LABEL_RE = re.compile(r"^Q([1-4])'(\d{2})$")
+_QUARTER_END_MONTH_DAY = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+
+
+def _calendar_quarter_end(label: Any) -> Optional[date]:
+    """Last day of the calendar quarter a stored label names ("Q3'26" → 2026-09-30),
+    or None for a label that is not a calendar-quarter key. Two-digit years are
+    2000s, as in `period_labels.format_calendar_quarter` / `_period_sort_key`."""
+    if not isinstance(label, str):
+        return None
+    m = _CALENDAR_QUARTER_LABEL_RE.match(label.strip())
+    if m is None:
+        return None
+    month, day = _QUARTER_END_MONTH_DAY[int(m.group(1))]
+    return date(2000 + int(m.group(2)), month, day)
+
+
+def _run_day(now: Any) -> date:
+    """UTC calendar date of a run's `computed_at` ISO timestamp."""
+    try:
+        dt = datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        # Every caller passes datetime.now(timezone.utc).isoformat(); if that ever
+        # changes, gate on today's date rather than skip the gate.
+        logger.warning(
+            "industry_benchmark: unparseable run timestamp %r — using today's UTC date "
+            "for the calendar-quarter age gate", now,
+        )
+        return datetime.now(timezone.utc).date()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).date()
 
 # metric_name → type / cap, for the winsorization dispatch on the sector accumulator.
 # (The `positive_only` filter is inherited automatically — we reuse the sector
@@ -151,6 +206,9 @@ class IndustryBenchmarkService:
         # Reuse the sector service's FMP fetch + per-group aggregation + throttle.
         self._sb = SectorBenchmarkService()
         self._fmp = get_fmp_client()  # for the TTM /ratios-ttm + /key-metrics-ttm path
+        # Set when the database refused a calendar-quarter row because migration 184
+        # is not applied; reset at the start of every run (see `_upsert`).
+        self._calendar_quarter_blocked = False
 
     # ── Universe ─────────────────────────────────────────────────────
     def _load_universe(self) -> List[Tuple[str, List[Tuple[str, List[Tuple[str, float]]]]]]:
@@ -243,9 +301,20 @@ class IndustryBenchmarkService:
         values_by_key: Dict[Tuple[str, str, str], List[float]], now: str,
     ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
+        run_day = _run_day(now)
+        too_recent: set = set()   # calendar quarters ended < CALENDAR_QUARTER_MIN_AGE_DAYS ago
+        unkeyed: set = set()      # calendar-quarter rows whose label names no quarter
         for (metric_name, period_type, period_label), values in values_by_key.items():
             if len(values) < MIN_SAMPLE_SIZE:
                 continue
+            if period_type == CALENDAR_QUARTER_PERIOD_TYPE:
+                quarter_end = _calendar_quarter_end(period_label)
+                if quarter_end is None:
+                    unkeyed.add(period_label)
+                    continue
+                if (run_day - quarter_end).days < CALENDAR_QUARTER_MIN_AGE_DAYS:
+                    too_recent.add(period_label)
+                    continue
             cleaned = _winsorize_for(
                 metric_name, _METRIC_TYPE.get(metric_name, "direct"), values,
             )
@@ -259,6 +328,21 @@ class IndustryBenchmarkService:
                 "sample_size": len(cleaned),
                 "computed_at": now,
             })
+        group = f"{sector} / {industry}" if industry else f"{sector} (sector aggregate)"
+        if too_recent:
+            logger.info(
+                "industry_benchmark: %s — not writing calendar quarter(s) %s: ended less "
+                "than %d days before this run (%s), so only early off-calendar filers "
+                "have reported; written by a later run",
+                group, ", ".join(sorted(too_recent, key=_calendar_quarter_end)),
+                CALENDAR_QUARTER_MIN_AGE_DAYS, run_day.isoformat(),
+            )
+        if unkeyed:
+            logger.warning(
+                "industry_benchmark: %s — dropped calendar-quarter row(s) with no "
+                "calendar-quarter label: %s",
+                group, ", ".join(sorted(repr(x) for x in unkeyed)),
+            )
         return rows
 
     def _upsert(self, rows: List[Dict[str, Any]]) -> int:
@@ -268,7 +352,38 @@ class IndustryBenchmarkService:
         fresh '' timestamp and be wrongly SKIPPED on the next resume (the freshness
         probe only checks the '' row) — leaving its industry rows missing for a whole
         cycle. On abort the per-sector guard logs + continues to the next sector, and
-        the failed sector (never marked fresh) is retried in full next run."""
+        the failed sector (never marked fresh) is retried in full next run.
+
+        ONE exception, for the code-before-migration window: calendar-quarter rows are
+        written LAST, in their own batches, and a 23514 on the period_type CHECK
+        (migration 184 not applied yet) skips them for the rest of the run with an
+        ERROR instead of aborting the sector — so a forgotten migration costs the
+        quarterly peer lines only, not every sector's annual refresh. The run's summary
+        reports it (`calendar_quarter_blocked`); re-run with skip_recent_hours=0 once
+        184 is applied."""
+        others = [r for r in rows if r.get("period_type") != CALENDAR_QUARTER_PERIOD_TYPE]
+        calendar_quarter = [
+            r for r in rows if r.get("period_type") == CALENDAR_QUARTER_PERIOD_TYPE
+        ]
+        n = self._upsert_batches(others)
+        if not calendar_quarter or self._calendar_quarter_blocked:
+            return n
+        try:
+            n += self._upsert_batches(calendar_quarter)
+        except Exception as e:
+            if not is_check_violation(e, _PERIOD_TYPE_CHECK):
+                raise
+            self._calendar_quarter_blocked = True
+            logger.error(
+                "industry_benchmark: the database refused period_type=%r (%s: %s) — "
+                "migration 184 (184_calendar_quarter_benchmarks.sql) is not applied. "
+                "Skipping every calendar-quarter row for the rest of this run; annual "
+                "rows are still written. Apply 184, then re-run with skip_recent_hours=0.",
+                CALENDAR_QUARTER_PERIOD_TYPE, type(e).__name__, e,
+            )
+        return n
+
+    def _upsert_batches(self, rows: List[Dict[str, Any]]) -> int:
         n = 0
         for i in range(0, len(rows), UPSERT_BATCH_SIZE):
             batch = rows[i:i + UPSERT_BATCH_SIZE]
@@ -279,11 +394,14 @@ class IndustryBenchmarkService:
                 ).execute()
                 n += len(batch)
             except Exception as e:
-                logger.error(
-                    "industry_benchmark upsert batch failed (%d rows written before "
-                    "failure; aborting sector for retry): %s: %s",
-                    n, type(e).__name__, e,
-                )
+                # A refused calendar-quarter period_type is logged once, by `_upsert`,
+                # which degrades instead of aborting — don't also report it as an abort.
+                if not is_check_violation(e, _PERIOD_TYPE_CHECK):
+                    logger.error(
+                        "industry_benchmark upsert batch failed (%d rows written before "
+                        "failure; aborting sector for retry): %s: %s",
+                        n, type(e).__name__, e,
+                    )
                 raise
         return n
 
@@ -333,8 +451,11 @@ class IndustryBenchmarkService:
         for mc in METRIC_CONFIGS:
             for period_type in ("annual", "quarterly"):
                 vals = self._sb._collect_metric_values(company_data, mc, period_type)
+                # Quarterly values are keyed by CALENDAR quarter and stored under
+                # their own period_type (STORED_PERIOD_TYPE), never 'quarterly'.
+                stored_type = STORED_PERIOD_TYPE[period_type]
                 for period_label, values in vals.items():
-                    ind_values[(mc["name"], period_type, period_label)].extend(values)
+                    ind_values[(mc["name"], stored_type, period_label)].extend(values)
         return ind_values
 
     async def _compute_sector(
@@ -548,11 +669,14 @@ class IndustryBenchmarkService:
     ) -> Dict[str, Any]:
         start = datetime.now(timezone.utc)
         al, ql = FMP_ANNUAL_LIMIT_BACKFILL, FMP_QUARTERLY_LIMIT_BACKFILL
+        # Each run re-probes: migration 184 may have been applied since the last one.
+        self._calendar_quarter_blocked = False
 
         # Validation path: a few named industries only (industry rows, no sector
         # aggregate). Pair with dry_run to write nothing and just eyeball the medians.
         if industries:
             summary = await self._compute_industries_only(industries, al, ql, dry_run)
+            summary["calendar_quarter_blocked"] = self._calendar_quarter_blocked
             summary["elapsed_seconds"] = round((datetime.now(timezone.utc) - start).total_seconds(), 1)
             logger.info("industry_benchmark (industries-only) complete: %s", summary)
             return summary
@@ -583,6 +707,8 @@ class IndustryBenchmarkService:
             "sectors_skipped_fresh": skipped_fresh,
             "rows_upserted": total_rows,
             "dry_run": dry_run,
+            # True = migration 184 is missing, so NO calendar-quarter row was written.
+            "calendar_quarter_blocked": self._calendar_quarter_blocked,
             "elapsed_seconds": round(elapsed, 1),
         }
         logger.info("industry_benchmark complete: %s", summary)

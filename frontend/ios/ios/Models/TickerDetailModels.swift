@@ -2163,6 +2163,20 @@ extension TechnicalAnalysisDetailData {
 enum EarningsDataType: String, CaseIterable {
     case eps = "EPS"
     case revenue = "Revenue"
+
+    /// What the series actually IS, for captions and VoiceOver. The raw value stays the
+    /// short toggle label (and the toggle's ForEach id).
+    ///
+    /// The Earnings card plots the EPS the company reports AGAINST consensus — adjusted
+    /// (non-GAAP) for most large caps — while the Growth card directly below plots GAAP
+    /// diluted EPS. Both were captioned plain "EPS", so the same quarter showed two numbers
+    /// ~60% apart (AVGO: adjusted ≈1.58 vs GAAP ≈1.03) with nothing saying why.
+    var seriesTitle: String {
+        switch self {
+        case .eps: return "Adjusted EPS"
+        case .revenue: return "Revenue"
+        }
+    }
 }
 
 // MARK: - Earnings Time Range
@@ -2177,6 +2191,9 @@ enum EarningsQuarterResult {
     case missed     // Red - actual < estimate
     case matched    // Green with dashed border - actual == estimate (0% surprise)
     case pending    // Gray - future quarter, only estimate available
+    // Blue, no border - reported, but NO comparable analyst consensus existed. Not a
+    // beat, a miss or a match: there was nothing to compare against.
+    case noEstimate
 
     var dotColor: Color {
         switch self {
@@ -2186,6 +2203,10 @@ enum EarningsQuarterResult {
             return AppColors.bearish
         case .pending:
             return AppColors.textSecondary
+        case .noEstimate:
+            // Neutral, and deliberately NOT the gray of an estimate dot: this is a real
+            // reported figure. A text-role token, so the dot clears 4.5:1 as an icon.
+            return AppColors.primaryBlue
         }
     }
 
@@ -2202,6 +2223,11 @@ struct EarningsQuarterData: Identifiable {
     let estimateValue: Double
     let surprisePercent: Double? // nil for future quarters
     var fiscalDate: String? = nil // "yyyy-MM-dd" for price line positioning
+    /// False when no comparable analyst consensus existed for this quarter (wire:
+    /// `has_estimate`). The backend still sends `estimate_value` = the actual so shipped
+    /// builds keep decoding — which is exactly why it must never be compared. Defaults to
+    /// true so an older payload without the key keeps today's behaviour.
+    var hasEstimate: Bool = true
 
     var result: EarningsQuarterResult {
         // Pending is defined by the ABSENCE of a reported actual — NOT by a nil
@@ -2210,6 +2236,13 @@ struct EarningsQuarterData: Identifiable {
         // guards the /0), which used to mislabel a real result as a gray "pending".
         guard let actual = actualValue else {
             return .pending
+        }
+        // Checked BEFORE the comparison: with no consensus the estimate slot holds a copy
+        // of the actual, so `actual == estimateValue` and every uncovered quarter used to
+        // render as a green dashed "met estimates exactly". Not keyed on a nil surprise —
+        // a real estimate of 0 also has one, and that quarter is still a beat or a miss.
+        guard hasEstimate else {
+            return .noEstimate
         }
         if actual > estimateValue {
             return .beat
@@ -2220,23 +2253,74 @@ struct EarningsQuarterData: Identifiable {
         }
     }
 
+    /// The 1Y row's caption. Precision by magnitude so it fits a ~48pt column and never
+    /// contradicts the dot beside it:
+    ///  * ≥ 1000% → compact ("+1.3k%"): a near-zero consensus makes the percentage explode,
+    ///    and "+1300.0%" wrapped onto two lines while the 3Y axis said "1.3k%".
+    ///  * ≥ 100% → whole percent ("+250%").
+    ///  * otherwise one decimal ("+4.2%").
+    ///  * a non-zero surprise that rounds to 0.0 → "<0.1%". The backend rounds to 2dp, so a
+    ///    -0.04% miss printed a red "-0.0%", and a beat by 0.004% arrived as 0.0 and printed
+    ///    "0%" — the info sheet's definition of Matched — beside a solid green Beat dot.
+    ///    "0%" is reserved for a real match.
     var formattedSurprise: String? {
-        guard let surprise = surprisePercent else { return nil }
-        if surprise == 0 {
-            return "0%"
-        }
-        let sign = surprise > 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", surprise))%"
+        guard let surprise = surprisePercent, surprise.isFinite else { return nil }
+        let outcome = result
+        guard outcome != .noEstimate, outcome != .pending else { return nil }
+        return Self.surpriseText(surprise, isMatch: outcome == .matched)
     }
 
-    var surpriseColor: Color {
-        guard let surprise = surprisePercent else { return AppColors.textSecondary }
-        if surprise > 0 {
-            return AppColors.bullish
-        } else if surprise < 0 {
-            return AppColors.bearish
+    /// The ONE surprise formatter: the 1Y row's caption (`formattedSurprise`), the 3Y bar
+    /// chart's off-scale value label and every bar's VoiceOver label all read it, so the
+    /// three can never disagree. The 3Y bars used to format with whole-percent
+    /// `CompactNumberFormat.percentString`, which spoke a +0.3% beat as "+0%" and a −0.4%
+    /// miss as "0%" (no sign: −0.4 rounds to −0, and the "+" was added only above 0) — the
+    /// info sheet's definition of Matched — and printed a clamped 10.3% outlier as "+10%",
+    /// the same text as the axis maximum beside a chevron saying the bar runs past it.
+    ///
+    /// The sign comes from the VALUE, never from the rounded string. `isMatch` alone may
+    /// print "0%"; any other surprise under 0.05 in magnitude prints "<0.1%".
+    static func surpriseText(_ surprise: Double, isMatch: Bool) -> String {
+        guard surprise.isFinite else { return "—" }
+        let magnitude: Double = abs(surprise)
+        if magnitude < 0.05 {
+            return isMatch ? "0%" : "<0.1%"
         }
-        return AppColors.accentCyan
+        let sign: String = surprise > 0 ? "+" : "-"
+        if magnitude >= 1000 {
+            return sign + CompactNumberFormat.percentString(magnitude)
+        }
+        if magnitude >= 99.95 {
+            return sign + String(format: "%.0f", magnitude) + "%"
+        }
+        return sign + String(format: "%.1f", magnitude) + "%"
+    }
+
+    /// The outcome word VoiceOver reads before the surprise, so a "<0.1%" caption (which
+    /// carries no sign) is never ambiguous to a listener. Empty when there is no outcome.
+    var spokenOutcome: String {
+        switch result {
+        case .beat: return "beat"
+        case .missed: return "missed"
+        case .matched: return "matched"
+        case .pending, .noEstimate: return ""
+        }
+    }
+
+    /// Taken from `result`, not from the surprise's sign, so the caption, the dot and the
+    /// bar always tell one story (a beat that rounds to 0.0% is still a green beat).
+    var surpriseColor: Color {
+        guard surprisePercent != nil else { return AppColors.textSecondary }
+        switch result {
+        case .beat:
+            return AppColors.bullish
+        case .missed:
+            return AppColors.bearish
+        case .matched:
+            return AppColors.accentCyan
+        case .pending, .noEstimate:
+            return AppColors.textSecondary
+        }
     }
 }
 
@@ -2298,6 +2382,17 @@ struct EarningsData {
     let priceHistory: [EarningsPricePoint]
     let dailyPriceHistory: [EarningsDailyPricePoint]
     let nextEarningsDate: NextEarningsDate?
+    /// The server's reasons this build is PARTIAL (`EarningsResponse.degraded`: an upstream
+    /// leg such as "income" or "estimates" failed); empty for a complete build. Assigned by
+    /// `EarningsDTO.toDisplayModel()` AFTER construction, so it is a defaulted `var` and every
+    /// existing init call keeps compiling.
+    ///
+    /// The card needs it to tell an outage from a fact: an FMP failure arrives as a 200 with
+    /// empty quarter lists, which used to read "No Adjusted EPS history available for this
+    /// ticker." for AAPL — a transient failure presented as a property of the company.
+    var degraded: [String] = []
+
+    var isDegraded: Bool { !degraded.isEmpty }
 
     init(
         epsQuarters: [EarningsQuarterData],
@@ -2447,6 +2542,14 @@ extension EarningsData {
         ],
         priceHistory: []
     )
+
+    /// An FMP outage as the backend degrades it: a 200 with empty quarter lists and the
+    /// failed legs named in `degraded`. Previews only.
+    static let sampleTemporarilyUnavailable: EarningsData = {
+        var data = EarningsData(epsQuarters: [], revenueQuarters: [], priceHistory: [])
+        data.degraded = ["income", "estimates"]
+        return data
+    }()
 }
 
 // Fix for nil price in sample data

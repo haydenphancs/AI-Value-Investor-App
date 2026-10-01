@@ -320,6 +320,26 @@ def _project_market_dynamics(md: dict) -> dict:
     return md
 
 
+def _share_count_change_known(ca: Any) -> bool:
+    """Whether a capital-allocation block's `share_count_change` was MEASURED: the block's
+    own `share_count_change_known` when present, else (a report written before the key)
+    the SoC summary's rule — at least two points report a share count. A block without
+    points (an older report) keeps its figure."""
+    if not isinstance(ca, dict) or not ca:
+        return True
+    flag = ca.get("share_count_change_known")
+    if isinstance(flag, bool):
+        return flag
+    points = ca.get("data_points")
+    if isinstance(points, list) and points:
+        reported = sum(
+            1 for p in points
+            if isinstance(p, dict) and (_num(p.get("shares_outstanding")) or 0.0) > 0
+        )
+        return reported >= 2
+    return True
+
+
 def build_context(
     data: dict,
     fair_value_estimate: Optional[float] = None,
@@ -485,6 +505,18 @@ def build_context(
         "yoy": _num(p.get("yoy_change_percent")),
         "sector": _num(p.get("sector_average_yoy")),
     } for p in (growth_chart.get("revenue_annual") or []) if isinstance(p, dict)]
+    # The dashed line is the INDUSTRY median whenever GrowthService found industry cells
+    # for this series (`peer_group_levels`), so the legend says which — the app's tab
+    # legend and the report sheet already do. No benchmark value on any point → no legend
+    # entry at all (the chart draws no line to name).
+    growth_peer_levels = growth_chart.get("peer_group_levels")
+    growth_peer_word = (
+        "Industry"
+        if isinstance(growth_peer_levels, dict)
+        and growth_peer_levels.get("revenue_annual") == "industry"
+        else "Sector"
+    )
+    growth_has_peer = any(it["sector"] is not None for it in growth_items)
     # Forecast table: use the timeline's FORECAST years so it matches the chart
     # (which plots annual_timeline through the last analyst year, e.g. 2031).
     # Fall back to the curated 4-year window when no annual timeline exists.
@@ -630,6 +662,8 @@ def build_context(
         "price_change_pct": _num(price_action.get("change_pct")),
         "window_label": price_action.get("window_label") or "12M",
         "growth_metric_label": growth_metric_label,
+        "growth_peer_word": growth_peer_word,
+        "growth_has_peer": growth_has_peer,
         "vitals": vitals,
         "bull_case": bull_case,
         "bear_case": bear_case,
@@ -648,6 +682,14 @@ def build_context(
         "revenue_engine": {
             "segments": segments,
             "total_revenue": _num(engine.get("total_revenue")),
+            # Set only for a GROSS segment stack (segments include sales between
+            # segments): the shares above are of REPORTED revenue and add past 100%, so
+            # the eliminations row is what reconciles them. Positive magnitude, same
+            # unit as total_revenue.
+            "eliminations_pct": (
+                (_num(engine.get("intersegment_eliminations")) / seg_denom * 100.0)
+                if seg_denom and _num(engine.get("intersegment_eliminations")) else None
+            ),
             "revenue_unit": engine.get("revenue_unit") or "",
             "period": engine.get("period") or "",
             "analysis_note": engine.get("analysis_note") or "",
@@ -676,6 +718,9 @@ def build_context(
             "timeframe": insider.get("timeframe") or "",
             "transactions": insider.get("transactions") or [],
             "capital_allocation": cap or None,
+            # False → the block's share_count_change is a 0.0 placeholder (fewer than two
+            # reported share counts), printed as "—", never as a measured "+0.0%".
+            "share_count_known": _share_count_change_known(cap),
             "recent": recent_tx,
             "ownership_note": insider.get("ownership_note") or "",
         },

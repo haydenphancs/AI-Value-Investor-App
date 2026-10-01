@@ -245,6 +245,21 @@ struct MetricHistoryLineChart: View {
                     .foregroundStyle(AppColors.growthYoYYellow)
                     .symbolSize(45)
             }
+
+            // Off-scale cue: a chevron just inside the edge, pointing off the plot, on
+            // every company point the domain pins (its true value is in the row below).
+            ForEach(offScaleCompany) { p in
+                PointMark(x: .value("i", Double(p.id)), y: .value("Company", p.pinned))
+                    .symbolSize(0)
+                    .annotation(position: p.chevronPosition, spacing: 3) {
+                        // A meaningful icon reads at the TEXT bar: the text-safe sibling
+                        // of the series token, as the value row below uses.
+                        Image(systemName: p.chevronSymbol)
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(AppColors.accentYellow)
+                            .accessibilityLabel(p.chevronLabel)
+                    }
+            }
         }
         .chartXScale(domain: xDomain(), range: .plotDimension(padding: edgeLabelPad))
         .chartXAxis(.hidden)
@@ -359,13 +374,25 @@ struct MetricHistoryLineChart: View {
 
     /// When zones are shown, the domain must SPAN the cutoffs (so every zone +
     /// boundary line is visible) regardless of the data range.
+    ///
+    /// The DATA side is fenced first (`ChartDomain.robust`, Tukey far-out fences). It
+    /// used the raw min/max, so one extreme year — Z = 120 in a year liabilities dipped,
+    /// or a dropped digit upstream — set the domain to 0…132 and squeezed the Distress
+    /// and Grey bands into 3pt and 2pt slivers of the 220pt plot, on the chart whose job
+    /// is to show them (the same on the low side). That point now pins to the edge with
+    /// an off-scale chevron, and the row below still prints its true value. A series that
+    /// is legitimately high every year (Z 40–80) has no outlier, so it still spans its
+    /// data: no fixed multiple of the cutoffs caps it.
     private var thresholdDomain: ClosedRange<Double>? {
         guard let tz = thresholds,
               let firstT = tz.thresholds.first, let lastT = tz.thresholds.last else { return nil }
-        let dMin = companyValues.min() ?? firstT
-        let dMax = companyValues.max() ?? lastT
-        var lo = Swift.min(0, dMin, firstT)
-        var hi = Swift.max(dMax, lastT)
+        // Fallback 0...1 (not 0...lastT): valid for ANY cutoffs, and the union with the
+        // cutoffs below supplies the real span when there is no data.
+        let data: ClosedRange<Double> = ChartDomain.robust(
+            companyValues, includeZero: true, headroomFraction: 0, fallback: 0...1
+        )
+        var lo = Swift.min(0, data.lowerBound, firstT)
+        var hi = Swift.max(data.upperBound, lastT)
         if hi <= lo { hi = lo + 1 }
         let pad = (hi - lo) * 0.10
         hi += pad
@@ -391,6 +418,32 @@ struct MetricHistoryLineChart: View {
     /// the TRUE value, so an outlier reads "5000.0x" even though its vertex pins).
     private func clamped(_ v: Double) -> Double {
         Swift.min(Swift.max(v, yDomain.lowerBound), yDomain.upperBound)
+    }
+
+    /// A company point drawn pinned to the top or bottom edge of the plot.
+    private struct OffScalePoint: Identifiable {
+        let id: Int          // row index
+        let pinned: Double   // the edge value it is drawn at
+        let isHigh: Bool     // true = above the domain (pinned to the top)
+
+        // Resolved here, with explicit types, so the Chart builder below does no
+        // ternary type inference of its own.
+        var chevronPosition: AnnotationPosition { isHigh ? AnnotationPosition.bottom : AnnotationPosition.top }
+        var chevronSymbol: String { isHigh ? "chevron.up" : "chevron.down" }
+        var chevronLabel: String { isHigh ? "Above the chart scale" : "Below the chart scale" }
+    }
+
+    /// Company points outside the domain. Each gets a chevron pointing off the plot, so
+    /// a pinned vertex never reads as a real value at the edge.
+    private var offScaleCompany: [OffScalePoint] {
+        let domain: ClosedRange<Double> = yDomain
+        var out: [OffScalePoint] = []
+        for (i, r) in rows.enumerated() {
+            guard let v = r.company, ChartDomain.isOffScale(v, in: domain) else { continue }
+            out.append(OffScalePoint(id: i, pinned: ChartDomain.clamp(v, to: domain),
+                                     isHigh: v > domain.upperBound))
+        }
+        return out
     }
 
     // MARK: - Unit-aware formatters
@@ -426,6 +479,11 @@ struct MetricHistoryLineChart: View {
     let zscore: [MetricHistoryPoint] = [1.9, 1.5, 1.7, 1.9, 2.4, 2.5].enumerated().map {
         MetricHistoryPoint(period: String(2021 + $0.offset), value: $0.element)
     }
+    // One extreme Z year: pins to the top with a chevron; the zones stay readable and
+    // the value row still prints 120.0.
+    let zscoreOutlier: [MetricHistoryPoint] = [3.1, 2.9, 3.4, 2.8, 120].enumerated().map {
+        MetricHistoryPoint(period: String(2021 + $0.offset), value: $0.element)
+    }
     return ScrollView {
         VStack(spacing: 24) {
             // lower-is-better → red while expensive, green once cheaper
@@ -436,6 +494,7 @@ struct MetricHistoryLineChart: View {
             MetricHistoryLineChart(points: company, sector: nil, unit: "x")
             // Altman Z: bankruptcy zones, line sits in the grey band
             MetricHistoryLineChart(points: zscore, sector: nil, unit: "score", thresholds: .altmanZ)
+            MetricHistoryLineChart(points: zscoreOutlier, sector: nil, unit: "score", thresholds: .altmanZ)
         }
         .padding()
     }

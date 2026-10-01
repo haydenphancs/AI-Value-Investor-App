@@ -921,6 +921,22 @@ shares) legitimately feeds the P/FCF, EV/EBITDA and earnings-yield fallbacks. It
 slow, daily-cadence upstream field on the same clock as FMP's TTM ratios, inside the
 24-hour staleness budget by construction. A live quote is not.
 
+**A partial build is served, never stored (Financials tab, 2026-09-30).** Each of the six
+Financials services (earnings, growth, profit power, health check, revenue breakdown,
+signal of confidence) returns a `degraded: [str]` list naming the upstream legs that failed
+— a 429 on one FMP leg, an earnings-feed outage, a benchmark lookup whose DB call failed
+(`sector_benchmark_lookup.BenchmarkLookupFailed`, so a failure is not mistaken for "no
+peer group"). A degraded build lives ~60 s in Tier 1 and is never written to its Supabase
+table; the iOS repository does not cache it; the report collector drops that section
+instead of freezing it into a report, and a collection or report missing a section is not
+written to `ticker_data_cache` or `ticker_report_cache` (it is still delivered). The
+earnings, growth, profit-power, health-check, revenue-breakdown and SoC rows carry a
+`payload_version` inside their JSON, bumped whenever a field or a FORMULA changes, so rows
+written by the previous code are rebuilt on first read. A plausibility REPAIR (the earnings
+feed's revenue disagreeing with the filed revenue by more than 25% — the one closer to
+consensus wins, the AVGO dropped-digit case) is not degradation: the repaired value is
+correct and cacheable.
+
 Three tables added by the 2026-09 FMP-entitlement rebuild follow the same rule.
 `market_close_snapshot` holds two SETTLED sessions per symbol — the official
 `batch-eod` close and the one before it, keyed by `symbol` with their `trade_date`s —
@@ -946,6 +962,7 @@ values; there is no `CachePolicy` or `CacheKey` type.
 | news | 60 s | the backend already caches it for hours; this only collapses tab-flipping |
 | analysis | 1800 s | recomputed on the server far less often than that |
 | fundamental | 86400 s | quarterly data |
+| financials | 1800 s | the six Financials cards; never stored when the response carries a non-empty `degraded` or no data, and an earnings entry is stale once its next earnings date is today or earlier |
 | events | 86400 s | earnings calendar |
 
 The private `getCached(_:maxAge:)` takes the TTL per call, but only `getStockQuote(ticker:maxAge:)`

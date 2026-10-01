@@ -942,6 +942,46 @@ class CorporateActionsService:
             for ev in events
         )
 
+    async def unclassified_adjustment_or_none(
+        self,
+        symbol: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        *,
+        effective_from: Optional[str] = None,
+        effective_to: Optional[str] = None,
+    ) -> Optional[bool]:
+        """TRI-STATE twin of :meth:`has_unclassified_adjustment`: ``True`` / ``False`` when
+        the window could be derived, ``None`` when it could not (a price leg raised, came
+        back short, or carried another symbol's rows).
+
+        Same fetch window, same cache, same ``effective_from < date <= effective_to``
+        filter. The difference is the failure answer, and it is the whole point:
+        :meth:`has_unclassified_adjustment` fails CLOSED (``True``) because, for the 13F
+        magnitude backstop, "could not look" must arm the backstop. A caller that is NOT
+        a backstop — the Signal of Confidence spin-off guard, where ``True`` swaps the
+        relative dividend verdict for the absolute ladder — read that fail-closed ``True``
+        as "a spin-off happened": one 429 on either price leg turned AAPL's "Fair" into a
+        red "Low" and the build was persisted for a day. Such a caller needs to see
+        "unknown" and decide for itself. The 13F callers keep the fail-closed method.
+        """
+        events = await self._events_or_none(symbol, from_date, to_date, kind="split")
+        if events is None:
+            logger.warning(
+                "corporate_actions: cannot determine unclassified adjustments for %s "
+                "%s..%s — answering UNKNOWN (None), not 'none' and not 'one'",
+                symbol, from_date, to_date,
+            )
+            return None
+        lo = str(effective_from)[:10] if effective_from else None
+        hi = str(effective_to)[:10] if effective_to else None
+        return any(
+            not ev.is_split
+            and (lo is None or ev.date > lo)
+            and (hi is None or ev.date <= hi)
+            for ev in events
+        )
+
     async def get_ex_dividend_dates(
         self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None
     ) -> List[str]:

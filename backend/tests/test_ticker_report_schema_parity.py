@@ -1701,3 +1701,183 @@ def test_revenue_forecast_unknown_guidance_is_a_valid_wire_value():
     # The field is still required and still a string — the contract iOS decodes.
     with pytest.raises(Exception):
         RevenueForecastResponse.model_validate({**rf, "management_guidance": None})
+
+
+# ── Financials deep check (2026-09-30): the report's new optional wire fields ─────────
+#
+# Every field below is ADDITIVE and decoded as Optional on iOS (TickerReportResponse.swift),
+# so a shipped build keeps decoding a new report and a new build keeps decoding an old one.
+# These pin both directions through the real `assemble_report`, for EVERY persona.
+
+
+def _with_financials_deepcheck_inputs(out: CollectedTickerData) -> CollectedTickerData:
+    """Populate the inputs that exercise the new fields, then rebuild the sections:
+    a GROSS revenue breakdown (eliminations), dated annual income (period_end / eps_basis)
+    and an earnings track record with a MET quarter (result)."""
+    from app.schemas.earnings import EarningsQuarterSchema, EarningsResponse
+    from app.schemas.revenue_breakdown import RevenueBreakdownResponse, RevenueSourceSchema
+
+    out.revenue_breakdown = RevenueBreakdownResponse(
+        symbol=out.ticker, fiscal_year="2025",
+        revenue_sources=[
+            RevenueSourceSchema(name="Client", value=32.2e9),
+            RevenueSourceSchema(name="Foundry", value=17.8e9),
+            RevenueSourceSchema(name="Data Center", value=16.9e9),
+            RevenueSourceSchema(name="Other", value=3.6e9),
+        ],
+        cost_of_sales=0.0, operating_expense=0.0, tax=0.0,
+        reported_revenue=52.9e9, intersegment_eliminations=17.6e9,
+    )
+    out.income = [
+        {"date": "2025-12-27", "fiscalYear": "2025", "calendarYear": 2025,
+         "revenue": 52.9e9, "netIncome": 1.0e9, "operatingIncome": 2.0e9, "epsDiluted": 0.23},
+        {"date": "2024-12-28", "fiscalYear": "2024", "calendarYear": 2024,
+         "revenue": 53.1e9, "netIncome": -18.0e9, "operatingIncome": -11.0e9, "epsDiluted": -4.38},
+    ]
+    out.estimates = [
+        {"date": "2026-12-26", "revenueAvg": 55.0e9, "epsAvg": 0.9, "numAnalystsRevenue": 20},
+        {"date": "2027-12-25", "revenueAvg": 58.0e9, "epsAvg": 1.4},
+    ]
+    out.earnings = EarningsResponse(
+        symbol=out.ticker, revenue_quarters=[], price_history=[],
+        eps_quarters=[
+            EarningsQuarterSchema(quarter="Q1 '25", actual_value=0.13, estimate_value=0.01,
+                                  surprise_percent=1200.0, fiscal_date="2025-03-29"),
+            EarningsQuarterSchema(quarter="Q2 '25", actual_value=0.10, estimate_value=0.10,
+                                  surprise_percent=0.0, fiscal_date="2025-06-28"),
+            EarningsQuarterSchema(quarter="Q3 '25", actual_value=0.23, estimate_value=0.05,
+                                  surprise_percent=None, fiscal_date="2025-09-27",
+                                  has_estimate=False),
+        ],
+    )
+    coll = TickerReportDataCollector()
+    coll._compute_metrics(out)
+    coll._build_sections(out)
+    return out
+
+
+@pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
+def test_new_financials_fields_validate_for_every_persona(persona_key):
+    coll = TickerReportDataCollector()
+    out = _with_financials_deepcheck_inputs(_make_collected_data(persona=persona_key))
+    report = coll.assemble_report(out, stage_a_fallback())
+    model = TickerReportResponse.model_validate(report)  # must not raise
+
+    engine = model.revenue_engine
+    assert engine.total_revenue == 52900.0          # reported revenue, not the 70.5B gross
+    assert engine.intersegment_eliminations == 17600.0
+    assert engine.period == "FY 2025" and engine.revenue_unit == "Millions"
+
+    rf = model.revenue_forecast
+    assert [p.result for p in rf.earnings_track_record] == ["beat", "met"]
+    assert [p.beat for p in rf.earnings_track_record] == [True, False]
+    assert rf.beat_summary == "Beat 1 of 2 · 1 met"
+    timeline = rf.annual_timeline
+    assert [t.period for t in timeline] == ["2024", "2025", "2026", "2027"]
+    assert all(t.period_end for t in timeline)
+    assert [t.eps_basis for t in timeline] == ["gaap", "gaap", "consensus", "consensus"]
+    assert timeline[2].eps_yoy_pct is None      # GAAP → consensus is not a growth rate
+    assert timeline[0].eps_label == "-$4.38"
+
+    # The iOS decoder's keys travel in the JSON the endpoint serializes.
+    dumped = model.model_dump()
+    assert "intersegment_eliminations" in dumped["revenue_engine"]
+    assert {"period_end", "eps_basis"} <= set(dumped["revenue_forecast"]["annual_timeline"][0])
+    assert "result" in dumped["revenue_forecast"]["earnings_track_record"][0]
+
+
+def test_reports_without_the_new_fields_still_validate():
+    """An already-cached report (written before the fields existed) must keep validating:
+    no `intersegment_eliminations`, no `period_end` / `eps_basis`, no `result`."""
+    coll = TickerReportDataCollector()
+    out = _with_financials_deepcheck_inputs(_make_collected_data())
+    report = coll.assemble_report(out, stage_a_fallback())
+    report["revenue_engine"].pop("intersegment_eliminations")
+    for row in report["revenue_forecast"]["annual_timeline"]:
+        row.pop("period_end")
+        row.pop("eps_basis")
+    for point in report["revenue_forecast"]["earnings_track_record"]:
+        point.pop("result")
+    model = TickerReportResponse.model_validate(report)
+    assert model.revenue_engine.intersegment_eliminations is None
+    assert model.revenue_forecast.annual_timeline[0].period_end is None
+    assert model.revenue_forecast.earnings_track_record[0].result is None
+
+
+def test_a_thin_placeholder_breakdown_reports_no_segments_and_no_top_segment():
+    """Ford-shaped: the breakdown chose Total Revenue; the report must show the empty
+    Revenue Engine (iOS "unavailable") and a "Primary" top segment — never the raw feed."""
+    from app.schemas.revenue_breakdown import RevenueBreakdownResponse, RevenueSourceSchema
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.revenue_breakdown = RevenueBreakdownResponse(
+        symbol="F", fiscal_year="2024",
+        revenue_sources=[RevenueSourceSchema(name="Total Revenue", value=391e9)],
+        cost_of_sales=0.0, operating_expense=0.0, tax=0.0, reported_revenue=391e9,
+    )
+    out.segments_raw = [{"date": "2024-12-31", "fiscalYear": 2024, "data": {"Ford Credit": 13.3e9}}]
+    coll._build_sections(out)
+    assert out.revenue_engine_partial["segments"] == []
+    assert out.revenue_vital["top_segment"] == "Primary"
+    report = coll.assemble_report(out, stage_a_fallback())
+    assert TickerReportResponse.model_validate(report).revenue_engine.segments == []
+
+
+def test_degraded_growth_and_earnings_are_not_frozen_into_the_report():
+    from app.schemas.earnings import EarningsResponse
+    from app.schemas.growth import GrowthResponse
+    from app.services.agents.ticker_report_data_collector import _refuse_degraded_financials
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.growth_chart = GrowthResponse(
+        symbol="AAPL", eps_annual=[], eps_quarterly=[], revenue_annual=[],
+        revenue_quarterly=[], degraded=["quarterly_income"],
+    )
+    out.earnings = EarningsResponse(
+        symbol="AAPL", eps_quarters=[], revenue_quarters=[], price_history=[],
+        degraded=["earnings_feed"],
+    )
+    _refuse_degraded_financials(out)
+    report = coll.assemble_report(out, stage_a_fallback())
+    model = TickerReportResponse.model_validate(report)
+    assert model.growth_chart is None
+    assert model.revenue_forecast.earnings_track_record == []
+    assert sorted(out.degraded_sections) == ["earnings:earnings_feed", "growth_chart:quarterly_income"]
+
+
+def test_lost_sections_ride_the_report_as_an_internal_key_the_wire_never_carries():
+    """Round 2 (R3/R5): `out.degraded_sections` lands on the assembled report under
+    `_degraded_sections` (the doors read it to skip every shared cache) and the validated
+    response drops it — iOS never sees it, and the report still decodes."""
+    from app.services.agents.ticker_report_data_collector import DEGRADED_SECTIONS_KEY
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.degraded_sections = ["growth_chart:quarterly_income", "snap_health:health_check:ratios"]
+    report = coll.assemble_report(out, stage_a_fallback())
+    assert report[DEGRADED_SECTIONS_KEY] == [
+        "growth_chart:quarterly_income", "snap_health:health_check:ratios",
+    ]
+    dumped = TickerReportResponse.model_validate(report).model_dump()
+    assert DEGRADED_SECTIONS_KEY not in dumped
+
+    clean = coll.assemble_report(_make_collected_data(), stage_a_fallback())
+    assert DEGRADED_SECTIONS_KEY not in clean
+
+
+def test_capital_allocation_block_flags_an_unmeasured_share_change_and_still_validates():
+    """Round 2 (R21/R24): fewer than two reported share counts → the block says so, and the
+    wire block (share_count_change still a float for shipped iOS) validates."""
+    soc = _make_signal_of_confidence(share_count_change=0.0)
+    for dp in soc.data_points:
+        dp.shares_outstanding = None
+    soc.summary.share_count_change_known = False
+    block = _build_capital_allocation_block(soc)
+    assert block["share_count_change_known"] is False
+    assert isinstance(block["share_count_change"], float)
+    model = CapitalAllocationResponse.model_validate(block)
+    assert model.share_count_change == 0.0
+    # The measured case keeps its flag True.
+    assert _build_capital_allocation_block(_make_signal_of_confidence())["share_count_change_known"] is True

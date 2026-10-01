@@ -10,7 +10,12 @@ differently, causing the same NVDA Feb-22-after-close event to show as
 Financials tab.
 """
 
-from typing import Optional
+import logging
+import math
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ── Canonical timing tokens ────────────────────────────────────────
@@ -88,3 +93,168 @@ def alert_report_time(token: str) -> Optional[str]:
     if token in (BEFORE_OPEN, AFTER_CLOSE):
         return token
     return None
+
+
+# ── Next pending announcement (shared by the five Financials services) ──
+#
+# Each service used to carry its own copy of "first row dated AFTER today with no
+# actual", and every copy had the same two defects:
+#   * ``ec_date <= today_str`` skipped TODAY's pending report. On report day the
+#     card read next quarter's date (~3 months out) as "Confirmed", and because that
+#     far date is also the Supabase cache-invalidation key, a build made that morning
+#     stayed live for its full 24h — the just-reported quarter never appeared.
+#   * A reschedule leaves the ORIGINAL date behind as a pending row. When a company
+#     reports EARLIER than first announced, that stale row (a few days ahead) was
+#     returned as the next "Confirmed" report for a quarter already reported.
+#
+# 21 days, not more: a reschedule moves a date by days to two weeks, while two REAL
+# consecutive releases can sit only ~30-45 days apart — a non-accelerated filer's 10-K
+# deadline (Mar 31) and 10-Q deadline (May 15) are exactly 45 days apart, and an NT 10-K
+# filer's ~30. A 45-day window dropped those filers' real next report: the card showed the
+# quarter AFTER it (~3 months out) as "Confirmed", and that far date became the
+# cache-invalidation key of all five Financials services, so their rows were not rebuilt
+# on the real release day.
+STALE_RESCHEDULE_DAYS = 21
+
+
+def _finite(value: Any) -> bool:
+    try:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def has_reported_actual(rec: Dict[str, Any]) -> bool:
+    """True when an earnings-calendar row carries a reported EPS or revenue actual."""
+    return any(_finite(rec.get(k)) for k in ("epsActual", "eps", "revenueActual"))
+
+
+def _row_date(rec: Dict[str, Any]) -> Optional[datetime]:
+    try:
+        return datetime.strptime(str(rec.get("date") or "")[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _sorted_dated_rows(ec_records: Any) -> List[Dict[str, Any]]:
+    rows = [
+        r for r in (ec_records if isinstance(ec_records, list) else [])
+        if isinstance(r, dict) and _row_date(r) is not None
+    ]
+    rows.sort(key=lambda r: str(r.get("date"))[:10])
+    return rows
+
+
+def _in_window_after_reported(when: datetime, reported: List[datetime]) -> bool:
+    return any(0 <= (when - rd).days <= STALE_RESCHEDULE_DAYS for rd in reported)
+
+
+def within_reschedule_window(rec: Dict[str, Any], ec_records: Any) -> bool:
+    """True when pending row ``rec`` is dated within ``STALE_RESCHEDULE_DAYS`` after a row
+    that already reported — i.e. it may be a reschedule's leftover. ``next_pending_earnings``
+    still returns such a row when no later pending row exists (it is never dropped to
+    None); a caller that labels the date "Confirmed" should not, for this one."""
+    when = _row_date(rec) if isinstance(rec, dict) else None
+    if when is None:
+        return False
+    reported = [_row_date(r) for r in _sorted_dated_rows(ec_records) if has_reported_actual(r)]
+    return _in_window_after_reported(when, reported)
+
+
+def next_pending_earnings(
+    ec_records: Any, today_str: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """The next announcement still to come: the earliest row dated TODAY or later with no
+    reported actual. A row dated within ``STALE_RESCHEDULE_DAYS`` after a row that already
+    reported is skipped as a stale reschedule ONLY when a later pending row exists to take
+    its place; a lone pending row is never dropped (``within_reschedule_window`` tells a
+    caller it is suspect). None if no pending row at all."""
+    if today_str is None:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = _sorted_dated_rows(ec_records)
+    reported = [_row_date(r) for r in rows if has_reported_actual(r)]
+    pending = [
+        r for r in rows
+        if str(r.get("date"))[:10] >= today_str and not has_reported_actual(r)
+    ]
+    for i, rec in enumerate(pending):
+        ec_date = str(rec.get("date"))[:10]
+        if _in_window_after_reported(_row_date(rec), reported):
+            if i + 1 < len(pending):
+                logger.warning(
+                    "earnings calendar: skipping stale pending row %s (symbol=%s) — the "
+                    "quarter already reported within %sd before it; next pending row %s",
+                    ec_date, rec.get("symbol"), STALE_RESCHEDULE_DAYS,
+                    str(pending[i + 1].get("date"))[:10],
+                )
+                continue
+            logger.warning(
+                "earnings calendar: keeping lone pending row %s (symbol=%s) although a row "
+                "reported within %sd before it — no later pending row to prefer",
+                ec_date, rec.get("symbol"), STALE_RESCHEDULE_DAYS,
+            )
+        return rec
+    return None
+
+
+def next_pending_earnings_date(
+    ec_records: Any, today_str: Optional[str] = None
+) -> Optional[str]:
+    """``next_pending_earnings`` as a ``yyyy-MM-dd`` string (or None)."""
+    rec = next_pending_earnings(ec_records, today_str)
+    return str(rec.get("date"))[:10] if rec else None
+
+
+# ── Dropped / added digit in a feed EPS actual ─────────────────────
+#
+# A dropped-digit EPS (feed 0.169 for a real 1.69) answers 200 with no `degraded` reason:
+# without this it shipped as a "-90% miss" on the Financials tab AND was frozen into the
+# report's EPS Track Record. Its signature is a same-sign ratio to the estimate that sits on
+# a power of ten (log10 within the tolerance of a whole number) outside the normal miss
+# band. When the filed GAAP EPS is known (non-zero) it is a POSITIVE tie-break, not a
+# veto: the feed's actual is suspect only if the filing shares the estimate's sign and
+# sits strictly nearer (in log10) the estimate's magnitude than the feed's. A ratio-band
+# veto ([0.67, 1.5] of the feed) read a real ~90% small-cap miss near break-even as a
+# dropped digit whenever GAAP differed from adjusted — often with the OPPOSITE sign, which
+# can never confirm the estimate's magnitude. Shared by earnings_service (the tab) and the
+# report collector so the two never disagree about the same quarter.
+EPS_GLITCH_MIN_ESTIMATE = 0.05
+EPS_GLITCH_NORMAL_BAND = (0.2, 5.0)
+EPS_GLITCH_LOG10_TOLERANCE = 0.06
+# Float slack on the tie-break: an exact tie (GAAP 3x from both) is not evidence.
+_EPS_GLITCH_TIE_EPSILON = 1e-9
+
+
+def _num(value: Any) -> Optional[float]:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def eps_digit_shift_suspect(actual: Any, estimate: Any, gaap: Any = None) -> bool:
+    """True when `actual` vs `estimate` has the dropped/added-digit signature and the
+    filed GAAP EPS (when known and non-zero) sides with the estimate: same sign as the
+    estimate, and strictly nearer its magnitude than the feed's (log10 distance)."""
+    a = _num(actual)
+    e = _num(estimate)
+    if a is None or e is None or a == 0 or e == 0:
+        return False
+    if (a > 0) != (e > 0) or abs(e) < EPS_GLITCH_MIN_ESTIMATE:
+        return False
+    ratio = abs(a / e)
+    lo, hi = EPS_GLITCH_NORMAL_BAND
+    if lo <= ratio <= hi:
+        return False
+    lg = math.log10(ratio)
+    if abs(lg - round(lg)) > EPS_GLITCH_LOG10_TOLERANCE:
+        return False
+    g = _num(gaap)
+    if g is not None and g != 0:
+        if (g > 0) != (e > 0):
+            return False
+        to_estimate = abs(math.log10(abs(g / e)))
+        to_feed = abs(math.log10(abs(g / a)))
+        return to_estimate + _EPS_GLITCH_TIE_EPSILON < to_feed
+    return True

@@ -22,6 +22,7 @@ from app.services.agents.ticker_report_data_collector import (
     _hist_ev_ebitda,
     _hist_pfcf,
     _parse_history_label,
+    _period_calendar_keys,
     _sector_period_map,
 )
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
@@ -62,16 +63,53 @@ def test_period_id_quarter_derived_from_date_when_period_missing():
     assert q == 2 and key == "2024-Q2" and label == "Q2 '24"
 
 
-def test_period_id_fiscal_label_with_calendar_join_for_offcalendar_company():
-    # Oracle-style: FMP gives fiscalYear + null calendarYear; the date's
-    # calendar year drives the JOIN key, the fiscal year drives the LABEL.
-    # ORCL fiscal Q1 (Aug 2023) → calendar 2023, fiscal 2024 → label "Q1 '24".
+def test_period_id_fiscal_label_with_calendar_quarter_join_for_offcalendar_company():
+    # Oracle-style: FMP gives fiscalYear + null calendarYear. The JOIN key is the
+    # CALENDAR QUARTER the period ends in (the key of the stored 'calendar_quarter'
+    # benchmark rows); the fiscal year + fiscal quarter drive the LABEL.
+    # ORCL fiscal Q1 '24 ends 2023-08-31 → calendar Jul-Sep 2023 → "2023-Q3".
+    # The old key paired the FISCAL quarter number with the end-date year ("2023-Q1"),
+    # which joined this quarter to peers' Jan-Mar 2023 — six months away.
     key, label, cal_year, q, _ = _history_period_id(
         {"fiscalYear": 2024, "calendarYear": None, "period": "Q1",
          "date": "2023-08-31"}, quarterly=True)
-    assert cal_year == 2023 and q == 1
-    assert key == "2023-Q1"        # calendar key (for sector join + YoY)
+    assert cal_year == 2023 and q == 3
+    assert key == "2023-Q3"        # calendar-quarter key (for sector join + YoY)
     assert label == "Q1 '24"       # fiscal label (chronologically monotonic)
+
+
+def test_period_id_52_53_week_quarter_spill_joins_the_previous_calendar_quarter():
+    # A Q4 that closes on Jan 3 belongs to calendar Q4 of the PREVIOUS year (the same
+    # 1-7-day spill rule the producer uses), even though the date's year is 2026.
+    key, label, cal_year, q, _ = _history_period_id(
+        {"fiscalYear": 2025, "calendarYear": None, "period": "Q4",
+         "date": "2026-01-03"}, quarterly=True)
+    assert (cal_year, q, key) == (2025, 4, "2025-Q4")
+    assert label == "Q4 '25"
+
+
+def test_period_id_undated_row_keeps_the_fiscal_quarter_fallback_key():
+    # No usable date → no calendar quarter to derive; the row still keys (and charts)
+    # on (calendarYear, fiscal quarter) rather than being dropped.
+    key, label, cal_year, q, sort_date = _history_period_id(
+        {"fiscalYear": 2024, "calendarYear": 2023, "period": "Q1"}, quarterly=True)
+    assert (cal_year, q, key) == (2023, 1, "2023-Q1")
+    assert label == "Q1 '24" and sort_date == "2023-Q1"
+
+
+def test_offcalendar_quarter_overlay_reads_the_peers_same_calendar_quarter():
+    # End to end through the overlay: ORCL's fiscal "Q1 '24" (Jun-Aug 2023) must draw
+    # the peers' calendar Q3'23 value, not their Q1'23 one.
+    income = [{"fiscalYear": 2024, "calendarYear": None, "period": "Q1",
+               "date": "2023-08-31", "revenue": 100.0}]
+    label_to_calkey = _period_calendar_keys(income, [], quarterly=True)
+    assert label_to_calkey == {"Q1 '24": (2023, 3)}
+    sector_map = _sector_period_map({"Q1'23": 0.10, "Q3'23": 0.30})
+    series, has_value = _aligned_sector_series(
+        [{"period": "Q1 '24", "value": 42.0}], label_to_calkey, sector_map, to_percent=True,
+    )
+    assert has_value is True
+    assert series == [{"period": "Q1 '24", "value": 30.0}]
 
 
 # ── Quarterly collisions (THE headline bug) ────────────────────────────

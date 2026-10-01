@@ -4,7 +4,7 @@ Matches the SwiftUI ProfitPowerSectionData / ProfitPowerDataPoint structs.
 """
 
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProfitPowerDataPointSchema(BaseModel):
@@ -32,3 +32,10 @@ class ProfitPowerResponse(BaseModel):
     # "Sector Avg" legend/footer label on the Profitability drill-down. Optional →
     # old payloads / the live detail chart decode it as nil and keep "Sector".
     peer_group_level: Optional[str] = None
+    # The FMP legs that failed in THIS build ("quarterly_income", "profile", ...). Empty
+    # for a complete build. Reflects the value actually served — a Tier-1 hit or an
+    # in-flight join hands out the build it holds, degradation included — so a client
+    # with its own long-lived cache (iOS StockRepository) and the report collector can
+    # refuse to keep a partial build. A degraded build is never written to the Supabase
+    # tier. Additive: shipped iOS builds ignore the key.
+    degraded: List[str] = Field(default_factory=list)

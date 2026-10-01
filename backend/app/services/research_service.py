@@ -26,6 +26,7 @@ from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
 from app.integrations.fmp import get_fmp_client
 from app.services.agents.research_agent import ResearchAgent
+from app.services.agents.ticker_report_data_collector import report_degraded_sections
 from app.services.agents.persona_config import get_persona_config
 from app.services.agents.persona_scoring import compute_quality_score
 from app.services.report_degradation import (
@@ -552,7 +553,21 @@ class ResearchService:
             # benefit from this expensive agentic run for the next 24h.
             # Best-effort — failures inside upsert_cached_report are logged
             # but never raised, so a Supabase blip can't fail the report.
-            await upsert_cached_report(ticker, persona_key, ticker_report_data)
+            #
+            # NOT when the report lost Financials data to a DEGRADED upstream build
+            # (a 429 on one FMP leg): it is delivered and billed to this caller like any
+            # other completed report, but shared with nobody — `_lookup_shared_cache`
+            # refuses the row for the same reason, so the next caller regenerates.
+            lost_sections = report_degraded_sections(ticker_report_data)
+            if lost_sections:
+                logger.warning(
+                    "[report-partial-not-cached] Report %s for %s/%s NOT seeded into the "
+                    "shared cache — Financials sections lost to a degraded upstream "
+                    "build: %s",
+                    report_id, ticker, persona_key, ", ".join(lost_sections),
+                )
+            else:
+                await upsert_cached_report(ticker, persona_key, ticker_report_data)
 
             # Credits were charged upfront in /research/generate
             # (CreditService.try_charge). No deduction here. Refunds on
@@ -895,6 +910,16 @@ class ResearchService:
                         logger.info(
                             "Shared cache row for %s/%s was built under the other "
                             "DCF_ENABLED setting — treating as a miss", ticker, persona_key,
+                        )
+                        return None
+                    # Never re-sell a report that lost Financials data to a degraded
+                    # upstream build: it was delivered to its own buyer only.
+                    lost_sections = report_degraded_sections(blob)
+                    if lost_sections:
+                        logger.warning(
+                            "[report-partial-not-cached] Shared cache row for %s/%s lost "
+                            "Financials sections (%s) — treating as a miss rather than "
+                            "re-selling it", ticker, persona_key, ", ".join(lost_sections),
                         )
                         return None
                     return blob

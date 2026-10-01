@@ -18,7 +18,10 @@ struct EarningsDataTypeToggle: View {
                         selectedType = type
                     }
                 } label: {
+                    // The short raw label fits the controls row; VoiceOver hears what the
+                    // series really is ("Adjusted EPS", see EarningsDataType.seriesTitle).
                     Text(type.rawValue)
+                        .accessibilityLabel(type.seriesTitle)
                         .font(AppTypography.labelSmallEmphasis)
                         .foregroundColor(selectedType == type ? AppColors.textPrimary : AppColors.textSecondary)
                         .padding(.horizontal, AppSpacing.lg)

@@ -280,6 +280,12 @@ struct HealthCheckInfoSheet: View {
                     .cardFill()
             )
 
+            // How the count is built: the badge's [passed/total] and the rating above.
+            Text("A metric in line with its peers counts as half a pass toward the rating. A metric shown as N/M (not meaningful), such as ROE when shareholder equity is negative, is not scored.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             // Disclaimer
             Text("Note: Health Check is one tool in your analysis toolkit. Always combine with qualitative research, industry analysis, and management assessment before making investment decisions.")
                 .font(AppTypography.caption)

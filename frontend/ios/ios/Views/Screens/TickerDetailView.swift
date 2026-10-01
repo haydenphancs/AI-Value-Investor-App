@@ -369,7 +369,11 @@ struct TickerDetailView: View {
                 currentPrice: viewModel.tickerData?.currentPrice,
                 valuationPriceHistory: viewModel.valuationPriceHistory,
                 valuationPriceHistoryLabel: viewModel.valuationPriceHistoryLabel,
-                isValuationPriceHistoryLoading: !viewModel.isFinancialsLoaded,
+                // Two sources feed the closes: earnings' daily history, else the 13F payload's
+                // (holders). The Financials fetches now settle in their own group, ahead of
+                // holders, so "no history" is only a verdict once holders has settled too.
+                isValuationPriceHistoryLoading: !viewModel.isFinancialsLoaded
+                    || (viewModel.valuationPriceHistory.isEmpty && !viewModel.isHoldersLoaded),
                 isAnalystLoaded: viewModel.isAnalystLoaded,
                 isSentimentLoaded: viewModel.isSentimentLoaded,
                 isTechnicalLoaded: viewModel.isTechnicalLoaded,
@@ -403,12 +407,23 @@ struct TickerDetailView: View {
                 revenueBreakdownData: viewModel.revenueBreakdownData,
                 healthCheckData: viewModel.healthCheckData,
                 isLoaded: viewModel.isFinancialsLoaded,
+                // A Financials fetch failure first; else the overview failure that made the
+                // load stop before the six fetches ever ran.
+                loadFailureMessage: viewModel.financialsError ?? viewModel.errorMessage,
+                failedSectionNames: viewModel.financialsFailedSections,
+                isRetrying: viewModel.isLoading || viewModel.isRetryingFinancials,
+                // The six Financials fetches only — NOT `loadTickerData()`, which joins a load
+                // still busy with holders / technical / news and so did nothing at all. The
+                // VM falls back to the whole load only when the overview itself failed.
+                onRetry: { Task { await viewModel.retryFinancials() } },
                 onEarningsDetailTap: viewModel.handleEarningsDetail,
                 onGrowthDetailTap: viewModel.handleGrowthDetail,
                 onProfitPowerDetailTap: viewModel.handleProfitPowerDetail,
                 onSignalOfConfidenceDetailTap: viewModel.handleSignalOfConfidenceDetail,
                 onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail,
-                onHealthCheckDetailTap: viewModel.handleHealthCheckDetail
+                onHealthCheckDetailTap: viewModel.handleHealthCheckDetail,
+                growthIsDegraded: viewModel.growthIsDegraded,
+                profitPowerIsDegraded: viewModel.profitPowerIsDegraded
             )
         case .holders:
             if let holdersData = viewModel.holdersData {

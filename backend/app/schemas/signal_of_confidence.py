@@ -17,8 +17,18 @@ class SignalOfConfidenceDataPointSchema(BaseModel):
     """One quarter of shareholder-return data."""
 
     period: str = Field(..., description="Quarter label, e.g. \"Q2 '24\"")
-    dividend_yield: float = Field(0.0, description="Annualised dividend yield as percentage (1.3 = 1.3%)")
-    buyback_yield: float = Field(0.0, description="Annualised buyback yield as percentage")
+    # TRAILING-TWELVE-MONTH yields (owner decision, 2026-09-30): the four quarters ending
+    # here, over the market cap at THIS quarter's period end. They used to be the single
+    # quarter x4, which turned cash-settlement timing into fake swings — KO's unchanged
+    # dividend read 0.12% / 2.92% / 2.92% / 5.85% on a 2.95% yield, and one ASR quarter
+    # flattened every other bar. A quarter whose four-quarter window is not consecutive
+    # falls back to x4 (logged `[soc-ttm-fallback]`).
+    dividend_yield: float = Field(
+        0.0, description="Trailing-12-month dividend yield at this quarter's end, % (1.3 = 1.3%)"
+    )
+    buyback_yield: float = Field(
+        0.0, description="Trailing-12-month buyback yield at this quarter's end, %"
+    )
     dividend_amount: float = Field(0.0, description="Dividends paid in the quarter (USD millions)")
     buyback_amount: float = Field(0.0, description="Share buybacks in the quarter (USD millions)")
     # Optional because 0.0 is not a share count any listed company can have — FMP
@@ -43,6 +53,14 @@ class SignalOfConfidenceSummarySchema(BaseModel):
     buyback_status: str = Field(
         "Low",
         description="Buyback status: Diluting / Diluting (Mild) / Low / Moderate / High / Very High",
+    )
+    # False when fewer than two quarters REPORT a share count. `share_count_change` is then
+    # 0.0 because the field is a non-Optional Double on shipped iOS builds — not because the
+    # count was measured flat. Without this flag the card printed "+0.0%" and Cay AI was told
+    # "Share count unchanged" as a fact. Defaulted True so a payload cached before it existed
+    # (none survive the payload-version bump, but a fixture might) keeps its old meaning.
+    share_count_change_known: bool = Field(
+        True, description="False when share_count_change could not be measured (< 2 reported counts)"
     )
 
 
@@ -100,6 +118,13 @@ class DividendInfoSchema(BaseModel):
     dividend_growth_years: Optional[int] = Field(
         None, description="Years the growth figure spans, so the label can say so"
     )
+    # The window `five_year_avg_yield` ACTUALLY spans. The field name is legacy (kept for the
+    # shipped DTO): the average is over the quarterly points we hold — at most eight — so the
+    # card's "5Y Avg Yield" label claimed five years for two. "8Q" = mean of eight quarterly
+    # trailing-12-month yields; "NY" only on the annual fallback; None when there is no average.
+    avg_yield_window: Optional[str] = Field(
+        None, description="Window of five_year_avg_yield, e.g. '8Q' or '5Y'; None when undefined"
+    )
 
 
 class SignalOfConfidenceResponse(BaseModel):
@@ -109,3 +134,8 @@ class SignalOfConfidenceResponse(BaseModel):
     data_points: List[SignalOfConfidenceDataPointSchema]
     summary: SignalOfConfidenceSummarySchema
     dividend_info: Optional[DividendInfoSchema] = None
+    # Why THIS build is partial (e.g. "income", "profile", "market_cap", "cash_flow_row").
+    # Non-empty means it was never written to the 24h Supabase tier and lives in memory for
+    # a minute only; it reflects the value actually served (a Supabase hit is always []).
+    # iOS skips its own cache for a degraded payload.
+    degraded: List[str] = Field(default_factory=list)

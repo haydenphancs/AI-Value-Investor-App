@@ -14,41 +14,79 @@ struct RevenueBreakdownChartView: View {
     private let chartHeight: CGFloat = 320
     private let leftAxisWidth: CGFloat = 50
     private let rightAxisWidth: CGFloat = 50
+    /// Points reserved beside the net bar for its "Net Profit" / "-Net Loss" caption: the
+    /// 2pt gap, one captionSmall line at its 1.4× Dynamic Type cap (~17pt) and the 2pt
+    /// minimum bar below. The caption is an OVERLAY — it never sizes its column — so this
+    /// reservation is what keeps it inside the plot rather than clipped by it.
+    private let captionAllowance: CGFloat = 22
+    /// A non-zero net result never vanishes: a 0.5B loss on 50B of revenue is ~2pt tall.
+    private let minimumNetBarHeight: CGFloat = 2
+    /// Closest two axis labels may sit (one `caption` line) before they print on each other.
+    private let minimumLabelGap: CGFloat = 16
 
-    // Calculate chart bounds — use max(revenue, totalCosts) for proper scaling
+    // MARK: - Bounds — sized from what is DRAWN, one rule for profit and loss
+    //
+    // Three columns are drawn: the revenue stack from 0 up to `totalRevenue`, the cost
+    // waterfall from `totalRevenue` DOWN by `drawnWaterfallTotal` (credits are skipped), and
+    // the net bar from 0 to `netProfit`. The plot must contain all three plus the net bar's
+    // caption. It used to be sized from `max(totalRevenue, totalCosts)` with a floor fixed at
+    // 0 in a profit year, so:
+    //   • an operating loss rescued by other income (a profit year whose drawn costs exceed
+    //     revenue) ran the cost column out of the bottom of the frame, into the legend;
+    //   • net income above revenue (a divestiture gain) drew the profit bar ~380pt tall in
+    //     a 320pt plot, over the section header; with ZERO revenue the scale fell back to a
+    //     constant 1 dollar and the bar was billions of points tall;
+    //   • a small loss left no room for its caption, the over-full column was CENTRED by
+    //     its frame, and the loss bar floated above the zero line.
+    // Bars are now placed absolutely (offsets, not spacers), captions are overlays, and the
+    // plot is `.clipped()` as a last line of defence — never as the fix.
+
+    /// Top of the plot, in value units. The caption reservation is closed-form:
+    /// (top − NI)·h ≥ l·(top − bottom)  ⇔  top ≥ (NI·h − l·bottom) / (h − l).
+    /// Only a PROFIT bar carries its caption above it. NB: in a profit year
+    /// `chartBottomValue` does not read this property, so the two never recurse.
     private var chartTopValue: Double {
-        let maxVal = max(data.totalRevenue, data.totalCosts)
-        guard maxVal > 0 else { return 1 } // Avoid zero range
-        return maxVal * 1.1
+        let ceiling = max(data.totalRevenue, data.netProfit, data.drawnWaterfallTotal, 0) * 1.1
+        guard data.isProfit else { return ceiling }
+        let h = Double(chartHeight)
+        let l = Double(captionAllowance)
+        let needed = (data.netProfit * h - l * chartBottomValue) / (h - l)
+        return needed.isFinite ? max(ceiling, needed) : ceiling
     }
 
+    /// Bottom of the plot: below the LOWER of the reported net result and where the drawn
+    /// waterfall actually lands — in BOTH branches. The waterfall skips credit lines (income
+    /// is not a cost), so with a credit it ends BELOW net income — INTC FY2025 lands at
+    /// −1.55B against a −0.27B loss — and in a profit year it can still end below zero.
+    /// A loss bar's caption hangs under it; reserved in closed form:
+    /// (NI − bottom)·h ≥ l·(top − bottom)  ⇔  bottom ≤ (NI·h − l·top) / (h − l).
+    /// NB: in a loss year `chartTopValue` does not read this property.
     private var chartBottomValue: Double {
-        if data.isProfit {
-            return 0
-        } else {
-            // Loss: bottom extends below the LOWER of the reported net loss and where the
-            // drawn waterfall actually lands. The waterfall skips credit lines (income is
-            // not a cost), so with a credit it ends BELOW net income — INTC FY2025 lands at
-            // −1.55B against a −0.27B loss — and a floor set from net income alone let the
-            // bar bleed out of the frame.
-            let drawnCosts = data.waterfallItems.filter { !$0.isCredit }.reduce(0) { $0 + $1.value }
-            let waterfallBottom = data.totalRevenue - drawnCosts
-            return min(data.netProfit, waterfallBottom, 0) * 1.2
-        }
+        let drawnCosts = data.waterfallItems.filter { !$0.isCredit }.reduce(0) { $0 + $1.value }
+        let waterfallBottom = data.totalRevenue - drawnCosts
+        let floor = min(data.netProfit, waterfallBottom, 0) * 1.2
+        guard !data.isProfit else { return floor }
+        let h = Double(chartHeight)
+        let l = Double(captionAllowance)
+        let needed = (data.netProfit * h - l * chartTopValue) / (h - l)
+        return needed.isFinite ? min(floor, needed) : floor
     }
 
     private var chartRange: Double {
         let range = chartTopValue - chartBottomValue
-        return range > 0 ? range : 1 // Prevent division by zero
+        return range > 0 && range.isFinite ? range : 1 // Prevent division by zero
     }
 
-    // Where is the zero line (as fraction from bottom)
+    /// True when anything is drawn below zero — the plot then carries a zero line, and
+    /// every bar stands on it rather than on the frame bottom.
+    private var hasNegativeRegion: Bool {
+        chartBottomValue < 0
+    }
+
+    // Where is the zero line (as fraction from bottom) — derived from the bottom, not from
+    // the sign of net income: a profit year can dip below zero too.
     private var zeroLinePosition: CGFloat {
-        if data.isProfit {
-            return 0
-        } else {
-            return CGFloat(abs(chartBottomValue) / chartRange)
-        }
+        hasNegativeRegion ? CGFloat(-chartBottomValue / chartRange) : 0
     }
 
     // Grid values for Y-axis — aligned to NET revenue so 100% is the revenue the company
@@ -56,66 +94,97 @@ struct RevenueBreakdownChartView: View {
     // stack (INTC) rises past 100% to 133%; the eliminations step brings the waterfall
     // back down to it.
     private var gridValues: [Double] {
-        if data.isProfit {
-            // `chartTopValue` already floors at 1 when there is no revenue, so
-            // derive the ladder from it: using a zero `netRevenue` directly
-            // stacked all five grid lines (and their labels) on one pixel.
-            let rev = data.netRevenue > 0 ? data.netRevenue : chartTopValue
-            return [0, rev * 0.25, rev * 0.5, rev * 0.75, rev]
-        } else {
-            let step = chartRange / 4
-            return [
-                chartBottomValue,
-                chartBottomValue + step,
-                chartBottomValue + step * 2,
-                chartBottomValue + step * 3,
-                chartTopValue
-            ]
+        // The 0–100% ladder needs its quarter steps far enough apart to read: net income
+        // can now set the plot top (a gain several times revenue), which would otherwise
+        // squeeze all five labels onto the zero line.
+        let quarterStep = CGFloat(data.netRevenue * 0.25 / chartRange) * chartHeight
+        if data.isProfit && data.netRevenue > 0 && quarterStep >= minimumLabelGap {
+            let rev = data.netRevenue
+            let ladder = [0, rev * 0.25, rev * 0.5, rev * 0.75, rev]
+            // A profit year whose drawn waterfall dips below zero has a region under the
+            // zero line: label its floor too, unless it sits so close to the "0" label that
+            // the two would print on top of each other.
+            let floorGap = zeroLinePosition * chartHeight
+            return hasNegativeRegion && floorGap >= minimumLabelGap ? [chartBottomValue] + ladder : ladder
         }
+        // No revenue, or a loss: ladder the whole range in quarters. `chartRange` never
+        // collapses to 0, so the five lines (and their labels) never stack on one pixel.
+        let step = chartRange / 4
+        return [
+            chartBottomValue,
+            chartBottomValue + step,
+            chartBottomValue + step * 2,
+            chartBottomValue + step * 3,
+            chartTopValue
+        ]
     }
 
-    // Percentage labels (relative to total revenue), one per grid value.
+    // Percentage labels (relative to net revenue), one per grid value.
     //
     // The `totalRevenue <= 0` branch used to return the fixed 0/25/50/75/100%
     // ladder while `gridValues` took the LOSS branch, so the labels asserted
     // percentages that had nothing to do with the lines they were placed on.
-    // With no revenue there is no meaningful percentage — show a dash.
+    // With no revenue there is no meaningful percentage — show a dash. Every label is
+    // computed from its own line (rounded), so the profit ladder still reads 0–100% and
+    // the floor label under a profit year's zero line reads its real share.
     private var percentageLabels: [String] {
         guard data.netRevenue > 0 else {
             return gridValues.map { _ in "—" }
         }
-
-        if data.isProfit {
-            return ["0%", "25%", "50%", "75%", "100%"]
-        } else {
-            return gridValues.map { value in
-                let pct = (value / data.netRevenue) * 100
-                // `Int()` traps on non-finite / out-of-Int-range input.
-                guard pct.isFinite else { return "—" }
-                return "\(Int(min(max(pct, -9_999), 9_999)))%"
-            }
+        return gridValues.map { value in
+            let pct = (value / data.netRevenue) * 100
+            // `Int()` traps on non-finite / out-of-Int-range input. Beyond ±9,999% a dash,
+            // not a clamp: a gain thousands of times revenue printed "9999%" on four lines.
+            guard pct.isFinite, abs(pct) <= 9_999 else { return "—" }
+            return "\(Int(pct.rounded()))%"
         }
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            // Left Y-axis (absolute values)
-            leftYAxis
-                .frame(width: leftAxisWidth)
+        if data.hasChartableMagnitude {
+            HStack(alignment: .top, spacing: 0) {
+                // Left Y-axis (absolute values)
+                leftYAxis
+                    .frame(width: leftAxisWidth)
 
-            // Main chart
-            chartContent
-                .frame(height: chartHeight)
+                // Main chart
+                chartContent
+                    .frame(height: chartHeight)
 
-            // Right Y-axis (percentages)
-            rightYAxis
-                .frame(width: rightAxisWidth)
+                // Right Y-axis (percentages)
+                rightYAxis
+                    .frame(width: rightAxisWidth)
+            }
+        } else {
+            noRevenuePlaceholder
         }
     }
 
     // Convert a data value to a Y offset (from top of chart)
     private func yPosition(for value: Double, height: CGFloat) -> CGFloat {
         CGFloat((chartTopValue - value) / chartRange) * height
+    }
+
+    // MARK: - Empty state
+
+    /// Nothing reaches a dollar (see `RevenueBreakdownData.hasChartableMagnitude`): no axis
+    /// is invented for it.
+    private var noRevenuePlaceholder: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textMuted)
+            Text("No revenue reported")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+            Text("There is no revenue, cost or profit figure to chart for this year.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, minHeight: 120)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Left Y-Axis
@@ -168,16 +237,16 @@ struct RevenueBreakdownChartView: View {
                 // Grid lines
                 gridLines(height: height)
 
-                // Zero line for loss companies
-                if !data.isProfit {
+                // Zero line whenever anything is drawn below zero — profit years included
+                if hasNegativeRegion {
                     zeroLine(height: height)
                 }
 
-                // Revenue stacked bar (left side) - grows UP from zero/bottom
+                // Revenue stacked bar (left side) - stands on the zero line
                 revenueStackedBar(height: height, barWidth: barWidth)
                     .position(x: width * 0.22, y: height / 2)
 
-                // Cost waterfall bar (center) - descends FROM TOP
+                // Cost waterfall bar (center) - descends FROM TOP of the revenue stack
                 costWaterfallBar(height: height, barWidth: barWidth)
                     .position(x: width * 0.50, y: height / 2)
 
@@ -186,6 +255,10 @@ struct RevenueBreakdownChartView: View {
                     .position(x: width * 0.78, y: height / 2)
             }
         }
+        // Backstop only: the bounds above already contain every bar and caption. If they
+        // ever stop doing so, a bar is cut at the plot edge instead of painting over the
+        // header and the legend (the AVGO TestFlight overflow, in this chart's shape).
+        .clipped()
     }
 
     // MARK: - Grid Lines
@@ -202,7 +275,7 @@ struct RevenueBreakdownChartView: View {
         .frame(height: height)
     }
 
-    // MARK: - Zero Line (for loss companies)
+    // MARK: - Zero Line (whenever anything is drawn below zero)
 
     private func zeroLine(height: CGFloat) -> some View {
         let zeroY = height * (1 - zeroLinePosition)
@@ -217,7 +290,11 @@ struct RevenueBreakdownChartView: View {
 
     private func revenueStackedBar(height: CGFloat, barWidth: CGFloat) -> some View {
         let revenueBarHeight = CGFloat(data.totalRevenue / chartRange) * height
-        let zeroOffset = zeroLinePosition * height // Distance from bottom to zero line
+        // The stack's top, measured from the plot top. Its bottom is then the zero line
+        // wherever that sits — an offset, not a spacer, so nothing in the column can push
+        // it (the old spacer only lifted the stack in a LOSS year).
+        let rawTopY = yPosition(for: data.totalRevenue, height: height)
+        let topY = rawTopY.isFinite ? rawTopY : height
 
         // Calculate segment heights proportionally within the revenue bar.
         // Guard the divisor: the backend emits a single value=0 "Total Revenue" row
@@ -227,12 +304,11 @@ struct RevenueBreakdownChartView: View {
         // guarded divisors in this view: chartTopValue, chartRange, percentageLabels).
         let segments: [(color: Color, height: CGFloat)] = data.revenueSources.map { source in
             let fraction = data.totalRevenue > 0 ? source.value / data.totalRevenue : 0
-            return (source.color, max(0, CGFloat(fraction) * revenueBarHeight))
+            let h = CGFloat(fraction) * revenueBarHeight
+            return (source.color, h.isFinite ? max(0, h) : 0)
         }
 
-        return VStack(spacing: 0) {
-            Spacer()
-
+        return ZStack(alignment: .top) {
             VStack(spacing: 0) {
                 ForEach(0..<segments.count, id: \.self) { index in
                     Rectangle()
@@ -248,13 +324,9 @@ struct RevenueBreakdownChartView: View {
                     topTrailingRadius: 6
                 )
             )
-
-            // Offset for zero line position
-            if !data.isProfit {
-                Spacer().frame(height: zeroOffset)
-            }
+            .offset(y: topY)
         }
-        .frame(height: height)
+        .frame(width: barWidth, height: height, alignment: .top)
     }
 
     // MARK: - Cost Waterfall Bar (descends from top)
@@ -287,11 +359,10 @@ struct RevenueBreakdownChartView: View {
         let rawRevenueTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit
         let revenueTopY = rawRevenueTopY.isFinite ? max(rawRevenueTopY, 0) : 0
 
-        return VStack(spacing: 0) {
-            // Space above the cost bar (aligns with revenue top)
-            Spacer().frame(height: revenueTopY)
-
-            // Cost segments descending from revenue top
+        // Placed by OFFSET inside a top-aligned frame: an over-full spacer stack used to be
+        // centred by its frame, which slid this column's top off the revenue top it is
+        // meant to line up with. The bounds guarantee it ends inside the plot.
+        return ZStack(alignment: .top) {
             VStack(spacing: 0) {
                 ForEach(costSegments) { item in
                     Rectangle()
@@ -307,73 +378,77 @@ struct RevenueBreakdownChartView: View {
                     topTrailingRadius: 6
                 )
             )
-
-            Spacer()
+            .offset(y: revenueTopY)
         }
-        .frame(height: height)
+        .frame(width: barWidth, height: height, alignment: .top)
     }
 
     // MARK: - Net Profit/Loss Bar
 
     private func netProfitBar(height: CGFloat, barWidth: CGFloat) -> some View {
         let pixelsPerUnit = height / chartRange
-        let netProfitHeight = CGFloat(abs(data.netProfit)) * pixelsPerUnit
+        let rawBarHeight = CGFloat(abs(data.netProfit)) * pixelsPerUnit
+        let trueHeight = rawBarHeight.isFinite ? rawBarHeight : 0
+        let netProfitHeight = data.netProfit == 0 ? 0 : max(trueHeight, minimumNetBarHeight)
+        // Both bars stand on the ZERO LINE (the frame bottom only when nothing dips below
+        // zero). A profit bar used to stand on the frame bottom even when the waterfall had
+        // pushed the zero line up.
+        let zeroY = height * (1 - zeroLinePosition)
 
         if data.isProfit {
-            // Profit bar - grows up from zero (bottom)
+            // Profit bar - grows UP from the zero line; caption overlaid above it
             return AnyView(
-                VStack(spacing: 0) {
-                    Spacer()
-
-                    VStack(spacing: 2) {
-                        Text("Net Profit")
-                            .font(AppTypography.captionSmall)
-                            .foregroundColor(AppColors.textMuted)
-
-                        Rectangle()
-                            .fill(AppColors.bullish)
-                            .frame(width: barWidth, height: netProfitHeight)
-                            .clipShape(
-                                UnevenRoundedRectangle(
-                                    topLeadingRadius: 6,
-                                    bottomLeadingRadius: 0,
-                                    bottomTrailingRadius: 0,
-                                    topTrailingRadius: 6
-                                )
+                ZStack(alignment: .top) {
+                    Rectangle()
+                        .fill(AppColors.bullish)
+                        .frame(width: barWidth, height: netProfitHeight)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 6,
+                                bottomLeadingRadius: 0,
+                                bottomTrailingRadius: 0,
+                                topTrailingRadius: 6
                             )
-                    }
+                        )
+                        .overlay(alignment: .top) {
+                            // Bottom of the caption 2pt above the bar's top. An overlay
+                            // never sizes the column, so it cannot shift the bar.
+                            Text("Net Profit")
+                                .font(AppTypography.captionSmall)
+                                .foregroundColor(AppColors.textMuted)
+                                .fixedSize()
+                                .alignmentGuide(.top) { $0[.bottom] + 2 }
+                        }
+                        .offset(y: zeroY - netProfitHeight)
                 }
-                .frame(height: height)
+                .frame(width: barWidth, height: height, alignment: .top)
             )
         } else {
-            // Loss bar - goes below zero line
-            let zeroY = height * (1 - zeroLinePosition)
-
+            // Loss bar - hangs DOWN from the zero line; caption overlaid below it
             return AnyView(
-                VStack(spacing: 0) {
-                    Spacer().frame(height: zeroY)
-
-                    VStack(spacing: 2) {
-                        Rectangle()
-                            .fill(AppColors.loss)
-                            .frame(width: barWidth, height: netProfitHeight)
-                            .clipShape(
-                                UnevenRoundedRectangle(
-                                    topLeadingRadius: 0,
-                                    bottomLeadingRadius: 6,
-                                    bottomTrailingRadius: 6,
-                                    topTrailingRadius: 0
-                                )
+                ZStack(alignment: .top) {
+                    Rectangle()
+                        .fill(AppColors.loss)
+                        .frame(width: barWidth, height: netProfitHeight)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: 0,
+                                bottomLeadingRadius: 6,
+                                bottomTrailingRadius: 6,
+                                topTrailingRadius: 0
                             )
-
-                        Text("-Net Loss")
-                            .font(AppTypography.captionSmall)
-                            .foregroundColor(AppColors.textMuted)
-                    }
-
-                    Spacer()
+                        )
+                        .overlay(alignment: .bottom) {
+                            // Top of the caption 2pt below the bar's bottom.
+                            Text("-Net Loss")
+                                .font(AppTypography.captionSmall)
+                                .foregroundColor(AppColors.textMuted)
+                                .fixedSize()
+                                .alignmentGuide(.bottom) { $0[.top] - 2 }
+                        }
+                        .offset(y: zeroY)
                 }
-                .frame(height: height)
+                .frame(width: barWidth, height: height, alignment: .top)
             )
         }
     }
@@ -412,6 +487,43 @@ struct RevenueBreakdownChartView: View {
                     .font(AppTypography.headingSmall)
 
                 RevenueBreakdownChartView(data: RevenueBreakdownData.sampleLossCompany)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+
+                // Outlier shapes: every bar and caption must stay inside its frame.
+                Text("Operating loss, net profit (sample)")
+                    .foregroundColor(AppColors.textOnAccent)
+                    .font(AppTypography.headingSmall)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleOperatingLossTurnedProfit)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+
+                Text("Net income above revenue (sample)")
+                    .foregroundColor(AppColors.textOnAccent)
+                    .font(AppTypography.headingSmall)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleGainAboveRevenue)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+
+                Text("Small net loss (sample)")
+                    .foregroundColor(AppColors.textOnAccent)
+                    .font(AppTypography.headingSmall)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleSmallLoss)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+
+                Text("No revenue reported (sample)")
+                    .foregroundColor(AppColors.textOnAccent)
+                    .font(AppTypography.headingSmall)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleNoRevenue)
                     .padding()
                     .background(AppColors.cardBackground)
                     .cornerRadius(AppCornerRadius.large)

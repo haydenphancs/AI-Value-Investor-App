@@ -47,7 +47,25 @@ struct ReportEarningsTimelinePanel: View {
 
             legend
                 .padding(.top, AppSpacing.md)
+
+            // Reported years plot GAAP EPS; forecast years plot the analyst consensus,
+            // which most companies report on an ADJUSTED basis — so the line can step at
+            // the boundary without that being growth (the backend leaves that year's EPS
+            // YoY empty). Shown only when the report says so (`eps_basis`, newer reports).
+            if mixesEPSBases {
+                Text("EPS: reported years are GAAP; forecast years are the analyst consensus, usually adjusted.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, AppSpacing.xs)
+            }
         }
+    }
+
+    /// True when the timeline has GAAP actual years AND consensus forecast years.
+    private var mixesEPSBases: Bool {
+        let bases = Set(timeline.compactMap(\.epsBasis))
+        return bases.contains("gaap") && bases.contains("consensus")
     }
 
     private enum LegendShape { case bar, dot, line }

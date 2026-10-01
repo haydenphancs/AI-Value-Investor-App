@@ -179,7 +179,7 @@ async def test_growth_tier1_hit_still_reports_the_degraded_build(monkeypatch):
     reads it as a Tier-1 HIT. The hit must carry the degradation, or the snapshot pins it."""
 
     async def _degraded_build(ticker):
-        return _growth(12.0), ["quarterly_income"]
+        return _growth(12.0), ["annual_income"]
 
     gmod, growth_svc = _real_growth_service(monkeypatch, _degraded_build)
     growth_persisted = _spy_persist(monkeypatch, growth_svc, "_upsert_supabase_cache_safe")
@@ -187,7 +187,7 @@ async def test_growth_tier1_hit_still_reports_the_degraded_build(monkeypatch):
     assert growth_persisted == [], "GrowthService itself must not persist a degraded build"
 
     response, degraded = await growth_svc.get_growth_with_status("AAPL")   # Tier-1 hit
-    assert degraded == ["quarterly_income"]
+    assert degraded == ["annual_income"]
     assert response.symbol == "AAPL"
 
     gs, snap = _growth_snapshot(monkeypatch)

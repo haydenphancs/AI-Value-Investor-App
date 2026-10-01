@@ -246,6 +246,12 @@ struct RevenueProjectionDTO: Codable {
     let revenueAnalystCount: Int?
     let epsAnalystCount: Int?
     let isForecast: Bool
+    /// Earnings Timeline rows only: the fiscal period's END ("yyyy-MM-dd"). `period` is the
+    /// FISCAL year, so the price overlay places closes by period window when this is present.
+    /// Optional: `projections` rows and reports generated before it omit the key.
+    let periodEnd: String?
+    /// "gaap" on reported years, "consensus" on forecast years; nil on older reports.
+    let epsBasis: String?
 
     enum CodingKeys: String, CodingKey {
         case period, revenue
@@ -257,6 +263,8 @@ struct RevenueProjectionDTO: Codable {
         case revenueAnalystCount = "revenue_analyst_count"
         case epsAnalystCount = "eps_analyst_count"
         case isForecast = "is_forecast"
+        case periodEnd = "period_end"
+        case epsBasis = "eps_basis"
     }
 }
 
@@ -264,11 +272,15 @@ struct EarningsTrackRecordPointDTO: Codable {
     let period: String
     let surprisePercent: Double
     let beat: Bool
+    /// "beat" | "miss" | "met". Optional: reports generated before it lack the key, and the
+    /// display model then falls back to `beat`.
+    let result: String?
 
     enum CodingKeys: String, CodingKey {
         case period
         case surprisePercent = "surprise_percent"
         case beat
+        case result
     }
 }
 
@@ -336,6 +348,10 @@ struct CapitalAllocationDTO: Codable {
     // card can draw the compact dilution mini-chart + label the share-count
     // window. Optional → tolerates older/cached payloads without the key.
     let dataPoints: [SignalOfConfidenceDataPointDTO]?
+    /// False when `shareCountChange` is an unmeasured 0.0 placeholder. Optional: absent on
+    /// older reports and wherever the response schema does not carry it yet — the display
+    /// model then derives the same rule from `dataPoints`.
+    let shareCountChangeKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case buybackStatus = "buyback_status"
@@ -345,6 +361,7 @@ struct CapitalAllocationDTO: Codable {
         case totalYield = "total_yield"
         case shareCountChange = "share_count_change"
         case dataPoints = "data_points"
+        case shareCountChangeKnown = "share_count_change_known"
     }
 }
 
@@ -492,6 +509,9 @@ struct RevenueEngineDTO: Codable {
     let revenueUnit: String
     let period: String
     let analysisNote: String?
+    /// Millions, positive: intersegment sales a GROSS segment stack includes and
+    /// consolidation removes. Optional: set only for a gross stack, absent on older reports.
+    let intersegmentEliminations: Double?
 
     enum CodingKeys: String, CodingKey {
         case segments
@@ -499,6 +519,7 @@ struct RevenueEngineDTO: Codable {
         case revenueUnit = "revenue_unit"
         case period
         case analysisNote = "analysis_note"
+        case intersegmentEliminations = "intersegment_eliminations"
     }
 }
 
@@ -872,7 +893,8 @@ extension TickerReportAPIResponse {
             insight: revenueForecast.insight,
             earningsTrackRecord: (revenueForecast.earningsTrackRecord ?? []).map {
                 EarningsTrackRecordPoint(
-                    period: $0.period, surprisePercent: $0.surprisePercent, beat: $0.beat
+                    period: $0.period, surprisePercent: $0.surprisePercent, beat: $0.beat,
+                    result: $0.result
                 )
             },
             beatSummary: revenueForecast.beatSummary,
@@ -883,7 +905,9 @@ extension TickerReportAPIResponse {
                     eps: $0.eps, epsLabel: $0.epsLabel, epsYoyPct: $0.epsYoyPct,
                     revenueAnalystCount: $0.revenueAnalystCount,
                     epsAnalystCount: $0.epsAnalystCount,
-                    isForecast: $0.isForecast
+                    isForecast: $0.isForecast,
+                    periodEnd: $0.periodEnd,
+                    epsBasis: $0.epsBasis
                 )
             },
             forecastAnalystCount: revenueForecast.forecastAnalystCount,
@@ -900,24 +924,29 @@ extension TickerReportAPIResponse {
                 InsiderTransaction(type: t.type, count: t.count, shares: t.shares, value: t.value)
             },
             ownershipNote: insiderData.ownershipNote,
-            capitalAllocation: insiderData.capitalAllocation.map { c in
-                ReportCapitalAllocation(
+            capitalAllocation: insiderData.capitalAllocation.map { (c: CapitalAllocationDTO) -> ReportCapitalAllocation in
+                let points: [SignalOfConfidenceDataPoint]? = c.dataPoints?.map { p in
+                    SignalOfConfidenceDataPoint(
+                        period: p.period,
+                        dividendYield: p.dividendYield,
+                        buybackYield: p.buybackYield,
+                        dividendAmount: p.dividendAmount,
+                        buybackAmount: p.buybackAmount,
+                        sharesOutstanding: p.sharesOutstanding
+                    )
+                }
+                // The wire flag when present; else the SoC rule over the points carried.
+                let known: Bool = c.shareCountChangeKnown
+                    ?? ReportCapitalAllocation.isShareCountChangeMeasured(points: points)
+                return ReportCapitalAllocation(
                     buybackStatus: c.buybackStatus,
                     dividendStatus: c.dividendStatus,
                     dividendYield: c.dividendYield,
                     buybackYield: c.buybackYield,
                     totalYield: c.totalYield,
                     shareCountChange: c.shareCountChange,
-                    dataPoints: (c.dataPoints ?? []).map { p in
-                        SignalOfConfidenceDataPoint(
-                            period: p.period,
-                            dividendYield: p.dividendYield,
-                            buybackYield: p.buybackYield,
-                            dividendAmount: p.dividendAmount,
-                            buybackAmount: p.buybackAmount,
-                            sharesOutstanding: p.sharesOutstanding
-                        )
-                    }
+                    dataPoints: points ?? [],
+                    shareCountChangeKnown: known
                 )
             },
             insiderFlow: insiderData.insiderFlow?.toDisplayModel(),
@@ -973,7 +1002,8 @@ extension TickerReportAPIResponse {
             totalRevenue: revenueEngine.totalRevenue,
             revenueUnit: revenueEngine.revenueUnit,
             period: revenueEngine.period,
-            analysisNote: revenueEngine.analysisNote
+            analysisNote: revenueEngine.analysisNote,
+            intersegmentEliminations: revenueEngine.intersegmentEliminations
         )
 
         // Moat & Competition

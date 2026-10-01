@@ -18,11 +18,12 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.services._earnings_common import next_pending_earnings_date
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
-from app.integrations.fmp import get_fmp_client
+from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
 from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,18 @@ logger = logging.getLogger(__name__)
 # ── In-memory cache ───────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
+
+# Version stamped into every health_check_cache row. Bump it whenever a stored value's
+# MEANING changes, so rows written by the old rules are rebuilt on their next read
+# instead of being served for up to 24h (same pattern as signal_of_confidence_service).
+# 2 (2026-09-30): Altman Z is omitted for financials / REITs; ROE on negative equity is
+#     "N/M" and unscored; IC=0 with no interest expense and P/E<=0 are omitted; a
+#     non-positive peer median is no benchmark; Z status uses the 2-dp score.
+# 3 (2026-09-30, round 2): the Z insight prints 2 dp (it printed "3.0" beside "Safe");
+#     a barely-positive ROE / IC / D/E median is no benchmark (`_MIN_USABLE_MEDIAN`); a
+#     balance-sheet equity of 0 beside a positive D/E no longer makes ROE "N/M".
+_HC_PAYLOAD_VERSION = 3
+_HC_VERSION_KEY = "payload_version"
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -90,16 +103,9 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 
 
 def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
-    """Return the first future earnings date as yyyy-MM-dd, or None."""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ec in sorted(ec_records, key=lambda r: r.get("date") or ""):
-        ec_date = (ec.get("date") or "")[:10]
-        if not ec_date or ec_date <= today_str:
-            continue
-        if ec.get("eps") is not None:
-            continue
-        return ec_date
-    return None
+    """Next pending earnings date (yyyy-MM-dd) — includes TODAY's pending report and
+    skips a stale reschedule row. Shared rule: ``_earnings_common.next_pending_earnings``."""
+    return next_pending_earnings_date(ec_records)
 
 
 def _clamp(val: float, lo: float, hi: float) -> float:
@@ -177,6 +183,11 @@ METRIC_DEFS = [
     },
 ]
 
+# highlighted_value of a row the card SHOWS but cannot judge (ROE on negative equity).
+# iOS keys its "N/M" rendering on this exact token (HealthCheckMetric.notMeaningfulToken),
+# and the row is left out of passed_count / total_count.
+NOT_MEANINGFUL = "N/M"
+
 # ── Status thresholds (percent difference) ────────────────────────
 # For lower_is_better: negative pct_diff = company below sector = good
 # For higher_is_better: positive pct_diff = company above sector = good
@@ -189,6 +200,36 @@ _STATUS_THRESHOLDS = {
     "quick_ratio":       {"positive_above": 10,  "negative_below": -25},
     # altman_z_score uses absolute thresholds, not percent difference
 }
+
+# The smallest peer median (in the metric's RAW units — ROE as a decimal) that is still a
+# usable anchor for a percent gap. At or below it the metric falls back to the absolute
+# heuristics with no comparison, exactly as for a non-positive median. A percent gap
+# divides by the median, so a median near zero turns a small absolute difference into an
+# absurd verdict: ROE 5% against a 1% median read "5.0x well above sector average.
+# Exceptional capital efficiency." and became the card's top pass, where the absolute
+# reading is "Modest returns"; a 1e-6 median read "50000.0x".
+#   roe 0.02 — a thin or loss-heavy industry whose median peer barely earns anything;
+#       a 2% ROE is no yardstick for "capital efficiency" (FMP medians are not floored
+#       at zero: `industry_benchmark_service._TTM_METRICS` keeps negatives).
+#   interest_coverage 1.0 — a median peer that cannot cover its own interest is a
+#       distressed anchor; "6.0x well above. Outsized capacity" for an IC of 3.0 against
+#       0.5 overstates the absolute "Adequate coverage".
+#   debt_to_equity 0.05 — a near debt-free peer group (D/E is not positive_only either);
+#       a D/E of 0.5 against 0.04 read "12.5x well above. Significantly leveraged vs
+#       peers", where 0.5 is moderate leverage on any absolute reading.
+# P/E, current and quick ratio medians are positive_only and never plausibly this close
+# to zero, so they keep the bare non-positive rule. Normal medians are untouched.
+_MIN_USABLE_MEDIAN: Dict[str, float] = {
+    "roe": 0.02,
+    "interest_coverage": 1.0,
+    "debt_to_equity": 0.05,
+}
+_NON_POSITIVE_MEDIAN = 1e-9
+
+
+def _min_usable_median(metric_type: str) -> float:
+    """A median at or below this value is no benchmark for `metric_type`."""
+    return _MIN_USABLE_MEDIAN.get(metric_type, _NON_POSITIVE_MEDIAN)
 
 
 def _determine_status(metric_type: str, pct_diff: float, lower_is_better: bool) -> str:
@@ -222,12 +263,22 @@ def _gauge_position(value: float, sector: float) -> float:
 
 # ── Dynamic insight text ─────────────────────────────────────────
 
-def _format_diff_label(abs_pct: float) -> str:
-    """Format the highlighted_value as percentage or multiplier."""
-    if abs_pct >= 200:
-        multiplier = round(abs_pct / 100 + 1, 1)
+def _format_diff_label(pct_diff: float) -> str:
+    """Format the highlighted_value for a SIGNED percent difference vs the peer median.
+
+    A multiplier only reads correctly ABOVE the median (+400% is "5.0x" the median). It
+    used to be applied to |pct|, so ROE -25% against a 12% median (pct -308) printed
+    "4.1x well below sector average" — "N times below" means nothing. Below the median the
+    gap is a share of the median, which can only pass 100% once the company value has
+    crossed zero; the metric loop diverts that case before any generator runs
+    (`_crossed_zero_insight`), and anything that still slips through is capped at 100%.
+    """
+    if pct_diff >= 200:
+        multiplier = round(pct_diff / 100 + 1, 1)
         return f"{multiplier}x"
-    return f"{int(round(abs_pct))}%"
+    if pct_diff < 0:
+        return f"{min(int(round(-pct_diff)), 100)}%"
+    return f"{int(round(pct_diff))}%"
 
 
 def _generate_de_insight(
@@ -239,8 +290,7 @@ def _generate_de_insight(
     frontend renders: ``{value} {label} {main_text}``
     e.g.  **43%** **below** sector average. Conservative leverage.
     """
-    abs_pct = abs(pct_diff)
-    label = _format_diff_label(abs_pct)
+    label = _format_diff_label(pct_diff)
 
     if pct_diff < -50:
         return (
@@ -296,8 +346,7 @@ def _generate_pe_insight(
     frontend renders: ``{value} {label} {main_text}``
     e.g.  **15%** **below** sector average. Fair value opportunity.
     """
-    abs_pct = abs(pct_diff)
-    label = _format_diff_label(abs_pct)
+    label = _format_diff_label(pct_diff)
 
     if pct_diff < -30:
         return (
@@ -353,8 +402,7 @@ def _generate_roe_insight(
     frontend renders: ``{value} {label} {main_text}``
     e.g.  **22%** **above** sector average. Strong capital efficiency.
     """
-    abs_pct = abs(pct_diff)
-    label = _format_diff_label(abs_pct)
+    label = _format_diff_label(pct_diff)
 
     if pct_diff > 100:
         return (
@@ -405,8 +453,7 @@ def _generate_cr_insight(
     pct_diff: float, value: float, sector: float,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Current Ratio."""
-    abs_pct = abs(pct_diff)
-    label = _format_diff_label(abs_pct)
+    label = _format_diff_label(pct_diff)
 
     if pct_diff > 75:
         return (
@@ -456,8 +503,7 @@ def _generate_ic_insight(
     pct_diff: float, value: float, sector: float,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Interest Coverage (higher is better)."""
-    abs_pct = abs(pct_diff)
-    label = _format_diff_label(abs_pct)
+    label = _format_diff_label(pct_diff)
 
     if pct_diff > 100:
         return (
@@ -502,8 +548,7 @@ def _generate_qr_insight(
     pct_diff: float, value: float, sector: float,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Quick Ratio (higher is better)."""
-    abs_pct = abs(pct_diff)
-    label = _format_diff_label(abs_pct)
+    label = _format_diff_label(pct_diff)
 
     if pct_diff > 50:
         return (
@@ -551,8 +596,15 @@ def _generate_zscore_insight(
 
     Returns (main_text, highlighted_value, highlighted_label).
     No sector comparison — uses Altman's universal bankruptcy-risk zones.
+
+    The zone is judged and PRINTED on the same 2-dp number. The status is judged at 2 dp
+    (`_zscore_status`, the report's precision) but this used to print 1 dp, so a Z of
+    3.03 read "3.0 Z-Score. Safe zone" beside the card's "1.8 – 3.0" Grey label, and
+    1.83 read "1.8 · Grey zone" beside "≤ 1.8" Distress. Rounding here as well keeps the
+    text self-consistent even for a caller that passes an unrounded score.
     """
-    formatted = f"{value:.1f}"
+    value = round(value, 2)
+    formatted = f"{value:.2f}"
 
     if value > 4.5:
         return (
@@ -647,13 +699,53 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     return summed
 
 
+# Industries whose balance sheet the Altman model was never built for. Matched as whole
+# words (so "Banks - Regional", "Investment - Banking & Investment Services",
+# "Insurance - Life", "REIT - Retail", "Financial - Credit Services", "Financial -
+# Mortgages") and only as a backstop: the sector test below already covers every
+# correctly classified financial / real-estate company. It catches a misclassified row.
+_ALTMAN_NA_SECTORS = frozenset({"financial services", "real estate"})
+_ALTMAN_NA_INDUSTRY_RE = re.compile(
+    r"\b(?:bank\w*|insurance|reits?|asset management|capital markets|credit services|"
+    r"mortgages?)\b",
+    re.IGNORECASE,
+)
+
+
+def altman_z_applicable(sector: Optional[str], industry: Optional[str]) -> bool:
+    """False for banks, insurers, REITs and the rest of Financial Services / Real Estate.
+
+    Altman's Z is a manufacturing-firm model: for a bank, liabilities ARE the operating
+    funding (deposits) and there is no current-asset/current-liability split, so the
+    formula lands far below 1.8 on every healthy lender. JPM-shaped inputs scored 0.4 —
+    "Deep distress. Imminent default risk." — and a Realty-Income-shaped REIT scored 1.0,
+    cached for 24h and fed into the Overview and report health ratings. An unknown or
+    empty sector/industry is NOT a reason to omit: the score is applicable by default.
+    """
+    # FMP sends null for an unclassified symbol; anything that is not a string is unknown.
+    sector = sector.strip() if isinstance(sector, str) else ""
+    industry = industry if isinstance(industry, str) else ""
+    if (_normalize_sector(sector) or "").lower() in _ALTMAN_NA_SECTORS:
+        return False
+    if industry and _ALTMAN_NA_INDUSTRY_RE.search(industry):
+        return False
+    return True
+
+
 def _compute_z_score(
     bs: Dict, inc: Dict, mcap: Optional[float], *, ndigits: int = 1,
+    sector: Optional[str] = None, industry: Optional[str] = None,
 ) -> Optional[float]:
     """Compute Altman Z-Score from balance sheet, income, and market cap.
 
     Returns None — so the caller OMITS the metric — whenever a term that
     materially moves the score is unavailable, rather than substituting 0.
+
+    It also returns None when ``altman_z_applicable(sector, industry)`` is False. The gate
+    lives HERE, in the one implementation, so no caller can publish a bank's Z by
+    forgetting to check: every caller passes the profile's ``sector=`` / ``industry=``
+    (pinned by tests/test_health_check_deepcheck_altman.py). Omitted keywords mean
+    "unknown", which scores as before.
 
     This used to do ``0.6 * ((mcap or 0) / tl)``: a failed company-profile fetch
     (only a logger.warning upstream) silently valued the equity at ZERO. On
@@ -671,6 +763,13 @@ def _compute_z_score(
     collector rounds to 2) without needing a private copy of the formula.
     `tests/test_altman_z_single_implementation.py` fails the build on a fifth copy.
     """
+    if not altman_z_applicable(sector, industry):
+        logger.info(
+            "altman_z_score: not applicable to sector=%r industry=%r (financial / real "
+            "estate balance sheet) — omitting the metric", sector, industry,
+        )
+        return None
+
     ta = _safe_float(bs, "totalAssets")
     tl = _safe_float(bs, "totalLiabilities")
     ca = _safe_float(bs, "totalCurrentAssets")
@@ -721,7 +820,15 @@ def _zscore_gauge(z: float) -> float:
 
 
 def _zscore_status(z: float) -> str:
-    """Determine status from Altman Z-Score absolute thresholds."""
+    """Determine status from Altman Z-Score absolute thresholds.
+
+    THE zone convention, used on every surface: Distress <= 1.8, Grey (1.8, 3.0],
+    Safe > 3.0. The report collector, iOS `MetricThresholdZones.zoneIndex` and the card's
+    zone labels follow it; they used to put 1.8 in Grey and 3.0 in Safe, so one company
+    read "Grey zone" on the Financials tab and "Safe" in its report. Feed it the 2-dp
+    score (the report's precision), never the 1-dp display value: a raw 3.04 rounded to
+    3.0 first read Grey here while the report, at 2 dp, read Safe.
+    """
     if z > 3.0:
         return "positive"
     elif z > 1.8:
@@ -854,6 +961,9 @@ def _fallback_insight(
         return ("Low liquidity. May face short-term payment challenges.", formatted, "current ratio.")
 
     elif metric_type == "interest_coverage":
+        if value <= 0:
+            # An operating loss against real interest expense ("thin" understated it).
+            return ("Operating earnings do not cover interest expense.", formatted, "interest coverage.")
         if value > 10:
             return ("Outsized capacity to service debt obligations.", formatted, "interest coverage.")
         elif value > 5:
@@ -875,6 +985,31 @@ def _fallback_insight(
         return _generate_zscore_insight(value)
 
     return ("", None, None)
+
+
+# Metrics whose company value can legitimately cross zero (a net loss, an operating loss)
+# while the peer median stays positive. D/E has its own negative-equity row and P/E <= 0
+# is omitted, so only these two reach the comparison with a value <= 0.
+_CROSSES_ZERO_TYPES = frozenset({"roe", "interest_coverage"})
+
+
+def _crossed_zero_insight(
+    metric_type: str, value: float,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Insight for a company value <= 0 against a POSITIVE peer median.
+
+    A percent gap is meaningless here: ROE -25% vs a 12% median is pct -308, which the
+    generators rendered "4.1x well below sector average", and IC -3 vs 20 rendered
+    "115% well below". Say what the number means instead; the status stays "negative".
+    """
+    word = "Negative" if value < 0 else "Zero"
+    if metric_type == "roe":
+        text = ("The company is losing money on its equity." if value < 0
+                else "No return on shareholder equity.")
+        return (text, word, "ROE vs a positive sector average.")
+    text = ("Operating losses leave interest expense uncovered." if value < 0
+            else "Operating earnings do not cover interest expense.")
+    return (text, word, "interest coverage vs a positive sector average.")
 
 
 def _overall_rating(passed: int, total: int) -> str:
@@ -939,11 +1074,16 @@ class HealthCheckService:
             # a day, for every user, and freezes it into the 20-credit report. The
             # 5-minute in-memory tier still absorbs a retry storm, so the cost of
             # skipping is one extra fan-out. Mirrors profit_power_service's gate.
-            hc_degraded = not getattr(result, "metrics", None)
+            #
+            # The gate used to be "no metrics survived". A 429 on /ratios-ttm alone drops
+            # D/E, P/E, CR, IC and QR but leaves ROE and Z, so a 2-metric "Excellent
+            # [2/2]" was persisted for 24h. `degraded` now names every failed leg, and it
+            # rides on the response so health_snapshot (and iOS) can see it too.
+            hc_degraded = list(getattr(result, "degraded", None) or [])
             if hc_degraded:
                 logger.warning(
-                    "Health check NOT persisted for %s (degraded: no metrics survived "
-                    "the build) — will rebuild after the in-memory TTL", ticker,
+                    "Health check NOT persisted for %s (degraded: %s) — will rebuild "
+                    "after the in-memory TTL", ticker, ", ".join(hc_degraded),
                 )
             else:
                 # Persist to Supabase in background (fire-and-forget)
@@ -1006,11 +1146,32 @@ class HealthCheckService:
                     logger.info(f"Supabase cache STALE (past earnings {next_earnings}) for {ticker}")
                     return None
 
-            json_data = entry["response_json"]
+            json_data = dict(entry.get("response_json") or {})
+            # A VERSION, not a key probe: rows written under the old rules (a bank's
+            # "Deep distress" Z, a negative-equity ROE read as "Exceptional") carry no
+            # field this code could test for. They are rebuilt on their next read.
+            version = json_data.pop(_HC_VERSION_KEY, 1)
+            if version != _HC_PAYLOAD_VERSION:
+                logger.info(
+                    "Health check Supabase cache STALE for %s (payload_version=%r, want %d) "
+                    "— recomputing", ticker, version, _HC_PAYLOAD_VERSION,
+                )
+                return None
+            if json_data.get("degraded"):
+                # Never written by this code (the writer refuses a degraded build), so
+                # a row that has it was written by hand or by a bug — do not serve it.
+                logger.warning(
+                    "Health check Supabase row for %s carries degraded=%r — ignoring it",
+                    ticker, json_data.get("degraded"),
+                )
+                return None
             return HealthCheckResponse(**json_data)
 
         except Exception as e:
-            logger.warning(f"Supabase cache check failed for {ticker}: {e}")
+            logger.warning(
+                "Supabase cache check failed for health_check %s: %s: %s",
+                ticker, type(e).__name__, e,
+            )
             return None
 
     def _upsert_supabase_cache_safe(
@@ -1023,14 +1184,18 @@ class HealthCheckService:
             self.supabase.table("health_check_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": result.model_dump(),
+                    "response_json": {**result.model_dump(),
+                                      _HC_VERSION_KEY: _HC_PAYLOAD_VERSION},
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
                 on_conflict="ticker",
             ).execute()
         except Exception as e:
-            logger.warning(f"Supabase upsert failed for {ticker}: {e}")
+            logger.warning(
+                "Supabase upsert failed for health_check %s: %s: %s",
+                ticker, type(e).__name__, e,
+            )
 
     # ── Builder ───────────────────────────────────────────────────
 
@@ -1053,29 +1218,51 @@ class HealthCheckService:
             return_exceptions=True,
         )
 
+        # Every leg that failed TRANSIENTLY. Each one is replaced by an empty default and
+        # the build still renders, which is exactly why it must not reach the 24h tier
+        # (see get_health_check). A permanent FMPNotEntitledException is not degradation:
+        # that slice will not come back on retry, so the build without it is the answer.
+        # The earnings calendar only feeds the cache's next-earnings stamp: optional.
+        degraded: List[str] = []
+        for leg_name, leg in (
+            ("profile", profile), ("ratios", ratios_list), ("key_metrics", key_metrics_list),
+            ("balance_sheet", bs_raw), ("income", inc_raw),
+        ):
+            if isinstance(leg, Exception) and not isinstance(leg, FMPNotEntitledException):
+                degraded.append(leg_name)
+
         if isinstance(profile, Exception):
-            logger.warning(f"Profile fetch failed for {ticker}: {profile}")
+            logger.warning(f"Profile fetch failed for {ticker}: {type(profile).__name__}: {profile}")
             profile = {}
         if isinstance(ratios_list, Exception):
-            logger.error(f"Ratios fetch failed for {ticker}: {ratios_list}")
+            logger.error(f"Ratios fetch failed for {ticker}: {type(ratios_list).__name__}: {ratios_list}")
             ratios_list = []
         if isinstance(key_metrics_list, Exception):
-            logger.error(f"Key metrics fetch failed for {ticker}: {key_metrics_list}")
+            logger.error(
+                f"Key metrics fetch failed for {ticker}: "
+                f"{type(key_metrics_list).__name__}: {key_metrics_list}"
+            )
             key_metrics_list = []
         if isinstance(ec_raw, Exception):
-            logger.warning(f"Earnings calendar failed for {ticker}: {ec_raw}")
+            logger.warning(f"Earnings calendar failed for {ticker}: {type(ec_raw).__name__}: {ec_raw}")
             ec_raw = []
         if isinstance(bs_raw, Exception):
-            logger.warning(f"Balance sheet fetch failed for {ticker}: {bs_raw}")
+            logger.warning(f"Balance sheet fetch failed for {ticker}: {type(bs_raw).__name__}: {bs_raw}")
             bs_raw = []
         if isinstance(inc_raw, Exception):
-            logger.warning(f"Income statement fetch failed for {ticker}: {inc_raw}")
+            logger.warning(f"Income statement fetch failed for {ticker}: {type(inc_raw).__name__}: {inc_raw}")
             inc_raw = []
 
         # Phase 2: extract company ratios from both sources
         ratios = ratios_list[0] if isinstance(ratios_list, list) and ratios_list else {}
         key_metrics = key_metrics_list[0] if isinstance(key_metrics_list, list) and key_metrics_list else {}
         balance_sheet = bs_raw[0] if isinstance(bs_raw, list) and bs_raw else {}
+        if not isinstance(ratios, dict):
+            ratios = {}
+        if not isinstance(key_metrics, dict):
+            key_metrics = {}
+        if not isinstance(balance_sheet, dict):
+            balance_sheet = {}
         # Sum 4 quarters into TTM so Z-Score's EBIT and Revenue inputs
         # reflect the trailing twelve months, not the latest single quarter.
         income_stmt = _sum_ttm_income(inc_raw) if isinstance(inc_raw, list) else {}
@@ -1098,20 +1285,40 @@ class HealthCheckService:
         cur_bench: Dict[str, Optional[float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
-            cur_bench = await asyncio.to_thread(
-                lookup.get_current_benchmark_values,
-                industry,
-                sector,
-                [
-                    "debt_to_equity",
-                    "pe_ratio",
-                    "roe",
-                    "current_ratio",
-                    "interest_coverage",
-                    "quick_ratio",
-                ],
-            )
+            try:
+                # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
+                cur_bench = await asyncio.to_thread(
+                    lookup.get_current_benchmark_values,
+                    industry,
+                    sector,
+                    [
+                        "debt_to_equity",
+                        "pe_ratio",
+                        "roe",
+                        "current_ratio",
+                        "interest_coverage",
+                        "quick_ratio",
+                    ],
+                )
+            except Exception as e:
+                # A lookup FAILURE is not the same answer as "this peer group has no
+                # rows": every metric falls back to the absolute heuristics, which is a
+                # fine thing to SERVE and a wrong thing to pin for 24h.
+                logger.warning(
+                    "Health check %s: benchmark lookup failed (%s: %s) — absolute "
+                    "heuristics, build marked degraded", ticker, type(e).__name__, e,
+                )
+                cur_bench = {}
+                degraded.append("benchmarks")
+            else:
+                # The lookup SWALLOWS a DB error into the empty shape; it flags that
+                # shape so a transient failure is not persisted as "no peer group".
+                if lookup_failed(cur_bench):
+                    logger.warning(
+                        "Health check %s: benchmark lookup returned a FAILED shape — "
+                        "absolute heuristics, build marked degraded", ticker,
+                    )
+                    degraded.append("benchmarks")
             logger.info(f"Health check {ticker}: current benchmarks={cur_bench}")
             for bm_name, bm_val in cur_bench.items():
                 if bm_val is None:
@@ -1119,16 +1326,62 @@ class HealthCheckService:
         else:
             logger.warning(f"Health check {ticker}: no sector found, skipping benchmark lookup")
 
-        # Pre-compute Altman Z-Score for use in the metric loop
-        z_score_val = _compute_z_score(balance_sheet, income_stmt, mcap)
+        # Pre-compute Altman Z-Score for use in the metric loop. Two decimals: the status,
+        # gauge and insight are judged on the same precision the report uses, so the
+        # two surfaces cannot disagree about a Z of 3.04 (see _zscore_status). The
+        # sector/industry gate inside omits it for banks, insurers and REITs.
+        z_score_val = _compute_z_score(
+            balance_sheet, income_stmt, mcap, ndigits=2,
+            sector=raw_sector, industry=industry,
+        )
+
+        # Negative shareholder equity, decided ONCE before the loop. FMP's ROE is net
+        # income / equity, so a negative denominator flips its sign: a loss-maker
+        # (Boeing-shaped, ROE +303%) read "Exceptional capital efficiency" and a
+        # profitable buyback-heavy company (McDonald's-shaped, ROE -216%) read
+        # "Significantly underperforming", while the same card's D/E row said
+        # "Negative equity". D/E comes from the ratios leg, which can fail on its own,
+        # so the balance sheet is a second witness.
+        de_ratio = _safe_float(ratios, "debtToEquityRatioTTM")
+        if de_ratio is None:
+            de_ratio = _safe_float(ratios, "debtToEquityRatio")
+        bs_equity = _safe_float(balance_sheet, "totalStockholdersEquity")
+        # A strictly negative witness is always believed (ratios-TTM can lag a new
+        # quarter that turned equity negative — that is what the second witness is for).
+        # A balance-sheet equity of EXACTLY 0 is believed only when D/E does not
+        # contradict it: FMP zero-fills unreported statement fields, and a 0 next to a
+        # positive D/E (equity clearly positive in the ratios leg) used to mark a 30% ROE
+        # "N/M … equity is negative" beside "Healthy debt position", dropping a real pass.
+        de_negative = de_ratio is not None and de_ratio < 0
+        bs_negative = bs_equity is not None and bs_equity < 0
+        bs_zero = bs_equity is not None and bs_equity == 0
+        zero_equity = bs_zero and (de_ratio is None or de_ratio <= 0)
+        if bs_zero and not zero_equity:
+            logger.warning(
+                f"Health check {ticker}: balance-sheet totalStockholdersEquity is 0 but "
+                f"D/E={de_ratio!r} is positive — treating the 0 as unreported, ROE judged"
+            )
+        negative_equity = de_negative or bs_negative or zero_equity
+        # The N/M row says which it is: "negative" only on a strictly negative witness.
+        equity_state = "negative" if (de_negative or bs_negative) else "reported as zero"
 
         # Phase 4: build each metric
         metrics: List[HealthCheckMetricSchema] = []
+        # Rows shown on the card but left out of passed / neutral / total: a value with
+        # no meaning cannot pass or fail (and half credit for "neutral" would still
+        # move the rating).
+        unscored_types: set = set()
         for mdef in METRIC_DEFS:
             # Altman Z-Score is computed separately, not from a single FMP field
             if mdef["type"] == "altman_z_score":
                 if z_score_val is None:
-                    logger.warning(f"Health check {ticker}: altman_z_score — insufficient data to compute")
+                    if not altman_z_applicable(raw_sector, industry):
+                        logger.info(
+                            f"Health check {ticker}: altman_z_score omitted — not "
+                            f"applicable to sector={raw_sector!r} industry={industry!r}"
+                        )
+                    else:
+                        logger.warning(f"Health check {ticker}: altman_z_score — insufficient data to compute")
                     continue
 
                 gauge = _zscore_gauge(z_score_val)
@@ -1138,7 +1391,11 @@ class HealthCheckService:
                 metrics.append(
                     HealthCheckMetricSchema(
                         type="altman_z_score",
-                        value=round(z_score_val, 1),
+                        # 2 dp, like the status and the insight's printed score: iOS
+                        # places the zone-gauge marker from it, and its header must print
+                        # it at 2 dp too, or a 3.03 reads "3.0 · Safe zone" under a
+                        # "1.8 – 3.0" Grey label.
+                        value=round(z_score_val, 2),
                         comparison_value=None,
                         percent_difference=None,
                         gauge_position=round(gauge, 2),
@@ -1165,9 +1422,28 @@ class HealthCheckService:
                 )
                 continue
 
-            # Skip negative P/E (loss-making company — ratio is meaningless)
-            if mdef["type"] == "pe_ratio" and company_val < 0:
+            # Skip a P/E of zero or below: a loss-maker's ratio is meaningless, and FMP
+            # reports 0 when there are no earnings. The benchmark medians drop P/E <= 0
+            # too (positive_only), so a 0 compared against them read "Deep value
+            # opportunity, 100% below".
+            if mdef["type"] == "pe_ratio" and company_val <= 0:
                 continue
+
+            # Interest coverage of exactly 0 with no interest expense on the books is how
+            # FMP reports a company with nothing to cover (the benchmark side drops it,
+            # positive_only). It used to score as a fail — "Vulnerable to interest
+            # expense pressure" — on a debt-free balance sheet. Omitted rather than
+            # passed: zero reported interest expense does not prove there is no debt
+            # (some issuers net interest into other income). With interest expense on
+            # the books, a 0 is a real operating-loss reading and stays below.
+            if mdef["type"] == "interest_coverage" and company_val == 0:
+                ttm_interest = income_stmt.get("interestExpense")
+                if ttm_interest is None or ttm_interest == 0:
+                    logger.warning(
+                        f"Health check {ticker}: interest_coverage is 0 with no TTM "
+                        f"interest expense ({ttm_interest!r}) — omitting the metric"
+                    )
+                    continue
 
             # Negative D/E means negative equity — force to worst-case
             if mdef["type"] == "debt_to_equity" and company_val < 0:
@@ -1179,7 +1455,10 @@ class HealthCheckService:
                         percent_difference=None,
                         gauge_position=0.98,
                         status="negative",
-                        insight_text="Negative equity. Liabilities exceed total assets.",
+                        # iOS renders "{value} {label} {text}" — the highlight already
+                        # says "Negative shareholder equity.", so the text must not
+                        # repeat it ("Negative shareholder equity. Negative equity. …").
+                        insight_text="Liabilities exceed total assets.",
                         highlighted_value="Negative",
                         highlighted_label="shareholder equity.",
                     )
@@ -1191,9 +1470,47 @@ class HealthCheckService:
             if mdef["is_percentage"]:
                 display_val = round(company_val * 100, 2)
 
+            # ROE on negative equity: shown, never judged (see `negative_equity`).
+            if mdef["type"] == "roe" and negative_equity:
+                logger.info(
+                    f"Health check {ticker}: roe {display_val}% is not meaningful — "
+                    f"shareholder equity {equity_state} (D/E={de_ratio!r}, "
+                    f"equity={bs_equity!r}) — shown as N/M, left out of the score"
+                )
+                metrics.append(
+                    HealthCheckMetricSchema(
+                        type="roe",
+                        value=round(display_val, 2),
+                        comparison_value=None,
+                        percent_difference=None,
+                        gauge_position=0.5,
+                        status="neutral",
+                        insight_text=f"Not meaningful: shareholder equity is {equity_state}.",
+                        highlighted_value=NOT_MEANINGFUL,
+                        highlighted_label="ROE.",
+                    )
+                )
+                unscored_types.add("roe")
+                continue
+
             # CURRENT sector/industry benchmark (TTM row if present, else latest
             # mature annual value) for this metric.
             sector_val = cur_bench.get(mdef["benchmark_name"])
+            median_floor = _min_usable_median(mdef["type"])
+            if sector_val is not None and sector_val <= median_floor:
+                # A peer median at or below zero is no benchmark. Dividing by its
+                # absolute value FLIPPED the verdict: in a loss-making industry (ROE
+                # median -30%) a company at -10% read "+67% above sector. Strong capital
+                # efficiency.", while the gauge — which already refused a non-positive
+                # anchor — sat in the red. A barely-positive median is no anchor either
+                # (`_MIN_USABLE_MEDIAN`). Status, gauge, text and the iOS peer tick
+                # all fall back to the absolute heuristics together.
+                logger.info(
+                    f"Health check {ticker}: {mdef['type']} peer median {sector_val!r} "
+                    f"is at or below the usable floor {median_floor!r} — treating as "
+                    f"no benchmark"
+                )
+                sector_val = None
             sector_display = None
             if sector_val is not None:
                 if mdef["is_percentage"]:
@@ -1203,34 +1520,41 @@ class HealthCheckService:
 
             # Calculate percent difference
             pct_diff = None
-            if sector_val is not None and abs(sector_val) > 1e-9:
+            if sector_val is not None:
                 pct_diff = round((company_val - sector_val) / abs(sector_val) * 100, 1)
 
             # Gauge position (uses raw values, not display values)
-            if sector_val is not None and sector_val > 0:
+            if sector_val is not None:
                 gauge = _gauge_position(company_val, sector_val)
             else:
                 # No sector benchmark — use absolute-value heuristic
                 # Pass display_val so ROE is in % form for correct thresholds
                 gauge = _absolute_gauge(mdef["type"], display_val)
 
-            # Status
-            if pct_diff is not None:
+            if (
+                pct_diff is not None
+                and mdef["type"] in _CROSSES_ZERO_TYPES
+                and company_val <= 0
+            ):
+                # Crossed zero against a positive median: a percent gap has no meaning
+                # (see _crossed_zero_insight). Keep the comparison value — the median is
+                # real context — but drop the percentage.
+                status = "negative"
+                insight_text, highlighted_value, highlighted_label = _crossed_zero_insight(
+                    mdef["type"], display_val,
+                )
+                pct_diff = None
+            elif pct_diff is not None:
                 status = _determine_status(
                     mdef["type"], pct_diff, mdef["lower_is_better"]
                 )
-            else:
-                # No sector benchmark — use absolute-value heuristic
-                status = _absolute_status(mdef["type"], display_val)
-
-            # Dynamic insight text
-            if pct_diff is not None:
                 gen = _INSIGHT_GENERATORS[mdef["type"]]
                 insight_text, highlighted_value, highlighted_label = gen(
                     pct_diff, display_val, sector_display or 0,
                 )
             else:
-                # Fallback text when no sector data is available
+                # No sector benchmark — absolute-value heuristic and its fallback text
+                status = _absolute_status(mdef["type"], display_val)
                 insight_text, highlighted_value, highlighted_label = _fallback_insight(
                     mdef["type"], display_val,
                 )
@@ -1249,15 +1573,19 @@ class HealthCheckService:
                 )
             )
 
-        # Phase 5: overall rating
-        passed = sum(1 for m in metrics if m.status == "positive")
-        neutrals = sum(1 for m in metrics if m.status == "neutral")
-        total = len(metrics)
+        # Phase 5: overall rating, over the SCORED metrics only
+        scored = [m for m in metrics if m.type not in unscored_types]
+        passed = sum(1 for m in scored if m.status == "positive")
+        neutrals = sum(1 for m in scored if m.status == "neutral")
+        total = len(scored)
         # Neutral (in-line-with-sector) metrics get HALF credit in the rating, so a
         # company that matches its sector on everything reads "mix", not "poor
         # [0/N]". passed_count stays the strict positive count (honest "N of M beat
         # sector" badge); only a genuine "negative" is a full miss.
         rating = _overall_rating(passed + 0.5 * neutrals, total)
+
+        if not metrics:
+            degraded.append("no_metrics")
 
         response = HealthCheckResponse(
             symbol=ticker,
@@ -1265,6 +1593,7 @@ class HealthCheckService:
             passed_count=passed,
             total_count=total,
             metrics=metrics,
+            degraded=degraded,
         )
 
         # Phase 6: next earnings for cache invalidation

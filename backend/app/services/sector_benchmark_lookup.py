@@ -23,6 +23,17 @@ _CACHE_TTL = 3600  # 1 hour
 # period_type of the TTM current-snapshot rows (written by industry_benchmark_service).
 TTM_PERIOD_TYPE = "ttm"
 
+# period_type of the QUARTERLY rows, keyed by the CALENDAR quarter the period ends in
+# (`period_labels.calendar_quarter_label`, e.g. "Q3'25" = Jul-Sep 2025). Every quarterly
+# reader asks for this, and joins a company quarter with the same helper.
+#
+# 🔴 Never read period_type 'quarterly'. Those legacy rows were keyed "<FISCAL quarter
+# number>'<calendar year of the period end>", so an off-calendar company (Microsoft, Apple,
+# Nvidia, every Jan-year-end retailer) was pooled with — and joined to — peers' quarters
+# 3-10 months away. They are kept only until the owner deletes them after the first
+# calendar-quarter recompute (migration 185).
+CALENDAR_QUARTER_PERIOD_TYPE = "calendar_quarter"
+
 
 def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
@@ -111,6 +122,68 @@ def _period_sort_key(label: str) -> Tuple[int, int]:
         return (int(s), 0)
     except ValueError:
         return (0, 0)
+
+
+def hold_back_thin_benchmarks(
+    rich: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, float]]:
+    """Flatten rich benchmark cells to ``{metric: {period: value}}``, replacing any
+    THIN period's value (sample_size < MATURE_SAMPLE_FLOOR) with the latest mature
+    value AT OR BEFORE that period.
+
+    The just-completed fiscal period is only partially reported — e.g. the
+    Semiconductors FY2026 EPS-growth median is +79% from n=9 early reporters
+    (mostly hypergrowth names) vs a credible +4.9% from n=77 in FY2025. Without the
+    hold-back a genuine 65%-grower is scored "below sector" against a contaminated
+    benchmark (see the persona-scoring validation). Mirrors the mature-sample-floor
+    hold-back the current-snapshot pickers already apply (sector_benchmark_lookup).
+
+    CRITICAL: hold back to the latest mature value that is NOT chronologically LATER
+    than the thin period — never the global-latest. An OLDER thin period (e.g. an
+    early year frozen at n<20 while later years grew past 20) must NOT be painted
+    with a FUTURE year's median (a lookahead that corrupts that year's chart point).
+    If no mature period exists at-or-before a thin period, keep its own value.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for metric, cells in rich.items():
+        # Mature cells (n >= floor, non-null value) as (sort_key, value), oldest→newest.
+        mature_sorted = sorted(
+            (
+                (_period_sort_key(lab), c["value"])
+                for lab, c in cells.items()
+                if (c.get("n") or 0) >= MATURE_SAMPLE_FLOOR and c.get("value") is not None
+            ),
+            key=lambda t: t[0],
+        )
+        flat: Dict[str, float] = {}
+        for period, cell in cells.items():
+            if (cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
+                flat[period] = cell["value"]
+                continue
+            pk = _period_sort_key(period)
+            prior = [v for (sk, v) in mature_sorted if sk <= pk]
+            flat[period] = prior[-1] if prior else cell["value"]
+        out[metric] = flat
+    return out
+
+
+class BenchmarkLookupFailed(dict):
+    """The empty ``{metric: {}}`` shape a lookup returns when the DB call FAILED.
+
+    Callers keep the same contract (no benchmark → absolute heuristics), but a
+    failure is not the same answer as "this peer group has no rows": a service that
+    persists its build (health check, 24h) must not pin a heuristic-only verdict
+    produced by a transient Supabase error. ``lookup_failed`` lets it tell the two
+    apart WITHOUT a signature change — test stubs and other callers that return a
+    plain dict read as "not failed".
+    """
+
+    lookup_failed = True
+
+
+def lookup_failed(result: Any) -> bool:
+    """True when a benchmark lookup result came from a failed DB call."""
+    return bool(getattr(result, "lookup_failed", False))
 
 
 def pick_mature_benchmark(
@@ -232,7 +305,9 @@ class SectorBenchmarkLookup:
                     # SECTOR-aggregate rows only — exclude industry=<name> rows so
                     # the sector lookup never mixes in industry rows.
                     query = query.eq("sector", sector).eq("industry", "")
-                resp = query.range(start, start + self._PAGE - 1).execute()
+                # A stable ORDER BY: without one, a concurrent upsert (the quarterly
+                # recompute) can shift rows between pages and silently skip or repeat one.
+                resp = query.order("id").range(start, start + self._PAGE - 1).execute()
                 batch = resp.data or []
                 rows.extend(batch)
                 if len(batch) < self._PAGE:
@@ -392,7 +467,7 @@ class SectorBenchmarkLookup:
             _log = logger.warning if _is_transient(e) else logger.error
             _log("Industry benchmark lookup failed for %r/%r/%s: %s: %s",
                  industry, sector, period_type, type(e).__name__, e)
-            return {m: {} for m in metrics}
+            return BenchmarkLookupFailed({m: {} for m in metrics})
 
         _cache_set(cache_key, result)
         return result
@@ -410,10 +485,12 @@ class SectorBenchmarkLookup:
         peer-group label still reads "sector" until Phase 3 plumbs level/name
         into the DTOs)."""
         rich = self.get_benchmarks(industry, sector, metrics, period_type)
-        return {
+        flat = {
             metric: {label: cell["value"] for label, cell in periods.items()}
             for metric, periods in rich.items()
         }
+        # Keep a failed DB call distinguishable from "no rows" through the flatten.
+        return BenchmarkLookupFailed(flat) if lookup_failed(rich) else flat
 
     # ── Current-snapshot benchmark: TTM-first, mature-annual fallback ────
 
@@ -451,6 +528,9 @@ class SectorBenchmarkLookup:
             # Prefer a mature annual value; if none exists, a thin TTM value still
             # beats an empty comparison (better a noisy benchmark than no benchmark).
             result[metric] = cell if cell is not None else ttm_cell
+        # Carry a failed DB call through (the TTM layer, or the annual fallback layer).
+        if lookup_failed(ttm) or lookup_failed(annual):
+            return BenchmarkLookupFailed(result)
         return result
 
     def get_current_benchmark_values(
@@ -462,7 +542,8 @@ class SectorBenchmarkLookup:
         """Flat {metric: value} of get_current_benchmarks (TTM-first, mature-annual
         fallback). Drop-in for the snapshot services' single-value comparisons."""
         rich = self.get_current_benchmarks(industry, sector, metrics)
-        return {m: (cell["value"] if cell else None) for m, cell in rich.items()}
+        flat = {m: (cell["value"] if cell else None) for m, cell in rich.items()}
+        return BenchmarkLookupFailed(flat) if lookup_failed(rich) else flat
 
 
 # ── Singleton ─────────────────────────────────────────────────────

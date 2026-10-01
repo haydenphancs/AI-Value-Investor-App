@@ -16,63 +16,104 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
-from app.utils.period_labels import extract_year as _extract_year, quarterly_period_label
+from app.utils.period_labels import (
+    annual_benchmark_key,
+    annual_fiscal_year,
+    calendar_quarter_label,
+    extract_year as _extract_year,
+    quarterly_period_label,
+)
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.services.sector_benchmark_lookup import (
+    CALENDAR_QUARTER_PERIOD_TYPE,
     MATURE_SAMPLE_FLOOR,
     _period_sort_key,
     get_sector_benchmark_lookup,
+    hold_back_thin_benchmarks,
+    lookup_failed,
 )
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
 
 
-def _hold_back_thin_benchmarks(
+# `_hold_back_thin_benchmarks` moved to sector_benchmark_lookup (shared with
+# profit_power_service); re-exported here so existing imports keep working.
+_hold_back_thin_benchmarks = hold_back_thin_benchmarks
+
+
+def _held_back_levels(
     rich: Dict[str, Dict[str, Dict[str, Any]]],
-) -> Dict[str, Dict[str, float]]:
-    """Flatten rich benchmark cells to ``{metric: {period: value}}``, replacing any
-    THIN period's value (sample_size < MATURE_SAMPLE_FLOOR) with the latest mature
-    value AT OR BEFORE that period.
+) -> Dict[str, Dict[str, Optional[str]]]:
+    """``{metric: {period: "industry" | "sector" | None}}`` — the peer level of the cell
+    whose VALUE each period shows after `_hold_back_thin_benchmarks`.
 
-    The just-completed fiscal period is only partially reported — e.g. the
-    Semiconductors FY2026 EPS-growth median is +79% from n=9 early reporters
-    (mostly hypergrowth names) vs a credible +4.9% from n=77 in FY2025. Without the
-    hold-back a genuine 65%-grower is scored "below sector" against a contaminated
-    benchmark (see the persona-scoring validation). Mirrors the mature-sample-floor
-    hold-back the current-snapshot pickers already apply (sector_benchmark_lookup).
-
-    CRITICAL: hold back to the latest mature value that is NOT chronologically LATER
-    than the thin period — never the global-latest. An OLDER thin period (e.g. an
-    early year frozen at n<20 while later years grew past 20) must NOT be painted
-    with a FUTURE year's median (a lookahead that corrupts that year's chart point).
-    If no mature period exists at-or-before a thin period, keep its own value.
+    A thin cell is drawn with the latest MATURE value at or before it, and that donor can
+    sit on the other level (the lookup falls back industry → sector per cell). Mirrors the
+    hold-back's selection exactly (same floor, same sort key, same at-or-before rule), so
+    the legend names the peer group the plotted point actually came from.
     """
-    out: Dict[str, Dict[str, float]] = {}
+    out: Dict[str, Dict[str, Optional[str]]] = {}
     for metric, cells in rich.items():
-        # Mature cells (n >= floor, non-null value) as (sort_key, value), oldest→newest.
         mature_sorted = sorted(
             (
-                (_period_sort_key(lab), c["value"])
+                (_period_sort_key(lab), c.get("level"))
                 for lab, c in cells.items()
                 if (c.get("n") or 0) >= MATURE_SAMPLE_FLOOR and c.get("value") is not None
             ),
             key=lambda t: t[0],
         )
-        flat: Dict[str, float] = {}
+        levels: Dict[str, Optional[str]] = {}
         for period, cell in cells.items():
             if (cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
-                flat[period] = cell["value"]
+                levels[period] = cell.get("level")
                 continue
             pk = _period_sort_key(period)
-            prior = [v for (sk, v) in mature_sorted if sk <= pk]
-            flat[period] = prior[-1] if prior else cell["value"]
-        out[metric] = flat
+            prior = [lvl for (sk, lvl) in mature_sorted if sk <= pk]
+            levels[period] = prior[-1] if prior else cell.get("level")
+        out[metric] = levels
     return out
+
+
+def _series_peer_level(
+    points: List[Dict[str, Any]],
+    metric_benchmarks: Dict[str, Any],
+    metric_levels: Dict[str, Optional[str]],
+) -> Optional[str]:
+    """Peer group a series' dashed line comes from: a majority vote over the points that
+    actually DRAW a benchmark value and whose cell declares a level. A tie goes to
+    "industry" only when there are votes (profit_power_service's rule); no votes → None,
+    so the client keeps its neutral wording instead of claiming "Industry" for a line
+    that does not exist."""
+    votes: List[str] = []
+    for p in points:
+        key = p.get("_match_period", p["period"])
+        if not key or metric_benchmarks.get(key) is None:   # "" = no peer value drawn
+            continue
+        level = metric_levels.get(key)
+        if level in ("industry", "sector"):
+            votes.append(level)
+    if not votes:
+        return None
+    return "industry" if votes.count("industry") >= votes.count("sector") else "sector"
 
 # ── In-memory cache ───────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
+
+# Version stamped into every `growth_cache.response_json`. A row without it (or with an
+# older one) is a MISS and is rebuilt, so a 24h row written by a build that computed a
+# different number cannot outlive the deploy that fixed it.
+# 2 (2026-09-30): YoY pairs rows by period-end DATE SPAN (52/53-week filers), annual
+#     labels are fiscal years, the off-calendar quarterly peer line is hidden, and the
+#     response carries `degraded` + `peer_group_levels`.
+# 3 (2026-09-30, round 2): a quarter whose legacy benchmark key names another calendar
+#     quarter (a 52/53-week Q4 closing Jan 1-7) draws no peer value, so a v2 row could
+#     still show a peer value 6-12 months off.
+# 4 (2026-09-30): quarterly peers come from the CALENDAR-quarter benchmark rows and join
+#     on the calendar quarter of the period end; the off-calendar hide is gone.
+_GROWTH_PAYLOAD_VERSION = 4
+_VERSION_KEY = "payload_version"
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -123,6 +164,15 @@ def _note_degraded(key: str, degraded: List[str]) -> None:
 
 def _degraded_of(key: str) -> List[str]:
     return list(_degraded_by_key.get(key) or [])
+
+
+def _with_degraded(response: GrowthResponse, degraded: List[str]) -> GrowthResponse:
+    """A COPY of ``response`` whose ``degraded`` is exactly ``degraded``.
+
+    Never mutate the object held in Tier 1 or handed to in-flight joiners: it is shared
+    by every concurrent caller, and the field must describe the value each one receives.
+    """
+    return response.model_copy(update={"degraded": list(degraded)})
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -205,8 +255,77 @@ def _sort_key_date(record: Dict[str, Any]) -> str:
 
 
 def _annual_period_label(record: Dict[str, Any]) -> str:
-    """Extract annual period label like '2021' from FMP income statement."""
-    return _extract_year(record)
+    """DISPLAY label for an annual row, e.g. '2025' — the FISCAL year.
+
+    `/stable` rows carry no ``calendarYear``, so the old ``date[:4]`` label called a
+    52/53-week filer's FY2025 (ended 2026-01-03: Cadence, Snap-on) "2026" — a year that
+    has not ended — and gave Kellanova two bars both labelled "2022" (FY2021 ends
+    2022-01-01, FY2022 ends 2022-12-31). The benchmark JOIN keeps the calendar key
+    (``_match_period``), because the stored annual benchmarks are keyed that way.
+    """
+    return annual_fiscal_year(record) or _extract_year(record)
+
+
+# A year-ago comparison row must END 50-55 weeks before the current one: 52 weeks is
+# 364 days, a 53-week year 371, a calendar year 365/366. Pairing by YEAR LABEL instead
+# compared Disney's Q1 FY23 (ended 2022-12-31) with Q1 FY21 (ended 2022-01-01 → the
+# same "2022" key was overwritten) and printed +45% where the truth is +7.8%, and
+# nulled every 53-week filer's latest annual YoY as a "2024 -> 2026 year gap".
+_YOY_MIN_DAYS = 350
+_YOY_MAX_DAYS = 385
+_YOY_TARGET_DAYS = 364
+
+
+def _period_end(record: Dict[str, Any]) -> Optional[datetime]:
+    """Parsed period-END date of a statement row, or None when absent/unparsable."""
+    raw = record.get("date")
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(str(raw)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _fiscal_year_int(record: Dict[str, Any]) -> Optional[int]:
+    try:
+        return int(str(record.get("fiscalYear") or "").strip())
+    except ValueError:
+        return None
+
+
+def _year_ago_row(
+    record: Dict[str, Any],
+    end: datetime,
+    candidates: List[Tuple[datetime, Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """The candidate whose period ended 350-385 days before ``end`` (nearest 364 wins;
+    a fiscalYear exactly one lower breaks a tie). None when no row qualifies — a gap,
+    a fiscal-year-end change, or the oldest row — which the caller turns into a null
+    YoY rather than a comparison against the wrong base."""
+    cur_fy = _fiscal_year_int(record)
+    best: Optional[Dict[str, Any]] = None
+    best_key: Optional[Tuple[int, int]] = None
+    for cand_end, cand in candidates:
+        gap = (end - cand_end).days
+        if not (_YOY_MIN_DAYS <= gap <= _YOY_MAX_DAYS):
+            continue
+        cand_fy = _fiscal_year_int(cand)
+        fy_miss = 0 if (cur_fy is not None and cand_fy == cur_fy - 1) else 1
+        key = (abs(gap - _YOY_TARGET_DAYS), fy_miss)
+        if best_key is None or key < best_key:
+            best, best_key = cand, key
+    return best
+
+
+def _ends_a_short_period(
+    end: datetime, candidates: List[Tuple[datetime, Dict[str, Any]]],
+) -> bool:
+    """True when the annual row ending at ``end`` follows its predecessor by less than
+    50 weeks — a fiscal-year-end TRANSITION stub (e.g. a 6-month period). A full year
+    measured against a stub would print a doubled "growth"; the caller nulls that YoY.
+    Same-date duplicates (gap 0) are not a predecessor."""
+    return any(0 < (end - cand_end).days < _YOY_MIN_DAYS for cand_end, _ in candidates)
 
 
 def _quarterly_period_label(
@@ -228,6 +347,21 @@ def _quarterly_period_label(
     return f"{period}'{year}"
 
 
+def _quarterly_join_key(record: Dict[str, Any]) -> str:
+    """Benchmark JOIN key for one quarterly row: the CALENDAR quarter its period ends in
+    (``period_labels.calendar_quarter_label``, e.g. "Q3'25"; an end on day 1-7 counts as
+    the previous month, so a 52/53-week Q4 closing 2026-01-03 is Q4'25). The stored
+    quarterly benchmarks are keyed the same way (period_type ``calendar_quarter``,
+    migration 184), so Microsoft's fiscal Q1 (Jul-Sep) meets its peers' Jul-Sep and
+    Nvidia's Q4 ending late January meets their Jan-Mar (its END date's quarter) — no
+    more 6-10-month mis-joins, and no
+    off-calendar hide. ``""`` (no peer value) for an undated row: there is no key to
+    join on, and inventing one is how the old mis-joins began. Shared rule with
+    profit_power_service so the two cards agree on which quarter a peer value is.
+    """
+    return calendar_quarter_label(record)
+
+
 def _compute_growth_points(
     records: List[Dict[str, Any]],
     metric_key: str,
@@ -236,11 +370,12 @@ def _compute_growth_points(
     """
     Compute YoY growth data points from sorted income statement records.
 
-    For annual: compare consecutive years.
-    For quarterly: compare same quarter in prior year.
+    The year-ago base is chosen by PERIOD-END DATE SPAN (350-385 days earlier), never
+    by year label — see ``_YOY_MIN_DAYS``. Quarterly additionally requires the same
+    fiscal ``period`` ("Q1"). No qualifying base → the bar still charts with a null
+    YoY (a gap or a fiscal-year-end change is a discontinuity, not zero growth).
 
     Returns list of dicts with period, value, yoy_change_percent.
-    The oldest record(s) used only as baseline are excluded from output.
     """
     records = _as_list(records)
     if not records:
@@ -252,20 +387,20 @@ def _compute_growth_points(
     results = []
 
     if is_quarterly:
-        # Build lookup: (period, year) -> record
-        lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Same-fiscal-quarter rows with a usable period end, per period ("Q1" → rows).
+        by_period: Dict[str, List[Tuple[datetime, Dict[str, Any]]]] = {}
         for rec in sorted_recs:
-            p = rec.get("period") or ""
-            cy = _extract_year(rec)
-            lookup[(p, cy)] = rec
+            end = _period_end(rec)
+            if end is not None:
+                by_period.setdefault(rec.get("period") or "", []).append((end, rec))
 
         for rec in sorted_recs:
             period = rec.get("period") or ""
             cal_year = _extract_year(rec)
             try:
-                prev_year = str(int(cal_year) - 1)
+                int(cal_year)
             except ValueError:
-                continue
+                continue  # no year at all → no label; unchanged from before
 
             current_val = _safe_float(rec, metric_key)
             if current_val is None:
@@ -274,62 +409,67 @@ def _compute_growth_points(
             # A missing prior-year same quarter (FMP gap) must NOT drop the bar —
             # it has a real, chartable value. Emit it with a null YoY, mirroring
             # the annual branch's 'always emit the bar' invariant.
-            prev_rec = lookup.get((period, prev_year))
+            end = _period_end(rec)
+            prev_rec = (
+                _year_ago_row(rec, end, by_period.get(period, []))
+                if end is not None else None
+            )
             prev_val = _safe_float(prev_rec, metric_key) if prev_rec is not None else None
 
             results.append({
-                # period = fiscal label for DISPLAY; _match_period = calendar
-                # label for the sector-benchmark join (identical to the
-                # calendar-keyed sector_benchmarks rows so the overlay matches).
+                # period = fiscal label for DISPLAY; _match_period = the CALENDAR
+                # quarter the period ends in (the benchmark join key) — see
+                # `_quarterly_join_key`.
                 "period": quarterly_period_label(rec, use_fiscal_year=True),
-                "_match_period": _quarterly_period_label(rec),
+                "_match_period": _quarterly_join_key(rec),
                 "value": current_val,
                 "yoy_change_percent": _compute_yoy(current_val, prev_val),
                 "cal_year": cal_year,
                 "quarter": period,
             })
     else:
-        # Annual: every later year with a finite value gets a bar. The year-gap
-        # check only governs whether a YoY is MEANINGFUL — it must NOT drop the
-        # bar (a gap year still has a real, chartable value). Mirror the
-        # negative-value path: emit the bar, null the YoY, break the line.
-        # Start at 0, not 1. Skipping index 0 dropped the OLDEST year's bar entirely
-        # — and for a company with a single annual filing (a recent listing) that is
-        # every bar, so the chart came back completely empty. The oldest year has no
-        # predecessor and therefore no YoY, which is exactly the "emit the bar, null
-        # the YoY" contract the quarterly branch above already follows and the gap
-        # case below already relies on. A missing PRIOR year is not a missing VALUE.
-        for i in range(len(sorted_recs)):
-            rec = sorted_recs[i]
-            prev_rec = sorted_recs[i - 1] if i > 0 else None
-
+        # Annual: every year with a finite value gets a bar, the OLDEST included (a
+        # single-filing listing would otherwise chart nothing). Whether a YoY is
+        # meaningful is decided separately — it must NOT drop the bar: a gap year
+        # still has a real, chartable value. Emit the bar, null the YoY, break the line.
+        dated: List[Tuple[datetime, Dict[str, Any]]] = [
+            (end, rec) for rec in sorted_recs if (end := _period_end(rec)) is not None
+        ]
+        for rec in sorted_recs:
             current_val = _safe_float(rec, metric_key)
             if current_val is None:
                 continue  # non-finite / missing value: genuinely unchartable
 
-            # YoY only when prev is exactly the prior calendar year; otherwise
-            # emit the bar with a null YoY (a multi-year gap is a discontinuity,
-            # not zero growth) so the value still charts.
-            if prev_rec is None:
-                yoy = None  # oldest point: nothing to compare against
-            else:
-                try:
-                    cur_year = int(_extract_year(rec))
-                    prev_year = int(_extract_year(prev_rec))
-                    if cur_year - prev_year == 1:
-                        yoy = _compute_yoy(current_val, _safe_float(prev_rec, metric_key))
-                    else:
+            yoy: Optional[float] = None
+            end = _period_end(rec)
+            if end is not None:
+                prev_rec = _year_ago_row(rec, end, dated)
+                if prev_rec is None:
+                    if any(cand_end < end for cand_end, _ in dated):
                         logger.warning(
-                            "growth annual year gap %s->%s for metric=%s; "
-                            "emitting bar with null YoY",
-                            prev_year, cur_year, metric_key,
+                            "growth annual: no prior year ending 350-385d before %s for "
+                            "metric=%s (gap or fiscal-year-end change); emitting bar with "
+                            "null YoY", rec.get("date"), metric_key,
                         )
-                        yoy = None
-                except (ValueError, TypeError):
-                    yoy = None
+                    # else: oldest point — nothing to compare against
+                else:
+                    prev_end = _period_end(prev_rec)
+                    if prev_end is not None and _ends_a_short_period(prev_end, dated):
+                        logger.warning(
+                            "growth annual: prior period ending %s is a short transition "
+                            "period for metric=%s; null YoY for %s rather than a full "
+                            "year vs a stub", prev_rec.get("date"), metric_key,
+                            rec.get("date"),
+                        )
+                    else:
+                        yoy = _compute_yoy(current_val, _safe_float(prev_rec, metric_key))
 
             results.append({
+                # period = FISCAL year for display; _match_period = the benchmark join
+                # key (year of the period end minus 7 days — see annual_benchmark_key;
+                # shared with profit_power_service so the two cards agree).
                 "period": _annual_period_label(rec),
+                "_match_period": annual_benchmark_key(rec) or _extract_year(rec),
                 "value": current_val,
                 "yoy_change_percent": yoy,
                 "cal_year": _extract_year(rec),
@@ -357,12 +497,17 @@ class GrowthService:
         return response
 
     async def get_growth_with_status(self, ticker: str) -> Tuple[GrowthResponse, List[str]]:
-        """`get_growth` plus the FMP legs that failed in the build being served.
+        """`get_growth` plus the legs that failed in the build being served — the FMP
+        statement legs, and ``"benchmarks"`` when a peer-benchmark read failed.
 
         ``degraded`` is empty for a Tier-2 hit (only complete builds are persisted) and
         for a complete build. A Tier-1 hit or an in-flight join reports the degradation of
         the build it received, so a caller with its own long-lived cache (the growth
         snapshot) can refuse to persist what this service itself refused to persist.
+
+        The same list rides on the response itself (``GrowthResponse.degraded``), set on
+        EVERY path from the memo for the value actually handed out — never trusted from
+        a cached object — so the endpoint's body tells iOS not to keep a partial build.
         """
         # UNIQUE(ticker) in growth_cache is case-SENSITIVE, so "aapl" and "AAPL"
         # would occupy two rows and cost two FMP fan-outs (and the
@@ -374,12 +519,16 @@ class GrowthService:
         # ── Tier 1: in-memory ──
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached, _degraded_of(cache_key)
+            degraded_now = _degraded_of(cache_key)
+            return _with_degraded(cached, degraded_now), degraded_now
 
         # ── Tier 2: Supabase (in a thread — the SDK is sync) ──
         db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
         if db_cached is not None:
             logger.info(f"Growth Supabase HIT for {ticker}")
+            # Only complete builds are persisted; force the field so a stray value in a
+            # hand-edited row can never mark (or un-mark) what is served.
+            db_cached = _with_degraded(db_cached, [])
             _cache_set(cache_key, db_cached)
             _note_degraded(cache_key, [])
             return db_cached, []
@@ -395,7 +544,8 @@ class GrowthService:
             # one leaves it untouched. Matches profit_power_service.py.
             joined = await asyncio.shield(_inflight[cache_key])
             # The leader notes its degradation BEFORE resolving the future.
-            return joined, _degraded_of(cache_key)
+            degraded_now = _degraded_of(cache_key)
+            return _with_degraded(joined, degraded_now), degraded_now
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -404,6 +554,8 @@ class GrowthService:
         try:
             logger.info(f"Growth cache MISS for {ticker} — fetching from FMP")
             result, degraded = await self._build_growth(ticker)
+            degraded = list(degraded)
+            result = _with_degraded(result, degraded)
             next_earnings = await asyncio.to_thread(
                 self._next_earnings_date_safe, ticker
             )
@@ -488,7 +640,22 @@ class GrowthService:
                     )
                     return None
 
-            return GrowthResponse(**entry["response_json"])
+            json_data = entry.get("response_json")
+            if not isinstance(json_data, dict):
+                logger.warning("Growth Supabase cache row for %s is not an object — rebuilding",
+                               ticker)
+                return None
+            json_data = dict(json_data)
+            version = json_data.pop(_VERSION_KEY, None)
+            if version != _GROWTH_PAYLOAD_VERSION:
+                # Written by a build that paired YoY by year label (see the version note):
+                # rebuild rather than serve a number this build would not compute.
+                logger.info(
+                    "Growth Supabase cache STALE for %s (%s=%r, want %d) — rebuilding",
+                    ticker, _VERSION_KEY, version, _GROWTH_PAYLOAD_VERSION,
+                )
+                return None
+            return GrowthResponse(**json_data)
         except Exception as e:
             logger.warning(f"Growth Supabase cache check failed for {ticker}: {e}")
             return None
@@ -500,14 +667,21 @@ class GrowthService:
         FMP call); the sibling cache for the same ticker already stores it, so
         read it opportunistically. None just means "expire on the 24h TTL".
 
-        The date MUST still be in the future. profit_power writes a strictly
-        future date, but that date decays as its row ages and only refreshes
-        when someone hits the profit-power path — so on any day after a company
-        reports but before profit_power is re-fetched, copying it verbatim would
-        write a row that our own freshness check (``today >= next_earnings``)
-        rejects on the very next read. That row is born stale: the Supabase tier
-        would never hit for that ticker and every 5-minute window would re-run
-        the 10-call FMP fan-out this cache exists to prevent.
+        The date must be TODAY or later. profit_power writes the next PENDING
+        report date (``_earnings_common.next_pending_earnings_date``), which is
+        TODAY on report day: copying it makes this row stale for the rest of
+        that day (``today >= next_earnings`` in ``_check_supabase_cache``), so
+        Growth rebuilds after each 5-minute in-memory window and picks up the
+        just-reported quarter — the report-day trade-off the other five
+        Financials services already make. Rejecting it (the old ``>`` rule)
+        fell back to the plain 24h TTL and kept the pre-release morning build
+        until the next day.
+
+        A date BEFORE today is still rejected: that profit_power row is old (its
+        date only refreshes when someone hits the profit-power path), and a
+        growth row carrying it would be born stale — the Supabase tier would
+        never hit and every 5-minute window would re-run the 10-call FMP
+        fan-out for as long as the stale date stayed in profit_power_cache.
         """
         try:
             row = (
@@ -520,12 +694,12 @@ class GrowthService:
             if row.data:
                 candidate = row.data[0].get("next_earnings_date")
                 today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                if candidate and candidate > today_str:
+                if candidate and candidate >= today_str:
                     return candidate
                 if candidate:
                     logger.info(
                         "Growth %s: ignoring stale next_earnings_date %s from "
-                        "profit_power_cache (<= today) — using the 24h TTL",
+                        "profit_power_cache (before today) — using the 24h TTL",
                         ticker, candidate,
                     )
         except Exception as e:
@@ -543,7 +717,9 @@ class GrowthService:
             self.supabase.table("growth_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": result.model_dump(),
+                    "response_json": {
+                        **result.model_dump(), _VERSION_KEY: _GROWTH_PAYLOAD_VERSION,
+                    },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -631,6 +807,16 @@ class GrowthService:
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
         benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
+        # Peer level of the value each benchmark cell SHOWS (after the hold-back), per
+        # metric and period label — feeds `peer_group_levels` for the legend wording.
+        levels_annual: Dict[str, Dict[str, Optional[str]]] = {}
+        levels_quarterly: Dict[str, Dict[str, Optional[str]]] = {}
+        # Which benchmark reads FAILED (a DB error inside the lookup), as opposed to
+        # answering "no rows for this peer group". The lookup degrades a failure to the
+        # same empty shape and does not cache it, so the next build recovers — this
+        # build must therefore not be persisted (a peer-less chart, and a snapshot
+        # re-scored on absolute heuristics, pinned for 24h).
+        failed_lookups: List[str] = []
         if sector:
             lookup = get_sector_benchmark_lookup()
             # The lookup is SYNCHRONOUS (sync supabase-py + a time.sleep retry), and a
@@ -638,17 +824,39 @@ class GrowthService:
             # so a cache miss cannot stall the single uvicorn worker's event loop.
             # Sequential on purpose: the keys differ, and a thread per call would only
             # add concurrent use of the shared sync client.
+            rich_annual = await asyncio.to_thread(
+                lookup.get_benchmarks, industry, sector, all_yoy_metrics, "annual",
+            )
+            # Quarterly peers are the CALENDAR-quarter rows (migration 184): never the
+            # legacy fiscal-keyed 'quarterly' rows, which pooled peer quarters 3-10
+            # months apart for every off-calendar company.
+            rich_quarterly = await asyncio.to_thread(
+                lookup.get_benchmarks, industry, sector, all_yoy_metrics,
+                CALENDAR_QUARTER_PERIOD_TYPE,
+            )
+            rich_qoq_quarterly = await asyncio.to_thread(
+                lookup.get_benchmarks, industry, sector, all_qoq_metrics,
+                CALENDAR_QUARTER_PERIOD_TYPE,
+            )
+            if lookup_failed(rich_annual):
+                failed_lookups.append("annual")
+            if lookup_failed(rich_quarterly) or lookup_failed(rich_qoq_quarterly):
+                failed_lookups.append("quarterly")
             # Hold thin just-completed periods back to the last mature (n>=20) value
             # so a contaminated latest-FY median can't make a real grower read weak.
-            benchmarks_annual = _hold_back_thin_benchmarks(await asyncio.to_thread(
-                lookup.get_benchmarks, industry, sector, all_yoy_metrics, "annual",
-            ))
-            benchmarks_quarterly = _hold_back_thin_benchmarks(await asyncio.to_thread(
-                lookup.get_benchmarks, industry, sector, all_yoy_metrics, "quarterly",
-            ))
-            benchmarks_qoq_quarterly = _hold_back_thin_benchmarks(await asyncio.to_thread(
-                lookup.get_benchmarks, industry, sector, all_qoq_metrics, "quarterly",
-            ))
+            # The levels are read from the RICH cells first: the flatten discards them.
+            levels_annual = _held_back_levels(rich_annual)
+            levels_quarterly = _held_back_levels(rich_quarterly)
+            benchmarks_annual = _hold_back_thin_benchmarks(rich_annual)
+            benchmarks_quarterly = _hold_back_thin_benchmarks(rich_quarterly)
+            benchmarks_qoq_quarterly = _hold_back_thin_benchmarks(rich_qoq_quarterly)
+
+        if failed_lookups:
+            logger.warning(
+                "Growth %s: benchmark lookup FAILED (%s) — peer line omitted; build marked "
+                "degraded (benchmarks) and NOT persisted", ticker, "+".join(failed_lookups),
+            )
+            degraded.append("benchmarks")
 
         # Phase 5: assemble response with sector averages matched by period label
         def _to_schemas(
@@ -660,22 +868,43 @@ class GrowthService:
         ) -> List[GrowthDataPointSchema]:
             metric_benchmarks = benchmarks.get(metric_name, {})
             qoq_metric_benchmarks = (qoq_benchmarks or {}).get(qoq_metric_name, {})
+
+            def _peer(cells: Dict[str, float], p: Dict[str, Any]) -> Optional[float]:
+                # Match on the join key (_match_period), not the fiscal display label,
+                # for both annual and quarterly points. "" = this point draws no peer
+                # value (a quarter whose legacy key names another calendar quarter).
+                key = p.get("_match_period", p["period"])
+                return cells.get(key) if key else None
+
             return [
                 GrowthDataPointSchema(
                     period=p["period"],
                     value=p["value"],
                     yoy_change_percent=p["yoy_change_percent"],
-                    # Match on the calendar key (_match_period); annual points
-                    # have no _match_period and fall back to period (also calendar).
-                    sector_average_yoy=metric_benchmarks.get(
-                        p.get("_match_period", p["period"])
-                    ),
-                    sector_average_qoq=qoq_metric_benchmarks.get(
-                        p.get("_match_period", p["period"])
-                    ),
+                    sector_average_yoy=_peer(metric_benchmarks, p),
+                    sector_average_qoq=_peer(qoq_metric_benchmarks, p),
                 )
                 for p in points
             ]
+
+        # (wire key, points, yoy metric, flattened benchmarks, levels) per series.
+        series_specs = [
+            ("eps_annual", eps_annual_points, "eps_yoy", benchmarks_annual, levels_annual),
+            ("eps_quarterly", eps_quarterly_points, "eps_yoy", benchmarks_quarterly, levels_quarterly),
+            ("revenue_annual", rev_annual_points, "revenue_yoy", benchmarks_annual, levels_annual),
+            ("revenue_quarterly", rev_quarterly_points, "revenue_yoy", benchmarks_quarterly, levels_quarterly),
+            ("net_income_annual", ni_annual_points, "net_income_yoy", benchmarks_annual, levels_annual),
+            ("net_income_quarterly", ni_quarterly_points, "net_income_yoy", benchmarks_quarterly, levels_quarterly),
+            ("operating_profit_annual", op_annual_points, "operating_income_yoy", benchmarks_annual, levels_annual),
+            ("operating_profit_quarterly", op_quarterly_points, "operating_income_yoy", benchmarks_quarterly, levels_quarterly),
+            ("fcf_annual", fcf_annual_points, "fcf_yoy", benchmarks_annual, levels_annual),
+            ("fcf_quarterly", fcf_quarterly_points, "fcf_yoy", benchmarks_quarterly, levels_quarterly),
+        ]
+        peer_group_levels: Dict[str, str] = {}
+        for key, pts, metric, bench, lvls in series_specs:
+            level = _series_peer_level(pts, bench.get(metric, {}), lvls.get(metric, {}))
+            if level is not None:
+                peer_group_levels[key] = level
 
         response = GrowthResponse(
             symbol=ticker,
@@ -701,6 +930,8 @@ class GrowthService:
             free_cash_flow_quarterly=_to_schemas(
                 fcf_quarterly_points, "fcf_yoy", benchmarks_quarterly,
             ),
+            degraded=list(degraded),
+            peer_group_levels=peer_group_levels,
         )
         return response, degraded
 

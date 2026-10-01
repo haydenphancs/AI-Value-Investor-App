@@ -13,6 +13,11 @@ struct HealthCheckGaugeBar: View {
     /// Whether a peer benchmark backs the 50% anchor tick.
     var hasBenchmark: Bool = true
     var height: CGFloat = 8
+    /// The TRUE Altman Z (the metric's `value`), for the zone gauge. The backend's
+    /// `gauge_position` is `clamp(z / 4.5, 0.02, 0.98)` rounded to 2 dp, so inverting it
+    /// can never place a Z above 4.41 (every mega-cap, Z 4.5 or 60, sat at the same 73.5%)
+    /// and snapped Z 1.78–1.82 onto the 1.8 boundary. nil only in previews / old callers.
+    var zValue: Double? = nil
 
     private var clampedPosition: Double {
         // NaN survives `min(max(...))` — with a NaN both comparisons are false,
@@ -20,6 +25,18 @@ struct HealthCheckGaugeBar: View {
         // indicator vanishes). Check finiteness first.
         guard position.isFinite else { return 0.5 }
         return min(max(position, 0.02), 0.98)  // Keep indicator visible
+    }
+
+    private var markerDiameter: CGFloat { height + 6 }
+
+    /// Leading offset that centres the marker at `fraction` of `width`, with the centre
+    /// clamped so the whole circle stays on the track (at 0.98 of a 248pt bar it used to
+    /// hang 2pt past the trailing edge).
+    private func markerOffset(width: CGFloat, fraction: Double) -> CGFloat {
+        let radius = markerDiameter / 2
+        guard width > markerDiameter else { return max(width / 2 - radius, 0) }
+        let centre = min(max(width * CGFloat(fraction), radius), width - radius)
+        return centre - radius
     }
 
     /// Returns gradient colors based on metric type
@@ -129,28 +146,32 @@ struct HealthCheckGaugeBar: View {
                 // Position indicator (white circle)
                 Circle()
                     .fill(AppColors.mediaSurface)
-                    .frame(width: height + 6, height: height + 6)
+                    .frame(width: markerDiameter, height: markerDiameter)
                     .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
-                    .offset(x: geometry.size.width * clampedPosition - (height + 6) / 2.0)
+                    .offset(x: markerOffset(width: geometry.size.width, fraction: clampedPosition))
             }
         }
-        .frame(height: height + 6)
+        .frame(height: markerDiameter)
     }
 
     // MARK: - Zone-based gauge (Altman Z-Score)
-    // Shows three distinct colored segments: Distress (≤1.8), Grey (1.8–3.0), Safe (>3.0)
-    // with a triangle marker for the current value position
+    // Shows three distinct colored segments: Distress (≤ 1.8), Grey (above 1.8 up to
+    // 3.0), Safe (> 3.0) — the backend `_zscore_status` convention — with a circle
+    // marker for the current value.
 
     /// Altman Z-Score zone boundaries mapped to gauge fractions.
-    /// Max display range is 0–6.0 (anything above 6 clamps to the right edge).
+    /// Display range is 0–6.0: a Z of 6 or more (or 0 or less) pins the marker to the
+    /// end of the track, which `zValue` makes reachable.
     private static let zScoreMax: Double = 6.0
     private static let distressFrac: Double = 1.8 / zScoreMax   // 0.30
     private static let greyFrac: Double = 3.0 / zScoreMax       // 0.50
 
     private var zScorePosition: Double {
-        // Map the actual Z-Score value to 0.0–1.0 within the 0–6 range
-        let zValue = position * 4.5  // undo backend mapping (backend: z / 4.5)
-        return min(max(zValue / Self.zScoreMax, 0.02), 0.98)
+        // The true Z when the caller has it; inverting the backend's clamped, rounded
+        // gauge is only the fallback (it tops out at Z 4.41).
+        let z = zValue ?? position * 4.5
+        guard z.isFinite else { return 0.5 }
+        return min(max(z / Self.zScoreMax, 0.02), 0.98)
     }
 
     private var zoneBasedGauge: some View {
@@ -183,12 +204,12 @@ struct HealthCheckGaugeBar: View {
                 // Position indicator (white circle, same as other metrics)
                 Circle()
                     .fill(AppColors.mediaSurface)
-                    .frame(width: height + 6, height: height + 6)
+                    .frame(width: markerDiameter, height: markerDiameter)
                     .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
-                    .offset(x: w * zScorePosition - (height + 6) / 2.0)
+                    .offset(x: markerOffset(width: w, fraction: zScorePosition))
             }
         }
-        .frame(height: height + 6)
+        .frame(height: markerDiameter)
     }
 }
 
@@ -238,6 +259,15 @@ struct HealthCheckGaugeBar: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
                 HealthCheckGaugeBar(position: 0.53, metricType: .altmanZScore)
+            }
+
+            // True-value placement: Z 4.5 and Z 60 used to share one spot at 73.5%.
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                Text("Altman Z-Score 4.5 vs 60 (true value)")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                HealthCheckGaugeBar(position: 0.98, metricType: .altmanZScore, zValue: 4.5)
+                HealthCheckGaugeBar(position: 0.98, metricType: .altmanZScore, zValue: 60)
             }
         }
         .padding()

@@ -383,7 +383,11 @@ def test_growth_never_stores_a_past_next_earnings_date():
     svc.supabase = _FakeSupabase(past)
     assert svc._next_earnings_date_safe("AAPL") is None      # stale -> fall back to TTL
     svc.supabase = _FakeSupabase(today)
-    assert svc._next_earnings_date_safe("AAPL") is None      # today is already too late
+    # Report day: profit_power writes TODAY's pending report as the next date. Growth
+    # keeps it, so its row is stale for the rest of the day and the just-reported
+    # quarter appears after the next 5-minute window (was None → a 24h TTL that kept
+    # the pre-release build until tomorrow). Financials deep check 2026-09-30, R27.
+    assert svc._next_earnings_date_safe("AAPL") == today
     svc.supabase = _FakeSupabase(future)
     assert svc._next_earnings_date_safe("AAPL") == future    # genuinely future -> keep
     svc.supabase = _FakeSupabase(None)

@@ -86,7 +86,7 @@ struct GrowthInfoSheet: View {
 
     private func metricExplanationRow(metric: GrowthMetricType) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text(metric.rawValue)
+            Text(metric.displayName)
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
 
@@ -187,8 +187,8 @@ struct GrowthInfoSheet: View {
 
                 chartLegendExplanation(
                     color: AppColors.growthSectorGray,
-                    title: "Gray Dashed Line (Sector Avg)",
-                    description: "Industry average growth. Compare to see if company outperforms peers."
+                    title: "Gray Dashed Line (Industry or Sector Avg)",
+                    description: "Peer median growth: the company's industry when enough peers report, otherwise its sector. The legend says which. Quarterly values compare the same calendar quarter, even when the company's fiscal quarters are offset."
                 )
 
                 chartLegendExplanation(

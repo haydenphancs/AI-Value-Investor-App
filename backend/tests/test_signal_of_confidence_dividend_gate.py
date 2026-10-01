@@ -37,6 +37,10 @@ def _cf(date: str, **fields) -> dict:
 
 
 def _points(cf: dict, pays=None, inc=None, mcap=None):
+    # ONE quarter: there is no four-quarter window, so these yields are the documented
+    # x4 fallback (`[soc-ttm-fallback]`) — which is why the `* 4` assertions below still
+    # hold after the trailing-12-month change. The TTM path is pinned in
+    # tests/test_soc_deepcheck.py.
     return _svc()._build_data_points(
         [cf], [inc or _inc(cf["date"])], 2.5e9, mcap or MCAP, "PLUG", pays_common_dividend=pays,
     )
@@ -216,6 +220,10 @@ class _FMP:
 class _CorporateActions:
     async def get_ex_dividend_dates(self, symbol, from_date=None, to_date=None):
         return []
+
+    async def has_unclassified_adjustment(self, symbol, from_date=None, to_date=None, *,
+                                          effective_from=None, effective_to=None):
+        return False   # the spin-off guard (#86); these fixtures hold no spin-off
 
 
 def _wire(fmp) -> S:

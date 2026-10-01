@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
+import statistics
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -887,12 +889,35 @@ EVIDENCE:
 {write_block}"""
 
 
+def _fmt_millions_usd(v: Any) -> Optional[str]:
+    """A Revenue Engine value (always MILLIONS on the wire) as compact dollars:
+    209586.0 → "$209.6B". The prompts used to print the raw number beside the section's
+    `revenue_unit`, which said "Billions" for any $1B+ company — telling the model iPhone
+    earned 209,586 billion. None when missing / non-finite."""
+    try:
+        m = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(m):
+        return None
+    dollars = m * 1e6
+    sign = "-" if dollars < 0 else ""
+    a = abs(dollars)
+    if a >= 1e12:
+        return f"{sign}${a / 1e12:.2f}T"
+    if a >= 1e9:
+        return f"{sign}${a / 1e9:.1f}B"
+    if a >= 1e6:
+        return f"{sign}${a / 1e6:.0f}M"
+    return f"{sign}${a:,.0f}"
+
+
 def _revenue_engine_analysis_note_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
     re_section = shell.get("revenue_engine", {}) or {}
     segs = re_section.get("segments", []) or []
-    unit = re_section.get("revenue_unit", "Millions")
+    eliminations = re_section.get("intersegment_eliminations")
 
     # Pre-compute YoY % and share-of-total per segment so the model
     # doesn't do arithmetic (it's bad at it) and so the prompt can
@@ -920,7 +945,8 @@ def _revenue_engine_analysis_note_prompt(
         frame_hint = "Note the breakdown is unavailable and keep it short."
     else:
         seg_str = "; ".join(
-            f"{s['name']} {s['curr']:.0f} ({s['share_pct']:.0f}% of total, {s['yoy_label']})"
+            f"{s['name']} {_fmt_millions_usd(s['curr']) or 'n/a'} "
+            f"({s['share_pct']:.0f}% of revenue, {s['yoy_label']})"
             for s in enriched
         )
 
@@ -930,7 +956,13 @@ def _revenue_engine_analysis_note_prompt(
         # decline without flagging noise.
         rising = [s for s in enriched if s["yoy_pct"] is not None and s["yoy_pct"] >= 10]
         fading = [s for s in enriched if s["yoy_pct"] is not None and s["yoy_pct"] <= -5]
-        top = enriched[0]
+        # The largest REAL segment: "Other" (folded small lines) and "Unallocated" (the gap
+        # to reported revenue) are not a business line to call "the concentration".
+        top = next(
+            (s for s in enriched
+             if s["name"].strip().lower() != "other" and s["name"].strip() != "Unallocated"),
+            enriched[0],
+        )
 
         if rising and fading:
             frame_hint = (
@@ -959,9 +991,20 @@ def _revenue_engine_analysis_note_prompt(
                 "steady and what that means for predictability."
             )
 
+    # A GROSS stack (segments include sales between the company's own segments): the
+    # shares of reported revenue add to more than 100%, which the model must not read as
+    # an arithmetic error or "narrate" as more than all of revenue.
+    elim_str = _fmt_millions_usd(eliminations) if eliminations else None
+    gross_line = (
+        f"\nNOTE: the segments are reported GROSS of {elim_str} of intersegment sales "
+        "that consolidation eliminates, so their shares of revenue add to more than 100%. "
+        "Do not sum the shares."
+        if elim_str else ""
+    )
+
     return f"""Write a one-line takeaway on the revenue engine.
 
-SEGMENTS ({unit}): {seg_str}
+SEGMENTS: {seg_str}{gross_line}
 
 FRAME: {frame_hint}
 
@@ -1016,11 +1059,20 @@ def _revenue_forecast_insight_prompt(
     # forecast's CREDIBILITY, not just its shape: steady beats back an
     # accelerating curve, chronic misses undercut it.
     track = rf.get("earnings_track_record") or []
-    if track:
-        avg_surprise = sum(q.get("surprise_percent", 0.0) for q in track) / len(track)
+    # The MEDIAN, not the mean: a quarter against a near-zero consensus (0.01 → 0.12 is a
+    # true +1100%) dragged a steady ~+3% record to "avg EPS surprise +112.7%".
+    surprises = [
+        float(q["surprise_percent"]) for q in track
+        if isinstance(q, dict)
+        and isinstance(q.get("surprise_percent"), (int, float))
+        and not isinstance(q.get("surprise_percent"), bool)
+        and math.isfinite(q["surprise_percent"])
+    ]
+    if surprises:
+        median_surprise = statistics.median(surprises)
         track_str = (
             f"{rf.get('beat_summary') or 'mixed'}, "
-            f"avg EPS surprise {avg_surprise:+.1f}% over the last {len(track)} quarters"
+            f"median EPS surprise {median_surprise:+.1f}% over the last {len(surprises)} quarters"
         )
     else:
         track_str = "no reported beat/miss history"
@@ -1107,6 +1159,29 @@ RULES:
 * No hype. If a level is low, say so plainly and do not manufacture drama."""
 
 
+def _share_count_change_known(ca: Dict[str, Any]) -> bool:
+    """Whether the capital-allocation block's `share_count_change` is a MEASUREMENT.
+
+    False when the block says so (`share_count_change_known`), and — for a block written
+    without the key — when fewer than two of its points report a share count (the SoC
+    summary's own rule). Then `share_count_change` is a 0.0 placeholder (non-Optional on
+    shipped iOS), and stating it as "roughly flat" / "+0.0%" fabricates a fact."""
+    flag = ca.get("share_count_change_known")
+    if isinstance(flag, bool):
+        return flag
+    if ca.get("share_count_change") is None:
+        return False
+    dps = ca.get("data_points")
+    if isinstance(dps, list) and dps:
+        reported = 0
+        for dp in dps:
+            n = dp.get("shares_outstanding") if isinstance(dp, dict) else None
+            if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0:
+                reported += 1
+        return reported >= 2
+    return True
+
+
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -1182,7 +1257,11 @@ def _key_management_insight_prompt(
             f"pays a dividend (about {div_yield}% yield)"
             if div_yield > 0 else "pays no dividend"
         )
-        if scc is not None and scc > 2.0:
+        if not _share_count_change_known(ca):
+            # Unmeasured (fewer than two reported share counts): the 0.0 on the block is a
+            # placeholder. Say so instead of narrating a "roughly flat" share count.
+            steward = None
+        elif scc is not None and scc > 2.0:
             steward = (
                 "is NET-DILUTING: the share count is rising"
                 + (
@@ -1203,7 +1282,14 @@ def _key_management_insight_prompt(
                 "keeps the share count roughly flat, neither meaningfully "
                 "diluting nor shrinking it"
             )
-        capital_line = f"The company {div_desc} and {steward}."
+        if steward is None:
+            capital_line = (
+                f"The company {div_desc}. Its share-count change is NOT REPORTED for this "
+                "window: do not say whether it is diluting, shrinking or holding its share "
+                "count steady."
+            )
+        else:
+            capital_line = f"The company {div_desc} and {steward}."
 
     return f"""Write a 2 to 3 sentence insight for the "Insider & Management" section. Synthesize the THREE topics below into ONE read on how aligned management is with shareholders and how well they steward capital. Weave them; do NOT list them separately.
 
@@ -2099,7 +2185,6 @@ def _digest_revenue_engine(report: Dict[str, Any]) -> List[str]:
     """Revenue Engine (segments)."""
     out: List[str] = []
     reng = report.get("revenue_engine") or {}
-    unit = reng.get("revenue_unit", "")
     parts: List[str] = []
     for s in (reng.get("segments") or [])[:3]:
         if not isinstance(s, dict):
@@ -2111,8 +2196,10 @@ def _digest_revenue_engine(report: Dict[str, Any]) -> List[str]:
                 yoy = (float(cur) - float(prev)) / abs(float(prev)) * 100.0
         except (TypeError, ValueError, ZeroDivisionError):
             yoy = None
-        curs = _f_num(cur, "{:,.0f}")
-        piece = f"{s.get('name', '?')} {curs}{unit}" if curs else f"{s.get('name', '?')}"
+        # Values are MILLIONS on every report (old and new); the `revenue_unit` beside them
+        # used to read "Billions" ("iPhone 209,586Billions"), so format, never append it.
+        curs = _fmt_millions_usd(cur)
+        piece = f"{s.get('name', '?')} {curs}" if curs else f"{s.get('name', '?')}"
         yoys = _f_num(yoy, "{:+.0f}")
         if yoys is not None:
             piece += f" ({yoys}% YoY)"
@@ -2192,7 +2279,10 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
         dy = _f_num(ca.get("dividend_yield"), "{:.1f}")
         if dy is not None and (ca.get("dividend_yield") or 0) > 0:
             ca_bits.append(f"div yield {dy}%")
-        scc = _f_num(ca.get("share_count_change"), "{:+.1f}")
+        scc = (
+            _f_num(ca.get("share_count_change"), "{:+.1f}")
+            if _share_count_change_known(ca) else None
+        )
         if scc is not None:
             # share_count_change spans the whole series (oldest→newest, up to
             # ~2yr), NOT year-over-year — cite the real window so the narrative

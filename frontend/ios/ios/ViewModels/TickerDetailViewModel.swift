@@ -33,6 +33,12 @@ class TickerDetailViewModel: ObservableObject {
     }
     @Published var growthData: GrowthSectionData?
     @Published var profitPowerData: ProfitPowerSectionData?
+    /// True while the shown Growth / Profit Power build lost a company DATA leg (an
+    /// upstream statement leg failed — `failedDataLegs`). For the cards' `isDegraded`, so a
+    /// tab or series emptied by an outage reads "temporarily unavailable", not as a fact
+    /// about the company. A peer-only gap ("benchmarks", "profile") never sets it.
+    @Published private(set) var growthIsDegraded: Bool = false
+    @Published private(set) var profitPowerIsDegraded: Bool = false
     @Published var signalOfConfidenceData: SignalOfConfidenceSectionData?
     @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var healthCheckData: HealthCheckSectionData?
@@ -52,9 +58,26 @@ class TickerDetailViewModel: ObservableObject {
     /// Same split as IndexDetailViewModel: a 404 is permanent, anything else retryable.
     @Published var technicalUnavailableMessage: String?
     @Published var technicalIsRetryable: Bool = false
-    /// False until the Financials task group settles, so the tab can show a
+    /// False until the six Financials fetches settle, so the tab can show a
     /// skeleton instead of six indistinguishable blank cards.
     @Published var isFinancialsLoaded: Bool = false
+    /// The first Financials fetch failure of this load, routed through `AppError.from(_:)`.
+    /// With every section missing it becomes the tab's failure card (with a retry) instead
+    /// of "isn't available for this company" — a network failure is not a property of the
+    /// company. nil when every fetch answered (an empty answer is not a failure).
+    @Published var financialsError: String?
+    /// Display names of the sections whose fetch FAILED this load, for the tab's inline
+    /// retry notice when the other sections did load. A typed backend error is no longer
+    /// auto-retried by `APIClient`, so this notice is the retry.
+    @Published var financialsFailedSections: [String] = []
+    /// True while `retryFinancials()` re-runs the six fetches — the tab's "Retrying…".
+    @Published private(set) var isRetryingFinancials: Bool = false
+    /// Which Financials run may write. Bumped by every run (a fresh load or a retry); a fetch
+    /// that resolves after a newer run started writes NOTHING — no section, no failure, no
+    /// settle — so a retry overtaken by pull-to-refresh cannot settle the tab, or name a
+    /// failed section, in the middle of the newer load (and a slow stale response cannot
+    /// overwrite a newer one).
+    private var financialsGeneration: Int = 0
     /// Same contract for the Holders tab. Without it, `holdersData == nil` was
     /// indistinguishable from "still loading", so a failed fetch (e.g. the cold
     /// 12-call FMP build exceeding the 30s URLSession timeout — `.networkError`
@@ -232,7 +255,12 @@ class TickerDetailViewModel: ObservableObject {
 
         isLoading = true
         errorMessage = nil
+        // A new Financials run: anything still in flight from an earlier load or a
+        // `retryFinancials()` is now stale and writes nothing.
+        financialsGeneration &+= 1
         isFinancialsLoaded = false
+        financialsError = nil
+        financialsFailedSections = []
         isHoldersLoaded = false
         holdersError = nil
         // BOTH technical flags, together. Clearing only the message would leave every
@@ -242,6 +270,14 @@ class TickerDetailViewModel: ObservableObject {
         // thing. Same pairing as CryptoDetailViewModel.refresh().
         isTechnicalLoaded = false
         technicalUnavailableMessage = nil
+        // Analyst / sentiment: back to "pending" only when there is nothing on screen, so a
+        // pull-to-refresh does not flash their skeletons over real data. Without this, a
+        // retry after the early-return path (which settles both as loaded with no data —
+        // `settlePhaseTwoAfterFailedLoad`) showed neither a skeleton nor a section for the
+        // whole retry, then popped them in. Every path below settles them again:
+        // `fetchAnalystAnalysis` on success or failure, the early-return helper otherwise.
+        if analystRatingsData == nil { isAnalystLoaded = false }
+        if sentimentAnalysisData == nil { isSentimentLoaded = false }
 
         loadTask = Task { [weak self] in
             guard let self = self else { return }
@@ -334,6 +370,12 @@ class TickerDetailViewModel: ObservableObject {
                     self.errorMessage = AppError.from(error).message
                     print("⚠️ TickerDetailVM: fallback yielded NO data for \(ticker) — surfacing error")
                     self.isLoading = false
+                    // Phase 2 is skipped on this path, so nothing else would ever settle its
+                    // flags: the Financials tab shimmered forever with no message and no
+                    // retry, the Valuation chart spun, and Holders / Technical sat on
+                    // "loading" — even when the fast core had already painted the header.
+                    // Settle them all as FAILED (each tab's retry re-runs the load).
+                    self.settlePhaseTwoAfterFailedLoad(message: self.errorMessage)
                     return
                 }
                 self.tickerData = self.buildTickerDetailData()
@@ -363,21 +405,13 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchStockNews(ticker) }
                 group.addTask { await self.fetchAnalystAnalysis(ticker) }
                 group.addTask { await self.fetchChartEvents(ticker) }
-                group.addTask { await self.fetchEarnings(ticker) }
-                group.addTask { await self.fetchGrowth(ticker) }
-                group.addTask { await self.fetchProfitPower(ticker) }
-                group.addTask { await self.fetchRevenueBreakdown(ticker) }
-                group.addTask { await self.fetchHealthCheck(ticker) }
-                group.addTask { await self.fetchSignalOfConfidence(ticker) }
+                // The six Financials fetches settle the tab ON THEIR OWN (see the method):
+                // waiting for the whole group also waited on holders (a cold 30s build),
+                // technical (45s + retries) and news before the tab could say anything.
+                group.addTask { await self.fetchFinancialSections(ticker) }
                 group.addTask { await self.fetchHolders(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
-
-            // Financials sections have all settled (each either has data or is
-            // honestly nil). Until this flips, the tab can't tell "still
-            // loading" from "backend returned nothing" — both render as blank
-            // cards — so the view shows a skeleton while it's false.
-            self.isFinancialsLoaded = true
 
             // If the feed is empty/failed, stay empty (TickerNewsContent shows its
             // honest "No News Available" state). NEVER seed sampleDataForTicker — those
@@ -611,66 +645,287 @@ class TickerDetailViewModel: ObservableObject {
         return f.string(from: start)
     }
 
-    private func fetchEarnings(_ ticker: String) async {
+    // MARK: - Financials tab
+
+    /// Display order of the Financials sections — the failure notice names them in the
+    /// order the tab draws them, not in whatever order their fetches happened to fail.
+    private static let financialsSectionOrder = [
+        "Earnings", "Growth", "Revenue Breakdown", "Profit Power", "Health Check",
+        "Signal of Confidence",
+    ]
+
+    /// One section of a Financials run that has nothing to show. `message` is the
+    /// `AppError` copy for the tab's failure card; nil for a section that ANSWERED but has
+    /// nothing to draw (a degraded, empty earnings build) — named in the retry notice,
+    /// never offered as the card's reason.
+    private struct FinancialsFailure: Sendable {
+        let section: String
+        let message: String?
+    }
+
+    /// `degraded` reasons that are NOT a failed company data leg. "profile" / "benchmarks"
+    /// leave the company series intact (only a label or the peer line is missing);
+    /// "no_metrics", "cash_flow_row" and "cash_flow_statement_missing" describe what the
+    /// company has filed — a retry returns the same answer, so none of them earns a notice.
+    private static let nonDataLegReasons: Set<String> = [
+        "profile", "benchmarks", "no_metrics", "cash_flow_row", "cash_flow_statement_missing",
+    ]
+
+    /// The reasons in `degraded` that ARE a failed data leg (an FMP 429/5xx replaced a
+    /// statement with []). Only these make an empty Growth / Profit Power / Health Check /
+    /// Signal of Confidence answer an outage rather than the company's own empty record.
+    private static func failedDataLegs(_ degraded: [String]?) -> [String] {
+        (degraded ?? []).filter { !nonDataLegReasons.contains($0) }
+    }
+
+    /// The six Financials fetches, in their OWN group, settling `isFinancialsLoaded` the
+    /// moment the six are done — independent of holders / news / analyst in the outer
+    /// Phase-2 group, which used to hold the tab's skeleton up for a minute after all six
+    /// had already failed fast.
+    ///
+    /// A run's failures are collected and published ONCE, when its six settle, so a retry
+    /// keeps the tab's current notice on screen (as "Retrying…") instead of clearing it up
+    /// front. Every write is fenced on the run's `generation`: a superseded run writes
+    /// nothing, settles nothing.
+    private func fetchFinancialSections(_ ticker: String) async {
+        let generation = financialsGeneration
+        let failures = await withTaskGroup(of: FinancialsFailure?.self) { group -> [FinancialsFailure] in
+            group.addTask { await self.fetchEarnings(ticker, generation: generation) }
+            group.addTask { await self.fetchGrowth(ticker, generation: generation) }
+            group.addTask { await self.fetchProfitPower(ticker, generation: generation) }
+            group.addTask { await self.fetchRevenueBreakdown(ticker, generation: generation) }
+            group.addTask { await self.fetchHealthCheck(ticker, generation: generation) }
+            group.addTask { await self.fetchSignalOfConfidence(ticker, generation: generation) }
+            var collected: [FinancialsFailure] = []
+            for await failure in group {
+                if let failure { collected.append(failure) }
+            }
+            return collected
+        }
+        guard isCurrentFinancialsRun(generation, ticker: ticker, step: "settle") else { return }
+        // Named in the order the tab draws them, not the order their fetches failed.
+        let order = Self.financialsSectionOrder
+        let ordered = failures.sorted {
+            (order.firstIndex(of: $0.section) ?? order.count) < (order.firstIndex(of: $1.section) ?? order.count)
+        }
+        financialsFailedSections = ordered.map(\.section)
+        // The card's reason: the first REAL failure. A degraded-but-answered section has no
+        // `AppError` to offer, and an all-answered run leaves this nil ("isn't available").
+        financialsError = ordered.lazy.compactMap(\.message).first
+        // Each section either has data or is honestly nil. Until this flips, the tab
+        // can't tell "still loading" from "backend returned nothing" — both render as
+        // blank cards — so the view shows a skeleton while it's false.
+        self.isFinancialsLoaded = true
+    }
+
+    /// The Financials tab's Try Again: re-runs ONLY the six Financials fetches.
+    ///
+    /// It used to call `loadTickerData()`, whose coalescer JOINS a load still in flight —
+    /// and the six settle in their own group while holders (a cold ~30s 13F build),
+    /// technical (45s + retries) and news keep that load alive. Every tap in that window
+    /// returned without resetting or fetching anything and with no feedback; the load it
+    /// joined had already finished its six fetches and never ran them again. Sections that
+    /// loaded COMPLETE come back from the repository's 30-minute cache, so only the failed
+    /// (or degraded) ones go to the network.
+    func retryFinancials() async {
+        guard !isRetryingFinancials else {
+            print("⏳ TickerDetailVM: Financials retry for \(tickerSymbol) already in flight")
+            return
+        }
+        // The overview failed before Phase 2 ran: the six never ran and the header is missing
+        // too, so this is the whole load's retry (joining one already in flight is right then).
+        if errorMessage != nil {
+            loadTickerData()
+            return
+        }
+        // A fresh load reset the tab and is fetching the six right now — it IS the retry.
+        guard isFinancialsLoaded else {
+            print("⏳ TickerDetailVM: Financials for \(tickerSymbol) still loading — retry skipped")
+            return
+        }
+        financialsGeneration &+= 1
+        isRetryingFinancials = true
+        defer { isRetryingFinancials = false }
+        print("🔁 TickerDetailVM: retrying Financials for \(tickerSymbol) — failed: \(financialsFailedSections)")
+        await fetchFinancialSections(tickerSymbol)
+    }
+
+    /// True while `generation` is still the run allowed to write. A superseded run (a newer
+    /// load or retry started) is logged and dropped.
+    private func isCurrentFinancialsRun(_ generation: Int, ticker: String, step: String) -> Bool {
+        guard generation == financialsGeneration else {
+            print("⏭️ TickerDetailVM: Financials \(step) for \(ticker) dropped — run \(generation) superseded by \(financialsGeneration)")
+            return false
+        }
+        return true
+    }
+
+    /// A Financials fetch FAILURE (not an empty answer), mapped through `AppError` for the
+    /// tab's retry UI and logged here so every section reports the same way.
+    private func financialsFailure(_ section: String, ticker: String, error: Error) -> FinancialsFailure? {
+        let appError = AppError.from(error)
+        print("⚠️ TickerDetailVM: \(section) failed for \(ticker): \(appError.message) [\(error)]")
+        // APIClient wraps cancellation into `.networkError`, so a `CancellationError` catch
+        // never matches — a cancelled load is not a failure the user should be told about.
+        guard !Task.isCancelled else { return nil }
+        return FinancialsFailure(section: section, message: appError.message)
+    }
+
+    /// The overview AND both fallbacks failed, so the load returns before Phase 2. Settle
+    /// every Phase-2 flag as failed so no tab waits forever: Financials shows its failure
+    /// card (with `errorMessage`), Holders its Try Again, Technical its retry. Data from an
+    /// earlier successful load (a failed pull-to-refresh) is left on screen.
+    private func settlePhaseTwoAfterFailedLoad(message: String?) {
+        isFinancialsLoaded = true
+        holdersError = message
+        isHoldersLoaded = true
+        isAnalystLoaded = true
+        isSentimentLoaded = true
+        if technicalAnalysisData == nil {
+            technicalUnavailableMessage = "Couldn\u{2019}t load technical analysis."
+            technicalIsRetryable = true
+        }
+        isTechnicalLoaded = true
+    }
+
+    // Each Financials fetcher writes its section only while its run is current, and returns
+    // its failure (or nil) for `fetchFinancialSections` to publish when the six settle.
+
+    private func fetchEarnings(_ ticker: String, generation: Int) async -> FinancialsFailure? {
         do {
             let dto = try await stockRepository.getEarnings(ticker: ticker)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "earnings") else { return nil }
             self.earningsData = dto.toDisplayModel()
             print("✅ TickerDetailVM: Got earnings for \(ticker) — \(dto.epsQuarters.count) EPS quarters")
+            // A 200 the server marked degraded with no quarter at all: an FMP leg failed, not
+            // "this company has no history". The card says so from `EarningsData.degraded`;
+            // naming it here puts the tab's Try Again beside it — the fetch "succeeded", so
+            // nothing else would ever offer one. Kept on screen (its daily closes may still
+            // feed the valuation chart); no `AppError` message, it is not a failed request.
+            if dto.isEmptyPayload, let reasons = dto.degraded, !reasons.isEmpty {
+                print("⚠️ TickerDetailVM: Earnings for \(ticker) is degraded with no quarters (\(reasons)) — offering a retry")
+                return FinancialsFailure(section: "Earnings", message: nil)
+            }
+            return nil
         } catch {
-            print("⚠️ TickerDetailVM: Earnings failed for \(ticker): \(error)")
+            let failure = financialsFailure("Earnings", ticker: ticker, error: error)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "earnings") else { return nil }
             // Leave nil on failure — do NOT substitute .sampleData (hardcoded Apple
             // figures). Placeholder data would render as THIS ticker's real financials
             // and leak into the AI chat context. An honest empty section is correct.
             self.earningsData = nil
+            return failure
         }
     }
 
-    private func fetchGrowth(_ ticker: String) async {
+    private func fetchGrowth(_ ticker: String, generation: Int) async -> FinancialsFailure? {
         do {
             let dto = try await stockRepository.getGrowth(ticker: ticker)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "growth") else { return nil }
             self.growthData = dto.toDisplayModel()
+            let failedLegs = Self.failedDataLegs(dto.degraded)
+            self.growthIsDegraded = !failedLegs.isEmpty
             print("✅ TickerDetailVM: Got growth for \(ticker)")
+            // A 200 that lost a DATA leg and has no series at all: an outage, not "this
+            // company has no growth history". The card hides itself (no metric has data),
+            // so without this the section vanished with no Try Again — the Earnings rule.
+            if dto.isEmptyPayload, !failedLegs.isEmpty {
+                print("⚠️ TickerDetailVM: Growth for \(ticker) is degraded with no series (\(failedLegs)) — offering a retry")
+                return FinancialsFailure(section: "Growth", message: nil)
+            }
+            return nil
         } catch {
-            print("⚠️ TickerDetailVM: Growth failed for \(ticker): \(error)")
+            let failure = financialsFailure("Growth", ticker: ticker, error: error)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "growth") else { return nil }
             // No .sampleData fallback — see fetchEarnings. Fabricated growth curves
             // must never masquerade as this ticker's data or feed financialsContext.
             self.growthData = nil
+            self.growthIsDegraded = false
+            return failure
         }
     }
 
-    private func fetchProfitPower(_ ticker: String) async {
+    private func fetchProfitPower(_ ticker: String, generation: Int) async -> FinancialsFailure? {
         do {
             let dto = try await stockRepository.getProfitPower(ticker: ticker)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "profit power") else { return nil }
+            let failedLegs = Self.failedDataLegs(dto.degraded)
+            self.profitPowerIsDegraded = !failedLegs.isEmpty
+            // A 200 that lost a DATA leg and has no point in either period: an outage. The
+            // only thing that card could draw is "Margin data isn't available for this
+            // company" — the outage stated as a company fact — so no card (as Growth,
+            // Health Check and Signal of Confidence already do for nothing to draw), and
+            // the tab's notice names the section with a Try Again.
+            if dto.isEmptyPayload, !failedLegs.isEmpty {
+                self.profitPowerData = nil
+                print("⚠️ TickerDetailVM: Profit power for \(ticker) is degraded with no points (\(failedLegs)) — offering a retry")
+                return FinancialsFailure(section: "Profit Power", message: nil)
+            }
             self.profitPowerData = dto.toDisplayModel()
             print("✅ TickerDetailVM: Got profit power for \(ticker)")
+            return nil
         } catch {
-            print("⚠️ TickerDetailVM: Profit power failed for \(ticker): \(error)")
+            let failure = financialsFailure("Profit Power", ticker: ticker, error: error)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "profit power") else { return nil }
             // No .sampleData fallback — see fetchEarnings.
             self.profitPowerData = nil
+            self.profitPowerIsDegraded = false
+            return failure
         }
     }
 
-    private func fetchHealthCheck(_ ticker: String) async {
+    private func fetchHealthCheck(_ ticker: String, generation: Int) async -> FinancialsFailure? {
         do {
             let dto = try await stockRepository.getHealthCheck(ticker: ticker)
-            self.healthCheckData = dto.toDisplayModel()
-            print("✅ TickerDetailVM: Got health check for \(ticker)")
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "health check") else { return nil }
+            let model = dto.toDisplayModel()
+            // Nothing SCORED is not a verdict: it rendered "[0/0] Mix" and told Cay AI
+            // "Health Check: [0/0] Mix". No card instead — counted AFTER the mapper drops
+            // metric types this build can't draw and leaves the not-meaningful row (ROE over
+            // negative equity) out of `totalCount`, so a lone N/M row is no card either.
+            self.healthCheckData = model.totalCount == 0 ? nil : model
+            print("✅ TickerDetailVM: Got health check for \(ticker) — \(model.metrics.count) metrics, badge \(model.ratingBadgeText)")
+            // Nothing scored BECAUSE a data leg failed (ratios, key metrics, balance sheet,
+            // income): an outage, not the company's record. "no_metrics" alone is the
+            // company's own empty answer and offers nothing (a retry returns the same).
+            let failedLegs = Self.failedDataLegs(dto.degraded)
+            if model.totalCount == 0, !failedLegs.isEmpty {
+                print("⚠️ TickerDetailVM: Health check for \(ticker) is degraded with nothing scored (\(failedLegs)) — offering a retry")
+                return FinancialsFailure(section: "Health Check", message: nil)
+            }
+            return nil
         } catch {
-            print("⚠️ TickerDetailVM: Health check failed for \(ticker): \(error)")
+            let failure = financialsFailure("Health Check", ticker: ticker, error: error)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "health check") else { return nil }
             // No .sampleData fallback — see fetchEarnings.
             self.healthCheckData = nil
+            return failure
         }
     }
 
-    private func fetchSignalOfConfidence(_ ticker: String) async {
+    private func fetchSignalOfConfidence(_ ticker: String, generation: Int) async -> FinancialsFailure? {
         do {
             let dto = try await stockRepository.getSignalOfConfidence(ticker: ticker)
-            self.signalOfConfidenceData = dto.toDisplayModel()
-            print("✅ TickerDetailVM: Got signal of confidence for \(ticker)")
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "signal of confidence") else { return nil }
+            // No quarter at all means the summary is the server's all-zero placeholder —
+            // "0.0% yield, share count unchanged", a fabricated returns-nothing verdict on
+            // the card and in Cay AI's context. No card instead.
+            self.signalOfConfidenceData = dto.dataPoints.isEmpty ? nil : dto.toDisplayModel()
+            print("✅ TickerDetailVM: Got signal of confidence for \(ticker) — \(dto.dataPoints.count) quarters")
+            // No quarter BECAUSE a data leg failed (income, cash flow): an outage, so the
+            // tab's notice names it with a Try Again instead of the card silently vanishing.
+            let failedLegs = Self.failedDataLegs(dto.degraded)
+            if dto.isEmptyPayload, !failedLegs.isEmpty {
+                print("⚠️ TickerDetailVM: Signal of confidence for \(ticker) is degraded with no quarters (\(failedLegs)) — offering a retry")
+                return FinancialsFailure(section: "Signal of Confidence", message: nil)
+            }
+            return nil
         } catch {
-            print("⚠️ TickerDetailVM: Signal of confidence failed for \(ticker): \(error)")
+            let failure = financialsFailure("Signal of Confidence", ticker: ticker, error: error)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "signal of confidence") else { return nil }
             // No .sampleData fallback — see fetchEarnings.
             self.signalOfConfidenceData = nil
+            return failure
         }
     }
 
@@ -711,17 +966,21 @@ class TickerDetailViewModel: ObservableObject {
         self.isHoldersLoaded = true
     }
 
-    private func fetchRevenueBreakdown(_ ticker: String) async {
+    private func fetchRevenueBreakdown(_ ticker: String, generation: Int) async -> FinancialsFailure? {
         do {
             let dto = try await stockRepository.getRevenueBreakdown(ticker: ticker)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "revenue breakdown") else { return nil }
             self.revenueBreakdownData = dto.toDisplayModel()
             print("✅ TickerDetailVM: Got revenue breakdown for \(ticker)")
+            return nil
         } catch {
-            print("⚠️ TickerDetailVM: Revenue breakdown failed for \(ticker): \(error)")
+            let failure = financialsFailure("Revenue Breakdown", ticker: ticker, error: error)
+            guard isCurrentFinancialsRun(generation, ticker: ticker, step: "revenue breakdown") else { return nil }
             // Clear, like the five sibling fetchers. Leaving the old value in
             // place meant a failed pull-to-refresh kept this card rendering
             // stale figures while every other Financials card blanked out.
             self.revenueBreakdownData = nil
+            return failure
         }
     }
 
@@ -1014,9 +1273,9 @@ class TickerDetailViewModel: ObservableObject {
     /// same @Published properties in no defined order.
     func refresh() async {
         // Drop this ticker's CLIENT-side cache first, or the gesture does no network
-        // work at all: the six Financials cards, earnings and chart-events are cached
-        // for 24h against a process-lifetime singleton, and analyst/sentiment/technical
-        // for 30 minutes. Pull-to-refresh looked like it worked (the spinner ran, the
+        // work at all: chart-events are cached for 24h against a process-lifetime
+        // singleton, and the six Financials cards and analyst/sentiment/technical for
+        // 30 minutes. Pull-to-refresh looked like it worked (the spinner ran, the
         // task awaited) and changed nothing. Backend caches still absorb the upstream
         // cost — this only bypasses the on-device copy.
         stockRepository.invalidate(symbol: tickerSymbol)
@@ -1143,11 +1402,21 @@ class TickerDetailViewModel: ObservableObject {
         guard let data = signalOfConfidenceData else { return nil }
         var parts: [String] = []
         parts.append(data.summary.formattedSummary)
+        // `shareCountDescription` says "not reported" when `shareCountChangeKnown` is false
+        // (fewer than two measured share counts) — the 0.0 placeholder is never narrated as
+        // "Share count unchanged".
         parts.append(data.summary.shareCountDescription)
+        // From the SUMMARY, unconditionally: `dividendInfo` is nil for every non-payer
+        // (AMZN, NFLX, BRK-B), so reading the verdict from it dropped the buyback status
+        // for exactly the biggest repurchasers. The summary already falls back to the
+        // dividend block for an older backend.
+        parts.append("Buyback Status: \(data.summary.buybackStatus.rawValue)")
         if let info = data.dividendInfo {
             parts.append("Dividend Status: \(info.status.rawValue)")
-            parts.append("Buyback Status: \(info.buybackStatus.rawValue)")
-            parts.append("5Y Avg Yield: \(info.formattedYield)")
+            // The card's own label, named by the window the average really spans ("Avg
+            // Dividend Yield (2Y)" for "8Q"; window-neutral for an older payload). This line
+            // used to tell Cay AI "5Y Avg Yield" over at most two years of data.
+            parts.append("\(info.averageYieldLabel): \(info.formattedYield)")
         }
         return parts.joined(separator: " ")
     }
@@ -1903,6 +2172,13 @@ class TickerDetailViewModel: ObservableObject {
         return parts.isEmpty ? nil : parts.joined(separator: ". ")
     }
 
+    /// "2023" → "FY2023"; any other label ("Q1 '24", "TTM") passes through unchanged.
+    static func fiscalPeriodLabel(_ period: String) -> String {
+        let trimmed = period.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return "latest fiscal year" }
+        return trimmed.allSatisfy(\.isNumber) ? "FY\(trimmed)" : trimmed
+    }
+
     /// Financials tab context — growth, margins, health check, earnings
     private var financialsContext: String? {
         var parts: [String] = []
@@ -1926,7 +2202,13 @@ class TickerDetailViewModel: ObservableObject {
 
         // Profit margins — omit a margin the company doesn't report (a bank has
         // no gross profit) rather than grounding the AI on a fabricated 0%.
+        //
+        // Always NAMED by fiscal year. `annualData.last` is the latest fiscal year the
+        // backend sent, and a year whose revenue was zero or missing now arrives with nil
+        // margins instead of being dropped — so an unlabelled line let Cay AI present an
+        // older year's 20% margin as "current".
         if let pp = profitPowerData, let latest = pp.annualData.last {
+            let periodLabel = Self.fiscalPeriodLabel(latest.period)
             let margins: [(String, Double?)] = [
                 ("Gross", latest.grossMargin),
                 ("Operating", latest.operatingMargin),
@@ -1938,10 +2220,13 @@ class TickerDetailViewModel: ObservableObject {
                 return "\(name): \(String(format: "%.1f", value))%"
             }
             if !reported.isEmpty {
-                parts.append("Margins — \(reported.joined(separator: ", "))")
+                parts.append("Margins (\(periodLabel)) — \(reported.joined(separator: ", "))")
+            } else {
+                // Said, not omitted: silence let the model fall back on an older year.
+                parts.append("Margins (\(periodLabel)): not available")
             }
             if let sectorAvg = latest.sectorAverageNetMargin {
-                parts.append("\(pp.peerWord) Avg Net Margin: \(String(format: "%.1f", sectorAvg))%")
+                parts.append("\(pp.peerWord) Avg Net Margin (\(periodLabel)): \(String(format: "%.1f", sectorAvg))%")
             }
         }
 
@@ -1974,6 +2259,11 @@ class TickerDetailViewModel: ObservableObject {
         if let hc = healthCheckData {
             parts.append("Health Check: \(hc.ratingBadgeText)")
             let metricsSummary = hc.metrics.map { m in
+                // A not-meaningful row (ROE over NEGATIVE equity) is neutral only so it
+                // stays out of the score; "Mixed" would tell Cay AI it was judged.
+                if m.isNotMeaningful {
+                    return "\(m.type.rawValue): not meaningful (negative equity)"
+                }
                 let statusLabel: String
                 switch m.status {
                 case .positive: statusLabel = "Pass"
@@ -1985,13 +2275,34 @@ class TickerDetailViewModel: ObservableObject {
             parts.append("Metrics: \(metricsSummary)")
         }
 
-        // Earnings beat/miss streak
+        // Earnings beat/miss streak — counted over quarters that HAD an analyst estimate.
+        // A `.noEstimate` quarter is neither a beat, a miss nor in line; leaving it in the
+        // denominator ("2 beats, 1 misses in last 20 quarters") implied 17 exact matches
+        // that never happened.
         if let ed = earningsData {
-            let reported = ed.epsQuarters.filter { $0.actualValue != nil }
-            let beats = reported.filter { $0.result == .beat }.count
-            let misses = reported.filter { $0.result == .missed }.count
-            if !reported.isEmpty {
-                parts.append("Earnings: \(beats) beats, \(misses) misses in last \(reported.count) quarters")
+            // A build that lost the earnings feed, the estimates or the income leg pairs no
+            // quarter with its consensus, so every one falls to `.noEstimate` — and "20
+            // reported quarters had no analyst estimate" told Cay AI that AAPL has no
+            // analyst coverage. Say the record is unknown instead. A "prices"-only gap
+            // feeds just the price history and leaves the record intact.
+            let recordIsPartial = ed.degraded.contains { $0 != "prices" }
+            if recordIsPartial {
+                parts.append("Earnings data is partial right now (an upstream data source failed); analyst-estimate coverage and the beat/miss record are not known")
+            } else {
+                let reported = ed.epsQuarters.filter { $0.actualValue != nil }
+                let withEstimate = reported.filter { $0.result != .noEstimate }
+                let beats = withEstimate.filter { $0.result == .beat }.count
+                let misses = withEstimate.filter { $0.result == .missed }.count
+                let inLine = withEstimate.filter { $0.result == .matched }.count
+                if !withEstimate.isEmpty {
+                    parts.append("Earnings: \(beats) beats, \(misses) misses, \(inLine) in line, of the last \(withEstimate.count) reported quarters with an analyst estimate")
+                }
+                let uncovered = reported.count - withEstimate.count
+                if uncovered > 0 {
+                    parts.append(uncovered == 1
+                        ? "1 reported quarter had no analyst estimate"
+                        : "\(uncovered) reported quarters had no analyst estimate")
+                }
             }
             if let next = ed.nextEarningsDate {
                 let formatter = DateFormatter()

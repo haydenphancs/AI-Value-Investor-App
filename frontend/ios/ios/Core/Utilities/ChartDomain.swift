@@ -77,6 +77,49 @@ enum ChartDomain {
         return lower...upper
     }
 
+    /// Outlier-robust variant of `make`: values beyond Tukey's FAR-OUT fences
+    /// (q1 − 3·IQR, q3 + 3·IQR) do not set the domain, so one extreme point (a
+    /// −150,000% margin on a ~$1M-revenue quarter) cannot flatten every ordinary
+    /// series into a sliver. Callers MUST draw values through `clamp(_:to:)` and
+    /// mark the pinned ones (`isOffScale`) — the domain no longer contains them.
+    ///
+    /// With fewer than 4 finite values, or nothing beyond the fences, the result
+    /// is exactly `make(values, …)`, so ordinary data keeps the same axis.
+    static func robust(
+        _ values: [Double],
+        includeZero: Bool = true,
+        headroomFraction: Double = 0.15,
+        fallback: ClosedRange<Double> = 0...1
+    ) -> ClosedRange<Double> {
+        let finite = values.filter { $0.isFinite }.sorted()
+        let n = finite.count
+        guard n >= 4, let lo = finite.first, let hi = finite.last else {
+            return make(finite, includeZero: includeZero,
+                        headroomFraction: headroomFraction, fallback: fallback)
+        }
+        let q1 = finite[n / 4]
+        // Cap q3 below the max so a single extreme value cannot become q3 itself
+        // (same small-n guard as MetricHistoryChart.yDomain).
+        let q3 = finite[Swift.min((n * 3) / 4, n - 2)]
+        let iqr = Swift.max(q3 - q1, abs(q3) * 0.1, minimumSpan)
+        let fencedLo = Swift.max(lo, q1 - 3 * iqr)
+        let fencedHi = Swift.min(hi, q3 + 3 * iqr)
+        return make([fencedLo, fencedHi], includeZero: includeZero,
+                    headroomFraction: headroomFraction, fallback: fallback)
+    }
+
+    /// Pin `value` into `domain` (non-finite → the domain's lower bound is NOT
+    /// returned; callers skip non-finite values before drawing).
+    static func clamp(_ value: Double, to domain: ClosedRange<Double>) -> Double {
+        Swift.min(Swift.max(value, domain.lowerBound), domain.upperBound)
+    }
+
+    /// True when `value` lies outside `domain` and is therefore drawn pinned to
+    /// an edge — the cue to draw an off-scale marker beside it.
+    static func isOffScale(_ value: Double, in domain: ClosedRange<Double>) -> Bool {
+        value.isFinite && (value < domain.lowerBound || value > domain.upperBound)
+    }
+
     /// `count` evenly spaced interior grid values for a domain.
     ///
     /// Returns `[]` rather than crashing when the domain is degenerate — the

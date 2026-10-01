@@ -34,6 +34,14 @@ struct ReportRevenueEngineSection: View {
                     }
                 }
 
+                // A GROSS stack: the segments include sales between the company's own
+                // segments, so their shares of reported revenue add to more than 100%.
+                // This negative line is what brings the column back to 100% — the same
+                // step the Financials tab's Revenue Breakdown legend shows.
+                if data.hasEliminations {
+                    eliminationsRow
+                }
+
                 // Analysis Note (if available)
                 if let note = data.analysisNote {
                     analysisNoteSection(note)
@@ -49,10 +57,36 @@ struct ReportRevenueEngineSection: View {
             Text("Revenue breakdown unavailable")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
-            Text("This company doesn't report a product or service segment split.")
+            // Also shown when a feed lists only a sliver of revenue (one segment covering
+            // a few percent) — the Financials tab rejects that as a breakdown, and the
+            // report must not present it as "100% of total".
+            Text("No reliable product or service segment split is reported for this company.")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Intersegment Eliminations
+
+    private var eliminationsRow: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Intersegment eliminations")
+                    .font(AppTypography.labelSmallEmphasis)
+                    .foregroundColor(AppColors.textSecondary)
+                Spacer()
+                Text(data.formattedEliminations)
+                    .font(AppTypography.labelSmallEmphasis)
+                    .foregroundColor(AppColors.textSecondary)
+            }
+            Text("\(data.formattedEliminationsPercentage) of total · sales between segments, removed in consolidation")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
@@ -183,6 +217,16 @@ struct ReportRevenueEngineSection: View {
     ScrollView {
         ReportRevenueEngineSection(
             data: ReportRevenueEngineData.sampleOracle
+        )
+        .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Gross stack — eliminations line") {
+    ScrollView {
+        ReportRevenueEngineSection(
+            data: ReportRevenueEngineData.sampleGross
         )
         .padding()
     }

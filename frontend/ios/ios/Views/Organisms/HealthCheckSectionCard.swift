@@ -110,6 +110,12 @@ struct HealthCheckSectionCard: View {
                     healthCheckData: HealthCheckSectionData.sampleApple,
                     onDetailTapped: {}
                 )
+
+                // Negative equity: ROE shows "N/M" and is outside the [0/2] count.
+                HealthCheckSectionCard(
+                    healthCheckData: HealthCheckSectionData.sampleNegativeEquity,
+                    onDetailTapped: {}
+                )
             }
             .padding()
         }

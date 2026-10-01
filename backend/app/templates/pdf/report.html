@@ -143,6 +143,7 @@
   .pill { display:inline-block; border-radius: 999px; padding: 2px 9px; font-size: 9px; font-weight: 700;
           background:#EFF6FF; color:#1E40AF; border:1px solid #BFDBFE; }
   .beat { color:#1D4ED8; font-weight:800; } .miss { color:#DC2626; font-weight:800; }
+  .met { color:#6B7280; font-weight:800; }
 
   /* ── Risk / factor cards ── */
   .risk-card, .factor-card { border: 1px solid var(--grid); border-left: 3px solid var(--muted);
@@ -291,9 +292,15 @@
   <div class="barrow">
     <span class="lbl">{{ s.name }}{% if s.growth is not none %}<span class="growth-chip" style="color:{{ '#2563EB' if s.growth >= 0 else '#DC2626' }}">{{ pct(s.growth) }} YoY</span>{% endif %}</span>
     <span class="val">{{ "%.0f"|format(s.pct) }}%</span>
-    <div class="track"><div class="fill" style="width:{{ s.pct }}%;background:var(--accent)"></div></div>
+    <div class="track"><div class="fill" style="width:{{ [s.pct, 100]|min }}%;background:var(--accent)"></div></div>
   </div>
   {% endfor %}
+  {% if revenue_engine.eliminations_pct %}
+  <div class="barrow">
+    <span class="lbl">Intersegment eliminations</span>
+    <span class="val">−{{ "%.0f"|format(revenue_engine.eliminations_pct) }}%</span>
+  </div>
+  {% endif %}
   {% if revenue_engine.analysis_note %}<p class="lead">{{ revenue_engine.analysis_note }}</p>{% endif %}
   {% else %}<div class="no-data">Segment breakdown unavailable.</div>{% endif %}
 
@@ -329,7 +336,7 @@
   <div class="chart-block">
     <div style="font-size:11px;font-weight:700;color:#0F172A;margin-bottom:2px">{{ growth_metric_label }} Growth — Annual</div>
     <div class="chart-wrap">{{ charts.growth | safe }}</div>
-    <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>{{ growth_metric_label }}<span class="sw" style="background:#F59E0B"></span>YoY %<span class="sw" style="background:#64748B"></span>Sector avg</div>
+    <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>{{ growth_metric_label }}<span class="sw" style="background:#F59E0B"></span>YoY %{% if growth_has_peer %}<span class="sw" style="background:#64748B"></span>{{ growth_peer_word }} avg{% endif %}</div>
   </div>
   {% endif %}
 
@@ -367,7 +374,7 @@
   {% if forecast.track_record %}
   <div style="margin-top:7px;font-size:10px">
     <span class="sub-h" style="display:inline">Earnings Surprises:</span>
-    {% for t in forecast.track_record %}<span style="margin-right:9px">{{ t.period }} <span class="{{ 'beat' if t.beat else 'miss' }}">{{ pct(t.surprise_percent) }}</span></span>{% endfor %}
+    {% for t in forecast.track_record %}<span style="margin-right:9px">{{ t.period }} <span class="{{ t.result if t.result in ('beat', 'miss', 'met') else ('beat' if t.beat else ('met' if (t.surprise_percent or 0)|abs < 0.05 else 'miss')) }}">{{ pct(t.surprise_percent) }}</span></span>{% endfor %}
   </div>
   {% endif %}
   {% if forecast.guidance_quote %}
@@ -396,7 +403,11 @@
           <td><div class="k">Dividend</div><div class="v">{{ pct(ca.dividend_yield, false) }}</div></td>
           <td><div class="k">Buyback</div><div class="v">{{ pct(ca.buyback_yield, false) }}</div></td>
           <td><div class="k">Total Yield</div><div class="v">{{ pct(ca.total_yield, false) }}</div></td>
+          {% if insider.share_count_known %}
           <td><div class="k">Share Δ</div><div class="v" style="color:{{ '#2563EB' if (ca.share_count_change or 0) <= 0 else '#DC2626' }}">{{ pct(ca.share_count_change) }}</div></td>
+          {% else %}
+          <td><div class="k">Share Δ</div><div class="v" style="color:#6B7280">—</div></td>
+          {% endif %}
         </tr>
       </table>
       {% if charts.capital_returned %}<div class="chart-wrap" style="margin-top:4px">{{ charts.capital_returned | safe }}</div>

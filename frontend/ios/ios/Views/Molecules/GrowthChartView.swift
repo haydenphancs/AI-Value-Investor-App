@@ -77,14 +77,100 @@ struct GrowthChartView: View {
         return (rangeMin - padding, rangeMax + padding)
     }
 
-    // Grid lines: the zero baseline plus interior lines across the (sign-aware)
-    // domain, so a chart with negative bars still shows a visible 0 line.
-    private var gridValues: [Double] {
+    /// Smallest vertical gap, in points, between two y-axis ticks — keeps an 11pt
+    /// caption from overprinting its neighbour on an asymmetric domain.
+    private let minTickSpacing: CGFloat = 24
+
+    /// ONE tick list for the gridlines AND the y-axis labels, top → bottom.
+    ///
+    /// They used to come from two formulas: gridlines at thirds of EACH side of zero,
+    /// labels at thirds of the WHOLE span. On a loss-maker ([-23.7B, 5B, 10B]) no label
+    /// sat on any gridline and the zero baseline was unlabelled, with "-1.4B" printed
+    /// just under it. Now every label is a gridline. Always 0; each domain end when it
+    /// clears 0 by `minTickSpacing`; the interior thirds of each side only where they
+    /// clear every tick already kept (hi = 0.5B over lo = -27B would otherwise stack
+    /// three labels inside ~4pt).
+    ///
+    /// Every candidate is SNAPPED to the precision its label prints (`snapToLabel`)
+    /// before the spacing check, so a gridline sits exactly on the value it names.
+    /// Exact thirds labelled by a rounding formatter put near-break-even EPS
+    /// [0.01, 0.02, 0.04] on gridlines at 0.0153 / 0.0307 / 0.046 named "0.02" /
+    /// "0.03" / "0.05" — the 0.02 bar topped out ~22pt above its own "0.02" line. The
+    /// two domain ends snap TOWARD zero so the outer gridlines stay inside the plot;
+    /// the interior thirds snap to the nearest printable value. A candidate that
+    /// snaps onto 0 or onto a kept tick fails the spacing check (distance 0) and is
+    /// dropped, so labels still never stack or repeat.
+    private var yTicks: [Double] {
         let hi = yDomain.upperBound, lo = yDomain.lowerBound
-        var vals: [Double] = [0]
-        if hi > 0 { vals += [hi / 3, 2 * hi / 3] }
-        if lo < 0 { vals += [lo / 3, 2 * lo / 3] }
-        return vals
+        let span = hi - lo
+        guard span > 0, span.isFinite else { return [0] }
+        let plotHeight = Double(chartHeight)
+        let minGap = Double(minTickSpacing)
+        var ticks: [Double] = [0]
+        var candidates: [Double] = []
+        // Clamped as well: `value * 100` can round UP by an ulp (3.4499999999999997 →
+        // 345.0), which would put the "toward zero" end a hair outside the domain.
+        if hi > 0 { candidates.append(Swift.min(snapToLabel(hi, .towardZero), hi)) }
+        if lo < 0 { candidates.append(Swift.max(snapToLabel(lo, .towardZero), lo)) }
+        if hi > 0 {
+            candidates += [
+                snapToLabel(2 * hi / 3, .toNearestOrAwayFromZero),
+                snapToLabel(hi / 3, .toNearestOrAwayFromZero),
+            ]
+        }
+        if lo < 0 {
+            candidates += [
+                snapToLabel(lo / 3, .toNearestOrAwayFromZero),
+                snapToLabel(2 * lo / 3, .toNearestOrAwayFromZero),
+            ]
+        }
+        // An interior third of a sub-cent side can round OUTWARD past its domain end
+        // (lo = -0.0077: 2·lo/3 → -0.01): such a gridline would sit outside the plot.
+        for candidate in candidates where candidate.isFinite && candidate >= lo && candidate <= hi {
+            let clearsAll = ticks.allSatisfy { kept in
+                abs(kept - candidate) / span * plotHeight >= minGap
+            }
+            if clearsAll { ticks.append(candidate) }
+        }
+        return ticks.sorted(by: >)
+    }
+
+    /// `value` rounded (by `rule`) to the precision `formatLargeNumber` prints it at, so
+    /// the tick IS the number its label shows. Below 1,000 that is the cent (the label's
+    /// own `(number * 100).rounded() / 100`); at or above it, CompactNumberFormat's unit:
+    /// one decimal of K/M/B/T while the scaled value is below 10, whole units from 10.
+    private func snapToLabel(_ value: Double, _ rule: FloatingPointRoundingRule) -> Double {
+        guard value.isFinite else { return value }
+        let magnitude = abs(value)
+        if magnitude < 1_000 {
+            return (value * 100).rounded(rule) / 100
+        }
+        let unit: Double
+        if magnitude >= 1_000_000_000_000 {
+            unit = 1_000_000_000_000
+        } else if magnitude >= 1_000_000_000 {
+            unit = 1_000_000_000
+        } else if magnitude >= 1_000_000 {
+            unit = 1_000_000
+        } else {
+            unit = 1_000
+        }
+        let step: Double = magnitude / unit >= 10 ? unit : unit / 10
+        return (value / step).rounded(rule) * step
+    }
+
+    // Grid lines sit exactly on the labelled ticks (zero baseline always included).
+    private var gridValues: [Double] { yTicks }
+
+    /// Vertical centre of a y-axis label, in plot points from the top: the tick's own
+    /// gridline, clamped so the top/bottom labels stay inside the axis column.
+    private func tickLabelCenterY(_ value: Double, textHeight: CGFloat) -> CGFloat {
+        let hi = yDomain.upperBound, lo = yDomain.lowerBound
+        let span = hi - lo
+        guard span > 0 else { return chartHeight / 2 }
+        let raw = CGFloat((hi - value) / span) * chartHeight
+        let half = textHeight / 2
+        return Swift.min(Swift.max(raw, half), chartHeight - half)
     }
 
     /// Group consecutive non-nil points into segments (id increments across each
@@ -124,7 +210,31 @@ struct GrowthChartView: View {
         return 11
     }
 
+    /// Height of the whole component (plot + x-axis row + value/YoY/sector rows), shared
+    /// by the chart and its empty state so switching chips never makes the card jump.
+    private var componentHeight: CGFloat {
+        chartHeight + 20 + AppSpacing.md + (20 + AppSpacing.sm) * 3
+    }
+
     var body: some View {
+        if dataPoints.isEmpty {
+            // An empty series (a failed FMP leg, or a metric this company never reports)
+            // used to draw a fabricated 0–1.2 axis over an empty plot with no message.
+            emptyState
+        } else {
+            chartBody
+        }
+    }
+
+    private var emptyState: some View {
+        Text("No data for this period")
+            .font(AppTypography.bodySmall)
+            .foregroundColor(AppColors.textMuted)
+            .frame(maxWidth: .infinity)
+            .frame(height: componentHeight)
+    }
+
+    private var chartBody: some View {
         HStack(alignment: .top, spacing: 0) {
             // Left column: Y-axis labels (fixed, never scrolls). Sizes to its OWN
             // content width (not a fixed column) so short labels like EPS's "6.7"
@@ -174,7 +284,7 @@ struct GrowthChartView: View {
                 }
                 .defaultScrollAnchor(.trailing)
             }
-            .frame(height: chartHeight + 20 + AppSpacing.md + (20 + AppSpacing.sm) * 3 + (needsScroll ? AppSpacing.md : 0))
+            .frame(height: componentHeight + (needsScroll ? AppSpacing.md : 0))
         }
     }
 
@@ -301,38 +411,26 @@ struct GrowthChartView: View {
     // MARK: - Y-Axis Labels
 
     private var barYAxisLabels: some View {
-        // Evenly-spaced labels at the 0% / 33% / 66% / 100% plot positions of the
-        // sign-aware domain (top→bottom). For an all-positive series lo==0 so the
-        // bottom label is "0"; for negatives it shows the real negative floor.
-        let hi = yDomain.upperBound
-        let lo = yDomain.lowerBound
-        let span = hi - lo
-        // .leading so the numbers hug the card's left edge (instead of floating
-        // centered in the column with a left indent).
-        return VStack(alignment: .leading) {
-            Text(formatLargeNumber(hi))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-
-            Spacer()
-
-            Text(formatLargeNumber(hi - span / 3))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-
-            Spacer()
-
-            Text(formatLargeNumber(lo + span / 3))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-
-            Spacer()
-
-            Text(lo < 0 ? formatLargeNumber(lo) : "0")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+        // One label per `yTicks` entry, each centred on its own gridline (positioned by
+        // an alignment guide, not by Spacers between four fixed labels). The clear
+        // anchor pins the stack to the plot's 0…chartHeight, and the fixed-size labels
+        // give the column its intrinsic width — the axis still hugs the card's edge.
+        let ticks: [Double] = yTicks
+        return ZStack(alignment: .topLeading) {
+            Color.clear
+                .frame(width: 0, height: chartHeight)
+            ForEach(ticks, id: \.self) { tick in
+                Text(tick == 0 ? "0" : formatLargeNumber(tick))
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .alignmentGuide(VerticalAlignment.top) { d in
+                        d.height / 2 - tickLabelCenterY(tick, textHeight: d.height)
+                    }
+            }
         }
-        .frame(height: chartHeight)
+        .frame(height: chartHeight, alignment: .topLeading)
         .padding(.trailing, AppSpacing.xs)
     }
 
@@ -440,10 +538,21 @@ struct GrowthChartView: View {
     }
 
     private func formatLargeNumber(_ number: Double) -> String {
+        guard number.isFinite else { return "—" }
+        // Below 1,000 the value is a PER-SHARE figure (EPS) — every statement total is in
+        // dollars and far larger. CompactNumberFormat keeps one decimal below 10 and none
+        // at 10+, so near-break-even EPS (0.02 / -0.03) printed "0" / "-0" over a "+300%"
+        // YoY, and 10.40 / 10.60 printed "10" / "11". Cents, rounded first so a tiny
+        // negative cannot print "-0.00"; an exact zero stays "0".
+        if number == 0 { return "0" }
+        if abs(number) < 1_000 {
+            let cents = (number * 100).rounded() / 100
+            return String(format: "%.2f", cents == 0 ? 0 : cents)
+        }
         // Shared formatter. This copy printed whole B/M/K directly above a YoY row that
         // keeps one decimal, so the two rows of the SAME chart contradicted each other:
         // a bar labelled "2B" sat over "+12.3%" computed from 2.4B.
-        CompactNumberFormat.string(number)
+        return CompactNumberFormat.string(number)
     }
 }
 
@@ -460,4 +569,27 @@ struct GrowthChartView: View {
             .padding()
         }
     }
+}
+
+#Preview("Loss-maker, near-zero EPS, empty") {
+    ScrollView {
+        VStack(spacing: AppSpacing.xl) {
+            // Mixed sign: every y label must sit on a gridline, 0 labelled.
+            GrowthChartView(dataPoints: [
+                GrowthDataPoint(period: "2023", value: -23_700_000_000, yoyChangePercent: nil, sectorAverageYoY: 4.0),
+                GrowthDataPoint(period: "2024", value: 5_000_000_000, yoyChangePercent: nil, sectorAverageYoY: 6.0),
+                GrowthDataPoint(period: "2025", value: 10_000_000_000, yoyChangePercent: 100.0, sectorAverageYoY: 5.0)
+            ])
+            // Near-break-even EPS: cents, never "0" / "-0".
+            GrowthChartView(dataPoints: [
+                GrowthDataPoint(period: "Q1 '25", value: 0.02, yoyChangePercent: nil, sectorAverageYoY: nil),
+                GrowthDataPoint(period: "Q2 '25", value: -0.03, yoyChangePercent: nil, sectorAverageYoY: nil),
+                GrowthDataPoint(period: "Q3 '25", value: 0.04, yoyChangePercent: 300.0, sectorAverageYoY: nil)
+            ])
+            // Empty series: a message, not a fabricated axis.
+            GrowthChartView(dataPoints: [])
+        }
+        .padding()
+    }
+    .background(AppColors.background)
 }

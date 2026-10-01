@@ -404,7 +404,19 @@ async def get_or_collect(ticker: str, fetch_fresh) -> Any:
     _INFLIGHT[ticker] = fut
     try:
         out = await fetch_fresh()
-        await store_collection(ticker, out)
+        # A collection whose Financials sections were REFUSED (their service served a
+        # partial build — see ticker_report_data_collector._refuse_degraded_financials)
+        # is fine to use for THIS request: the section is absent, never wrong. Persisting
+        # it would keep the section absent for every persona until the next close.
+        degraded_sections = getattr(out, "degraded_sections", None)
+        if degraded_sections:
+            logger.warning(
+                "ticker_data_cache write SKIPPED for %s — degraded sections %s; the next "
+                "request re-collects",
+                ticker, degraded_sections,
+            )
+        else:
+            await store_collection(ticker, out)
         if not fut.done():
             fut.set_result(out)
         return out

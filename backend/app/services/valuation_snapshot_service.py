@@ -30,7 +30,7 @@ from app.schemas.stock_overview import (
     SnapshotItemResponse,
     SnapshotMetricResponse,
 )
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,10 @@ _CACHE_TTL = 300  # 5 minutes
 #     reconstruction. Changes the number on every cached ticker (AAPL 32.19 → 27.59).
 # 4 (2026-09-17): carries FMP's discounted-cash-flow value (`dcf`) for the Analysis tab's
 #     Valuation Meter. Cached rows without it would render the meter with no DCF row.
-_SNAPSHOT_PAYLOAD_VERSION = 4
+# 5 (2026-09-30): a failed peer-benchmark lookup now marks the build degraded and it is
+#     never persisted. A v4 row may have been written heuristic-only during such a
+#     failure (the old lookup swallowed it) and would read back as clean; rebuild them.
+_SNAPSHOT_PAYLOAD_VERSION = 5
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -103,6 +106,43 @@ def _cache_set(key: str, value: Any) -> None:
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Build status of the value each key serves ─────────────────────
+# A degraded build is SERVED (Tier 1 for 5 min, and to every in-flight joiner) but never
+# persisted. The report collector freezes what it receives into the close-aligned
+# ticker_data_cache and a paid report (the Valuation vital), so
+# `get_valuation_snapshot_with_status` must report the status of the EXACT object handed
+# out, on a Tier-1 hit and an in-flight join as much as on the build. Same role as
+# growth_service's `_degraded_by_key`, but each entry holds `(value, degraded)` and a status
+# is reported only for that very object (identity).
+_degraded_by_key: Dict[str, Tuple[Any, List[str]]] = {}
+# Larger than the Tier-1 cap: entries are written in lockstep with `_cache_set`, so the
+# memo can only lose an entry Tier 1 still holds after twice as many writes.
+_DEGRADED_MAX_ENTRIES = 2 * _CACHE_MAX_ENTRIES
+# Reported when the served object has no memo entry (evicted, or a value reached Tier 1 by a
+# path that never noted it). Fail CLOSED: an unknown provenance must not be frozen.
+_STATUS_UNKNOWN = "status_unknown"
+
+
+def _note_degraded(key: str, value: Any, degraded: List[str]) -> None:
+    """Record the degraded legs of ``value``, the object now served under ``key``.
+
+    Call it on EVERY write of a value to Tier 1, and before resolving the in-flight future
+    with it, so a joiner resuming after `set_result` reads the leader's status."""
+    _degraded_by_key.pop(key, None)
+    _degraded_by_key[key] = (value, list(degraded))
+    if len(_degraded_by_key) > _DEGRADED_MAX_ENTRIES:
+        for _old in list(_degraded_by_key.keys())[: len(_degraded_by_key) - _DEGRADED_MAX_ENTRIES]:
+            _degraded_by_key.pop(_old, None)
+
+
+def _degraded_of(key: str, value: Any) -> Optional[List[str]]:
+    """The degraded legs noted for exactly ``value`` under ``key``; None when unknown."""
+    entry = _degraded_by_key.get(key)
+    if entry is None or entry[0] is not value:
+        return None
+    return list(entry[1])
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -296,7 +336,42 @@ class ValuationSnapshotService:
         date), and freezing it here stacked a second 24 h on top, so the Analysis tab could show
         yesterday's value while a report generated today showed today's. A fetch failure
         degrades to no row for this serve only."""
+        snapshot, _degraded = await self.get_valuation_snapshot_with_status(ticker)
+        return snapshot
+
+    async def get_valuation_snapshot_with_status(
+        self, ticker: str,
+    ) -> Tuple[SnapshotItemResponse, List[str]]:
+        """`get_valuation_snapshot` plus the degraded slices of the multiples build served.
+
+        ``degraded`` is ``[]`` for a clean build and for a Supabase-tier hit (only clean
+        builds are persisted). A Tier-1 hit and an in-flight join report the status of the
+        build that produced the value they received. A served object with no recorded
+        status reports ``["status_unknown"]`` (fail closed).
+
+        The status describes the CACHED multiples snapshot only. The Caydex estimate
+        attached at serve time has its own caches and its own failure mode (no row for
+        this serve); the report reads its fair value separately, so a missing estimate is
+        not reported here.
+        """
         snapshot = await self._get_snapshot_cached(ticker)
+        # Read before any further await: the memo describes exactly this object.
+        cache_key = f"val_snapshot:{_validate_ticker(ticker)}"
+        degraded = _degraded_of(cache_key, snapshot)
+        if degraded is None:
+            logger.warning(
+                "Valuation snapshot status UNKNOWN for %s — reporting it degraded so it is "
+                "not frozen into a long-lived cache", ticker,
+            )
+            degraded = [_STATUS_UNKNOWN]
+        return await self._attach_serve_time_estimate(ticker, snapshot), degraded
+
+    async def _attach_serve_time_estimate(
+        self, ticker: str, snapshot: SnapshotItemResponse,
+    ) -> SnapshotItemResponse:
+        """While settings.DCF_ENABLED, a COPY carrying today's Caydex estimate (FMP's DCF
+        retired); otherwise the cached object itself (recording the shadow estimate when
+        DCF_SHADOW is on)."""
         if not settings.DCF_ENABLED:
             if settings.DCF_SHADOW:
                 _shadow_record(_validate_ticker(ticker))
@@ -305,7 +380,10 @@ class ValuationSnapshotService:
         return snapshot.model_copy(update={"caydex_estimate": estimate, "dcf": None})
 
     async def _get_snapshot_cached(self, ticker: str) -> SnapshotItemResponse:
-        """Two-tier caching and in-flight dedup of the multiples snapshot."""
+        """Two-tier caching and in-flight dedup of the multiples snapshot.
+
+        Every value it hands out has its build status noted (`_note_degraded`), which
+        `get_valuation_snapshot_with_status` reads back."""
         ticker = _validate_ticker(ticker)
         cache_key = f"val_snapshot:{ticker}"
 
@@ -320,6 +398,8 @@ class ValuationSnapshotService:
         if db_cached is not None:
             logger.info(f"Valuation snapshot Supabase HIT for {ticker}")
             _cache_set(cache_key, db_cached)
+            # Only clean builds are persisted, so a Tier-2 row is clean by construction.
+            _note_degraded(cache_key, db_cached, [])
             return db_cached
 
         # ── In-flight deduplication ──
@@ -354,6 +434,8 @@ class ValuationSnapshotService:
                 )
 
             _cache_set(cache_key, result)
+            # Noted BEFORE set_result: a joiner reads it when it resumes.
+            _note_degraded(cache_key, result, degraded)
             if not future.done():
                 future.set_result(result)
             return result
@@ -452,8 +534,9 @@ class ValuationSnapshotService:
         against sector benchmarks.
 
         Returns ``(snapshot, degraded)`` where ``degraded`` names every upstream slice
-        that RAISED (a permanent `FMPNotEntitledException` excluded) — `get_valuation_snapshot`
-        refuses to write such a build to the 24h tier.
+        that RAISED (a permanent `FMPNotEntitledException` excluded), plus ``benchmarks``
+        when the peer lookup failed — `get_valuation_snapshot` refuses to write such a
+        build to the 24h tier.
 
         Switched from `period=annual` to TTM (`ratios-ttm` / `key-metrics-ttm`)
         in 2026-05 — the annual endpoints anchor to the last fiscal year-end,
@@ -528,8 +611,24 @@ class ValuationSnapshotService:
                     sector,
                     ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
                 )
+                # A FAILED lookup (swallowed DB error) answers the same all-None shape as
+                # "this peer group has no rows" — but it is a transient hole, not an
+                # answer: every multiple loses its sector comparison and scores on
+                # absolute heuristics. Serve it; never persist it for 24h.
+                if lookup_failed(cur_bench):
+                    logger.warning(
+                        "Valuation snapshot: benchmark lookup FAILED for %s "
+                        "(industry=%r, sector=%r) — scoring without peers, build marked "
+                        "degraded", ticker, industry, sector,
+                    )
+                    degraded.append("benchmarks")
             except Exception as e:
-                logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
+                logger.warning(
+                    "Valuation snapshot: benchmark lookup raised for %s: %s: %s — scoring "
+                    "without peers, build marked degraded", ticker, type(e).__name__, e,
+                )
+                cur_bench = {}
+                degraded.append("benchmarks")
 
 
         snapshot = build_price_snapshot(

@@ -144,10 +144,46 @@ struct RevenueSegment: Identifiable {
 
 struct ReportRevenueEngineData {
     let segments: [RevenueSegment]
+    /// The share denominator, in millions: REPORTED revenue when the income statement has
+    /// it (the Financials tab's basis), else the segment sum.
     let totalRevenue: Double
-    let revenueUnit: String         // "Millions" or "Billions"
-    let period: String              // e.g., "FY 2024"
+    let revenueUnit: String         // the unit of every value: "Millions"
+    let period: String              // e.g., "FY 2024"; "" when the fiscal year is unknown
     let analysisNote: String?       // Optional AI insight
+    /// Millions, positive: intersegment sales a GROSS segment stack includes and
+    /// consolidation removes (INTC FY2025: $70.5B of segments vs $52.9B of revenue). The
+    /// segments' shares of reported revenue add to more than 100% by exactly this much, so
+    /// the panel draws it as a negative line. nil for every other stack and older reports.
+    /// `var` with a default so existing memberwise inits and previews still compile.
+    var intersegmentEliminations: Double? = nil
+
+    /// The eliminations line, when there is one to draw (finite and positive).
+    var hasEliminations: Bool {
+        guard let e = intersegmentEliminations else { return false }
+        return e.isFinite && e > 0
+    }
+
+    /// "-$17.7B" — the same M / B / T tiers as the segment rows.
+    var formattedEliminations: String {
+        guard let e = intersegmentEliminations, e.isFinite else { return "—" }
+        return "-" + Self.formatMillions(e)
+    }
+
+    /// "-33%" of the reported total, so the column visibly adds back to 100%.
+    var formattedEliminationsPercentage: String {
+        guard let e = intersegmentEliminations, e.isFinite, totalRevenue > 0 else { return "—" }
+        return String(format: "-%.0f%%", e / totalRevenue * 100)
+    }
+
+    private static func formatMillions(_ value: Double) -> String {
+        if value >= 1_000_000 {
+            return String(format: "$%.2fT", value / 1_000_000)
+        } else if value >= 1000 {
+            return String(format: "$%.1fB", value / 1000)
+        } else {
+            return String(format: "$%.0fM", value)
+        }
+    }
 
     // MARK: - Role Assignment Logic
 
@@ -236,5 +272,22 @@ extension ReportRevenueEngineData {
         revenueUnit: "Millions",
         period: "FY 2024",
         analysisNote: "Oracle's revenue engine is transforming: cloud infrastructure is exploding at 80% YoY while legacy license revenue shrinks. The core support business remains stable and massive, generating $38.5B in recurring revenue."
+    )
+
+    /// A GROSS stack (illustrative, not market data): the segments include sales between
+    /// the company's own segments, so their shares of reported revenue add to ~134% and
+    /// the eliminations line brings the column back to 100%.
+    static let sampleGross = ReportRevenueEngineData(
+        segments: [
+            RevenueSegment(name: "Client Products", currentRevenue: 32_200, previousRevenue: 30_300, totalRevenue: 52_900),
+            RevenueSegment(name: "Foundry Services", currentRevenue: 17_800, previousRevenue: 18_900, totalRevenue: 52_900),
+            RevenueSegment(name: "Data Center", currentRevenue: 16_900, previousRevenue: 15_500, totalRevenue: 52_900),
+            RevenueSegment(name: "Other", currentRevenue: 3_600, previousRevenue: 3_500, totalRevenue: 52_900)
+        ],
+        totalRevenue: 52_900,
+        revenueUnit: "Millions",
+        period: "FY 2025",
+        analysisNote: nil,
+        intersegmentEliminations: 17_600
     )
 }

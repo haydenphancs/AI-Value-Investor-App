@@ -24,12 +24,15 @@ struct RevenueBreakdownSectionCard: View {
             // Header
             headerSection
 
-            // Chart
+            // Chart (or its "No revenue reported" state — see `hasChartableMagnitude`)
             RevenueBreakdownChartView(data: data)
 
-            // Legend
-            RevenueBreakdownLegendView(data: data)
-                .padding(.top, AppSpacing.md)
+            // Legend — omitted when there is nothing to chart: it would only list a column
+            // of zeros, and a "Net Profit 0" derived from no data is a fabricated figure.
+            if data.hasChartableMagnitude {
+                RevenueBreakdownLegendView(data: data)
+                    .padding(.top, AppSpacing.md)
+            }
         }
         .padding(AppSpacing.lg)
         .background(
@@ -94,6 +97,23 @@ struct RevenueBreakdownSectionCard: View {
 
                 RevenueBreakdownSectionCard(
                     data: RevenueBreakdownData.sampleLossCompany,
+                    onDetailTapped: {}
+                )
+
+                // Outlier shapes (illustrative sample figures): the chart must stay inside
+                // the card, above the legend.
+                RevenueBreakdownSectionCard(
+                    data: RevenueBreakdownData.sampleOperatingLossTurnedProfit,
+                    onDetailTapped: {}
+                )
+
+                RevenueBreakdownSectionCard(
+                    data: RevenueBreakdownData.sampleGainAboveRevenue,
+                    onDetailTapped: {}
+                )
+
+                RevenueBreakdownSectionCard(
+                    data: RevenueBreakdownData.sampleNoRevenue,
                     onDetailTapped: {}
                 )
             }

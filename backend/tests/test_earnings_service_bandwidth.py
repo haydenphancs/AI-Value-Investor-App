@@ -45,7 +45,9 @@ class _FakeFMP:
         self.calls.append(("get_historical_prices", ticker, from_date, to_date))
         return [{"date": "2025-03-31", "close": 150.0}, {"date": "2024-12-31", "close": 140.0}]
 
-    async def get_earning_calendar_full(self, ticker):
+    async def get_earning_calendar_full(self, ticker, raise_errors=False):
+        # earnings_service passes raise_errors=True so a failed fetch marks the build
+        # degraded instead of reading as "no announcements".
         self.calls.append(("get_earning_calendar_full", ticker))
         return [
             # Reported quarters (epsActual present) with paired non-GAAP actual/estimate.

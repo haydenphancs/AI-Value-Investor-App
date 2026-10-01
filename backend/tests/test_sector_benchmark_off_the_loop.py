@@ -119,9 +119,11 @@ async def test_profit_power_build_reads_benchmarks_off_the_loop(lookup_threads):
 
     svc = _bare(ProfitPowerService, fmp=_FakeFMP())
     await svc._build_profit_power("AAPL")
-    _assert_off_loop(
-        lookup_threads, threading.get_ident(), {"get_benchmark_values", "get_benchmarks"},
-    )
+    # Profit Power reads the RICH cells only since 2026-09-30 (it needs the sample size
+    # to hold back thin benchmark periods), so `get_benchmark_values` is no longer called:
+    # annual + quarterly series, both off the loop.
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_benchmarks"})
+    assert sum(1 for n, _ in lookup_threads if n == "get_benchmarks") == 2
 
 
 @pytest.mark.asyncio

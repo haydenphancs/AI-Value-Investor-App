@@ -854,7 +854,7 @@ class FMPClient:
         return await self._make_request("earnings-calendar", params=params)
 
     async def get_earning_calendar_full(
-        self, ticker: str
+        self, ticker: str, raise_errors: bool = False
     ) -> List[Dict[str, Any]]:
         """Return full earning calendar records for a ticker.
 
@@ -867,29 +867,46 @@ class FMPClient:
         legacy `eps`/`revenue`; we normalize here so the 4 downstream
         helpers (`_find_next_earnings_date(_simple)`) keep working
         unchanged.
+
+        ``raise_errors``: by default a failure (429, 5xx, a non-list body) degrades to
+        ``[]``, which is indistinguishable from "this ticker has no announcements".
+        ``earnings_service`` and ``revenue_breakdown_service`` pass True so a failed fetch
+        marks their build DEGRADED instead of being cached for 24h as a real "no
+        announcements" answer. The other callers keep the swallowing default.
         """
         symbol = ticker.upper()
         try:
             data = await self._make_request(
                 "earnings", params={"symbol": symbol}
             )
-            if not isinstance(data, list):
-                return []
-            normalized: List[Dict[str, Any]] = []
-            for row in data:
-                if not isinstance(row, dict):
-                    continue
-                # Map new field names to legacy names. Keep originals too
-                # so any caller that's already on the new schema works.
-                if "eps" not in row and "epsActual" in row:
-                    row["eps"] = row.get("epsActual")
-                if "revenue" not in row and "revenueActual" in row:
-                    row["revenue"] = row.get("revenueActual")
-                normalized.append(row)
-            return normalized
         except Exception as e:
+            if raise_errors:
+                raise
             logger.warning(f"earnings (per-symbol) failed for {symbol}: {e}")
             return []
+        if not isinstance(data, list):
+            logger.warning(
+                "earnings (per-symbol) for %s: expected a list, got %s",
+                symbol, type(data).__name__,
+            )
+            if raise_errors:
+                raise FMPException(
+                    f"earnings (per-symbol) for {symbol}: non-list body "
+                    f"({type(data).__name__})"
+                )
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            # Map new field names to legacy names. Keep originals too
+            # so any caller that's already on the new schema works.
+            if "eps" not in row and "epsActual" in row:
+                row["eps"] = row.get("epsActual")
+            if "revenue" not in row and "revenueActual" in row:
+                row["revenue"] = row.get("revenueActual")
+            normalized.append(row)
+        return normalized
 
     async def get_earning_call_transcript(
         self, ticker: str, year: Optional[int] = None, quarter: Optional[int] = None,

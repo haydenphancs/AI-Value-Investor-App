@@ -46,7 +46,15 @@ def _code() -> str:
 def test_marks_use_the_numeric_index_axis_not_the_period_string():
     src = _code()
     view = _decl_body(src, "struct ProfitPowerChartView")
-    assert view.count('x: .value("i", Double(index))') == 4, "all four mark builders index the x-axis"
+    # The four line/point builders plot precomputed vertices (clamped + segmented, the
+    # 2026-09-30 deep-check), and the off-scale arrows plot their marker's column; every
+    # x value is still the numeric column index.
+    assert view.count('x: .value("i", Double(vertex.index))') == 4, (
+        "all four mark builders index the x-axis"
+    )
+    assert view.count('x: .value("i", Double(marker.index))') == 1, "the off-scale arrows too"
+    xs = re.findall(r'x: \.value\("([^"]*)", ([^)]*\))', view)
+    assert xs and all(name == "i" and arg.startswith("Double(") for name, arg in xs), xs
     assert 'x: .value("Period"' not in view, "a categorical period axis is the bug"
     assert '.chartXScale(domain: xDomain(), range: .plotDimension(padding: edgeLabelPad))' in view
     dom = _decl_body(view, "private func xDomain()")

@@ -9,7 +9,7 @@ Altman Z-Score uses absolute thresholds (no sector benchmark).
 
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthCheckMetricSchema(BaseModel):
@@ -27,6 +27,15 @@ class HealthCheckMetricSchema(BaseModel):
 class HealthCheckResponse(BaseModel):
     symbol: str
     overall_rating: str  # "excellent" | "good" | "mix" | "caution" | "poor"
+    # passed_count / total_count count only SCORED metrics. A row the service shows but
+    # cannot judge (ROE on negative equity, highlighted_value "N/M") is in `metrics` and
+    # in neither count.
     passed_count: int
     total_count: int
     metrics: List[HealthCheckMetricSchema]
+    # Why this build is partial: the FMP legs that failed transiently ("ratios",
+    # "key_metrics", "balance_sheet", "income", "profile"), "benchmarks" when the peer
+    # lookup raised, "no_metrics" when nothing survived. A degraded build is served from
+    # the 5-minute memory tier only, never written to health_check_cache, so this always
+    # describes the payload actually served. Additive: shipped iOS builds ignore it.
+    degraded: List[str] = Field(default_factory=list)

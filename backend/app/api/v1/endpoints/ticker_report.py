@@ -46,6 +46,7 @@ from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
+    report_degraded_sections,
 )
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
@@ -415,6 +416,16 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
                 logger.info(
                     f"Legacy report for {ticker}/{persona} was built under the other "
                     f"DCF_ENABLED setting — skipping"
+                )
+                return None
+            # A deep-door report that lost a Financials section to a degraded upstream
+            # build is the BUYER's report only: it is delivered (and billed) to its
+            # caller but never shared, so this free path must not hand it to anyone else.
+            partial = report_degraded_sections(rpt)
+            if partial:
+                logger.info(
+                    "[report-partial-not-shared] legacy report for %s/%s lost sections "
+                    "%s — skipping", ticker, persona, partial,
                 )
                 return None
             return rpt

@@ -20,10 +20,13 @@ struct RevenueBreakdownLegendView: View {
                     .padding(.bottom, AppSpacing.xs)
 
                 ForEach(data.revenueSources) { source in
+                    // `legendValue(for:)`, not `formattedValue`: a negative-revenue filer's
+                    // lone Total Revenue bar is drawn at 0 but its row prints the reported,
+                    // signed figure (and "—" for its share, since there is no positive base).
                     RevenueBreakdownLegendItem(
                         color: source.color,
                         name: source.name,
-                        value: source.formattedValue,
+                        value: data.legendValue(for: source),
                         percentage: source.formattedPercentage(of: data.revenueBasis)
                     )
                 }

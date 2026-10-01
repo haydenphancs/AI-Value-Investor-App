@@ -13,6 +13,10 @@ struct ProfitPowerLegendView: View {
     /// represents. The backend has always sent `peer_group_level`, but the label
     /// was hardcoded to "Sector", so an industry-level benchmark was mislabelled.
     var peerWord: String = "Sector"
+    /// False when the chart draws no peer line for the selected period — e.g. a peer
+    /// group with no benchmark rows for those periods yet. A legend entry for a line that
+    /// is not there reads as a bug.
+    var showsPeerLine: Bool = true
 
     var body: some View {
         VStack(spacing: AppSpacing.md) {
@@ -26,10 +30,12 @@ struct ProfitPowerLegendView: View {
             // Second row: Net Margin, peer-group Average
             HStack(spacing: AppSpacing.xl) {
                 ProfitPowerLegendItem(marginType: .netMargin)
-                ProfitPowerLegendItem(
-                    marginType: .sectorAverage,
-                    labelOverride: "\(peerWord) Average\nNet Margin"
-                )
+                if showsPeerLine {
+                    ProfitPowerLegendItem(
+                        marginType: .sectorAverage,
+                        labelOverride: "\(peerWord) Average\nNet Margin"
+                    )
+                }
             }
         }
     }
@@ -43,6 +49,7 @@ struct ProfitPowerLegendView: View {
         VStack(spacing: AppSpacing.xl) {
             ProfitPowerLegendView()
             ProfitPowerLegendView(peerWord: "Industry")
+            ProfitPowerLegendView(peerWord: "Industry", showsPeerLine: false)
         }
         .padding()
     }

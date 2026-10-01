@@ -114,6 +114,9 @@ class _FakeSupabase:
     def range(self, *a, **k):
         return self
 
+    def order(self, *a, **k):
+        return self
+
     def execute(self):
         self.execute_calls += 1
         item = self._script.pop(0) if len(self._script) > 1 else self._script[0]

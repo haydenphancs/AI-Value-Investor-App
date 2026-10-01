@@ -23,32 +23,55 @@ struct EarningsChartView: View {
     let showPriceLine: Bool
     var dataType: EarningsDataType = .eps
 
-    // Calculate chart bounds based ONLY on EPS/Revenue data (NOT price)
+    // Calculate chart bounds based ONLY on EPS/Revenue data (NOT price).
+    // Finite values only — a NaN poisons min()/max() — and no estimate for a quarter
+    // that had none (its estimate slot is a copy of the actual, not a consensus).
     private var earningsValues: [Double] {
         var values: [Double] = []
         for quarter in quarters {
-            if let actual = quarter.actualValue {
+            if let actual = quarter.actualValue, actual.isFinite {
                 values.append(actual)
             }
-            values.append(quarter.estimateValue)
+            if quarter.hasEstimate, quarter.estimateValue.isFinite {
+                values.append(quarter.estimateValue)
+            }
         }
         return values
     }
+
+    /// No values → no axis. The fallback domain used to print an invented
+    /// "1.10 / 0.50 / -0.10" scale over an empty plot.
+    private var hasValues: Bool { !earningsValues.isEmpty }
 
     // Pad OUTWARD additively from the data span so the domain always CONTAINS every
     // value regardless of sign. The old multiplicative `min*0.9 / max*1.1` moved a
     // NEGATIVE min toward zero (e.g. -2.0*0.9 = -1.8 > -2.0), pushing a loss-maker's
     // EPS dot below the axis and off-screen, and left the labels not bounding the data.
+    //
+    // ...but never pad ACROSS zero when the data does not cross it. Revenue cannot be
+    // negative, yet a series whose smallest value is under a tenth of its span (a
+    // dropped-digit 22.2M quarter beside 25B estimates — AVGO's "-2.5B" axis — or a
+    // biotech's 0.05B…2.0B) padded the floor below 0 and printed negative revenue.
     private var minValue: Double {
         let lo = earningsValues.min() ?? 0
         let hi = earningsValues.max() ?? 1
-        return lo - max((hi - lo) * 0.1, 0.01)
+        let pad = max((hi - lo) * 0.1, 0.01)
+        return lo >= 0 ? max(lo - pad, 0) : lo - pad
     }
 
+    // Mirror of the floor: an all-negative series (a loss-maker's EPS) never pads above 0.
+    // `lo < 0` keeps an all-ZERO series from collapsing to a 0...0 domain.
     private var maxValue: Double {
         let lo = earningsValues.min() ?? 0
         let hi = earningsValues.max() ?? 1
-        return hi + max((hi - lo) * 0.1, 0.01)
+        let pad = max((hi - lo) * 0.1, 0.01)
+        return (hi <= 0 && lo < 0) ? min(hi + pad, 0) : hi + pad
+    }
+
+    /// The three labelled values. Gridlines and labels are BOTH placed through
+    /// `normalizedY` at exactly these, so a dot level with a label has that value.
+    private var axisValues: [Double] {
+        [maxValue, (maxValue + minValue) / 2, minValue]
     }
 
     // Price bounds for independent normalization (quarterly fallback)
@@ -74,7 +97,9 @@ struct EarningsChartView: View {
     }
 
     private var chartHeight: CGFloat { 200 }
-    private var yAxisWidth: CGFloat { dataType == .revenue ? 50 : 40 }
+    // Shared with EarningsSurpriseBarChart and EarningsSurpriseRow, so the columns of all
+    // three line up (EarningsChartLayout explains the drift this replaced).
+    private var yAxisWidth: CGFloat { EarningsChartLayout.yAxisWidth(for: dataType) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,13 +112,13 @@ struct EarningsChartView: View {
                 GeometryReader { geometry in
                     let width = geometry.size.width
                     let height = geometry.size.height
-                    let quarterCount = quarters.count
+                    let quarterCount = max(quarters.count, 1)
                     let stepX = width / CGFloat(quarterCount)
                     let range = max(maxValue - minValue, 0.01)
 
                     ZStack {
                         // Horizontal grid lines
-                        gridLines(height: height)
+                        gridLines(width: width, height: height)
 
                         // Price line (optional, rendered first so it's behind)
                         if showPriceLine && !priceValues.isEmpty {
@@ -104,20 +129,24 @@ struct EarningsChartView: View {
                             }
                         }
 
-                        // Estimate dots (gray)
+                        // Estimate dots (gray). None for a quarter that had no consensus:
+                        // its estimate slot is a copy of the actual, and a gray dot there
+                        // claimed an estimate existed.
                         ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
-                            let x = CGFloat(index) * stepX + stepX / 2
-                            let y = height - normalizedY(quarter.estimateValue, height: height, range: range)
+                            if quarter.hasEstimate, quarter.estimateValue.isFinite {
+                                let x = CGFloat(index) * stepX + stepX / 2
+                                let y = height - normalizedY(quarter.estimateValue, height: height, range: range)
 
-                            Circle()
-                                .fill(AppColors.textSecondary)
-                                .frame(width: 14, height: 14)
-                                .position(x: x, y: y)
+                                Circle()
+                                    .fill(AppColors.textSecondary)
+                                    .frame(width: 14, height: 14)
+                                    .position(x: x, y: y)
+                            }
                         }
 
                         // Actual result dots (colored based on result)
                         ForEach(Array(quarters.enumerated()), id: \.element.id) { index, quarter in
-                            if let actual = quarter.actualValue {
+                            if let actual = quarter.actualValue, actual.isFinite {
                                 let x = CGFloat(index) * stepX + stepX / 2
                                 let y = height - normalizedY(actual, height: height, range: range)
 
@@ -152,32 +181,56 @@ struct EarningsChartView: View {
 
     // MARK: - Helper Views
 
-    private func gridLines(height: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            ForEach(0..<4) { index in
-                Rectangle()
-                    .fill(AppColors.cardBackgroundLight.opacity(0.5))
-                    .frame(height: 1)
-                if index < 3 {
-                    Spacer()
-                }
+    // Gridlines at the three LABELLED values, through the same `normalizedY` as the dots.
+    // They used to be four Spacer-spread lines at 0, ⅓, ⅔ and 1 of the frame, matching
+    // neither the labels nor any value.
+    private func gridLines(width: CGFloat, height: CGFloat) -> some View {
+        let range = max(maxValue - minValue, 0.01)
+        return Path { path in
+            guard hasValues else { return }
+            for value in axisValues {
+                let y = height - normalizedY(value, height: height, range: range)
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: width, y: y))
             }
         }
+        .stroke(AppColors.cardBackgroundLight.opacity(0.5), lineWidth: 1)
     }
 
+    // Each label is placed at its own value's y via `normalizedY`, exactly like the dots.
+    // A Spacer-spread VStack put the top and bottom labels ~8pt from where their values
+    // plot (the 7.5% inset), so on AVGO's axis a dot level with the top label sat ~1.5B
+    // below the printed number.
     private func yAxisLabels() -> some View {
-        VStack {
-            Text(formatYValue(maxValue))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-            Spacer()
-            Text(formatYValue((maxValue + minValue) / 2))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-            Spacer()
-            Text(formatYValue(minValue))
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+        GeometryReader { geometry in
+            let height = geometry.size.height
+            let range = max(maxValue - minValue, 0.01)
+            let centerX = geometry.size.width / 2
+
+            if hasValues {
+                ZStack {
+                    Text(formatYValue(maxValue))
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .position(x: centerX, y: height - normalizedY(maxValue, height: height, range: range))
+
+                    Text(formatYValue((maxValue + minValue) / 2))
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .position(x: centerX, y: height - normalizedY((maxValue + minValue) / 2, height: height, range: range))
+
+                    Text(formatYValue(minValue))
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .position(x: centerX, y: height - normalizedY(minValue, height: height, range: range))
+                }
+            }
         }
         .frame(height: chartHeight)
         .padding(.trailing, AppSpacing.sm)
@@ -334,18 +387,27 @@ struct EarningsChartView: View {
         let anchorInterval = lastAnchor.date.timeIntervalSince(firstAnchor.date)
         let rate = (xLast - xFirst) / CGFloat(anchorInterval)
 
-        let pRange = max(maxPrice - minPrice, 0.01)
+        // Place every close FIRST, then scale on the VISIBLE window. The backend sends
+        // ~5 years of closes while 1Y shows ~15 months, and the old scale (the whole
+        // series' min/max) squeezed a stock that fell $60 → $20-25 into the bottom ~11%
+        // of the plot: the reaction around each earnings dot — the reason the Price
+        // toggle exists — was a flat line.
+        let placed: [(x: CGFloat, price: Double)] = datesAndPrices.compactMap { pair in
+            guard pair.1.isFinite else { return nil }
+            return (x: xFirst + rate * CGFloat(pair.0.timeIntervalSince(firstAnchor.date)), price: pair.1)
+        }
+        let visible = Self.visiblePriceWindow(placed, width: width)
+        guard visible.drawn.count >= 2 else {
+            return AnyView(EmptyView())
+        }
+        let visMin = visible.low
+        let pRange = max(visible.high - visible.low, 0.01)
 
         return AnyView(
             Path { path in
                 var started = false
-                for (date, price) in datesAndPrices {
-                    let x = xFirst + rate * CGFloat(date.timeIntervalSince(firstAnchor.date))
-
-                    // Skip points that fall before the chart area
-                    guard x >= 0 else { continue }
-
-                    let normalizedPrice = (price - minPrice) / pRange
+                for (x, price) in visible.drawn {
+                    let normalizedPrice = (price - visMin) / pRange
                     let y = height - (CGFloat(normalizedPrice) * height * 0.85 + height * 0.075)
 
                     if !started {
@@ -401,6 +463,26 @@ struct EarningsChartView: View {
         )
     }
 
+    /// The closes to draw and the band to scale them on. `drawn` is every close inside the
+    /// plot plus the nearest one on each side, so the line still reaches both edges (the
+    /// path is clipped). The band comes from the IN-WINDOW closes only, falling back to the
+    /// whole series when fewer than two are inside. `placed` is in date order and x grows
+    /// with date (the anchors guarantee a positive rate), so the in-window run is contiguous.
+    static func visiblePriceWindow(
+        _ placed: [(x: CGFloat, price: Double)],
+        width: CGFloat
+    ) -> (drawn: [(x: CGFloat, price: Double)], low: Double, high: Double) {
+        let inside = placed.indices.filter { placed[$0].x >= 0 && placed[$0].x <= width }
+        guard let first = inside.first, let last = inside.last else {
+            return (drawn: [], low: 0, high: 1)
+        }
+        let lowerIndex = max(first - 1, 0)
+        let upperIndex = min(last + 1, placed.count - 1)
+        let drawn = Array(placed[lowerIndex...upperIndex])
+        let band: [Double] = inside.count >= 2 ? inside.map { placed[$0].price } : placed.map { $0.price }
+        return (drawn: drawn, low: band.min() ?? 0, high: band.max() ?? 1)
+    }
+
     // MARK: - Helper Functions
 
     private func normalizedY(_ value: Double, height: CGFloat, range: Double) -> CGFloat {
@@ -410,15 +492,29 @@ struct EarningsChartView: View {
 
     private func formatYValue(_ value: Double) -> String {
         if dataType == .revenue {
-            return formatLargeNumber(value)
+            return Self.dropNegativeZero(formatLargeNumber(value))
         }
-        if value >= 100 {
-            return String(format: "%.0f", value)
-        } else if value >= 10 {
-            return String(format: "%.1f", value)
+        // Precision by MAGNITUDE, sign kept. `value >= 100` / `>= 10` never fire for a
+        // negative, so a loss-maker's -11.68 printed all six characters into the 32pt
+        // gutter (and wrapped) while +11.68 printed "11.7"; -150 printed "-150.00".
+        let magnitude = abs(value)
+        let text: String
+        if magnitude >= 100 {
+            text = String(format: "%.0f", value)
+        } else if magnitude >= 10 {
+            text = String(format: "%.1f", value)
         } else {
-            return String(format: "%.2f", value)
+            text = String(format: "%.2f", value)
         }
+        return Self.dropNegativeZero(text)
+    }
+
+    /// "-0.00" / "-0" → "0.00" / "0": a midpoint a hair below zero is zero on this axis.
+    static func dropNegativeZero(_ text: String) -> String {
+        guard text.hasPrefix("-"), let parsed = Double(text.dropFirst()), parsed == 0 else {
+            return text
+        }
+        return String(text.dropFirst())
     }
 
     private func formatLargeNumber(_ value: Double) -> String {
@@ -452,5 +548,34 @@ struct EarningsChartView: View {
             )
             .padding()
         }
+    }
+}
+
+#Preview("Revenue - floor at 0, no-consensus quarter") {
+    // All-positive revenue with one near-zero quarter: the axis must bottom out at "0",
+    // never a negative revenue ("-2.5B"). The blue dot is a quarter reported with no
+    // analyst consensus — no gray estimate dot under it.
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        EarningsChartView(
+            quarters: { () -> [EarningsQuarterData] in
+                var uncovered = EarningsQuarterData(quarter: "Q4 '25", actualValue: 18.0e9, estimateValue: 18.0e9, surprisePercent: nil)
+                uncovered.hasEstimate = false
+                return [
+                    EarningsQuarterData(quarter: "Q2 '25", actualValue: 15.0e9, estimateValue: 14.8e9, surprisePercent: 1.4),
+                    EarningsQuarterData(quarter: "Q3 '25", actualValue: 15.9e9, estimateValue: 15.8e9, surprisePercent: 0.8),
+                    uncovered,
+                    EarningsQuarterData(quarter: "Q1 '26", actualValue: 0.0222e9, estimateValue: 19.1e9, surprisePercent: -99.9),
+                    EarningsQuarterData(quarter: "Q2 '26", actualValue: nil, estimateValue: 24.1e9, surprisePercent: nil),
+                    EarningsQuarterData(quarter: "Q3 '26", actualValue: nil, estimateValue: 25.0e9, surprisePercent: nil),
+                ]
+            }(),
+            priceHistory: [],
+            showPriceLine: false,
+            dataType: .revenue
+        )
+        .padding()
     }
 }

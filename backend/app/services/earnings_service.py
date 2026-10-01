@@ -12,13 +12,14 @@ Data sources (priority order):
 import asyncio
 import math
 import logging
+import statistics
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
-from app.integrations.fmp import FMPClient, get_fmp_client
+from app.integrations.fmp import FMPClient, FMPException, get_fmp_client
 from app.utils.period_labels import quarterly_period_label
 from app.schemas.earnings import (
     EarningsDailyPriceSchema,
@@ -28,24 +29,52 @@ from app.schemas.earnings import (
     NextEarningsDateSchema,
 )
 from app.services._earnings_common import (
+    STALE_RESCHEDULE_DAYS,
+    eps_digit_shift_suspect,
+    has_reported_actual,
+    next_pending_earnings,
     parse_fmp_timing,
     timing_display,
+    within_reschedule_window,
     UNSPECIFIED,
 )
 
 logger = logging.getLogger(__name__)
 
 # ── In-memory cache ────────────────────────────────────────────────
-_cache: Dict[str, Tuple[float, Any]] = {}
+# (written_at, value, ttl_seconds) — the TTL is per entry so a DEGRADED build can be
+# held for a minute (absorbing a retry storm) without living the full 5 minutes.
+_cache: Dict[str, Tuple[float, Any, float]] = {}
 _CACHE_TTL = 300  # 5 minutes
+_DEGRADED_CACHE_TTL = 60
+
+# Stored INSIDE earnings_cache.response_json (stripped on read; not a response field).
+# Bump it whenever a stored value's computation changes, so rows written before a deploy
+# are rebuilt on their next read instead of being served for up to 24h. That is the only
+# way to evict an already-poisoned row: AVGO's Q2 '26 dropped-digit revenue (-89.97%)
+# sat in this tier with no version to invalidate it.
+#   1 (2026-09-30): revenue reconciliation against the filed income statement,
+#     has_estimate, GAAP fallbacks without a surprise, one-to-one announcement
+#     assignment, just-reported quarter synthesis, anchored forecast labels.
+#   2 (2026-09-30, round 2): an ambiguous day-98-110 release is no longer synthesized as
+#     the next (unreported) quarter; a dropped-digit feed revenue with no consensus loses
+#     to the filing; a just-reported revenue >50% off consensus is omitted; the next date
+#     keeps a 30-45-day-later real report (21-day reschedule window). A v1 row written by
+#     any pre-deploy build would otherwise serve those wrong values for up to 24h.
+#   3 (2026-09-30, round 3): an EPS actual with the digit-shift signature
+#     (`eps_digit_shift_suspect`, now a sign-aware filing tie-break) is OMITTED on every
+#     path — the matched announcement (it used to show the filed GAAP EPS) and the
+#     just-reported quarter (it used to ship a "-90% miss"); a late release with an
+#     earlier still-unreported estimate quarter goes to a quarter only on evidence.
+_EARNINGS_PAYLOAD_VERSION = 3
 
 
 def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
         return None
-    ts, value = entry
-    if time.time() - ts > _CACHE_TTL:
+    ts, value, ttl = entry
+    if time.time() - ts > ttl:
         del _cache[key]
         return None
     return value
@@ -60,9 +89,9 @@ def _cache_get(key: str) -> Optional[Any]:
 _CACHE_MAX_ENTRIES = 1024
 
 
-def _cache_set(key: str, value: Any) -> None:
+def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
     _cache.pop(key, None)
-    _cache[key] = (time.time(), value)
+    _cache[key] = (time.time(), value, _CACHE_TTL if ttl is None else ttl)
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
@@ -241,41 +270,699 @@ def _infer_fiscal_label(est_date: str, fiscal_month_map: Dict[int, str]) -> str:
     return f"{period} '{yr}"
 
 
+def _parse_day(value: Any) -> Optional[datetime]:
+    """``yyyy-MM-dd`` (any suffix) → datetime, or None for a missing/malformed date."""
+    try:
+        return datetime.strptime(str(value or "")[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _row_key(rec: dict) -> str:
+    return str(rec.get("date") or "")[:10]
+
+
+# ── Announcement ↔ quarter pairing ─────────────────────────────────
+# No company releases a quarter within a few days of closing it (Oracle, among the
+# fastest, reports 9-10 days after quarter end). An announcement dated within this many
+# days AFTER a period end is therefore the PREVIOUS quarter's late release, never this
+# quarter's own — a December filer's Q4 released 2026-04-02 (92 days, a non-accelerated
+# filer near its 10-K deadline) used to be paired with Q1 (ended 2026-03-31, two days
+# earlier), so Q1 showed Q4's numbers and the real Q1 release was never used.
+_MIN_ANNOUNCE_LAG_DAYS = 7
+_ANNOUNCE_WINDOW_DAYS = 80
+# A late release (NT 10-K, non-accelerated filer) can land past the 80-day window; it is
+# offered to its quarter up to this lag, but never once it is far enough past the NEXT
+# period end to be that quarter's own release.
+_LATE_RELEASE_MAX_DAYS = 110
+_IMPLIED_QUARTER_DAYS = 91
+_MAX_QUARTER_SPAN_DAYS = 120
+# An analyst estimate within this many days of a reported period end is that quarter.
+_COVERED_TOLERANCE_DAYS = 15
+# With no reported period on file at all, estimates older than this are not "upcoming".
+_UNREPORTED_GRACE_DAYS = 100
+_DAYS_PER_QUARTER = 91.3
+
+
+def _prefer_reported(rows: List[dict]) -> Optional[dict]:
+    """First row carrying a reported actual, else the first row (a pending placeholder)."""
+    for rec in rows:
+        if has_reported_actual(rec):
+            return rec
+    return rows[0] if rows else None
+
+
 def _match_announcement(
-    period_end: str, ec_sorted: List[dict], max_days: int = 80
+    period_end: str,
+    ec_sorted: List[dict],
+    max_days: int = _ANNOUNCE_WINDOW_DAYS,
+    consumed: Optional[set] = None,
 ) -> Optional[dict]:
     """Pair an income quarter (by fiscal PERIOD-END) with its earnings announcement:
-    the FIRST earnings-calendar record strictly AFTER the period end, within
-    ``max_days``.
+    a record dated ``_MIN_ANNOUNCE_LAG_DAYS``..``max_days`` days after the period end,
+    preferring one that carries a reported actual.
 
-    An earnings announcement lands ~20-50 days after the quarter-end, and the NEXT
-    quarter's announcement is ~130 days out — so "first record after the period end,
-    within ~80 days" is unambiguous. Crucially it's robust to WHEN the 10-Q/10-K is
-    filed. Matching the filing/accepted date instead broke both ways:
+    An earnings announcement lands ~10-50 days after the quarter-end, and the NEXT
+    quarter's announcement is ~100-130 days out — so "after the period end, within ~80
+    days" is unambiguous. Crucially it's robust to WHEN the 10-Q/10-K is filed.
+    Matching the filing/accepted date instead broke both ways:
       * a tight window MISSED a fiscal-Q4 whose 10-K lags the release (Oracle FY26 Q4:
         announced 2026-06-10, 10-K accepted 2026-06-22) → the quarter fell to the GAAP
         income-statement EPS compared against a non-GAAP estimate = a bogus "miss";
       * a loose window CROSS-MATCHED a very late 10-K into the NEXT quarter's
         announcement (Disney files its 10-K ~Jan for a Sep FY-end → Q4 grabbed Q1's
         numbers, and both showed the same figure).
-    ``ec_sorted`` must be ascending by ``date``.
+    Preferring a REPORTED row: across a reschedule FMP can keep the original date as a
+    pending row beside the real one. Taking whichever came first paired the quarter with
+    the empty placeholder, so its EPS fell to GAAP-vs-non-GAAP and showed a fake miss.
+    ``consumed`` (row dates already paired with another quarter) keeps the pairing
+    one-to-one. ``ec_sorted`` must be ascending by ``date``.
     """
-    try:
-        pe = datetime.strptime(period_end[:10], "%Y-%m-%d")
-    except Exception:
+    pe = _parse_day(period_end)
+    if pe is None:
         return None
+    rows: List[dict] = []
     for rec in ec_sorted:
-        d = (rec.get("date") or "")[:10]
-        try:
-            dd = datetime.strptime(d, "%Y-%m-%d")
-        except Exception:
+        dd = _parse_day(rec.get("date"))
+        if dd is None:
             continue
-        if dd <= pe:
+        lag = (dd - pe).days
+        if lag < _MIN_ANNOUNCE_LAG_DAYS:
             continue
-        # First announcement after the period end: it's this quarter's iff it lands
-        # inside the window (else this quarter simply has no announcement on file).
-        return rec if (dd - pe).days <= max_days else None
+        if lag > max_days:
+            break
+        if consumed and _row_key(rec) in consumed:
+            continue
+        rows.append(rec)
+    return _prefer_reported(rows)
+
+
+def _match_late_release(
+    pe: datetime, next_pe: datetime, ec_sorted: List[dict], consumed: set
+) -> Optional[dict]:
+    """A release past the normal window, still offered to quarter ``pe`` because it
+    lands too soon after ``next_pe`` to be the NEXT quarter's own release."""
+    rows: List[dict] = []
+    for rec in ec_sorted:
+        dd = _parse_day(rec.get("date"))
+        if dd is None:
+            continue
+        lag = (dd - pe).days
+        if lag <= _ANNOUNCE_WINDOW_DAYS:
+            continue
+        if lag > _LATE_RELEASE_MAX_DAYS or (dd - next_pe).days >= _MIN_ANNOUNCE_LAG_DAYS:
+            break
+        if _row_key(rec) in consumed:
+            continue
+        rows.append(rec)
+    return _prefer_reported(rows)
+
+
+# A REPORTED release past a quarter's late window but still within _LATE_RELEASE_MAX_DAYS
+# of its period end (day ~98-110) is AMBIGUOUS: a late fiscal Q4 (an NT 10-K filer at day
+# ~100) or the NEXT quarter's fast release (a bank's day-13 Q1 is day 104). Dates alone
+# cannot tell them apart, so it goes to a quarter only on evidence (_late_release_owner),
+# and nobody uses it without. Guessing "next" synthesized an unreported Q1 from Q4's numbers
+# (Phase A2) and dropped the real pending Q1 date; guessing "this" would hand a bank's Q1 to
+# Q4 whenever the feed has a hole at Q4.
+_EST_MATCH_REL_TOL = 0.10    # the row's consensus within 10% of a quarter's analyst average
+_EST_MATCH_MARGIN = 2.0      # ... and more than 2x nearer it than the other quarter's
+
+
+def _estimate_near(
+    fiscal_date: str,
+    est_by_date: Optional[Dict[str, dict]],
+    tolerance_days: int = _COVERED_TOLERANCE_DAYS,
+) -> Optional[dict]:
+    """The analyst-estimate row for a fiscal period end: exact date, else the nearest
+    within ``tolerance_days`` (earlier first on a tie)."""
+    if not est_by_date:
+        return None
+    if fiscal_date in est_by_date:
+        return est_by_date[fiscal_date]
+    dt = _parse_day(fiscal_date)
+    if dt is None:
+        return None
+    for delta in range(1, tolerance_days + 1):
+        for d in (dt - timedelta(days=delta), dt + timedelta(days=delta)):
+            k = d.strftime("%Y-%m-%d")
+            if k in est_by_date:
+                return est_by_date[k]
     return None
+
+
+def _consensus_vote(
+    rec: dict, est_this: Optional[dict], est_next: Optional[dict]
+) -> Optional[str]:
+    """``"this"`` / ``"next"`` when the row's OWN consensus (``epsEstimated``,
+    ``revenueEstimated``) clearly matches one quarter's analyst average; None when it is
+    missing, equal for both, halfway, far from both — or when EPS and revenue disagree."""
+    votes: set = set()
+    for row_field, avg_field in (("epsEstimated", "epsAvg"), ("revenueEstimated", "revenueAvg")):
+        row_v = _safe_float(rec, row_field)
+        a = _safe_float(est_this, avg_field) if est_this else None
+        b = _safe_float(est_next, avg_field) if est_next else None
+        if row_v is None or a is None or b is None:
+            continue
+        da, db = abs(row_v - a), abs(row_v - b)
+        if da * _EST_MATCH_MARGIN < db and da <= _EST_MATCH_REL_TOL * abs(a):
+            votes.add("this")
+        elif db * _EST_MATCH_MARGIN < da and db <= _EST_MATCH_REL_TOL * abs(b):
+            votes.add("next")
+    return votes.pop() if len(votes) == 1 else None
+
+
+def _late_release_owner(
+    rec: dict,
+    pe: datetime,
+    next_pe: datetime,
+    ec_sorted: List[dict],
+    est_this: Optional[dict],
+    est_next: Optional[dict],
+    next_reported: bool,
+) -> Optional[str]:
+    """Whose release is ``rec``, an ambiguous row 98-110 days after quarter ``pe``?
+
+    * ``"this"`` — quarter ``pe``'s late release: its consensus matches ``pe``'s analyst
+      average, or the NEXT quarter's own release is listed in that quarter's window more
+      than ``STALE_RESCHEDULE_DAYS`` after it (a nearer row is a reschedule duplicate, not
+      evidence). When the next quarter already has an income row it has reported, so only
+      a REPORTED later row counts.
+    * ``"next"`` — its consensus matches the next quarter's and no later row contradicts it.
+    * None — ambiguous: no quarter may use it.
+    """
+    dd = _parse_day(rec.get("date"))
+    if dd is None:
+        return None
+    vote = _consensus_vote(rec, est_this, est_next)
+    later = False
+    for other in ec_sorted:
+        od = _parse_day(other.get("date"))
+        if od is None or other is rec:
+            continue
+        if next_reported and not has_reported_actual(other):
+            continue
+        if (od - dd).days > STALE_RESCHEDULE_DAYS and (
+            _MIN_ANNOUNCE_LAG_DAYS <= (od - next_pe).days <= _ANNOUNCE_WINDOW_DAYS
+        ):
+            later = True
+            break
+    if vote == "next":
+        return None if later else "next"
+    if vote == "this" or later:
+        return "this"
+    return None
+
+
+def _claim_ambiguous_release(
+    key: str,
+    pe: datetime,
+    next_pe: datetime,
+    next_reported: bool,
+    ec_sorted: List[dict],
+    consumed: set,
+    est_by_date: Optional[Dict[str, dict]],
+    ticker: str,
+) -> Optional[dict]:
+    """The first unconsumed REPORTED row past quarter ``pe``'s late window (and within
+    ``_LATE_RELEASE_MAX_DAYS``) that the evidence gives to ``pe``, else None."""
+    est_this = _estimate_near(key, est_by_date)
+    est_next = _estimate_near(next_pe.strftime("%Y-%m-%d"), est_by_date)
+    for rec in ec_sorted:
+        dd = _parse_day(rec.get("date"))
+        if dd is None:
+            continue
+        lag = (dd - pe).days
+        if lag <= _ANNOUNCE_WINDOW_DAYS:
+            continue
+        if lag > _LATE_RELEASE_MAX_DAYS:
+            break
+        if (
+            (dd - next_pe).days < _MIN_ANNOUNCE_LAG_DAYS
+            or _row_key(rec) in consumed
+            or not has_reported_actual(rec)
+        ):
+            continue
+        owner = _late_release_owner(
+            rec, pe, next_pe, ec_sorted, est_this, est_next, next_reported,
+        )
+        if owner == "this":
+            logger.warning(
+                "earnings %s: release %s (%sd after %s) assigned to %s as its late release "
+                "— past the late window, but the evidence (consensus / the next quarter's "
+                "own later release) says it is not the next quarter's",
+                ticker, _row_key(rec), lag, key, key,
+            )
+            return rec
+    return None
+
+
+def _assign_announcements(
+    income_sorted: List[dict],
+    ec_sorted: List[dict],
+    est_by_date: Optional[Dict[str, dict]] = None,
+    *,
+    ticker: str = "",
+) -> Dict[str, dict]:
+    """One-to-one: each income period end (``yyyy-MM-dd``) → its announcement row.
+
+    Walks the quarters oldest first and never hands one row to two quarters, so a late
+    Q4 release can no longer be read as the next quarter's numbers (both quarters used
+    to show the same figures, or the later quarter showed the earlier one's). A quarter
+    with nothing in its window or its late window may still claim an AMBIGUOUS row
+    (98-110 days) on evidence — see ``_late_release_owner``; ``est_by_date`` (analyst
+    estimates by period end) feeds the consensus half of that evidence.
+    """
+    pes: List[Tuple[str, datetime]] = []
+    seen: set = set()
+    for rec in income_sorted:
+        key = _row_key(rec)
+        dt = _parse_day(key)
+        if dt is None or key in seen:
+            continue
+        seen.add(key)
+        pes.append((key, dt))
+
+    assigned: Dict[str, dict] = {}
+    consumed: set = set()
+    for i, (key, pe) in enumerate(pes):
+        match = _match_announcement(key, ec_sorted, consumed=consumed)
+        if match is None:
+            # A later income row means the quarter after this one has reported (even when
+            # a hole in history makes its period end implied).
+            next_reported = i + 1 < len(pes)
+            next_pe = pes[i + 1][1] if next_reported else None
+            if next_pe is None or (next_pe - pe).days > _MAX_QUARTER_SPAN_DAYS:
+                next_pe = pe + timedelta(days=_IMPLIED_QUARTER_DAYS)
+            match = _match_late_release(pe, next_pe, ec_sorted, consumed)
+            if match is None:
+                match = _claim_ambiguous_release(
+                    key, pe, next_pe, next_reported, ec_sorted, consumed, est_by_date,
+                    ticker,
+                )
+        if match is not None:
+            assigned[key] = match
+            consumed.add(_row_key(match))
+    return assigned
+
+
+def _pair_unconsumed_announcements(
+    ec_sorted: List[dict],
+    consumed: set,
+    newest_end: datetime,
+    estimate_keys: List[str],
+    today_str: str,
+    *,
+    newest_owned: bool = True,
+    est_by_date: Optional[Dict[str, dict]] = None,
+    ticker: str = "",
+) -> List[Tuple[str, dict]]:
+    """Reported announcements that no income quarter claimed yet → ``(period_end, row)``.
+
+    A company announces days (a 10-Q) to weeks (a Q4 10-K) before FMP carries the filed
+    income row. Only income rows produced history, so in that gap the quarter it had
+    ALREADY reported rendered as a gray pending estimate and its announced actual was
+    dropped. The period end is the latest analyst-estimate date the release follows by
+    ``_MIN_ANNOUNCE_LAG_DAYS``..``_ANNOUNCE_WINDOW_DAYS`` days (one-to-one), else the
+    newest period end + one quarter. A row dated on/before the newest filed period end
+    is a stale duplicate, never a new quarter.
+
+    ``newest_owned`` False (the newest filed quarter has no REPORTED announcement): a row
+    within ``_LATE_RELEASE_MAX_DAYS`` of its period end may be THAT quarter's late release
+    (an NT 10-K Q4 at day ~100), so it becomes the next quarter only when the evidence
+    says so (``_late_release_owner`` → "next"). Otherwise an unreported Q1 was rendered as
+    reported with Q4's numbers, and the real pending Q1 date was dropped as stale. The
+    same evidence decides when an EARLIER estimate quarter (no income row, no release
+    used) lies between the newest filed quarter and the chosen period end: the row goes
+    to that quarter ("this"), stays with the later one ("next"), or to none.
+    """
+    est_dts = sorted({d for d in (_parse_day(k) for k in estimate_keys) if d is not None})
+    used_periods: set = set()
+    last_end = newest_end
+    implied_next = newest_end + timedelta(days=_IMPLIED_QUARTER_DAYS)
+    newest_key = newest_end.strftime("%Y-%m-%d")
+    out: List[Tuple[str, dict]] = []
+    for rec in ec_sorted:
+        key = _row_key(rec)
+        dd = _parse_day(key)
+        if (
+            dd is None
+            or key in consumed
+            or key > today_str
+            or dd <= newest_end
+            or not has_reported_actual(rec)
+        ):
+            continue
+        if not newest_owned and (dd - newest_end).days <= _LATE_RELEASE_MAX_DAYS:
+            owner = _late_release_owner(
+                rec, newest_end, implied_next, ec_sorted,
+                _estimate_near(newest_key, est_by_date),
+                _estimate_near(implied_next.strftime("%Y-%m-%d"), est_by_date),
+                False,
+            )
+            if owner != "next":
+                logger.warning(
+                    "earnings %s: release %s is %sd after the newest filed quarter %s, "
+                    "which has no reported announcement — it may be that quarter's late "
+                    "release, so it is NOT shown as the next quarter (owner=%s)",
+                    ticker, key, (dd - newest_end).days, newest_key, owner,
+                )
+                continue
+        candidates = [
+            e for e in est_dts
+            if e not in used_periods
+            and (e - newest_end).days > _COVERED_TOLERANCE_DAYS
+            and _MIN_ANNOUNCE_LAG_DAYS <= (dd - e).days <= _ANNOUNCE_WINDOW_DAYS
+        ]
+        if candidates:
+            pe = max(candidates)
+        else:
+            pe = last_end + timedelta(days=_IMPLIED_QUARTER_DAYS)
+            if pe in used_periods or not (
+                _MIN_ANNOUNCE_LAG_DAYS <= (dd - pe).days <= _ANNOUNCE_WINDOW_DAYS
+            ):
+                continue
+        # An estimate quarter strictly between the newest filed quarter and `pe` that no
+        # release has been used for yet has not reported, so this row may be ITS late
+        # release: an NT 10-K Q4 at day ~100 while FMP's newest income row is still Q3
+        # (Q3 owns its release, so the gate above never runs) rendered Q1 as REPORTED with
+        # Q4's numbers, and Q4 vanished. Only evidence moves it (`_late_release_owner` for
+        # the nearest such quarter against `pe`): "this" → that quarter; "next" → `pe`;
+        # None → no quarter uses it. Deliberately not capped at _LATE_RELEASE_MAX_DAYS: a
+        # day-111+ Q4 would otherwise still be pinned onto Q1.
+        earlier = [
+            e for e in est_dts
+            if e not in used_periods
+            and (e - newest_end).days > _COVERED_TOLERANCE_DAYS
+            and (pe - e).days > _COVERED_TOLERANCE_DAYS
+        ]
+        if earlier:
+            e_prev = max(earlier)
+            e_prev_key, pe_key = e_prev.strftime("%Y-%m-%d"), pe.strftime("%Y-%m-%d")
+            owner = _late_release_owner(
+                rec, e_prev, pe, ec_sorted,
+                _estimate_near(e_prev_key, est_by_date), _estimate_near(pe_key, est_by_date),
+                False,
+            )
+            if owner == "this":
+                logger.warning(
+                    "earnings %s: release %s (%sd after %s) is the late release of %s, "
+                    "which has no income row yet — not %s's result (consensus / %s's own "
+                    "later release)",
+                    ticker, key, (dd - e_prev).days, e_prev_key, e_prev_key, pe_key, pe_key,
+                )
+                pe = e_prev
+            elif owner != "next":
+                logger.warning(
+                    "earnings %s: release %s is %sd after %s, an earlier quarter with no "
+                    "income row and no release yet — it may be that quarter's late "
+                    "release or %s's, so it is used by no quarter",
+                    ticker, key, (dd - e_prev).days, e_prev_key, pe_key,
+                )
+                continue
+        used_periods.add(pe)
+        last_end = max(last_end, pe)
+        out.append((pe.strftime("%Y-%m-%d"), rec))
+    return out
+
+
+# ── Forecast labels ────────────────────────────────────────────────
+
+def _forecast_anchor(income_sorted: List[dict]) -> Optional[Tuple[datetime, int, int]]:
+    """``(period_end, quarter, fiscal_year)`` of the newest income row carrying FMP's own
+    ``fiscalYear`` and a Q1-Q4 period — the label every forecast steps forward from."""
+    for rec in reversed(income_sorted):
+        period = str(rec.get("period") or "")
+        if len(period) != 2 or period[0] != "Q" or period[1] not in "1234":
+            continue
+        fy_raw = str(rec.get("fiscalYear") or "").strip()[:4]
+        if len(fy_raw) != 4 or not fy_raw.isdigit():
+            continue
+        dt = _parse_day(rec.get("date"))
+        if dt is None:
+            continue
+        return dt, int(period[1]), int(fy_raw)
+    return None
+
+
+def _forecast_label(
+    est_date: str,
+    anchor: Optional[Tuple[datetime, int, int]],
+    fiscal_month_map: Dict[int, str],
+) -> str:
+    """Label a quarter that has no income row yet (a forecast or a just-reported one).
+
+    Steps forward from the newest HISTORICAL label — n = round(days / 91.3) quarters,
+    rolling the fiscal year after Q4 — instead of re-deriving the fiscal year from a
+    formula. The formula assumed a fiscal year is named for the calendar year it ENDS
+    in, so a start-year-named filer (fiscalYear 2025 for the year ending 2026-02-01)
+    jumped a year at the actual→forecast boundary ("Q2 '26" then "Q3 '27"), and a
+    December 52/53-week filer whose quarter ends spill into April/October got its
+    forecasts a year ahead (and two "Q1 '28" columns). Anchoring follows whatever
+    convention FMP's own fiscalYear uses. Falls back to the month-map inference only
+    with no anchor, or for a date not at least one quarter past it.
+    """
+    if anchor is not None:
+        dt = _parse_day(est_date)
+        if dt is not None:
+            d0, q0, fy0 = anchor
+            n = round((dt - d0).days / _DAYS_PER_QUARTER)
+            if n >= 1:
+                idx = (q0 - 1) + n
+                return f"Q{idx % 4 + 1} '{(fy0 + idx // 4) % 100:02d}"
+    return _infer_fiscal_label(est_date, fiscal_month_map)
+
+
+# ── Revenue plausibility ───────────────────────────────────────────
+# The earnings feed's revenueActual is a SECOND copy of a figure the filed income
+# statement also carries, and FMP edits feed rows after the fact. AVGO Q2 FY26 (period
+# end 2026-05-03) was served with revenueActual 2,218,700,000 — a dropped digit of the
+# filed 22,187,000,000 — against a 22,130,300,000 consensus: a +0.26% beat rendered as a
+# -89.97% miss and frozen in both cache tiers. Banks are the reason the filed figure
+# cannot simply win: their feed revenue is NET revenue, a different definition from the
+# income statement's, and agrees with its own consensus.
+_FEED_FILED_DISAGREE = 0.25           # |feed - filed| / filed above this = a disagreement
+_MAX_PLAUSIBLE_SURPRISE_PCT = 50.0    # a revenue surprise beyond this needs corroboration
+_ESTIMATE_GLITCH_RATIO = 3.0          # feed consensus vs analyst revenueAvg
+# Feed / filed revenue outside this band is a unit or digit glitch, not a definition gap:
+# a bank's net-vs-gross ratio sits well inside it (a small bank's gross can exceed 2x its
+# net), while a dropped or extra digit (0.1x / 10x) does not.
+_FEED_FILED_MIN_RATIO = 0.2
+_FEED_FILED_MAX_RATIO = 5.0
+
+
+class _Reconciled(NamedTuple):
+    actual: float
+    estimate: float
+    surprise: Optional[float]
+    has_estimate: bool
+
+
+def _no_comparable_consensus(actual: float) -> _Reconciled:
+    # estimate_value is a required float (shipped iOS decodes a non-optional Double), so
+    # it repeats the actual; has_estimate=False is what tells iOS there was no consensus.
+    return _Reconciled(actual, actual, None, False)
+
+
+def _rel_gap(value: float, reference: float) -> float:
+    return abs(value - reference) / abs(reference) if reference else math.inf
+
+
+def _is_usd_statement(rec: dict) -> bool:
+    """Income rows carry FMP's ``reportedCurrency``; consensus figures are USD. A
+    missing currency is treated as USD (the common case for US filers)."""
+    return str(rec.get("reportedCurrency") or "").strip().upper() in ("", "USD")
+
+
+def _reconcile_revenue(
+    feed_actual: Optional[float],
+    feed_est: Optional[float],
+    filed: Optional[float],
+    filed_usd: bool,
+    analyst_avg: Optional[float],
+    *,
+    ticker: str,
+    fiscal_key: str,
+    omit_uncorroborated_outlier: bool = False,
+) -> Optional[_Reconciled]:
+    """Revenue actual / estimate / surprise for one quarter, or None with no actual (or
+    an omitted outlier, below).
+
+    * ``feed_actual`` present and the filed (USD) revenue disagrees by >25%: take
+      whichever is CLOSER to the consensus (the AVGO dropped digit loses to the filing;
+      a bank's net-revenue feed figure keeps its own consensus). If neither lies within
+      50% of the consensus, keep the feed value with no surprise.
+    * ``feed_actual`` present with NO feed consensus: a feed/filed ratio outside
+      [0.2, 5] is a digit/unit glitch and the filing wins; a smaller (>25%) disagreement
+      is decided by the analyst ``revenueAvg`` (closer wins, if within 50%). When the
+      filing wins, the quarter is reconciled exactly like one with no feed revenue.
+      Before, the feed value returned before any check and a 10x-off figure was charted.
+    * ``omit_uncorroborated_outlier`` (the just-reported quarter, no filing yet): a feed
+      actual more than 50% off its consensus is OMITTED (None), never charted — and never
+      emitted with a null actual, which iOS reads as an upcoming quarter.
+    * A surprise beyond ±50% stands only when corroborated: the filed USD revenue agrees
+      with the actual AND the feed consensus is not >3x off the analyst ``revenueAvg``
+      for the quarter (a dropped digit in the ESTIMATE otherwise shipped as +900%).
+    * ``feed_actual`` missing → cross-source: filed revenue against a consensus from
+      another feed. Compared only for a USD statement and only within ±50%; a foreign
+      filer's TWD/JPY revenue against a USD consensus, or a bank's gross revenue against
+      a net-revenue consensus, is not a surprise.
+    Every intervention logs a WARNING naming the ticker, quarter and all the numbers.
+    """
+    if feed_actual is None:
+        if filed is None:
+            return None
+        if feed_est is None:
+            return _no_comparable_consensus(filed)
+        if not filed_usd:
+            logger.warning(
+                "earnings revenue %s %s: no surprise — filed revenue %s is not USD, "
+                "consensus %s is", ticker, fiscal_key, filed, feed_est,
+            )
+            return _no_comparable_consensus(filed)
+        surprise = _compute_surprise(filed, feed_est)
+        if surprise is not None and abs(surprise) > _MAX_PLAUSIBLE_SURPRISE_PCT:
+            logger.warning(
+                "earnings revenue %s %s: no surprise — filed revenue %s vs a consensus "
+                "%s from another feed is %s%% (definition/currency mismatch, not a result)",
+                ticker, fiscal_key, filed, feed_est, surprise,
+            )
+            return _no_comparable_consensus(filed)
+        return _Reconciled(filed, feed_est, surprise, True)
+
+    filed_ok = filed is not None and filed_usd and filed > 0
+    if feed_est is None:
+        if filed_ok and _rel_gap(feed_actual, filed) > _FEED_FILED_DISAGREE:
+            ratio = feed_actual / filed
+            if not (_FEED_FILED_MIN_RATIO <= ratio <= _FEED_FILED_MAX_RATIO):
+                logger.warning(
+                    "earnings revenue %s %s: feed revenueActual %s is %.3gx the filed "
+                    "revenue %s and the feed has no consensus — a digit/unit glitch; "
+                    "using the filing", ticker, fiscal_key, feed_actual, ratio, filed,
+                )
+                return _reconcile_revenue(
+                    None, analyst_avg, filed, filed_usd, analyst_avg,
+                    ticker=ticker, fiscal_key=fiscal_key,
+                )
+            if analyst_avg is not None and analyst_avg > 0:
+                gap_filed = _rel_gap(filed, analyst_avg)
+                if (
+                    gap_filed < _rel_gap(feed_actual, analyst_avg)
+                    and gap_filed <= _MAX_PLAUSIBLE_SURPRISE_PCT / 100
+                ):
+                    logger.warning(
+                        "earnings revenue %s %s: feed revenueActual %s disagrees with "
+                        "filed revenue %s and the feed has no consensus; the filing is "
+                        "closer to the analyst revenueAvg %s — using it",
+                        ticker, fiscal_key, feed_actual, filed, analyst_avg,
+                    )
+                    return _reconcile_revenue(
+                        None, analyst_avg, filed, filed_usd, analyst_avg,
+                        ticker=ticker, fiscal_key=fiscal_key,
+                    )
+        return _no_comparable_consensus(feed_actual)
+
+    if filed_ok and _rel_gap(feed_actual, filed) > _FEED_FILED_DISAGREE:
+        gap_feed = _rel_gap(feed_actual, feed_est)
+        gap_filed = _rel_gap(filed, feed_est)
+        if min(gap_feed, gap_filed) > _MAX_PLAUSIBLE_SURPRISE_PCT / 100:
+            logger.warning(
+                "earnings revenue %s %s: feed %s and filed %s disagree and NEITHER is "
+                "within 50%% of consensus %s — keeping the feed value, no surprise",
+                ticker, fiscal_key, feed_actual, filed, feed_est,
+            )
+            return _no_comparable_consensus(feed_actual)
+        if gap_filed < gap_feed:
+            logger.warning(
+                "earnings revenue %s %s: feed revenueActual %s disagrees with filed "
+                "revenue %s; the filing is closer to consensus %s — using it",
+                ticker, fiscal_key, feed_actual, filed, feed_est,
+            )
+            return _Reconciled(filed, feed_est, _compute_surprise(filed, feed_est), True)
+        # The feed agrees with its own consensus: a definitional difference (a bank's
+        # net revenue), not a glitch. INFO, not WARNING — it fires every quarter for
+        # every bank and would drown the real interventions.
+        logger.info(
+            "earnings revenue %s %s: feed %s differs from filed %s but matches consensus "
+            "%s — keeping the feed value", ticker, fiscal_key, feed_actual, filed, feed_est,
+        )
+        return _Reconciled(
+            feed_actual, feed_est, _compute_surprise(feed_actual, feed_est), True
+        )
+
+    surprise = _compute_surprise(feed_actual, feed_est)
+    if surprise is not None and abs(surprise) > _MAX_PLAUSIBLE_SURPRISE_PCT:
+        if not filed_ok:
+            # The analyst revenueAvg can still corroborate the ACTUAL (the feed's own
+            # consensus being the glitched figure): then it is kept, without a surprise.
+            corroborated = (
+                analyst_avg is not None
+                and analyst_avg != 0
+                and _rel_gap(feed_actual, analyst_avg) <= _MAX_PLAUSIBLE_SURPRISE_PCT / 100
+            )
+            if omit_uncorroborated_outlier and not corroborated:
+                logger.warning(
+                    "earnings revenue %s %s: OMITTED — feed revenueActual %s is %s%% off "
+                    "consensus %s and no filing exists yet to corroborate it; not charted "
+                    "until the filed figure lands", ticker, fiscal_key, feed_actual,
+                    surprise, feed_est,
+                )
+                return None
+            logger.warning(
+                "earnings revenue %s %s: no surprise — %s%% (feed %s vs consensus %s) "
+                "has no filed USD revenue to corroborate it (filed=%s usd=%s)",
+                ticker, fiscal_key, surprise, feed_actual, feed_est, filed, filed_usd,
+            )
+            return _no_comparable_consensus(feed_actual)
+        if analyst_avg is not None and analyst_avg != 0:
+            ratio = feed_est / analyst_avg
+            if ratio <= 0 or ratio > _ESTIMATE_GLITCH_RATIO or ratio < 1 / _ESTIMATE_GLITCH_RATIO:
+                logger.warning(
+                    "earnings revenue %s %s: no surprise — feed consensus %s is %.2fx the "
+                    "analyst revenueAvg %s (a glitched estimate, not a %s%% result)",
+                    ticker, fiscal_key, feed_est, ratio, analyst_avg, surprise,
+                )
+                return _no_comparable_consensus(feed_actual)
+    return _Reconciled(feed_actual, feed_est, surprise, True)
+
+
+def _quarter(
+    label: str,
+    actual: Optional[float],
+    estimate: float,
+    surprise: Optional[float],
+    fiscal_key: str,
+    has_estimate: bool,
+) -> EarningsQuarterSchema:
+    return EarningsQuarterSchema(
+        quarter=label,
+        actual_value=actual,
+        estimate_value=estimate,
+        surprise_percent=surprise,
+        fiscal_date=fiscal_key,
+        has_estimate=has_estimate,
+    )
+
+
+def _checked_leg(ticker: str, leg: str, payload: Any, degraded: List[str]) -> List[dict]:
+    """A gather leg as a list of dicts. A raised leg or a non-list body is recorded in
+    ``degraded`` (the build is then PARTIAL: never persisted, see ``get_earnings``); a
+    genuinely EMPTY list — a new listing — is not a failure."""
+    if isinstance(payload, BaseException):
+        logger.error(
+            "earnings %s: %s leg failed — %s: %s; build is DEGRADED",
+            ticker, leg, type(payload).__name__, payload,
+        )
+        degraded.append(leg)
+        return []
+    if not isinstance(payload, list):
+        logger.warning(
+            "earnings %s: %s leg returned %s, not a list; build is DEGRADED",
+            ticker, leg, type(payload).__name__,
+        )
+        degraded.append(leg)
+        return []
+    return [r for r in payload if isinstance(r, dict)]
 
 
 # ── Service ────────────────────────────────────────────────────────
@@ -332,11 +1019,22 @@ class EarningsService:
             next_earnings = (
                 result.next_earnings_date.date if result.next_earnings_date else None
             )
-            loop.run_in_executor(
-                None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
-            )
-
-            _cache_set(cache_key, result)
+            if result.degraded:
+                # A PARTIAL build (an upstream leg failed) is never persisted: the 24h tier
+                # used to freeze it for every user — an income 429 left only estimates, a
+                # swallowed earnings-feed 429 turned every quarter into a GAAP-vs-non-GAAP
+                # "miss" — and the report collector then baked it into a paid report. A
+                # short in-memory entry still absorbs the retry storm.
+                logger.warning(
+                    "Earnings NOT persisted for %s (degraded: %s) — in-memory for %ss only",
+                    ticker, ", ".join(result.degraded), _DEGRADED_CACHE_TTL,
+                )
+                _cache_set(cache_key, result, ttl=_DEGRADED_CACHE_TTL)
+            else:
+                loop.run_in_executor(
+                    None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
+                )
+                _cache_set(cache_key, result)
             if not future.done():
                 future.set_result(result)
             return result
@@ -385,6 +1083,8 @@ class EarningsService:
             next_earnings = entry.get("next_earnings_date")
             if next_earnings:
                 today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                # `>=`, deliberately: an entry built on report day carries TODAY as its
+                # next date, and must keep rebuilding so the after-close actuals appear.
                 if today_str >= next_earnings:
                     logger.info(
                         f"Earnings Supabase cache STALE (past earnings "
@@ -392,7 +1092,28 @@ class EarningsService:
                     )
                     return None
 
-            return EarningsResponse(**entry["response_json"])
+            json_data = entry.get("response_json") or {}
+            # A VERSION, so a computation fix evicts rows cached before the deploy (see
+            # _EARNINGS_PAYLOAD_VERSION). A row from before versioning has none.
+            version = json_data.get("payload_version")
+            if version != _EARNINGS_PAYLOAD_VERSION:
+                logger.info(
+                    "Earnings Supabase cache STALE for %s (payload_version=%r, want %d) "
+                    "— rebuilding", ticker, version, _EARNINGS_PAYLOAD_VERSION,
+                )
+                return None
+            if json_data.get("degraded"):
+                # Never written by this code (degraded builds are not persisted); a row
+                # that carries reasons anyway must not be served for 24h.
+                logger.warning(
+                    "Earnings Supabase row for %s is marked degraded %s — ignoring it",
+                    ticker, json_data.get("degraded"),
+                )
+                return None
+            # Not a response field; strip it so the model never depends on extras being
+            # ignored.
+            json_data = {k: v for k, v in json_data.items() if k != "payload_version"}
+            return EarningsResponse(**json_data)
         except Exception as e:
             logger.warning(f"Earnings Supabase cache check failed for {ticker}: {e}")
             return None
@@ -404,11 +1125,23 @@ class EarningsService:
         next_earnings: Optional[str],
     ) -> None:
         """Write-through to the Supabase tier. Best-effort: logged, never fatal."""
+        if result.degraded:
+            # get_earnings already routes a degraded build away from here; a second
+            # guard at the writer, because a frozen partial build is the bug this
+            # whole gate exists to stop.
+            logger.warning(
+                "Earnings upsert REFUSED for %s — degraded build (%s)",
+                ticker, ", ".join(result.degraded),
+            )
+            return
         try:
             self.supabase.table("earnings_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": result.model_dump(),
+                    "response_json": {
+                        **result.model_dump(),
+                        "payload_version": _EARNINGS_PAYLOAD_VERSION,
+                    },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -438,20 +1171,13 @@ class EarningsService:
             return_exceptions=True,
         )
 
-        # Handle failures gracefully
-        if isinstance(income_raw, Exception):
-            logger.error(f"income_statement failed for {ticker}: {income_raw}")
-            income_raw = []
-        if isinstance(estimates_raw, Exception):
-            logger.error(f"analyst_estimates failed for {ticker}: {estimates_raw}")
-            estimates_raw = []
-        if isinstance(prices_raw, Exception):
-            logger.error(f"historical_prices failed for {ticker}: {prices_raw}")
-            prices_raw = []
-
-        # Normalize non-list FMP payloads (error dict returned with a 200).
-        income_raw = _as_list(income_raw)
-        estimates_raw = _as_list(estimates_raw)
+        # Which legs failed. A failed leg is replaced by an empty one so the section
+        # still renders, but the build is then PARTIAL — `get_earnings` must not freeze it
+        # into the 24h tier (or let a report freeze it). A genuinely empty list is not a
+        # failure.
+        degraded: List[str] = []
+        income_raw = _checked_leg(ticker, "income", income_raw, degraded)
+        estimates_raw = _checked_leg(ticker, "estimates", estimates_raw, degraded)
 
         # Sort income statements chronologically (oldest first).
         # `(r.get("period") or "")` — a present-but-null period would otherwise
@@ -461,7 +1187,7 @@ class EarningsService:
                 r for r in income_raw
                 if r.get("date") and (r.get("period") or "").startswith("Q")
             ],
-            key=lambda r: r["date"],
+            key=lambda r: str(r["date"]),
         )
 
         # Phase 2: Earnings announcements (past + upcoming) for this symbol — ONE call.
@@ -481,28 +1207,72 @@ class EarningsService:
         # bandwidth (4.3 GB/mo, ~10k calls). One per-symbol call (~KB) carries the same
         # data; next_earnings_date still falls back to analyst-estimates if a future
         # announcement isn't listed yet.
-        full_ec = await self.fmp.get_earning_calendar_full(ticker)
-        ec_records = list(full_ec) if isinstance(full_ec, list) else []
+        #
+        # raise_errors=True: the default swallows a 429/5xx into `[]`, which reads as "no
+        # announcements" — every quarter then fell to the GAAP-vs-non-GAAP fallback and
+        # that build was cached for 24h.
+        try:
+            full_ec = await self.fmp.get_earning_calendar_full(ticker, raise_errors=True)
+        except Exception as e:
+            logger.warning(
+                "earnings %s: per-symbol earnings feed failed — %s: %s; build is DEGRADED",
+                ticker, type(e).__name__, e,
+                exc_info=not isinstance(e, FMPException),
+            )
+            degraded.append("earnings_feed")
+            full_ec = []
+        if not isinstance(full_ec, list):
+            logger.warning(
+                "earnings %s: per-symbol earnings feed returned %s, not a list; build is "
+                "DEGRADED", ticker, type(full_ec).__name__,
+            )
+            degraded.append("earnings_feed")
+            full_ec = []
+        ec_records = [r for r in full_ec if isinstance(r, dict)]
 
-        # Build earnings-calendar lookup keyed by report date
-        # We'll match these to income statements by date proximity
+        # Earnings-calendar rows keyed by report date. On a same-date duplicate keep the
+        # row that carries a reported actual — keeping whichever FMP listed LAST let a
+        # pending twin replace the real result (a fake GAAP-vs-non-GAAP miss).
         ec_by_date: Dict[str, dict] = {}
         for rec in ec_records:
-            d = (rec.get("date") or "")[:10]
-            if d:
+            d = _row_key(rec)
+            if _parse_day(d) is None:
+                continue
+            prior = ec_by_date.get(d)
+            if prior is None or (has_reported_actual(rec) and not has_reported_actual(prior)):
                 ec_by_date[d] = rec
-        # Announcements ascending by date → pair each income quarter to the FIRST
-        # announcement after its period-end (see _match_announcement).
-        ec_sorted = sorted(ec_by_date.values(), key=lambda r: (r.get("date") or "")[:10])
+        # Announcements ascending by date → pair each income quarter with its
+        # announcement (see _assign_announcements / _match_announcement).
+        ec_sorted = sorted(ec_by_date.values(), key=_row_key)
 
         # Build price lookup: date → close
         # FMP returns either a list or a dict with "historical" key
-        if isinstance(prices_raw, dict):
-            price_list = prices_raw.get("historical", [])
+        if isinstance(prices_raw, BaseException):
+            logger.error(
+                "earnings %s: prices leg failed — %s: %s; build is DEGRADED",
+                ticker, type(prices_raw).__name__, prices_raw,
+            )
+            degraded.append("prices")
+            price_list: List[Any] = []
+        elif isinstance(prices_raw, dict) and isinstance(prices_raw.get("historical"), list):
+            price_list = prices_raw["historical"]
         elif isinstance(prices_raw, list):
             price_list = prices_raw
         else:
+            logger.warning(
+                "earnings %s: prices leg returned %s; build is DEGRADED",
+                ticker, type(prices_raw).__name__,
+            )
+            degraded.append("prices")
             price_list = []
+        # A non-dict row used to reach `p.get(...)` → AttributeError → a bare 502 for the
+        # whole Earnings section.
+        malformed_prices = sum(1 for p in price_list if not isinstance(p, dict))
+        if malformed_prices:
+            logger.warning(
+                "earnings %s: skipping %d non-dict price rows", ticker, malformed_prices,
+            )
+        price_list = [p for p in price_list if isinstance(p, dict)]
 
         price_lookup: Dict[str, float] = {}
         for p in price_list:
@@ -512,7 +1282,7 @@ class EarningsService:
                 try:
                     fc = float(c)
                     if math.isfinite(fc):  # a NaN/Inf close -> REQUIRED price float -> 500
-                        price_lookup[d] = fc
+                        price_lookup[str(d)[:10]] = fc
                 except (ValueError, TypeError):
                     pass
 
@@ -520,20 +1290,19 @@ class EarningsService:
 
         # Sort estimates chronologically (oldest first)
         estimates_sorted = sorted(
-            [e for e in estimates_raw if isinstance(e, dict) and e.get("date")],
-            key=lambda e: e["date"],
+            [e for e in estimates_raw if _parse_day(e.get("date")) is not None],
+            key=_row_key,
         )
 
         # Build estimate lookup by date for matching with income statements
         est_by_date: Dict[str, dict] = {}
         for est in estimates_sorted:
-            d = est.get("date", "")[:10]
-            if d:
-                est_by_date[d] = est
+            est_by_date[_row_key(est)] = est
 
         # ── Build merged quarterly data ──
-        # Phase A: Historical quarters from income-statement, enriched by earnings-calendar
-        # Phase B: Future quarters from analyst-estimates
+        # Phase A : historical quarters from income-statement, enriched by earnings-calendar
+        # Phase A2: reported quarters FMP has no income row for yet
+        # Phase B : future quarters from analyst-estimates
 
         eps_quarters: List[EarningsQuarterSchema] = []
         revenue_quarters: List[EarningsQuarterSchema] = []
@@ -541,6 +1310,21 @@ class EarningsService:
         used_fiscal_dates: set = set()
 
         fiscal_month_map = _build_fiscal_quarter_map(income_sorted)
+        forecast_anchor = _forecast_anchor(income_sorted)
+
+        # Pair every income quarter with its announcement, one-to-one (see
+        # _assign_announcements for the late-Q4 and reschedule failure modes).
+        assignments = _assign_announcements(
+            income_sorted, ec_sorted, est_by_date, ticker=ticker,
+        )
+        consumed = {_row_key(r) for r in assignments.values()}
+        # This ticker's own release lag (period end → announcement), for projecting a
+        # next date when the feed lists none.
+        announce_lags: List[int] = []
+        for pe_key, rec in assignments.items():
+            pe_dt, ann_dt = _parse_day(pe_key), _parse_day(rec.get("date"))
+            if pe_dt is not None and ann_dt is not None and has_reported_actual(rec):
+                announce_lags.append((ann_dt - pe_dt).days)
 
         # ── Phase A: Historical quarters ──
         for rec in income_sorted:
@@ -549,14 +1333,18 @@ class EarningsService:
             # off-calendar-FY companies (Oracle FY ends May) read monotonically
             # instead of scrambling fiscal Q1/Q2 to the prior calendar year.
             label = quarterly_period_label(rec, use_fiscal_year=True)
-            fiscal_key = fiscal_date[:10]
+            fiscal_key = str(fiscal_date)[:10]
 
-            # Pair this quarter with its earnings-calendar announcement (adjusted /
-            # non-GAAP actual + estimate) by fiscal PERIOD-END — the first
-            # announcement after it. Robust to when the 10-Q/10-K is filed; see
-            # _match_announcement for the Oracle (lagging Q4 10-K) and Disney (very
-            # late 10-K) failure modes that filing-date matching got wrong.
-            ec_match = _match_announcement(fiscal_key, ec_sorted)
+            # This quarter's announcement (adjusted / non-GAAP actual + estimate), paired
+            # by fiscal PERIOD-END — robust to when the 10-Q/10-K is filed; see
+            # _match_announcement for the Oracle (lagging Q4 10-K) and Disney (very late
+            # 10-K) failure modes that filing-date matching got wrong.
+            ec_match = assignments.get(fiscal_key)
+            matched_est = self._find_matching_estimate(fiscal_key, est_by_date)
+            analyst_rev_avg = _safe_float(matched_est, "revenueAvg") if matched_est else None
+            filed_rev = _safe_float(rec, "revenue")
+            filed_usd = _is_usd_statement(rec)
+            gaap_eps = _first_not_none(_safe_float(rec, "epsDiluted"), _safe_float(rec, "eps"))
 
             if ec_match:
                 # earnings-calendar has properly paired adjusted actual/estimate data
@@ -565,197 +1353,215 @@ class EarningsService:
                 ec_rev_actual = _safe_float(ec_match, "revenueActual")
                 ec_rev_estimate = _safe_float(ec_match, "revenueEstimated")
 
-                # EPS: use earnings-calendar values (adjusted, non-GAAP)
-                if ec_eps_actual is not None and ec_eps_estimate is not None:
-                    eps_quarters.append(EarningsQuarterSchema(
-                        quarter=label,
-                        actual_value=ec_eps_actual,
-                        estimate_value=ec_eps_estimate,
-                        surprise_percent=_compute_surprise(ec_eps_actual, ec_eps_estimate),
-                        fiscal_date=fiscal_key,
+                # EPS: use earnings-calendar values (adjusted, non-GAAP) — unless the
+                # actual has the dropped/added-digit signature (`eps_digit_shift_suspect`:
+                # ~10x off its estimate, and the filed GAAP EPS — when known — sides with
+                # the estimate). Then the feed's actual is not trusted and the EPS point is
+                # OMITTED. Never the GAAP figure: it was plotted inside the "Adjusted EPS"
+                # series, so AVGO's GAAP 1.03 between adjusted ~1.6s read as a ~35% EPS
+                # collapse. The report's Track Record applies the same shared rule, so the
+                # two never disagree.
+                if (
+                    ec_eps_actual is not None and ec_eps_estimate is not None
+                    and eps_digit_shift_suspect(ec_eps_actual, ec_eps_estimate, gaap_eps)
+                ):
+                    logger.warning(
+                        "earnings EPS digit-shift suspect for %s %s — feed actual %s vs "
+                        "estimate %s (filed GAAP %s): EPS point omitted",
+                        ticker, fiscal_key, ec_eps_actual, ec_eps_estimate, gaap_eps,
+                    )
+                elif ec_eps_actual is not None and ec_eps_estimate is not None:
+                    eps_quarters.append(_quarter(
+                        label, ec_eps_actual, ec_eps_estimate,
+                        _compute_surprise(ec_eps_actual, ec_eps_estimate), fiscal_key, True,
                     ))
                 elif ec_eps_actual is not None:
                     # Has actual but no estimate — show actual without surprise
-                    eps_quarters.append(EarningsQuarterSchema(
-                        quarter=label,
-                        actual_value=ec_eps_actual,
-                        estimate_value=ec_eps_actual,
-                        surprise_percent=None,
-                        fiscal_date=fiscal_key,
+                    eps_quarters.append(_quarter(
+                        label, ec_eps_actual, ec_eps_actual, None, fiscal_key, False,
                     ))
-                else:
+                elif gaap_eps is not None:
                     # Matched announcement lacks a usable EPS actual (a not-yet-reported
-                    # placeholder, or an FMP gap). DON'T silently drop the quarter's EPS
-                    # — fall back to the income-statement GAAP epsDiluted (+ analyst
-                    # estimate if present), the SAME degrade path as the no-match branch
-                    # (revenue already falls back to the income statement below). Without
-                    # this, a matched-but-null-actual record consumed the quarter and its
-                    # EPS bar vanished.
-                    gaap_eps = _first_not_none(_safe_float(rec, "epsDiluted"), _safe_float(rec, "eps"))
-                    if gaap_eps is not None:
-                        matched_est = self._find_matching_estimate(fiscal_key, est_by_date)
-                        est_eps = _safe_float(matched_est, "epsAvg") if matched_est else None
-                        if est_eps is not None:
-                            logger.warning(
-                                "earnings EPS DEGRADED to GAAP epsDiluted vs non-GAAP epsAvg "
-                                "for %s %s — matched announcement had null epsActual "
-                                "(actual=%s est=%s)",
-                                ticker, fiscal_key, gaap_eps, est_eps,
-                            )
-                        eps_quarters.append(EarningsQuarterSchema(
-                            quarter=label,
-                            actual_value=gaap_eps,
-                            estimate_value=est_eps if est_eps is not None else gaap_eps,
-                            surprise_percent=_compute_surprise(gaap_eps, est_eps) if est_eps is not None else None,
-                            fiscal_date=fiscal_key,
-                        ))
-
-                # Revenue: prefer earnings-calendar, fall back to income-statement
-                if ec_rev_actual is not None and ec_rev_estimate is not None:
-                    revenue_quarters.append(EarningsQuarterSchema(
-                        quarter=label,
-                        actual_value=ec_rev_actual,
-                        estimate_value=ec_rev_estimate,
-                        surprise_percent=_compute_surprise(ec_rev_actual, ec_rev_estimate),
-                        fiscal_date=fiscal_key,
-                    ))
-                else:
-                    # Fall back to income-statement revenue
-                    actual_rev = _first_not_none(ec_rev_actual, _safe_float(rec, "revenue"))
-                    est_rev = ec_rev_estimate
-                    if actual_rev is not None:
-                        revenue_quarters.append(EarningsQuarterSchema(
-                            quarter=label,
-                            actual_value=actual_rev,
-                            estimate_value=est_rev if est_rev is not None else actual_rev,
-                            surprise_percent=_compute_surprise(actual_rev, est_rev) if est_rev is not None else None,
-                            fiscal_date=fiscal_key,
-                        ))
-            else:
-                # No earnings-calendar match — fall back to income-statement + analyst-estimates
-                actual_eps = _first_not_none(_safe_float(rec, "epsDiluted"), _safe_float(rec, "eps"))
-                actual_rev = _safe_float(rec, "revenue")
-
-                # Try to find matching analyst estimate
-                matched_est = self._find_matching_estimate(fiscal_key, est_by_date)
-
-                if actual_eps is not None:
-                    if matched_est and _safe_float(matched_est, "epsAvg") is not None:
-                        est_eps = _safe_float(matched_est, "epsAvg")
-                        # DEGRADED path: no announcement in the per-symbol feed for
-                        # this quarter, so we compare the income statement's GAAP
-                        # epsDiluted against the NON-GAAP analyst epsAvg — the exact
-                        # apples-to-oranges comparison the announcement matching
-                        # avoids (it can look like a big beat/miss when GAAP and
-                        # non-GAAP diverge). Rare (feed gap / stub period), but log it
-                        # loudly so it's greppable in prod rather than a silent wrong
-                        # surprise. See _match_announcement.
+                    # placeholder, or an FMP gap). DON'T silently drop the quarter's EPS —
+                    # show the income-statement GAAP epsDiluted, the SAME degrade path as
+                    # the no-match branch. Without this, a matched-but-null-actual record
+                    # consumed the quarter and its EPS bar vanished. The only estimate on
+                    # hand is the NON-GAAP epsAvg, so there is NO surprise: GAAP 1.03 vs
+                    # adjusted 1.57 read as a -34% "miss" for AVGO, counted in the report's
+                    # beat/miss record and averaged into its narrative.
+                    est_eps = _safe_float(matched_est, "epsAvg") if matched_est else None
+                    if est_eps is not None:
                         logger.warning(
-                            "earnings surprise DEGRADED to GAAP epsDiluted vs non-GAAP "
-                            "epsAvg for %s %s — no announcement in per-symbol feed "
-                            "(actual=%s est=%s)",
-                            ticker, fiscal_key, actual_eps, est_eps,
+                            "earnings EPS DEGRADED to GAAP epsDiluted for %s %s — matched "
+                            "announcement had null epsActual; no surprise against the "
+                            "non-GAAP epsAvg (actual=%s est=%s)",
+                            ticker, fiscal_key, gaap_eps, est_eps,
                         )
-                        eps_quarters.append(EarningsQuarterSchema(
-                            quarter=label,
-                            actual_value=actual_eps,
-                            estimate_value=est_eps,
-                            surprise_percent=_compute_surprise(actual_eps, est_eps),
-                            fiscal_date=fiscal_key,
-                        ))
-                    else:
-                        # No estimate available — show actual as pending (no surprise)
-                        eps_quarters.append(EarningsQuarterSchema(
-                            quarter=label,
-                            actual_value=actual_eps,
-                            estimate_value=actual_eps,
-                            surprise_percent=None,
-                            fiscal_date=fiscal_key,
-                        ))
+                    eps_quarters.append(_quarter(
+                        label, gaap_eps, gaap_eps, None, fiscal_key, False,
+                    ))
 
-                if actual_rev is not None:
-                    if matched_est and _safe_float(matched_est, "revenueAvg") is not None:
-                        est_rev = _safe_float(matched_est, "revenueAvg")
-                        revenue_quarters.append(EarningsQuarterSchema(
-                            quarter=label,
-                            actual_value=actual_rev,
-                            estimate_value=est_rev,
-                            surprise_percent=_compute_surprise(actual_rev, est_rev),
-                            fiscal_date=fiscal_key,
-                        ))
-                    else:
-                        revenue_quarters.append(EarningsQuarterSchema(
-                            quarter=label,
-                            actual_value=actual_rev,
-                            estimate_value=actual_rev,
-                            surprise_percent=None,
-                            fiscal_date=fiscal_key,
-                        ))
-
-            used_fiscal_dates.add(fiscal_key)
-
-            # Price — OMIT the quarter when no close is within +-5 days rather
-            # than emitting a fabricated 0. A 0 is a real price on the wire: it
-            # entered the chart's Y domain and dragged the whole price line to
-            # the floor. iOS matches price points to quarters by LABEL (not by
-            # position), so a missing entry is handled; a fake 0 was not.
-            close_price = _find_close_price(fiscal_date, price_lookup)
-            if close_price is None:
-                logger.warning(
-                    "earnings %s: no close price within +-5d of %s — omitting price point",
-                    ticker, fiscal_key,
+                revenue = _reconcile_revenue(
+                    ec_rev_actual, ec_rev_estimate, filed_rev, filed_usd, analyst_rev_avg,
+                    ticker=ticker, fiscal_key=fiscal_key,
                 )
             else:
-                price_history.append(EarningsPricePointSchema(
-                    quarter=label,
-                    price=close_price,
-                    fiscal_date=fiscal_key,
+                # No earnings-calendar match — fall back to income-statement + analyst-estimates
+                if gaap_eps is not None:
+                    est_eps = _safe_float(matched_est, "epsAvg") if matched_est else None
+                    if est_eps is not None:
+                        # DEGRADED path: no announcement in the per-symbol feed for this
+                        # quarter, so the only actual is the income statement's GAAP
+                        # epsDiluted and the only estimate the NON-GAAP analyst epsAvg —
+                        # the apples-to-oranges comparison the announcement matching
+                        # avoids. Show the actual, compute NO surprise, and log it loudly
+                        # so it's greppable in prod. See _match_announcement.
+                        logger.warning(
+                            "earnings surprise DEGRADED to GAAP epsDiluted for %s %s — no "
+                            "announcement in per-symbol feed; no surprise against the "
+                            "non-GAAP epsAvg (actual=%s est=%s)",
+                            ticker, fiscal_key, gaap_eps, est_eps,
+                        )
+                    eps_quarters.append(_quarter(
+                        label, gaap_eps, gaap_eps, None, fiscal_key, False,
+                    ))
+
+                revenue = _reconcile_revenue(
+                    None, analyst_rev_avg, filed_rev, filed_usd, analyst_rev_avg,
+                    ticker=ticker, fiscal_key=fiscal_key,
+                )
+
+            if revenue is not None:
+                revenue_quarters.append(_quarter(
+                    label, revenue.actual, revenue.estimate, revenue.surprise,
+                    fiscal_key, revenue.has_estimate,
                 ))
+
+            used_fiscal_dates.add(fiscal_key)
+            self._append_price_point(ticker, label, fiscal_key, price_lookup, price_history)
+
+        # ── Phase A2: reported quarters with no income row yet ──
+        if income_sorted:
+            newest_key = _row_key(income_sorted[-1])
+            newest_end = _parse_day(newest_key)
+            # Owned only by a REPORTED row: a quarter paired with a pending placeholder may
+            # still have its real (late) release among the unconsumed rows.
+            newest_owned = has_reported_actual(assignments.get(newest_key) or {})
+            synthesized = (
+                _pair_unconsumed_announcements(
+                    ec_sorted, consumed, newest_end,
+                    [_row_key(e) for e in estimates_sorted], today_str,
+                    newest_owned=newest_owned, est_by_date=est_by_date, ticker=ticker,
+                )
+                if newest_end is not None else []
+            )
+            for pe_key, rec in synthesized:
+                label = _forecast_label(pe_key, forecast_anchor, fiscal_month_map)
+                est_row = self._find_matching_estimate(pe_key, est_by_date)
+                eps_actual = _safe_float(rec, "epsActual")
+                eps_est = _first_not_none(
+                    _safe_float(rec, "epsEstimated"),
+                    _safe_float(est_row, "epsAvg") if est_row else None,
+                )
+                # The same digit-shift gate as Phase A (no filing exists yet, so the
+                # signature alone decides): a dropped-digit actual (0.169 vs 1.70) shipped
+                # as a "-90% miss" on the newest quarter while the report hid it. The EPS
+                # point is OMITTED until the filing lands; revenue and price stay, and
+                # `used_fiscal_dates` below keeps Phase B from re-adding it as pending.
+                if (
+                    eps_actual is not None and eps_est is not None
+                    and eps_digit_shift_suspect(eps_actual, eps_est, None)
+                ):
+                    logger.warning(
+                        "earnings EPS digit-shift suspect for %s %s (just reported %s, no "
+                        "filing yet) — feed actual %s vs estimate %s: EPS point omitted "
+                        "until the filing lands",
+                        ticker, pe_key, _row_key(rec), eps_actual, eps_est,
+                    )
+                elif eps_actual is not None:
+                    if eps_est is not None:
+                        eps_quarters.append(_quarter(
+                            label, eps_actual, eps_est,
+                            _compute_surprise(eps_actual, eps_est), pe_key, True,
+                        ))
+                    else:
+                        eps_quarters.append(_quarter(
+                            label, eps_actual, eps_actual, None, pe_key, False,
+                        ))
+                # No filed revenue exists yet to corroborate the feed, so a revenue more
+                # than 50% off consensus is OMITTED until the 10-Q lands (Phase A then
+                # reconciles it against the filing) — a kept value without a surprise
+                # still charted the AVGO dropped digit and fed it to the report.
+                revenue = _reconcile_revenue(
+                    _safe_float(rec, "revenueActual"),
+                    _first_not_none(
+                        _safe_float(rec, "revenueEstimated"),
+                        _safe_float(est_row, "revenueAvg") if est_row else None,
+                    ),
+                    None, True,
+                    _safe_float(est_row, "revenueAvg") if est_row else None,
+                    ticker=ticker, fiscal_key=pe_key, omit_uncorroborated_outlier=True,
+                )
+                if revenue is not None:
+                    revenue_quarters.append(_quarter(
+                        label, revenue.actual, revenue.estimate, revenue.surprise,
+                        pe_key, revenue.has_estimate,
+                    ))
+                logger.info(
+                    "earnings %s: %s (%s) reported %s, before its income row — built from "
+                    "the announcement", ticker, label, pe_key, _row_key(rec),
+                )
+                ann_dt, pe_dt = _parse_day(rec.get("date")), _parse_day(pe_key)
+                if ann_dt is not None and pe_dt is not None:
+                    announce_lags.append((ann_dt - pe_dt).days)
+                consumed.add(_row_key(rec))
+                used_fiscal_dates.add(pe_key)
+                self._append_price_point(ticker, label, pe_key, price_lookup, price_history)
+
+        # The newest period already reported. Phase B used to emit EVERY estimate not
+        # within 15 days of an income date, so when the income call failed (or the
+        # history had a hole) quarters ended long ago rendered as gray "upcoming" dots.
+        # Cut on the last REPORTED period, never on today: a quarter that has ended but
+        # not yet reported (Q3 ends 09-30, reports late October) is genuinely upcoming.
+        if used_fiscal_dates:
+            reported_through = max(used_fiscal_dates)
+        else:
+            reported_releases = [
+                _row_key(r) for r in ec_sorted
+                if has_reported_actual(r) and _row_key(r) <= today_str
+            ]
+            reported_through = (
+                max(reported_releases) if reported_releases
+                else (today - timedelta(days=_UNREPORTED_GRACE_DAYS)).strftime("%Y-%m-%d")
+            )
 
         # ── Phase B: Future quarters from analyst-estimates ──
         for est in estimates_sorted:
-            est_date = est.get("date", "")
+            est_key = _row_key(est)
             est_eps = _safe_float(est, "epsAvg")
             est_rev = _safe_float(est, "revenueAvg")
 
             if est_eps is None and est_rev is None:
                 continue
+            if est_key <= reported_through:
+                continue
 
             # Skip if this estimate matches an already-processed income quarter
-            est_key = est_date[:10]
-            already_covered = False
-            for fd in used_fiscal_dates:
-                try:
-                    diff = abs((datetime.strptime(est_key, "%Y-%m-%d") -
-                                datetime.strptime(fd, "%Y-%m-%d")).days)
-                    if diff <= 15:
-                        already_covered = True
-                        break
-                except Exception:
-                    continue
-
-            if already_covered:
+            est_dt = _parse_day(est_key)
+            if any(
+                abs((est_dt - fd).days) <= _COVERED_TOLERANCE_DAYS
+                for fd in (_parse_day(d) for d in used_fiscal_dates)
+                if fd is not None
+            ):
                 continue
 
             # Future quarter — no actuals
-            label = _infer_fiscal_label(est_date, fiscal_month_map)
+            label = _forecast_label(est_key, forecast_anchor, fiscal_month_map)
 
             if est_eps is not None:
-                eps_quarters.append(EarningsQuarterSchema(
-                    quarter=label,
-                    actual_value=None,
-                    estimate_value=est_eps,
-                    surprise_percent=None,
-                    fiscal_date=est_key,
-                ))
+                eps_quarters.append(_quarter(label, None, est_eps, None, est_key, True))
             if est_rev is not None:
-                revenue_quarters.append(EarningsQuarterSchema(
-                    quarter=label,
-                    actual_value=None,
-                    estimate_value=est_rev,
-                    surprise_percent=None,
-                    fiscal_date=est_key,
-                ))
+                revenue_quarters.append(_quarter(label, None, est_rev, None, est_key, True))
 
         # Sort everything by actual fiscal date (correct for all fiscal year types)
         eps_quarters.sort(key=lambda q: q.fiscal_date or "9999-99-99")
@@ -765,13 +1571,13 @@ class EarningsService:
         # ── Daily Price History (continuous line data) ──
         daily_price_history: List[EarningsDailyPriceSchema] = []
         # Use ALL income dates to determine the price range
-        all_income_dates = {r["date"][:10] for r in income_sorted if r.get("date")}
+        all_income_dates = {str(r["date"])[:10] for r in income_sorted if r.get("date")}
         if all_income_dates and price_list:
             sorted_dates = sorted(all_income_dates)
             range_start = sorted_dates[0]
             range_end = today_str
             for p in price_list:
-                d = (p.get("date") or "")[:10]
+                d = str(p.get("date") or "")[:10]
                 c = p.get("close")
                 if d and c is not None and range_start <= d <= range_end:
                     try:
@@ -795,13 +1601,17 @@ class EarningsService:
 
         # ── Next Earnings Date ──
         next_earnings = self._find_next_earnings_date(
-            estimates_sorted, ec_records, used_fiscal_dates, today_str
+            estimates_sorted, ec_records, used_fiscal_dates, today_str,
+            reported_through=reported_through,
+            announce_lag_days=(
+                int(round(statistics.median(announce_lags))) if announce_lags else None
+            ),
         )
 
         logger.info(
             f"Earnings for {ticker}: {len(eps_quarters)} EPS quarters, "
             f"{len(revenue_quarters)} rev quarters, {len(price_history)} price points, "
-            f"next={'yes' if next_earnings else 'no'}"
+            f"next={'yes' if next_earnings else 'no'}, degraded={degraded or 'no'}"
         )
 
         return EarningsResponse(
@@ -811,24 +1621,40 @@ class EarningsService:
             price_history=price_history,
             daily_price_history=daily_price_history,
             next_earnings_date=next_earnings,
+            degraded=degraded,
         )
+
+    @staticmethod
+    def _append_price_point(
+        ticker: str,
+        label: str,
+        fiscal_key: str,
+        price_lookup: Dict[str, float],
+        price_history: List[EarningsPricePointSchema],
+    ) -> None:
+        """Close on the quarter's period end. OMIT the point when no close is within
+        ±5 days rather than emitting a fabricated 0: a 0 is a real price on the wire, it
+        entered the chart's Y domain and dragged the whole price line to the floor. iOS
+        matches price points to quarters by LABEL (not by position), so a missing entry
+        is handled; a fake 0 was not."""
+        close_price = _find_close_price(fiscal_key, price_lookup)
+        if close_price is None:
+            logger.warning(
+                "earnings %s: no close price within +-5d of %s — omitting price point",
+                ticker, fiscal_key,
+            )
+            return
+        price_history.append(EarningsPricePointSchema(
+            quarter=label,
+            price=close_price,
+            fiscal_date=fiscal_key,
+        ))
 
     def _find_matching_estimate(
         self, fiscal_date: str, est_by_date: Dict[str, dict], tolerance_days: int = 15
     ) -> Optional[dict]:
         """Find analyst-estimate record matching a fiscal date."""
-        if fiscal_date in est_by_date:
-            return est_by_date[fiscal_date]
-        try:
-            dt = datetime.strptime(fiscal_date, "%Y-%m-%d")
-        except Exception:
-            return None
-        for delta in range(1, tolerance_days + 1):
-            for d in [(dt - timedelta(days=delta)), (dt + timedelta(days=delta))]:
-                k = d.strftime("%Y-%m-%d")
-                if k in est_by_date:
-                    return est_by_date[k]
-        return None
+        return _estimate_near(fiscal_date, est_by_date, tolerance_days)
 
     def _find_next_earnings_date(
         self,
@@ -836,46 +1662,58 @@ class EarningsService:
         ec_records: List[dict],
         used_fiscal_dates: set,
         today_str: str,
+        reported_through: Optional[str] = None,
+        announce_lag_days: Optional[int] = None,
     ) -> Optional[NextEarningsDateSchema]:
-        """Find the next future earnings date.
+        """Find the next earnings date.
 
-        Prefers FMP's earnings-calendar (confirmed date + timing) over
-        analyst-estimates (fiscal period-end). Uses the shared timing
-        parser so the returned ``timing`` matches what the alert card
-        shows for the same event.
+        Prefers FMP's earnings-calendar (confirmed date + timing), through the shared
+        ``next_pending_earnings`` rule: TODAY's pending report counts (it used to be
+        skipped, so on report day the card read next quarter's date as "Confirmed"),
+        and a stale reschedule row is skipped when a later pending row exists (a lone one
+        is kept but shown unconfirmed). Uses the shared timing parser so the returned
+        ``timing`` matches what the alert card shows for the same event.
+
+        Fallback (no pending row in the feed): an analyst estimate is dated at the
+        fiscal PERIOD END, not the release, so the projection is period end + this
+        ticker's median announcement lag, unconfirmed. It used to return the bare period
+        end — ~6 weeks early for AVGO — and once that period ended it jumped a whole
+        quarter ahead past the pending report. An ended-but-unreported quarter is
+        therefore still a candidate, and only a STRICTLY future projection is returned:
+        a past/today date would read stale on the card and invalidate the Supabase row
+        on every read. With no lag history there is no honest projection → None.
         """
-        # First, check earnings-calendar for future dates with timing info
-        for ec in sorted(ec_records, key=lambda r: (r.get("date") or "")):
-            ec_date = (ec.get("date") or "")[:10]
-            if not ec_date or ec_date <= today_str:
-                continue
-            # Check this quarter wasn't already reported
-            if _safe_float(ec, "epsActual") is not None:
-                continue
-            timing_token = parse_fmp_timing(ec.get("time"))
+        pending = next_pending_earnings(ec_records, today_str)
+        if pending is not None:
+            # A lone pending row dated just after a reported one is returned rather than
+            # dropped, but it may be a reschedule's leftover for the quarter that already
+            # reported — so it is shown, never as "Confirmed".
             return NextEarningsDateSchema(
-                date=ec_date,
-                is_confirmed=True,
-                timing=timing_display(timing_token),
+                date=_row_key(pending),
+                is_confirmed=not within_reschedule_window(pending, ec_records),
+                timing=timing_display(parse_fmp_timing(pending.get("time"))),
             )
 
-        # Fallback: use analyst-estimates (fiscal-period-end, no timing)
+        if announce_lag_days is None:
+            return None
+        lag = max(_MIN_ANNOUNCE_LAG_DAYS, min(_LATE_RELEASE_MAX_DAYS, announce_lag_days))
+        used = [d for d in (_parse_day(k) for k in used_fiscal_dates) if d is not None]
         for est in estimates_sorted:
-            est_date = est.get("date", "")
-            if est_date > today_str:
-                # Check this estimate wasn't matched to an income record
-                matched = any(
-                    abs((datetime.strptime(est_date[:10], "%Y-%m-%d") -
-                         datetime.strptime(d[:10], "%Y-%m-%d")).days) <= 15
-                    for d in used_fiscal_dates
-                    if d
+            est_key = _row_key(est)
+            est_dt = _parse_day(est_key)
+            if est_dt is None:
+                continue
+            if reported_through and est_key <= reported_through:
+                continue
+            if any(abs((est_dt - u).days) <= _COVERED_TOLERANCE_DAYS for u in used):
+                continue
+            projected = (est_dt + timedelta(days=lag)).strftime("%Y-%m-%d")
+            if projected > today_str:
+                return NextEarningsDateSchema(
+                    date=projected,
+                    is_confirmed=False,
+                    timing=timing_display(UNSPECIFIED),
                 )
-                if not matched:
-                    return NextEarningsDateSchema(
-                        date=est_date[:10],
-                        is_confirmed=False,
-                        timing=timing_display(UNSPECIFIED),
-                    )
         return None
 
 

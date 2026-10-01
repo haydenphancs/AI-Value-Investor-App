@@ -2,7 +2,7 @@
 //  EarningsResultDot.swift
 //  ios
 //
-//  Atom: Colored dot indicator for earnings results (Beat/Miss/Estimate)
+//  Atom: Colored dot indicator for earnings results (Beat/Miss/Estimate/Reported)
 //
 
 import SwiftUI
@@ -66,6 +66,13 @@ struct EarningsResultDot: View {
             VStack(spacing: AppSpacing.sm) {
                 EarningsResultDot(result: .pending)
                 Text("Estimate")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+            }
+
+            VStack(spacing: AppSpacing.sm) {
+                EarningsResultDot(result: .noEstimate)
+                Text("Reported")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
             }

@@ -24,11 +24,15 @@ struct EarningsInfoSheet: View {
                     infoSection(
                         title: "Data Types",
                         items: [
+                            // Adjusted, not GAAP: this card plots the EPS a company reports
+                            // against analyst consensus. The old text gave the GAAP definition
+                            // while the chart drew adjusted figures, and the Growth card's
+                            // GAAP EPS for the same quarter can differ by ~60% (AVGO).
                             InfoItem(
                                 icon: "dollarsign.circle.fill",
                                 iconColor: AppColors.primaryBlue,
-                                title: "EPS (Earnings Per Share)",
-                                description: "Company's profit divided by outstanding shares. Higher EPS indicates better profitability."
+                                title: "Adjusted EPS (Earnings Per Share)",
+                                description: "Profit per share as the company reports it against analyst estimates — usually adjusted (non-GAAP), which excludes items such as stock-based compensation and amortization. If a quarter has no adjusted figure, its GAAP EPS is shown as a Reported dot with no beat or miss. The Growth card shows GAAP diluted EPS, so the two can differ."
                             ),
                             InfoItem(
                                 icon: "chart.bar.fill",
@@ -79,6 +83,11 @@ struct EarningsInfoSheet: View {
                                 description: "Actual earnings met estimates exactly (0% surprise)."
                             ),
                             InfoItem(
+                                dotColor: EarningsQuarterResult.noEstimate.dotColor,
+                                title: "Reported — no analyst consensus",
+                                description: "The company reported this quarter, but no comparable analyst estimate existed, so it is not counted as a beat, a miss or a match."
+                            ),
+                            InfoItem(
                                 dotColor: AppColors.textSecondary,
                                 title: "Estimate",
                                 description: "Analyst consensus estimate for upcoming quarters."
@@ -95,6 +104,12 @@ struct EarningsInfoSheet: View {
                                 iconColor: AppColors.neutral,
                                 title: "Earnings Surprise",
                                 description: "Shows how much actual earnings differed from estimates. Positive surprises (green) often lead to stock price increases, while negative surprises (red) may cause declines."
+                            ),
+                            InfoItem(
+                                icon: "chevron.down",
+                                iconColor: AppColors.textSecondary,
+                                title: "Bars Beyond the Scale",
+                                description: "When one quarter's surprise is far larger than the rest, its bar stops at the edge of the chart with an arrow, and its true value is printed beside it, so the other quarters stay readable."
                             )
                         ]
                     )

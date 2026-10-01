@@ -135,34 +135,37 @@ struct ReportFutureForecastSection: View {
                         .offset(y: -2)
                     Spacer()
                     if let summary = forecast.beatSummary {
+                        // Neutral, not green: "Beat 1 of 10" is not good news, and the
+                        // capsule used to colour every summary bullish.
                         Text(summary)
                             .font(AppTypography.labelSmall)
-                            .foregroundColor(AppColors.bullish)
+                            .foregroundColor(AppColors.textSecondary)
                             .padding(.horizontal, AppSpacing.sm)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(AppColors.bullish.opacity(0.15)))
+                            .background(Capsule().fill(AppColors.textSecondary.opacity(0.12)))
                     }
                 }
 
                 // Up to 10 reported quarters — scrolls horizontally so the full
-                // streak fits. Each cell shows the beat/miss arrow, the signed EPS
-                // surprise %, and the fiscal quarter.
+                // streak fits. Each cell shows the beat / miss / met glyph, the EPS
+                // surprise %, and the fiscal quarter. Driven by the tri-state `outcome`
+                // (the backend's `result`): a quarter that MET its estimate used to be
+                // drawn as a red miss arrow over "+0.0%", while the Financials tab showed
+                // the same quarter as Matched.
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AppSpacing.sm) {
                         ForEach(forecast.earningsTrackRecord) { q in
                             VStack(spacing: 3) {
-                                Image(systemName: q.beat ? "arrow.up" : "arrow.down")
+                                Image(systemName: q.outcomeSymbol)
                                     .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(q.beat ? AppColors.bullish : AppColors.bearish)
+                                    .foregroundColor(q.outcomeColor)
                                     .frame(width: 22, height: 22)
                                     .background(
-                                        Circle().fill(
-                                            (q.beat ? AppColors.bullish : AppColors.bearish).opacity(0.15)
-                                        )
+                                        Circle().fill(q.outcomeColor.opacity(0.15))
                                     )
                                 Text(q.surpriseText)
                                     .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(q.beat ? AppColors.bullish : AppColors.bearish)
+                                    .foregroundColor(q.outcomeColor)
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.7)
                                 Text(q.period)
@@ -172,6 +175,8 @@ struct ReportFutureForecastSection: View {
                                     .minimumScaleFactor(0.7)
                             }
                             .frame(width: 50)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("\(q.period): \(q.outcomeLabel), \(q.surpriseText)")
                         }
                     }
                 }

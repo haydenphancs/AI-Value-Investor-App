@@ -9,10 +9,15 @@ import SwiftUI
 
 struct DividendInfoCard: View {
     let dividendInfo: DividendInfo
-    var currentYield: Double = 0.0
+    /// Trailing-12-month DIVIDEND yield (`summary.dividendYield`) — the like-for-like
+    /// partner of the dividend-only average shown directly beneath it.
+    var dividendYield: Double = 0.0
+    /// Total shareholder yield (dividends + buybacks), on its own row away from the
+    /// average. nil hides the row.
+    var totalYield: Double? = nil
 
-    private var formattedCurrentYield: String {
-        String(format: "%.1f%%", currentYield)
+    private var formattedDividendYield: String {
+        String(format: "%.2f%%", dividendYield)
     }
 
     var body: some View {
@@ -66,17 +71,22 @@ struct DividendInfoCard: View {
 
             divider
 
-            // Current Yield row (Dividends + Buyback)
+            // Like with like. This row used to be "Current Yield (Div + Buyback)" — the
+            // TOTAL yield — directly above a DIVIDEND-only average, so an AAPL-shaped
+            // payer read "3.1%" over "0.40%" (8x its own average?) while "Dividend Status"
+            // said Fair: the numerator/denominator mismatch the backend fixed for
+            // `status`, reintroduced by the layout. Both rows are now dividend-only.
             DividendInfoRow(
-                label: "Current Yield (Div + Buyback)",
-                value: formattedCurrentYield
+                label: "Dividend Yield (T12M)",
+                value: formattedDividendYield
             )
 
             divider
 
-            // 5Y Avg Yield row
+            // The average's REAL window ("Avg Dividend Yield (2Y)" for eight quarters).
+            // It was labelled "5Y Avg Yield" over at most eight quarters of data.
             DividendInfoRow(
-                label: "5Y Avg Yield",
+                label: dividendInfo.averageYieldLabel,
                 value: dividendInfo.formattedYield
             )
 
@@ -90,6 +100,17 @@ struct DividendInfoCard: View {
             )
 
             divider
+
+            // Dividends + buybacks together, kept apart from the dividend-only rows and
+            // next to the buyback verdict it shares a numerator with.
+            if let total = totalYield {
+                DividendInfoRow(
+                    label: "Total Yield (Div + Buyback)",
+                    value: String(format: "%.1f%%", total)
+                )
+
+                divider
+            }
 
             // Buyback Status row
             DividendInfoRow(
@@ -142,14 +163,25 @@ struct BuybackOnlyInfoCard: View {
     let buybackStatus: BuybackStatus
     var buybackYield: Double = 0.0
     var shareCountChange: Double = 0.0
+    /// False when fewer than two quarters reported a share count: `shareCountChange` is
+    /// then a 0.0 placeholder, and printing it as "+0.0%" claimed a measured flat count.
+    var shareCountChangeKnown: Bool = true
 
     private var formattedBuybackYield: String {
         String(format: "%.1f%%", buybackYield)
     }
 
     private var formattedShareCountChange: String {
+        guard shareCountChangeKnown else { return "—" }
         // Sign is meaningful here: negative == shrinking share count == buybacks.
-        String(format: "%+.1f%%", shareCountChange)
+        return String(format: "%+.1f%%", shareCountChange)
+    }
+
+    private var shareCountChangeColor: Color {
+        guard shareCountChangeKnown else { return AppColors.textSecondary }
+        // A shrinking count is the shareholder-friendly direction.
+        return shareCountChange < 0 ? AppColors.gain
+            : (shareCountChange > 0 ? AppColors.loss : AppColors.textPrimary)
     }
 
     var body: some View {
@@ -171,9 +203,7 @@ struct BuybackOnlyInfoCard: View {
             DividendInfoRow(
                 label: "Share Count Change",
                 value: formattedShareCountChange,
-                // A shrinking count is the shareholder-friendly direction.
-                valueColor: shareCountChange < 0 ? AppColors.gain
-                    : (shareCountChange > 0 ? AppColors.loss : AppColors.textPrimary)
+                valueColor: shareCountChangeColor
             )
 
             divider
@@ -228,10 +258,12 @@ private struct DividendInfoRow: View {
         AppColors.background
             .ignoresSafeArea()
 
+        ScrollView {
         VStack(spacing: AppSpacing.lg) {
-            DividendInfoCard(dividendInfo: .sample, currentYield: 2.9)
+            DividendInfoCard(dividendInfo: .sample, dividendYield: 2.95, totalYield: 3.4)
 
-            // High yield example
+            // High yield example — no window from the backend (an older payload), so the
+            // average row falls back to the window-neutral label.
             DividendInfoCard(
                 dividendInfo: DividendInfo(
                     exDividendDate: Date(),
@@ -240,9 +272,19 @@ private struct DividendInfoRow: View {
                     status: .high,
                     buybackStatus: .high
                 ),
-                currentYield: 5.8
+                dividendYield: 3.6,
+                totalYield: 5.8
+            )
+
+            // A non-payer whose share count was never reported twice: "—", not "+0.0%".
+            BuybackOnlyInfoCard(
+                buybackStatus: .moderate,
+                buybackYield: 1.4,
+                shareCountChange: 0.0,
+                shareCountChangeKnown: false
             )
         }
         .padding()
+        }
     }
 }

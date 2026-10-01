@@ -89,10 +89,14 @@ def test_capital_allocation_block_surfaces_status():
 
 
 def _earnings(surprises) -> EarningsResponse:
+    # The actual is DERIVED from the surprise (estimate 10.0) so each quarter is
+    # internally consistent: the track record's beat/miss/met now comes from the raw
+    # actual vs estimate (the Financials tab's rule), and the old fixed 10.0 vs 9.0 made
+    # every quarter a beat whatever its surprise said.
     quarters = [
         EarningsQuarterSchema(
-            quarter=f"Q{i + 1} '24", actual_value=10.0, estimate_value=9.0,
-            surprise_percent=s, fiscal_date=f"2024-0{i + 1}-01",
+            quarter=f"Q{i + 1} '24", actual_value=10.0 * (1 + s / 100), estimate_value=10.0,
+            surprise_percent=s, fiscal_date=f"2024-{i + 1:02d}-01",
         )
         for i, s in enumerate(surprises)
     ]

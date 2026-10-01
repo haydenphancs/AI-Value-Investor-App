@@ -37,6 +37,19 @@ struct SignalOfConfidenceSectionCard: View {
             )
             .padding(.top, AppSpacing.sm)
 
+            // Say what a yield bar IS, truthfully for EVERY bar. A bar is a trailing twelve
+            // months (it was the quarter x4, which turned payment timing into fake swings)
+            // — except where four consecutive quarters of cash flow are not on file (a
+            // recent listing's first bars, the three after a missing quarter), which the
+            // server still builds as that quarter x4. The wire does not mark which bars
+            // those are, so the caption names both bases rather than promising one.
+            if selectedView == .yield && !signalData.dataPoints.isEmpty {
+                Text("Each bar: trailing 12 months of dividends or buybacks ÷ market cap at that quarter's end (that quarter × 4 where four consecutive quarters aren't on file).")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // Legend
             SignalOfConfidenceLegendView()
                 .frame(maxWidth: .infinity)
@@ -47,16 +60,21 @@ struct SignalOfConfidenceSectionCard: View {
             // branch used to render nothing at all and the buyback verdict (which
             // never depended on dividends) was silently dropped.
             if let dividendInfo = signalData.dividendInfo {
+                // `dividendYield` (dividend-only) sits beside the dividend-only average;
+                // the total shareholder yield gets its own row. It used to pass
+                // `totalYield` into the row above the average — apples to oranges.
                 DividendInfoCard(
                     dividendInfo: dividendInfo,
-                    currentYield: signalData.summary.totalYield
+                    dividendYield: signalData.summary.dividendYield,
+                    totalYield: signalData.summary.totalYield
                 )
                     .padding(.top, AppSpacing.md)
             } else {
                 BuybackOnlyInfoCard(
                     buybackStatus: signalData.summary.buybackStatus,
                     buybackYield: signalData.summary.buybackYield,
-                    shareCountChange: signalData.summary.shareCountChange
+                    shareCountChange: signalData.summary.shareCountChange,
+                    shareCountChangeKnown: signalData.summary.shareCountChangeKnown
                 )
                     .padding(.top, AppSpacing.md)
             }

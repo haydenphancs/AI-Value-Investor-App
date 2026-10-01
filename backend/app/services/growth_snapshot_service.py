@@ -58,8 +58,60 @@ def _cache_set(key: str, value: Any) -> None:
             _cache.pop(_old, None)
 
 
+# ── Build status of the value each key serves ─────────────────────
+# A degraded build is SERVED (Tier 1 for 5 min, and to every in-flight joiner) but never
+# persisted. The report collector freezes what it receives into the close-aligned
+# ticker_data_cache and a paid report, so `get_growth_snapshot_with_status` must report
+# the status of the EXACT object handed out — on a Tier-1 hit and an in-flight join as much
+# as on the build itself. Same role as growth_service's `_degraded_by_key`, but each entry
+# holds `(value, degraded)` and a status is reported only for that very object (identity),
+# so an entry can never describe a different build than the one being served.
+_degraded_by_key: Dict[str, Tuple[Any, List[str]]] = {}
+# Larger than the Tier-1 cap: entries are written in lockstep with `_cache_set`, so the
+# memo can only lose an entry Tier 1 still holds after twice as many writes.
+_DEGRADED_MAX_ENTRIES = 2 * _CACHE_MAX_ENTRIES
+# Reported when the served object has no memo entry (evicted, or a value reached Tier 1 by a
+# path that never noted it). Fail CLOSED: an unknown provenance must not be frozen.
+_STATUS_UNKNOWN = "status_unknown"
+
+
+def _note_degraded(key: str, value: Any, degraded: List[str]) -> None:
+    """Record the degraded legs of ``value``, the object now served under ``key``.
+
+    Call it on EVERY write of a value to Tier 1, and before resolving the in-flight future
+    with it, so a joiner resuming after `set_result` reads the leader's status."""
+    _degraded_by_key.pop(key, None)
+    _degraded_by_key[key] = (value, list(degraded))
+    if len(_degraded_by_key) > _DEGRADED_MAX_ENTRIES:
+        for _old in list(_degraded_by_key.keys())[: len(_degraded_by_key) - _DEGRADED_MAX_ENTRIES]:
+            _degraded_by_key.pop(_old, None)
+
+
+def _degraded_of(key: str, value: Any) -> Optional[List[str]]:
+    """The degraded legs noted for exactly ``value`` under ``key``; None when unknown."""
+    entry = _degraded_by_key.get(key)
+    if entry is None or entry[0] is not value:
+        return None
+    return list(entry[1])
+
+
 # ── In-flight deduplication ───────────────────────────────────────
 _inflight: Dict[str, asyncio.Future] = {}
+
+# Version stamped into this card's `snapshot_cache.response_json` (same key as the
+# valuation/ownership cards on the shared table). A row without it, or with an older one,
+# is a MISS and is rebuilt — the 24h tier must not outlive a change to the figures.
+# 2 (2026-09-30): the latest annual YoY only (no backward scan to an older year), the
+#     rating weighted over present metrics, and YoY paired by period-end date span.
+_SNAPSHOT_PAYLOAD_VERSION = 2
+_VERSION_KEY = "_schema_v"
+
+# GrowthService legs this card does NOT read: it scores only the newest ANNUAL point of
+# each series, so a failed quarterly statement leaves its figures exactly as a clean
+# build's. Inheriting them refused (and never persisted) a correctly measured card and
+# dropped it from the report (round 3, P24). "benchmarks" is NOT here: the service does
+# not say whether the annual or the quarterly peer read failed, so it stays blocking.
+_QUARTERLY_ONLY_LEGS = frozenset({"quarterly_income", "quarterly_cashflow"})
 
 # ── Ticker validation ────────────────────────────────────────────
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
@@ -134,8 +186,34 @@ class GrowthSnapshotService:
     def __init__(self):
         self.supabase = get_supabase()
 
+    async def get_growth_snapshot_with_status(
+        self, ticker: str,
+    ) -> Tuple[SnapshotItemResponse, List[str]]:
+        """`get_growth_snapshot` plus the degraded legs of the build being served.
+
+        ``degraded`` is ``[]`` for a clean build and for a Supabase-tier hit (only clean
+        builds are persisted). A Tier-1 hit and an in-flight join report the status of the
+        build that produced the value they received. A served object with no recorded
+        status reports ``["status_unknown"]`` — fail closed, so a caller with its own
+        long-lived cache (the report collector) never freezes a build of unknown quality.
+        """
+        snapshot = await self.get_growth_snapshot(ticker)
+        # No await between the return above and this read: the memo describes this object.
+        cache_key = f"growth_snapshot:{_validate_ticker(ticker)}"
+        degraded = _degraded_of(cache_key, snapshot)
+        if degraded is None:
+            logger.warning(
+                "Growth snapshot status UNKNOWN for %s — reporting it degraded so it is "
+                "not frozen into a long-lived cache", ticker,
+            )
+            degraded = [_STATUS_UNKNOWN]
+        return snapshot, degraded
+
     async def get_growth_snapshot(self, ticker: str) -> SnapshotItemResponse:
-        """Public entry point with two-tier caching and in-flight dedup."""
+        """Public entry point with two-tier caching and in-flight dedup.
+
+        Every value it hands out has its build status noted (`_note_degraded`), which
+        `get_growth_snapshot_with_status` reads back."""
         ticker = _validate_ticker(ticker)
         cache_key = f"growth_snapshot:{ticker}"
 
@@ -150,6 +228,8 @@ class GrowthSnapshotService:
         if db_cached is not None:
             logger.info(f"Growth snapshot Supabase HIT for {ticker}")
             _cache_set(cache_key, db_cached)
+            # Only clean builds are persisted, so a Tier-2 row is clean by construction.
+            _note_degraded(cache_key, db_cached, [])
             return db_cached
 
         # ── In-flight deduplication ──
@@ -183,6 +263,8 @@ class GrowthSnapshotService:
                 )
 
             _cache_set(cache_key, result)
+            # Noted BEFORE set_result: a joiner reads it when it resumes.
+            _note_degraded(cache_key, result, degraded)
             if not future.done():
                 future.set_result(result)
             return result
@@ -227,7 +309,20 @@ class GrowthSnapshotService:
                 logger.info(f"Growth snapshot Supabase STALE (age={age}) for {ticker}")
                 return None
 
-            json_data = entry["response_json"]
+            json_data = entry.get("response_json")
+            if not isinstance(json_data, dict):
+                logger.warning(
+                    "Growth snapshot cache row for %s is not an object — rebuilding", ticker,
+                )
+                return None
+            json_data = dict(json_data)
+            version = json_data.pop(_VERSION_KEY, 1)
+            if version != _SNAPSHOT_PAYLOAD_VERSION:
+                logger.info(
+                    "Growth snapshot payload v%s != v%s for %s — rebuilding",
+                    version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
+                )
+                return None
             return SnapshotItemResponse(**json_data)
 
         except Exception as e:
@@ -240,7 +335,9 @@ class GrowthSnapshotService:
                 {
                     "ticker": ticker,
                     "category": "Growth",
-                    "response_json": result.model_dump(),
+                    "response_json": {
+                        **result.model_dump(), _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
+                    },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker,category",
@@ -261,27 +358,36 @@ class GrowthSnapshotService:
         """Reuse GrowthService (Financials tab) to get exact same data the user sees.
 
         Returns ``(snapshot, degraded)``. ``degraded`` carries GrowthService's own list of
-        failed FMP legs for the build it served, plus ``"no_values"`` when none of the
+        failed FMP legs for the build it served — minus the quarterly-only legs this
+        card never reads (`_QUARTERLY_ONLY_LEGS`) — plus ``"no_values"`` when none of the
         four metrics has a value (every score is then the neutral sentinel 3).
         `get_growth_snapshot` refuses to persist a build with a non-empty list.
         """
         from app.services.growth_service import get_growth_service
 
         growth, upstream_degraded = await get_growth_service().get_growth_with_status(ticker)
-        degraded: List[str] = list(upstream_degraded)
+        upstream = [str(r) for r in upstream_degraded]
+        degraded: List[str] = [r for r in upstream if r not in _QUARTERLY_ONLY_LEGS]
+        if len(degraded) != len(upstream):
+            logger.info(
+                "[growth-snapshot-quarterly-only] ticker=%s step=snapshot: ignoring the "
+                "quarterly-only failed leg(s) %s — this card reads the annual series only",
+                ticker, ", ".join(r for r in upstream if r in _QUARTERLY_ONLY_LEGS),
+            )
 
-        # Extract the most recent annual YoY + sector benchmark for each metric.
-        # GrowthResponse lists are sorted oldest→newest. Walk backwards to find
-        # the most recent point with a non-None yoy_change_percent (handles cases
-        # where prior year's value was 0, making YoY computation impossible).
+        # The LATEST annual point's YoY + sector benchmark for each metric — and only
+        # that point. GrowthResponse lists are sorted oldest→newest. This used to walk
+        # back to the newest NON-NULL YoY and present it, with no period attached, as the
+        # current "Revenue Growth (YoY)": a latest year whose YoY is n/m (a 0 base, a gap,
+        # a loss→profit flip) showed LAST year's growth, scored it, and pinned it for 24h,
+        # while GrowthChartSheet (which deliberately refuses that backfill) said "n/m".
+        # A null latest YoY now renders "—" with no score, like any absent metric.
         def _latest(points) -> Tuple[Optional[float], Optional[float]]:
-            """Return (yoy_change_percent, sector_average_yoy) from most recent valid point."""
+            """Return (yoy_change_percent, sector_average_yoy) of the newest point."""
             if not points:
                 return None, None
-            for pt in reversed(points):
-                if pt.yoy_change_percent is not None:
-                    return pt.yoy_change_percent, pt.sector_average_yoy
-            return None, None
+            newest = points[-1]
+            return newest.yoy_change_percent, newest.sector_average_yoy
 
         rev_growth, sector_rev = _latest(growth.revenue_annual)
         eps_growth, sector_eps = _latest(growth.eps_annual)
@@ -297,8 +403,29 @@ class GrowthSnapshotService:
         if all(v is None for v in (rev_growth, eps_growth, fcf_growth, op_growth)):
             degraded.append("no_values")
 
-        # Weighted average: Revenue 30%, EPS 30%, FCF 20%, Op Income 20%
-        weighted = (score_rev * 0.30) + (score_eps * 0.30) + (score_fcf * 0.20) + (score_op * 0.20)
+        # Weighted average: Revenue 30%, EPS 30%, FCF 20%, Op Income 20% — over the
+        # metrics that HAVE a value, re-normalised. An absent metric used to vote the
+        # neutral sentinel 3 at full weight, dragging a 5/5 grower whose FCF YoY is n/m
+        # toward "average". Neutral 3.0 only when none has a value (that build is also
+        # flagged "no_values" above and never persisted). Stays inside [1, 5]: a weighted
+        # mean of scores that are each in [1, 5].
+        weighted_parts = [
+            (score, weight)
+            for value, score, weight in (
+                (rev_growth, score_rev, 0.30),
+                (eps_growth, score_eps, 0.30),
+                (fcf_growth, score_fcf, 0.20),
+                (op_growth, score_op, 0.20),
+            )
+            if value is not None
+        ]
+        if weighted_parts:
+            weighted = (
+                sum(score * weight for score, weight in weighted_parts)
+                / sum(weight for _, weight in weighted_parts)
+            )
+        else:
+            weighted = 3.0
         rating = max(1, min(5, round(weighted)))
 
         metrics = [

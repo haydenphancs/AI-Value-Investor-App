@@ -19,8 +19,11 @@ struct RevenueSource: Identifiable {
         0 // Will be calculated in context of total revenue
     }
 
+    /// Share of `total`, or NaN when there is no positive revenue to share — `PercentShare`
+    /// renders that as "—". A literal 0 here printed "Total Revenue 0 (0%)" and, through the
+    /// same rule on `CostItem`, "Op. Expense 500M (0%)" for a pre-revenue company.
     func percentage(of total: Double) -> Double {
-        guard total > 0 else { return 0 }
+        guard total > 0 else { return .nan }
         return (value / total) * 100
     }
 
@@ -73,9 +76,10 @@ struct CostItem: Identifiable {
     }
 
     /// Share of revenue, **signed**. The `abs()` that used to live here silently reported a
-    /// credit as a positive share of revenue.
+    /// credit as a positive share of revenue. NaN (→ "—") with no positive revenue: a 500M
+    /// cost is not "0%" of nothing.
     func percentage(of total: Double) -> Double {
-        guard total > 0 else { return 0 }
+        guard total > 0 else { return .nan }
         let pct = (value / total) * 100
         // Cap to prevent display overflow in edge cases.
         return min(max(pct, -999), 999)
@@ -271,6 +275,41 @@ struct RevenueBreakdownData {
         (eliminationsWaterfallStep.map { [$0] } ?? []) + costItems
     }
 
+    /// Total height of the cost column, in value units: the eliminations bridge plus every
+    /// NON-credit cost. A credit is income, so the bar skips it — which is why the drawn
+    /// waterfall can end BELOW net income (an operating loss rescued by other income or a
+    /// tax benefit), and why the chart sizes itself from this rather than `totalCosts`,
+    /// whose credits are netted in. Same expression as the floor in
+    /// `RevenueBreakdownChartView.chartBottomValue` (pinned equal by a test).
+    var drawnWaterfallTotal: Double {
+        waterfallItems.filter { !$0.isCredit }.reduce(0) { $0 + $1.value }
+    }
+
+    /// False when nothing the chart would draw reaches a dollar — no revenue, no drawn cost,
+    /// no net income (the backend's "no revenue data at all" placeholder, or a shell with
+    /// every line at zero). The chart used to stand that on a constant 1-dollar scale, where
+    /// any later value painted thousands of points tall; it shows "No revenue reported"
+    /// instead, and the card drops a legend that would only list zeros.
+    var hasChartableMagnitude: Bool {
+        let largest = max(totalRevenue, drawnWaterfallTotal, abs(netProfit))
+        return largest.isFinite && largest >= 1
+    }
+
+    /// The amount printed beside a revenue row in the legend.
+    ///
+    /// When REPORTED revenue is at or below zero the backend still sends the single
+    /// "Total Revenue" bar at 0.0 — a negative source would invert the stack and the
+    /// chart's scale — and carries the signed figure in `reported_revenue`. The legend
+    /// prints that figure, so a negative-revenue filer reads "Total Revenue -1.2B (—)"
+    /// rather than a revenue of 0 that the cost lines beneath it do not reconcile with.
+    func legendValue(for source: RevenueSource) -> String {
+        if revenueSources.count == 1, source.name == "Total Revenue", source.value == 0,
+           let reportedRevenue, reportedRevenue.isFinite, reportedRevenue < 0 {
+            return CompactNumberFormat.string(reportedRevenue)
+        }
+        return source.formattedValue
+    }
+
     // Cost items for display
     var costItems: [CostItem] {
         var items: [CostItem] = [
@@ -318,9 +357,10 @@ struct RevenueBreakdownData {
     /// This used to return `abs(netProfit) / totalRevenue`, so a company losing
     /// more than its revenue rendered as a bare "103%" in the legend next to
     /// the "Net Loss" label — a reader scanning the percentage column saw a
-    /// positive-looking figure for a loss. The sign is the whole point here.
+    /// positive-looking figure for a loss. The sign is the whole point here. NaN (→ "—")
+    /// with no positive revenue: "Net Loss -480M (0%)" contradicted the amount beside it.
     func netProfitPercentage() -> Double {
-        guard revenueBasis > 0 else { return 0 }
+        guard revenueBasis > 0 else { return .nan }
         let pct = (netProfit / revenueBasis) * 100
         return min(max(pct, -999), 999) // Cap to prevent display overflow
     }
@@ -426,6 +466,67 @@ extension RevenueBreakdownData {
         costOfSales: 72_000_000_000,
         operatingExpense: 63_000_000_000,
         tax: 16_000_000_000
+    )
+
+    // ── Preview-only outlier shapes (illustrative figures, fictional "SAMPLE" ticker) ──
+    // Each one broke the chart's frame before its bounds came from the drawn geometry.
+
+    /// An operating LOSS turned into a small net profit by other income: the drawn costs
+    /// exceed revenue, so the cost column ends below zero in a PROFIT year.
+    static let sampleOperatingLossTurnedProfit = RevenueBreakdownData(
+        tickerSymbol: "SAMPLE",
+        fiscalYear: "2024",
+        revenueSources: [
+            RevenueSource(name: "Rides", value: 5_790_000_000, color: RevenueSource.iPhoneColor)
+        ],
+        costOfSales: 3_400_000_000,
+        operatingExpense: 2_540_000_000,
+        tax: 10_000_000,
+        reportedNetIncome: 23_000_000,
+        reportedRevenue: 5_790_000_000,
+        otherExpense: -183_000_000
+    )
+
+    /// Net income ABOVE revenue (a one-off divestiture gain booked as other income).
+    static let sampleGainAboveRevenue = RevenueBreakdownData(
+        tickerSymbol: "SAMPLE",
+        fiscalYear: "2021",
+        revenueSources: [
+            RevenueSource(name: "Marketplace", value: 10_420_000_000, color: RevenueSource.iPhoneColor)
+        ],
+        costOfSales: 3_000_000_000,
+        operatingExpense: 5_000_000_000,
+        tax: 1_500_000_000,
+        reportedNetIncome: 13_600_000_000,
+        reportedRevenue: 10_420_000_000,
+        otherExpense: -12_680_000_000
+    )
+
+    /// A small net loss: the "-Net Loss" caption needs room under a ~2pt bar.
+    static let sampleSmallLoss = RevenueBreakdownData(
+        tickerSymbol: "SAMPLE",
+        fiscalYear: "2024",
+        revenueSources: [
+            RevenueSource(name: "Products", value: 50_000_000_000, color: RevenueSource.iPhoneColor)
+        ],
+        costOfSales: 40_000_000_000,
+        operatingExpense: 9_500_000_000,
+        tax: 500_000_000,
+        reportedNetIncome: -500_000_000,
+        reportedRevenue: 50_000_000_000,
+        otherExpense: 500_000_000
+    )
+
+    /// The backend's "no revenue data at all" placeholder: nothing to chart.
+    static let sampleNoRevenue = RevenueBreakdownData(
+        tickerSymbol: "SAMPLE",
+        fiscalYear: "",
+        revenueSources: [
+            RevenueSource(name: "Total Revenue", value: 0, color: RevenueSource.iPhoneColor)
+        ],
+        costOfSales: 0,
+        operatingExpense: 0,
+        tax: 0
     )
 }
 

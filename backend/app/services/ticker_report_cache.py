@@ -172,7 +172,19 @@ TABLE_NAME = "ticker_report_cache"
 #     old baked `macro_data` — and an all-clear that was never measured is exactly what
 #     must not survive a deploy. This is also a FORMULA change, not just new fields (two
 #     severity band sets were re-derived), which a key-presence probe cannot see.
-CACHE_SCHEMA_FLOOR = datetime(2026, 9, 8, 1, 0, 0, tzinfo=timezone.utc)
+# 2026-09-30: bumped for the Financials deep check. Cached collections and reports bake
+#     a Revenue Engine with a GROSS segment total, a "FY {generation year}" period and a
+#     "Billions" unit on millions; an annual Earnings Timeline keyed on date[:4]; an EPS
+#     Track Record that counts an exact "met" quarter as a miss; and earnings built before
+#     the feed-vs-filed revenue reconciliation (the AVGO dropped-digit "-90% miss"). All
+#     new fields are Optional, so an old row decodes — and keeps the wrong numbers. Set
+#     to the commit time on deploy day (2026-10-01 UTC), a PAST instant just before the
+#     deploy, per the paragraph above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 1, 5, 11, 0, tzinfo=timezone.utc)
+
+# The internal report key carrying the Financials sections a report lost to a degraded
+# upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.
+PARTIAL_REPORT_KEY = "_degraded_sections"
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────
@@ -399,6 +411,18 @@ async def get_cached_report(
 
             data = entry.get("ticker_report_data")
             if not isinstance(data, dict):
+                return None
+            # Defence in depth: neither door writes a report that lost a Financials section
+            # to a degraded upstream build (it is delivered to its buyer, never shared), but
+            # if one ever lands here it must read as a miss. The key literal mirrors
+            # `ticker_report_data_collector.DEGRADED_SECTIONS_KEY` (importing the collector
+            # here would be circular; a test pins the two equal).
+            if data.get(PARTIAL_REPORT_KEY):
+                logger.warning(
+                    "[report-partial-not-shared] ticker_report_cache row for %s/%s lost "
+                    "sections %s — treated as a miss", ticker, persona,
+                    data.get(PARTIAL_REPORT_KEY),
+                )
                 return None
             if not report_dcf_source_matches(data):
                 logger.info(

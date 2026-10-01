@@ -341,10 +341,12 @@ struct CapitalAllocationMiniChart: View {
         viewType == .yield ? String(format: "%.1f%%", value) : formatMoney(value)
     }
 
-    /// Dollar amounts arrive in millions.
+    /// Dollar amounts arrive in millions. The SAME rule as the Financials tab's
+    /// `SignalOfConfidenceChartView` (`SignalOfConfidenceFormat.money`): the two charts
+    /// draw the same quarters and used to print "$1.5B" here and "$2B" there. It also
+    /// gains the trillion tier this copy never had ("$1500.0B").
     private func formatMoney(_ millions: Double) -> String {
-        if millions >= 1000 { return String(format: "$%.1fB", millions / 1000) }
-        return String(format: "$%.0fM", millions)
+        SignalOfConfidenceFormat.money(millions: millions)
     }
 
     /// Shares are in millions; pick ONE unit for the whole axis (off the max)

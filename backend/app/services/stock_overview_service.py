@@ -1739,7 +1739,9 @@ class StockOverviewService:
         if health_snapshot is not None:
             snapshots.append(health_snapshot)
         else:
-            snapshots.append(self._build_health_snapshot(bs, inc0, cf0, fr, km, market_cap))
+            snapshots.append(self._build_health_snapshot(
+                bs, inc0, cf0, fr, km, market_cap, sector=sector, industry=industry,
+            ))
 
         # 5. Insiders & Ownership (use cached snapshot if available)
         if ownership_snapshot is not None:
@@ -1898,7 +1900,7 @@ class StockOverviewService:
 
     def _build_health_snapshot(
         self, bs: Dict, inc: Dict, cf: Dict, fr: Dict, km: Dict,
-        market_cap: float,
+        market_cap: float, *, sector: str = "", industry: str = "",
     ) -> SnapshotItemResponse:
         # Altman Z-Score — ONE implementation, shared with `health_check_service`.
         #
@@ -1926,7 +1928,11 @@ class StockOverviewService:
         # `_compute_z_score` reads the raw dicts with its OWN Optional-returning
         # `_safe_float`, so "absent" survives the trip; passing this module's 0.0-defaulted
         # locals would re-introduce the substitution one layer up.
-        z_score = _compute_z_score(bs, inc, market_cap if market_cap else None)
+        # `sector` / `industry` reach the shared gate: no Z (rating 0, "—") for a bank,
+        # insurer or REIT, where the model reads deposit funding as distress.
+        z_score = _compute_z_score(
+            bs, inc, market_cap if market_cap else None, sector=sector, industry=industry,
+        )
 
         # Still needed BELOW, for the FCF-margin row — it is not a Z-Score input here any
         # more. (`test_no_undefined_globals` caught the deletion: `ast.parse` and importing

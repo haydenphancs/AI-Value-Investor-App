@@ -50,6 +50,7 @@ from app.services.agents.ticker_report_data_collector import (
     TickerReportDataCollector,
     build_financial_context,
     get_collector,
+    report_degraded_sections,
 )
 from app.services.ticker_report_cache import (
     get_cached_report,
@@ -180,7 +181,14 @@ class TickerReportService:
         #    credits, returned as a success, AND written here, where it was then served free
         #    to every other user for the rest of the close cycle. One Gemini blip poisoned a
         #    ticker for everyone until the next close.
+        #
+        #    A report that lost Financials data to a DEGRADED upstream build (a 429 on one
+        #    FMP leg — `DEGRADED_SECTIONS_KEY`, set by `assemble_report`) is a different
+        #    case: its AI content is complete, so it is DELIVERED and billed like any other
+        #    report, but never written here — the next caller regenerates instead of
+        #    inheriting the hole for the rest of the close cycle.
         degraded_reason = _degraded_reason(shell)
+        lost_sections = report_degraded_sections(report)
         if degraded_reason:
             logger.warning(
                 "Ticker report for %s/%s NOT cached — degraded (%s). The caller is "
@@ -188,6 +196,13 @@ class TickerReportService:
                 ticker, persona_key, degraded_reason,
             )
             report["_degraded"] = degraded_reason
+        elif lost_sections:
+            logger.warning(
+                "[report-partial-not-cached] Ticker report for %s/%s NOT cached — "
+                "Financials sections lost to a degraded upstream build: %s. Delivered to "
+                "this caller only.",
+                ticker, persona_key, ", ".join(lost_sections),
+            )
         else:
             await upsert_cached_report(ticker, persona_key, report)
 

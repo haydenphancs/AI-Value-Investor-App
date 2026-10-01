@@ -14,7 +14,9 @@ struct GrowthMetricChip: View {
 
     var body: some View {
         Button(action: action) {
-            Text(metricType.rawValue)
+            // displayName, not rawValue: EPS reads "EPS (GAAP)" so it is not mistaken for
+            // the Earnings card's adjusted EPS on the same tab.
+            Text(metricType.displayName)
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(isSelected ? AppColors.textOnAccent : AppColors.textSecondary)  // selected chip sits on primaryFill: textPrimary is 3.81:1 in light
                 .padding(.horizontal, AppSpacing.lg)

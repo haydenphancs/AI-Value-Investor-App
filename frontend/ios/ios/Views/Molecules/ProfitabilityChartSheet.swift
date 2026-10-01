@@ -72,16 +72,24 @@ struct ProfitabilityChartSheet: View {
         (series(m)?.quarterly.filter { $0.company != nil }.count ?? 0) >= 2
     }
 
-    /// Latest charted period with a real company value (header/legend anchor here).
-    private var latestPoint: ProfitabilityChartPoint? {
+    /// The genuinely-latest charted period (the chart's right edge), whether or not it
+    /// has a company value. Header and legend anchor HERE — mirrors GrowthChartSheet.
+    /// It used to skip back to the last period WITH a value, so a biotech whose latest
+    /// two years are revenue gaps read "Current: 20.00%" (its 2023 margin) under a
+    /// chart ending in two empty years, while the report's Profitability card said "—".
+    private var latestPoint: ProfitabilityChartPoint? { current.last }
+
+    /// The last period that DID report a company value — shown only as an explicitly
+    /// period-labelled secondary line, never asserted as "Current".
+    private var lastReported: ProfitabilityChartPoint? {
         current.last(where: { $0.company != nil })
     }
 
-    /// Same-period company-vs-sector pair, only for the latest period where BOTH
-    /// exist — so the delta never quotes a stale ratio from an older period.
+    /// Same-period company-vs-sector pair for the LATEST period only, when it has both —
+    /// so the verdict-coloured vs-industry line is never computed from an older period
+    /// than the one the header reports.
     private var sectorPair: (company: Double, sector: Double)? {
-        guard let p = current.last(where: { $0.company != nil && $0.sector != nil }),
-              let c = p.company, let s = p.sector else { return nil }
+        guard let p = latestPoint, let c = p.company, let s = p.sector else { return nil }
         return (c, s)
     }
 
@@ -167,11 +175,19 @@ struct ProfitabilityChartSheet: View {
             Text("Current: \(currentText)")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
+            // The latest period has no value (a no-revenue year, a quarter whose cash
+            // flow has not landed): name the last period that did, with its period.
+            if latestPoint?.company == nil, let lr = lastReported, let v = lr.company {
+                Text("Last reported: \(pct(v)) (\(lr.period))")
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+            }
         }
     }
 
     private var currentText: String {
-        guard let v = latestPoint?.company else { return "—" }
+        guard let p = latestPoint else { return "—" }
+        guard let v = p.company else { return "— (\(p.period))" }
         return pct(v)
     }
 
@@ -219,6 +235,16 @@ struct ProfitabilityChartSheet: View {
         return "Current \(c) · \(peer) \(s) · \(spread)"
     }
 
+    /// Legend line when the LATEST period has no company value; nil when it has one (or
+    /// the series is empty).
+    private var notReportedText: String? {
+        guard let p = latestPoint, p.company == nil else { return nil }
+        let head: String = "\(p.period) not reported"
+        guard let lr = lastReported, let v = lr.company else { return head }
+        let tail: String = "last reported \(pct(v)) (\(lr.period))"
+        return head + " · " + tail
+    }
+
     @ViewBuilder
     private var legendAndDelta: some View {
         VStack(alignment: .center, spacing: AppSpacing.xs) {
@@ -249,6 +275,13 @@ struct ProfitabilityChartSheet: View {
                     .multilineTextAlignment(.center)
             } else if let v = latestPoint?.company {
                 Text("Current \(pct(v)) · Company only")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .multilineTextAlignment(.center)
+            } else if let text = notReportedText {
+                // Latest period has no company value: say so, with its period, and quote
+                // the last reported value only under its own period — never a verdict.
+                Text(text)
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)

@@ -5,7 +5,7 @@ Maps to SwiftUI RevenueBreakdownData model.
 """
 
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class RevenueSourceSchema(BaseModel):
@@ -63,3 +63,16 @@ class RevenueBreakdownResponse(BaseModel):
     #: under-cover it, which the "Unallocated" segment closes instead). Optional so a
     #: shipped build keeps decoding.
     intersegment_eliminations: Optional[float] = None
+
+    #: Why this build is PARTIAL — empty for a complete card. Reasons:
+    #:   "segmentation_unavailable"      the segment feed failed; the card is the
+    #:                                   single Total Revenue bar from the income statement
+    #:   "earnings_calendar_unavailable" no next-earnings date, so a stored row could not be
+    #:                                   invalidated on the report day
+    #:   "income_statement_empty"        FMP returned no income statement at all
+    #:   "revenue_unreported"            the income statement carries no usable revenue
+    #: A degraded build is NEVER written to `revenue_breakdown_cache` (only a short
+    #: in-memory TTL), so a transient vendor failure cannot be frozen for 24 h, and iOS
+    #: skips its own cache for it. The list reflects the value actually served. Additive
+    #: with a default, so a shipped build and a cached row both keep decoding.
+    degraded: List[str] = Field(default_factory=list)

@@ -124,11 +124,11 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
         case .peRatio:
             return "Price-to-Earnings ratio shows how much investors pay per dollar of earnings. Lower P/E relative to sector may indicate undervaluation - a key value investing signal."
         case .returnOnEquity:
-            return "Measures profitability relative to shareholder equity. Higher ROE indicates efficient use of capital, but compare to sector average for context."
+            return "Measures profitability relative to shareholder equity. Higher ROE indicates efficient use of capital, but compare to sector average for context. When shareholder equity is negative the ratio's sign flips, so it shows as N/M (not meaningful) and is left out of the score."
         case .currentRatio:
             return "Measures ability to pay short-term obligations. Above 1.5 is comfortable; 0.8-1.5 is adequate but tight. Value investors look for financial stability."
         case .altmanZScore:
-            return "Predicts bankruptcy probability using five financial ratios. Z > 3.0 is safe, 1.8–3.0 is a grey zone, and below 1.8 signals distress. A key metric for value investors assessing downside risk."
+            return "Predicts bankruptcy probability using five financial ratios. Z above 3.0 is safe, above 1.8 up to 3.0 is a grey zone, and 1.8 or below signals distress. Not shown for banks, insurers, REITs and other financial or real-estate companies: the model was built for industrial balance sheets and reads their deposit and property funding as distress."
         case .interestCoverage:
             return "EBIT divided by interest expense. Higher means the company can comfortably service its debt; a ratio under 2 signals vulnerability to earnings pressure."
         case .quickRatio:
@@ -170,7 +170,18 @@ struct HealthCheckMetric: Identifiable {
     let highlightedValue: String?  // e.g., "43% lower" or "15% discount"
     let highlightedLabel: String?  // e.g., "debt" or "discount"
 
+    /// `highlighted_value` the backend sends for a row it shows but cannot judge
+    /// (`health_check_service.NOT_MEANINGFUL`): ROE on negative shareholder equity, whose
+    /// sign is flipped by the negative denominator. Such a row is neutral and outside
+    /// passedCount / totalCount.
+    static let notMeaningfulToken = "N/M"
+
+    var isNotMeaningful: Bool { highlightedValue == Self.notMeaningfulToken }
+
     var formattedValue: String {
+        // The raw ratio of a not-meaningful row (a loss over negative equity reads
+        // +303%) must not be printed as if it were a real ROE.
+        if isNotMeaningful { return Self.notMeaningfulToken }
         switch type {
         case .debtToEquity:
             return String(format: "%.2f", value)
@@ -187,19 +198,27 @@ struct HealthCheckMetric: Identifiable {
             // to show the real number.
             return value < 0 ? "Negative" : String(format: "%.2f", value)
         case .altmanZScore:
-            return String(format: "%.1f", value)
+            // 2 dp: the backend judges the zone on a 2-dp Z, so "3.0" over a Grey label
+            // (Z = 3.03 is Safe, > 3.0) no longer contradicts itself.
+            return String(format: "%.2f", value)
         case .interestCoverage:
             return String(format: "%.2f", value)
         }
     }
 
     var formattedComparison: String? {
+        if isNotMeaningful { return nil }
         switch type {
         case .altmanZScore:
-            // Show zone label instead of sector comparison
-            if value > 3.0 { return "Safe zone" }
-            else if value > 1.8 { return "Grey zone" }
-            else { return "Distress zone" }
+            // Zone label instead of a sector comparison, taken from the backend STATUS
+            // (`_zscore_status`: Distress <= 1.8, Grey (1.8, 3.0], Safe > 3.0) rather than
+            // re-derived from `value`: a value rounded for display used to land on the
+            // other side of a boundary from the status it was judged by.
+            switch status {
+            case .positive: return "Safe zone"
+            case .neutral: return "Grey zone"
+            case .negative: return "Distress zone"
+            }
         default:
             break
         }
@@ -218,49 +237,17 @@ struct HealthCheckMetric: Identifiable {
         }
     }
 
+    /// Colour of the value and the highlighted insight words: the backend VERDICT.
+    ///
+    /// It used to be sampled from the gauge position, which is a different scale (the
+    /// peer median sits at 0.5, the status uses percent-gap thresholds), so a pass at
+    /// D/E 50% below peers (gauge 0.25) and a "Safe zone" Z of 3.2 rendered amber, and a
+    /// neutral D/E 80% above peers rendered red. The gradient bar keeps the positional
+    /// cue; the colour now says what the text says. `primaryColor` is the text-safe
+    /// gain / caution / loss trio.
     var valueColor: Color {
-        colorAtPosition(gaugePosition, for: type)
-    }
-    
-    /// Calculate the color at a specific position on the gauge gradient
-    private func colorAtPosition(_ position: Double, for metricType: HealthCheckMetricType) -> Color {
-        let clampedPosition = min(max(position, 0.0), 1.0)
-        
-        let gradientColors: [Color]
-        switch metricType {
-        case .debtToEquity, .peRatio:
-            // Lower is better: green -> lime -> yellow -> orange -> red
-            gradientColors = [
-                AppColors.bullish,
-                AppColors.caution,
-                AppColors.neutral,
-                AppColors.alertOrange,
-                AppColors.bearish
-            ]
-        case .returnOnEquity, .currentRatio, .altmanZScore, .interestCoverage, .quickRatio:
-            // Higher is better: red -> orange -> yellow -> lime -> green
-            gradientColors = [
-                AppColors.bearish,
-                AppColors.alertOrange,
-                AppColors.neutral,
-                AppColors.caution,
-                AppColors.bullish
-            ]
-        }
-         
-        // Map position to color index (0.0 -> first color, 1.0 -> last color)
-        let colorCount = gradientColors.count
-        let scaledPosition = clampedPosition * Double(colorCount - 1)
-        let lowerIndex = Int(floor(scaledPosition))
-        let upperIndex = min(lowerIndex + 1, colorCount - 1)
-        let fraction = scaledPosition - Double(lowerIndex)
-        
-        // For simplicity, return the closest color (no interpolation)
-        if fraction < 0.5 {
-            return gradientColors[lowerIndex]
-        } else {
-            return gradientColors[upperIndex]
-        }
+        if isNotMeaningful { return AppColors.textSecondary }
+        return status.primaryColor
     }
 }
 
@@ -401,6 +388,50 @@ extension HealthCheckSectionData {
                 status: .positive,
                 insightText: "Fortress balance sheet. Very low bankruptcy risk.",
                 highlightedValue: "4.8",
+                highlightedLabel: "Z-Score."
+            )
+        ]
+    )
+
+    /// Preview of the edge rows: negative equity (D/E "Negative", ROE "N/M" and left out
+    /// of the 1/2 count), and a Z of exactly 3.0, which is GREY (the boundary belongs to
+    /// the lower zone). Illustrative values, not a real company.
+    static let sampleNegativeEquity = HealthCheckSectionData(
+        overallRating: .mix,
+        passedCount: 0,
+        totalCount: 2,
+        metrics: [
+            HealthCheckMetric(
+                type: .debtToEquity,
+                value: -13.0,
+                comparisonValue: nil,
+                percentDifference: nil,
+                gaugePosition: 0.98,
+                status: .negative,
+                insightText: "Liabilities exceed total assets.",
+                highlightedValue: "Negative",
+                highlightedLabel: "shareholder equity."
+            ),
+            HealthCheckMetric(
+                type: .returnOnEquity,
+                value: 303.0,
+                comparisonValue: nil,
+                percentDifference: nil,
+                gaugePosition: 0.5,
+                status: .neutral,
+                insightText: "Not meaningful: shareholder equity is negative.",
+                highlightedValue: HealthCheckMetric.notMeaningfulToken,
+                highlightedLabel: "ROE."
+            ),
+            HealthCheckMetric(
+                type: .altmanZScore,
+                value: 3.0,
+                comparisonValue: nil,
+                percentDifference: nil,
+                gaugePosition: 0.67,
+                status: .neutral,
+                insightText: "Grey zone, leaning safe. Monitor closely.",
+                highlightedValue: "3.0",
                 highlightedLabel: "Z-Score."
             )
         ]

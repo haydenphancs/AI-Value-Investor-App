@@ -300,3 +300,15 @@ def test_the_forecast_digest_only_carries_a_measured_stance(guidance, expected):
     else:
         assert expected in joined
     assert "beat 6 of 8" in joined  # the rest of the digest is untouched
+
+
+def test_the_forecast_insight_summarises_surprises_by_the_median():
+    """One quarter against a near-zero consensus (a true +1100%) used to turn nine ~+3%
+    quarters into "avg EPS surprise +112.7%" in the model's context."""
+    shell = _forecast_shell("unknown")
+    shell["revenue_forecast"]["earnings_track_record"] = (
+        [{"surprise_percent": 3.0}] * 9 + [{"surprise_percent": 1100.0}]
+    )
+    prompt = np_._revenue_forecast_insight_prompt(PERSONA, "EVIDENCE", shell)
+    assert "median EPS surprise +3.0% over the last 10 quarters" in prompt
+    assert "avg EPS surprise" not in prompt

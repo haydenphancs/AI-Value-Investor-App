@@ -61,6 +61,8 @@ struct EarningsTimelineChart: View {
         let epsYoYColor: Color
         let revenueAnalystCount: Int?
         let epsAnalystCount: Int?
+        /// The column's fiscal period END ("yyyy-MM-dd"); nil on older reports.
+        let periodEnd: String?
         /// False when the backend sent "N/A" for this year's EPS (genuinely
         /// absent, not a real 0). The EPS marker/segment is skipped for these so
         /// the line doesn't dip to a false zero; the bar + "N/A" label still show.
@@ -75,7 +77,8 @@ struct EarningsTimelineChart: View {
                       epsLabel: p.epsLabel,
                       epsYoYText: p.epsYoYText, epsYoYColor: p.epsYoYColor,
                       revenueAnalystCount: p.revenueAnalystCount,
-                      epsAnalystCount: p.epsAnalystCount)
+                      epsAnalystCount: p.epsAnalystCount,
+                      periodEnd: p.periodEnd)
         }
     }
 
@@ -130,10 +133,18 @@ struct EarningsTimelineChart: View {
 
     private var firstForecastIndex: Int? { points.firstIndex(where: { $0.isForecast }) }
 
-    /// Daily prices mapped into COLUMN space: x = yearIndex + fractionThroughYear
+    /// Daily prices mapped into COLUMN space: x = columnIndex + fractionThroughPeriod
     /// (so a price flows left→right across each year's column). Only the years
     /// that exist on the chart and have price data — the line naturally stops
-    /// at "now", left of the forecast.
+    /// at "now".
+    ///
+    /// Columns are FISCAL years. When every column carries its period END (reports
+    /// generated after `period_end` shipped), a close belongs to the column whose window
+    /// (previous period end, this period end] contains it — NVDA's FY2026 column runs
+    /// Feb 2025 – Jan 2026. Mapping by CALENDAR year put calendar-2025 closes over the
+    /// FY2025 bar (about 11 months late for NVDA, 7 for ORCL) and today's price over the
+    /// last reported year instead of the in-progress forecast column. Older reports
+    /// without period ends keep the calendar mapping.
     ///
     /// Parsing the ~1500 daily date strings is EXPENSIVE, so this runs ONCE into
     /// `priceColumns` (on load / when the series arrives) — NOT on every render.
@@ -142,19 +153,84 @@ struct EarningsTimelineChart: View {
     /// seconds to draw on every toggle/tap.
     private func computePriceColumns() -> [(colX: Double, price: Double)] {
         guard !dailyPrices.isEmpty, !points.isEmpty else { return [] }
-        // `uniqueKeysWithValues:` TRAPS on a duplicate key, and the backend does not
-        // dedupe the year it derives: `_build_annual_timeline` takes `int(date[:4])` of
-        // every annual income-statement record, so a company that moved its fiscal
-        // year-end has two annual period-ends inside one calendar year and ships two
-        // points with the same `year`. That crashed the chart on open.
-        //
-        // Keep the LAST occurrence — `points` is ordered oldest-first, so that is the
-        // most recent period for the year, which is what the column should plot.
+        let cols: [(colX: Double, price: Double)]
+        if let edges = periodEndEdges() {
+            cols = priceColumnsByPeriodEnd(edges: edges)
+        } else {
+            cols = priceColumnsByCalendarYear()
+        }
+        // Start the line at the CENTER of its leftmost data column, not that
+        // column's left edge — so the tail sits over the first bar instead of
+        // overshooting ~half a column to its left. A price's natural early-period
+        // start maps to colX ≈ idx (the left edge); we trim that lead-in up
+        // to idx + 0.5 (the bar center). Only ever pulls the tail rightward.
+        guard let minColX = cols.map(\.colX).min() else { return cols }
+        let firstCenter = minColX.rounded(.down) + 0.5
+        let clipped = cols.filter { $0.colX >= firstCenter }
+        return clipped.isEmpty ? cols : clipped
+    }
+
+    /// The first column has no previous period end on the wire: its window opens this many
+    /// days before its own end. The backend's `_TIMELINE_FIRST_COLUMN_DAYS` (which trims the
+    /// frozen price series to the same window) uses the same span.
+    private static let firstColumnDays = 365
+
+    /// Day numbers of each column's period end, or nil when any column lacks a parseable
+    /// one (an older report) or they are not strictly increasing — then the calendar
+    /// mapping is used instead.
+    private func periodEndEdges() -> [Int]? {
+        var edges: [Int] = []
+        edges.reserveCapacity(points.count)
+        for p in points {
+            guard let s = p.periodEnd, let day = Self.dayNumber(s) else { return nil }
+            if let last = edges.last, day <= last { return nil }
+            edges.append(day)
+        }
+        return edges.isEmpty ? nil : edges
+    }
+
+    /// Column i spans (edges[i-1], edges[i]]; the first spans `firstColumnDays` before its
+    /// end. A close outside every window (before the first, after the last) is dropped.
+    private func priceColumnsByPeriodEnd(edges: [Int]) -> [(colX: Double, price: Double)] {
+        guard let lastEdge = edges.last else { return [] }
+        let firstStart: Int = edges[0] - Self.firstColumnDays
+        var out: [(colX: Double, price: Double)] = []
+        out.reserveCapacity(dailyPrices.count)
+        for dp in dailyPrices {
+            guard let day = Self.dayNumber(dp.date), day > firstStart, day <= lastEdge else {
+                continue
+            }
+            // First column whose period end is on or after this day (binary search).
+            var lo = 0
+            var hi = edges.count - 1
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if edges[mid] < day {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            let start: Int = lo == 0 ? firstStart : edges[lo - 1]
+            let span: Int = max(edges[lo] - start, 1)
+            let frac: Double = Double(day - start) / Double(span)
+            out.append((colX: Double(lo) + frac, price: dp.price))
+        }
+        return out
+    }
+
+    /// Legacy mapping for reports without period ends: the close's CALENDAR year picks the
+    /// column, its month/day the fraction through it.
+    private func priceColumnsByCalendarYear() -> [(colX: Double, price: Double)] {
+        // `uniqueKeysWithValues:` TRAPS on a duplicate key, and older reports did not
+        // dedupe the year (`int(date[:4])` of every annual record — a company that moved
+        // its fiscal year-end has two period ends inside one calendar year). Keep the LAST
+        // occurrence — `points` is ordered oldest-first, so that is the most recent period.
         let yearToIndex = Dictionary(
             points.enumerated().map { ($0.element.year, $0.offset) },
             uniquingKeysWith: { _, latest in latest }
         )
-        let cols: [(colX: Double, price: Double)] = dailyPrices.compactMap { dp in
+        return dailyPrices.compactMap { dp in
             guard dp.date.count >= 10,
                   let y = Int(dp.date.prefix(4)),
                   let m = Int(dp.date.dropFirst(5).prefix(2)),
@@ -163,15 +239,34 @@ struct EarningsTimelineChart: View {
             let frac = (Double(m - 1) * 30.4 + Double(d)) / 365.0
             return (Double(idx) + frac, dp.price)
         }
-        // Start the line at the CENTER of its leftmost data column, not that
-        // column's left edge — so the tail sits over the first bar instead of
-        // overshooting ~half a column to its left. A price's natural early-year
-        // (Jan) start maps to colX ≈ idx (the left edge); we trim that lead-in up
-        // to idx + 0.5 (the bar center). Only ever pulls the tail rightward.
-        guard let minColX = cols.map(\.colX).min() else { return cols }
-        let firstCenter = minColX.rounded(.down) + 0.5
-        let clipped = cols.filter { $0.colX >= firstCenter }
-        return clipped.isEmpty ? cols : clipped
+    }
+
+    /// Days since 1970-01-01 for a "yyyy-MM-dd" prefix, by integer civil-date arithmetic
+    /// (days_from_civil) — no DateFormatter on ~1,500 closes. nil when malformed.
+    private static func dayNumber(_ s: String) -> Int? {
+        let bytes: [UInt8] = Array(s.utf8.prefix(10))
+        guard bytes.count == 10, bytes[4] == 45, bytes[7] == 45 else { return nil }
+        var fields: [Int] = [0, 0, 0]
+        let ranges: [Range<Int>] = [0..<4, 5..<7, 8..<10]
+        for (k, r) in ranges.enumerated() {
+            var v = 0
+            for i in r {
+                let c = bytes[i]
+                guard c >= 48, c <= 57 else { return nil }
+                v = v * 10 + Int(c - 48)
+            }
+            fields[k] = v
+        }
+        let month: Int = fields[1]
+        let dayOfMonth: Int = fields[2]
+        guard (1...12).contains(month), (1...31).contains(dayOfMonth) else { return nil }
+        let y: Int = month <= 2 ? fields[0] - 1 : fields[0]
+        let era: Int = (y >= 0 ? y : y - 399) / 400
+        let yoe: Int = y - era * 400
+        let mp: Int = (month + 9) % 12
+        let doy: Int = (153 * mp + 2) / 5 + dayOfMonth - 1
+        let doe: Int = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146_097 + doe - 719_468
     }
 
     private var chartWidth: CGFloat {
@@ -465,4 +560,17 @@ struct EarningsTimelineChart: View {
         }
         .frame(minWidth: 58, alignment: .leading)
     }
+}
+
+#Preview("Fiscal-year columns + price overlay") {
+    // Sample ORCL-shaped data (fiscal year ends May 31): every column carries its period
+    // end, so the price line is placed by fiscal window, not calendar year.
+    EarningsTimelineChart(
+        timeline: TickerReportData.sampleOracle.revenueForecast.annualTimeline,
+        dailyPrices: TickerReportData.sampleOracle.revenueForecast.timelinePrices,
+        showPrice: true,
+        selectedIndex: .constant(nil)
+    )
+    .padding()
+    .background(AppColors.cardBackground)
 }

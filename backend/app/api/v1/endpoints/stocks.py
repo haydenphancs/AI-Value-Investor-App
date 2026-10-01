@@ -22,6 +22,8 @@ from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list, sanitize_non_finite
 from app.api.error_response import (
     ErrorCode,
+    classify_exception,
+    error_body_from_exception,
     error_response_from_exception,
     make_error_response,
     upstream_error_response,
@@ -1073,6 +1075,70 @@ async def get_analyst_analysis(ticker: str):
         )
 
 
+# ── Financials tab endpoints (earnings, growth, profit power, health check, ──
+# ── revenue breakdown, signal of confidence) ──────────────────────────────
+
+#: The user copy for an UNEXPECTED failure on one Financials card, by step. An unknown
+#: exception classifies as REPORT_GENERATION_FAILED, whose registered copy ("The report
+#: failed to generate") names a surface this is not. A KNOWN upstream code (FMP rate-limit /
+#: outage, not-entitled, ticker-not-found) keeps its own registered copy.
+_FINANCIALS_SECTION_NAMES: Dict[str, str] = {
+    "earnings": "earnings",
+    "growth": "growth",
+    "profit_power": "profit power",
+    "health_check": "health check",
+    "revenue_breakdown": "revenue breakdown",
+    "signal_of_confidence": "signal of confidence",
+}
+
+#: The prefix every Financials service's `_validate_ticker` raises with. Matched on the
+#: MESSAGE, not the class alone: a stray `float("n/a")` inside a build is also a
+#: ValueError, and calling that an invalid ticker would send the user to fix a symbol that
+#: is fine.
+_INVALID_TICKER_PREFIX = "Invalid ticker symbol"
+
+
+def _financials_error_response(exc: Exception, *, ticker: str, step: str) -> JSONResponse:
+    """The `APIErrorResponse` body for a failed Financials build (invariant #3).
+
+    These six handlers used to raise ``HTTPException(502, "<X> service unavailable")``: a
+    bare string iOS cannot decode, so APIClient retried it blind as `.serverError` (each
+    retry a full uncached cold FMP fan-out) and the tab could never say why. A typed body is
+    not auto-retried; the Financials tab now owns the retry (its failure card / notice).
+    """
+    if isinstance(exc, ValueError) and str(exc).startswith(_INVALID_TICKER_PREFIX):
+        # Stays a 400 (the route's long-standing status), now with a typed code.
+        logger.info("[financials] %s rejected %r: %s", step, ticker, exc)
+        return make_error_response(
+            ErrorCode.TICKER_NOT_FOUND,
+            status_code=400,
+            message=f"{type(exc).__name__}: {exc}"[:300],
+            details={"ticker": ticker, "step": step},
+        )
+
+    known = upstream_error_response(exc, ticker=ticker, step=step)
+    if known is not None:
+        # A classified upstream failure (FMP 429 / outage …): expected, no stack needed.
+        logger.warning(
+            "[financials] %s failed for %s (upstream): %s: %s",
+            step, ticker, type(exc).__name__, exc,
+        )
+        return known
+
+    logger.error(
+        "[financials] %s failed for %s (unexpected): %s: %s",
+        step, ticker, type(exc).__name__, exc,
+        exc_info=True,
+    )
+    _code, status_code = classify_exception(exc)
+    # `error_body_from_exception` REDACTS before truncating (an httpx message can carry the
+    # FMP key in its URL) — never build `message` / `details.underlying` from `str(exc)` here.
+    body = error_body_from_exception(exc, ticker=ticker, step=step)
+    section = _FINANCIALS_SECTION_NAMES.get(step, "this section")
+    body["user_message"] = f"We couldn't load {section} right now. Please try again."
+    return JSONResponse(status_code=status_code, content=body)
+
+
 # ── Earnings endpoint ────────────────────────────────────────────
 
 @router.get("/{ticker}/earnings", response_model=EarningsResponse)
@@ -1088,11 +1154,7 @@ async def get_earnings(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Earnings failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Earnings service unavailable for {ticker}",
-        )
+        return _financials_error_response(e, ticker=ticker, step="earnings")
 
 
 # ── Growth endpoint ──────────────────────────────────────────────
@@ -1107,11 +1169,7 @@ async def get_growth(ticker: str, _fanout: None = MarketFanoutRateLimit):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Growth failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Growth service unavailable for {ticker}",
-        )
+        return _financials_error_response(e, ticker=ticker, step="growth")
 
 
 # ── Profit Power endpoint ────────────────────────────────────────
@@ -1123,18 +1181,11 @@ async def get_profit_power(ticker: str, _fanout: None = MarketFanoutRateLimit):
     try:
         service = get_profit_power_service()
         return await service.get_profit_power(ticker)
-    except ValueError as e:
-        # Invalid ticker symbol — a 400, matching /revenue-breakdown and
-        # /signal-of-confidence rather than masquerading as a 502 outage.
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Profit power failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Profit power service unavailable for {ticker}",
-        )
+        # An invalid symbol (ValueError from `_validate_ticker`) answers a typed 400 inside.
+        return _financials_error_response(e, ticker=ticker, step="profit_power")
 
 
 # ── Health Check endpoint ────────────────────────────────────────
@@ -1146,18 +1197,11 @@ async def get_health_check(ticker: str, _fanout: None = MarketFanoutRateLimit):
     try:
         service = get_health_check_service()
         return await service.get_health_check(ticker)
-    except ValueError as e:
-        # Invalid ticker symbol — a 400, matching /revenue-breakdown and
-        # /signal-of-confidence rather than masquerading as a 502 outage.
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Health check failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Health check service unavailable for {ticker}",
-        )
+        # An invalid symbol (ValueError from `_validate_ticker`) answers a typed 400 inside.
+        return _financials_error_response(e, ticker=ticker, step="health_check")
 
 
 # ── Revenue breakdown endpoint ───────────────────────────────────
@@ -1173,16 +1217,11 @@ async def get_revenue_breakdown(ticker: str, _fanout: None = MarketFanoutRateLim
     try:
         service = get_revenue_breakdown_service()
         return await service.get_revenue_breakdown(ticker)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Revenue breakdown failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Revenue breakdown service unavailable for {ticker}",
-        )
+        # An invalid symbol (ValueError from `_validate_ticker`) answers a typed 400 inside.
+        return _financials_error_response(e, ticker=ticker.upper(), step="revenue_breakdown")
 
 
 # ── Signal of Confidence endpoint ────────────────────────────────
@@ -1198,16 +1237,11 @@ async def get_signal_of_confidence(ticker: str):
     try:
         service = get_signal_of_confidence_service()
         return await service.get_signal_of_confidence(ticker)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Signal of confidence failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Signal of confidence service unavailable for {ticker}",
-        )
+        # An invalid symbol (ValueError from `_validate_ticker`) answers a typed 400 inside.
+        return _financials_error_response(e, ticker=ticker.upper(), step="signal_of_confidence")
 
 
 def _plausible_percent_institutional(

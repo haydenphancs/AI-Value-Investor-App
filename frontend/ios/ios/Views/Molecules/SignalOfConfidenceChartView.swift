@@ -212,8 +212,9 @@ struct SignalOfConfidenceChartView: View {
             }
 
             // Dashed connector line from newest shares outstanding to right Y-axis
-            // Anchor on the newest REPORTED quarter, not simply the last one.
-            if let lastShares = dataPoints.compactMap({ $0.sharesOutstanding }).last {
+            // Anchor on the newest REPORTED quarter, not simply the last one — the same
+            // value the highlighted right-axis label prints.
+            if let lastShares = newestShares {
                 RuleMark(y: .value("SharesConnector", normalizeShares(lastShares)))
                     .foregroundStyle(AppColors.confidenceSharesOutstanding.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
@@ -225,6 +226,12 @@ struct SignalOfConfidenceChartView: View {
         .chartPlotStyle { plotArea in
             plotArea
                 .background(Color.clear)
+                // Defense in depth for the TestFlight overflow class: no mark may draw
+                // outside the plot. Bars sit inside `barDomain` by construction today, but
+                // two points sharing one period label land in ONE category column, and a
+                // future mark must not be able to paint over the label rows below.
+                // Clipping the PLOT (not the whole chart) leaves the axes untouched.
+                .clipped()
         }
     }
 
@@ -240,38 +247,60 @@ struct SignalOfConfidenceChartView: View {
             Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.9) : "")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                // "2.0%" is wider than the axis column and wrapped onto two lines
+                // ("2.0" over "%"); shrink instead of wrapping.
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
 
             Spacer()
 
             Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.6) : "")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
 
             Spacer()
 
             Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.3) : "")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
 
             Spacer()
 
             Text(viewType == .yield ? "0%" : "$0")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
         }
         .frame(height: chartHeight)
         .padding(.trailing, AppSpacing.xs)
     }
 
-    /// Newest shares outstanding value for right Y-axis highlight
-    private var newestShares: Double {
-        dataPoints.last?.sharesOutstanding ?? 0
+    /// Every finite share count a quarter actually REPORTED, oldest first.
+    private var reportedShares: [Double] {
+        dataPoints.compactMap { $0.sharesOutstanding }.filter { $0.isFinite }
     }
 
-    /// Vertical position (0 = top, 1 = bottom) of the newest shares on the right Y-axis
-    private var newestSharesYPosition: CGFloat {
-        sharesYFractionFromTop(newestShares)
-    }
+    /// False when no quarter reported a share count — the right axis then has nothing
+    /// real to label, and `sharesRange` is only a synthetic 0…1 kept for the normaliser.
+    private var hasReportedShares: Bool { !reportedShares.isEmpty }
+
+    /// Newest REPORTED share count for the right Y-axis highlight, or nil.
+    ///
+    /// Was `dataPoints.last?.sharesOutstanding ?? 0`. The backend sends nil for a quarter
+    /// whose filing reported no count (FMP's `weightedAverageShsOut: 0`, live on CD's
+    /// 2026-06-30 quarter), so the `?? 0` printed a bold "0.00M" — a company with no
+    /// shares — exactly on top of the axis-minimum label, while the dashed connector
+    /// pointed at the last real count. `CapitalAllocationMiniChart` already read it this way.
+    private var newestShares: Double? { reportedShares.last }
+
+    /// A static right-axis label closer than this to the highlighted newest one is hidden
+    /// rather than overprinted (the caption font is ~13pt tall).
+    private let axisLabelMinSeparation: CGFloat = 14
 
     private var rightYAxisLabels: some View {
         // Every label — the static max/mid/min AND the highlighted newest — is
@@ -281,30 +310,56 @@ struct SignalOfConfidenceChartView: View {
         // linear axis) while the line was compressed into the 15–85% band, so
         // reading the line against this axis gave the wrong share count for
         // every point except the midpoint.
+        //
+        // No reported share count anywhere → no labels at all (an empty frame of the same
+        // height keeps the plot's width). The synthetic 0…1 range used to print
+        // "1.00M / 0.50M / 0.00M" plus a bold "0.00M" for a line that is never drawn.
         GeometryReader { geometry in
-            let midValue = (sharesRange.max + sharesRange.min) / 2
-            ZStack(alignment: .leading) {
-                axisLabel(
-                    formatSharesValue(sharesRange.max), value: sharesRange.max,
-                    in: geometry, color: AppColors.textMuted, bold: false
-                )
-                axisLabel(
-                    formatSharesValue(midValue), value: midValue,
-                    in: geometry, color: AppColors.textMuted, bold: false
-                )
-                axisLabel(
-                    formatSharesValue(sharesRange.min), value: sharesRange.min,
-                    in: geometry, color: AppColors.textMuted, bold: false
-                )
-                // Highlighted newest shares value, sitting on the dashed connector
-                axisLabel(
-                    formatSharesValue(newestShares), value: newestShares,
-                    in: geometry, color: AppColors.confidenceSharesOutstanding, bold: true
-                )
+            if hasReportedShares {
+                let midValue = (sharesRange.max + sharesRange.min) / 2
+                ZStack(alignment: .leading) {
+                    if !collidesWithNewest(sharesRange.max, in: geometry) {
+                        axisLabel(
+                            formatSharesValue(sharesRange.max), value: sharesRange.max,
+                            in: geometry, color: AppColors.textMuted, bold: false
+                        )
+                    }
+                    if !collidesWithNewest(midValue, in: geometry) {
+                        axisLabel(
+                            formatSharesValue(midValue), value: midValue,
+                            in: geometry, color: AppColors.textMuted, bold: false
+                        )
+                    }
+                    if !collidesWithNewest(sharesRange.min, in: geometry) {
+                        axisLabel(
+                            formatSharesValue(sharesRange.min), value: sharesRange.min,
+                            in: geometry, color: AppColors.textMuted, bold: false
+                        )
+                    }
+                    // Highlighted newest REPORTED shares value, on the dashed connector.
+                    if let newest = newestShares {
+                        axisLabel(
+                            formatSharesValue(newest), value: newest,
+                            in: geometry, color: AppColors.confidenceSharesOutstanding, bold: true
+                        )
+                    }
+                }
+            } else {
+                Color.clear
             }
         }
         .frame(height: chartHeight)
         .padding(.leading, AppSpacing.xs)
+    }
+
+    /// True when a static label at `value` would sit within `axisLabelMinSeparation` of
+    /// the highlighted newest label — it is then hidden, the way
+    /// `CapitalAllocationMiniChart.sharesTicks` replaces a colliding tick.
+    private func collidesWithNewest(_ value: Double, in geometry: GeometryProxy) -> Bool {
+        guard let newest = newestShares else { return false }
+        let dy = abs(sharesYFractionFromTop(value) - sharesYFractionFromTop(newest))
+            * geometry.size.height
+        return dy < axisLabelMinSeparation
     }
 
     private func axisLabel(
@@ -469,15 +524,11 @@ struct SignalOfConfidenceChartView: View {
         }
     }
 
+    /// Amounts arrive in USD millions. ONE rule shared with `CapitalAllocationMiniChart`:
+    /// this used `$%.0fB`, so $1,499M / $1,500M read "$1B" / "$2B" here and "$1.5B" in the
+    /// report for the same quarter.
     private func formatLargeNumber(_ number: Double) -> String {
-        let absNumber = abs(number)
-        if absNumber >= 1_000_000 {
-            return String(format: "$%.0fT", number / 1_000_000)
-        } else if absNumber >= 1_000 {
-            return String(format: "$%.0fB", number / 1_000)
-        } else {
-            return String(format: "$%.0fM", number)
-        }
+        SignalOfConfidenceFormat.money(millions: number)
     }
 }
 
@@ -486,6 +537,7 @@ struct SignalOfConfidenceChartView: View {
         AppColors.background
             .ignoresSafeArea()
 
+        ScrollView {
         VStack(spacing: AppSpacing.xl) {
             Text("Yield View")
                 .foregroundColor(AppColors.textOnAccent)
@@ -502,7 +554,33 @@ struct SignalOfConfidenceChartView: View {
                 dataPoints: SignalOfConfidenceSectionData.sampleData.dataPoints,
                 viewType: .capital
             )
+
+            // The newest quarter reported no share count (CD, 2026-06-30): the bold
+            // right-axis label must be the last REAL count, never "0.00M".
+            Text("Newest share count unreported")
+                .foregroundColor(AppColors.textPrimary)
+            SignalOfConfidenceChartView(
+                dataPoints: SignalOfConfidenceChartPreviewData.newestSharesMissing,
+                viewType: .capital
+            )
         }
         .padding()
+        }
+    }
+}
+
+/// Preview-only points (sample shapes, not market data).
+private enum SignalOfConfidenceChartPreviewData {
+    static var newestSharesMissing: [SignalOfConfidenceDataPoint] {
+        var points = Array(SignalOfConfidenceSectionData.sampleData.dataPoints.prefix(4))
+        points.append(SignalOfConfidenceDataPoint(
+            period: "Q2 '25",
+            dividendYield: 1.4,
+            buybackYield: 1.2,
+            dividendAmount: 1_499,
+            buybackAmount: 12_300,
+            sharesOutstanding: nil
+        ))
+        return points
     }
 }

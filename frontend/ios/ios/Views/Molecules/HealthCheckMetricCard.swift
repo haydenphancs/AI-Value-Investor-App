@@ -16,8 +16,12 @@ struct HealthCheckMetricCard: View {
             // Header: Metric name, subtitle, and value
             headerSection
 
-            // Gauge bar with position indicator
-            gaugeSection
+            // Gauge bar with position indicator. A not-meaningful row (ROE on negative
+            // equity) has no place on the scale, so it draws no gauge at all rather than
+            // a marker parked at a made-up midpoint.
+            if !metric.isNotMeaningful {
+                gaugeSection
+            }
 
             // Insight text with highlighted portion
             insightSection
@@ -66,15 +70,20 @@ struct HealthCheckMetricCard: View {
             HealthCheckGaugeBar(
                 position: metric.gaugePosition,
                 metricType: metric.type,
-                hasBenchmark: metric.comparisonValue != nil
+                hasBenchmark: metric.comparisonValue != nil,
+                // The zone gauge places the TRUE Z; inverting gauge_position capped it
+                // at 4.41.
+                zValue: metric.type == .altmanZScore ? metric.value : nil
             )
 
             if metric.type == .altmanZScore {
-                // Zone labels aligned to segment widths: Distress 30%, Grey 20%, Safe 50%
+                // Zone labels aligned to segment widths: Distress 30%, Grey 20%, Safe 50%.
+                // Boundaries follow the backend status: 1.8 itself is Distress, 3.0
+                // itself is Grey.
                 GeometryReader { geo in
                     let w = geo.size.width
                     HStack(spacing: 0) {
-                        Text("< 1.8")
+                        Text("≤ 1.8")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.bearish)
                             .frame(width: w * 0.30, alignment: .center)
@@ -137,6 +146,10 @@ struct HealthCheckMetricCard: View {
         ScrollView {
             VStack(spacing: AppSpacing.lg) {
                 ForEach(HealthCheckSectionData.sampleData.metrics) { metric in
+                    HealthCheckMetricCard(metric: metric)
+                }
+                // Edge rows: negative D/E, ROE "N/M" (no gauge), Z exactly 3.0 (Grey).
+                ForEach(HealthCheckSectionData.sampleNegativeEquity.metrics) { metric in
                     HealthCheckMetricCard(metric: metric)
                 }
             }

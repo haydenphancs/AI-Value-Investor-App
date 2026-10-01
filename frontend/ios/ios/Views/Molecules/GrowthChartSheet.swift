@@ -28,23 +28,20 @@ struct GrowthChartSheet: View {
     init(card: DeepDiveMetricCard, growthData: GrowthSectionData) {
         self.card = card
         self.growthData = growthData
-        // Open on the first metric that actually has data, on Annual when present.
-        let avail = GrowthMetricType.allCases.filter {
-            growthData.dataPoints(for: $0, period: .annual).count >= 2
-                || growthData.dataPoints(for: $0, period: .quarterly).count >= 2
-        }
-        let first = avail.first ?? .eps
-        _selectedMetric = State(initialValue: first)
-        let hasAnnual = growthData.dataPoints(for: first, period: .annual).count >= 2
-        _selectedPeriod = State(initialValue: hasAnnual ? .annual : .quarterly)
+        // Open on the first metric that actually has data, on Annual when present —
+        // the SAME helper the Financials-tab GrowthSectionCard uses (this sheet keeps
+        // its stricter two-point minimum).
+        let start = growthData.initialSelection(minimum: Self.minimumPoints)
+        _selectedMetric = State(initialValue: start.metric)
+        _selectedPeriod = State(initialValue: start.period)
     }
+
+    /// A series needs two points to show a trend in this drill-down.
+    private static let minimumPoints = 2
 
     /// Metrics that have a chartable series in either granularity (no empty chips).
     private var availableMetrics: [GrowthMetricType] {
-        GrowthMetricType.allCases.filter {
-            growthData.dataPoints(for: $0, period: .annual).count >= 2
-                || growthData.dataPoints(for: $0, period: .quarterly).count >= 2
-        }
+        growthData.metricsWithData(minimum: Self.minimumPoints)
     }
 
     private var current: [GrowthDataPoint] {
@@ -52,7 +49,7 @@ struct GrowthChartSheet: View {
     }
 
     private func quarterlyAvailable(_ m: GrowthMetricType) -> Bool {
-        growthData.dataPoints(for: m, period: .quarterly).count >= 2
+        growthData.hasPoints(m, .quarterly, minimum: Self.minimumPoints)
     }
 
     /// The genuinely-latest charted period (newest bar), regardless of whether
@@ -118,7 +115,7 @@ struct GrowthChartSheet: View {
                             selectedPeriod = .annual
                         }
                     } label: {
-                        Text(m.rawValue)
+                        Text(m.displayName)
                             .font(AppTypography.labelSmall)
                             .fontWeight(isSelected ? .semibold : .regular)
                             .foregroundColor(isSelected ? AppColors.textOnAccent : AppColors.textSecondary)  // selected chip sits on primaryFill: textPrimary is 3.81:1 in light
@@ -146,7 +143,7 @@ struct GrowthChartSheet: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(selectedMetric.rawValue)
+            Text(selectedMetric.displayName)
                 .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
             Text("Current: \(currentText)")
@@ -204,9 +201,17 @@ struct GrowthChartSheet: View {
         abs(v) >= 100 ? String(format: "%.0f%%", v) : String(format: "%.2f%%", v)
     }
 
-    /// "Industry" when the benchmark line is industry-level, else "Sector".
+    /// "Industry" when THIS series' benchmark line is industry-level, else "Sector".
+    /// The level is per series (the lookup falls back industry → sector per cell); the
+    /// card's single ticker-wide level is only the fallback for a report frozen before
+    /// `peer_group_levels` existed.
     private var peerWord: String {
-        card.peerGroupLevel == "industry" ? "Industry" : "Sector"
+        growthData.peerWord(for: selectedMetric, period: selectedPeriod, legacyLevel: card.peerGroupLevel)
+    }
+
+    /// The series draws a dashed peer line (it has at least one benchmark value).
+    private var showsPeerLine: Bool {
+        current.contains { $0.sectorAverageYoY != nil }
     }
 
     private func deltaText(company: Double, sector: Double) -> String {
@@ -244,15 +249,19 @@ struct GrowthChartSheet: View {
                         .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                 }
-                HStack(spacing: 5) {
-                    HStack(spacing: 2) {  // dashed-line swatch
-                        ForEach(0..<3, id: \.self) { _ in
-                            Capsule().fill(AppColors.growthSectorGray).frame(width: 4, height: 2)
+                // Only when the series draws the dashed line (a series with no peer
+                // benchmark has none) — never name a line that is not there.
+                if showsPeerLine {
+                    HStack(spacing: 5) {
+                        HStack(spacing: 2) {  // dashed-line swatch
+                            ForEach(0..<3, id: \.self) { _ in
+                                Capsule().fill(AppColors.growthSectorGray).frame(width: 4, height: 2)
+                            }
                         }
+                        Text("\(peerWord) Average")
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textSecondary)
                     }
-                    Text("\(peerWord) Average")
-                        .font(AppTypography.labelSmall)
-                        .foregroundColor(AppColors.textSecondary)
                 }
             }
             if let pair = sectorPair {

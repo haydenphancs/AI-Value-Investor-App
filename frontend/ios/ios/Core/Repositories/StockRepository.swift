@@ -73,9 +73,22 @@ final class StockRepository: StockRepositoryProtocol {
         static let volatile: TimeInterval = 120        // 2 min — quote, overview
         static let chart: TimeInterval = 25            // 25 sec — under the 30s refresh interval
         static let news: TimeInterval = 60             // 1 min — news updates frequently
-        static let fundamental: TimeInterval = 86400   // 24 hours — matches backend Supabase cache
+        // 24 hours — profile, ETF profile/holdings/dividends, holders. Does NOT "match" the
+        // backend's 24h Supabase tier: the two ADD (a row 23h old there, then 24h here).
+        static let fundamental: TimeInterval = 86400
         static let analysis: TimeInterval = 1800       // 30 min — analyst, sentiment, technical
         static let events: TimeInterval = 86400        // 24 hours — chart events rarely change
+        /// 30 min — the six Financials cards (earnings, growth, profit power, health check,
+        /// signal of confidence, revenue breakdown).
+        ///
+        /// Was `fundamental` (24h). Stacked on the backend's own 24h tier that pinned a bad
+        /// upstream value for ~47h in a live process (the AVGO earnings-feed revenue glitch,
+        /// 2026-09-23), showed a just-reported quarter as pending all evening, and kept a
+        /// DEGRADED 200 the server itself refused to persist. The backend's 5-min memory +
+        /// 24h Supabase tiers already absorb the FMP cost, so this only has to dedupe a
+        /// session's reopen burst. A degraded or empty payload is never cached at all
+        /// (`FinancialsCacheable.isCacheable`).
+        static let financials: TimeInterval = 1800
     }
 
     // MARK: - Properties
@@ -682,8 +695,17 @@ final class StockRepository: StockRepositoryProtocol {
     func getEarnings(ticker: String) async throws -> EarningsDTO {
         let cacheKey = "earnings_\(ticker)"
 
-        if let cached: EarningsDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
-            return cached
+        if let cached: EarningsDTO = getCached(cacheKey, maxAge: CacheTTL.financials) {
+            // The entry describes the world BEFORE its own "next" report. Once that day has
+            // arrived (UTC, the backend's `today_str`) the just-released quarter would sit
+            // there as pending under a past "Next Earnings" date — the backend's tier already
+            // invalidates on the same condition, so ask it.
+            if cached.nextEarningsDayHasArrived() {
+                cache.removeValue(forKey: cacheKey)
+                print("🗑️ StockRepository: earnings for \(ticker) passed its next earnings date — refetching")
+            } else {
+                return cached
+            }
         }
 
         let response = try await apiClient.request(
@@ -691,7 +713,7 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: EarningsDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        cacheFinancialsIfComplete(cacheKey, response: response, section: "earnings", ticker: ticker)
         print("✅ StockRepository: Got earnings for \(ticker) — \(response.epsQuarters.count) EPS quarters")
         return response
     }
@@ -699,7 +721,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getGrowth(ticker: String) async throws -> GrowthResponseDTO {
         let cacheKey = "growth_\(ticker)"
 
-        if let cached: GrowthResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+        if let cached: GrowthResponseDTO = getCached(cacheKey, maxAge: CacheTTL.financials) {
             return cached
         }
 
@@ -708,7 +730,7 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: GrowthResponseDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        cacheFinancialsIfComplete(cacheKey, response: response, section: "growth", ticker: ticker)
         print("✅ StockRepository: Got growth for \(ticker)")
         return response
     }
@@ -718,7 +740,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getProfitPower(ticker: String) async throws -> ProfitPowerResponseDTO {
         let cacheKey = "profit_power_\(ticker)"
 
-        if let cached: ProfitPowerResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+        if let cached: ProfitPowerResponseDTO = getCached(cacheKey, maxAge: CacheTTL.financials) {
             return cached
         }
 
@@ -727,7 +749,7 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: ProfitPowerResponseDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        cacheFinancialsIfComplete(cacheKey, response: response, section: "profit power", ticker: ticker)
         print("✅ StockRepository: Got profit power for \(ticker)")
         return response
     }
@@ -737,7 +759,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getHealthCheck(ticker: String) async throws -> HealthCheckResponseDTO {
         let cacheKey = "health_check_\(ticker)"
 
-        if let cached: HealthCheckResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+        if let cached: HealthCheckResponseDTO = getCached(cacheKey, maxAge: CacheTTL.financials) {
             return cached
         }
 
@@ -746,7 +768,7 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: HealthCheckResponseDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        cacheFinancialsIfComplete(cacheKey, response: response, section: "health check", ticker: ticker)
         print("✅ StockRepository: Got health check for \(ticker)")
         return response
     }
@@ -756,7 +778,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO {
         let cacheKey = "signal_of_confidence_\(ticker)"
 
-        if let cached: SignalOfConfidenceResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+        if let cached: SignalOfConfidenceResponseDTO = getCached(cacheKey, maxAge: CacheTTL.financials) {
             return cached
         }
 
@@ -765,7 +787,7 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: SignalOfConfidenceResponseDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        cacheFinancialsIfComplete(cacheKey, response: response, section: "signal of confidence", ticker: ticker)
         print("✅ StockRepository: Got signal of confidence for \(ticker)")
         return response
     }
@@ -808,7 +830,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getRevenueBreakdown(ticker: String) async throws -> RevenueBreakdownDTO {
         let cacheKey = "revenue_breakdown_\(ticker)"
 
-        if let cached: RevenueBreakdownDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+        if let cached: RevenueBreakdownDTO = getCached(cacheKey, maxAge: CacheTTL.financials) {
             return cached
         }
 
@@ -817,12 +839,30 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: RevenueBreakdownDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        cacheFinancialsIfComplete(cacheKey, response: response, section: "revenue breakdown", ticker: ticker)
         print("✅ StockRepository: Got revenue breakdown for \(ticker)")
         return response
     }
 
     // MARK: - Cache Helpers
+
+    /// The ONLY way a Financials payload enters the cache.
+    ///
+    /// A build the server marked `degraded` (an upstream leg failed) is one it deliberately
+    /// refused to persist — it keeps it for a short in-memory TTL and rebuilds — so caching
+    /// it here for 30 minutes would pin the hole the backend already healed. An EMPTY payload
+    /// (no quarters / points / metrics) is the same failure arriving without a flag, e.g.
+    /// from a backend older than the `degraded` field. Neither is cached; the next open asks
+    /// again, and the backend's own tiers absorb the cost.
+    private func cacheFinancialsIfComplete<T: FinancialsCacheable>(
+        _ key: String, response: T, section: String, ticker: String
+    ) {
+        guard response.isCacheable else {
+            print("⚠️ StockRepository: NOT caching \(section) for \(ticker) — degraded=\(response.degraded ?? []) empty=\(response.isEmptyPayload)")
+            return
+        }
+        setCache(key, value: response)
+    }
 
     private struct CacheEntry {
         let data: Any
@@ -871,10 +911,11 @@ final class StockRepository: StockRepositoryProtocol {
     ///
     /// Pull-to-refresh was doing no network work at all for most of a detail screen.
     /// This repository is a process-lifetime `@MainActor` singleton and
-    /// `CacheTTL.fundamental` is 86_400s, so the six Financials cards, earnings,
-    /// chart-events and the ETF profile/holdings-risk/dividends could not be refreshed
-    /// for the life of the app; `CacheTTL.analysis` (1_800s) froze analyst/sentiment/
-    /// technical for half an hour. Only `getHolders` had an escape hatch. The gesture
+    /// `CacheTTL.fundamental` is 86_400s, so chart-events and the ETF profile/holdings-risk/
+    /// dividends (and, until they moved to `CacheTTL.financials`, the six Financials cards)
+    /// could not be refreshed for the life of the app; `CacheTTL.analysis` (1_800s) froze
+    /// analyst/sentiment/technical for half an hour, as `CacheTTL.financials` now holds the
+    /// Financials cards. Only `getHolders` had an escape hatch. The gesture
     /// bypasses the CLIENT cache only — the backend's own tiers still absorb the
     /// upstream cost, so this is not an FMP amplifier.
     ///
@@ -1892,6 +1933,26 @@ extension AnalystAnalysisDTO {
     }
 }
 
+// MARK: - Financials cache contract
+
+/// The six Financials payloads, as far as `StockRepository`'s cache is concerned.
+///
+/// `degraded` is the server's own list of reasons a build is PARTIAL (an upstream leg
+/// failed). It is Optional on every DTO: a shipped backend never sends it, and a missing key
+/// must decode, not throw. `isEmptyPayload` is the structural belt for the same failure
+/// arriving without the flag — nothing a card can draw.
+protocol FinancialsCacheable {
+    var degraded: [String]? { get }
+    var isEmptyPayload: Bool { get }
+}
+
+extension FinancialsCacheable {
+    /// Complete AND non-empty. Anything else is served but never cached on the device.
+    var isCacheable: Bool {
+        (degraded ?? []).isEmpty && !isEmptyPayload
+    }
+}
+
 // MARK: - Earnings DTOs
 
 struct EarningsQuarterDTO: Codable {
@@ -1900,6 +1961,11 @@ struct EarningsQuarterDTO: Codable {
     let estimateValue: Double
     let surprisePercent: Double?
     let fiscalDate: String?
+    /// False when no comparable analyst consensus existed. The backend still fills
+    /// `estimate_value` with the actual (so shipped builds keep decoding), which is exactly
+    /// why this flag — not an equality test — decides "no estimate". Optional: nil from an
+    /// older backend keeps today's behaviour.
+    let hasEstimate: Bool?
 
     enum CodingKeys: String, CodingKey {
         case quarter
@@ -1907,6 +1973,19 @@ struct EarningsQuarterDTO: Codable {
         case estimateValue = "estimate_value"
         case surprisePercent = "surprise_percent"
         case fiscalDate = "fiscal_date"
+        case hasEstimate = "has_estimate"
+    }
+
+    func toDisplayModel() -> EarningsQuarterData {
+        var quarter = EarningsQuarterData(
+            quarter: self.quarter,
+            actualValue: actualValue,
+            estimateValue: estimateValue,
+            surprisePercent: surprisePercent,
+            fiscalDate: fiscalDate
+        )
+        quarter.hasEstimate = hasEstimate ?? true
+        return quarter
     }
 }
 
@@ -1938,13 +2017,15 @@ struct NextEarningsDateDTO: Codable {
     }
 }
 
-struct EarningsDTO: Codable {
+struct EarningsDTO: Codable, FinancialsCacheable {
     let symbol: String
     let epsQuarters: [EarningsQuarterDTO]
     let revenueQuarters: [EarningsQuarterDTO]
     let priceHistory: [EarningsPricePointDTO]
     let dailyPriceHistory: [EarningsDailyPricePointDTO]?
     let nextEarningsDate: NextEarningsDateDTO?
+    /// Why this build is partial; nil/empty when complete. Never cached when non-empty.
+    let degraded: [String]?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -1953,7 +2034,33 @@ struct EarningsDTO: Codable {
         case priceHistory = "price_history"
         case dailyPriceHistory = "daily_price_history"
         case nextEarningsDate = "next_earnings_date"
+        case degraded
     }
+
+    var isEmptyPayload: Bool {
+        epsQuarters.isEmpty && revenueQuarters.isEmpty
+    }
+
+    /// True once this payload's "next" earnings day (UTC — the backend compares its own
+    /// `today_str` the same way) is today or earlier: the quarter it calls pending has
+    /// reported, or is reporting, so the copy is stale whatever its age.
+    ///
+    /// It cannot catch a payload fetched ON report day — the backend already rolls the date
+    /// forward to the following quarter then — which is what the short
+    /// `CacheTTL.financials` covers.
+    func nextEarningsDayHasArrived(now: Date = Date()) -> Bool {
+        guard let raw = nextEarningsDate?.date, raw.count >= 10 else { return false }
+        // "yyyy-MM-dd" sorts lexicographically, so a string compare is a day compare.
+        return String(raw.prefix(10)) <= Self.utcDayFormatter.string(from: now)
+    }
+
+    private static let utcDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 
     func toDisplayModel() -> EarningsData {
         let dateFormatter = DateFormatter()
@@ -1966,24 +2073,10 @@ struct EarningsDTO: Codable {
         // Forcing UTC on only THIS side broke that round-trip (rendered a day
         // early west of UTC).
 
-        let eps = epsQuarters.map { q in
-            EarningsQuarterData(
-                quarter: q.quarter,
-                actualValue: q.actualValue,
-                estimateValue: q.estimateValue,
-                surprisePercent: q.surprisePercent,
-                fiscalDate: q.fiscalDate
-            )
-        }
-        let revenue = revenueQuarters.map { q in
-            EarningsQuarterData(
-                quarter: q.quarter,
-                actualValue: q.actualValue,
-                estimateValue: q.estimateValue,
-                surprisePercent: q.surprisePercent,
-                fiscalDate: q.fiscalDate
-            )
-        }
+        // One mapper for both series, so `hasEstimate` cannot be carried on one and
+        // forgotten on the other.
+        let eps = epsQuarters.map { $0.toDisplayModel() }
+        let revenue = revenueQuarters.map { $0.toDisplayModel() }
         let prices = priceHistory.map { p in
             EarningsPricePoint(quarter: p.quarter, price: p.price, fiscalDate: p.fiscalDate)
         }
@@ -2005,13 +2098,19 @@ struct EarningsDTO: Codable {
                 print("⚠️ EarningsDTO: unparseable next_earnings_date \(nd.date)")
             }
         }
-        return EarningsData(
+        var data = EarningsData(
             epsQuarters: eps,
             revenueQuarters: revenue,
             priceHistory: prices,
             dailyPriceHistory: dailyPrices,
             nextEarningsDate: nextDate
         )
+        // The server's reasons this build is partial (an FMP leg failed). Dropped here, an
+        // outage with no quarters read as "No Adjusted EPS history available for this
+        // ticker" — a statement about the company. Assigned after construction so the
+        // memberwise init (and every preview) is unchanged; nil from an older backend is [].
+        data.degraded = degraded ?? []
+        return data
     }
 }
 
@@ -2031,7 +2130,7 @@ struct GrowthDataPointDTO: Codable {
     }
 }
 
-struct GrowthResponseDTO: Codable {
+struct GrowthResponseDTO: Codable, FinancialsCacheable {
     let symbol: String
     let epsAnnual: [GrowthDataPointDTO]
     let epsQuarterly: [GrowthDataPointDTO]
@@ -2043,6 +2142,13 @@ struct GrowthResponseDTO: Codable {
     let operatingProfitQuarterly: [GrowthDataPointDTO]
     let freeCashFlowAnnual: [GrowthDataPointDTO]
     let freeCashFlowQuarterly: [GrowthDataPointDTO]
+    /// Why this build is partial (e.g. "quarterly_income"); never cached when non-empty.
+    /// Optional — the report payload reuses this DTO, and legacy reports never carry it.
+    let degraded: [String]?
+    /// Per-series peer group ("industry" / "sector"), keyed "eps_annual",
+    /// "revenue_quarterly", "fcf_annual"… Optional for older payloads: nil keeps the
+    /// legend's "Sector" wording.
+    let peerGroupLevels: [String: String]?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -2056,6 +2162,14 @@ struct GrowthResponseDTO: Codable {
         case operatingProfitQuarterly = "operating_profit_quarterly"
         case freeCashFlowAnnual = "free_cash_flow_annual"
         case freeCashFlowQuarterly = "free_cash_flow_quarterly"
+        case degraded
+        case peerGroupLevels = "peer_group_levels"
+    }
+
+    var isEmptyPayload: Bool {
+        [epsAnnual, epsQuarterly, revenueAnnual, revenueQuarterly, netIncomeAnnual,
+         netIncomeQuarterly, operatingProfitAnnual, operatingProfitQuarterly,
+         freeCashFlowAnnual, freeCashFlowQuarterly].allSatisfy { $0.isEmpty }
     }
 
     func toDisplayModel() -> GrowthSectionData {
@@ -2071,7 +2185,7 @@ struct GrowthResponseDTO: Codable {
                 )
             }
         }
-        return GrowthSectionData(
+        var section = GrowthSectionData(
             epsAnnual: convert(epsAnnual),
             epsQuarterly: convert(epsQuarterly),
             revenueAnnual: convert(revenueAnnual),
@@ -2083,6 +2197,9 @@ struct GrowthResponseDTO: Codable {
             freeCashFlowAnnual: convert(freeCashFlowAnnual),
             freeCashFlowQuarterly: convert(freeCashFlowQuarterly)
         )
+        // Assigned after construction so the memberwise init (and every preview) is unchanged.
+        section.peerGroupLevels = peerGroupLevels ?? [:]
+        return section
     }
 }
 
@@ -2115,17 +2232,25 @@ struct ProfitPowerDataPointDTO: Codable {
     }
 }
 
-struct ProfitPowerResponseDTO: Codable {
+struct ProfitPowerResponseDTO: Codable, FinancialsCacheable {
     let symbol: String
     let annual: [ProfitPowerDataPointDTO]
     let quarterly: [ProfitPowerDataPointDTO]
     // "industry" / "sector" — which peer group the benchmark lines represent.
     // Optional → old payloads decode as nil and the UI keeps the "Sector" wording.
     let peerGroupLevel: String?
+    /// Why this build is partial; never cached when non-empty. Optional — the report reuses
+    /// this DTO and legacy reports never carry it.
+    let degraded: [String]?
 
     enum CodingKeys: String, CodingKey {
         case symbol, annual, quarterly
         case peerGroupLevel = "peer_group_level"
+        case degraded
+    }
+
+    var isEmptyPayload: Bool {
+        annual.isEmpty && quarterly.isEmpty
     }
 
     func toDisplayModel() -> ProfitPowerSectionData {
@@ -2181,12 +2306,14 @@ struct HealthCheckMetricDTO: Codable {
     }
 }
 
-struct HealthCheckResponseDTO: Codable {
+struct HealthCheckResponseDTO: Codable, FinancialsCacheable {
     let symbol: String
     let overallRating: String
     let passedCount: Int
     let totalCount: Int
     let metrics: [HealthCheckMetricDTO]
+    /// Why this build is partial (e.g. "no_metrics"); never cached when non-empty.
+    let degraded: [String]?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -2194,6 +2321,18 @@ struct HealthCheckResponseDTO: Codable {
         case passedCount = "passed_count"
         case totalCount = "total_count"
         case metrics
+        case degraded
+    }
+
+    /// Zero metrics is not a verdict — the server answers it with `total 0` and an
+    /// `overall_rating` of "mix", which rendered "[0/0] Mix". Never cached, and the
+    /// ViewModel maps it to no card at all.
+    ///
+    /// Nothing SCORED is the same answer: a payload whose only rows are not-meaningful
+    /// (ROE over negative equity, every other leg missing) also arrives as `total 0` /
+    /// "mix". `allSatisfy` is true for an empty list, so this covers both.
+    var isEmptyPayload: Bool {
+        metrics.allSatisfy { $0.highlightedValue == HealthCheckMetric.notMeaningfulToken }
     }
 
     func toDisplayModel() -> HealthCheckSectionData {
@@ -2244,14 +2383,29 @@ struct HealthCheckResponseDTO: Codable {
             )
         }
 
-        // Recount over the metrics we can actually SHOW. Passing the server's
-        // counts through while compactMap dropped rows let the badge read
-        // "[3/7]" above 5 visible cards.
-        let shownPassed = displayMetrics.filter { $0.status == .positive }.count
+        // The badge counts the SCORED rows we can show — never a not-meaningful one.
+        //
+        // An N/M row (ROE over negative equity) is shown but judged by nobody: the server
+        // leaves it out of `passed_count` / `total_count` (`health_check_service`, Phase 5),
+        // so a Boeing-shaped payload is 7 rows over `total_count` 6. Counting every shown row
+        // rendered "[3/7] Mix" on the card and told Cay AI the same, while the info sheet
+        // says an N/M metric is not scored.
+        //
+        // Recounted, never passed through: compactMap may also drop a metric this build
+        // can't draw (contract drift), and a server count over rows we don't show let the
+        // badge read "[3/7]" above 5 visible cards. With every row mapped this equals the
+        // server's own counts (`passed_count` = positives among the scored rows); when it
+        // does not, say so in the log rather than in the badge.
+        let scored = displayMetrics.filter { !$0.isNotMeaningful }
+        let scoredPassed = scored.filter { $0.status == .positive }.count
+        if scored.count != totalCount || scoredPassed != passedCount {
+            print("⚠️ HealthCheckDTO: \(symbol) badge recounted to [\(scoredPassed)/\(scored.count)] from server [\(passedCount)/\(totalCount)] — \(metrics.count) rows, \(displayMetrics.count) shown, \(displayMetrics.count - scored.count) not meaningful")
+        }
         return HealthCheckSectionData(
             overallRating: ratingMap[overallRating] ?? .mix,
-            passedCount: displayMetrics.count == totalCount ? passedCount : shownPassed,
-            totalCount: displayMetrics.count,
+            passedCount: scoredPassed,
+            totalCount: scored.count,
+            // Every mappable row stays on screen, the N/M one included (it explains itself).
             metrics: displayMetrics
         )
     }
@@ -2264,7 +2418,7 @@ struct RevenueSourceDTO: Codable {
     let value: Double
 }
 
-struct RevenueBreakdownDTO: Codable {
+struct RevenueBreakdownDTO: Codable, FinancialsCacheable {
     let symbol: String
     let fiscalYear: String
     let revenueSources: [RevenueSourceDTO]
@@ -2292,6 +2446,9 @@ struct RevenueBreakdownDTO: Codable {
     /// arrive AS REPORTED; the chart draws this as the first waterfall step down from the
     /// gross stack. nil ⇒ the stack already sums to revenue, or an older backend.
     let intersegmentEliminations: Double?
+    /// Why this build is partial (e.g. "segmentation_unavailable"); never cached when
+    /// non-empty. Optional so an older backend still decodes.
+    let degraded: [String]?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -2304,6 +2461,13 @@ struct RevenueBreakdownDTO: Codable {
         case reportedRevenue = "reported_revenue"
         case otherExpense = "other_expense"
         case intersegmentEliminations = "intersegment_eliminations"
+        case degraded
+    }
+
+    /// No segment AND no reported revenue: nothing to draw. A reported revenue of 0 is a
+    /// real (pre-revenue) answer and is not "empty".
+    var isEmptyPayload: Bool {
+        revenueSources.isEmpty && reportedRevenue == nil
     }
 
     func toDisplayModel() -> RevenueBreakdownData {
@@ -2407,6 +2571,10 @@ struct SignalOfConfidenceSummaryDTO: Codable {
     /// `buybackYield` + `shareCountChange`, and `dividendInfo` is nil for every
     /// non-dividend payer — which silently discarded it for the biggest repurchasers.
     let buybackStatus: String?
+    /// False when fewer than two quarters reported a share count, so `share_count_change`
+    /// is the 0.0 sentinel rather than a measurement ("unchanged" would be invented).
+    /// Optional: nil from an older backend keeps today's behaviour.
+    let shareCountChangeKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case totalYield = "total_yield"
@@ -2414,6 +2582,7 @@ struct SignalOfConfidenceSummaryDTO: Codable {
         case buybackYield = "buyback_yield"
         case shareCountChange = "share_count_change"
         case buybackStatus = "buyback_status"
+        case shareCountChangeKnown = "share_count_change_known"
     }
 }
 
@@ -2430,6 +2599,9 @@ struct DividendInfoDTO: Codable {
     let dividendPerShareYear: String?
     let dividendGrowthPct: Double?
     let dividendGrowthYears: Int?
+    /// The window `five_year_avg_yield` actually averaged ("8Q", "5Y"…). Optional: an older
+    /// backend never sends it, and the card then keeps its "5Y" wording.
+    let avgYieldWindow: String?
 
     enum CodingKeys: String, CodingKey {
         case exDividendDate = "ex_dividend_date"
@@ -2442,6 +2614,7 @@ struct DividendInfoDTO: Codable {
         case dividendPerShareYear = "dividend_per_share_year"
         case dividendGrowthPct = "dividend_growth_pct"
         case dividendGrowthYears = "dividend_growth_years"
+        case avgYieldWindow = "avg_yield_window"
     }
 }
 
@@ -2460,17 +2633,28 @@ struct AnnualDividendDTO: Codable {
     }
 }
 
-struct SignalOfConfidenceResponseDTO: Codable {
+struct SignalOfConfidenceResponseDTO: Codable, FinancialsCacheable {
     let symbol: String
     let dataPoints: [SignalOfConfidenceDataPointDTO]
     let summary: SignalOfConfidenceSummaryDTO
     let dividendInfo: DividendInfoDTO?
+    /// Why this build is partial; never cached when non-empty. Optional so an older backend
+    /// still decodes.
+    let degraded: [String]?
 
     enum CodingKeys: String, CodingKey {
         case symbol
         case dataPoints = "data_points"
         case summary
         case dividendInfo = "dividend_info"
+        case degraded
+    }
+
+    /// No quarter at all: the server's summary is then all zeros — "0.0% yield, share count
+    /// unchanged", a fabricated returns-nothing verdict. Never cached, and the ViewModel
+    /// maps it to no card.
+    var isEmptyPayload: Bool {
+        dataPoints.isEmpty
     }
 
     func toDisplayModel() -> SignalOfConfidenceSectionData {
@@ -2485,7 +2669,7 @@ struct SignalOfConfidenceResponseDTO: Codable {
             )
         }
 
-        let summaryModel = SignalOfConfidenceSummary(
+        var summaryModel = SignalOfConfidenceSummary(
             totalYield: summary.totalYield,
             dividendYield: summary.dividendYield,
             buybackYield: summary.buybackYield,
@@ -2495,6 +2679,8 @@ struct SignalOfConfidenceResponseDTO: Codable {
                 ?? dividendInfo.flatMap { BuybackStatus(rawValue: $0.buybackStatus) }
                 ?? .low
         )
+        // Assigned after construction so the memberwise init (and every preview) is unchanged.
+        summaryModel.shareCountChangeKnown = summary.shareCountChangeKnown ?? true
 
         var divInfo: DividendInfo? = nil
         if let dto = dividendInfo {
@@ -2511,7 +2697,7 @@ struct SignalOfConfidenceResponseDTO: Codable {
             let yieldStatus = DividendYieldStatus(rawValue: dto.status) ?? .fair
             let bbStatus = BuybackStatus(rawValue: dto.buybackStatus) ?? .low
 
-            divInfo = DividendInfo(
+            var info = DividendInfo(
                 exDividendDate: exDate,
                 paymentDate: payDate,
                 // 0.0 means the backend had too little history to average, not that the
@@ -2529,6 +2715,9 @@ struct SignalOfConfidenceResponseDTO: Codable {
                 growthPct: dto.dividendGrowthPct,
                 growthYears: dto.dividendGrowthYears
             )
+            // The window the average really spans; nil (older backend) keeps "5Y".
+            info.avgYieldWindowLabel = dto.avgYieldWindow
+            divInfo = info
         }
 
         return SignalOfConfidenceSectionData(

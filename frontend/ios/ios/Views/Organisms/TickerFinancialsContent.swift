@@ -18,12 +18,24 @@ struct TickerFinancialsContent: View {
     /// loading tab and a tab whose backend returned nothing render identically
     /// (six missing cards), so the user can't tell which they're looking at.
     var isLoaded: Bool = true
+    /// Why the tab has nothing to show, already mapped through `AppError` by the ViewModel
+    /// (never a raw backend string). nil means every fetch answered — an empty answer is
+    /// "isn't available for this company", a FAILURE is this card with a retry.
+    var loadFailureMessage: String? = nil
+    /// Sections whose fetch failed while others loaded — named in an inline retry notice.
+    var failedSectionNames: [String] = []
+    var isRetrying: Bool = false
+    var onRetry: (() -> Void)?
     var onEarningsDetailTap: (() -> Void)?
     var onGrowthDetailTap: (() -> Void)?
     var onProfitPowerDetailTap: (() -> Void)?
     var onSignalOfConfidenceDetailTap: (() -> Void)?
     var onRevenueBreakdownDetailTap: (() -> Void)?
     var onHealthCheckDetailTap: (() -> Void)?
+    /// The Growth / Profit Power build lost a DATA leg upstream (an FMP 429): an empty
+    /// series then reads "temporarily unavailable", not "isn't available for this company".
+    var growthIsDegraded: Bool = false
+    var profitPowerIsDegraded: Bool = false
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -33,7 +45,8 @@ struct TickerFinancialsContent: View {
                     earningsData: earningsData,
                     onDetailTap: {
                         onEarningsDetailTap?()
-                    }
+                    },
+                    onRetry: onRetry
                 )
             }
 
@@ -47,6 +60,7 @@ struct TickerFinancialsContent: View {
             if let growthData = growthData {
                 GrowthSectionCard(
                     growthData: growthData,
+                    isDegraded: growthIsDegraded,
                     onDetailTapped: {
                         onGrowthDetailTap?()
                     }
@@ -69,7 +83,8 @@ struct TickerFinancialsContent: View {
                     profitPowerData: profitPowerData,
                     onDetailTapped: {
                         onProfitPowerDetailTap?()
-                    }
+                    },
+                    isDegraded: profitPowerIsDegraded
                 )
             }
 
@@ -93,15 +108,36 @@ struct TickerFinancialsContent: View {
                 )
             }
 
-            // Still loading, or everything failed — say which.
+            // Still loading, failed, or genuinely empty — say which.
             if !isLoaded && !hasAnySection {
                 loadingPlaceholder
+            } else if isLoaded && !hasAnySection, let loadFailureMessage {
+                // A failed load (network down, overview + fallbacks failed, every fetch
+                // errored) is not a property of the company: it gets a reason and a retry.
+                DetailLoadFailureCard(
+                    message: loadFailureMessage,
+                    title: "Couldn't load financials",
+                    isRetrying: isRetrying,
+                    onRetry: onRetry
+                )
             } else if isLoaded && !hasAnySection {
                 ChartUnavailableView(
                     message: "Financial data isn't available for this company right now.",
                     systemImage: "doc.text.magnifyingglass"
                 )
                 .padding(.vertical, AppSpacing.xl)
+            } else if isLoaded && !failedSectionNames.isEmpty {
+                // Some sections loaded, others failed. A typed backend error is not
+                // auto-retried by APIClient, so without this the failed card would simply
+                // be missing with no way back short of pull-to-refresh.
+                // A retry keeps the tab settled (`isLoaded` stays true), so the notice stays
+                // up through it, says so, and cannot be tapped again until it lands.
+                InlineRetryNotice(
+                    message: "Couldn't load \(failedSectionNames.joined(separator: ", ")).",
+                    retryTitle: isRetrying ? "Retrying\u{2026}" : "Try Again",
+                    onRetry: onRetry
+                )
+                .disabled(isRetrying)
             }
 
             // Bottom spacing for AI bar
@@ -140,6 +176,42 @@ struct TickerFinancialsContent: View {
             signalOfConfidenceData: SignalOfConfidenceSectionData.sampleData,
             revenueBreakdownData: RevenueBreakdownData.sampleApple,
             healthCheckData: HealthCheckSectionData.sampleData
+        )
+    }
+    .background(AppColors.background)
+}
+
+#Preview("Load failed") {
+    // No sample market data on a failed load — the tab shows the reason and a retry.
+    ScrollView {
+        TickerFinancialsContent(
+            earningsData: nil,
+            growthData: nil,
+            profitPowerData: nil,
+            signalOfConfidenceData: nil,
+            revenueBreakdownData: nil,
+            healthCheckData: nil,
+            isLoaded: true,
+            loadFailureMessage: "Unable to connect. Check your internet connection.",
+            onRetry: {}
+        )
+    }
+    .background(AppColors.background)
+}
+
+#Preview("Partial failure") {
+    ScrollView {
+        TickerFinancialsContent(
+            earningsData: EarningsData.sampleData,
+            growthData: nil,
+            profitPowerData: ProfitPowerSectionData.sampleData,
+            signalOfConfidenceData: nil,
+            revenueBreakdownData: nil,
+            healthCheckData: nil,
+            isLoaded: true,
+            loadFailureMessage: "Our market data provider is temporarily unavailable. Try again shortly.",
+            failedSectionNames: ["Growth", "Health Check"],
+            onRetry: {}
         )
     }
     .background(AppColors.background)

@@ -1809,22 +1809,65 @@ class ChatService:
             data = await service.get_profit_power(ticker)
             if not data.annual:
                 return None
-            latest = data.annual[-1]
-            parts = [f"Latest annual margins for {ticker} ({latest.period}):"]
-            if latest.gross_margin is not None:
-                parts.append(f"Gross {latest.gross_margin:.1f}%")
-            if latest.operating_margin is not None:
-                parts.append(f"Operating {latest.operating_margin:.1f}%")
-            if latest.net_margin is not None:
-                parts.append(f"Net {latest.net_margin:.1f}%")
-            if latest.fcf_margin is not None:
-                parts.append(f"FCF {latest.fcf_margin:.1f}%")
-            if latest.sector_average_net_margin is not None:
-                parts.append(f"Sector avg net margin {latest.sector_average_net_margin:.1f}%")
-            return ", ".join(parts[:1]) + " " + ", ".join(parts[1:]) + "."
+            return self._format_profit_summary(ticker, data)
         except Exception as e:
-            logger.warning(f"Profit summary fetch failed for {ticker}: {e}")
+            logger.warning(
+                "Profit summary fetch failed for %s: %s: %s", ticker, type(e).__name__, e,
+            )
             return None
+
+    @staticmethod
+    def _format_profit_summary(ticker: str, data: Any) -> str:
+        """The grounding line for Profit Power, from ``data.annual`` (non-empty).
+
+        ``annual[-1]`` can be a revenue GAP: Profit Power keeps a zero / negative revenue
+        year as an all-None point so the latest year really is the latest. Formatting it
+        like a normal year emitted "Latest annual margins for X (2025): ." — or a lone
+        "Sector avg net margin 12.0%" that reads as the company's own. Such a year now says
+        "not available", the most recent year WITH margins is quoted under its own year,
+        and the peer figure is always named as a peer figure.
+
+        The peer figure is never attributed to FY{latest}: Profit Power flattens a THIN
+        latest-year peer cell (n below the mature floor — the newest fiscal year early in
+        every reporting season, always for an off-calendar filer) to the latest MATURE
+        median at or before it (``hold_back_thin_benchmarks``), and the response carries
+        only the value, not its year. "(peer group, same year)" put FY2025's median under
+        FY2026, and Cay AI repeated it as "the industry's FY2026 average".
+        """
+        def _margins(p: Any) -> List[str]:
+            out = []
+            for name, value in (("Gross", p.gross_margin), ("Operating", p.operating_margin),
+                                ("Net", p.net_margin), ("FCF", p.fcf_margin)):
+                if value is not None:
+                    out.append(f"{name} {value:.1f}%")
+            return out
+
+        peer = "Industry" if getattr(data, "peer_group_level", None) == "industry" else "Sector"
+        latest = data.annual[-1]
+        company = _margins(latest)
+        peer_net = latest.sector_average_net_margin
+        peer_year = (
+            f"latest available peer reading; it may be from a year before FY{latest.period}"
+        )
+        if company:
+            text = f"Latest annual margins for {ticker} (FY{latest.period}): {', '.join(company)}"
+            if peer_net is not None:
+                text += f"; {peer} peer-group median net margin {peer_net:.1f}% ({peer_year})"
+            return text + "."
+
+        text = (
+            f"Latest annual margins for {ticker} (FY{latest.period}): not available "
+            f"(no positive revenue reported that year)."
+        )
+        prior = next((p for p in reversed(data.annual[:-1]) if _margins(p)), None)
+        if prior is not None:
+            text += f" Most recent year with margins: FY{prior.period}: {', '.join(_margins(prior))}."
+        if peer_net is not None:
+            text += (
+                f" {peer} peer-group median net margin: {peer_net:.1f}% "
+                f"(peers, not {ticker}; {peer_year})."
+            )
+        return text
 
     async def _get_snapshot_summary(self, ticker: str) -> Optional[str]:
         """Fetch all 5 cached snapshots and format compact summary strings."""

@@ -13,6 +13,10 @@ struct ProfitPowerSectionCard: View {
 
     let profitPowerData: ProfitPowerSectionData
     let onDetailTapped: () -> Void
+    /// The build lost a company data leg upstream (`TickerDetailViewModel.profitPowerIsDegraded`):
+    /// a tab it emptied reads "temporarily unavailable", not "isn't available for this
+    /// company". Defaults to false, so a caller that does not pass it keeps today's wording.
+    var isDegraded: Bool = false
 
     // MARK: - State
 
@@ -33,20 +37,29 @@ struct ProfitPowerSectionCard: View {
             // Header with title, info icon, and detail link
             headerSection
 
-            // Period toggle (Annual / Quarterly)
+            // Period toggle (Annual / Quarterly). Switching clears the tooltip: the
+            // selection outlived the toggle and drew the other tab's period (e.g. the
+            // 2024 annual margins) over the new series until its 2.5s timer fired.
             ProfitPowerPeriodToggle(selectedPeriod: $selectedPeriod)
                 .padding(.leading, AppSpacing.xs)
+                .onChange(of: selectedPeriod) {
+                    selectedDataPoint = nil
+                }
 
             // Main chart
             ProfitPowerChartView(
                 dataPoints: currentDataPoints,
                 selectedDataPoint: $selectedDataPoint,
-                peerWord: profitPowerData.peerWord
+                peerWord: profitPowerData.peerWord,
+                isDegraded: isDegraded
             )
             .padding(.top, AppSpacing.sm)
 
             // Legend
-            ProfitPowerLegendView(peerWord: profitPowerData.peerWord)
+            ProfitPowerLegendView(
+                peerWord: profitPowerData.peerWord,
+                showsPeerLine: currentDataPoints.contains { $0.sectorAverageNetMargin != nil }
+            )
                 .frame(maxWidth: .infinity)
                 .padding(.top, AppSpacing.md)
         }
@@ -104,6 +117,25 @@ struct ProfitPowerSectionCard: View {
                 onDetailTapped: {}
             )
             .padding()
+        }
+    }
+}
+
+#Preview("Quarterly leg failed upstream") {
+    // A degraded build: annual margins are real, the quarterly statement leg failed. The
+    // Quarterly tab reads "temporarily unavailable" instead of a fact about the company.
+    let data = ProfitPowerSectionData(
+        annualData: ProfitPowerSectionData.sampleData.annualData,
+        quarterlyData: [],
+        peerGroupLevel: "industry"
+    )
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        ScrollView {
+            ProfitPowerSectionCard(profitPowerData: data, onDetailTapped: {}, isDegraded: true)
+                .padding()
         }
     }
 }

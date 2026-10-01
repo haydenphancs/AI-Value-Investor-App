@@ -12,6 +12,8 @@ enum EarningsLegendType {
     case estimate
     case beat
     case missed
+    /// Reported with no analyst consensus (EarningsQuarterResult.noEstimate).
+    case reported
 
     var color: Color {
         switch self {
@@ -23,6 +25,9 @@ enum EarningsLegendType {
             return AppColors.bullish  // Green
         case .missed:
             return AppColors.bearish  // Red
+        case .reported:
+            // Must equal EarningsQuarterResult.noEstimate.dotColor — the dot it explains.
+            return EarningsQuarterResult.noEstimate.dotColor
         }
     }
 
@@ -36,6 +41,8 @@ enum EarningsLegendType {
             return "Beat"
         case .missed:
             return "Missed"
+        case .reported:
+            return "Reported"
         }
     }
 }
@@ -75,6 +82,7 @@ struct EarningsLegendItem: View {
             EarningsLegendItem(type: .estimate)
             EarningsLegendItem(type: .beat)
             EarningsLegendItem(type: .missed)
+            EarningsLegendItem(type: .reported)
         }
     }
 }

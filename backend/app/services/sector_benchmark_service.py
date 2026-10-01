@@ -17,6 +17,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
+from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
+from app.utils.period_labels import (
+    calendar_quarter_key,
+    calendar_quarter_label,
+    format_calendar_quarter,
+    previous_calendar_quarter,
+)
 from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
@@ -38,6 +45,15 @@ FMP_QUARTERLY_LIMIT_BACKFILL = 80   # deep quarterly history (FMP may return few
 # Daily limits (only refresh recent/current periods)
 FMP_ANNUAL_LIMIT_DAILY = 3          # 3 records → 2 YoY points (current + prior year)
 FMP_QUARTERLY_LIMIT_DAILY = 12      # ~3 years of quarters (covers recent YoY + QoQ)
+
+# Statement granularity the producer READS ("annual" / "quarterly", which also names the
+# FMP data keys `income_quarterly` etc.) → the `period_type` its rows are STORED under.
+# Quarterly rows are keyed by calendar quarter (`_quarterly_period_label`), so they get
+# their own period_type and never mix with the legacy fiscal-keyed 'quarterly' rows.
+STORED_PERIOD_TYPE: Dict[str, str] = {
+    "annual": "annual",
+    "quarterly": CALENDAR_QUARTER_PERIOD_TYPE,
+}
 
 # FMP sector names → canonical app sector names
 _FMP_SECTOR_MAP: Dict[str, str] = {
@@ -237,12 +253,35 @@ def _annual_period_label(record: Dict[str, Any]) -> str:
 
 
 def _quarterly_period_label(record: Dict[str, Any]) -> str:
-    """Quarterly period label like \"Q1'24\"."""
-    period = record.get("period") or ""  # "Q1", "Q2", etc. (null-safe)
-    year = _extract_year(record)
-    if len(year) >= 4:
-        return f"{period}'{year[-2:]}"
-    return f"{period}'{year}"
+    """Storage key of a QUARTERLY row: the CALENDAR quarter its period ends in, e.g.
+    \"Q3'25\" for any quarter ending Jul-Sep 2025 (an end on day 1-7 counts as the
+    previous month, for 52/53-week filers). ``""`` when the row has no usable date.
+
+    It used to be FMP's FISCAL ``period`` + the calendar year of the end date, which
+    pooled Microsoft's Jul-Sep quarter (fiscal Q1) with everyone else's Jan-Mar and
+    Nvidia's Nov-Jan quarter (fiscal Q4) with Oct-Dec of the FOLLOWING year. Consumers
+    join on the same helper (`period_labels.calendar_quarter_label`).
+    """
+    return calendar_quarter_label(record)
+
+
+def _by_calendar_quarter(
+    records: List[Dict[str, Any]],
+) -> Dict[Tuple[int, int], Dict[str, Any]]:
+    """One QUARTERLY record per calendar quarter, keyed ``(year, quarter)``.
+
+    When two of a company's rows land in the same calendar quarter (a fiscal-year-end
+    change leaves a short stub period; FMP occasionally repeats a row) the NEWEST period
+    end wins, so a company is counted once per quarter — a duplicate used to enter the
+    median twice. Non-dict rows and rows without a usable date are skipped.
+    """
+    out: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    rows = [r for r in (records or []) if isinstance(r, dict)]
+    for rec in sorted(rows, key=lambda r: str(r.get("date") or "")):
+        key = calendar_quarter_key(rec.get("date"))
+        if key is not None:
+            out[key] = rec
+    return out
 
 
 def _compute_yoy_for_records(
@@ -257,37 +296,27 @@ def _compute_yoy_for_records(
     if not records:
         return {}
 
-    sorted_recs = sorted(records, key=lambda r: r.get("date") or "")
     result: Dict[str, float] = {}
 
     if is_quarterly:
-        # Build lookup: (period, year) -> record
-        lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for rec in sorted_recs:
-            p = rec.get("period", "")
-            cy = _extract_year(rec)
-            lookup[(p, cy)] = rec
-
-        for rec in sorted_recs:
-            period = rec.get("period", "")
-            cal_year = _extract_year(rec)
-            try:
-                prev_year = str(int(cal_year) - 1)
-            except ValueError:
-                continue
-
-            prev_rec = lookup.get((period, prev_year))
+        # Same CALENDAR quarter one year earlier. Keyed by calendar quarter, not by
+        # (fiscal period, end year): the old key missed the prior year whenever a
+        # 52/53-week Q4 closed on Jan 1-7 (FY2025 ending 2026-01-03 looked for a
+        # "Q4 2025" row that was keyed 2024), and it labelled the result with the
+        # fiscal quarter number.
+        by_quarter = _by_calendar_quarter(records)
+        for key, rec in by_quarter.items():
+            prev_rec = by_quarter.get((key[0] - 1, key[1]))
             if prev_rec is None:
                 continue
-
             current_val = _safe_float(rec, field)
             prev_val = _safe_float(prev_rec, field)
             if current_val is not None and prev_val is not None and prev_val != 0:
-                yoy = round((current_val - prev_val) / abs(prev_val) * 100, 2)
-                label = _quarterly_period_label(rec)
-                if label:
-                    result[label] = yoy
+                result[format_calendar_quarter(key)] = round(
+                    (current_val - prev_val) / abs(prev_val) * 100, 2,
+                )
     else:
+        sorted_recs = sorted(records, key=lambda r: r.get("date") or "")
         # Annual: compare consecutive sorted records (only if exactly 1 year apart)
         for i in range(1, len(sorted_recs)):
             rec = sorted_recs[i]
@@ -317,23 +346,29 @@ def _compute_qoq_for_records(
 ) -> Dict[str, float]:
     """
     Compute sequential Quarter-over-Quarter growth % for each period.
-    Compares each quarter to the immediately preceding quarter (Q2 vs Q1, Q3 vs Q2, etc.).
-    Returns {period_label: qoq_percent}.
+    Compares each quarter to the immediately preceding CALENDAR quarter (Q2 vs Q1,
+    Q1 vs the prior Q4). Returns {calendar period_label: qoq_percent}.
+
+    The previous quarter must actually be present: this used to compare each row with
+    whatever row preceded it in date order, so a quarter missing from FMP's history
+    silently produced a six-month change filed as a one-quarter one.
     """
     if not records:
         return {}
 
-    sorted_recs = sorted(records, key=lambda r: r.get("date") or "")
+    by_quarter = _by_calendar_quarter(records)
     result: Dict[str, float] = {}
 
-    for i in range(1, len(sorted_recs)):
-        current_val = _safe_float(sorted_recs[i], field)
-        prev_val = _safe_float(sorted_recs[i - 1], field)
+    for key, rec in by_quarter.items():
+        prev_rec = by_quarter.get(previous_calendar_quarter(key))
+        if prev_rec is None:
+            continue
+        current_val = _safe_float(rec, field)
+        prev_val = _safe_float(prev_rec, field)
         if current_val is not None and prev_val is not None and prev_val != 0:
-            qoq = round((current_val - prev_val) / abs(prev_val) * 100, 2)
-            label = _quarterly_period_label(sorted_recs[i])
-            if label:
-                result[label] = qoq
+            result[format_calendar_quarter(key)] = round(
+                (current_val - prev_val) / abs(prev_val) * 100, 2,
+            )
 
     return result
 
@@ -415,13 +450,19 @@ def _ev_ebitda_from_raw(
 def _index_by_period(
     records: List[Dict[str, Any]], period_type: str,
 ) -> Dict[str, Dict[str, Any]]:
-    """Key each record by its period label so we can join across endpoints."""
+    """Key each record by its period label so we can join across endpoints.
+
+    Quarterly rows key on the calendar quarter (newest period end wins a collision),
+    so the income / balance / cash-flow / key-metrics rows of one quarter still meet.
+    """
+    if period_type == "quarterly":
+        return {
+            format_calendar_quarter(key): rec
+            for key, rec in _by_calendar_quarter(records).items()
+        }
     out: Dict[str, Dict[str, Any]] = {}
     for rec in records:
-        label = (
-            _quarterly_period_label(rec) if period_type == "quarterly"
-            else _annual_period_label(rec)
-        )
+        label = _annual_period_label(rec)
         if label:
             out[label] = rec
     return out
@@ -823,6 +864,7 @@ class SectorBenchmarkService:
                 period_values = self._collect_metric_values(
                     all_company_data, metric_config, period_type
                 )
+                stored_type = STORED_PERIOD_TYPE[period_type]
                 metric_type = metric_config["type"]
                 for period_label, values in period_values.items():
                     # Filter BEFORE the sample-size gate, not after. `_winsorize` now drops
@@ -837,7 +879,7 @@ class SectorBenchmarkService:
                         continue
                     # Skip periods already stored (historical benchmarks never change)
                     if existing_periods and (
-                        metric_config["name"], period_type, period_label
+                        metric_config["name"], stored_type, period_label
                     ) in existing_periods:
                         continue
                     # Winsorize to cap extreme outliers.
@@ -885,7 +927,7 @@ class SectorBenchmarkService:
                         # industry_benchmark_service. See migration 072.
                         "industry": "",
                         "metric_name": metric_config["name"],
-                        "period_type": period_type,
+                        "period_type": stored_type,
                         "period_label": period_label,
                         "median_value": round(statistics.median(cleaned), 4),
                         "sample_size": len(cleaned),
@@ -997,16 +1039,22 @@ class SectorBenchmarkService:
                 # a negative multiple is "Neg."/undefined (the company side hides it)
                 # and would drag the median below the comparable profitable-peer level.
                 positive_only = metric_config.get("positive_only", False)
-                for rec in records:
+                # Quarterly: one row per calendar quarter per company (see
+                # `_by_calendar_quarter`), so a duplicate row can't vote twice.
+                labelled = (
+                    [
+                        (format_calendar_quarter(key), rec)
+                        for key, rec in _by_calendar_quarter(records).items()
+                    ]
+                    if is_quarterly
+                    else [(_annual_period_label(rec), rec) for rec in records]
+                )
+                for label, rec in labelled:
                     val = _safe_float(rec, field)
                     if val is None:
                         continue
                     if positive_only and val <= 0:
                         continue
-                    label = (
-                        _quarterly_period_label(rec) if is_quarterly
-                        else _annual_period_label(rec)
-                    )
                     if label:
                         period_values.setdefault(label, []).append(val)
 

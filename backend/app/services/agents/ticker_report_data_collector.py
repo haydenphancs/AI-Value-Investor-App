@@ -48,6 +48,13 @@ from datetime import date, datetime, timedelta, timezone
 # Volatility-relative price-move math now lives in ONE shared leaf module
 # (also imported by the pure materiality gate + the σ precompute). Re-imported
 # here under the original names so `_build_price_action` is unchanged.
+from app.services.sector_benchmark_lookup import (
+    CALENDAR_QUARTER_PERIOD_TYPE,
+    BenchmarkLookupFailed,
+    lookup_failed,
+)
+from app.utils.period_labels import calendar_quarter_key
+from app.services._earnings_common import eps_digit_shift_suspect
 from app.services.price_volatility import (  # noqa: E402  (import-after-import block)
     _BASELINE_DAYS,
     _BIG_MOVE_Z,
@@ -130,13 +137,6 @@ _AGENT_MAP: Dict[str, str] = {
     "peter_lynch": "lynch",
     "bill_ackman": "ackman",
     "michael_burry": "burry",
-}
-
-# FMP segmentation metadata keys to drop when extracting segment dicts.
-_SEGMENT_META_KEYS = {
-    "date", "symbol", "reportedCurrency", "cik", "fillingDate",
-    "acceptedDate", "calendarYear", "period", "link", "finalLink",
-    "fiscalYear", "data",
 }
 
 
@@ -380,6 +380,13 @@ class CollectedTickerData:
     # the paid Profitability drill-down draws from identical data.
     profit_power: Optional[ProfitPowerResponse] = None
     revenue_breakdown: Optional[RevenueBreakdownResponse] = None
+    # Financials sections REFUSED because their service served a DEGRADED (partial) build
+    # — "growth_chart:quarterly_income", "earnings:earnings_feed", ... Those sections are
+    # set to None rather than frozen: a 429 on one FMP leg used to bake an empty quarterly
+    # Growth chart (or a feed-glitch EPS track record) into a paid report forever, and into
+    # the close-aligned ticker_data_cache row every persona reuses. Empty for a complete
+    # collection. A plain list of strings, so the cache serializer needs no registry entry.
+    degraded_sections: List[str] = field(default_factory=list)
 
     # ── Peer + sector data for the Moat module (PR 2) ───────────────────
     # `peer_tickers` is fetched in pass 1 (alongside FMP financial calls).
@@ -482,8 +489,13 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
     * `news` failed → an `EmptyAfterFailure` marker, NOT the plain `[]` default: Stage B
       otherwise narrated a Notable+ move as "no catalyst in window", the same shape as a
       quiet week;
-    * anything else failed → its default, with a warning.
+    * anything else failed → its default, with a warning;
+    * a snapshot card (`_SNAPSHOT_STATUS_ATTRS`) arrives as `(snapshot, degraded)` and is
+      landed by `_settle_snapshot_result`, which refuses a degraded build.
     """
+    if attr in _SNAPSHOT_STATUS_ATTRS:
+        _settle_snapshot_result(out, attr, result, ticker)
+        return
     if isinstance(result, Exception):
         logger.warning(
             f"Collector: {attr} failed for {ticker}: "
@@ -505,6 +517,468 @@ async def _caydex_dcf(ticker: str):
     logs them and leaves `caydex_dcf` None (fair value then unmeasured)."""
     from app.services.dcf_fair_value_service import get_dcf_fair_value_service
     return await get_dcf_fair_value_service().get_fair_value(ticker)
+
+
+async def _growth_chart_with_status(ticker: str) -> GrowthResponse:
+    """The Growth chart WITH its degradation status attached. `get_growth_with_status`
+    returns the failed FMP legs beside the response; they are copied onto
+    `response.degraded` when the response does not already carry them, so
+    `_refuse_degraded_financials` reads one field for every frozen Financials section."""
+    from app.services.growth_service import get_growth_service
+
+    response, degraded = await get_growth_service().get_growth_with_status(ticker)
+    if degraded and not list(getattr(response, "degraded", None) or []):
+        response = response.model_copy(update={"degraded": list(degraded)})
+    return response
+
+
+# The Financials sections the report FREEZES (persisted with the report, shared through
+# ticker_report_cache / ticker_data_cache), mapped to the degradation reasons that do NOT
+# touch what the report reads. The report reads only `eps_quarters` from the earnings
+# build, so a failed PRICE leg there leaves the frozen data intact.
+_FROZEN_FINANCIALS_IGNORABLE: Dict[str, frozenset] = {
+    "growth_chart": frozenset(),
+    "profit_power": frozenset(),
+    "earnings": frozenset({"prices"}),
+    # A newest quarter whose cash-flow row has not landed yet is a data LAG, not a failed
+    # fetch (T12M is computed from the quarters that have one); every other SoC reason is
+    # a failed leg (cash flow, income, ratios, profile, market cap) that skews the yields.
+    # The lagging quarter's "$0" cash is trimmed from the report's capital-allocation
+    # block instead (`_build_capital_allocation_block`), so it is never shown as a measured
+    # "Buybacks: $0".
+    "signal_of_confidence": frozenset({"cash_flow_row"}),
+    # Refusing a breakdown whose SEGMENT feed failed sends the Revenue Engine down the
+    # failed-fetch path (rebuild from raw segments) instead of freezing the income-only
+    # placeholder. The other reasons describe the company, not an outage.
+    "revenue_breakdown": frozenset(
+        {"earnings_calendar_unavailable", "income_statement_empty", "revenue_unreported"}
+    ),
+}
+
+# Reasons that describe the company's FILINGS at the vendor, not a failed fetch. The
+# section is still refused (None: it would chart unknowns as $0), but NOT recorded on
+# `degraded_sections`: a permanent vendor gap must not keep the collection and the report
+# out of every shared cache forever. `cash_flow_statement_missing` is the Signal of
+# Confidence build whose cash-flow leg ANSWERED but matched no displayed quarter (a raised
+# leg is still "cash_flow", which blocks). Any other reason beside it still blocks.
+_FROZEN_FINANCIALS_COMPANY_STATE: Dict[str, frozenset] = {
+    "signal_of_confidence": frozenset({"cash_flow_statement_missing"}),
+}
+
+# The assembled report carries the refused/narrowed sections under this INTERNAL key (a
+# leading underscore: `TickerReportResponse` ignores it, so it never reaches iOS). Both
+# report doors read it to keep a report that lost Financials data to a degraded upstream
+# build OUT of every shared cache — ticker_report_cache, and the deep door's cross-user
+# `_lookup_shared_cache` reuse — while still delivering (and billing) it to its caller.
+# NOT `report_degradation.REPORT_DEGRADED_KEY`: that one means "undeliverable, refund".
+DEGRADED_SECTIONS_KEY = "_degraded_sections"
+
+
+def report_degraded_sections(report: Any) -> List[str]:
+    """The Financials sections a report lost to a degraded upstream build ([] if none).
+    Tolerant of any blob shape — a non-dict or a malformed value reads as []."""
+    if not isinstance(report, dict):
+        return []
+    raw = report.get(DEGRADED_SECTIONS_KEY)
+    if isinstance(raw, (list, tuple)):
+        return [str(r) for r in raw if r]
+    return [str(raw)] if raw else []
+
+
+# Growth: the FMP leg → the series it feeds (GrowthService._build_growth). A failed leg
+# leaves those series EMPTY in the build; the others are complete.
+_GROWTH_LEG_SERIES: Dict[str, Tuple[str, ...]] = {
+    "annual_income": (
+        "eps_annual", "revenue_annual", "net_income_annual", "operating_profit_annual",
+    ),
+    "quarterly_income": (
+        "eps_quarterly", "revenue_quarterly", "net_income_quarterly",
+        "operating_profit_quarterly",
+    ),
+    "annual_cashflow": ("free_cash_flow_annual",),
+    "quarterly_cashflow": ("free_cash_flow_quarterly",),
+}
+_GROWTH_SERIES: Tuple[str, ...] = tuple(s for v in _GROWTH_LEG_SERIES.values() for s in v)
+# `peer_group_levels` key of each series (GrowthService names FCF "fcf_*").
+_GROWTH_LEVEL_KEY = {
+    "free_cash_flow_annual": "fcf_annual", "free_cash_flow_quarterly": "fcf_quarterly",
+}
+# Legs whose failure costs ONLY the peer-benchmark overlay: the profile supplies the
+# sector/industry the benchmark lookup keys on; "benchmarks" is a failed benchmark read.
+_BENCHMARK_ONLY_LEGS = frozenset({"profile", "benchmarks"})
+
+
+def _narrow_growth_chart(resp: Any, blocking: List[str]) -> Optional[Any]:
+    """The Growth build with ONLY what its failed legs fed removed: a quarterly-income 429
+    empties the quarterly income series (the annual chart stays), a profile failure
+    strips the peer overlay (the company's own series stay). None when a reason is unknown
+    (fail closed) or nothing measured is left."""
+    if not hasattr(resp, "model_copy"):
+        return None
+    if any(r not in _GROWTH_LEG_SERIES and r not in _BENCHMARK_ONLY_LEGS for r in blocking):
+        return None
+    update: Dict[str, Any] = {}
+    for leg in blocking:
+        for series in _GROWTH_LEG_SERIES.get(leg, ()):
+            update[series] = []
+    strip_peers = any(r in _BENCHMARK_ONLY_LEGS for r in blocking)
+    for series in _GROWTH_SERIES:
+        if series in update:
+            continue
+        points = list(getattr(resp, series, None) or [])
+        if strip_peers and points:
+            update[series] = [
+                p.model_copy(update={"sector_average_yoy": None, "sector_average_qoq": None})
+                if hasattr(p, "model_copy") else p
+                for p in points
+            ]
+    if not any(
+        (update[s] if s in update else (getattr(resp, s, None) or [])) for s in _GROWTH_SERIES
+    ):
+        return None
+    levels = dict(getattr(resp, "peer_group_levels", None) or {})
+    if strip_peers:
+        levels = {}
+    else:
+        for series, value in update.items():
+            if not value:
+                levels.pop(_GROWTH_LEVEL_KEY.get(series, series), None)
+    update["peer_group_levels"] = levels
+    return resp.model_copy(update=update)
+
+
+# Profit Power: the FMP leg → (the period list it feeds, "all" margins or "fcf" only).
+_PROFIT_POWER_LEG: Dict[str, Tuple[str, str]] = {
+    "annual_income": ("annual", "all"),
+    "quarterly_income": ("quarterly", "all"),
+    "annual_cashflow": ("annual", "fcf"),
+    "quarterly_cashflow": ("quarterly", "fcf"),
+}
+_PROFIT_POWER_PEER_FIELDS = (
+    "sector_average_net_margin", "sector_average_gross_margin",
+    "sector_average_operating_margin", "sector_average_fcf_margin",
+)
+
+
+def _narrow_profit_power(resp: Any, blocking: List[str]) -> Optional[Any]:
+    """The Profit Power build with only what its failed legs fed removed: an income leg
+    empties that period list, a cash-flow leg blanks that list's FCF margin (company and
+    peer), a profile/benchmark failure blanks every peer field. None when a reason is
+    unknown (fail closed) or no period is left."""
+    if not hasattr(resp, "model_copy"):
+        return None
+    if any(r not in _PROFIT_POWER_LEG and r not in _BENCHMARK_ONLY_LEGS for r in blocking):
+        return None
+    strip_peers = any(r in _BENCHMARK_ONLY_LEGS for r in blocking)
+    update: Dict[str, Any] = {}
+    for period in ("annual", "quarterly"):
+        legs = [_PROFIT_POWER_LEG[r] for r in blocking if r in _PROFIT_POWER_LEG]
+        if any(p == period and kind == "all" for p, kind in legs):
+            update[period] = []
+            continue
+        blank: Dict[str, Any] = {}
+        if any(p == period and kind == "fcf" for p, kind in legs):
+            blank.update({"fcf_margin": None, "sector_average_fcf_margin": None})
+        if strip_peers:
+            blank.update({f: None for f in _PROFIT_POWER_PEER_FIELDS})
+        if blank:
+            update[period] = [
+                p.model_copy(update=blank) if hasattr(p, "model_copy") else p
+                for p in (getattr(resp, period, None) or [])
+            ]
+    annual = update.get("annual", getattr(resp, "annual", None) or [])
+    quarterly = update.get("quarterly", getattr(resp, "quarterly", None) or [])
+    if not annual and not quarterly:
+        return None
+    if strip_peers:
+        update["peer_group_level"] = None
+    return resp.model_copy(update=update)
+
+
+# Sections that keep what their healthy legs measured instead of being dropped whole.
+_PARTIAL_SECTION_NARROWERS = {
+    "growth_chart": _narrow_growth_chart,
+    "profit_power": _narrow_profit_power,
+}
+
+
+def _refuse_degraded_financials(out: Any) -> None:
+    """Drop (or narrow) every frozen Financials section whose service served a DEGRADED build.
+
+    The services already refuse to PERSIST a partial build (it lives ~60 s in memory), but
+    the report used to take whatever it was handed and freeze it into a 20-credit report
+    shared through the caches. Now:
+
+      * Growth / Profit Power keep what their healthy legs measured — a quarterly-income
+        429 empties only the quarterly income series, a profile failure only the peer
+        overlay (`_narrow_growth_chart` / `_narrow_profit_power`); an unknown reason drops
+        the section;
+      * every other degraded section is None — rendered as unavailable, exactly like a
+        failed fetch.
+
+    Either way the reason is recorded on `out.degraded_sections` (except a section whose
+    only reasons describe the company, `_FROZEN_FINANCIALS_COMPANY_STATE`: None, not
+    recorded), which keeps the collection out of ticker_data_cache and — carried onto the report under
+    `DEGRADED_SECTIONS_KEY` — the report out of every shared report cache. It does NOT
+    catch a feed that answers 200 with a wrong value (a dropped-digit EPS has no
+    `degraded` reason): that is `_screen_eps_digit_glitches`. Never raises.
+    """
+    ticker = getattr(out, "ticker", "?")
+    for attr, ignorable in _FROZEN_FINANCIALS_IGNORABLE.items():
+        resp = getattr(out, attr, None)
+        if resp is None:
+            continue
+        raw = getattr(resp, "degraded", None)
+        reasons = [str(r) for r in raw] if isinstance(raw, (list, tuple)) else []
+        blocking = [r for r in reasons if r not in ignorable]
+        if not blocking:
+            continue
+        company_state = _FROZEN_FINANCIALS_COMPANY_STATE.get(attr, frozenset())
+        if all(r in company_state for r in blocking):
+            logger.info(
+                "[report-section-unmeasured] ticker=%s step=%s: the vendor has no data to "
+                "measure it (%s) — left out of the report; not an outage, so the "
+                "collection and the report stay cacheable",
+                ticker, attr, ", ".join(blocking),
+            )
+            setattr(out, attr, None)
+            continue
+        kept = None
+        narrower = _PARTIAL_SECTION_NARROWERS.get(attr)
+        if narrower is not None:
+            try:
+                kept = narrower(resp, blocking)
+            except Exception as exc:  # a malformed build must never take the report down
+                logger.warning(
+                    "[report-degraded-section] %s: narrowing %s failed (%s: %s) — "
+                    "dropping the section", ticker, attr, type(exc).__name__, exc,
+                )
+                kept = None
+        if kept is not None:
+            logger.warning(
+                "[report-degraded-section] %s: %s served a PARTIAL build (degraded: %s) — "
+                "kept the healthy legs only; the report will not be shared-cached",
+                ticker, attr, ", ".join(blocking),
+            )
+        else:
+            logger.warning(
+                "[report-degraded-section] %s: %s served a PARTIAL build (degraded: %s) — "
+                "dropped from the report instead of frozen into it",
+                ticker, attr, ", ".join(blocking),
+            )
+        setattr(out, attr, kept)
+        out.degraded_sections.append(f"{attr}:{'+'.join(blocking)}")
+
+
+# Snapshot cards fetched WITH their build status (`get_*_snapshot_with_status`, which
+# report the status of the build that produced the served value — a Tier-1 hit and an
+# in-flight join included).
+_SNAPSHOT_STATUS_ATTRS = frozenset(
+    {"snap_profitability", "snap_health", "snap_growth", "snap_valuation"}
+)
+
+
+async def _await_with_status(call: Any) -> Any:
+    """Run a zero-arg `*_with_status` call INSIDE the gathered coroutine, so building the
+    task list can never raise (the service factory and the attribute lookup happen here,
+    and a failure lands in `gather` like any other leg)."""
+    return await call()
+
+
+# Snapshot statuses that describe the COMPANY, not a failed upstream leg: a clean build
+# with nothing measurable (a single 10-K, a fiscal-year-end change, a statement-less fund).
+# Such a card carries only the neutral sentinel rating, so it is still left out (None), but
+# the status repeats on every rebuild: recording it on `degraded_sections` kept the ticker
+# out of ticker_data_cache and every shared report cache for good, so each open was a new
+# 20-credit generation (round 3, P3/P4). A real outage always adds its own reason beside
+# these (a leg name, "benchmarks", "status_unknown", ...), so it still blocks the caches.
+_SNAPSHOT_COMPANY_STATE_REASONS = frozenset({"no_values", "health_check:no_metrics"})
+
+
+def _settle_snapshot_result(out: Any, attr: str, result: Any, ticker: str) -> None:
+    """Land one `(snapshot, degraded)` result on `out`.
+
+    A snapshot built from a DEGRADED upstream (a 429'd ratios leg behind the health card,
+    a partial Profit Power behind the profitability card) used to be frozen into the
+    collection cache and every persona's vital scores for the close cycle. Now it is None
+    — the vitals already fall back to their computed path — and `snap_<name>:<reasons>`
+    goes on `out.degraded_sections`. Fail closed: a result without a readable status is
+    refused, never trusted. A build whose ONLY reasons describe the company
+    (`_SNAPSHOT_COMPANY_STATE_REASONS`) is also None but is not recorded, so the report
+    stays cacheable. Never raises.
+    """
+    if isinstance(result, BaseException):
+        logger.warning(
+            f"Collector: {attr} failed for {ticker}: {type(result).__name__}: {result}"
+        )
+        setattr(out, attr, None)
+        return
+    if isinstance(result, tuple) and len(result) == 2:
+        snapshot, raw = result
+        if isinstance(raw, (list, tuple)):
+            reasons = [str(r) for r in raw if r]
+        else:
+            reasons = ["status_malformed"]
+    else:
+        snapshot, reasons = result, ["status_unknown"]
+    if snapshot is None:
+        setattr(out, attr, None)
+        return
+    if reasons and all(r in _SNAPSHOT_COMPANY_STATE_REASONS for r in reasons):
+        logger.info(
+            "[report-snapshot-no-values] ticker=%s step=%s: the card has no measurable "
+            "value (%s) — left out of the report; not an outage, so the collection and "
+            "the report stay cacheable",
+            ticker, attr, ", ".join(reasons),
+        )
+        setattr(out, attr, None)
+        return
+    if reasons:
+        logger.warning(
+            "[report-degraded-section] %s: %s was built from a DEGRADED upstream "
+            "(degraded: %s) — dropped from the report instead of frozen into it",
+            ticker, attr, ", ".join(reasons),
+        )
+        setattr(out, attr, None)
+        out.degraded_sections.append(f"{attr}:{'+'.join(reasons)}")
+        return
+    setattr(out, attr, snapshot)
+
+
+# Recorded on `out.degraded_sections` when a sector-history benchmark read FAILED.
+_SECTOR_HISTORY_DEGRADED = "sector_history:benchmarks"
+
+
+def _read_sector_history(
+    lookup: Any, industry: str, sector: str, metrics: List[str], period_type: str,
+) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    """One sector-history read: flat ``{metric: {period_label: value}}`` and whether the
+    read FAILED (a DB error inside the lookup) rather than answering "no rows".
+
+    Reads the rich cells (`get_benchmarks`) and flattens them itself, exactly as
+    `get_benchmark_values` does, because that flat view rebuilds a plain dict and drops
+    the `BenchmarkLookupFailed` flag. A lookup exposing only the flat reader is read
+    through it, and its own flag is honoured. Synchronous: run it via `to_thread`.
+    """
+    rich_reader = getattr(lookup, "get_benchmarks", None)
+    if callable(rich_reader):
+        raw = rich_reader(industry, sector, metrics, period_type)
+        if not isinstance(raw, dict):
+            return {}, True
+        flat: Dict[str, Dict[str, Any]] = {}
+        for metric, periods in raw.items():
+            if not isinstance(periods, dict):
+                continue
+            flat[metric] = {
+                label: cell["value"]
+                for label, cell in periods.items()
+                if isinstance(cell, dict) and "value" in cell
+            }
+        return flat, lookup_failed(raw)
+    raw = lookup.get_benchmark_values(industry, sector, metrics, period_type)
+    if not isinstance(raw, dict):
+        return {}, True
+    return (
+        {m: dict(p) for m, p in raw.items() if isinstance(p, dict)},
+        lookup_failed(raw),
+    )
+
+
+def _settle_sector_history(out: Any, result: Any, ticker: str) -> None:
+    """Land the pass-2 sector-history result on `out`. A failed benchmark read (or a
+    raised fetch) keeps what loaded but records `_SECTOR_HISTORY_DEGRADED`, so the
+    collection stays out of ticker_data_cache and the report out of every shared report
+    cache: the missing sector line is a transient hole, not the company's shape. Never
+    raises."""
+    if isinstance(result, BaseException):
+        logger.warning(
+            "[report-sector-history] ticker=%s step=sector_history: fetch raised %s: %s — "
+            "no sector line; the collection and report will not be shared-cached",
+            ticker, type(result).__name__, result,
+        )
+        out.sector_benchmark_history = {}
+        out.degraded_sections.append(_SECTOR_HISTORY_DEGRADED)
+        return
+    if lookup_failed(result):
+        logger.warning(
+            "[report-sector-history] ticker=%s step=sector_history: a benchmark read "
+            "FAILED — kept what loaded; the collection and report will not be "
+            "shared-cached", ticker,
+        )
+        out.sector_benchmark_history = dict(result)
+        out.degraded_sections.append(_SECTOR_HISTORY_DEGRADED)
+        return
+    out.sector_benchmark_history = result or {}
+
+
+# A dropped-digit EPS (feed 0.169 for a real 1.69) answers 200 and carries no `degraded`
+# reason, so the gate above never sees it; it became a permanent "-90% miss" in the
+# Track Record. Its signature is a same-sign ratio to the estimate that sits on a power
+# of ten (log10 within this tolerance of a whole number) outside the normal miss band.
+# The rule (thresholds and all) lives in `_earnings_common.eps_digit_shift_suspect`, shared
+# with earnings_service so the Financials tab and this Track Record agree on a quarter.
+_eps_digit_shift_suspect = eps_digit_shift_suspect
+
+
+def _gaap_eps_for(fiscal_date: Any, gaap_by_end: Dict[date, float]) -> Optional[float]:
+    """The filed `epsDiluted` for the quarter ending on `fiscal_date` (exact, else the
+    nearest period end within 10 days — the feed and the filing can disagree by a few
+    days on a 52/53-week calendar)."""
+    end = _iso_day(fiscal_date)
+    if end is None or not gaap_by_end:
+        return None
+    if end in gaap_by_end:
+        return gaap_by_end[end]
+    best = min(gaap_by_end, key=lambda d: abs((d - end).days))
+    return gaap_by_end[best] if abs((best - end).days) <= 10 else None
+
+
+def _screen_eps_digit_glitches(out: Any) -> None:
+    """Null the surprise of every EPS quarter with the dropped-digit signature, so the
+    Track Record skips it instead of freezing a fabricated "-90% miss" (its filter needs a
+    surprise). The actual is kept — never "corrected". Runs on the FRESH collection, where
+    the quarterly income statement (the GAAP cross-check) is still attached. Never raises.
+    """
+    earnings = getattr(out, "earnings", None)
+    ticker = getattr(out, "ticker", "?")
+    try:
+        quarters = list(getattr(earnings, "eps_quarters", None) or [])
+        if not quarters:
+            return
+        gaap_by_end: Dict[date, float] = {}
+        for rec in getattr(out, "income_q", None) or []:
+            if not isinstance(rec, dict):
+                continue
+            end = _iso_day(rec.get("date"))
+            eps = _num_or_none(rec.get("epsDiluted"))
+            if end is not None and eps is not None:
+                gaap_by_end.setdefault(end, eps)
+        changed = False
+        screened = []
+        for q in quarters:
+            if getattr(q, "surprise_percent", None) is not None and _eps_digit_shift_suspect(
+                getattr(q, "actual_value", None), getattr(q, "estimate_value", None),
+                _gaap_eps_for(getattr(q, "fiscal_date", None), gaap_by_end),
+            ):
+                gaap = _gaap_eps_for(getattr(q, "fiscal_date", None), gaap_by_end)
+                logger.warning(
+                    "[report-eps-digit-glitch] %s %s (%s): feed EPS %s vs estimate %s "
+                    "(GAAP %s) has the dropped-digit signature — left out of the Track "
+                    "Record", ticker, getattr(q, "quarter", "?"),
+                    getattr(q, "fiscal_date", None), getattr(q, "actual_value", None),
+                    getattr(q, "estimate_value", None), gaap,
+                )
+                screened.append(q.model_copy(update={"surprise_percent": None}))
+                changed = True
+            else:
+                screened.append(q)
+        if changed:
+            out.earnings = earnings.model_copy(update={"eps_quarters": screened})
+    except Exception as exc:
+        logger.warning(
+            "[report-eps-digit-glitch] %s: screen failed (%s: %s) — earnings left as served",
+            ticker, type(exc).__name__, exc,
+        )
 
 
 class TickerReportDataCollector:
@@ -704,7 +1178,6 @@ class TickerReportDataCollector:
         from app.services.growth_snapshot_service import (
             get_growth_snapshot_service,
         )
-        from app.services.growth_service import get_growth_service
         from app.services.profit_power_service import get_profit_power_service
         from app.services.valuation_snapshot_service import (
             get_valuation_snapshot_service,
@@ -812,28 +1285,40 @@ class TickerReportDataCollector:
             # Snapshot services — same data the Financials tab shows in
             # TickerDetailView. Fetching here gives the report cards the
             # exact same numbers the user already sees on the other view.
+            #
+            # Each WITH its build status (`_settle_snapshot_result`): a card built from a
+            # degraded upstream is refused, never frozen into the collection cache and
+            # every persona's vital scores.
             (
                 "snap_profitability",
-                get_profitability_snapshot_service().get_profitability_snapshot(ticker),
+                _await_with_status(
+                    lambda: get_profitability_snapshot_service()
+                    .get_profitability_snapshot_with_status(ticker)
+                ),
                 None,
             ),
             (
                 "snap_health",
-                get_health_snapshot_service().get_health_snapshot(ticker),
+                _await_with_status(
+                    lambda: get_health_snapshot_service().get_health_snapshot_with_status(ticker)
+                ),
                 None,
             ),
             (
                 "snap_growth",
-                get_growth_snapshot_service().get_growth_snapshot(ticker),
+                _await_with_status(
+                    lambda: get_growth_snapshot_service().get_growth_snapshot_with_status(ticker)
+                ),
                 None,
             ),
             # Full rich Growth chart — the SAME GrowthService data the snapshot
             # derives from (5-min cache → effectively a cache hit here, no extra
             # FMP fan-out). Frozen into the report so the paid Growth card matches
-            # the free TickerDetailView chart.
+            # the free TickerDetailView chart. Fetched WITH its status so a partial
+            # build is refused below (`_refuse_degraded_financials`), never frozen.
             (
                 "growth_chart",
-                get_growth_service().get_growth(ticker),
+                _growth_chart_with_status(ticker),
                 None,
             ),
             # Full rich Profit Power chart (margins + per-margin sector medians) —
@@ -848,7 +1333,10 @@ class TickerReportDataCollector:
             ),
             (
                 "snap_valuation",
-                get_valuation_snapshot_service().get_valuation_snapshot(ticker),
+                _await_with_status(
+                    lambda: get_valuation_snapshot_service()
+                    .get_valuation_snapshot_with_status(ticker)
+                ),
                 None,
             ),
             (
@@ -882,6 +1370,13 @@ class TickerReportDataCollector:
 
         for (attr, _coro, default), result in zip(tasks, results):
             _settle_pass1_result(out, attr, result, default, ticker)
+
+        # A Financials section served from a PARTIAL build must not be frozen into the
+        # report (or the shared collection cache) — see the function's docstring.
+        _refuse_degraded_financials(out)
+        # A feed value that answered 200 but is a dropped digit carries no `degraded`
+        # reason; screened here while the quarterly filings are still attached.
+        _screen_eps_digit_glitches(out)
 
         # ── Pass 2: fetches that depend on pass-1 results ─────────────
         # peer_profiles needs peer_tickers; sector_aggregates needs
@@ -1196,14 +1691,7 @@ class TickerReportDataCollector:
             return_exceptions=True,
         )
 
-        if isinstance(sector_bench, Exception):
-            logger.warning(
-                f"Collector pass 2: sector_benchmark_history failed for {ticker}: "
-                f"{type(sector_bench).__name__}: {sector_bench}"
-            )
-            out.sector_benchmark_history = {}
-        else:
-            out.sector_benchmark_history = sector_bench or {}
+        _settle_sector_history(out, sector_bench, ticker)
 
         if isinstance(peer_profiles, Exception):
             logger.warning(
@@ -1342,8 +1830,10 @@ class TickerReportDataCollector:
 
         The lookup is synchronous (Supabase sync SDK) + 1h-cached, so it's run
         via `to_thread`. Degrades to {} on any failure — the chart simply omits
-        the sector line. Quarterly is best-effort (the table may only carry
-        annual rows for some sectors/metrics).
+        the sector line — and a FAILED read (not an empty one) returns the result as
+        a `BenchmarkLookupFailed`, which `_settle_sector_history` records so the
+        collection is not shared-cached. Quarterly is best-effort (the table may only
+        carry annual rows for some sectors/metrics).
 
         The sector name is NORMALIZED (`_normalize_sector`) exactly as the
         snapshot services do before they look up the card's "*" comparison —
@@ -1361,22 +1851,44 @@ class TickerReportDataCollector:
         metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
         # Industry-first values (sector fallback per cell). Also fetch the TTM
         # current-snapshot row so we can pin the chart's latest annual point to it.
-        annual, quarterly, ttm = await asyncio.gather(
-            asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "annual"),
-            asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "quarterly"),
-            asyncio.to_thread(lookup.get_benchmark_values, industry, sector, metrics, "ttm"),
+        # Each read reports whether it FAILED (`_read_sector_history`), which the flat
+        # `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped the
+        # `BenchmarkLookupFailed` flag, so a Supabase error read like "no rows" and the
+        # report froze a missing sector line into every shared cache (round 3, P6/P23).
+        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE, "ttm")
+        reads = await asyncio.gather(
+            asyncio.to_thread(_read_sector_history, lookup, industry, sector, metrics, "annual"),
+            # Calendar-quarter rows (migration 184), joined by `_history_period_id`.
+            asyncio.to_thread(
+                _read_sector_history, lookup, industry, sector, metrics,
+                CALENDAR_QUARTER_PERIOD_TYPE,
+            ),
+            asyncio.to_thread(_read_sector_history, lookup, industry, sector, metrics, "ttm"),
             return_exceptions=True,
         )
-        annual = annual if isinstance(annual, dict) else {}
-        quarterly = quarterly if isinstance(quarterly, dict) else {}
-        ttm = ttm if isinstance(ttm, dict) else {}
+        values: List[Dict[str, Dict[str, Any]]] = []
+        failed_reads: List[str] = []
+        for period_type, read in zip(period_types, reads):
+            if isinstance(read, BaseException):
+                logger.warning(
+                    "[report-sector-history] industry=%r sector=%r step=%s: read raised "
+                    "%s: %s", industry, sector, period_type, type(read).__name__, read,
+                )
+                values.append({})
+                failed_reads.append(period_type)
+                continue
+            flat, failed = read
+            values.append(flat)
+            if failed:
+                failed_reads.append(period_type)
+        annual, quarterly, ttm = values
 
         # "Keep history + TTM current": overwrite the CURRENT calendar year's annual
         # benchmark point with the TTM value — a full rolling-12-months median, so the
         # chart's latest sector point doesn't spike on a thin partial fiscal year while
         # older years keep their complete-fiscal values. A company whose latest period
         # isn't the current year aligns to its own (complete) fiscal point, so the
-        # injected point is simply unused for it. get_benchmark_values returns fresh
+        # injected point is simply unused for it. `_read_sector_history` returns fresh
         # dicts → safe to mutate. Annual only (quarterly multiples are single-quarter
         # scale; injecting an annual-scale TTM there would mix scales).
         from datetime import datetime, timezone
@@ -1385,7 +1897,16 @@ class TickerReportDataCollector:
             if periods:
                 annual.setdefault(metric, {})[cur_year] = next(iter(periods.values()))
 
-        return {"annual": annual, "quarterly": quarterly}
+        history = {"annual": annual, "quarterly": quarterly}
+        if failed_reads:
+            logger.warning(
+                "[report-sector-history] industry=%r sector=%r: benchmark read(s) FAILED "
+                "(%s) — kept what loaded; flagged so the caller keeps this collection "
+                "out of the shared caches", industry, sector, "+".join(failed_reads),
+            )
+            # The flag the caller reads (`lookup_failed`); still a plain mapping otherwise.
+            return BenchmarkLookupFailed(history)
+        return history
 
     async def _fetch_peer_ratios(
         self, peers: List[str],
@@ -1758,17 +2279,17 @@ class TickerReportDataCollector:
         )
 
         # ── Revenue vital — top segment hooked from real segments ─────
-        # Prefer RevenueBreakdownService (parity with TickerDetailView's
-        # Financials tab) and fall back to direct FMP segmentation.
-        segments_built = _segments_from_breakdown(
-            out.revenue_breakdown, out.segments_raw,
+        # RevenueBreakdownService's reconciled stack (parity with TickerDetailView's
+        # Financials tab). Raw FMP segmentation is used ONLY when that service failed,
+        # and then through the service's own extraction + reconciliation rules — never
+        # when it deliberately chose its Total Revenue placeholder (see the function).
+        engine_inputs = _revenue_engine_inputs(
+            out.revenue_breakdown, out.segments_raw, out.income, ticker=out.ticker,
         )
-        if not segments_built:
-            segments_built = _build_revenue_segments(out.segments_raw)
-        top_segment_name = (
-            segments_built[0]["name"] if segments_built else "Primary"
-        )
-        top_segment_growth = _segment_growth_pct(segments_built)
+        segments_built = engine_inputs["segments"]
+        top_segment = _top_named_segment(segments_built)
+        top_segment_name = top_segment["name"] if top_segment else "Primary"
+        top_segment_growth = _segment_growth_pct([top_segment] if top_segment else [])
         out.revenue_vital = _build_revenue_vital(
             c.get("total_revenue") or 0.0,
             c.get("revenue_growth_yoy"),
@@ -1840,7 +2361,10 @@ class TickerReportDataCollector:
 
         # ── Revenue engine segments ───────────────────────────────────
         out.revenue_engine_partial = _build_revenue_engine(
-            segments_built, now,
+            segments_built,
+            fiscal_year=engine_inputs["fiscal_year"],
+            total_revenue=engine_inputs["total_revenue"],
+            intersegment_eliminations=engine_inputs["intersegment_eliminations"],
         )
 
         # ── Revenue forecast (projections + CAGR — guidance from AI) ─
@@ -2514,6 +3038,15 @@ class TickerReportDataCollector:
             "disclaimer_text": DISCLAIMER,
         }
 
+        # The Financials sections this collection lost to a DEGRADED upstream build
+        # (`_refuse_degraded_financials` / `_settle_snapshot_result`). Internal — the
+        # response schema ignores it — and read by BOTH report doors: the report is still
+        # delivered to (and billed to) this caller, but never written to a shared cache,
+        # so the next caller re-collects instead of inheriting the hole.
+        lost_sections = list(getattr(out, "degraded_sections", None) or [])
+        if lost_sections:
+            report[DEGRADED_SECTIONS_KEY] = lost_sections
+
         return report
 
 
@@ -2716,7 +3249,14 @@ def _altman_z(
         else _num_or_none((profile or {}).get("mktCap"))
     )
     # ndigits=2 keeps this caller's published precision — the report has always shown two.
-    return _compute_z_score(balance[0], income[0], mkt_cap, ndigits=2)
+    # sector= / industry= let the ONE implementation refuse a bank / insurer / REIT: the
+    # manufacturing Z reads their balance sheet as "Distress", and the report froze that
+    # verdict (`_build_health_vital` then says "Data unavailable" instead).
+    _profile = profile or {}
+    return _compute_z_score(
+        balance[0], income[0], mkt_cap, ndigits=2,
+        sector=_profile.get("sector"), industry=_profile.get("industry"),
+    )
 
 
 def _hist_list(historical: Any) -> List[Dict[str, Any]]:
@@ -3103,13 +3643,18 @@ def _build_health_vital(
         }
 
     # Continuous Altman-Z base, piecewise-aligned to the published zone bands.
-    if altman_z < 1.8:
-        level, z_label = "critical", "Distress Zone (Below 1.8)"
+    # ONE boundary convention app-wide: Distress <= 1.8, Grey (1.8, 3.0], Safe > 3.0 —
+    # the Health Check card's `_zscore_status`. This used `<`, so a Z of exactly 3.00 was
+    # "Safe" in the report and "Grey" on the Financials tab for the same company (and
+    # 1.80 "Grey" vs "Distress"). The base is continuous at both cut points (4.0 at 1.8,
+    # 8.0 at 3.0), so moving the boundary moves no score — only the label and level.
+    if altman_z <= 1.8:
+        level, z_label = "critical", "Distress Zone (1.8 or below)"
         base = max(0.0, 1.0 + (altman_z / 1.8) * 3.0)        # 0..4
     elif altman_z < 2.4:
         level, z_label = "weak", "Grey Zone (1.8-3.0)"
         base = 4.0 + ((altman_z - 1.8) / 0.6) * 2.0          # 4..6
-    elif altman_z < 3.0:
+    elif altman_z <= 3.0:
         level, z_label = "moderate", "Grey Zone (1.8-3.0)"
         base = 6.0 + ((altman_z - 2.4) / 0.6) * 2.0          # 6..8
     else:
@@ -3218,22 +3763,76 @@ def _build_forecast_vital(
 # (reused, not rebuilt) so the report stays consistent with TickerDetailView.
 
 
+def _share_count_change_over(points: List[Any]) -> Tuple[float, bool]:
+    """(change %, known) over `points` by the SoC summary's own rule: oldest → newest of the
+    points that REPORT a share count; unknown (0.0, False) with fewer than two."""
+    measured = [
+        n for dp in points
+        if (n := _num_or_none(getattr(dp, "shares_outstanding", None))) is not None and n > 0
+    ]
+    if len(measured) < 2:
+        return 0.0, False
+    return round((measured[-1] - measured[0]) / measured[0] * 100, 2), True
+
+
+def _trim_unmeasured_cash_tail(soc: SignalOfConfidenceResponse) -> Tuple[List[Any], List[Any]]:
+    """(kept points, trimmed points) — now always (all points, []).
+
+    The Signal of Confidence service itself trims a newest quarter whose cash-flow row has
+    not landed (`signal_of_confidence_service._build_data_points`, the `unmeasured_tail`),
+    so every point that reaches the report has a cash-flow row: a newest all-zero point is
+    a MEASURED zero (a company that paused buybacks), never an unknown. Trimming it again
+    here dropped real quarters whenever `cash_flow_row` was set (an INTERIOR gap also sets
+    it). Kept as a seam so `_build_capital_allocation_block` stays unchanged.
+    """
+    return list(soc.data_points or []), []
+
+
 def _build_capital_allocation_block(
     soc: Optional[SignalOfConfidenceResponse],
 ) -> Optional[Dict[str, Any]]:
     """Compact capital-allocation block for the Insider & Management section.
     Reuses the Signal of Confidence service (same numbers as the Financials
-    tab). None when unavailable → iOS hides the block."""
+    tab). None when unavailable → iOS hides the block.
+
+    Two honesty rules on top of the service's numbers:
+      * `share_count_change_known` rides along — False when fewer than two quarters report
+        a share count, where `share_count_change` is a placeholder 0.0 (a non-Optional
+        Double on shipped iOS), never a measured "flat";
+      * a newest quarter whose cash-flow row has not landed (`cash_flow_row`) is trimmed
+        (`_trim_unmeasured_cash_tail`) instead of shown as "Buybacks: $0"; the share-count
+        change is then re-measured over the kept points, so the figure and its window
+        (data_points' first → last period) always describe the same quarters.
+    """
     if soc is None:
         return None
     s = soc.summary
     div = soc.dividend_info
+    points, trimmed = _trim_unmeasured_cash_tail(soc)
+    if trimmed:
+        share_change, share_known = _share_count_change_over(points)
+        from app.services.signal_of_confidence_service import SignalOfConfidenceService
+
+        buyback_status = SignalOfConfidenceService._classify_buyback(
+            s.buyback_yield, share_change,
+        )
+        logger.warning(
+            "[report-soc-cash-unmeasured] %s: newest quarter(s) %s have no cash-flow row "
+            "yet — trimmed from the report's capital allocation (shown as unknown, not "
+            "'$0'); share-count change re-measured over %d point(s): %s%% (known=%s)",
+            getattr(soc, "symbol", "?"), ", ".join(str(getattr(p, "period", "?")) for p in trimmed),
+            len(points), share_change, share_known,
+        )
+    else:
+        share_change = s.share_count_change
+        share_known = bool(getattr(s, "share_count_change_known", True))
+        buyback_status = s.buyback_status
     return {
         # Read from the SUMMARY, which is always present. This used to fall back to a
         # hardcoded "Low" whenever `dividend_info` was None — i.e. for every company
         # that pays no dividend — so the report asserted weak buybacks for AMZN, BRK-B
         # and NFLX, three of the largest repurchasers on the market.
-        "buyback_status": s.buyback_status,
+        "buyback_status": buyback_status,
         # "None", not "Fair". `div` is None only for a company that pays NO dividend, and
         # calling that "Fair" asserts a verdict on a payout that does not exist. Same class
         # of bug as the `buyback_status` fallback fixed directly above, and it was far
@@ -3248,12 +3847,16 @@ def _build_capital_allocation_block(
         "dividend_yield": round(s.dividend_yield, 2),
         "buyback_yield": round(s.buyback_yield, 2),
         "total_yield": round(s.total_yield, 2),
-        "share_count_change": round(s.share_count_change, 2),
+        "share_count_change": round(share_change, 2),
+        # False → `share_count_change` is the 0.0 placeholder, not a measurement: the
+        # prompts, the PDF and iOS (which derives the same rule from data_points until
+        # the response schema declares this key) render it as "not reported".
+        "share_count_change_known": share_known,
         # Forward the per-quarter series (already computed — no extra fetch) so
         # iOS can draw the compact dilution mini-chart and derive the share-count
         # window label. share_count_change is measured oldest→newest across these
         # points, so the chart makes the (up to ~2yr) window self-evident.
-        "data_points": [dp.model_dump() for dp in soc.data_points],
+        "data_points": [dp.model_dump() for dp in points],
     }
 
 
@@ -3285,23 +3888,67 @@ def _attach_earnings_track_record(
     EPS-based (reported vs estimated EPS from `eps_quarters`)."""
     record: List[Dict[str, Any]] = []
     if earnings is not None:
+        # KNOWN DIVERGENCE from the Financials tab (kept on purpose): a quarter whose
+        # surprise is None is left out here even when it has a real estimate — a consensus
+        # of exactly 0.00 (the service cannot divide by it) and a dropped-digit EPS
+        # (`_screen_eps_digit_glitches`). TickerDetail still scores the first as a beat or
+        # miss from the raw values, so the two "last N quarters" sets can differ by such a
+        # quarter. The point cannot carry it: `surprise_percent` is a non-Optional Double on
+        # shipped iOS builds, and a null would fail the whole report decode.
         reported = [
             q for q in (earnings.eps_quarters or [])
             if q.actual_value is not None and q.surprise_percent is not None
+            # No COMPARABLE consensus (GAAP actual vs non-GAAP estimate, a different
+            # source/currency, an implausible consensus): the estimate slot repeats the
+            # actual, so there is no beat or miss to record. The service already nulls
+            # the surprise; this is the explicit half of that contract.
+            and getattr(q, "has_estimate", None) is not False
+            and math.isfinite(q.surprise_percent)
         ]
         reported.sort(key=lambda q: q.fiscal_date or "")  # oldest → newest
-        for q in reported[-10:]:
+        scored = [
+            (q, r) for q in reported
+            if (r := _track_record_result(q.actual_value, q.estimate_value)) is not None
+        ]
+        for q, result in scored[-10:]:
             record.append({
                 "period": q.quarter,
                 "surprise_percent": round(q.surprise_percent, 1),
-                "beat": q.surprise_percent > 0,
+                # Kept for shipped builds, which branch on `beat` alone: a MET quarter
+                # is not a beat. The new build reads `result`.
+                "beat": result == "beat",
+                "result": result,
             })
     revenue_forecast["earnings_track_record"] = record
     if record:
-        beats = sum(1 for r in record if r["beat"])
-        revenue_forecast["beat_summary"] = f"Beat {beats} of {len(record)}"
+        # A met quarter counts in N but not in X — it is neither a beat nor a miss
+        # (it used to be counted as a miss and drawn as a red arrow over "+0.0%").
+        beats = sum(1 for r in record if r["result"] == "beat")
+        met = sum(1 for r in record if r["result"] == "met")
+        summary = f"Beat {beats} of {len(record)}"
+        if met:
+            summary += f" · {met} met"
+        revenue_forecast["beat_summary"] = summary
     else:
         revenue_forecast["beat_summary"] = None
+
+
+def _track_record_result(
+    actual: Optional[float], estimate: Optional[float],
+) -> Optional[str]:
+    """"beat" | "miss" | "met" from the RAW actual vs estimate — the same comparison the
+    Financials tab's `EarningsQuarterData.result` makes. Never from `surprise_percent`:
+    it is rounded (2 dp by the service, 1 dp here), so a 0.004% beat arrives as 0.0 and
+    an exact match was indistinguishable from it. None when either side is unusable."""
+    a = _num_or_none(actual)
+    e = _num_or_none(estimate)
+    if a is None or e is None:
+        return None
+    if a > e:
+        return "beat"
+    if a < e:
+        return "miss"
+    return "met"
 
 
 def _build_short_interest_signal(
@@ -3820,72 +4467,6 @@ async def patch_wall_street_consensus_live(
     return strip_caydex_if_disabled(payload)
 
 
-def _build_revenue_segments(
-    segments_raw: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Real product-segment revenue from FMP.
-
-    Returns a list of `{name, current_revenue, previous_revenue, total_revenue}`
-    dicts — currency in dollars (not pre-divided). The revenue_engine
-    section then converts to the appropriate display unit.
-    """
-    if not segments_raw:
-        return []
-
-    def _segments_for_record(rec: Dict[str, Any]) -> Dict[str, float]:
-        nested = rec.get("data")
-        if isinstance(nested, dict):
-            seg = {
-                k: v for k, v in nested.items()
-                if k not in _SEGMENT_META_KEYS
-            }
-        else:
-            seg = {
-                k: v for k, v in rec.items()
-                if k not in _SEGMENT_META_KEYS
-            }
-        cleaned: Dict[str, float] = {}
-        for k, v in seg.items():
-            try:
-                amount = float(v)
-            except (TypeError, ValueError):
-                continue
-            if amount <= 0:
-                continue
-            # Skip values that look like calendar years (FMP sometimes
-            # leaks fiscalYear into the data dict).
-            if 1900 <= amount <= 2100:
-                continue
-            cleaned[k] = amount
-        return cleaned
-
-    # FMP returns newest-first; latest = [0], prior = [1].
-    latest = _segments_for_record(segments_raw[0])
-    prior = (
-        _segments_for_record(segments_raw[1])
-        if len(segments_raw) >= 2 else {}
-    )
-
-    if not latest:
-        return []
-
-    total = sum(latest.values())
-    if total <= 0:
-        return []
-
-    # Sort largest first.
-    items = sorted(latest.items(), key=lambda kv: kv[1], reverse=True)
-    return [
-        {
-            "name": name,
-            "current_revenue": amount,
-            "previous_revenue": float(prior.get(name, 0.0)),
-            "total_revenue": total,
-        }
-        for name, amount in items
-    ]
-
-
 def _format_earnings_yield(ey: Optional[float]) -> str:
     """Render earnings yield for a DeepDiveMetric.value cell."""
     if ey is None:
@@ -3994,10 +4575,11 @@ def _history_period_id(
 ) -> Optional[Tuple[str, str, int, Optional[int], str]]:
     """Return (join_key, display_label, cal_year, quarter|None, sort_date), or None.
 
-    - `join_key` / `cal_year` / `quarter` are CALENDAR-based (calendarYear, or
-      the date's year, + the fiscal quarter). This identity dedups the arrays,
-      looks up the sector benchmark (which pools constituents by calendar
-      label), and anchors same-quarter-prior-year growth.
+    - `join_key` / `cal_year` / `quarter` are CALENDAR-based: annual rows use
+      calendarYear or the date's year; quarterly rows use the CALENDAR quarter the
+      period ends in (`calendar_quarter_key`, 1-7-day spill), the key of the stored
+      'calendar_quarter' benchmark rows. This identity dedups the arrays, looks up
+      the sector benchmark, and anchors same-quarter-prior-year growth.
     - `display_label` is FISCAL-year-based ("Q1 '26") so an off-calendar fiscal
       company (e.g. Oracle, FY ends May) reads chronologically monotonic — its
       fiscal Q1 (Aug) and the prior fiscal Q4 (May) share a calendar year, which
@@ -4043,13 +4625,19 @@ def _history_period_id(
         except ValueError:
             quarter = None
     if quarter is not None and 1 <= quarter <= 4:
-        # Display via the shared helper (single source for the "Q4 '26" form);
-        # the JOIN key below stays calendar for the sector-benchmark lookup.
+        # Display via the shared helper (single source for the "Q4 '26" form) on the
+        # FISCAL quarter; the JOIN key is the CALENDAR quarter the period ends in
+        # (`calendar_quarter_key`, 1-7-day spill), the key of the stored
+        # 'calendar_quarter' benchmark rows (migration 184). The old key paired the
+        # FISCAL quarter number with the end-date year, so Microsoft's fiscal Q1
+        # (Jul-Sep) met its peers' Jan-Mar. Undated rows keep the old pairing.
         display = quarterly_period_label(
             {"period": f"Q{quarter}", "fiscalYear": disp_year}, use_fiscal_year=True
         )
-        return (f"{cal_year}-Q{quarter}", display,
-                cal_year, quarter, date_str or f"{cal_year}-Q{quarter}")
+        cal_key = calendar_quarter_key(date_str) if date_str else None
+        join_year, join_q = cal_key if cal_key is not None else (cal_year, quarter)
+        return (f"{join_year}-Q{join_q}", display,
+                join_year, join_q, date_str or f"{join_year}-Q{join_q}")
     # Last resort: a per-row unique key (the date) so the row still charts;
     # YoY can't be computed for it (no derivable quarter), which is correct.
     return (date_str or f"{cal_year}-?",
@@ -4507,71 +5095,327 @@ def _overall_assessment_from_cards(
     }
 
 
-def _segments_from_breakdown(
-    breakdown: Optional[RevenueBreakdownResponse],
-    segments_raw: Optional[List[Dict[str, Any]]] = None,
+# ── Revenue Engine: segment selection (parity with the Financials tab) ──────────────
+#
+# The report used to take the breakdown's segments and divide by their own SUM, label the
+# panel "FY {today's year}", pair every segment with `segments_raw[1]` whatever year the
+# breakdown used, and — whenever the breakdown held only its Total Revenue placeholder —
+# fall back to the RAW segmentation with no reconciliation at all. So INTC's report said
+# "Total Revenue $70.5B, Client Computing 46%" (the tab: $52.9B and 61% with a −33%
+# eliminations line), Ford's said "Ford Credit 100% of total" against $185B of revenue,
+# and a thin newest year paired a year with itself ("Stable +0.0%" on every segment).
+
+_OTHER_SEGMENT_NAME = "Other"
+_UNALLOCATED_SEGMENT_NAME = "Unallocated"
+_TOTAL_REVENUE_PLACEHOLDER = "Total Revenue"
+# The breakdown's "Other" is the sum of the filer's small segments; rebuilding its prior
+# year needs the SAME members, so the raw record must reproduce that sum this closely.
+_OTHER_COMPOSITION_TOLERANCE = 0.01
+
+
+def _finite_positive(v: Any) -> Optional[float]:
+    n = _num_or_none(v)
+    return n if n is not None and n > 0 else None
+
+
+def _is_synthetic_segment(name: str) -> bool:
+    """"Other" (folded small segments) and "Unallocated" (the gap the breakdown closes)
+    are built by the breakdown service — never a filer's raw key, so no raw prior-year
+    value exists under their name."""
+    stripped = (name or "").strip()
+    return stripped.lower() == _OTHER_SEGMENT_NAME.lower() or stripped == _UNALLOCATED_SEGMENT_NAME
+
+
+def _empty_engine_inputs() -> Dict[str, Any]:
+    return {
+        "segments": [],
+        "fiscal_year": None,
+        "total_revenue": None,
+        "intersegment_eliminations": None,
+    }
+
+
+def _raw_segment_values(rec: Any) -> Dict[str, float]:
+    """One raw FMP segmentation record → {segment key: value}, filtered by the SAME rules
+    `revenue_breakdown_service._extract_segments` applies (metadata keys, non-finite or
+    non-positive values, year-like values, elimination rows, total rows) but WITHOUT the
+    5% "Other" grouping — a prior year is matched by raw key, and grouping each year
+    separately can move a segment into "Other" in one year and not the other."""
+    from app.services.revenue_breakdown_service import (
+        _ELIMINATION_RE,
+        _SEGMENT_META_KEYS as _RB_META_KEYS,
+        _TOTAL_LIKE_RE,
+    )
+
+    if not isinstance(rec, dict):
+        return {}
+    nested = rec.get("data")
+    seg = nested if isinstance(nested, dict) else rec
+    values: Dict[str, float] = {}
+    for key, raw in seg.items():
+        if key in _RB_META_KEYS:
+            continue
+        amount = _num_or_none(raw)
+        if amount is None or amount <= 0 or 1900 <= amount <= 2100:
+            continue
+        name = str(key)
+        if _ELIMINATION_RE.search(name) or _TOTAL_LIKE_RE.search(name.strip()):
+            continue
+        values[name] = amount
+    return values
+
+
+def _segmentation_by_year(segments_raw: Any) -> Dict[str, Dict[str, Any]]:
+    """Raw segmentation records keyed by the breakdown service's own year key
+    (`_record_year`: fiscalYear → calendarYear → date[:4]), newest period-end first —
+    sorted here because the collector's fetch is NOT sorted (the service's is)."""
+    from app.services.revenue_breakdown_service import _record_year
+
+    rows = [r for r in (segments_raw or []) if isinstance(r, dict)]
+    rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    by_year: Dict[str, Dict[str, Any]] = {}
+    for rec in rows:
+        year = _record_year(rec)
+        if year and year not in by_year:
+            by_year[year] = rec
+    return by_year
+
+
+def _prior_year_key(fiscal_year: Any) -> Optional[str]:
+    try:
+        return str(int(str(fiscal_year).strip()) - 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _segment_rows(
+    sources: List[Tuple[str, float]],
+    fiscal_year: Optional[str],
+    segments_raw: Any,
+    basis: float,
+    ticker: str = "",
 ) -> List[Dict[str, Any]]:
-    """Use RevenueBreakdownService output for cross-view parity.
+    """Segment rows (dollars) with `previous_revenue` read from the raw record for
+    EXACTLY `fiscal_year - 1`, never by position. No such record → 0 for every segment,
+    which renders as "No prior-year figure" rather than a fabricated YoY.
 
-    Returns [] when the service either hit no data or fell back to its
-    single "Total Revenue" placeholder — caller then falls back to the
-    direct FMP segmentation path.
-
-    `segments_raw` is the per-period FMP product-segmentation list that
-    the collector already fetches alongside the breakdown. We use index
-    [1] (the prior fiscal year) to back-fill `previous_revenue` for each
-    segment — without this, every segment's YoY shows +0% because the
-    cached breakdown is single-period.
+      * a named segment → the prior record's value under the same raw key;
+      * "Other" → the prior values of the raw keys that make up THIS year's "Other"
+        (re-derived from the current raw record and accepted only when they reproduce
+        the breakdown's "Other" within 1%); never a raw key that happens to be "Other";
+      * "Unallocated" → 0 (a computed gap has no prior-year twin).
+    `total_revenue` on every row is `basis` — the share denominator.
     """
-    if breakdown is None or not breakdown.revenue_sources:
-        return []
+    from app.services.revenue_breakdown_service import _OTHER_THRESHOLD_PCT
 
-    sources = [
-        s for s in breakdown.revenue_sources
-        if s.name and s.name != "Total Revenue" and s.value > 0
-    ]
-    if not sources:
-        return []
+    by_year = _segmentation_by_year(segments_raw)
+    prior_key = _prior_year_key(fiscal_year)
+    prior_rec = by_year.get(prior_key) if prior_key else None
+    prior_vals = _raw_segment_values(prior_rec)
+    if prior_key and prior_rec is None and by_year:
+        logger.info(
+            "[report-revenue-engine] %s: no FY%s segmentation record to pair with FY%s — "
+            "segment YoY left unmeasured", ticker, prior_key, fiscal_year,
+        )
 
-    total = sum(s.value for s in sources)
-    if total <= 0:
-        return []
-
-    # Prior-period lookup from FMP segmentation (newest-first; [1] = prior).
-    # Segment names from the breakdown service match FMP keys verbatim,
-    # so a direct dict lookup is the right join key. Missing prior keys
-    # (e.g. a segment introduced this year) yield previous_revenue=0,
-    # which renders as "YoY n/a" rather than a misleading +∞ growth.
-    prior_lookup: Dict[str, float] = {}
-    if segments_raw and len(segments_raw) >= 2:
-        prior_rec = segments_raw[1]
-        nested = prior_rec.get("data")
-        if isinstance(nested, dict):
-            prior_seg_dict = nested
+    named = {name for name, _ in sources if not _is_synthetic_segment(name)}
+    other_value = next(
+        (v for name, v in sources if name.strip().lower() == _OTHER_SEGMENT_NAME.lower()),
+        None,
+    )
+    other_prior = 0.0
+    if other_value is not None and prior_vals:
+        cur_vals = _raw_segment_values(by_year.get(str(fiscal_year)) if fiscal_year else None)
+        cur_total = sum(cur_vals.values())
+        folded = [
+            key for key, val in cur_vals.items()
+            if key not in named and (
+                key.strip().lower() == _OTHER_SEGMENT_NAME.lower()
+                or (cur_total > 0 and val / cur_total * 100 < _OTHER_THRESHOLD_PCT)
+            )
+        ]
+        folded_sum = sum(cur_vals[k] for k in folded)
+        # A member with no prior-year value under its key (a renamed or newly split line,
+        # which FMP does between years) cannot be summed as 0: that made "Other" +49% when
+        # it grew +6%. Accept the prior only when the members missing from it are within
+        # the composition tolerance of "Other" — the rule a named segment follows.
+        missing_prior = [k for k in folded if k not in prior_vals]
+        missing_value = sum(cur_vals[k] for k in missing_prior)
+        if folded and abs(folded_sum - other_value) <= _OTHER_COMPOSITION_TOLERANCE * other_value:
+            if missing_value <= _OTHER_COMPOSITION_TOLERANCE * other_value:
+                other_prior = sum(prior_vals.get(k, 0.0) for k in folded)
+            else:
+                logger.info(
+                    "[report-revenue-engine] %s: FY%s 'Other' members %s have no FY%s "
+                    "value (%.4g of %.4g) — its YoY is left unmeasured",
+                    ticker, fiscal_year, missing_prior, prior_key, missing_value,
+                    other_value,
+                )
         else:
-            prior_seg_dict = prior_rec
-        for k, v in prior_seg_dict.items():
-            if k in _SEGMENT_META_KEYS:
-                continue
-            try:
-                amount = float(v)
-            except (TypeError, ValueError):
-                continue
-            if amount <= 0 or (1900 <= amount <= 2100):
-                continue
-            prior_lookup[k] = amount
+            logger.info(
+                "[report-revenue-engine] %s: FY%s 'Other' (%.4g) is not reproducible from "
+                "the raw record (%.4g over %d keys) — its YoY is left unmeasured",
+                ticker, fiscal_year, other_value, folded_sum, len(folded),
+            )
 
-    # Sort largest first, mirror the FMP-direct path's contract.
-    sources.sort(key=lambda s: s.value, reverse=True)
-    return [
-        {
-            "name": s.name,
-            "current_revenue": float(s.value),
-            "previous_revenue": float(prior_lookup.get(s.name, 0.0)),
-            "total_revenue": float(total),
-        }
-        for s in sources
-    ]
+    rows: List[Dict[str, Any]] = []
+    for name, value in sources:
+        stripped = name.strip()
+        if stripped.lower() == _OTHER_SEGMENT_NAME.lower():
+            prev = other_prior
+        elif stripped == _UNALLOCATED_SEGMENT_NAME:
+            prev = 0.0
+        else:
+            prev = float(prior_vals.get(name, 0.0))
+        rows.append({
+            "name": name,
+            "current_revenue": float(value),
+            "previous_revenue": prev,
+            "total_revenue": float(basis),
+        })
+    rows.sort(key=lambda r: r["current_revenue"], reverse=True)
+    return rows
+
+
+def _engine_inputs_from_sources(
+    sources: List[Tuple[str, float]],
+    fiscal_year: Optional[str],
+    reported_revenue: Optional[float],
+    intersegment_eliminations: Optional[float],
+    segments_raw: Any,
+    ticker: str = "",
+) -> Dict[str, Any]:
+    """The share denominator is REPORTED revenue whenever it is known (the Financials
+    tab's `revenueBasis`); the segment sum only when it is not. A gross stack keeps its
+    segments AS REPORTED and carries the eliminations so the panel can draw the line that
+    makes the shares add to 100%: switching the denominator without that line would show
+    shares summing to 134% with nothing to explain them."""
+    gross_sum = sum(v for _, v in sources)
+    reported = _finite_positive(reported_revenue)
+    basis = reported if reported is not None else gross_sum
+    if not sources or basis <= 0:
+        return _empty_engine_inputs()
+    eliminations = _finite_positive(intersegment_eliminations) if reported is not None else None
+    fy = str(fiscal_year).strip() if fiscal_year not in (None, "") else None
+    return {
+        "segments": _segment_rows(sources, fy, segments_raw, basis, ticker),
+        "fiscal_year": fy,
+        "total_revenue": basis,
+        "intersegment_eliminations": eliminations,
+    }
+
+
+def _raw_engine_inputs(
+    segments_raw: Any,
+    income: Any,
+    ticker: str = "",
+) -> Dict[str, Any]:
+    """Rebuild the segments from the collector's own raw fetch when the breakdown
+    SERVICE failed — through the service's rules, not around them: extract (drops
+    totals, eliminations, year-like values; folds < 5% into "Other"), pair each year
+    with the SAME fiscal year's income, reconcile to its reported revenue, and skip a
+    "thin" (< 50% coverage) or unreconcilable year exactly as the service does."""
+    from app.services.revenue_breakdown_service import (
+        _explicit_eliminations,
+        _extract_segments,
+        _reconcile_segments,
+        _record_year,
+        _safe_float_opt,
+    )
+
+    income_by_year: Dict[str, Dict[str, Any]] = {}
+    for rec in (income or []):
+        if not isinstance(rec, dict):
+            continue
+        year = _record_year(rec)
+        if year and year not in income_by_year:
+            income_by_year[year] = rec
+
+    seg_rows = [r for r in (segments_raw or []) if isinstance(r, dict)]
+    seg_rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    for seg_rec in seg_rows:
+        year = _record_year(seg_rec)
+        matched_income = income_by_year.get(year) if year else None
+        if matched_income is None:
+            continue
+        sources = _extract_segments(seg_rec)
+        if not sources:
+            continue
+        reported = _safe_float_opt(matched_income, "revenue")
+        sources, eliminations, outcome = _reconcile_segments(
+            sources, reported, _explicit_eliminations(seg_rec), ticker=ticker,
+        )
+        if outcome in ("thin", "unreconciled"):
+            logger.info(
+                "[report-revenue-engine-raw] %s: FY%s segmentation is %s — not a breakdown",
+                ticker, year, outcome,
+            )
+            continue
+        return _engine_inputs_from_sources(
+            [(s.name, float(s.value)) for s in sources],
+            year, reported,
+            eliminations if outcome == "gross" else None,
+            segments_raw, ticker,
+        )
+    return _empty_engine_inputs()
+
+
+def _revenue_engine_inputs(
+    breakdown: Optional[RevenueBreakdownResponse],
+    segments_raw: Any = None,
+    income: Any = None,
+    ticker: str = "",
+) -> Dict[str, Any]:
+    """{segments, fiscal_year, total_revenue, intersegment_eliminations} for the Revenue
+    Engine. Segments are dollars, largest first; [] means "breakdown unavailable".
+
+    Tells apart the two situations that both look like "no segments" in the breakdown:
+      * the service DELIBERATELY chose its single Total Revenue bar (a thin feed like
+        Ford's 7% "Ford Credit", no year match with the income statement, no
+        segmentation at all) → [] — the report agrees with the tab, never resurrects
+        the rejected raw feed;
+      * the service FAILED (None — the collector's gather default — or its segment leg
+        failed, degraded "segmentation_unavailable") → rebuilt from the raw fetch
+        through the service's own rules (`_raw_engine_inputs`).
+    """
+    degraded = list(getattr(breakdown, "degraded", None) or []) if breakdown is not None else []
+    if breakdown is None or "segmentation_unavailable" in degraded:
+        logger.warning(
+            "[report-revenue-engine-raw] %s: revenue breakdown %s — rebuilding the "
+            "segments from the raw segmentation through the service's reconciliation",
+            ticker, "unavailable" if breakdown is None else f"degraded ({', '.join(degraded)})",
+        )
+        return _raw_engine_inputs(segments_raw, income, ticker)
+
+    sources: List[Tuple[str, float]] = []
+    for s in breakdown.revenue_sources or []:
+        value = _finite_positive(getattr(s, "value", None))
+        if s.name and s.name != _TOTAL_REVENUE_PLACEHOLDER and value is not None:
+            sources.append((s.name, value))
+    if not sources:
+        logger.info(
+            "[report-revenue-engine] %s: the breakdown chose its Total Revenue placeholder "
+            "(FY%s) — no segment split to show", ticker, breakdown.fiscal_year or "?",
+        )
+        return _empty_engine_inputs()
+    return _engine_inputs_from_sources(
+        sources,
+        breakdown.fiscal_year or None,
+        breakdown.reported_revenue,
+        breakdown.intersegment_eliminations,
+        segments_raw,
+        ticker,
+    )
+
+
+def _top_named_segment(segments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The largest REAL segment — never the synthetic "Other" / "Unallocated" rows, which
+    can out-size every named segment (a filer whose segments cover 55% of revenue) and
+    would otherwise reach the revenue vital and the AI as the "top segment"."""
+    for s in segments or []:
+        if not _is_synthetic_segment(str(s.get("name") or "")):
+            return s
+    return None
 
 
 def _segment_growth_pct(
@@ -4586,34 +5430,42 @@ def _segment_growth_pct(
 
 
 def _build_revenue_engine(
-    segments: List[Dict[str, Any]], now: datetime,
+    segments: List[Dict[str, Any]],
+    *,
+    fiscal_year: Optional[str] = None,
+    total_revenue: Optional[float] = None,
+    intersegment_eliminations: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Emit segments in MILLIONS — iOS decides how to render (M / B / T).
 
     Older versions of this function pre-divided by the chosen display unit
     (1e9 for big-cap, 1e12 for mega-cap), which silently broke the iOS
     formatter — it assumes millions and infers the user-facing tier from
-    magnitude. Always emitting in millions keeps the API contract single-
-    unit; iOS handles the display branch. `revenue_unit` is still surfaced
-    so the AI insight prompt can phrase magnitudes correctly without doing
-    its own arithmetic.
+    magnitude. Always emitting in millions keeps the API contract single-unit.
+
+    * `revenue_unit` is the TRUE unit of the emitted numbers, always "Millions". It used
+      to say "Billions" for any $1B+ company over values in millions, and three prompts
+      printed that label beside them — a 1000× magnitude error in AI prose.
+    * `period` is the breakdown's FISCAL year ("FY 2025"), "" when unknown — never the
+      generation year, which labelled FY2025 data "FY 2026" for most of every year.
+    * `total_revenue` is the share denominator: reported revenue when known (see
+      `_engine_inputs_from_sources`), else the segment sum.
+    * `intersegment_eliminations` (millions, positive) is set only for a gross stack.
     """
+    period = f"FY {fiscal_year}" if fiscal_year else ""
     if not segments:
         return {
             "segments": [],
             "total_revenue": 0.0,
             "revenue_unit": "Millions",
-            "period": f"FY {now.year}",
+            "period": period,
+            "intersegment_eliminations": None,
             "analysis_note": None,  # filled by AI
         }
 
-    total = sum(s["current_revenue"] for s in segments)
-    if total >= 1e12:
-        unit = "Trillions"
-    elif total >= 1e9:
-        unit = "Billions"
-    else:
-        unit = "Millions"
+    gross = sum(s["current_revenue"] for s in segments)
+    total = _finite_positive(total_revenue) or gross
+    eliminations = _finite_positive(intersegment_eliminations)
 
     divisor = 1e6  # always emit in millions
     scaled = []
@@ -4628,15 +5480,168 @@ def _build_revenue_engine(
     return {
         "segments": scaled,
         "total_revenue": round(total / divisor, 2),
-        "revenue_unit": unit,
-        "period": f"FY {now.year}",
+        "revenue_unit": "Millions",
+        "period": period,
+        "intersegment_eliminations": (
+            round(eliminations / divisor, 2) if eliminations is not None else None
+        ),
         "analysis_note": None,  # AI fills
     }
 
 
 def _int_or_none(v: Any) -> Optional[int]:
-    """FMP `numAnalysts*` → int, or None when absent / zero / unparseable."""
-    return int(v) if isinstance(v, (int, float)) and v else None
+    """FMP `numAnalysts*` → int, or None when absent / zero / unparseable / non-finite
+    (`int(nan)` raises, and a NaN is truthy, so it used to reach that call)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return int(v) if v else None
+
+
+class _TimelineRow(NamedTuple):
+    """One fiscal year of the Earnings Timeline. `revenue` / `eps` are None when genuinely
+    absent (→ "N/A"), distinct from a real 0.0."""
+
+    fy: int
+    revenue: Optional[float]
+    eps: Optional[float]
+    is_forecast: bool
+    revenue_analyst_count: Optional[int]
+    eps_analyst_count: Optional[int]
+    period_end: str  # "yyyy-MM-dd" — the fiscal period's END date
+
+
+def _iso_day(value: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except ValueError:
+        return None
+
+
+def _rows_symbol(*row_lists: Any) -> str:
+    """The FMP `symbol` on the first row that has one — log context for helpers that are
+    handed only the statement rows."""
+    for rows in row_lists:
+        for rec in rows or []:
+            if isinstance(rec, dict) and rec.get("symbol"):
+                return str(rec["symbol"])
+    return "?"
+
+
+def _annual_timeline_rows(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+) -> Tuple[List[_TimelineRow], List[_TimelineRow]]:
+    """(actual rows, forecast rows), each ascending by FISCAL year, one row per year.
+
+    Actual years come from `annual_fiscal_year` (FMP `fiscalYear`, else the period END
+    minus 7 days) — NOT `date[:4]`. A 52/53-week filer that closes its year on the
+    Saturday nearest Dec 31 ends FY2021 on 2022-01-01 and FY2022 on 2022-12-31, and
+    `date[:4]` shipped two "2022" columns, no 2025, and dropped the FY2026 consensus as
+    "already reported" — while the report's other panels label by fiscal year. Two rows
+    for one fiscal year (a changed year-end) keep the LATER period end.
+
+    Analyst-estimate rows carry no `fiscalYear`, so a forecast's year is the last actual
+    year plus the whole number of years between the two period ends. Without actuals the
+    estimate's own end date is keyed like an actual row. Forecasts for a year already
+    reported are dropped (actuals win).
+    """
+    from app.utils.period_labels import annual_fiscal_year
+
+    ticker = _rows_symbol(income, estimates)
+
+    def _est_num(est: Dict[str, Any], primary: str, legacy: str) -> Optional[float]:
+        # `/stable` uses revenueAvg/epsAvg; the deprecated `/api/v3` used the
+        # estimated* names. None-preserving (a genuinely absent field → "N/A"),
+        # unlike _est_revenue/_est_eps which collapse missing to 0.0.
+        v = _num_or_none(est.get(primary))
+        return v if v is not None else _num_or_none(est.get(legacy))
+
+    actual_by_fy: Dict[int, _TimelineRow] = {}
+    for rec in income or []:
+        if not isinstance(rec, dict):
+            continue
+        end = _iso_day(rec.get("date"))
+        fy_key = annual_fiscal_year(rec) if end is not None else ""
+        if not fy_key.isdigit():
+            continue
+        fy = int(fy_key)
+        held = actual_by_fy.get(fy)
+        if held is not None:
+            logger.warning(
+                "[report-timeline-duplicate-fy] %s: two annual rows map to FY%s (%s, %s) — "
+                "keeping the later period end", ticker, fy, held.period_end, end.isoformat(),
+            )
+            if held.period_end >= end.isoformat():
+                continue
+        # Reported actuals have no analyst coverage.
+        actual_by_fy[fy] = _TimelineRow(
+            fy, _num_or_none(rec.get("revenue")), _num_or_none(rec.get("epsDiluted")),
+            False, None, None, end.isoformat(),
+        )
+    actuals = [actual_by_fy[k] for k in sorted(actual_by_fy)]
+
+    last = actuals[-1] if actuals else None
+    last_end = _iso_day(last.period_end) if last is not None else None
+    forecast_by_fy: Dict[int, _TimelineRow] = {}
+    est_rows = [e for e in (estimates or []) if isinstance(e, dict)]
+    for est in sorted(est_rows, key=lambda r: str(r.get("date") or "")):
+        end = _iso_day(est.get("date"))
+        if end is None:
+            continue
+        if last is not None and last_end is not None:
+            fy = last.fy + round((end - last_end).days / 365.25)
+            if fy <= last.fy:
+                continue  # actuals win for already-reported years
+        else:
+            fy_key = annual_fiscal_year(est)
+            if not fy_key.isdigit():
+                continue
+            fy = int(fy_key)
+        if fy in forecast_by_fy:
+            logger.warning(
+                "[report-timeline-duplicate-fy] %s: two estimate rows map to FY%s (%s, %s) — "
+                "keeping the later period end",
+                ticker, fy, forecast_by_fy[fy].period_end, end.isoformat(),
+            )
+        forecast_by_fy[fy] = _TimelineRow(
+            fy,
+            _est_num(est, "revenueAvg", "estimatedRevenueAvg"),
+            _est_num(est, "epsAvg", "estimatedEpsAvg"),
+            True,
+            _int_or_none(est.get("numAnalystsRevenue")),
+            _int_or_none(est.get("numAnalystsEps")),
+            end.isoformat(),
+        )
+    forecasts = [forecast_by_fy[k] for k in sorted(forecast_by_fy)]
+
+    years = [r.fy for r in actuals + forecasts]
+    if any(b - a != 1 for a, b in zip(years, years[1:])):
+        logger.warning(
+            "[report-timeline-gap] %s: fiscal years are not consecutive %s — a YoY across "
+            "a gap is left unmeasured", ticker, years,
+        )
+    return actuals, forecasts
+
+
+def _signed_revenue_label(rev: Optional[float]) -> str:
+    """`_format_revenue` with a sign: it collapses every non-positive value to "$0", which
+    captioned a below-zero bar (a financial's negative revenue year) "$0"."""
+    if rev is None:
+        return "N/A"
+    if rev < 0:
+        return "-" + _format_revenue(-rev)
+    return _format_revenue(rev)
+
+
+def _signed_eps_label(eps: Optional[float]) -> str:
+    """"-$2.00", not "$-2.00" — the module's sign style (`_format_money_compact`)."""
+    if eps is None:
+        return "N/A"
+    if eps < 0 and round(abs(eps), 2) > 0:
+        return f"-${abs(eps):.2f}"
+    return f"${abs(eps):.2f}" if eps < 0 else f"${eps:.2f}"
 
 
 def _build_annual_timeline(
@@ -4654,6 +5659,17 @@ def _build_annual_timeline(
     padded. Missing revenue/EPS/analyst-count values are PRESERVED as absent and
     surfaced as "N/A" downstream — never a misleading $0 or a hidden blank.
 
+    Years are FISCAL years (see `_annual_timeline_rows`), so each row also carries its
+    `period_end`: the label no longer equals a calendar year, and the price overlay is
+    placed by period window, not by calendar year.
+
+    EPS changes BASIS at the actual → forecast boundary: actual years are the income
+    statement's GAAP `epsDiluted`, forecasts are the analyst consensus `epsAvg` (adjusted
+    for most filers). The first forecast year's EPS YoY is therefore None — AVGO's GAAP
+    $4.77 against a $10.00 consensus read as "+110%" growth — and every row says which
+    basis it is on (`eps_basis`). Revenue is the same basis on both sides and keeps its
+    YoY. A YoY across a missing fiscal year is None too (it would be a 2-year change).
+
     Self-contained: its own divisor + YoY, independent of the curated forecast
     window in `_build_revenue_forecast_partial`. Reuses inputs the collector
     already fetched (no new FMP calls). Returns [] when there is no data.
@@ -4661,56 +5677,13 @@ def _build_annual_timeline(
     _ACTUALS_SHOWN = 5   # last N reported years (standard forecast-chart past window)
     _FORECASTS_SHOWN = 5  # up to N forward estimate years (whatever FMP has, capped)
 
-    def _year(rec: Dict[str, Any]) -> Optional[int]:
-        ds = rec.get("date") or ""
-        try:
-            return int(ds[:4]) if len(ds) >= 4 else None
-        except ValueError:
-            return None
-
-    def _est_num(est: Dict[str, Any], primary: str, legacy: str) -> Optional[float]:
-        # `/stable` uses revenueAvg/epsAvg; the deprecated `/api/v3` used the
-        # estimated* names. None-preserving (a genuinely absent field → "N/A"),
-        # unlike _est_revenue/_est_eps which collapse missing to 0.0.
-        v = _num_or_none(est.get(primary))
-        return v if v is not None else _num_or_none(est.get(legacy))
-
-    # (year, revenue|None, eps|None, is_forecast, revenue_analyst_count,
-    # eps_analyst_count) — revenue/eps are None when genuinely absent (→ "N/A"),
-    # distinct from a real 0.0.
-    Row = Tuple[int, Optional[float], Optional[float], bool, Optional[int], Optional[int]]
-    actuals: List[Row] = []
-    for rec in sorted((income or []), key=lambda r: r.get("date") or ""):
-        y = _year(rec)
-        if y is not None:
-            # Reported actuals have no analyst coverage.
-            actuals.append(
-                (y, _num_or_none(rec.get("revenue")), _num_or_none(rec.get("epsDiluted")),
-                 False, None, None)
-            )
-    last_actual = max((y for y, *_ in actuals), default=None)
-
-    forecasts: List[Row] = []
-    for est in sorted((estimates or []), key=lambda r: r.get("date") or ""):
-        y = _year(est)
-        if y is None:
-            continue
-        if last_actual is not None and y <= last_actual:
-            continue  # actuals win for already-reported years
-        forecasts.append((
-            y,
-            _est_num(est, "revenueAvg", "estimatedRevenueAvg"),
-            _est_num(est, "epsAvg", "estimatedEpsAvg"),
-            True,
-            _int_or_none(est.get("numAnalystsRevenue")),
-            _int_or_none(est.get("numAnalystsEps")),
-        ))
+    actuals, forecasts = _annual_timeline_rows(income, estimates)
 
     # Window: last 5 actuals DISPLAYED, plus one older actual (when present) kept
     # ONLY as the leftmost bar's off-screen YoY anchor (so it still gets a % chip),
     # then up to 5 forecasts. Mirrors the off-screen-anchor idea in
     # _select_visible_forecast_window.
-    anchor: List[Row] = (
+    anchor: List[_TimelineRow] = (
         actuals[-(_ACTUALS_SHOWN + 1):-_ACTUALS_SHOWN]
         if len(actuals) > _ACTUALS_SHOWN else []
     )
@@ -4720,7 +5693,7 @@ def _build_annual_timeline(
     rows_for_yoy = anchor + display_rows
     anchor_offset = len(anchor)  # index in rows_for_yoy where the DISPLAYED rows start
 
-    max_rev = max((r for _, r, *_ in display_rows if r is not None), default=0.0)
+    max_rev = max((abs(r.revenue) for r in display_rows if r.revenue is not None), default=0.0)
     divisor = 1e12 if max_rev >= 1e12 else 1e9 if max_rev >= 1e9 else 1e6
 
     def _yoy(curr: Optional[float], prior: Optional[float]) -> Optional[float]:
@@ -4733,22 +5706,35 @@ def _build_annual_timeline(
 
     series: List[Dict[str, Any]] = []
     for k in range(anchor_offset, len(rows_for_yoy)):
-        year, rev, eps, is_fc, rev_n, eps_n = rows_for_yoy[k]
-        prior_rev = rows_for_yoy[k - 1][1] if k > 0 else None
-        prior_eps = rows_for_yoy[k - 1][2] if k > 0 else None
+        row = rows_for_yoy[k]
+        prior = rows_for_yoy[k - 1] if k > 0 else None
+        if prior is not None and prior.fy != row.fy - 1:
+            prior = None  # a gap year: no single-year change to measure
+        prior_rev = prior.revenue if prior is not None else None
+        # GAAP actual → consensus forecast: not a growth rate (see the docstring).
+        crosses_basis = prior is not None and row.is_forecast and not prior.is_forecast
+        prior_eps = prior.eps if prior is not None and not crosses_basis else None
+        rev, eps = row.revenue, row.eps
         series.append({
-            "period": str(year),
+            "period": str(row.fy),
+            "period_end": row.period_end,
             "revenue": round(rev / divisor, 2) if rev else 0.0,
-            "revenue_label": _format_revenue(rev) if rev is not None else "N/A",
+            "revenue_label": _signed_revenue_label(rev),
             "revenue_yoy_pct": _yoy(rev, prior_rev),
             "eps": round(eps, 2) if eps else 0.0,
-            "eps_label": f"${eps:.2f}" if eps is not None else "N/A",
+            "eps_label": _signed_eps_label(eps),
             "eps_yoy_pct": _yoy(eps, prior_eps),
-            "revenue_analyst_count": rev_n,
-            "eps_analyst_count": eps_n,
-            "is_forecast": is_fc,
+            "eps_basis": "consensus" if row.is_forecast else "gaap",
+            "revenue_analyst_count": row.revenue_analyst_count,
+            "eps_analyst_count": row.eps_analyst_count,
+            "is_forecast": row.is_forecast,
         })
     return series
+
+
+# The price overlay's first column has no previous period end on the wire; its window
+# opens this many days before its own end. iOS `EarningsTimelineChart` uses the same span.
+_TIMELINE_FIRST_COLUMN_DAYS = 365
 
 
 def _build_timeline_prices(
@@ -4766,15 +5752,32 @@ def _build_timeline_prices(
     the date parsing runs ONCE here at generation, never on the iOS render path
     (which is why monthly's cheap string-slice bucketing isn't needed). [] when no
     data.
+
+    The window opens at the first actual column's fiscal START (its period end minus
+    one year) when every actual row carries `period_end`. Filtering on the CALENDAR year
+    of the first label dropped NVDA's Feb–Dec prices of its first fiscal year (FY2022
+    runs Feb 2021 – Jan 2022). Rows without `period_end` (older timelines) keep the
+    calendar-year floor.
     """
-    actual_years = [
-        int(p["period"])
-        for p in (annual_timeline or [])
-        if not p.get("is_forecast") and str(p.get("period", "")).isdigit()
-    ]
-    if not actual_years:
+    actual_rows = [p for p in (annual_timeline or []) if not p.get("is_forecast")]
+    if not actual_rows:
         return []
-    year_min = min(actual_years)
+    ends = [_iso_day(p.get("period_end")) for p in actual_rows]
+    if all(e is not None for e in ends):
+        window_opens_after = min(ends) - timedelta(days=_TIMELINE_FIRST_COLUMN_DAYS)
+
+        def _in_window(d: date) -> bool:
+            return d > window_opens_after
+    else:
+        actual_years = [
+            int(p["period"]) for p in actual_rows if str(p.get("period", "")).isdigit()
+        ]
+        if not actual_years:
+            return []
+        year_min = min(actual_years)
+
+        def _in_window(d: date) -> bool:
+            return d.year >= year_min
 
     weekly: Dict[Tuple[int, int], Tuple[str, float]] = {}  # (iso_year, iso_week) -> (date, close)
     for rec in _hist_list(historical):
@@ -4785,7 +5788,7 @@ def _build_timeline_prices(
             d = date.fromisoformat(ds)
         except ValueError:
             continue
-        if d.year < year_min:
+        if not _in_window(d):
             continue
         close = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
         if close <= 0:
@@ -4806,38 +5809,34 @@ def _forecast_analyst_count(
     estimates: Optional[List[Dict[str, Any]]],
 ) -> Optional[int]:
     """How many analysts back the NEAREST forecast year — the max of FMP's
-    `numAnalystsRevenue` / `numAnalystsEps` for the first year past the last
-    reported one. Shown as forecast attribution ("consensus of N analysts").
-    None when unavailable."""
-    def _year(rec: Dict[str, Any]) -> Optional[int]:
-        ds = rec.get("date") or ""
-        try:
-            return int(ds[:4]) if len(ds) >= 4 else None
-        except ValueError:
-            return None
-
-    last_actual = max(
-        (y for y in (_year(r) for r in (income or [])) if y is not None),
-        default=None,
-    )
-    forecast = sorted(
-        (
-            (y, e)
-            for e in (estimates or [])
-            if (y := _year(e)) is not None
-            and (last_actual is None or y > last_actual)
-        ),
-        key=lambda t: t[0],
-    )
-    if not forecast:
+    `numAnalystsRevenue` / `numAnalystsEps` for the first fiscal year past the last
+    reported one (the Earnings Timeline's first forecast column, via the same fiscal-year
+    mapping). Shown as forecast attribution ("consensus of N analysts"). None when
+    unavailable."""
+    _actuals, forecasts = _annual_timeline_rows(income, estimates)
+    if not forecasts:
         return None
-    nearest = forecast[0][1]
-    nums = [
-        int(c)
-        for c in (nearest.get("numAnalystsRevenue"), nearest.get("numAnalystsEps"))
-        if isinstance(c, (int, float)) and c
-    ]
+    nearest = forecasts[0]
+    nums = [c for c in (nearest.revenue_analyst_count, nearest.eps_analyst_count) if c]
     return max(nums) if nums else None
+
+
+def _forecast_fiscal_label(est: Any, last_actual: Optional[_TimelineRow]) -> Optional[str]:
+    """The fiscal-year label `_annual_timeline_rows` gives an analyst-estimate row: the last
+    actual fiscal year plus the whole years between the two period ends (estimates carry no
+    `fiscalYear`), else the row's own `annual_fiscal_year`. None when undatable."""
+    from app.utils.period_labels import annual_fiscal_year
+
+    if not isinstance(est, dict):
+        return None
+    end = _iso_day(est.get("date"))
+    if end is None:
+        return None
+    last_end = _iso_day(last_actual.period_end) if last_actual is not None else None
+    if last_actual is not None and last_end is not None:
+        return str(last_actual.fy + round((end - last_end).days / 365.25))
+    fy_key = annual_fiscal_year(est)
+    return fy_key if fy_key.isdigit() else None
 
 
 def _build_revenue_forecast_partial(
@@ -4870,10 +5869,19 @@ def _build_revenue_forecast_partial(
             return None
         return round((curr - prior) / abs(prior) * 100, 1)
 
+    # Label each projection with the SAME fiscal year the Earnings Timeline gives that
+    # estimate (`_forecast_fiscal_label`). `date[:4]` named HD's FY2026 estimate (ending
+    # 2027-01-31) "2027" while the timeline bar said 2026, so the Stage B insight — built
+    # from these labels — cited a year one ahead of the chart it sits under.
+    timeline_actuals, _timeline_forecasts = _annual_timeline_rows(income, estimates)
+    last_actual = timeline_actuals[-1] if timeline_actuals else None
+
     projections: List[Dict[str, Any]] = []
     for i, est in enumerate(sorted_estimates):
         date_str = est.get("date") or ""
-        period = date_str[:4] if len(date_str) >= 4 else f"FY{i}"
+        period = _forecast_fiscal_label(est, last_actual) or (
+            date_str[:4] if len(date_str) >= 4 else f"FY{i}"
+        )
         rev = _est_revenue(est)
         eps = _est_eps(est)
         # Prior year is the previous visible projection, or the anchor
@@ -8239,15 +9247,26 @@ def build_financial_context(out: CollectedTickerData) -> str:
         )
 
     if out.revenue_engine_partial.get("segments"):
-        parts.append(
-            f"\nRevenue Segments "
-            f"({out.revenue_engine_partial.get('period', '?')}, "
-            f"{out.revenue_engine_partial.get('revenue_unit', '?')}):"
-        )
-        for seg in out.revenue_engine_partial["segments"][:6]:
+        # Pre-formatted dollars. The engine's values are MILLIONS, and this header used to
+        # print "Billions" beside them for every $1B+ company — the model was told iPhone
+        # earned 209,586 billion. A formatted "$209.6B" leaves no unit to misread.
+        engine = out.revenue_engine_partial
+        parts.append(f"\nRevenue Segments ({engine.get('period') or 'latest fiscal year'}):")
+        for seg in engine["segments"][:6]:
+            prior = seg.get("previous_revenue") or 0.0
             parts.append(
-                f"  {seg['name']}: {seg['current_revenue']} "
-                f"(prior: {seg['previous_revenue']})"
+                f"  {seg['name']}: {_format_money_compact(seg['current_revenue'] * 1e6)} "
+                f"(prior year: {_format_money_compact(prior * 1e6) if prior > 0 else 'n/a'})"
+            )
+        if engine.get("total_revenue"):
+            parts.append(
+                f"  Total revenue: {_format_money_compact(engine['total_revenue'] * 1e6)}"
+            )
+        if engine.get("intersegment_eliminations"):
+            parts.append(
+                "  Intersegment eliminations: "
+                f"-{_format_money_compact(engine['intersegment_eliminations'] * 1e6)} "
+                "(segments are reported gross; their shares of revenue add to more than 100%)"
             )
 
     if out.news:

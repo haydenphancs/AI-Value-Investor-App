@@ -18,10 +18,24 @@ enum GrowthMetricType: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The label shown on chips and headers. `rawValue` stays the stable key (view ids,
+    /// `seriesKey`), so the visible wording can change without moving any key.
+    ///
+    /// EPS here is GAAP DILUTED EPS from the income statement. The Earnings card on the
+    /// same Financials tab plots ADJUSTED (non-GAAP) EPS against analyst consensus, and
+    /// both used to be captioned a bare "EPS": for AVGO the two read ~$1.0x and ~$1.6x
+    /// for the same quarter with nothing saying why.
+    var displayName: String {
+        switch self {
+        case .eps: return "EPS (GAAP)"
+        case .revenue, .netIncome, .operatingProfit, .freeCashFlow: return rawValue
+        }
+    }
+
     var description: String {
         switch self {
         case .eps:
-            return "Earnings Per Share measures the company's profit allocated to each outstanding share of common stock."
+            return "Diluted earnings per share as reported under GAAP: the company's profit allocated to each outstanding share. The Earnings card shows adjusted (non-GAAP) EPS, so the two can differ."
         case .revenue:
             return "Total income generated from sales of goods or services before any expenses are deducted."
         case .netIncome:
@@ -136,6 +150,12 @@ struct GrowthSectionData {
     let operatingProfitQuarterly: [GrowthDataPoint]
     let freeCashFlowAnnual: [GrowthDataPoint]
     let freeCashFlowQuarterly: [GrowthDataPoint]
+    /// Which peer group each series' dashed line comes from — "industry" | "sector" —
+    /// keyed by the backend series name (`seriesKey(for:period:)`). Empty for a payload
+    /// that predates the field (a shipped backend or a frozen report): callers then keep
+    /// their old wording. A `var` with a default so every existing init still compiles;
+    /// the repository mapper assigns it after construction.
+    var peerGroupLevels: [String: String] = [:]
 
     func dataPoints(for metric: GrowthMetricType, period: GrowthPeriodType) -> [GrowthDataPoint] {
         switch (metric, period) {
@@ -158,6 +178,68 @@ struct GrowthSectionData {
             periodType: period,
             dataPoints: dataPoints(for: metric, period: period)
         )
+    }
+}
+
+// MARK: - Availability + peer group (shared by the tab card and the report sheet)
+//
+// One helper set so the free Financials-tab card and the report's GrowthChartSheet
+// cannot drift apart again: the card used to offer every chip and both periods and draw
+// an EMPTY series under a fabricated 0–1.2 axis, while the sheet already filtered.
+extension GrowthSectionData {
+    /// Backend series name for `peer_group_levels` (`GrowthResponse` in schemas/growth.py).
+    static func seriesKey(for metric: GrowthMetricType, period: GrowthPeriodType) -> String {
+        let base: String
+        switch metric {
+        case .eps: base = "eps"
+        case .revenue: base = "revenue"
+        case .netIncome: base = "net_income"
+        case .operatingProfit: base = "operating_profit"
+        case .freeCashFlow: base = "fcf"
+        }
+        let suffix: String = period == .annual ? "annual" : "quarterly"
+        return base + "_" + suffix
+    }
+
+    /// "industry" / "sector" for the series' dashed line; nil when that series draws none.
+    func peerGroupLevel(for metric: GrowthMetricType, period: GrowthPeriodType) -> String? {
+        peerGroupLevels[Self.seriesKey(for: metric, period: period)]
+    }
+
+    /// The legend word for the dashed line. `legacyLevel` is used only when the payload
+    /// carries no per-series levels at all (a report frozen before the field existed).
+    func peerWord(
+        for metric: GrowthMetricType,
+        period: GrowthPeriodType,
+        legacyLevel: String? = nil
+    ) -> String {
+        let level: String? = peerGroupLevels.isEmpty
+            ? legacyLevel
+            : peerGroupLevel(for: metric, period: period)
+        return level == "industry" ? "Industry" : "Sector"
+    }
+
+    func hasPoints(_ metric: GrowthMetricType, _ period: GrowthPeriodType, minimum: Int = 1) -> Bool {
+        dataPoints(for: metric, period: period).count >= minimum
+    }
+
+    /// Metrics with a chartable series in EITHER period, in display order.
+    func metricsWithData(minimum: Int = 1) -> [GrowthMetricType] {
+        GrowthMetricType.allCases.filter {
+            hasPoints($0, .annual, minimum: minimum) || hasPoints($0, .quarterly, minimum: minimum)
+        }
+    }
+
+    /// Periods the metric has data for (Annual first).
+    func periodsWithData(for metric: GrowthMetricType, minimum: Int = 1) -> [GrowthPeriodType] {
+        GrowthPeriodType.allCases.filter { hasPoints(metric, $0, minimum: minimum) }
+    }
+
+    /// Where a view should open: the first metric with data, on Annual when it has it.
+    func initialSelection(minimum: Int = 1) -> (metric: GrowthMetricType, period: GrowthPeriodType) {
+        let metric: GrowthMetricType = metricsWithData(minimum: minimum).first ?? .eps
+        let period: GrowthPeriodType = hasPoints(metric, .annual, minimum: minimum) ? .annual : .quarterly
+        return (metric, period)
     }
 }
 

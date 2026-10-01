@@ -56,8 +56,13 @@ enum SignalOfConfidenceMetricType: String, CaseIterable, Identifiable {
 struct SignalOfConfidenceDataPoint: Identifiable {
     let id = UUID()
     let period: String                    // e.g., "Q2 '24", "Q3 '24"
-    let dividendYield: Double             // Percentage (e.g., 1.3 for 1.3%)
-    let buybackYield: Double              // Percentage
+    /// Trailing-12-month yield at this quarter's end, % (1.3 = 1.3%): the four quarters'
+    /// cash over the market cap at THIS period end. The quarter x4 turned cash-settlement
+    /// timing into fake swings (KO 0.12% → 5.85% on a 2.95% yield), so it survives only
+    /// where four consecutive quarters of cash flow are not on file — unmarked on the wire,
+    /// which is why the card's caption names both bases.
+    let dividendYield: Double
+    let buybackYield: Double              // Trailing-12-month, same basis
     let dividendAmount: Double            // Dollar amount in millions
     let buybackAmount: Double             // Dollar amount in millions
     /// In millions (e.g. 150 for 150M). NIL when the filing did not report it.
@@ -90,8 +95,15 @@ struct SignalOfConfidenceSummary {
     // company that pays no dividend. Defaulted so existing call sites and previews
     // keep compiling.
     var buybackStatus: BuybackStatus = .low
+    /// False when fewer than two quarters reported a share count. `shareCountChange` is
+    /// then a 0.0 placeholder (non-Optional on the wire), NOT a measured "unchanged" — the
+    /// card and Cay AI used to present it as one. Defaulted so existing inits compile.
+    var shareCountChangeKnown: Bool = true
 
     var shareCountDescription: String {
+        guard shareCountChangeKnown else {
+            return "Share count change: not reported."
+        }
         if shareCountChange < 0 {
             return "Share count decrease by \(String(format: "%.1f", abs(shareCountChange)))%."
         } else if shareCountChange > 0 {
@@ -197,6 +209,31 @@ struct DividendInfo {
     var growthPct: Double? = nil
     /// How many years the growth figure spans, so a label cannot claim "5Y" over one year.
     var growthYears: Int? = nil
+    /// The window `fiveYearAvgYield` actually spans, from the backend's `avg_yield_window`
+    /// ("8Q" = eight quarterly trailing-12-month yields; "5Y" only on the annual fallback).
+    /// The field is named five-year for DTO compatibility, and the card used to print
+    /// "5Y Avg Yield" over at most two years of data. nil → a window-neutral label.
+    var avgYieldWindowLabel: String? = nil
+
+    /// Row label for `fiveYearAvgYield`: "Avg Dividend Yield (2Y)" for "8Q", "(6Q)" for a
+    /// count that is not whole years, and a window-neutral "Trailing Avg Dividend Yield"
+    /// when the backend did not say (an older payload) — never a claimed "5Y".
+    var averageYieldLabel: String {
+        guard let raw = avgYieldWindowLabel?.trimmingCharacters(in: .whitespaces),
+              raw.count >= 2,
+              let n = Int(raw.dropLast()), n > 0 else {
+            return "Trailing Avg Dividend Yield"
+        }
+        if raw.hasSuffix("Q") {
+            return n % 4 == 0
+                ? "Avg Dividend Yield (\(n / 4)Y)"
+                : "Avg Dividend Yield (\(n)Q)"
+        }
+        if raw.hasSuffix("Y") {
+            return "Avg Dividend Yield (\(n)Y)"
+        }
+        return "Trailing Avg Dividend Yield"
+    }
 
     var formattedPerShare: String {
         guard let v = perShare else { return "—" }
@@ -261,9 +298,40 @@ extension DividendInfo {
             perShare: 2.0402,
             perShareYear: "2025",
             growthPct: 24.3,
-            growthYears: 5
+            growthYears: 5,
+            avgYieldWindowLabel: "8Q"
         )
     }()
+}
+
+// MARK: - Money format (shared)
+
+/// ONE dollar format for every Signal of Confidence surface — the Financials chart and the
+/// report's `CapitalAllocationMiniChart` used to disagree on the same quarter ("$2B" vs
+/// "$1.5B"): the full chart rounded billions to whole numbers, so $1,499M and $1,500M read
+/// "$1B" and "$2B" and its 0.9/0.6/0.3 axis ticks collided.
+///
+/// Precision follows magnitude so no label is wider than today's "$999M" inside the
+/// eight `.fixedSize()` columns: ≥ $1T `%.1fT`, ≥ $10B `%.0fB`, ≥ $1B `%.1fB`, else `%.0fM`.
+/// A value that would round up into the next tier's digits ("$1000M", "$1000B") is
+/// promoted to that tier instead.
+enum SignalOfConfidenceFormat {
+    /// `millions` is USD millions, as every SoC amount arrives.
+    static func money(millions: Double) -> String {
+        guard millions.isFinite else { return "—" }
+        let sign = millions < 0 ? "-" : ""
+        let m = abs(millions)
+        if m >= 1_000_000 || (m / 1_000).rounded() >= 1_000 {
+            return sign + String(format: "$%.1fT", m / 1_000_000)
+        }
+        if m >= 10_000 {
+            return sign + String(format: "$%.0fB", m / 1_000)
+        }
+        if m >= 1_000 || m.rounded() >= 1_000 {
+            return sign + String(format: "$%.1fB", m / 1_000)
+        }
+        return sign + String(format: "$%.0fM", m)
+    }
 }
 
 // MARK: - Signal of Confidence Section Data

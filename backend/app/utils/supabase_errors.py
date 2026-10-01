@@ -121,6 +121,10 @@ TRANSIENT_SQLSTATES = frozenset({"08000", "08003", "08006", "08P01", "53300"})
 #: apart from a genuine failure. It must NEVER be transient — see below.
 UNIQUE_VIOLATION_SQLSTATE = "23505"
 
+#: Postgres check_violation — e.g. a row whose value a CHECK constraint does not allow
+#: yet, because the code that writes it shipped before its migration.
+CHECK_VIOLATION_SQLSTATE = "23514"
+
 
 def _status_from_code(code: Any) -> Optional[int]:
     """Normalize a postgrest ``.code`` into an HTTP status, or None.
@@ -284,6 +288,31 @@ def is_unique_violation(exc: BaseException) -> bool:
     the same object in the tests so the two can never drift into agreement.
     """
     return _walk_chain(exc, _is_unique_violation_one)
+
+
+def is_check_violation(exc: BaseException, constraint: Optional[str] = None) -> bool:
+    """True for a Postgres 23514 CHECK-constraint violation — optionally only for the
+    constraint named ``constraint`` (matched in the error's message/details).
+
+    Lets a writer degrade across a code-before-migration window (the new value is
+    refused, everything else is still written) without ever swallowing an unrelated
+    failure: keyed on a ``str`` code, like :func:`is_unknown_column_error`, so a
+    transient edge error (``int`` code) never matches.
+    """
+    def _one(e: BaseException) -> bool:
+        code = getattr(e, "code", None)
+        if not (isinstance(code, str) and code.strip() == CHECK_VIOLATION_SQLSTATE):
+            return False
+        if constraint is None:
+            return True
+        text = " ".join(
+            str(part) for part in (
+                getattr(e, "message", None), getattr(e, "details", None), e,
+            ) if part
+        )
+        return constraint in text
+
+    return _walk_chain(exc, _one)
 
 
 def retry_idempotent_sync(

@@ -44,7 +44,7 @@ class _FakeFMP:
     async def get_historical_prices(self, ticker, from_date=None, to_date=None):
         return []
 
-    async def get_earning_calendar_full(self, ticker):
+    async def get_earning_calendar_full(self, ticker, raise_errors=False):
         return self._full_ec
 
     async def _make_request(self, endpoint, params=None):
@@ -174,7 +174,13 @@ async def test_missing_announcement_degrades_to_gaap_and_logs_warning(caplog):
 
     q = next(q for q in resp.eps_quarters if getattr(q, "fiscal_date", None) == "2024-05-31")
     assert q.actual_value == pytest.approx(1.10)     # GAAP epsDiluted
-    assert q.estimate_value == pytest.approx(1.55)   # non-GAAP estimate
+    # Updated 2026-09-30 (deep-check #23): this used to pin estimate_value == 1.55 (the
+    # NON-GAAP epsAvg), which shipped a -29% "miss" that was only the GAAP/non-GAAP gap
+    # and was counted in the report's beat/miss record. No comparable consensus exists,
+    # so there is no surprise and the estimate repeats the actual.
+    assert q.surprise_percent is None
+    assert q.estimate_value == pytest.approx(1.10)
+    assert q.has_estimate is False
     assert "DEGRADED to GAAP" in caplog.text
 
 
@@ -209,7 +215,11 @@ async def test_matched_announcement_null_eps_actual_falls_back_to_gaap(caplog):
     q = next((q for q in resp.eps_quarters if getattr(q, "fiscal_date", None) == "2026-05-31"), None)
     assert q is not None, "EPS quarter was silently dropped (the bug)"
     assert q.actual_value == pytest.approx(1.45)     # GAAP epsDiluted fallback
-    assert q.estimate_value == pytest.approx(1.96)   # non-GAAP analyst estimate
+    # Updated 2026-09-30 (deep-check #23): GAAP 1.45 vs the non-GAAP 1.96 is not a
+    # result, so no surprise (it used to pin estimate 1.96 → a fake -26% miss).
+    assert q.surprise_percent is None
+    assert q.estimate_value == pytest.approx(1.45)
+    assert q.has_estimate is False
     assert "DEGRADED to GAAP" in caplog.text
     # Revenue is unaffected — still the announcement's real revenueActual.
     rq = next((r for r in resp.revenue_quarters if getattr(r, "fiscal_date", None) == "2026-05-31"), None)

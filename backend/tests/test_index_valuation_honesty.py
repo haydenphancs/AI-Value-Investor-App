@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import app.services.index_service as idx
+from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
 
 
 # ── F29: no fabricated forward P/E, and nothing narrates one ────────────────────────
@@ -160,10 +161,10 @@ def _rows():
     out = []
     for q in ("Q1'26", "Q2'26"):
         for i in range(11):
-            out.append({"sector": f"S{i}", "industry": "", "period_type": "quarterly",
+            out.append({"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
                         "period_label": q, "median_value": 22.0})
     for i in range(1500):
-        out.append({"sector": f"S{i % 11}", "industry": f"Ind{i}", "period_type": "quarterly",
+        out.append({"sector": f"S{i % 11}", "industry": f"Ind{i}", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
                     "period_label": "Q2'26", "median_value": 45.0})
     return _with_ids(out)
 
@@ -183,10 +184,10 @@ def test_the_read_is_paged_past_the_postgrest_clamp(monkeypatch):
     and an unpaged read returns an arbitrary first 1,000. Here the 11 newest sector rows
     are the LAST rows in the table: only a paged read can see them.
     """
-    rows = [{"sector": f"S{i}", "industry": "", "period_type": "quarterly",
+    rows = [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
              "period_label": f"Q{(q % 4) + 1}'{10 + q // 16:02d}", "median_value": 30.0}
             for q in range(110) for i in range(11)]          # 1,210 old rows, years '10-'16
-    rows += [{"sector": f"S{i}", "industry": "", "period_type": "quarterly",
+    rows += [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
               "period_label": "Q4'26", "median_value": 99.0} for i in range(11)]
     _with_ids(rows)
     assert len(rows) > 1000
@@ -203,9 +204,9 @@ def test_an_empty_table_is_none_not_zero(monkeypatch):
 
 
 def test_a_period_with_too_few_sectors_is_skipped(monkeypatch):
-    rows = [{"sector": f"S{i}", "industry": "", "period_type": "quarterly",
+    rows = [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
              "period_label": "Q2'26", "median_value": 30.0} for i in range(7)]
-    rows += [{"sector": f"S{i}", "industry": "", "period_type": "quarterly",
+    rows += [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
               "period_label": "Q1'26", "median_value": 20.0} for i in range(9)]
     _with_ids(rows)
     monkeypatch.setattr(idx, "get_supabase", lambda: _Recorder(rows))
@@ -265,3 +266,18 @@ def test_the_pager_actually_orders_the_read(monkeypatch):
     )
     assert all(col == "id" for col, _desc in rec.orders), rec.orders
 
+
+
+def test_legacy_fiscal_keyed_quarterly_rows_are_ignored(monkeypatch):
+    """Finding #34: the legacy period_type 'quarterly' rows pooled each company by its FISCAL
+    quarter number. Only the calendar-quarter rows may decide the index P/E — a NEWER legacy
+    label with a full set of sectors must not win."""
+    rows = [{"sector": f"S{i}", "industry": "", "period_type": "quarterly",
+             "period_label": "Q4'26", "median_value": 99.0} for i in range(11)]
+    rows += [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
+              "period_label": "Q2'26", "median_value": 18.0} for i in range(11)]
+    _with_ids(rows)
+    rec = _Recorder(rows)
+    monkeypatch.setattr(idx, "get_supabase", lambda: rec)
+    assert idx._compute_index_pe_from_sectors() == 18.0
+    assert ("period_type", CALENDAR_QUARTER_PERIOD_TYPE) in rec.eq_calls

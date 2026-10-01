@@ -26,7 +26,7 @@ from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 # ── In-memory cache ───────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
+
+# Version stamped into this card's snapshot_cache rows (same key and pattern as
+# valuation_snapshot_service). Bump it when a stored value's computation changes, so
+# rows written under the old rules rebuild on their next read instead of serving 24h.
+# 2 (2026-09-30): neutral sector metrics earn half credit in pass_rating (they counted as
+#     misses), and Altman Z is omitted for banks / insurers / REITs (it read as distress).
+_SNAPSHOT_PAYLOAD_VERSION = 3  # 3: health-check status rules changed (2026-09-30 deep check)
+_VERSION_KEY = "_schema_v"
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -62,6 +70,43 @@ def _cache_set(key: str, value: Any) -> None:
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Build status of the value each key serves ─────────────────────
+# A degraded build is SERVED (Tier 1 for 5 min, and to every in-flight joiner) but never
+# persisted. The report collector freezes what it receives into the close-aligned
+# ticker_data_cache and a paid report — the partial card's `weighted_score` drives the
+# Financial Health vital for every persona — so `get_health_snapshot_with_status` must
+# report the status of the EXACT object handed out, on a Tier-1 hit and an in-flight join
+# as much as on the build. Same role as growth_service's `_degraded_by_key`, but each entry
+# holds `(value, degraded)` and a status is reported only for that very object (identity).
+_degraded_by_key: Dict[str, Tuple[Any, List[str]]] = {}
+# Larger than the Tier-1 cap: entries are written in lockstep with `_cache_set`, so the
+# memo can only lose an entry Tier 1 still holds after twice as many writes.
+_DEGRADED_MAX_ENTRIES = 2 * _CACHE_MAX_ENTRIES
+# Reported when the served object has no memo entry (evicted, or a value reached Tier 1 by a
+# path that never noted it). Fail CLOSED: an unknown provenance must not be frozen.
+_STATUS_UNKNOWN = "status_unknown"
+
+
+def _note_degraded(key: str, value: Any, degraded: List[str]) -> None:
+    """Record the degraded legs of ``value``, the object now served under ``key``.
+
+    Call it on EVERY write of a value to Tier 1, and before resolving the in-flight future
+    with it, so a joiner resuming after `set_result` reads the leader's status."""
+    _degraded_by_key.pop(key, None)
+    _degraded_by_key[key] = (value, list(degraded))
+    if len(_degraded_by_key) > _DEGRADED_MAX_ENTRIES:
+        for _old in list(_degraded_by_key.keys())[: len(_degraded_by_key) - _DEGRADED_MAX_ENTRIES]:
+            _degraded_by_key.pop(_old, None)
+
+
+def _degraded_of(key: str, value: Any) -> Optional[List[str]]:
+    """The degraded legs noted for exactly ``value`` under ``key``; None when unknown."""
+    entry = _degraded_by_key.get(key)
+    if entry is None or entry[0] is not value:
+        return None
+    return list(entry[1])
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -200,8 +245,14 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     return summed
 
 
-def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
+def _compute_z_score(
+    bs: Dict, inc: Dict, mcap: Optional[float], *,
+    sector: Optional[str] = None, industry: Optional[str] = None,
+) -> Optional[float]:
     """Compute Altman Z-Score — delegated to the ONE implementation.
+
+    ``sector`` / ``industry`` reach the canonical gate, which returns None for banks,
+    insurers and REITs (the model reads their deposit funding as distress).
 
     🔴 This was a byte-for-byte transcription of the pre-fix version, kept green by having
     its own tests: `(ebit or 0)`, `(mcap or 0)` and `(rev or 0)` substituted **0** for a
@@ -215,7 +266,7 @@ def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[flo
     """
     from app.services.health_check_service import _compute_z_score as _canonical
 
-    return _canonical(bs, inc, mcap)
+    return _canonical(bs, inc, mcap, sector=sector, industry=industry)
 
 
 def _zscore_rating(z: Optional[float]) -> int:
@@ -283,8 +334,34 @@ class HealthSnapshotService:
         self.fmp = get_fmp_client()
         self.supabase = get_supabase()
 
+    async def get_health_snapshot_with_status(
+        self, ticker: str,
+    ) -> Tuple[SnapshotItemResponse, List[str]]:
+        """`get_health_snapshot` plus the degraded legs of the build being served.
+
+        ``degraded`` is ``[]`` for a clean build and for a Supabase-tier hit (only clean
+        builds are persisted). A Tier-1 hit and an in-flight join report the status of the
+        build that produced the value they received — e.g. ``["health_check:ratios"]``
+        while the health check served a build whose ratios leg 429'd. A served object with
+        no recorded status reports ``["status_unknown"]`` (fail closed).
+        """
+        snapshot = await self.get_health_snapshot(ticker)
+        # No await between the return above and this read: the memo describes this object.
+        cache_key = f"health_snapshot:{_validate_ticker(ticker)}"
+        degraded = _degraded_of(cache_key, snapshot)
+        if degraded is None:
+            logger.warning(
+                "Health snapshot status UNKNOWN for %s — reporting it degraded so it is "
+                "not frozen into a long-lived cache", ticker,
+            )
+            degraded = [_STATUS_UNKNOWN]
+        return snapshot, degraded
+
     async def get_health_snapshot(self, ticker: str) -> SnapshotItemResponse:
-        """Public entry point with two-tier caching and in-flight dedup."""
+        """Public entry point with two-tier caching and in-flight dedup.
+
+        Every value it hands out has its build status noted (`_note_degraded`), which
+        `get_health_snapshot_with_status` reads back."""
         ticker = _validate_ticker(ticker)
         cache_key = f"health_snapshot:{ticker}"
 
@@ -299,6 +376,8 @@ class HealthSnapshotService:
         if db_cached is not None:
             logger.info(f"Health snapshot Supabase HIT for {ticker}")
             _cache_set(cache_key, db_cached)
+            # Only clean builds are persisted, so a Tier-2 row is clean by construction.
+            _note_degraded(cache_key, db_cached, [])
             return db_cached
 
         # ── In-flight deduplication ──
@@ -332,6 +411,8 @@ class HealthSnapshotService:
                 )
 
             _cache_set(cache_key, result)
+            # Noted BEFORE set_result: a joiner reads it when it resumes.
+            _note_degraded(cache_key, result, degraded)
             if not future.done():
                 future.set_result(result)
             return result
@@ -376,11 +457,21 @@ class HealthSnapshotService:
                 logger.info(f"Health snapshot Supabase STALE (age={age}) for {ticker}")
                 return None
 
-            json_data = entry["response_json"]
+            json_data = dict(entry.get("response_json") or {})
+            version = json_data.pop(_VERSION_KEY, 1)
+            if version != _SNAPSHOT_PAYLOAD_VERSION:
+                logger.info(
+                    "Health snapshot payload v%s != v%s for %s — rebuilding",
+                    version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
+                )
+                return None
             return SnapshotItemResponse(**json_data)
 
         except Exception as e:
-            logger.warning(f"Health snapshot cache check failed for {ticker}: {e}")
+            logger.warning(
+                "Health snapshot cache check failed for %s: %s: %s",
+                ticker, type(e).__name__, e,
+            )
             return None
 
     def _upsert_supabase_cache(self, ticker: str, result: SnapshotItemResponse) -> None:
@@ -389,13 +480,17 @@ class HealthSnapshotService:
                 {
                     "ticker": ticker,
                     "category": "Financial Health",
-                    "response_json": result.model_dump(),
+                    "response_json": {**result.model_dump(),
+                                      _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION},
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker,category",
             ).execute()
         except Exception as e:
-            logger.warning(f"Health snapshot upsert failed for {ticker}: {e}")
+            logger.warning(
+                "Health snapshot upsert failed for %s: %s: %s",
+                ticker, type(e).__name__, e,
+            )
 
     # ── Core computation ──────────────────────────────────────────
 
@@ -412,7 +507,9 @@ class HealthSnapshotService:
         Returns ``(snapshot, degraded)``; `get_health_snapshot` refuses to persist a build
         with a non-empty list. Degraded means: the health check RAISED (the local
         fallback then stands in, plus any of its own bs/income/profile legs that raised),
-        or no metric in the card carries a value, which includes a health check that
+        the health check RETURNED a build it marked degraded (``health_check:<reason>``),
+        the fallback's peer-benchmark lookup failed (``benchmarks``), or no metric in the
+        card carries a value, which includes a health check that
         returned no metrics (the build it refuses to persist itself). A permanent
         `FMPNotEntitledException` is not degradation — that slice will not come back on
         retry.
@@ -445,6 +542,17 @@ class HealthSnapshotService:
             # The bs/income/profile legs only feed the local fallback below; with a
             # usable health check they change nothing on the card.
             degraded = []
+            # ...but a health check that RETURNED can still be partial (one FMP leg
+            # 429'd, the peer lookup failed). HealthCheckService serves that build from
+            # memory and refuses to persist it; this card would otherwise freeze the
+            # same partial verdict into snapshot_cache for 24h. The health check's flag
+            # rides on its response, so a Tier-1 hit there carries it too. The report
+            # reads this list through `get_health_snapshot_with_status`, which is what
+            # keeps the partial card out of its snap_health and ticker_data_cache.
+            degraded.extend(
+                f"health_check:{reason}"
+                for reason in (getattr(results[0], "degraded", None) or [])
+            )
 
         health = results[0] if not isinstance(results[0], Exception) else None
         bs_raw = results[1] if not isinstance(results[1], Exception) else []
@@ -513,20 +621,41 @@ class HealthSnapshotService:
                         sector,
                         ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
                     )
+                    # A FAILED lookup (swallowed DB error) answers the same all-None
+                    # shape as "this peer group has no rows" — but it is a transient
+                    # hole, not an answer: every ratio falls back to absolute heuristics.
+                    # Serve it; never persist it (same rule as the health check's own).
+                    if lookup_failed(cur):
+                        logger.warning(
+                            "Health snapshot fallback: benchmark lookup FAILED for %s "
+                            "(industry=%r, sector=%r) — scoring on absolute heuristics, "
+                            "build marked degraded", ticker, industry, sector,
+                        )
+                        degraded.append("benchmarks")
                     sector_ic = cur.get("interest_coverage")
                     sector_qr = cur.get("quick_ratio")
                     sector_de = cur.get("debt_to_equity")
                     sector_cr = cur.get("current_ratio")
                 except Exception as e:
-                    logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
+                    logger.warning(
+                        "Health snapshot fallback: benchmark lookup raised for %s: %s: %s "
+                        "— scoring on absolute heuristics, build marked degraded",
+                        ticker, type(e).__name__, e,
+                    )
+                    degraded.append("benchmarks")
 
-            # Z-Score from balance sheet + TTM income + market cap
-            z_score = _compute_z_score(bs, inc, mcap)
-            z_value = f"{z_score}" if z_score is not None else "—"
-            metrics.append(SnapshotMetricResponse(
-                name="Altman Z-Score", value=z_value,
-                metric_key="altman_z", score=_zscore_rating(z_score),
-            ))
+            # Z-Score from balance sheet + TTM income + market cap. Omitted outright for a
+            # bank / insurer / REIT, exactly as the health check omits it, so the two
+            # paths of this card show the same rows for the same company.
+            from app.services.health_check_service import altman_z_applicable
+
+            z_score = _compute_z_score(bs, inc, mcap, sector=raw_sector, industry=industry)
+            if altman_z_applicable(raw_sector, industry):
+                z_value = f"{z_score}" if z_score is not None else "—"
+                metrics.append(SnapshotMetricResponse(
+                    name="Altman Z-Score", value=z_value,
+                    metric_key="altman_z", score=_zscore_rating(z_score),
+                ))
             z_rating = _zscore_rating(z_score)
 
             # Debt-to-Equity = total debt / shareholders' equity
@@ -597,11 +726,19 @@ class HealthSnapshotService:
                 1 for m in health.metrics
                 if m.type in _SECTOR_RATING_TYPES and m.status == "positive"
             )
+            # Neutral = in line with peers, HALF credit — the same rule the Financials
+            # tab's own rating uses (health_check_service Phase 5). Counting only strict
+            # passes made four in-line ratios score the same pass_rating 1 as four
+            # failures, so one company read "Mix" on the tab and 2/5 in its report.
+            neutrals = sum(
+                1 for m in health.metrics
+                if m.type in _SECTOR_RATING_TYPES and m.status == "neutral"
+            )
             total_sector = sum(
                 1 for m in health.metrics if m.type in _SECTOR_RATING_TYPES
             )
             if total_sector > 0:
-                ratio = positives / total_sector
+                ratio = (positives + 0.5 * neutrals) / total_sector
                 if ratio >= 1.0:
                     pass_rating = 5
                 elif ratio >= 0.75:

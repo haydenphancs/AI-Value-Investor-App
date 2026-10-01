@@ -15,15 +15,18 @@ import asyncio
 import math
 import logging
 import re
+import statistics
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.services._earnings_common import next_pending_earnings_date
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
-from app.utils.period_labels import quarterly_period_label
+from app.utils.period_labels import annual_fiscal_year, quarterly_period_label
 from app.schemas.signal_of_confidence import (
     AnnualDividendSchema,
     DividendInfoSchema,
@@ -71,7 +74,59 @@ logger = logging.getLogger(__name__)
 #:     still charts and the 5-year average is a number, not "—". Bumped past 5 because
 #:     rows stamped 5 were written (locally, into the shared cache table) by the
 #:     intermediate build that zeroed every quarter.
-_PAYLOAD_VERSION = 6
+#: 7 → (2026-09-30 Financials deep check) per-quarter yields are TRAILING-12-MONTH, not the
+#:     quarter x4 (KO's unchanged dividend charted 0.12% → 5.85%); the dividend verdict
+#:     compares the newest TTM point with TTM points at least four quarters older; the
+#:     per-fiscal-year dividend map is keyed by `fiscalYear` (HD-style FYs read the
+#:     neighbouring year); duplicate income/cash-flow rows are collapsed; a quarter with
+#:     no market cap or no cash-flow row degrades the build instead of charting 0%; and
+#:     the payload gains `share_count_change_known`, `avg_yield_window` and `degraded`.
+#: 8 → (2026-09-30 round 2) x4-fallback points (no four consecutive cash-flow quarters)
+#:     leave the dividend verdict's baseline and a fallback NEWEST point refuses the
+#:     relative verdict — an annual payer's x4 bars read "Very High" for a flat dividend;
+#:     the no-current-cap summary no longer reads one x4 quarter as the T12M; a newest
+#:     quarter with no cash-flow row is trimmed instead of shipped as $0.
+#: 9 → (2026-09-30 round 3) the trimmed newest edge is BOUNDED: more than
+#:     `_MAX_CF_LAG_QUARTERS` trimmed, or a kept series ending more than
+#:     `_CF_STALE_MAX_DAYS` before the newest income quarter, is a stale feed and marks the
+#:     build `cash_flow` (blocking), not the ignorable `cash_flow_row`; a statement that
+#:     answered but matched no displayed quarter is `cash_flow_statement_missing`
+#:     (`cash_flow` stays for a leg that raised or answered a non-list).
+_PAYLOAD_VERSION = 9
+
+#: How many newest quarters the cash-flow statement may LAG the income statement by
+#: before the trim stops being "the row has not landed yet" (round-2 R47) and becomes a
+#: stale feed (round-3 P9): one filing. Two or more trimmed quarters rewound the series
+#: and its T12M by years while reading only as the ignorable `cash_flow_row`.
+_MAX_CF_LAG_QUARTERS = 1
+#: …and the newest KEPT quarter may end at most this many days before the newest income
+#: quarter (one ~91-day quarter of lag plus a 16-week fiscal quarter and slack). A gap in
+#: the income history itself can stretch a single trimmed quarter past it.
+_CF_STALE_MAX_DAYS = 200
+
+#: A build that `degraded` names is never persisted; it lives this long in memory — long
+#: enough to absorb a retry storm, short enough that the next refresh rebuilds it.
+_DEGRADED_CACHE_TTL = 60
+
+#: Four cash-flow rows make a trailing twelve months only when they are CONSECUTIVE
+#: quarters. Each step between period ends must be a real quarter: at least 8 weeks (a
+#: shorter one is a fiscal-year-change stub) and at most 18 — not the nominal ~100 days,
+#: because 16-week quarters exist (Costco's fiscal Q4 and Kroger's Q1 are 112 days).
+_TTM_GAP_MIN_DAYS = 56
+_TTM_GAP_MAX_DAYS = 125
+#: …and the first and last period ends of the window at most ~10 months apart (nominal
+#: 273 days, Costco 252-280), so three long steps cannot stretch it past a year.
+_TTM_SPAN_MAX_DAYS = 300
+
+#: An income period end with no cash-flow row on the SAME date may take one this close.
+#: Quarters are >= 56 days apart, so a week can never pick a neighbouring quarter.
+_CF_DATE_TOLERANCE_DAYS = 7
+
+#: A period-end market cap more than this far from the median of its ±5-day neighbours is
+#: a vendor glitch (a dropped digit, the AVGO class), not a price move: the median is used.
+_MCAP_OUTLIER_FRACTION = 0.5
+#: Neighbours needed before the median above means anything.
+_MCAP_MEDIAN_MIN_POINTS = 3
 
 #: An ex-dividend date derived from the price series within this many days counts as
 #: "currently paying" when neither the per-share record nor the profile is available.
@@ -97,7 +152,9 @@ _MIN_BASELINE_POINTS = 4
 _ANNUAL_DIVIDEND_YEARS = 6
 
 # ── In-memory cache ───────────────────────────────────────────────
-_cache: Dict[str, Tuple[float, Any]] = {}
+# (written_at, value, ttl_seconds) — per-entry TTL so a DEGRADED build is held for
+# `_DEGRADED_CACHE_TTL` only, not the full 5 minutes.
+_cache: Dict[str, Tuple[float, Any, float]] = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
@@ -105,8 +162,8 @@ def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
         return None
-    ts, value = entry
-    if time.time() - ts > _CACHE_TTL:
+    ts, value, ttl = entry
+    if time.time() - ts > ttl:
         del _cache[key]
         return None
     return value
@@ -121,9 +178,9 @@ def _cache_get(key: str) -> Optional[Any]:
 _CACHE_MAX_ENTRIES = 1024
 
 
-def _cache_set(key: str, value: Any) -> None:
+def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
     _cache.pop(key, None)
-    _cache[key] = (time.time(), value)
+    _cache[key] = (time.time(), value, _CACHE_TTL if ttl is None else ttl)
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
@@ -213,17 +270,96 @@ def _market_cap_on(date_str: str, lookup: Dict[str, float]) -> Optional[float]:
     return None
 
 
-def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
-    """Return the first future earnings date as yyyy-MM-dd, or None."""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ec in sorted(ec_records, key=lambda r: r.get("date") or ""):
-        ec_date = (ec.get("date") or "")[:10]
-        if not ec_date or ec_date <= today_str:
-            continue
-        if ec.get("eps") is not None:
-            continue
-        return ec_date
+def _robust_market_cap_on(
+    date_str: str, lookup: Dict[str, float], ticker: str = ""
+) -> Optional[float]:
+    """`_market_cap_on`, refusing a single-day vendor glitch.
+
+    `_build_market_cap_lookup` takes every positive value at face value, so one dropped
+    digit on a period-end day (the AVGO class) moved that quarter's yield x10. When at
+    least `_MCAP_MEDIAN_MIN_POINTS` values sit within ±5 days and the nearest one is more
+    than `_MCAP_OUTLIER_FRACTION` away from their median, the median is used and logged.
+    The quarter is never dropped — that would silently change the bar count.
+    """
+    nearest = _market_cap_on(date_str, lookup)
+    if nearest is None:
+        return None
+    try:
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+    except ValueError:
+        return nearest
+    window = [
+        lookup[k]
+        for k in ((dt + timedelta(days=delta)).strftime("%Y-%m-%d") for delta in range(-5, 6))
+        if k in lookup
+    ]
+    if len(window) < _MCAP_MEDIAN_MIN_POINTS:
+        return nearest
+    median = statistics.median(window)
+    if median > 0 and abs(nearest - median) / median > _MCAP_OUTLIER_FRACTION:
+        logger.warning(
+            "[soc-mcap-outlier] %s %s: market cap %.0f is %.0f%% off the ±5-day median "
+            "%.0f over %d days — using the median (a one-day vendor glitch would move this "
+            "quarter's yield by the same factor)",
+            ticker or "?", date_str[:10], nearest,
+            abs(nearest - median) / median * 100, median, len(window),
+        )
+        return median
+    return nearest
+
+
+def _positive_finite(record: Any, *keys: str) -> Optional[float]:
+    """First of ``keys`` holding a finite value > 0, else None (a 0 cap is not a cap)."""
+    if not isinstance(record, dict):
+        return None
+    for key in keys:
+        value = _safe_float(record, key)
+        if value is not None and value > 0:
+            return value
     return None
+
+
+def _day(date_str: str) -> Optional[datetime]:
+    try:
+        return datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+@dataclass
+class _QuarterDiagnostics:
+    """What `_build_quarters` could NOT measure, for the builder's degraded gate.
+
+    The points themselves stay non-Optional numbers (shipped iOS decodes them as
+    `Double`), so a gap has to travel beside them rather than inside them.
+    """
+
+    #: Labels of quarters with no cash-flow row for their period end: the newest edge,
+    #: TRIMMED from the series (round-2 R47), and interior gaps, which keep their point
+    #: (charted as $0 / 0.00% — a gap, not a measurement — and skipped by the summary).
+    missing_cash_flow_periods: List[str] = field(default_factory=list)
+    #: True when one of those is trimmed or among the newest `_TRAILING_POINTS`.
+    missing_cash_flow_recent: bool = False
+    #: Labels that returned capital but had no usable market cap (yield charted 0.00%).
+    unpriced_periods: List[str] = field(default_factory=list)
+    #: Labels whose yield is the single quarter x4 (no consecutive four-quarter window).
+    ttm_fallback_periods: List[str] = field(default_factory=list)
+    #: Period end (yyyy-MM-dd) of the oldest displayed quarter, or None.
+    oldest_period_end: Optional[str] = None
+    #: False when NO displayed quarter has a cash-flow row: the statement is missing, not
+    #: lagging, and every bar is an unknown charted as $0. The builder flags
+    #: `cash_flow_statement_missing` (a 200 with nothing usable, possibly permanent).
+    cash_flow_rows_found: bool = True
+    #: True when the trimmed newest edge is longer than `_MAX_CF_LAG_QUARTERS` or the kept
+    #: series ends more than `_CF_STALE_MAX_DAYS` before the newest income quarter: the
+    #: cash-flow feed is STALE, not lagging one filing. The builder flags `cash_flow`.
+    cash_flow_stale: bool = False
+
+
+def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
+    """Next pending earnings date (yyyy-MM-dd) — includes TODAY's pending report and
+    skips a stale reschedule row. Shared rule: ``_earnings_common.next_pending_earnings``."""
+    return next_pending_earnings_date(ec_records)
 
 
 # ── Service ───────────────────────────────────────────────────────
@@ -277,13 +413,17 @@ class SignalOfConfidenceService:
             # the payer verdict without its per-share record, and a build that ran without
             # it must not be pinned for a day either (the record is what keeps PLUG's
             # mis-tagged dividend line off the chart).
+            #
+            # A degraded build also lives in memory for `_DEGRADED_CACHE_TTL` only, and
+            # carries its reasons in `result.degraded` so the client skips its own cache.
             soc_degraded = not getattr(result, "data_points", None) or bool(degraded_slices)
             if soc_degraded:
                 logger.warning(
-                    "Signal of confidence NOT persisted for %s (degraded: %s) — will "
-                    "rebuild after the in-memory TTL",
+                    "Signal of confidence NOT persisted for %s (degraded: %s) — held in "
+                    "memory for %ds, then rebuilt",
                     ticker,
                     ", ".join(degraded_slices) if degraded_slices else "no data points survived the build",
+                    _DEGRADED_CACHE_TTL,
                 )
             else:
                 # Persist to Supabase in background
@@ -295,7 +435,7 @@ class SignalOfConfidenceService:
                     next_earnings,
                 )
 
-            _cache_set(cache_key, result)
+            _cache_set(cache_key, result, ttl=_DEGRADED_CACHE_TTL if soc_degraded else None)
             if not future.done():
                 future.set_result(result)
             return result
@@ -374,6 +514,14 @@ class SignalOfConfidenceService:
                 logger.info(
                     "Supabase cache STALE for %s (payload_version=%r, want %d) — recomputing",
                     ticker, version, _PAYLOAD_VERSION,
+                )
+                return None
+            # A degraded build is never written (see `get_signal_of_confidence`); a row
+            # that nonetheless carries reasons is refused rather than served for 24h.
+            if json_data.get("degraded"):
+                logger.warning(
+                    "Supabase cache row for %s carries degraded=%r — refusing it and "
+                    "recomputing", ticker, json_data.get("degraded"),
                 )
                 return None
             # Not a response field; strip it so the model never sees it. (Pydantic v2
@@ -521,6 +669,19 @@ class SignalOfConfidenceService:
         if not isinstance(quote_data, dict):
             quote_data = {}
 
+        # A cash-flow leg that answered something other than a list (an FMP error dict, a
+        # null body) failed in all but name: `cash_flow`, the blocking reason, exactly like
+        # a raise — NOT `cash_flow_statement_missing`, which is a real (possibly permanent)
+        # 200 with no usable row and must not make the report uncacheable (round-3 P10).
+        if not isinstance(quarterly_cashflow, list) and "cash_flow" not in degraded:
+            logger.warning(
+                "[soc-cashflow-not-a-list] ticker=%s step=cash_flow: the quarterly cash-flow "
+                "leg answered %s, not a list — treated as a failed leg; this build is "
+                "served from memory only, not persisted",
+                ticker, type(quarterly_cashflow).__name__,
+            )
+            degraded.append("cash_flow")
+
         # Ensure all are lists
         quarterly_cashflow = _as_list(quarterly_cashflow)
         quarterly_income = _as_list(quarterly_income)
@@ -529,7 +690,15 @@ class SignalOfConfidenceService:
         hist_mcap_raw = _as_list(hist_mcap_raw)
 
         # Phase 2: build per-quarter data points
-        current_market_cap = _safe_float(quote_data, "marketCap")
+        #
+        # The current cap falls back to the profile's own `marketCap` (`mktCap` on the
+        # legacy shape). `price_service.get_quote` swallows a profile failure into `{}`, so
+        # a split failure — its internal profile read down, our own profile call up — left
+        # this None; with the historical series also down every yield read 0.00%, both
+        # verdicts read "Low" for a top repurchaser, and nothing marked the build degraded.
+        current_market_cap = _positive_finite(quote_data, "marketCap") or _positive_finite(
+            profile, "marketCap", "mktCap"
+        )
         mcap_by_date = _build_market_cap_lookup(hist_mcap_raw)
 
         # ONE payer verdict, shared by the bars and the card below, so the two can never
@@ -538,7 +707,7 @@ class SignalOfConfidenceService:
             annual_ratios, profile, ex_dividend_dates
         )
 
-        data_points = self._build_data_points(
+        data_points, diag = self._build_quarters(
             quarterly_cashflow,
             quarterly_income,
             current_market_cap,
@@ -548,8 +717,88 @@ class SignalOfConfidenceService:
             dividend_by_year=self._annual_dividend_map(annual_ratios),
         )
 
+        # A quarter that returned capital but could not be priced charts 0.00%, and the
+        # verdicts below read that as "returns nothing". Served from memory only.
+        if diag.unpriced_periods:
+            logger.warning(
+                "[soc-market-cap-unavailable] %s: %d quarter(s) returned capital but have "
+                "no usable market cap (%s; current cap %s) — their yields read 0.00%%; "
+                "this build is served from memory only, not persisted",
+                ticker, len(diag.unpriced_periods), ", ".join(diag.unpriced_periods),
+                "unavailable" if current_market_cap is None else "present",
+            )
+            degraded.append("market_cap")
+        # A statement that ANSWERED (a list, no raise) but matched NO displayed quarter:
+        # every bar is an unknown charted as $0 and both verdicts read "returns nothing",
+        # so the report must not show the section. But unlike a raised leg it may be
+        # PERMANENT for this ticker (an empty or off-cycle vendor feed), so it is its own
+        # reason, `cash_flow_statement_missing`: the report collector drops the section
+        # WITHOUT marking the report degraded, so the report stays cacheable instead of
+        # being re-run and re-billed on every open (round-3 P10). `cash_flow` stays the
+        # reason for a leg that raised or answered a non-list (above).
+        if data_points and not diag.cash_flow_rows_found and "cash_flow" not in degraded:
+            logger.warning(
+                "[soc-cashflow-statement-empty] ticker=%s step=cash_flow: %d income quarter(s) "
+                "but no cash-flow row for any of them (%d row(s) returned) — every yield is "
+                "unknown; marked cash_flow_statement_missing; this build is served from "
+                "memory only, not persisted",
+                ticker, len(data_points), len(quarterly_cashflow),
+            )
+            degraded.append("cash_flow_statement_missing")
+        # A trimmed newest edge longer than one filing's lag is a STALE feed: the series
+        # and its T12M were rewound to quarters years old while reading only as the
+        # ignorable `cash_flow_row`, which the report froze (round-3 P9). It is reported
+        # as `cash_flow_statement_missing`: never persisted here, and the report DROPS the
+        # section — but, being a vendor gap that may never close, it does not make every
+        # report for the ticker uncacheable (owner decision 2026-10-01). The trim itself
+        # stays (an unmeasured point is never $0). `_build_quarters` logs the detail under
+        # [soc-cashflow-stale].
+        if (
+            diag.cash_flow_stale
+            and "cash_flow" not in degraded
+            and "cash_flow_statement_missing" not in degraded
+        ):
+            degraded.append("cash_flow_statement_missing")
+        # A cash-flow row that has not landed yet (or never will) for one of the newest
+        # four quarters is a hole in the T12M summary (the newest edge is trimmed, an
+        # interior gap is skipped). Skip this when the whole cash-flow leg failed, is
+        # stale, or matched nothing — "cash_flow" / "cash_flow_statement_missing" already
+        # say so.
+        if diag.missing_cash_flow_recent and not (
+            {"cash_flow", "cash_flow_statement_missing"} & set(degraded)
+        ):
+            degraded.append("cash_flow_row")
+
         # Phase 3: build trailing-12-month summary
-        summary = self._build_summary(data_points, current_market_cap)
+        missing_cf = set(diag.missing_cash_flow_periods)
+        fallback_x4 = set(diag.ttm_fallback_periods)
+        summary = self._build_summary(
+            data_points, current_market_cap, missing_cash_flow_periods=missing_cf,
+            ttm_fallback_periods=fallback_x4,
+        )
+
+        # A spin-off inside the window makes every pre-spin historical cap too small
+        # (FMP back-computes it from the spin-adjusted price series), so the older yields
+        # the dividend verdict compares against are inflated by the spin factor. Asked only
+        # when the RELATIVE verdict can run at all (the same inputs `_build_dividend_info`
+        # uses): a trailing-twelve-month newest point and a positive baseline of enough
+        # trailing-twelve-month points. Anything else runs the absolute ladder anyway, and
+        # an unknown answer would degrade the build for nothing.
+        spinoff_in_window = False
+        newest, baseline = self._verdict_points(data_points, missing_cf, fallback_x4)
+        if (
+            diag.oldest_period_end
+            and newest is not None
+            and newest.period not in fallback_x4
+            and len(baseline) >= _MIN_BASELINE_POINTS
+            and round(sum(dp.dividend_yield for dp in baseline) / len(baseline), 2) > 0
+        ):
+            checked = await self._spinoff_in_window(ticker, diag.oldest_period_end)
+            if checked is None:
+                # Unknown is NOT a spin-off: the relative verdict runs as it always did,
+                # and the build stays out of the 24h tier so the next refresh re-checks.
+                degraded.append("spinoff_check")
+            spinoff_in_window = bool(checked)
 
         # Phase 4: build dividend info (optional)
         dividend_info = self._build_dividend_info(
@@ -561,6 +810,10 @@ class SignalOfConfidenceService:
             annual_ratios=annual_ratios,
             ex_dividend_dates=ex_dividend_dates,
             pays_common_dividend=pays_common_dividend,
+            missing_cash_flow_periods=missing_cf,
+            spinoff_in_window=spinoff_in_window,
+            ttm_fallback_periods=fallback_x4,
+            ticker=ticker,
         )
 
         # Phase 5: extract next earnings date for cache invalidation
@@ -571,9 +824,49 @@ class SignalOfConfidenceService:
             data_points=data_points,
             summary=summary,
             dividend_info=dividend_info,
+            degraded=list(degraded),
         )
 
         return response, next_earnings, degraded
+
+    async def _spinoff_in_window(self, ticker: str, oldest_period_end: str) -> Optional[bool]:
+        """TRI-STATE: True when an adjustment the classifier could not name as a split (a
+        spin-off) took effect after ``oldest_period_end``, False when the window was
+        derived and holds none, **None when it could not be derived** (a price leg 429'd,
+        timed out or came back short — or the call raised).
+
+        ⚠️ Never `has_unclassified_adjustment` here. That method fails CLOSED (True) for
+        the 13F magnitude backstop, and reading its "could not look" as "a spin-off
+        happened" zeroed the baseline, so the absolute ladder ran on the T12M: a steady
+        0.4% payer (AAPL-shaped) read red "Low" instead of "Fair", a 3% payer "High", and
+        nothing marked the build degraded, so it was persisted for a day (round-2 R20).
+        The caller keeps the relative verdict on None and marks the build degraded.
+        """
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            from_date, to_date = window_for_range(oldest_period_end, today_str)
+            answer = await corporate_actions_source(self).unclassified_adjustment_or_none(
+                ticker, from_date, to_date,
+                effective_from=oldest_period_end, effective_to=today_str,
+            )
+        except Exception as e:
+            logger.warning(
+                "[soc-spinoff-check-unavailable] ticker=%s step=spinoff_check: %s: %s — "
+                "the window %s..%s could not be checked; the relative dividend verdict "
+                "runs and the build is served from memory only, not persisted",
+                ticker, type(e).__name__, e, oldest_period_end, today_str,
+            )
+            return None
+        if answer is None:
+            logger.warning(
+                "[soc-spinoff-check-unavailable] ticker=%s step=spinoff_check: the price "
+                "series for %s..%s could not be derived — NOT read as a spin-off; the "
+                "relative dividend verdict runs and the build is served from memory only, "
+                "not persisted",
+                ticker, oldest_period_end, today_str,
+            )
+            return None
+        return bool(answer)
 
     # ── Per-quarter data points ───────────────────────────────────
 
@@ -587,13 +880,108 @@ class SignalOfConfidenceService:
         pays_common_dividend: Optional[bool] = None,
         dividend_by_year: Optional[Dict[str, float]] = None,
     ) -> List[SignalOfConfidenceDataPointSchema]:
-        """Build per-quarter data points from FMP data.
+        """The points of `_build_quarters`, without its diagnostics (callers that only
+        chart). The builder uses `_build_quarters` so the gaps reach its degraded gate."""
+        points, _diag = self._build_quarters(
+            cashflow_records,
+            income_records,
+            current_market_cap,
+            mcap_by_date,
+            ticker,
+            pays_common_dividend=pays_common_dividend,
+            dividend_by_year=dividend_by_year,
+        )
+        return points
 
-        Each quarter's yields are computed against the market cap at THAT
-        quarter's period end (point-in-time), not today's — scaling a two-year-old
-        quarter by the current cap understated the yields of any stock that has
-        since re-rated. Falls back to the current cap (with a warning) only when
-        the historical series has no value near the period end.
+    @staticmethod
+    def _gate_cash_flow_row(
+        cf_rec: Dict[str, Any],
+        quarter_pays: Optional[bool],
+        ticker: str,
+        date: str,
+    ) -> Tuple[Optional[float], float, bool]:
+        """``(dividend_dollars | None, buyback_dollars, payer_line_missing)`` for one
+        cash-flow row, both amounts as positive dollars.
+
+        The dividend gates, in order:
+        * `commonDividendsPaid` is the /stable field; legacy `dividendsPaid` only when that
+          KEY is absent (a present 0 is a real zero); `netDividendsPaid` — common PLUS
+          preferred — only for a known payer, because on a non-payer it charts preferred
+          coupons as a common dividend.
+        * Outflow sign, mirroring the buyback gate: a positive value is not a dividend (a
+          reclass, a refund, a sign error), and neither is any value at all when the
+          per-share record says the company pays no common dividend in this fiscal year.
+        Run over EVERY row a trailing window touches — not only the displayed quarters —
+        so a trailing sum can never add back a line the displayed bar would have refused.
+        """
+        dividends_paid_raw = _safe_float(cf_rec, "commonDividendsPaid")
+        common_absent = cf_rec.get("commonDividendsPaid") is None
+        if dividends_paid_raw is None and common_absent:
+            dividends_paid_raw = _safe_float(cf_rec, "dividendsPaid")
+        if (
+            dividends_paid_raw is None
+            and quarter_pays is True
+            and common_absent
+            and cf_rec.get("dividendsPaid") is None
+        ):
+            dividends_paid_raw = _safe_float(cf_rec, "netDividendsPaid")
+
+        if quarter_pays is False:
+            dividends_paid_raw = None
+        elif dividends_paid_raw is not None and dividends_paid_raw >= 0:
+            if dividends_paid_raw > 0:
+                logger.info(
+                    "[soc-dividend-sign] %s %s: dividend line %.0f is not an outflow "
+                    "— charted as 0",
+                    ticker or "?", date, dividends_paid_raw,
+                )
+            dividends_paid_raw = None
+        # A known payer whose row carries no usable line: a data gap, not a measurement.
+        missing_line = dividends_paid_raw is None and quarter_pays is True
+
+        dividend = abs(dividends_paid_raw) if dividends_paid_raw else None
+
+        # Buyback: commonStockRepurchased is negative when buying back; positive or zero
+        # is issuance or nothing.
+        repurchased_raw = _safe_float(cf_rec, "commonStockRepurchased")
+        buyback = abs(repurchased_raw) if (repurchased_raw is not None and repurchased_raw < 0) else 0.0
+        return dividend, buyback, missing_line
+
+    @staticmethod
+    def _is_consecutive_window(dates: List[str]) -> bool:
+        """True when ``dates`` (ascending period ends) are back-to-back fiscal quarters —
+        see `_TTM_GAP_MIN_DAYS` / `_TTM_GAP_MAX_DAYS` / `_TTM_SPAN_MAX_DAYS`."""
+        days = [_day(d) for d in dates]
+        if any(d is None for d in days):
+            return False
+        for prev, cur in zip(days, days[1:]):
+            gap = (cur - prev).days
+            if gap < _TTM_GAP_MIN_DAYS or gap > _TTM_GAP_MAX_DAYS:
+                return False
+        return (days[-1] - days[0]).days <= _TTM_SPAN_MAX_DAYS
+
+    def _build_quarters(
+        self,
+        cashflow_records: List[Dict[str, Any]],
+        income_records: List[Dict[str, Any]],
+        current_market_cap: Optional[float],
+        mcap_by_date: Optional[Dict[str, float]] = None,
+        ticker: str = "",
+        pays_common_dividend: Optional[bool] = None,
+        dividend_by_year: Optional[Dict[str, float]] = None,
+    ) -> Tuple[List[SignalOfConfidenceDataPointSchema], _QuarterDiagnostics]:
+        """Build per-quarter data points from FMP data, plus what could not be measured.
+
+        **Yields are TRAILING TWELVE MONTHS** (owner decision, 2026-09-30): the gated cash
+        of this quarter and the three before it, over the market cap at THIS quarter's
+        period end (point-in-time — today's cap mis-states an old quarter by the whole
+        re-rating since). They used to be the single quarter x4, but `commonDividendsPaid`
+        is cash that happened to SETTLE in the quarter: KO's unchanged dividend charted
+        0.12% / 2.92% / 2.92% / 5.85% against a 2.95% yield, and one accelerated buyback
+        read 40% "annualised" and flattened every other bar. When the four rows are not
+        consecutive quarters the quarter falls back to x4 and is logged.
+        `dividend_amount` / `buyback_amount` stay the raw quarter's cash (the Capital view
+        and the T12M summary add them up).
 
         ``pays_common_dividend`` is the shared per-share verdict from
         `_pays_common_dividend`: ``False`` zeroes every dividend bar regardless of the
@@ -610,36 +998,193 @@ class SignalOfConfidenceService:
         (INTC: paid through FY2024, FY2025 = 0) keeps its real FY2024 bars and loses only
         the fabricated ones; a quarter in a year the record does not cover (the FY in
         progress) falls back to the overall verdict.
+
+        Duplicates are collapsed before the newest eight are taken, so the window always
+        holds eight DISTINCT quarters: rows sharing a `date` keep FMP's first (newest-first
+        order, so a restatement wins), and two dates sharing a display label (a fiscal
+        year-end change) keep the later one. Two points with one label used to double-count
+        the T12M summary and land in ONE iOS category column with the label rows drifting
+        off their bars.
         """
         mcap_by_date = mcap_by_date or {}
-        missing_line_for_payer = 0
         dividend_by_year = dividend_by_year or {}
+        tag = ticker or "?"
+        diag = _QuarterDiagnostics()
 
-        # Build lookup dict by date
+        # Cash-flow rows by period end — FIRST occurrence wins. This used to keep the
+        # LAST, i.e. the stale original behind a restatement.
         cf_by_date: Dict[str, Dict[str, Any]] = {}
+        dup_cf = 0
         for rec in cashflow_records:
-            date = rec.get("date") or ""
-            if date:
-                cf_by_date[date] = rec
-
-        # Sort income records ascending by date, take last 8
-        sorted_income = sorted(income_records, key=lambda r: r.get("date") or "")
-        # Take the most recent 8 quarters
-        recent_income = sorted_income[-8:] if len(sorted_income) > 8 else sorted_income
-
-        results = []
-        fell_back_to_current = 0
-        for rec in recent_income:
-            date = rec.get("date") or ""
+            date = str(rec.get("date") or "")[:10]
             if not date:
                 continue
+            if date in cf_by_date:
+                dup_cf += 1
+                continue
+            cf_by_date[date] = rec
 
-            # Fiscal-year labels so off-calendar-FY companies (e.g. Oracle) read
-            # monotonically: fiscal Q1 (Aug 2025) -> "Q1 '26", not "Q1 '25".
+        income_by_date: Dict[str, Dict[str, Any]] = {}
+        dup_income = 0
+        for rec in income_records:
+            date = str(rec.get("date") or "")[:10]
+            if not date:
+                continue
+            if date in income_by_date:
+                dup_income += 1
+                continue
+            income_by_date[date] = rec
+
+        # Ascending, labelled, one row per display label (the chronologically latest).
+        # Fiscal-year labels so off-calendar-FY companies (e.g. Oracle) read
+        # monotonically: fiscal Q1 (Aug 2025) -> "Q1 '26", not "Q1 '25".
+        labelled: List[Optional[Tuple[str, str, Dict[str, Any]]]] = []
+        slot_by_label: Dict[str, int] = {}
+        dup_label = 0
+        for date in sorted(income_by_date):
+            rec = income_by_date[date]
             label = quarterly_period_label(rec, use_fiscal_year=True)
             if not label or not label.startswith("Q"):
                 continue
+            if label in slot_by_label:
+                labelled[slot_by_label[label]] = None
+                dup_label += 1
+            slot_by_label[label] = len(labelled)
+            labelled.append((date, label, rec))
+        quarters = [q for q in labelled if q is not None]
+        if dup_cf or dup_income or dup_label:
+            logger.warning(
+                "[soc-dup-label] %s: collapsed %d duplicate cash-flow date(s), %d duplicate "
+                "income date(s) and %d duplicate quarter label(s) — one point per quarter",
+                tag, dup_cf, dup_income, dup_label,
+            )
 
+        cf_dates = sorted(cf_by_date)
+        cf_index = {d: i for i, d in enumerate(cf_dates)}
+        cf_match: Dict[str, Optional[str]] = {}
+
+        def cash_flow_date_for(income_date: str) -> Optional[str]:
+            """The cash-flow row for an income period end: the exact date, else the
+            nearest within ±`_CF_DATE_TOLERANCE_DAYS` that no income row claims exactly.
+            Both statements come from one filing, so a near-miss is a vendor date wobble;
+            without this a one-day mismatch would read "no cash-flow row" on every build
+            and keep the ticker out of the 24h tier for good."""
+            if income_date in cf_match:
+                return cf_match[income_date]
+            matched: Optional[str] = None
+            if income_date in cf_by_date:
+                matched = income_date
+            else:
+                target = _day(income_date)
+                near = [] if target is None else [
+                    (abs((_day(d) - target).days), d) for d in cf_dates
+                    if d not in income_by_date and _day(d) is not None
+                    and abs((_day(d) - target).days) <= _CF_DATE_TOLERANCE_DAYS
+                ]
+                if near:
+                    matched = min(near)[1]
+                    logger.info(
+                        "[soc-cashflow-date-nudge] %s: income %s matched to cash-flow row %s",
+                        tag, income_date, matched,
+                    )
+            cf_match[income_date] = matched
+            return matched
+
+        # The NEWEST edge without a cash-flow row is trimmed BEFORE the window is taken
+        # (round-2 R47): the cash-flow statement lags the income statement, so the newest
+        # quarter's cash is UNKNOWN — and a point kept for its share count shipped "$0" /
+        # "0.00%" on the wire with no marker, which the Financials bar labels, the report's
+        # "Buybacks" header (`dataPoints.last`), its mini-chart and the Stage B prompt
+        # ("it is not repurchasing stock") all read as a measured zero. Trimmed here, every
+        # reader agrees: the series ends at the last quarter that HAS a cash-flow row, and
+        # the window still holds eight quarters when the history has them. The labels stay
+        # in `missing_cash_flow_periods` (logged; `cash_flow_row` keeps the build out of
+        # the 24h tier until the row lands). Interior gaps keep their point — the share
+        # line must stay continuous — and are skipped by the summary instead.
+        # Only while an older quarter HAS a row: with none at all there is no edge to trim
+        # to (the statement is missing, not lagging) and the builder flags
+        # `cash_flow_statement_missing`. A trim longer than one filing is a stale feed
+        # (`diag.cash_flow_stale`, below), which the builder flags as `cash_flow`.
+        unmeasured_tail: List[Tuple[str, str]] = []
+        if any(cash_flow_date_for(d) is not None for d, _lbl, _r in quarters):
+            while quarters and cash_flow_date_for(quarters[-1][0]) is None:
+                date, label, _rec = quarters.pop()
+                unmeasured_tail.append((date, label))
+        if unmeasured_tail:
+            unmeasured_tail.reverse()
+            diag.missing_cash_flow_periods.extend(lbl for _d, lbl in unmeasured_tail)
+            diag.missing_cash_flow_recent = True
+            logger.warning(
+                "[soc-cashflow-row-missing] %s: no cash-flow row yet for the newest %d "
+                "quarter(s) (%s) — trimmed from the series (their dividends and buybacks "
+                "are unknown, not $0); it ends at %s; this build is served from memory "
+                "only until the row lands",
+                tag, len(unmeasured_tail),
+                ", ".join(f"{lbl} {d}" for d, lbl in unmeasured_tail),
+                f"{quarters[-1][1]} {quarters[-1][0]}" if quarters else "nothing",
+            )
+            # Bounded (round-3 P9): one filing of lag is "the row has not landed yet";
+            # more is a STALE feed. The trim stays either way — the gate is the reason.
+            newest_income = _day(unmeasured_tail[-1][0])
+            newest_kept = _day(quarters[-1][0]) if quarters else None
+            gap_days = (
+                (newest_income - newest_kept).days
+                if newest_income is not None and newest_kept is not None
+                else None
+            )
+            if (
+                len(unmeasured_tail) > _MAX_CF_LAG_QUARTERS
+                or not quarters
+                or (gap_days is not None and gap_days > _CF_STALE_MAX_DAYS)
+            ):
+                diag.cash_flow_stale = True
+                logger.warning(
+                    "[soc-cashflow-stale] ticker=%s step=cash_flow: the cash-flow statement "
+                    "stops %d quarter(s) before the income statement (%s; newest kept %s, "
+                    "%s day(s) behind; bounds %d quarter(s) / %d days) — a stale feed, not "
+                    "a one-filing lag; the build is marked cash_flow and served from memory "
+                    "only, not persisted",
+                    tag, len(unmeasured_tail),
+                    ", ".join(lbl for _d, lbl in unmeasured_tail),
+                    f"{quarters[-1][1]} {quarters[-1][0]}" if quarters else "nothing",
+                    "?" if gap_days is None else gap_days,
+                    _MAX_CF_LAG_QUARTERS, _CF_STALE_MAX_DAYS,
+                )
+
+        # Take the most recent 8 DISTINCT quarters.
+        recent = quarters[-8:]
+        if recent:
+            diag.oldest_period_end = recent[0][0]
+        diag.cash_flow_rows_found = any(
+            cash_flow_date_for(d) is not None for d, _lbl, _r in recent
+        )
+
+        def fiscal_year(date: str) -> str:
+            src = income_by_date.get(date) or cf_by_date.get(date) or {}
+            return str(src.get("fiscalYear") or src.get("calendarYear") or date[:4])
+
+        def quarter_pays_for(date: str) -> Optional[bool]:
+            # The verdict for THIS quarter: its fiscal year's per-share record when the
+            # record covers it, else the overall (current) verdict.
+            fy = fiscal_year(date)
+            if fy in dividend_by_year:
+                return dividend_by_year[fy] > 0
+            return pays_common_dividend
+
+        gated_by_date: Dict[str, Tuple[Optional[float], float, bool]] = {}
+
+        def gated(date: str) -> Tuple[Optional[float], float, bool]:
+            if date not in gated_by_date:
+                gated_by_date[date] = self._gate_cash_flow_row(
+                    cf_by_date[date], quarter_pays_for(date), ticker, date
+                )
+            return gated_by_date[date]
+
+        results: List[SignalOfConfidenceDataPointSchema] = []
+        interior_missing: List[str] = []
+        fell_back_to_current = 0
+        missing_line_for_payer = 0
+        for position, (date, label, rec) in enumerate(recent):
             # Shares outstanding from income statement (weighted average)
             # 0.0 is a SENTINEL here, not a share count — no listed company has zero
             # weighted-average shares. FMP does return `weightedAverageShsOut: 0` on real
@@ -655,88 +1200,69 @@ class SignalOfConfidenceService:
                 else None
             )
 
-            # Cash flow data for this quarter
-            cf_rec = cf_by_date.get(date, {})
-
-            # The verdict for THIS quarter: its fiscal year's per-share record when the
-            # record covers it, else the overall (current) verdict.
-            fy = str(rec.get("fiscalYear") or rec.get("calendarYear") or date[:4])
-            if fy in dividend_by_year:
-                quarter_pays: Optional[bool] = dividend_by_year[fy] > 0
+            cf_date = cash_flow_date_for(date)
+            has_cash_flow = cf_date is not None
+            if has_cash_flow:
+                dividend, buyback, missing_line = gated(cf_date)
+                if missing_line:
+                    # Keep the point (the shares line must stay continuous) and say so,
+                    # rather than dropping the quarter silently.
+                    missing_line_for_payer += 1
             else:
-                quarter_pays = pays_common_dividend
+                # An INTERIOR quarter with no cash-flow row (the newest edge was trimmed
+                # above), or every quarter when the statement returned nothing usable.
+                # The share count is real, so the point stays; its cash is UNKNOWN —
+                # recorded so the summary skips it and the builder refuses to persist a
+                # T12M with a hole in it.
+                dividend, buyback = None, 0.0
+                diag.missing_cash_flow_periods.append(label)
+                interior_missing.append(f"{label} {date}")
+                if position >= len(recent) - _TRAILING_POINTS:
+                    diag.missing_cash_flow_recent = True
 
-            # Dividend amount in millions. `commonDividendsPaid` is the /stable field;
-            # legacy `dividendsPaid` only when that KEY is absent (a present 0 is a real
-            # zero); `netDividendsPaid` — common PLUS preferred — only for a known payer,
-            # because on a non-payer it charts preferred coupons as a common dividend.
-            dividends_paid_raw = _safe_float(cf_rec, "commonDividendsPaid")
-            common_absent = cf_rec.get("commonDividendsPaid") is None
-            if dividends_paid_raw is None and common_absent:
-                dividends_paid_raw = _safe_float(cf_rec, "dividendsPaid")
-            if (
-                dividends_paid_raw is None
-                and quarter_pays is True
-                and common_absent
-                and cf_rec.get("dividendsPaid") is None
-            ):
-                dividends_paid_raw = _safe_float(cf_rec, "netDividendsPaid")
+            dividend_amount = round(dividend / 1_000_000, 2) if dividend else 0.0
+            buyback_amount = round(buyback / 1_000_000, 2) if buyback else 0.0
 
-            # Outflow sign, mirroring the buyback gate below: a positive value is not a
-            # dividend (a reclass, a refund, a sign error), and neither is any value
-            # at all when the per-share record says the company pays no common dividend
-            # in this quarter's fiscal year.
-            if quarter_pays is False:
-                dividends_paid_raw = None
-            elif dividends_paid_raw is not None and dividends_paid_raw >= 0:
-                if dividends_paid_raw > 0:
-                    logger.info(
-                        "[soc-dividend-sign] %s %s: dividend line %.0f is not an outflow "
-                        "— charted as 0",
-                        ticker or "?", date, dividends_paid_raw,
-                    )
-                dividends_paid_raw = None
-            if dividends_paid_raw is None and quarter_pays is True and cf_rec:
-                # A known payer whose row carries no usable line. Keep the point (the
-                # shares line must stay continuous) and say so, rather than dropping the
-                # quarter silently — a 0.00% bar here is a data gap, not a measurement.
-                missing_line_for_payer += 1
-
-            if dividends_paid_raw is not None:
-                dividend_amount = round(abs(dividends_paid_raw) / 1_000_000, 2)
-            else:
-                dividend_amount = 0.0
-
-            # Buyback amount: commonStockRepurchased is negative when buying back
-            repurchased_raw = _safe_float(cf_rec, "commonStockRepurchased")
-            if repurchased_raw is not None and repurchased_raw < 0:
-                # Negative = actual buyback
-                buyback_amount = round(abs(repurchased_raw) / 1_000_000, 2)
-            else:
-                # Positive or zero = stock issuance or none
-                buyback_amount = 0.0
-
-            # Market cap AT THIS QUARTER'S PERIOD END (point-in-time). Using
-            # today's cap for a two-year-old quarter mis-states that quarter's
-            # yield by the whole re-rating since. Fall back to the current cap
-            # only when the historical series doesn't reach this period.
-            period_mcap = _market_cap_on(date, mcap_by_date)
+            # Market cap AT THIS QUARTER'S PERIOD END (point-in-time). Fall back to the
+            # current cap only when the historical series doesn't reach this period.
+            period_mcap = _robust_market_cap_on(date, mcap_by_date, ticker)
             if period_mcap is None:
                 period_mcap = current_market_cap
                 fell_back_to_current += 1
 
-            # Yields: annualised (x4) from the quarter's cash flow / that
-            # quarter's market cap. FMP stable key_metrics may not include
-            # dividendYield / buybackYield, so we compute from raw cash flow.
-            if period_mcap and period_mcap > 0 and dividends_paid_raw:
-                dividend_yield = round(abs(dividends_paid_raw) / period_mcap * 100 * 4, 2)
+            # Trailing twelve months ending here, or this quarter x4 without a
+            # consecutive window.
+            window: Optional[List[str]] = None
+            if has_cash_flow:
+                i = cf_index[cf_date]
+                if i >= _TRAILING_POINTS - 1:
+                    candidate = cf_dates[i - (_TRAILING_POINTS - 1): i + 1]
+                    if self._is_consecutive_window(candidate):
+                        window = candidate
+            if window is not None:
+                dividend_sum = sum(gated(d)[0] or 0.0 for d in window)
+                buyback_sum = sum(gated(d)[1] for d in window)
+                annualise = 1
             else:
-                dividend_yield = 0.0
+                dividend_sum = dividend or 0.0
+                buyback_sum = buyback
+                annualise = 4
+                if has_cash_flow:
+                    diag.ttm_fallback_periods.append(label)
 
-            if period_mcap and period_mcap > 0 and repurchased_raw and repurchased_raw < 0:
-                buyback_yield = round(abs(repurchased_raw) / period_mcap * 100 * 4, 2)
+            if period_mcap is not None and period_mcap > 0:
+                dividend_yield = (
+                    round(dividend_sum / period_mcap * 100 * annualise, 2)
+                    if dividend_sum > 0 else 0.0
+                )
+                buyback_yield = (
+                    round(buyback_sum / period_mcap * 100 * annualise, 2)
+                    if buyback_sum > 0 else 0.0
+                )
             else:
-                buyback_yield = 0.0
+                dividend_yield = buyback_yield = 0.0
+                if dividend_sum > 0 or buyback_sum > 0:
+                    diag.unpriced_periods.append(label)
 
             results.append(SignalOfConfidenceDataPointSchema(
                 period=label,
@@ -752,17 +1278,33 @@ class SignalOfConfidenceService:
                 "signal_of_confidence %s: %d/%d quarters had no historical market "
                 "cap within +-5d of the period end — those yields use the CURRENT "
                 "cap and are not point-in-time",
-                ticker or "?", fell_back_to_current, len(results),
+                tag, fell_back_to_current, len(results),
             )
         if missing_line_for_payer:
             logger.warning(
                 "[soc-dividend-missing] %s: %d/%d quarters of a known payer carry no "
                 "dividend outflow on the cash-flow row — charted as 0.00%%, which is a "
                 "gap, not a measurement",
-                ticker or "?", missing_line_for_payer, len(results),
+                tag, missing_line_for_payer, len(results),
+            )
+        if interior_missing:
+            logger.warning(
+                "[soc-cashflow-row-missing] %s: no cash-flow row for %d/%d displayed "
+                "quarter(s) (%s)%s — their dividends and buybacks are unknown, charted 0 "
+                "and left out of the T12M summary",
+                tag, len(interior_missing), len(results), ", ".join(interior_missing),
+                "" if cf_by_date else " (the cash-flow statement returned no rows at all)",
+            )
+        if diag.ttm_fallback_periods:
+            logger.warning(
+                "[soc-ttm-fallback] %s: %d/%d quarter(s) lack four consecutive cash-flow "
+                "quarters (%s) — their yields are the single quarter x4, not trailing "
+                "twelve months",
+                tag, len(diag.ttm_fallback_periods), len(results),
+                ", ".join(diag.ttm_fallback_periods),
             )
 
-        return results
+        return results, diag
 
     # ── Payer verdict ─────────────────────────────────────────────
 
@@ -838,8 +1380,18 @@ class SignalOfConfidenceService:
         self,
         data_points: List[SignalOfConfidenceDataPointSchema],
         current_market_cap: Optional[float],
+        missing_cash_flow_periods: Optional[Set[str]] = None,
+        ttm_fallback_periods: Optional[Set[str]] = None,
     ) -> SignalOfConfidenceSummarySchema:
-        """Build T12M summary from the most recent 4 quarters."""
+        """Build T12M summary from the most recent 4 quarters that HAVE a cash-flow row.
+
+        A quarter in ``missing_cash_flow_periods`` carries $0 because its cash is
+        unknown, not because nothing was returned; summing it dropped a steady
+        repurchaser's T12M by a quarter (4.0% "Very High" → 3.0% "High"). It is skipped.
+
+        ``ttm_fallback_periods`` (labels whose yield is the single quarter x4) matters only
+        on the no-current-cap fallback below, which reads a point's own yield.
+        """
 
         if not data_points:
             return SignalOfConfidenceSummarySchema(
@@ -847,47 +1399,61 @@ class SignalOfConfidenceService:
                 dividend_yield=0.0,
                 buyback_yield=0.0,
                 share_count_change=0.0,
+                share_count_change_known=False,
                 # No data points at all: 0 yield / 0 change classifies as "Low", which
                 # is the honest reading of "we measured nothing".
                 buyback_status=self._classify_buyback(0.0, 0.0),
             )
 
-        # Last 4 quarters (or fewer if not enough data)
-        last_4 = data_points[-4:] if len(data_points) >= 4 else data_points
+        missing = missing_cash_flow_periods or set()
+        cash_points = [dp for dp in data_points if dp.period not in missing]
+        # Last 4 measured quarters (or fewer if not enough data)
+        last_4 = cash_points[-_TRAILING_POINTS:]
 
         # T12M dividend yield: sum of dollar amounts / market cap * 100
         # (amounts are already in millions, market cap is in raw dollars)
         total_div_amount = sum(dp.dividend_amount for dp in last_4)
         total_bb_amount = sum(dp.buyback_amount for dp in last_4)
 
-        if current_market_cap and current_market_cap > 0:
+        if not last_4:
+            t12m_div_yield = t12m_bb_yield = 0.0
+        elif current_market_cap and current_market_cap > 0:
             # Convert millions back to raw for division
             t12m_div_yield = round(total_div_amount * 1_000_000 / current_market_cap * 100, 2)
             t12m_bb_yield = round(total_bb_amount * 1_000_000 / current_market_cap * 100, 2)
+        elif last_4[-1].period not in (ttm_fallback_periods or set()):
+            # Fallback: the newest measured point. Its yields are ALREADY a trailing twelve
+            # months (see `_build_quarters`) — averaging four of them, as the x4 points once
+            # needed, would smear the answer across seven quarters.
+            t12m_div_yield = round(last_4[-1].dividend_yield, 2)
+            t12m_bb_yield = round(last_4[-1].buyback_yield, 2)
         else:
-            # Fallback: average the per-quarter yields
+            # …unless the newest point is itself the x4 fallback (no four consecutive
+            # cash-flow quarters behind it): one Q4-heavy quarter x4 is not a year. The mean
+            # of the last four measured points is the old x4-era estimate, smoother than
+            # any single one of them (round-2 R48).
             t12m_div_yield = round(sum(dp.dividend_yield for dp in last_4) / len(last_4), 2)
             t12m_bb_yield = round(sum(dp.buyback_yield for dp in last_4) / len(last_4), 2)
 
         total_yield = round(t12m_div_yield + t12m_bb_yield, 2)
 
-        # Share count change: oldest → newest across all data points
-        if len(data_points) >= 2:
-            # Pick the oldest and newest points that actually REPORT a share count.
-            # Anchoring on `data_points[0]`/`[-1]` regardless meant one unreported
-            # quarter at either end produced a ±100% change out of nothing.
-            measured = [
-                dp for dp in data_points
-                if dp.shares_outstanding is not None and dp.shares_outstanding > 0
-            ]
-            oldest_shares = measured[0].shares_outstanding if measured else None
-            newest_shares = measured[-1].shares_outstanding if len(measured) > 1 else None
-            if oldest_shares and newest_shares and oldest_shares > 0:
-                share_count_change = round(
-                    (newest_shares - oldest_shares) / oldest_shares * 100, 2
-                )
-            else:
-                share_count_change = 0.0
+        # Share count change: oldest → newest across all data points.
+        # Pick the oldest and newest points that actually REPORT a share count.
+        # Anchoring on `data_points[0]`/`[-1]` regardless meant one unreported
+        # quarter at either end produced a ±100% change out of nothing. With fewer than
+        # two reported counts the change is UNKNOWN: 0.0 stays on the wire (a
+        # non-Optional Double on shipped iOS) and `share_count_change_known` says so.
+        measured = [
+            dp for dp in data_points
+            if dp.shares_outstanding is not None and dp.shares_outstanding > 0
+        ]
+        share_count_change_known = len(measured) >= 2
+        if share_count_change_known:
+            oldest_shares = measured[0].shares_outstanding
+            newest_shares = measured[-1].shares_outstanding
+            share_count_change = round(
+                (newest_shares - oldest_shares) / oldest_shares * 100, 2
+            )
         else:
             share_count_change = 0.0
 
@@ -896,6 +1462,7 @@ class SignalOfConfidenceService:
             dividend_yield=t12m_div_yield,
             buyback_yield=t12m_bb_yield,
             share_count_change=share_count_change,
+            share_count_change_known=share_count_change_known,
             buyback_status=self._classify_buyback(t12m_bb_yield, share_count_change),
         )
 
@@ -929,20 +1496,35 @@ class SignalOfConfidenceService:
 
     @staticmethod
     def _annual_dividend_map(rows: Any) -> Dict[str, float]:
-        """``{fiscal_year: dividendPerShare}`` from `ratios` (period=annual)."""
+        """``{fiscal_year: dividendPerShare}`` from `ratios` (period=annual).
+
+        Keyed by `annual_fiscal_year` — FMP ``fiscalYear`` first, the same field
+        `_build_quarters` reads a quarter's year from (else the year of ``date`` - 7 days,
+        so a 52/53-week year closing 2026-01-03 is 2025). It was keyed by the year of the
+        fiscal-year-END date, so for a company that names its year by the START (Home
+        Depot's FY ending 2026-02-01 is fiscal 2025) every quarter looked up its
+        neighbouring year: the card read "FY2026" beside "Q4 '25" bars, an initiator's
+        first paying year was zeroed, and a suspender's zero year charted again. Two rows
+        mapping to one year keep the later-dated row, not whichever came last.
+        """
         by_year: Dict[str, float] = {}
+        dated: Dict[str, str] = {}
         if not isinstance(rows, list):
             return by_year
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            year = str(row.get("date") or "")[:4]
+            date = str(row.get("date") or "")[:10]
+            year = annual_fiscal_year(row)
             if len(year) != 4 or not year.isdigit():
                 continue
             value = _safe_float(row, "dividendPerShare")
             if value is None or value < 0:
                 continue
+            if year in by_year and date <= dated[year]:
+                continue
             by_year[year] = value
+            dated[year] = date
         return by_year
 
     @staticmethod
@@ -1027,6 +1609,37 @@ class SignalOfConfidenceService:
             return None, None
         return round((last / first - 1.0) * 100.0, 1), years
 
+    @staticmethod
+    def _verdict_points(
+        data_points: Optional[List[Any]],
+        missing_cash_flow_periods: Optional[Set[str]] = None,
+        ttm_fallback_periods: Optional[Set[str]] = None,
+    ) -> Tuple[Optional[Any], List[Any]]:
+        """``(newest, baseline)`` — the two sides of the relative dividend verdict.
+
+        ``newest`` is the newest point whose cash is KNOWN (a quarter with no cash-flow row
+        is skipped); ``baseline`` the known points at least `_TRAILING_POINTS` older than
+        it, so their trailing windows never overlap the newest one — minus any x4-fallback
+        point (round-2 R48): a lumpy single quarter x4 is not a trailing twelve months, and
+        an annual payer's x4 Q2 (4x its yield) and Q3 (0%) dragged a flat payer's baseline
+        to half its real yield ("Very High" for a dividend that never moved). Whether
+        ``newest`` is itself a fallback is the CALLER's check. Shared by
+        `_build_dividend_info` and the builder's spin-off gate, so the lookup is spent
+        exactly when the relative verdict can run.
+        """
+        missing = missing_cash_flow_periods or set()
+        fallback = ttm_fallback_periods or set()
+        points = [
+            dp for dp in (data_points or []) if getattr(dp, "period", None) not in missing
+        ]
+        if not points:
+            return None, []
+        baseline = [
+            dp for dp in points[:-_TRAILING_POINTS]
+            if getattr(dp, "period", None) not in fallback
+        ]
+        return points[-1], baseline
+
     def _build_dividend_info(
         self,
         dividend_history: List[Dict[str, Any]],
@@ -1037,8 +1650,20 @@ class SignalOfConfidenceService:
         annual_ratios: Optional[List[Dict[str, Any]]] = None,
         ex_dividend_dates: Optional[List[str]] = None,
         pays_common_dividend: Optional[bool] = None,
+        missing_cash_flow_periods: Optional[Set[str]] = None,
+        spinoff_in_window: bool = False,
+        ttm_fallback_periods: Optional[Set[str]] = None,
+        ticker: str = "",
     ) -> Optional[DividendInfoSchema]:
         """Build DividendInfo for a company that actually pays a dividend.
+
+        ``missing_cash_flow_periods`` (labels whose cash is unknown) are left out of every
+        average below. ``ttm_fallback_periods`` (labels whose yield is the single quarter
+        x4) are left out of the verdict's baseline, and a fallback NEWEST point refuses the
+        relative verdict (round-2 R48). ``spinoff_in_window`` refuses it too: before a spin-off
+        FMP's historical cap is back-computed from the spin-adjusted prices, so it is too
+        small by the spin factor and every older yield is inflated by it — a payer whose
+        real yield never moved read "Low" (measured: a factor-2 spin, 4,4,4,4,4,2,2,2).
 
         ⚠️ THE GATE IS NOT `dividend_history`. It used to be, and that turned the whole
         card off for EVERY ticker on 2026-09-03: FMP's `/dividends` went outside the signed
@@ -1117,15 +1742,22 @@ class SignalOfConfidenceService:
         # exactly its own average.)
         #
         # NOTE the window is the available data points (<= 8 quarters, see
-        # _build_data_points), NOT five years — the schema field is named
+        # _build_quarters), NOT five years — the schema field is named
         # `five_year_avg_yield` for backward compatibility with the shipped iOS
-        # DTO, but it is a trailing average over whatever history we hold.
+        # DTO, but it is a trailing average over whatever history we hold, and
+        # `avg_yield_window` now says how much ("8Q"), so the card stops claiming "5Y".
+        missing = missing_cash_flow_periods or set()
+        points = [
+            dp for dp in (data_points or []) if getattr(dp, "period", None) not in missing
+        ]
         five_year_avg_yield = 0.0
-        if data_points and len(data_points) >= 4:
-            dividend_yields = [dp.dividend_yield for dp in data_points]
+        avg_yield_window: Optional[str] = None
+        if len(points) >= 4:
+            dividend_yields = [dp.dividend_yield for dp in points]
             five_year_avg_yield = round(
                 sum(dividend_yields) / len(dividend_yields), 2
             )
+            avg_yield_window = f"{len(points)}Q"
         else:
             # Fallback: use dividend history only
             yearly_yields: dict[str, float] = defaultdict(float)
@@ -1140,6 +1772,10 @@ class SignalOfConfidenceService:
             five_year_avg_yield = round(
                 sum(annual_values) / len(annual_values), 2
             ) if annual_values else 0.0
+            avg_yield_window = f"{len(annual_values)}Y" if annual_values else None
+        if five_year_avg_yield <= 0:
+            # No average to label (iOS renders the 0.0 as "—").
+            avg_yield_window = None
 
         # Dividend yield status: compare the trailing yield to its own history.
         #
@@ -1177,12 +1813,23 @@ class SignalOfConfidenceService:
         # Below `_MIN_BASELINE_POINTS` older quarters there is no independent history to
         # compare against, so the ratio is refused outright and the absolute ladder runs.
         # A fabricated verdict from a degenerate ratio is worse than an absolute one.
-        points = list(data_points or [])
-        recent_points = points[-_TRAILING_POINTS:]
-        baseline_points = points[:-_TRAILING_POINTS]
+        #
+        # The points are TRAILING-TWELVE-MONTH yields now (`_build_quarters`), so the
+        # trailing side is the NEWEST point alone — averaging the last four would smear
+        # seven quarters together — and the baseline is the points at least four quarters
+        # older (`points[:-4]`), whose windows never overlap the newest one.
+        #
+        # x4-FALLBACK points (no four consecutive cash-flow quarters behind them) are not on
+        # that basis: they are left out of the baseline (`_verdict_points`, then
+        # `_MIN_BASELINE_POINTS` is re-checked), and a fallback NEWEST point refuses the
+        # ratio outright — one Q4-heavy quarter x4 read "Very High", a Q1-light one "Low".
+        fallback = ttm_fallback_periods or set()
+        newest_point, baseline_points = self._verdict_points(
+            data_points, missing, fallback
+        )
         comparable_t12m = (
-            round(sum(dp.dividend_yield for dp in recent_points) / len(recent_points), 2)
-            if recent_points
+            round(newest_point.dividend_yield, 2)
+            if newest_point is not None
             else t12m_dividend_yield
         )
         baseline_yield = (
@@ -1190,6 +1837,29 @@ class SignalOfConfidenceService:
             if len(baseline_points) >= _MIN_BASELINE_POINTS
             else 0.0
         )
+        if (
+            newest_point is not None
+            and getattr(newest_point, "period", None) in fallback
+            and baseline_yield > 0
+        ):
+            logger.warning(
+                "[soc-ttm-fallback-verdict] ticker=%s: the newest point %s is the single "
+                "quarter x4 (no four consecutive cash-flow quarters behind it) — the "
+                "relative verdict (%.2f%% vs baseline %.2f%%) is refused and the absolute "
+                "ladder runs on the T12M %.2f%%",
+                ticker or "?", getattr(newest_point, "period", "?"), comparable_t12m,
+                baseline_yield, t12m_dividend_yield,
+            )
+            baseline_yield = 0.0
+        if spinoff_in_window and baseline_yield > 0:
+            logger.warning(
+                "[soc-spinoff-baseline] ticker=%s: an unclassified adjustment (spin-off) "
+                "falls inside the window — the pre-spin historical caps are too small, so "
+                "the relative verdict (newest %.2f%% vs baseline %.2f%%) is refused and the "
+                "absolute ladder runs on the current-cap T12M %.2f%%",
+                ticker or "?", comparable_t12m, baseline_yield, t12m_dividend_yield,
+            )
+            baseline_yield = 0.0
 
         if baseline_yield > 0:
             ratio = comparable_t12m / baseline_yield
@@ -1243,6 +1913,7 @@ class SignalOfConfidenceService:
             dividend_per_share_year=annual[-1].year if annual else None,
             dividend_growth_pct=growth_pct,
             dividend_growth_years=growth_years,
+            avg_yield_window=avg_yield_window,
         )
 
 

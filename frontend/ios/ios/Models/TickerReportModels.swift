@@ -484,15 +484,94 @@ struct ReportOverallAssessment {
 
 // MARK: - Revenue Forecast Data
 
+/// A reported quarter's outcome against the analyst EPS estimate — the same three states
+/// the Financials tab draws (`EarningsQuarterResult` .beat / .missed / .matched), plus
+/// `.inLine` for an OLD report that cannot tell them apart (see `outcome`).
+enum EarningsTrackRecordOutcome {
+    case beat
+    case miss
+    case met
+    /// Legacy only: a report written before `result` existed, whose quarter is not a beat
+    /// and whose surprise rounded to 0.0. That stored pair covers an exact match (the
+    /// common case at cent precision), a miss under 0.05% and a beat under 0.005%, so it
+    /// is drawn neutral — neither the red miss it used to be nor a "met" it cannot prove.
+    case inLine
+}
+
 struct EarningsTrackRecordPoint: Identifiable {
     let id = UUID()
     let period: String            // "Q1 '24"
     let surprisePercent: Double   // EPS surprise: signed beat (+) / miss (−), %
     let beat: Bool
+    /// Wire `result`: "beat" | "miss" | "met", from the raw actual vs estimate. nil on a
+    /// report generated before the field existed. `var` with a default so existing
+    /// memberwise inits and previews still compile.
+    var result: String? = nil
 
-    /// Signed EPS surprise for the cell, e.g. "+5.2%" / "-3.0%".
+    /// Tri-state outcome. Reads `result`; an older report without it falls back to the
+    /// two-state `beat` flag — except a non-beat whose stored surprise rounds to 0.0, which
+    /// is `.inLine` (an exact match there used to render as a red "<0.1%" miss).
+    var outcome: EarningsTrackRecordOutcome {
+        switch result {
+        case "beat": return .beat
+        case "miss": return .miss
+        case "met": return .met
+        default:
+            if beat { return .beat }
+            let magnitude = abs(surprisePercent)
+            if magnitude.isFinite && magnitude < 0.05 { return .inLine }
+            return .miss
+        }
+    }
+
+    /// EPS surprise for the cell. A met quarter reads "0%" (it used to read "+0.0%" in red
+    /// under a down arrow). A real beat or miss that rounds to 0.0 reads "<0.1%" — the
+    /// colour and arrow carry its direction — so "0%" stays reserved for an exact match,
+    /// the Financials tab's rule. Whole percent at ≥ 100% so "+1100%" fits the cell.
     var surpriseText: String {
-        String(format: "%+.1f%%", surprisePercent)
+        let magnitude = abs(surprisePercent)
+        if outcome == .inLine { return "0.0%" }
+        if outcome == .met || !magnitude.isFinite {
+            return outcome == .met ? "0%" : "—"
+        }
+        if magnitude < 0.05 {
+            return "<0.1%"
+        }
+        let sign = outcome == .miss ? "-" : "+"
+        if magnitude >= 99.95 {
+            return sign + String(format: "%.0f%%", magnitude)
+        }
+        return sign + String(format: "%.1f%%", magnitude)
+    }
+
+    /// Text-role colour for the cell (arrow and percentage).
+    var outcomeColor: Color {
+        switch outcome {
+        case .beat: return AppColors.gain
+        case .miss: return AppColors.loss
+        case .met: return AppColors.accentCyan
+        case .inLine: return AppColors.textSecondary
+        }
+    }
+
+    /// Spoken outcome for VoiceOver.
+    var outcomeLabel: String {
+        switch outcome {
+        case .beat: return "beat the estimate"
+        case .miss: return "missed the estimate"
+        case .met: return "met the estimate"
+        case .inLine: return "within 0.1% of the estimate"
+        }
+    }
+
+    /// SF Symbol for the cell: up / down / equal, and a neutral dash for `.inLine`.
+    var outcomeSymbol: String {
+        switch outcome {
+        case .beat: return "arrow.up"
+        case .miss: return "arrow.down"
+        case .met: return "equal"
+        case .inLine: return "minus"
+        }
     }
 }
 
@@ -559,6 +638,13 @@ struct RevenueProjection: Identifiable {
     let revenueAnalystCount: Int? // analysts behind a forecast year; nil on actuals
     let epsAnalystCount: Int?     // analysts behind a forecast year; nil on actuals
     let isForecast: Bool
+    /// Earnings Timeline rows: the fiscal period's END ("yyyy-MM-dd"). `period` is the
+    /// FISCAL year (NVDA's "2025" runs Feb 2024 – Jan 2025), so the price overlay places
+    /// each close by period window when every column has one. nil on `projections` rows
+    /// and older reports. `var` with a default so existing memberwise inits compile.
+    var periodEnd: String? = nil
+    /// "gaap" (reported EPS) or "consensus" (analyst forecast); nil on older reports.
+    var epsBasis: String? = nil
 
     /// Compact YoY string for the bar/dot annotations. Returns nil when
     /// we have no anchor — the view should hide the row entirely.
@@ -641,6 +727,20 @@ struct ReportCapitalAllocation {
     // Per-quarter series (same data as the Financials-tab chart). Empty when
     // Signal of Confidence is unavailable → the card renders numbers-only.
     let dataPoints: [SignalOfConfidenceDataPoint]
+    /// False when fewer than two quarters report a share count: `shareCountChange` is then
+    /// a 0.0 placeholder (the wire Double is non-Optional), not a measured "flat", and the
+    /// Share Count cell reads "—" (the Financials tab says "not reported" for the same
+    /// ticker). Defaulted so memberwise inits and previews keep compiling.
+    var shareCountChangeKnown: Bool = true
+
+    /// The SoC summary's own rule, applied to the points the report carries: a change is
+    /// measured only between two quarters that REPORT a share count. nil points (a report
+    /// written before the series existed) keep their figure.
+    static func isShareCountChangeMeasured(points: [SignalOfConfidenceDataPoint]?) -> Bool {
+        guard let points else { return true }
+        let reported = points.filter { ($0.sharesOutstanding ?? 0) > 0 }.count
+        return reported >= 2
+    }
 
     /// Sentiment of the buyback status → drives the chip color (green/red).
     var buybackSentiment: String {
@@ -663,10 +763,12 @@ struct ReportCapitalAllocation {
     /// "$0" white when it didn't — a plain spend figure, distinct from the
     /// net-dilution verdict (which lives on Share Count).
     var newestBuybackText: String {
-        guard let amt = dataPoints.last?.buybackAmount, amt > 0 else { return "$0" }
-        if amt >= 1000 { return String(format: "$%.1fB", amt / 1000) }  // amt is $ millions
-        if amt >= 1 { return String(format: "$%.0fM", amt) }
-        return String(format: "$%.1fM", amt)
+        guard let amt = dataPoints.last?.buybackAmount, amt.isFinite, amt > 0 else { return "$0" }
+        // amt is $ millions. One rule with both SoC charts (SignalOfConfidenceFormat), so
+        // the report header and the Financials tab print the same figure for a quarter;
+        // only a sub-$1M amount keeps a decimal instead of rounding to "$0M".
+        if amt < 1 { return String(format: "$%.1fM", amt) }
+        return SignalOfConfidenceFormat.money(millions: amt)
     }
     var newestBuybackColor: Color {
         (dataPoints.last?.buybackAmount ?? 0) > 0
@@ -679,9 +781,11 @@ struct ReportCapitalAllocation {
     /// flag dilution. e.g. "+3.7% (Diluting)", "-4.1% (Reducing)", or just
     /// "+1.2%" inside the ±2% noise band. NET read: a company can spend on
     /// buybacks yet still read "Diluting" if stock-comp issuance outpaced them.
-    private var _shareCountDiluting: Bool { shareCountChange > 2.0 }
-    private var _shareCountReducing: Bool { shareCountChange < -2.0 }
+    private var _shareCountDiluting: Bool { shareCountChangeKnown && shareCountChange > 2.0 }
+    private var _shareCountReducing: Bool { shareCountChangeKnown && shareCountChange < -2.0 }
     var shareCountVerdictText: String {
+        // Unmeasured: "—", never the placeholder's "+0.0%".
+        guard shareCountChangeKnown else { return "—" }
         if _shareCountDiluting { return "\(shareCountChangeText) (Diluting)" }
         if _shareCountReducing { return "\(shareCountChangeText) (Reducing)" }
         return shareCountChangeText
@@ -1593,18 +1697,18 @@ extension TickerReportData {
                 EarningsTrackRecordPoint(period: "Q2 '25", surprisePercent: 1.2, beat: true),
                 EarningsTrackRecordPoint(period: "Q3 '25", surprisePercent: 4.6, beat: true),
                 EarningsTrackRecordPoint(period: "Q4 '25", surprisePercent: 3.0, beat: true),
-                EarningsTrackRecordPoint(period: "Q1 '26", surprisePercent: -0.7, beat: false),
+                EarningsTrackRecordPoint(period: "Q1 '26", surprisePercent: 0.0, beat: false, result: "met"),
                 EarningsTrackRecordPoint(period: "Q2 '26", surprisePercent: 6.3, beat: true),
                 EarningsTrackRecordPoint(period: "Q3 '26", surprisePercent: 2.9, beat: true)
             ],
-            beatSummary: "Beat 7 of 10",
+            beatSummary: "Beat 7 of 10 · 1 met",
             annualTimeline: [
-                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
-                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
-                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
-                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25,  revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true),
-                RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true),
-                RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true)
+                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2023-05-31", epsBasis: "gaap"),
+                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2024-05-31", epsBasis: "gaap"),
+                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2025-05-31", epsBasis: "gaap"),
+                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: nil, revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true, periodEnd: "2026-05-31", epsBasis: "consensus"),
+                RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true, periodEnd: "2027-05-31", epsBasis: "consensus"),
+                RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true, periodEnd: "2028-05-31", epsBasis: "consensus")
             ],
             forecastAnalystCount: 31,
             timelinePrices: [

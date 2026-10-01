@@ -180,7 +180,7 @@ TABLE_NAME = "ticker_report_cache"
 #     new fields are Optional, so an old row decodes — and keeps the wrong numbers. Set
 #     to the commit time on deploy day (2026-10-01 UTC), a PAST instant just before the
 #     deploy, per the paragraph above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 1, 5, 11, 0, tzinfo=timezone.utc)
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 1, 13, 4, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

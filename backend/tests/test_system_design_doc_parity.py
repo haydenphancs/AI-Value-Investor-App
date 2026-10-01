@@ -407,6 +407,9 @@ _CURATED_TABLES = {
     # 2026-09-18: §9.3 LLM06 names the one tool-reachable write path (the grounded
     # catalyst's cache + audit rows), so the row stays coupled to those tables.
     "price_catalyst_cache", "price_catalyst_audit",
+    # 2026-10-01: §7.3 "Industry TAM / CAGR" names the per-industry dossier table the Moat
+    # card reads (the PLUG TAM/CAGR fix: grain rule, in-memory placeholder heal).
+    "industry_dossier",
     # Named by §9c.0b as the corpus that is EMPTY — the reason the book source pill
     # had to be earned rather than asserted. Curated so dropping it fails here
     # instead of quietly orphaning that paragraph.

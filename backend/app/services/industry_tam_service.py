@@ -24,7 +24,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from app.integrations.census import get_census_client
+from app.integrations.census import CensusUnavailableException, get_census_client
 from app.integrations.fred import get_fred_client
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,9 @@ INDUSTRY_TO_FRED_SERIES: Dict[str, str] = {
     "Chemicals - Specialty": "USMANNGSP",
     "Industrial - Machinery": "USMANNGSP",
     "Agricultural - Machinery": "USMANNGSP",
-    "Electrical Equipment & Parts": "USMANNGSP",
+    # NAICS 335 (electrical equipment, appliance & component mfg) — its own
+    # BEA series, verified live 2026-10-01: 2025 ≈ $87.1B value added.
+    "Electrical Equipment & Parts": "USELCEQAPMANNGSP",
     "Computer Hardware": "USMANNGSP",
     "Consumer Electronics": "USMANNGSP",
     # Finance & Insurance (NAICS 52)
@@ -133,6 +135,41 @@ INDUSTRY_TO_FRED_SERIES: Dict[str, str] = {
 }
 
 
+# Industries whose FRED series actually measures THAT industry (source_grain
+# 'industry'). Every other entry above maps a narrow FMP industry onto a whole
+# 2-digit NAICS sector — all of US manufacturing for "Industrial - Machinery",
+# all of finance & insurance for "Banks - Regional" — which overstates the
+# market by an order of magnitude or more. Those resolve with grain 'sector',
+# and `_apply_tam_source` hides a non-industry TAM/CAGR (owner decision
+# 2026-10-01: an honest "—" beats a sector GDP presented as an industry's TAM).
+#
+# Rule for membership: the BEA series' NAICS scope is the industry's own NAICS
+# code, or the industry is (nearly) all of that sector. Add an industry here
+# only with that argument written next to it.
+#
+# Deliberately NOT members (checked against their constituents 2026-10-01):
+#   "Construction" — FMP files building-products makers and distributors here
+#     (TT, LII, OC, BLDR, CSL, TREX: NAICS 3334 / 327x / 4233), not NAICS 23
+#     contractors, so all-US construction GDP is not their market.
+#   "Engineering & Construction" — PWR, EME, FIX, MTZ, J, WSP are a slice of
+#     NAICS 23 (plus 5413 engineering); homebuilders, ~40% of the sector, are a
+#     separate FMP industry.
+FRED_SERIES_MATCHES_INDUSTRY: frozenset[str] = frozenset({
+    "Electrical Equipment & Parts",   # USELCEQAPMANNGSP = NAICS 335 itself
+    "Restaurants",                    # USFOODDPNGSP = NAICS 722 food services & drinking places
+    "Diversified Utilities",          # USUTILNGSP = NAICS 22 utilities as a whole
+    "Regulated Electric",             # NAICS 22 — electric power is ~3/4 of the sector's
+                                      # value added, about the size of US retail electricity sales
+})
+
+
+def fred_mapping_grain(industry: str) -> str:
+    """`'industry'` when the industry's FRED series measures the industry
+    itself, `'sector'` when it is a whole-sector GDP stand-in (see
+    `FRED_SERIES_MATCHES_INDUSTRY`)."""
+    return "industry" if industry in FRED_SERIES_MATCHES_INDUSTRY else "sector"
+
+
 # ── Census NAICS mapping (4-digit, more precise than FRED) ─────────────
 #
 # FMP industry → NAICS 2017 code. Looked up via AIES (annual revenue,
@@ -169,7 +206,31 @@ INDUSTRY_TO_CENSUS: Dict[str, str] = {
     "Auto - Parts": "3363",
     # Electronic Shopping and Mail-Order Houses (NAICS 4541) — 2023 ≈ $1.16T
     "Internet Retail": "4541",
+    # Electrical Equipment, Appliance & Component Mfg (NAICS 335) — 2024
+    # AIES ≈ $195.0B, 2017 ECN ≈ $123.0B (verified live 2026-10-01). Fuel
+    # cells, batteries, wiring, generators and motors all sit in 335.
+    "Electrical Equipment & Parts": "335",
 }
+
+
+def expects_industry_grain(industry: str) -> bool:
+    """True when the industry is MAPPED to an industry-grain source (a Census
+    NAICS code, or a FRED series that measures the industry itself). A run
+    that resolves such an industry to anything broader hit a transient miss
+    on that source, not a change of truth."""
+    return industry in INDUSTRY_TO_CENSUS or industry in FRED_SERIES_MATCHES_INDUSTRY
+
+
+def census_naics_is_shared(industry: str) -> bool:
+    """True when the industry's Census NAICS code is also mapped to another
+    FMP industry (5112 Software Publishers covers Software - Infrastructure,
+    - Application AND - Services). Such a figure is the SUM of several FMP
+    industries, so it is no lower bound for any one of them — Phase B's
+    "global ≥ US Census" floor must not apply to it."""
+    naics = INDUSTRY_TO_CENSUS.get(industry)
+    if not naics:
+        return False
+    return sum(1 for code in INDUSTRY_TO_CENSUS.values() if code == naics) > 1
 
 
 @dataclass
@@ -194,6 +255,7 @@ class IndustryTAM:
 _FRED_SOURCE_LABELS: Dict[str, str] = {
     "USINFONGSP": "BEA Information Sector GDP (via FRED)",
     "USMANNGSP": "BEA Manufacturing GDP (via FRED)",
+    "USELCEQAPMANNGSP": "BEA Electrical Equipment, Appliance & Component Mfg GDP (via FRED)",
     "USFININSNGSP": "BEA Finance & Insurance GDP (via FRED)",
     "USHLTHSOCASSNGSP": "BEA Health Care & Social Assistance GDP (via FRED)",
     "USMINNGSP": "BEA Mining (oil & gas) GDP (via FRED)",
@@ -251,7 +313,9 @@ async def fred_tam_for_series(
         )
         return None
     latest = obs[0]
-    if latest.value <= 0:
+    # `not isfinite` before `<= 0`: NaN compares False to everything, so a NaN
+    # latest value would otherwise pass and block the sector fallback.
+    if not math.isfinite(latest.value) or latest.value <= 0:
         return None
 
     try:
@@ -298,6 +362,9 @@ async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
     Returns None when the industry isn't mapped, the Census API key
     isn't set (Census requires a key for every request, even free tier),
     or AIES doesn't cover the NAICS code (e.g., oil & gas extraction).
+    Lets `CensusUnavailableException` (a transient Census failure)
+    propagate: falling through to a broader FRED series on a blip would
+    swap an industry-grain figure for a hidden sector one.
     """
     naics = INDUSTRY_TO_CENSUS.get(industry)
     if not naics:
@@ -311,7 +378,8 @@ async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
     if snapshot is None:
         return None
 
-    # CAGR over `years_apart` years (typically 6 = 2023 AIES - 2017 ECN).
+    # CAGR over `years_apart` years (7 = 2024 AIES - 2017 ECN as of 2026-10;
+    # shown under the "5Yr" CAGR label — an annualized rate either way).
     # `years_apart` is None when the baseline call failed; we still emit
     # TAM in that case, just without a CAGR.
     cagr_decimal: float = 0.0
@@ -349,7 +417,14 @@ async def get_industry_tam(industry: Optional[str]) -> Optional[IndustryTAM]:
     if not industry:
         return None
 
-    census_tam = await _try_census_tam(industry)
+    try:
+        census_tam = await _try_census_tam(industry)
+    except CensusUnavailableException as exc:
+        logger.warning(
+            "industry TAM: Census unavailable for %r (%s) — falling through to FRED",
+            industry, exc,
+        )
+        census_tam = None
     if census_tam is not None and census_tam.current_tam > 0:
         return census_tam
 

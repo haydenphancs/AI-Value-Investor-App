@@ -55,6 +55,7 @@ from app.services.industry_dossier_service import (
     classify_lifecycle,
     get_industry_dossier_service,
 )
+from app.services.industry_tam_service import census_naics_is_shared
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,7 @@ class IndustryOverrideService:
     async def refresh_all_overrides(
         self,
         dry_run: bool = False,
+        phase_a_baseline: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Walk CURATED_OVERRIDE_INDUSTRIES, call Gemini for each, write
         accepted overrides to industry_dossier, log every attempt to
@@ -234,6 +236,12 @@ class IndustryOverrideService:
             dry_run: when True, fetch + validate but don't write to
                 either Supabase table. Returns the same summary so
                 operators can sanity-check before a real run.
+            phase_a_baseline: `{industry: {"tam", "source_label"}}` as Phase A
+                computed it THIS run (passed by `recompute_all`). Preferred over
+                re-reading the row: Phase A no longer writes a global row's TAM,
+                so the stored value is Phase B's own previous output — used as a
+                floor, a global TAM could then only ever go up. The standalone
+                admin route passes nothing and reads the rows.
         """
         run_id = str(uuid.uuid4())
         started = time.time()
@@ -261,6 +269,11 @@ class IndustryOverrideService:
         # Load all Phase A TAMs upfront so each override has its
         # sanity-baseline without N round-trips.
         phase_a_tams = (await asyncio.to_thread(self._load_phase_a_tams, [ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES]))
+        if phase_a_baseline:
+            for ind, _sector in CURATED_OVERRIDE_INDUSTRIES:
+                fresh = phase_a_baseline.get(ind)
+                if fresh is not None:
+                    phase_a_tams[ind] = fresh
 
         for industry, sector in CURATED_OVERRIDE_INDUSTRIES:
             pa = phase_a_tams.get(industry) or {}
@@ -381,7 +394,7 @@ class IndustryOverrideService:
         payload["_grounding_sources"] = grounding_sources
         payload["_search_queries"] = search_queries
 
-        validation = self._validate_response(payload, phase_a_tam, phase_a_label)
+        validation = self._validate_response(payload, phase_a_tam, phase_a_label, industry=industry)
         if validation["status"] != "ok":
             return OverrideResult(
                 industry=industry, sector=sector,
@@ -419,6 +432,7 @@ class IndustryOverrideService:
         payload: Dict[str, Any],
         phase_a_tam: Optional[float],
         phase_a_label: Optional[str] = None,
+        industry: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run numeric/structural validation. Returns {status, reason}.
 
@@ -479,9 +493,20 @@ class IndustryOverrideService:
         #     all-information, ...) → whole-sector GDP that OVERCOUNTS the
         #     industry. The floor must NOT block the accurate, smaller global
         #     figure here → SKIP the floor so Gemini's industry number wins.
+        #   * US Census for a NAICS code SHARED by several FMP industries (5112
+        #     Software Publishers = Infrastructure + Application + Services) is
+        #     their SUM, so it bounds none of them → SKIP the floor too. Latent
+        #     until 2026-10-01: the Census tier was dead (its dataset moved), so
+        #     no Phase-A label was ever a Census one.
         label = (phase_a_label or "").lower()
         phase_a_is_broad_fred = ("via fred" in label) or label.startswith("bea ")
-        if phase_a_tam and phase_a_tam > 0 and not phase_a_is_broad_fred:
+        phase_a_is_shared_census = (
+            "census" in label and industry is not None and census_naics_is_shared(industry)
+        )
+        if (
+            phase_a_tam and phase_a_tam > 0
+            and not phase_a_is_broad_fred and not phase_a_is_shared_census
+        ):
             if current_tam < phase_a_tam:
                 return {
                     "status": "rejected_below_phase_a",

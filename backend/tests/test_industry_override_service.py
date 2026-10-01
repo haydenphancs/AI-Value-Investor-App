@@ -190,3 +190,66 @@ def test_curated_list_industries_unique():
     industries = [i for i, _ in CURATED_OVERRIDE_INDUSTRIES]
     assert len(industries) == len(set(industries)), \
         f"Duplicate industries in CURATED_OVERRIDE_INDUSTRIES: {industries}"
+
+
+# ── Census floor + fresh Phase-A baseline (2026-10-01) ──────────────────
+
+
+def test_shared_naics_census_figure_is_not_a_floor():
+    """NAICS 5112 (Software Publishers, $568B US) is mapped to THREE FMP software
+    industries — it is their sum, so it bounds none of them. A $180B global
+    figure for Software - Infrastructure must not be rejected against it."""
+    svc = IndustryOverrideService()
+    v = svc._validate_response(
+        _ok_payload(current_tam_b=180.0, future_tam_b=300.0),
+        phase_a_tam=567.8,
+        phase_a_label="US Census AIES — Software publishers (NAICS 5112)",
+        industry="Software - Infrastructure",
+    )
+    assert v["status"] == "ok"
+
+
+def test_single_industry_census_figure_is_still_a_floor():
+    """NAICS 3361 belongs to Auto - Manufacturers alone: a global figure below the
+    US Census number is under-researched and rejected, as designed."""
+    svc = IndustryOverrideService()
+    v = svc._validate_response(
+        _ok_payload(current_tam_b=300.0, future_tam_b=400.0),
+        phase_a_tam=424.7,
+        phase_a_label="US Census AIES — Motor vehicle manufacturing (NAICS 3361)",
+        industry="Auto - Manufacturers",
+    )
+    assert v["status"] == "rejected_below_phase_a"
+
+
+@pytest.mark.asyncio
+async def test_refresh_prefers_the_fresh_phase_a_baseline_over_the_stored_row(monkeypatch):
+    """Phase A no longer writes a global row's TAM, so the stored value is Phase
+    B's OWN previous output. Used as the floor it would let a global TAM only ever
+    go up; recompute_all passes this run's Phase-A figure instead."""
+    from app.services import industry_override_service as mod
+
+    monkeypatch.setattr(mod.settings, "INDUSTRY_OVERRIDE_AI_ENABLED", True)
+    svc = IndustryOverrideService()
+    monkeypatch.setattr(svc, "_load_phase_a_tams", lambda industries: {
+        ind: {"tam": 9999.0, "source_label": "Prior global research"} for ind in industries
+    })
+    seen = {}
+
+    async def research_one(industry, sector, phase_a_tam, phase_a_label=None):
+        seen[industry] = (phase_a_tam, phase_a_label)
+        return mod.OverrideResult(
+            industry=industry, sector=sector, status="rejected_validation",
+            phase_a_tam_b=phase_a_tam, applied_tam_b=None, applied_cagr_pct=None,
+            applied_source_label=None, rejection_reason="stub", raw_response=None,
+            tokens_used=0,
+        )
+    monkeypatch.setattr(svc, "_research_one", research_one)
+
+    await svc.refresh_all_overrides(
+        dry_run=True,
+        phase_a_baseline={"Semiconductors": {"tam": 116.2, "source_label": "US Census AIES (NAICS 3344)"}},
+    )
+    assert seen["Semiconductors"] == (116.2, "US Census AIES (NAICS 3344)")
+    # An industry the baseline does not cover still falls back to the stored row.
+    assert seen["Biotechnology"] == (9999.0, "Prior global research")

@@ -1,12 +1,13 @@
 """Industry dossier — pre-computed TAM / CAGR / lifecycle / concentration
 for every FMP industry.
 
-Today the TickerReport "Moat & Competition" section calls FRED + Census
-*live* per report. This service replaces that hot-path latency with a
-weekly batch: every Sunday 2 AM local, `recompute_all` walks every
-industry in `backend/data/industry_universe.json` (built by
-`backend/scripts/discover_industries.py`), computes a fresh dossier
-row, and upserts to the `industry_dossier` Supabase table.
+The TickerReport "Moat & Competition" section reads this table instead of
+calling FRED + Census live per report. A QUARTERLY batch (first Sunday of
+Jan/Apr/Jul/Oct, 02:00 UTC — `_run_industry_dossier_job` in main.py) runs
+`recompute_all`, which walks every industry in
+`backend/data/industry_universe.json` (built by
+`backend/scripts/discover_industries.py`), computes a fresh dossier row,
+and upserts to the `industry_dossier` Supabase table.
 
 Read path: `get_dossier(industry)` is called from
 `ticker_report_data_collector._fetch_dependent` instead of
@@ -16,19 +17,31 @@ to be a superset of `IndustryTAM` so the existing `_apply_tam_source`
 logic keeps working when only TAM fields are read.
 
 Coverage chain — never returns null for a discovered industry:
-    1. Census 4-digit NAICS    → source_grain='industry'
-    2. Industry-specific FRED  → source_grain='industry'
-    3. Sector-level FRED       → source_grain='sector'
-    4. All-industry FRED USNGSP → source_grain='all_industry'
+    1. Census NAICS                → source_grain='industry'
+    2. Industry-mapped FRED        → 'industry' only when the series measures
+       the industry itself (`FRED_SERIES_MATCHES_INDUSTRY`), else 'sector'
+    3. Sector-level FRED           → source_grain='sector'
+    4. All-industry FRED USNGSP    → source_grain='all_industry'
 
-iOS shows a "⚠ Broader than industry" chip when source_grain != 'industry'.
+The report shows TAM/CAGR only for source_grain='industry' (`_apply_tam_source`
+hides the broad stand-ins — owner decision 2026-10-01). iOS renders neither
+`source_grain` nor `tam_source_label`; there is no "broader than industry" chip.
+
+Self-heal (2026-10-01): a stored row whose TAM is a zero placeholder (written
+when FRED/Census were unreachable — 138 of 158 rows sat that way from 2026-07-05
+until the next quarterly run) is treated as a MISS by `get_or_compute_dossier`:
+the TAM is computed live and merged over the stored row in memory. The read
+path never writes the table — persistence stays with `recompute_all` and its
+guards, because a third writer on the request path would race them.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -43,8 +56,12 @@ from app.services.industry_tam_service import (
     IndustryTAM,
     _try_census_tam,
     _try_fred_tam,
+    expects_industry_grain,
+    fred_mapping_grain,
     fred_tam_for_series,
 )
+from app.integrations.census import CensusUnavailableException
+from app.utils.inflight import fail_shared_future
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +260,72 @@ def _load_universe() -> List[Dict[str, Any]]:
     return load_universe(INDUSTRY_UNIVERSE)
 
 
+# ── Self-heal helpers (pure) ───────────────────────────────────────────
+
+
+def _finite_positive(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+
+
+def _is_placeholder(d: "IndustryDossier") -> bool:
+    """A stored row carries no usable TAM — the "no public data" placeholder
+    (TAM 0) or anything non-finite. Decided on the NUMBER, never the label
+    text, so a reworded placeholder cannot slip through."""
+    return not _finite_positive(d.current_tam)
+
+
+def _usable_live(d: Optional[Any]) -> bool:
+    """A live compute is worth showing only with a complete, positive pair —
+    a one-sided pair renders "$0B → $X"."""
+    return d is not None and _finite_positive(d.current_tam) and _finite_positive(d.future_tam)
+
+
+def _finite_or_none(v: Any) -> Optional[float]:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _fred_is_configured() -> bool:
+    from app.integrations.fred import get_fred_client  # noqa: PLC0415 — keeps FRED out of import time
+
+    try:
+        return bool(get_fred_client().is_configured)
+    except Exception as exc:
+        logger.warning("industry_dossier: could not read FRED configuration: %s: %s", type(exc).__name__, exc)
+        return False
+
+
+def _merge_live_tam(stored: "IndustryDossier", live: "IndustryDossier") -> "IndustryDossier":
+    """Lay a live-computed TAM over a stored placeholder row.
+
+    TAM-side fields come from `live`; the industry-wide CONCENTRATION fields
+    (HHI, top shares, label, constituent count — computed from the universe's
+    market caps, independent of FRED/Census) stay from `stored`. A live compute
+    runs with no constituents, so taking its concentration would flip a
+    measured "oligopoly" to the "fragmented" default. `replace` returns a new
+    object: the cached stored row is never mutated.
+    """
+    cagr = _finite_or_none(live.cagr_5y_pct)
+    return dataclasses.replace(
+        stored,
+        current_tam=live.current_tam,
+        future_tam=live.future_tam,
+        current_year=live.current_year,
+        future_year=live.future_year,
+        source_label=live.source_label,
+        cagr_5y_pct=cagr,
+        source_grain=live.source_grain,
+        tam_scope="us",  # Phase A sources (Census/FRED) are US-domestic
+        lifecycle_phase=classify_lifecycle(cagr, stored.constituent_count or 0),
+        sector=stored.sector or live.sector,
+    )
+
+
 # ── Service ─────────────────────────────────────────────────────────────
 
 
@@ -261,12 +344,37 @@ class IndustryDossierService:
     _cache: Dict[str, tuple[float, IndustryDossier]] = {}
     _CACHE_TTL_SECONDS = 300  # 5 min
 
+    # Self-heal state (see the module docstring).
+    #   _live_inflight  — one live compute per (industry, sector) at a time.
+    #   _heal_failed_at — negative memo: a live compute that failed or came back
+    #                     unusable is not retried for _CACHE_TTL_SECONDS, so a
+    #                     FRED outage does not cost every report a slow retry.
+    #   _generation     — bumped by reset_cache(); a heal that started before a
+    #                     recompute/override reset must not re-cache its stale
+    #                     result over the freshly written row.
+    _live_inflight: Dict[tuple[str, str], "asyncio.Future"] = {}
+    _heal_failed_at: Dict[str, tuple[float, bool]] = {}  # industry → (when, transient)
+    _heal_logged: set = set()
+    _generation: int = 0
+    # A live compute walks up to 3 FRED series (+4 Census probes for a mapped
+    # NAICS), each with a 30 s HTTP timeout. A report must not wait on that.
+    _LIVE_COMPUTE_TIMEOUT_SECONDS = 8.0
+
     def __init__(self) -> None:
         self._fmp: Optional[FMPClient] = None
 
     @classmethod
     def reset_cache(cls) -> None:
+        # Called from recompute_all and from industry_override_service (some of
+        # it inside asyncio.to_thread) — plain dict/int ops only. `_live_inflight`
+        # is deliberately NOT cleared: dropping a live future would strand the
+        # callers awaiting it.
         cls._cache.clear()
+        cls._heal_failed_at.clear()
+        # So a heal that is still needed AFTER a recompute logs again — that line
+        # is the signal that the recompute did not write a real row.
+        cls._heal_logged.clear()
+        cls._generation += 1
 
     def _get_fmp(self) -> FMPClient:
         if self._fmp is None:
@@ -279,18 +387,28 @@ class IndustryDossierService:
         """Pure read: in-memory → Supabase. Returns None on miss.
 
         Most callers should use `get_or_compute_dossier` instead — it
-        falls back to a live FRED/Census compute when the weekly batch
-        hasn't covered an industry yet, so every ticker gets data.
+        falls back to a live FRED/Census compute when the quarterly batch
+        hasn't covered an industry yet, or left a zero placeholder.
         """
+        dossier, _ok = await self._read_dossier(industry)
+        return dossier
+
+    async def _read_dossier(
+        self, industry: Optional[str],
+    ) -> tuple[Optional[IndustryDossier], bool]:
+        """(row, read_ok). `read_ok` is False only when Supabase itself failed,
+        so the caller can tell "no row" from "could not look" — the two need
+        different handling (see `get_or_compute_dossier`)."""
         if not industry:
-            return None
+            return None, True
 
         # 1. in-memory
         entry = self._cache.get(industry)
         if entry and (time.time() - entry[0]) < self._CACHE_TTL_SECONDS:
-            return entry[1]
+            return entry[1], True
 
         # 2. Supabase
+        generation = type(self)._generation
         try:
             sb = get_supabase()
             res = (
@@ -303,65 +421,198 @@ class IndustryDossierService:
             )
             rows = res.data or []
         except Exception as exc:
-            logger.warning("industry_dossier read failed for %r: %s", industry, exc)
-            return None
+            logger.warning(
+                "industry_dossier read failed for %r: %s: %s",
+                industry, type(exc).__name__, exc,
+            )
+            return None, False
 
         if not rows:
-            return None
+            return None, True
 
         dossier = IndustryDossier.from_db_row(rows[0])
-        self._cache[industry] = (time.time(), dossier)
-        return dossier
+        # A recompute/override that reset the cache while this read was in its
+        # worker thread may have written a newer row than the one we hold.
+        if type(self)._generation == generation:
+            self._cache[industry] = (time.time(), dossier)
+        return dossier, True
 
     async def get_or_compute_dossier(
         self,
         industry: Optional[str],
         sector: Optional[str] = None,
     ) -> Optional[IndustryDossier]:
-        """Read path with on-the-fly fallback — GUARANTEES coverage.
+        """`get_or_compute_dossier_with_status` without the transient flag."""
+        dossier, _transient = await self.get_or_compute_dossier_with_status(industry, sector)
+        return dossier
 
-        If the dossier exists (in-memory or Supabase), return it.
-        Otherwise compute one live using the same 4-tier fallback chain
-        the weekly job uses (Census → industry-FRED → sector-FRED →
-        all-industry USNGSP). The live-computed dossier is memoized for
-        5 minutes so concurrent reports for the same industry don't
-        re-hit FRED.
+    async def get_or_compute_dossier_with_status(
+        self,
+        industry: Optional[str],
+        sector: Optional[str] = None,
+    ) -> tuple[Optional[IndustryDossier], bool]:
+        """Read path with an on-the-fly fallback. Returns (dossier, transient).
 
-        Sector is taken from the FMP profile and is needed for tier-3
-        sector-level FRED fallback. When None, we skip tier 3 and fall
-        through directly to the all-industry tier.
+        - A stored row with a real TAM (US Census/FRED or a Phase-B global
+          override) is returned untouched — no live call.
+        - A stored ZERO PLACEHOLDER, or no row at all, triggers a live compute
+          (the same 4-tier chain the quarterly job uses), bounded by
+          `_LIVE_COMPUTE_TIMEOUT_SECONDS` and shared per (industry, sector).
+          A usable result is merged over the stored row in memory (concentration
+          kept — `_merge_live_tam`) and memoized for 5 min. It is NEVER written
+          to Supabase: the quarterly `recompute_all` owns persistence and its
+          guards, and a third writer on the request path would race them.
+        - A failed / timed-out / unusable live compute leaves the placeholder
+          (TAM 0 → the report shows "—") and is not retried for 5 min.
+        - A Supabase READ failure returns None with no live compute: a live US
+          figure computed then could replace a global research row for this
+          request and get baked into the close-aligned report caches.
 
-        Returns None only when `industry` itself is empty/None — every
-        non-empty industry string resolves to at least an all-industry
-        proxy.
+        `transient` is True when the answer is a momentary hole rather than the
+        industry's real state — a Supabase read failure, a live compute that
+        raised / timed out / was cancelled, or every FRED tier failing while
+        FRED is configured. The report collector records it on
+        `degraded_sections`, so that report is delivered but never shared-cached
+        for the rest of the close cycle (the next caller retries).
+
+        Sector comes from the FMP profile and feeds the tier-3 sector-FRED
+        fallback; the stored row's sector wins when it has one.
         """
         if not industry:
-            return None
+            return None, False
 
-        cached = await self.get_dossier(industry)
-        if cached is not None:
-            return cached
+        generation = type(self)._generation
+        stored, read_ok = await self._read_dossier(industry)
+        if not read_ok:
+            return None, True
+        if stored is not None and not _is_placeholder(stored):
+            return stored, False
 
-        # Miss — compute one live. No constituents available in the read
-        # path (we don't want to fan out FMP screener calls inline), so
-        # HHI/concentration stay null on the live-computed dossier; the
-        # focal-ticker's peer-derived concentration in
-        # `_build_market_dynamics` still fills that in.
-        logger.info(
-            "industry_dossier miss for %r (sector=%r) — computing live; "
-            "next weekly job will persist it",
-            industry, sector,
-        )
-        dossier = await self._compute_one(
-            industry=industry,
-            sector=sector or "Unknown",
-            tickers=[],
-            caps_by_ticker={},
-        )
-        # Memoize so the same industry across concurrent reports doesn't
-        # hammer FRED a second time within the in-memory TTL.
-        self._cache[industry] = (time.time(), dossier)
-        return dossier
+        memo = self._heal_failed_at.get(industry)
+        if memo is not None and (time.time() - memo[0]) < self._CACHE_TTL_SECONDS:
+            return stored, memo[1]
+
+        live_sector = (stored.sector if stored is not None and stored.sector else None) or sector or "Unknown"
+        live, transient = await self._shared_live_compute(industry, live_sector)
+        if not _usable_live(live):
+            return stored, transient  # placeholder (or None) — the leader logged + memoized
+
+        if stored is not None:
+            result = _merge_live_tam(stored, live)
+            if industry not in self._heal_logged:
+                self._heal_logged.add(industry)
+                logger.warning(
+                    "industry_dossier self-heal: stored row for %r is a zero placeholder "
+                    "(%r) — serving a live figure in memory: TAM %.1fB→%.1fB (%s→%s), "
+                    "CAGR %s, grain=%s, label=%r. The next quarterly recompute should "
+                    "persist a real row; if this line keeps appearing after one, it did not.",
+                    industry, stored.source_label, result.current_tam, result.future_tam,
+                    result.current_year, result.future_year, result.cagr_5y_pct,
+                    result.source_grain, result.source_label,
+                )
+        else:
+            # No row at all (industry outside the universe file). The live compute
+            # ran with no constituents, so it has no concentration to offer — None,
+            # never the "fragmented" default, which would override the focal
+            # ticker's peer-derived concentration in `_apply_tam_source`.
+            result = dataclasses.replace(live, concentration_label=None)
+            logger.info(
+                "industry_dossier miss for %r (sector=%r) — serving a live figure "
+                "(TAM %.1fB, grain=%s); not persisted",
+                industry, live_sector, result.current_tam, result.source_grain,
+            )
+
+        # Skip the memo when a recompute/override reset the cache since this call
+        # started (including during the Supabase read) — their freshly written row
+        # must win the next read.
+        if type(self)._generation == generation:
+            self._cache[industry] = (time.time(), result)
+        return result, False
+
+    async def _shared_live_compute(
+        self, industry: str, sector: str,
+    ) -> tuple[Optional[IndustryDossier], bool]:
+        """One bounded live `_compute_one` per (industry, sector) at a time.
+        Returns (live, transient).
+
+        Never raises an ordinary exception: failure, timeout and an unusable
+        result all come back as None-or-unusable, logged and negatively memoized
+        by the LEADER. Joiners share the leader's result; if the leader was
+        cancelled they get (None, transient) without touching the memo (a
+        cancelled request says nothing about FRED). Only the merge is per
+        caller, so a joiner is never handed a row built from someone else's
+        stored row.
+        """
+        key = (industry, sector)
+        inflight = self._live_inflight.get(key)
+        if inflight is not None:
+            try:
+                return await asyncio.shield(inflight)
+            except Exception:
+                return None, True
+
+        loop = asyncio.get_running_loop()
+        fut: "asyncio.Future" = loop.create_future()
+        self._live_inflight[key] = fut
+        try:
+            live: Optional[IndustryDossier]
+            transient = False
+            try:
+                live = await asyncio.wait_for(
+                    self._compute_one(
+                        industry=industry, sector=sector, tickers=[], caps_by_ticker={},
+                    ),
+                    timeout=self._LIVE_COMPUTE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "industry_dossier live compute TIMED OUT for %r (sector=%r) after "
+                    "%.0fs — keeping the stored placeholder; retry after %ds",
+                    industry, sector, self._LIVE_COMPUTE_TIMEOUT_SECONDS,
+                    self._CACHE_TTL_SECONDS,
+                )
+                live, transient = None, True
+            except Exception as exc:
+                logger.warning(
+                    "industry_dossier live compute FAILED for %r (sector=%r): %s: %s — "
+                    "keeping the stored placeholder; retry after %ds",
+                    industry, sector, type(exc).__name__, exc, self._CACHE_TTL_SECONDS,
+                    exc_info=True,
+                )
+                live, transient = None, True
+
+            if not _usable_live(live):
+                if live is not None:
+                    # `_compute_one` synthesizes a TAM-0 placeholder only when every
+                    # FRED tier failed. With FRED configured that is an outage
+                    # (transient); unconfigured, it is permanent — and treating it as
+                    # transient would keep every such report out of the shared caches.
+                    if not _finite_positive(live.current_tam):
+                        transient = _fred_is_configured()
+                    logger.warning(
+                        "industry_dossier live compute for %r (sector=%r) gave no usable "
+                        "TAM (current=%r future=%r label=%r) — keeping the stored "
+                        "placeholder; retry after %ds",
+                        industry, sector, live.current_tam, live.future_tam,
+                        live.source_label, self._CACHE_TTL_SECONDS,
+                    )
+                self._heal_failed_at[industry] = (time.time(), transient)
+            outcome = (live, transient)
+            if not fut.done():
+                fut.set_result(outcome)
+            return outcome
+        except BaseException as exc:
+            # Anything that escaped the handlers above (a cancel, or a bug in the
+            # logging/usability code): resolve the shared future so no joiner
+            # hangs, then re-raise on our own frame.
+            fail_shared_future(
+                fut,
+                exc if isinstance(exc, Exception)
+                else RuntimeError(f"industry_dossier live compute for {industry!r} was cancelled"),
+            )
+            raise
+        finally:
+            self._live_inflight.pop(key, None)
 
     # ── Write path (weekly batch) ──
 
@@ -426,11 +677,26 @@ class IndustryDossierService:
             try:
                 dossier = await self._compute_one(industry, sector, tickers, caps_by_ticker)
                 dossiers.append(dossier)
+            except CensusUnavailableException as exc:
+                # Transient: keep the stored row rather than persist a broader
+                # fallback for a quarter. The read path heals a zero row.
+                logger.warning(
+                    "dossier compute skipped for industry=%r sector=%r — Census "
+                    "unavailable (%s); the stored row is kept",
+                    industry, sector, exc,
+                )
             except Exception as exc:
                 logger.error(
                     "dossier compute failed for industry=%r sector=%r: %s",
                     industry, sector, exc, exc_info=True,
                 )
+
+        # Phase B's floor baseline: what Phase A computed THIS run, per industry —
+        # including the global rows it does not write (see the guard below).
+        phase_a_baseline: Dict[str, Dict[str, Any]] = {
+            d.industry: {"tam": d.current_tam, "source_label": d.source_label}
+            for d in dossiers
+        }
 
         # 3. Upsert in chunks. Supabase's batch upsert supports several
         # hundred rows per call; 100 is a safe ceiling.
@@ -454,12 +720,43 @@ class IndustryDossierService:
                 existing = (
                     (await sb_exec(
                         sb.table("industry_dossier")
-                        .select("industry, current_tam_b")
+                        .select("industry, current_tam_b, tam_scope, source_grain")
                     ))
                 )
                 has_real_tam = {
                     r["industry"] for r in (existing.data or [])
                     if (r.get("current_tam_b") or 0) > 0
+                }
+                # Phase-B GLOBAL rows (Gemini grounded research for the CURATED
+                # industries) are not Phase A's to replace. Before 2026-10-01
+                # Phase A overwrote them with its US Census/FRED figure every run
+                # and relied on Phase B to put the global number back — so a Phase
+                # B that failed or was switched off (quota, kill switch) left
+                # Semiconductors reading all-US-manufacturing GDP until the next
+                # quarter. Phase B refreshes these rows itself; its floor is fed the
+                # FRESH Phase-A figure computed here (`phase_a_baseline`), never the
+                # row's own previous global value — that would let a global TAM only
+                # ever go up. Limited to the curated list so a de-curated industry
+                # returns to Phase A.
+                from app.services.industry_override_service import (  # noqa: PLC0415
+                    CURATED_OVERRIDE_INDUSTRIES,
+                )
+                curated = {ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES}
+                global_rows = {
+                    r["industry"] for r in (existing.data or [])
+                    if (r.get("current_tam_b") or 0) > 0
+                    and r.get("tam_scope") == "global"
+                    and r["industry"] in curated
+                }
+                # Rows that already hold an INDUSTRY-grain real figure. A run that
+                # resolves one of them to a broader source for an industry that is
+                # MAPPED to an industry-grain source (Census NAICS, or a FRED series
+                # in FRED_SERIES_MATCHES_INDUSTRY) hit a transient miss on that
+                # source — writing it would hide the card's TAM for a quarter.
+                industry_grain_rows = {
+                    r["industry"] for r in (existing.data or [])
+                    if (r.get("current_tam_b") or 0) > 0
+                    and r.get("source_grain") == "industry"
                 }
             except Exception as exc:
                 # Fail SAFE: if we cannot tell which rows are good, do not risk clobbering
@@ -469,17 +766,43 @@ class IndustryDossierService:
                     "risking an overwrite of good rows", exc, exc_info=True,
                 )
                 has_real_tam = None
+                global_rows = set()
+                industry_grain_rows = set()
 
             if has_real_tam is None:
                 rows = []
             else:
-                kept, skipped = [], []
+                kept, skipped, kept_global, kept_grain = [], [], [], []
                 for row in rows:
+                    ind = row["industry"]
                     would_zero = (row.get("current_tam_b") or 0) <= 0
-                    if would_zero and row["industry"] in has_real_tam:
-                        skipped.append(row["industry"])
+                    downgrades = (
+                        row.get("source_grain") != "industry"
+                        and ind in industry_grain_rows
+                        and expects_industry_grain(ind)
+                    )
+                    if ind in global_rows:
+                        kept_global.append(row)
+                    elif would_zero and ind in has_real_tam:
+                        skipped.append(ind)
+                    elif downgrades:
+                        kept_grain.append(ind)
                     else:
                         kept.append(row)
+                if kept_grain:
+                    logger.warning(
+                        "industry_dossier: kept the EXISTING industry-level TAM for %d "
+                        "industr%s because this run fell back to a broader source (%s)",
+                        len(kept_grain), "y" if len(kept_grain) == 1 else "ies",
+                        ", ".join(sorted(kept_grain)),
+                    )
+                if kept_global:
+                    logger.warning(
+                        "industry_dossier: Phase A left the TAM of %d GLOBAL research row%s "
+                        "untouched (Phase B refreshes them): %s",
+                        len(kept_global), "" if len(kept_global) == 1 else "s",
+                        ", ".join(sorted(r["industry"] for r in kept_global)),
+                    )
                 if skipped:
                     logger.warning(
                         "industry_dossier: kept the EXISTING TAM for %d industr%s because "
@@ -501,6 +824,33 @@ class IndustryDossierService:
                 except Exception as exc:
                     logger.error("industry_dossier upsert failed: %s", exc, exc_info=True)
 
+            # A global row keeps its TAM, but its CONCENTRATION side (HHI, shares,
+            # label, constituent count — from the universe's market caps, not from
+            # FRED/Census) is Phase A's and still refreshes every run; Phase B
+            # never writes those columns. A per-row UPDATE with only these keys —
+            # never a mixed upsert, where PostgREST would null the TAM columns this
+            # batch leaves out. Skipped when the run measured no constituents, so an
+            # empty caps entry cannot erase a measured label.
+            for row in (kept_global if has_real_tam is not None else []):
+                if not row.get("constituent_count"):
+                    continue
+                concentration = {
+                    k: row.get(k) for k in (
+                        "sector", "hhi", "top1_share_pct", "top2_share_pct",
+                        "concentration_label", "constituent_count",
+                    )
+                }
+                try:
+                    (await sb_exec(
+                        sb.table("industry_dossier").update(concentration)
+                        .eq("industry", row["industry"])
+                    ))
+                except Exception as exc:
+                    logger.warning(
+                        "industry_dossier: concentration refresh failed for global row %r: "
+                        "%s: %s", row["industry"], type(exc).__name__, exc,
+                    )
+
         # 4. Reset the in-memory tier so the freshly-upserted rows are
         # read on the next request.
         self.reset_cache()
@@ -516,7 +866,9 @@ class IndustryDossierService:
             from app.services.industry_override_service import (
                 get_industry_override_service,
             )
-            phase_b_summary = await get_industry_override_service().refresh_all_overrides()
+            phase_b_summary = await get_industry_override_service().refresh_all_overrides(
+                phase_a_baseline=phase_a_baseline,
+            )
         except Exception as exc:
             logger.error(
                 "industry_dossier: Phase B (overrides) failed: %s — Phase A values stay",
@@ -548,7 +900,9 @@ class IndustryDossierService:
 
         Fallback chain — always returns a populated dossier (no nulls):
           1. industry-specific Census (NAICS)        source_grain='industry'
-          2. industry-specific FRED                  source_grain='industry'
+          2. industry-mapped FRED                    'industry' when the series
+             measures the industry itself (FRED_SERIES_MATCHES_INDUSTRY), else
+             'sector' — most of these map onto a whole 2-digit NAICS sector
           3. sector-level FRED                       source_grain='sector'
           4. all-industry USNGSP                     source_grain='all_industry'
 
@@ -563,6 +917,8 @@ class IndustryDossierService:
             tam_proxy = await _try_census_tam(industry)
         if tam_proxy is None and industry in INDUSTRY_TO_FRED_SERIES:
             tam_proxy = await _try_fred_tam(industry)
+            if tam_proxy is not None:
+                source_grain = fred_mapping_grain(industry)
 
         # ── Tier 3: sector-level FRED ──
         if tam_proxy is None:
@@ -587,9 +943,9 @@ class IndustryDossierService:
 
         if tam_proxy is None:
             # Every fallback failed (FRED API down + no env key). Synthesize
-            # a "data unavailable" placeholder so the row still upserts —
-            # the user sees the iOS warning chip + the source_label tells
-            # them what happened.
+            # a "data unavailable" placeholder (TAM 0 → the report shows "—").
+            # recompute_all never lets it overwrite a real row, and the read
+            # path treats a stored placeholder as a miss (self-heal).
             now_year = str(datetime.now(timezone.utc).year)
             tam_proxy = IndustryTAM(
                 current_tam=0.0,

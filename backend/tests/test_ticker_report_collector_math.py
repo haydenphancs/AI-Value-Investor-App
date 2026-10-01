@@ -2027,13 +2027,15 @@ def test_apply_tam_partial_ai_quote_falls_back_to_dossier():
     md = _md_with_zero_tam()
     md["cagr_5yr"] = None        # sector_aggregates produced nothing
     md["current_tam"] = 0.0
+    # Industry grain: only an industry-specific dossier is shown (a sector-grain
+    # one is hidden — test_apply_tam_hides_broad_dossier_tam_and_cagr).
     dossier = IndustryDossier(
         current_tam=1700.0, future_tam=2100.0,
         current_year="2024", future_year="2029",
         source_label="BEA Information Sector GDP (via FRED)",
         cagr_5y_pct=4.3,
         industry="Software - Infrastructure", sector="Technology",
-        concentration_label="oligopoly", source_grain="sector",
+        concentration_label="oligopoly", source_grain="industry",
     )
     _apply_tam_source(md, {
         # Only a future figure + a quote — no current_tam (the bug input).
@@ -2063,7 +2065,7 @@ def test_apply_tam_dossier_cagr_applies_even_when_ai_tam_wins():
         source_label="BEA Information Sector GDP (via FRED)",
         cagr_5y_pct=6.5,
         industry="Software - Infrastructure", sector="Technology",
-        source_grain="sector",
+        source_grain="industry",
     )
     _apply_tam_source(md, {
         "current_tam": 150_000_000_000,
@@ -2427,9 +2429,9 @@ def test_apply_tam_does_not_override_emerging_lifecycle():
 
 def test_apply_tam_writes_source_grain_from_dossier():
     """The dossier carries `source_grain` ('industry' | 'sector' |
-    'all_industry') so iOS can decide whether to show the
-    "⚠ Broader than industry" chip. `_apply_tam_source` must surface it
-    on market_dynamics. Plain `IndustryTAM` (no dossier) → no chip."""
+    'all_industry'). An industry-grain dossier is shown and its grain surfaced;
+    a sector-grain one is HIDDEN entirely (owner decision 2026-10-01 — no TAM,
+    no grain, no label). Plain `IndustryTAM` (no dossier) → grain unset."""
     from app.services.industry_dossier_service import IndustryDossier
     from app.services.industry_tam_service import IndustryTAM
 
@@ -2459,7 +2461,9 @@ def test_apply_tam_writes_source_grain_from_dossier():
         source_grain="sector",
     )
     _apply_tam_source(md2, {"tam_source_quote": ""}, sector_dossier)
-    assert md2["source_grain"] == "sector"
+    assert md2["source_grain"] is None
+    assert md2["current_tam"] == 0.0
+    assert md2["tam_source_label"] is None
 
     # Plain IndustryTAM (live-path fallback) → leaves source_grain unset.
     md3 = _md_with_zero_tam()
@@ -2512,6 +2516,137 @@ def test_apply_tam_dossier_lifecycle_overrides_default_mature():
     )
     _apply_tam_source(md, {"tam_source_quote": ""}, dossier)
     assert md["lifecycle_phase"] == "secular_growth"
+
+
+# ── Broad stand-ins are hidden (owner decision 2026-10-01, TestFlight PLUG) ──
+
+
+def _broad_dossier(grain: str, **over):
+    from app.services.industry_dossier_service import IndustryDossier
+
+    kw = dict(
+        current_tam=2930.1, future_tam=3980.7,
+        current_year="2025", future_year="2030",
+        source_label="BEA Manufacturing GDP (via FRED) — broader than Airlines",
+        cagr_5y_pct=6.3,
+        industry="Airlines, Airports & Air Services", sector="Industrials",
+        concentration_label="oligopoly", lifecycle_phase="secular_growth",
+        source_grain=grain,
+    )
+    kw.update(over)
+    return IndustryDossier(**kw)
+
+
+@pytest.mark.parametrize("grain", ["sector", "all_industry"])
+def test_apply_tam_hides_broad_dossier_tam_and_cagr(grain):
+    """A whole-sector GDP stand-in ("Airlines → $2.9T of US manufacturing")
+    is not an industry's market size: no TAM, no CAGR, no scope prefix, no
+    label — but the dossier's industry-wide CONCENTRATION (from constituents,
+    not FRED) still applies."""
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["concentration"] = "fragmented"
+    md["lifecycle_phase"] = "mature"
+    _apply_tam_source(md, {"tam_source_quote": ""}, _broad_dossier(grain))
+    assert md["current_tam"] == 0.0
+    assert md["future_tam"] == 0.0
+    assert md["cagr_5yr"] is None
+    assert md["tam_scope"] is None          # no "US - Market Size (TAM) —"
+    assert md["tam_source_label"] is None
+    assert md["source_grain"] is None
+    assert md["lifecycle_phase"] == "mature"  # broad CAGR-derived phase ignored
+    assert md["concentration"] == "oligopoly"
+
+
+def test_apply_tam_broad_dossier_keeps_emerging_lifecycle():
+    """'emerging' comes from the constituent count, not from the broad CAGR,
+    so it survives the hide."""
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["lifecycle_phase"] = "mature"
+    _apply_tam_source(md, {"tam_source_quote": ""}, _broad_dossier("sector", lifecycle_phase="emerging"))
+    assert md["lifecycle_phase"] == "emerging"
+    assert md["cagr_5yr"] is None
+
+
+@pytest.mark.parametrize("tam", [0.0, -5.0, float("nan"), float("inf")])
+def test_apply_tam_placeholder_industry_dossier_shows_nothing(tam):
+    """The July zero placeholder (or any non-finite TAM) — even labelled
+    'industry' — must not set a scope over an empty TAM: that was the tester's
+    exact "US - Market Size (TAM) —"."""
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["concentration"] = "fragmented"          # so the row's "oligopoly" must be applied
+    _apply_tam_source(md, {"tam_source_quote": ""}, _broad_dossier(
+        "industry", current_tam=tam, future_tam=0.0, cagr_5y_pct=None,
+        source_label="No public data available — FRED/Census unreachable at compute time",
+    ))
+    assert md["current_tam"] == 0.0
+    assert md["cagr_5yr"] is None
+    assert md["tam_scope"] is None
+    assert md["tam_source_label"] is None
+    assert md["concentration"] == "oligopoly"   # still from the row
+
+
+def test_apply_tam_ai_quote_with_broad_dossier_gets_no_broad_cagr():
+    """A complete earnings-call quote still wins the TAM pair, but a broad
+    dossier contributes neither CAGR nor scope — it is not about this industry,
+    so its "US" says nothing about the quoted figure."""
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {
+        "current_tam": 150_000_000_000,
+        "future_tam": 300_000_000_000,
+        "tam_source_quote": "We see a $150B market today expanding to $300B.",
+    }, _broad_dossier("sector"))
+    assert md["current_tam"] == 150.0
+    assert md["tam_source_label"] == "Earnings call quote"
+    assert md["cagr_5yr"] is None
+    assert md["tam_scope"] is None
+
+
+def test_apply_tam_ai_quote_over_placeholder_dossier_gets_no_scope():
+    """The July placeholder (TAM 0) under a complete quote: the quote shows, but
+    no scope is borrowed from a row that carries no figure."""
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {
+        "current_tam": 2_500_000_000_000,
+        "future_tam": 5_000_000_000_000,
+        "tam_source_quote": "a $2.5 trillion global hydrogen market",
+    }, _broad_dossier("all_industry", current_tam=0.0, future_tam=0.0, cagr_5y_pct=None))
+    assert md["current_tam"] == 2500.0
+    assert md["tam_scope"] is None
+
+
+def test_apply_tam_industry_census_dossier_shows_tam_cagr_and_scope():
+    """PLUG after the fix: Census NAICS 335, industry grain → everything shows."""
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    md["lifecycle_phase"] = "mature"
+    _apply_tam_source(md, {"tam_source_quote": ""}, _broad_dossier(
+        "industry", current_tam=195.0, future_tam=270.9,
+        current_year="2024", future_year="2029", cagr_5y_pct=6.8,
+        source_label="US Census AIES — Electrical equipment, appliance, and component manufacturing (NAICS 335)",
+        industry="Electrical Equipment & Parts", lifecycle_phase="mature",
+    ))
+    assert md["current_tam"] == 195.0
+    assert md["future_tam"] == 270.9
+    assert md["cagr_5yr"] == 6.8
+    assert md["tam_scope"] == "us"
+    assert md["source_grain"] == "industry"
+    assert md["tam_source_label"].startswith("US Census AIES")
+    assert md["concentration"] == "oligopoly"
+
+
+def test_apply_tam_nan_cagr_on_industry_dossier_is_not_surfaced():
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _broad_dossier(
+        "industry", current_tam=195.0, future_tam=270.9, cagr_5y_pct=float("nan"),
+    ))
+    assert md["current_tam"] == 195.0
+    assert md["cagr_5yr"] is None
 
 
 def test_dossier_classification_helpers_match_collector_thresholds():

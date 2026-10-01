@@ -1107,6 +1107,45 @@ the Performance / Benchmark cards and the 3M–2Y chart never end on a mid-sessi
   User-history reports in `research_reports` are **not** invalidated by the floor; they are patched
   on read.
 
+#### Industry TAM / CAGR — `industry_dossier` (2026-10-01)
+
+The Moat card's market size and 5-year CAGR come from one row per FMP industry in
+`industry_dossier`, written by the quarterly chain's first phase (`recompute_all`). Phase A
+resolves a US figure through Census AIES (the per-vintage aiesbasic dataset queried with `NAICS2017=`; the older
+time-series AIES dataset went 404 and silently disabled the whole tier until this date),
+then industry-mapped FRED/BEA, sector FRED, all-industry FRED. Phase B writes Gemini-researched
+GLOBAL figures for a curated list.
+
+- **Only an industry-specific figure is shown.** Each row carries `source_grain`. A FRED series
+  counts as `industry` only when it measures the industry itself (`FRED_SERIES_MATCHES_INDUSTRY`
+  in `industry_tam_service.py`); most industry→FRED mappings are whole 2-digit NAICS sectors
+  (all of US manufacturing for "Industrial - Machinery") and get `sector`. `_apply_tam_source`
+  hides the TAM, CAGR and scope prefix of any `sector` / `all_industry` row — an honest "—"
+  instead of an airline's "TAM" being all of US manufacturing GDP (owner decision, 2026-10-01).
+  The dossier's concentration still applies; it comes from the industry's constituents.
+- **Phase A never replaces a curated Phase-B global row's TAM** (`tam_scope='global'`, TAM > 0;
+  it still refreshes the row's concentration columns). Phase B refreshes the TAM itself, and its
+  floor is fed THIS run's Phase-A figure (`phase_a_baseline`), never the row's own previous
+  global value, which would let a global TAM only ever go up. A Census figure for a NAICS code
+  shared by several FMP industries (5112 across three software industries) is their sum and is
+  no floor for any one of them. Before this, a Phase B that failed left the US stand-in in place
+  for a quarter.
+- **A transient miss never replaces a better row.** Phase A also keeps a stored industry-level
+  row when this run fell back to a broader source for an industry that is mapped to an
+  industry-level one. A Census transport error, 5xx or 429 raises `CensusUnavailableException`
+  (uncached), never a 24 h "not published" miss.
+- **The read path heals a zero placeholder in memory.** A row whose TAM is 0 (the "no public
+  data" placeholder written when FRED/Census were unreachable — 138 of 158 rows from the July
+  2026 run) is a miss for `get_or_compute_dossier`: the TAM is computed live (8 s bound,
+  deduped per industry), merged over the stored row (concentration kept), memoized for 5 min,
+  and a failure is not retried for 5 min. **It never writes the table** — persistence stays with
+  `recompute_all` and its two guards (never zero a real TAM, never replace a global row), and a
+  request-path writer would race them. A Supabase read failure serves no figure rather than risk
+  a US stand-in over a global row in the close-aligned report caches. Every such transient
+  hole (read failure, live compute raised / timed out, FRED down) is recorded on the
+  collection's `degraded_sections` (`industry_tam:transient`), so that report is delivered
+  but never shared-cached for the rest of the close cycle.
+
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
 Everything scheduled runs INSIDE the one web process: 25 loops started by
@@ -3057,6 +3096,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-09-23 | CEO Buys is the 4th App-Exclusive Signal: CEO/co-CEO open-market common-stock purchases, ranked by DOLLARS over 30 days of Form 4 FILINGS, from the symbol-less FMP insider feed through a fail-closed pager; any card that RAISES marks the build degraded (memory 5 min, never written to `signals_cache`) | TestFlight request ("Insider buys … CEO only?"). One CEO per company makes a buyer count degenerate. Tier 2 is read before every rebuild, so a persisted partial build hid a transiently failed card for up to a day; a fourth card with ~3 FMP pages + a quote batch raised those odds | All officers + directors ranked by buyer count (rejected by the owner: 10%-owner funds swamp dollars; name/scope decided as "CEO Buys"); FMP's insider "latest" feed (mixes every transaction type); reusing `get_insider_trading` (swallows every failure to `[]`, so an outage would read as "no CEO bought anything") |
 | 2026-09-28 | Marketing may show FMP data except price display: financial statements, earnings and estimates, company info, filings, valuation figures (market cap, P/E, EV, yield) and news in screenshots are allowed; a price itself, % price moves, price charts and ETF data are not | FMP's emailed reply to a consent request allowed "select datasets" (example: certain financial statement fields) and refused price-related data (a separate public-display licence). Owner accepted the email as sufficient and reads it as everything except price display. MAR, real-person and congressional-counsel limits unchanged; supersedes the EDGAR-only class C of the 2026-09-16 row | Request a signed consent listing each dataset; treat price-derived figures as price data; buy a price public-display licence |
 | 2026-09-28 | Congressional-trade marketing needs no lawyer's sign-off. The rules: never name a member (a count of at least 2); write "disclosed purchases/sales" with the disclosure month, never "bought/sold"; the counts may name a ticker the Pro Congressional Buys card shows | The researched legal position (§12.1): 5 U.S.C. §13107(c) probably covers commercial use, and there is no exception for aggregates. But no enforcement has been found since 1978, the industry uses the data openly, and the in-app Pro feature is already the same use. Names add right-of-publicity and false-light risk; "bought" can be false, because a report covers spouses' trades, uses ranges and lags up to 45 days. Supersedes the counsel gate in the row above | Keep the lawyer gate (rejected: the owner accepts the low enforcement risk); allow names (rejected: they add claims and engage the privacy interest the statute protects); keep the congressional tickers Pro-only (rejected by the owner: "the only rule is no names") |
+| 2026-10-01 | Industry TAM/CAGR shown only when industry-specific; a zero dossier row heals in memory, never written from the request path; Phase A never replaces a Phase-B global row | TestFlight: PLUG showed CAGR/TAM "—" because 138 dossier rows held the July zero placeholder and the read path served it as data; fixing that alone would have shown whole-sector GDP (e.g. all US manufacturing) as an industry's TAM | Show every stand-in (with or without an iOS caption); write the healed row back to Supabase; wait for the quarterly job; a manual admin refresh (pays Phase B's Gemini calls twice) |
 
 ---
 

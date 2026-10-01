@@ -12,11 +12,17 @@ and every call short-circuits to None so the caller falls through to FRED.
 Two endpoints used:
 
   1. **AIES (Annual Integrated Economic Survey)** — the modern annual
-     survey that replaced SAS in March 2024. Time-series dataset at
-     `/data/timeseries/aies/basic`, covers most service / manufacturing /
-     retail NAICS codes. Has 2023 published as of 2026-05; newer years
-     will appear ~Q4 each year. Variable: `RCPT_TOT_VAL` ("Sales, value
-     of shipments, or revenue" in $1,000s).
+     survey that replaced SAS in March 2024. One dataset per vintage at
+     `/data/{year}/aiesbasic` (2023 and 2024 published as of 2026-10;
+     newer years appear ~Q4 each year), queried with `NAICS2017=<code>`.
+     Covers most service / manufacturing / retail NAICS codes. Variable:
+     `RCPT_TOT_VAL` ("Sales, value of shipments, or revenue" in $1,000s).
+     ⚠️ The earlier time-series dataset `/data/timeseries/aies/basic`
+     (`NAICS=`) began answering 404 for every code and year, and because a
+     404 also means "this vintage isn't published", the whole Census tier
+     went silently dead — every mapped industry fell through to FRED. A
+     snapshot that finds NO AIES year now logs a WARNING. A future vintage
+     may switch its parameter to `NAICS2022`; that shows up the same way.
 
   2. **Economic Census (ecnbasic)** — the every-5-years comprehensive
      industry census, used as the CAGR baseline. 2017 has full coverage
@@ -58,6 +64,21 @@ def _warn_unconfigured_once() -> None:
         "then to a zero-TAM placeholder.",
     )
 
+
+
+class CensusException(Exception):
+    """Base for Census client errors."""
+
+
+class CensusUnavailableException(CensusException):
+    """A transient failure — a transport error, a 5xx / 429 or an unparseable
+    body — as opposed to "this (year, NAICS) is not published" (204 / 404),
+    which stays an ordinary None. Raised, never cached: a transient error used
+    to be memoized for 24 h as a miss, so one blip on the 2017 baseline call
+    served a CAGR-less TAM for a day, and on the quarterly run could persist a
+    broader-source row for a quarter. Callers in `industry_dossier_service`
+    catch it (the read path retries after 5 min; the quarterly run keeps the
+    stored row). It never reaches an endpoint."""
 
 
 # In-memory cache. Census data updates annually so 24h is plenty; the
@@ -147,13 +168,18 @@ class CensusClient:
         self, url: str, params: Dict[str, str],
     ) -> Optional[list]:
         """One-row response parser. Returns the data row (list) when the
-        Census API returns its standard 2D array [header, row], None on
-        any error condition.
+        Census API returns its standard 2D array [header, row], None when the
+        answer is "no such data".
 
         Census returns 204 No Content when a query has no matching row
-        (e.g., NAICS not covered by the survey for that year). We treat
-        that as the same kind of "no data" as a 404.
+        (e.g., NAICS not covered by the survey for that year) and 404 for a
+        vintage that is not published yet — both mean "no data" → None.
+        A transport error, a 5xx / 429 or an unparseable body raises
+        `CensusUnavailableException` instead: a blip is not an answer.
         """
+        # Never log the key: it is a query parameter, so it is also inside an
+        # httpx error's URL — hence the status code, not str(e).
+        safe_params = {k: v for k, v in params.items() if k != "key"}
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, follow_redirects=True,
@@ -163,12 +189,16 @@ class CensusClient:
                     return None
                 resp.raise_for_status()
                 payload = resp.json()
-        except (httpx.HTTPError, ValueError) as e:
-            logger.warning(
-                f"Census fetch failed for {url} params={params}: "
-                f"{type(e).__name__}: {e}"
-            )
-            return None
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            logger.warning(f"Census fetch failed for {url} params={safe_params}: HTTP {status}")
+            raise CensusUnavailableException(f"Census HTTP {status} for {url}") from None
+        except httpx.HTTPError as e:
+            logger.warning(f"Census fetch failed for {url} params={safe_params}: {type(e).__name__}")
+            raise CensusUnavailableException(f"Census {type(e).__name__} for {url}") from None
+        except ValueError as e:
+            logger.warning(f"Census returned an unparseable body for {url} params={safe_params}: {e}")
+            raise CensusUnavailableException(f"Census unparseable body for {url}") from None
         if not isinstance(payload, list) or len(payload) < 2:
             return None
         header = payload[0]
@@ -181,18 +211,22 @@ class CensusClient:
         self, naics: str, year: int,
     ) -> Optional[CensusRevenuePoint]:
         """One AIES-basic year. Returns None when the (year, NAICS) combo
-        isn't published (Census 204) or any other fetch error."""
+        isn't published (Census 204/404) or the cell is suppressed; raises
+        `CensusUnavailableException` (uncached) on a transient failure."""
         cache_key = ("aies", str(naics), int(year))
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached if cached is not _MISS_SENTINEL else None
 
-        url = f"{self.base_url}/timeseries/aies/basic"
+        # One dataset per vintage (see the module docstring for why the old
+        # `/timeseries/aies/basic` URL is gone). An unpublished vintage answers
+        # 404, which `_http_get_rows` folds into "no data" → the caller probes
+        # the year before.
+        url = f"{self.base_url}/{int(year)}/aiesbasic"
         params = {
-            "get": "RCPT_TOT_VAL,YEAR",
-            "NAICS": str(naics),
+            "get": "RCPT_TOT_VAL",
+            "NAICS2017": str(naics),
             "for": "us:*",
-            "YEAR": str(year),
             "key": self.api_key,
         }
         rows = await self._http_get_rows(url, params)
@@ -276,14 +310,24 @@ class CensusClient:
             return None
 
         current_year = datetime.now(timezone.utc).year
+        probed = [current_year - offset for offset in range(1, 1 + _AIES_PROBE_YEARS)]
         latest: Optional[CensusRevenuePoint] = None
-        for offset in range(1, 1 + _AIES_PROBE_YEARS):
-            candidate = current_year - offset
+        for candidate in probed:
             point = await self._fetch_aies_year(naics, candidate)
             if point is not None and point.revenue_usd > 0:
                 latest = point
                 break
         if latest is None:
+            # Loud on purpose: the Census tier once died silently for every
+            # industry (dataset moved, 404 read as "no data"). A mapped NAICS
+            # with no AIES figure in the whole probe window is either a
+            # coverage gap or a broken endpoint — both worth seeing. The 24 h
+            # miss cache keeps this to ~one line per NAICS per day.
+            logger.warning(
+                f"Census AIES: no revenue for NAICS {naics} in any of the years "
+                f"{probed} — industry TAM falls through to FRED. Check the "
+                f"aiesbasic endpoint if this appears for every NAICS."
+            )
             return None
 
         baseline = await self._fetch_ecnbasic(naics, _ECN_BASELINE_YEAR)

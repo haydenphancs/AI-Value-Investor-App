@@ -913,6 +913,38 @@ def _settle_sector_history(out: Any, result: Any, ticker: str) -> None:
     out.sector_benchmark_history = result or {}
 
 
+# Recorded on `out.degraded_sections` when the industry dossier read was a TRANSIENT
+# hole (Supabase read failure, a live TAM compute that raised / timed out, FRED down).
+_INDUSTRY_TAM_DEGRADED = "industry_tam:transient"
+
+
+def _settle_industry_tam(out: Any, result: Any, ticker: str, industry: Optional[str]) -> None:
+    """Land the pass-2 industry-dossier result on `out`. A transient hole leaves the
+    Moat TAM/CAGR at "—" for THIS report and records `_INDUSTRY_TAM_DEGRADED`, so the
+    collection stays out of ticker_data_cache and the report out of every shared
+    report cache — otherwise one 8-second FRED/Census stall would serve "—" to every
+    user until the next close. A permanent gap (no industry-level figure exists) is
+    NOT recorded: it must not keep the ticker out of the caches forever. Never raises."""
+    if isinstance(result, BaseException):
+        logger.warning(
+            "[report-industry-tam] ticker=%s industry=%r step=industry_tam: raised %s: %s — "
+            "no TAM/CAGR; the collection and report will not be shared-cached",
+            ticker, industry, type(result).__name__, result,
+        )
+        out.industry_tam = None
+        out.degraded_sections.append(_INDUSTRY_TAM_DEGRADED)
+        return
+    dossier, transient = result if isinstance(result, tuple) and len(result) == 2 else (result, False)
+    out.industry_tam = dossier
+    if transient:
+        logger.warning(
+            "[report-industry-tam] ticker=%s industry=%r step=industry_tam: transient "
+            "dossier hole — TAM/CAGR shown as \"—\"; the collection and report will not "
+            "be shared-cached", ticker, industry,
+        )
+        out.degraded_sections.append(_INDUSTRY_TAM_DEGRADED)
+
+
 # A dropped-digit EPS (feed 0.169 for a real 1.69) answers 200 and carries no `degraded`
 # reason, so the gate above never sees it; it became a permanent "-90% miss" in the
 # Track Record. Its signature is a same-sign ratio to the estimate that sits on a power
@@ -1671,10 +1703,10 @@ class TickerReportDataCollector:
         )
 
         industry_tam_task = (
-            get_industry_dossier_service().get_or_compute_dossier(
+            get_industry_dossier_service().get_or_compute_dossier_with_status(
                 industry=industry, sector=sector,
             )
-            if industry else asyncio.sleep(0, result=None)
+            if industry else asyncio.sleep(0, result=(None, False))
         )
 
         # Sector-median history for the "*" drill-down line (pre-computed in
@@ -1722,14 +1754,7 @@ class TickerReportDataCollector:
         else:
             out.sector_aggregates = sector_agg
 
-        if isinstance(industry_tam, Exception):
-            logger.warning(
-                f"Collector pass 2: industry_tam failed for {ticker}: "
-                f"{type(industry_tam).__name__}: {industry_tam}"
-            )
-            out.industry_tam = None
-        else:
-            out.industry_tam = industry_tam
+        _settle_industry_tam(out, industry_tam, ticker, industry)
 
         # ── Phase 3C: fetch USPTO patents + FDA approvals for the
         # Intangible Assets pillar. Cached 180-day in ip_intel_cache so
@@ -6859,18 +6884,28 @@ def _apply_tam_source(
         with no current figure) is REJECTED here — applied alone it renders
         "$0B → $3T" and buries the real current TAM the industry proxy holds.
         (Strict on the quote to prevent fabrication.)
-      Priority 2 — industry-level proxy (Census 4-digit NAICS → FRED sector →
-        industry dossier, resolved upstream). Caption attributes the source.
+      Priority 2 — industry-level proxy (industry dossier: Census NAICS → FRED,
+        resolved upstream) — but ONLY when it measures the industry itself
+        (`source_grain == 'industry'`) with a positive TAM. A sector / all-industry
+        stand-in is HIDDEN (owner decision 2026-10-01): "Airlines → $2.9T of US
+        manufacturing GDP" under a "Market Size (TAM)" header is misinformation,
+        and iOS shows no caption that could qualify it.
       Priority 3 — leave 0.0 (iOS renders "—").
 
-    CAGR + lifecycle: taken from the industry dossier whenever it resolved,
-      REGARDLESS of which TAM source won. This fixes the "CAGR shows —" bug: a
-      valid AI TAM quote used to `return` early and silently skip the dossier's
-      CAGR. CAGR only fills when sector_aggregates (higher trust) didn't already
-      set it, so that precedence is preserved.
+    CAGR + lifecycle: taken from the industry dossier whenever it is
+      industry-specific, REGARDLESS of which TAM source won. This fixes the
+      "CAGR shows —" bug: a valid AI TAM quote used to `return` early and silently
+      skip the dossier's CAGR. CAGR only fills when sector_aggregates (higher
+      trust) didn't already set it, so that precedence is preserved. A broad
+      dossier contributes no CAGR, and only an 'emerging' lifecycle (that one
+      comes from the constituent count, not from the broad CAGR).
 
-    Concentration override stays tied to the proxy-TAM path (the dossier's
-    industry-wide HHI is applied when its TAM is the one shown).
+    `tam_scope` (the "US"/"Global" header prefix) is set only when a TAM is
+    actually shown — the placeholder used to yield "US - Market Size (TAM) —".
+
+    Concentration override stays tied to the non-AI path, and applies even when
+    the dossier's TAM is hidden: the dossier's industry-wide HHI comes from the
+    industry's constituents, not from FRED/Census.
     """
     # ── TAM PAIR ──────────────────────────────────────────────────────
     ai_tam_applied = False
@@ -6898,25 +6933,38 @@ def _apply_tam_source(
                         market_dynamics["future_year"] = s
                 ai_tam_applied = True
 
-    if not ai_tam_applied and industry_tam is not None:
-        # Priority 2: industry-level proxy (Census → FRED chain, or
-        # pre-computed industry_dossier row when available).
-        market_dynamics["current_tam"] = industry_tam.current_tam
-        market_dynamics["future_tam"] = industry_tam.future_tam
-        market_dynamics["current_year"] = industry_tam.current_year
-        market_dynamics["future_year"] = industry_tam.future_year
-        market_dynamics["tam_source_label"] = industry_tam.source_label
+    # Is the dossier's figure about THIS industry, with a real TAM? A plain
+    # `IndustryTAM` (no grain attribute) comes from Census / an industry FRED
+    # mapping and counts as industry-level.
+    dossier_tam = (
+        _finite_or_none(getattr(industry_tam, "current_tam", None))
+        if industry_tam is not None else None
+    )
+    dossier_is_specific = (
+        dossier_tam is not None
+        and dossier_tam > 0
+        and getattr(industry_tam, "source_grain", None) in (None, "industry")
+    )
 
-        # `source_grain` is set when the proxy is an IndustryDossier
-        # (i.e., pre-computed weekly batch). iOS reads it to render the
-        # "⚠ Broader than industry" chip when fallback was used.
-        grain = getattr(industry_tam, "source_grain", None)
-        if grain:
-            market_dynamics["source_grain"] = grain
+    if not ai_tam_applied and industry_tam is not None:
+        if dossier_is_specific:
+            # Priority 2: industry-level proxy (Census → FRED chain, or the
+            # pre-computed industry_dossier row).
+            market_dynamics["current_tam"] = industry_tam.current_tam
+            market_dynamics["future_tam"] = industry_tam.future_tam
+            market_dynamics["current_year"] = industry_tam.current_year
+            market_dynamics["future_year"] = industry_tam.future_year
+            market_dynamics["tam_source_label"] = industry_tam.source_label
+
+            # `source_grain` is set when the proxy is an IndustryDossier.
+            grain = getattr(industry_tam, "source_grain", None)
+            if grain:
+                market_dynamics["source_grain"] = grain
 
         # Industry-wide concentration (HHI from ALL constituents in this
-        # industry, computed weekly) is more authoritative than the focal
-        # ticker's peer-set HHI computed live. Override when present.
+        # industry, computed quarterly) is more authoritative than the focal
+        # ticker's peer-set HHI computed live. Override when present — even when
+        # the TAM above is hidden, since it does not come from FRED/Census.
         dossier_concentration = getattr(industry_tam, "concentration_label", None)
         if dossier_concentration:
             market_dynamics["concentration"] = dossier_concentration
@@ -6926,22 +6974,31 @@ def _apply_tam_source(
     #    CAGR (the "CAGR shows —" bug). ──────────────────────────────────
     if industry_tam is not None:
         # Scope label (US vs Global) follows the industry's resolved data
-        # source, regardless of which TAM source won the pair above — so an AI
-        # earnings quote inherits its industry's scope instead of being left
-        # unlabeled. Census/FRED dossiers are 'us'; Phase B overrides 'global'.
-        market_dynamics["tam_scope"] = getattr(industry_tam, "tam_scope", "us")
+        # source — Census/FRED dossiers are 'us', Phase B overrides 'global' —
+        # and a complete AI earnings quote inherits it (an existing design
+        # choice, ffac6032). Set only when a TAM is actually shown AND the
+        # dossier is about this industry: never over "—" (the tester's
+        # "US - Market Size (TAM) —"), never from a broad stand-in the card hides.
+        shown_tam = _finite_or_none(market_dynamics.get("current_tam"))
+        if dossier_is_specific and shown_tam is not None and shown_tam > 0:
+            market_dynamics["tam_scope"] = getattr(industry_tam, "tam_scope", "us")
         # Dossier-derived lifecycle wins outright when present (already
-        # incorporates CAGR + constituent count).
+        # incorporates CAGR + constituent count). From a BROAD dossier only
+        # 'emerging' is trusted — the other phases were derived from the
+        # sector-wide CAGR.
         dossier_lifecycle = getattr(industry_tam, "lifecycle_phase", None)
+        if not dossier_is_specific and dossier_lifecycle != "emerging":
+            dossier_lifecycle = None
         if dossier_lifecycle and dossier_lifecycle != "mature":
             # `mature` is the dataclass default — only override when the
             # dossier produced a non-default classification (a real signal).
             market_dynamics["lifecycle_phase"] = dossier_lifecycle
 
         # Surface the industry's realized CAGR only when sector_aggregates
-        # didn't already produce one — preserves the higher-trust source.
-        if market_dynamics.get("cagr_5yr") is None:
-            cagr = getattr(industry_tam, "cagr_5y_pct", None)
+        # didn't already produce one — preserves the higher-trust source — and
+        # only from an industry-specific dossier.
+        if dossier_is_specific and market_dynamics.get("cagr_5yr") is None:
+            cagr = _finite_or_none(getattr(industry_tam, "cagr_5y_pct", None))
             if cagr is not None:
                 market_dynamics["cagr_5yr"] = cagr
                 # Legacy promotion — only when the proxy didn't publish a

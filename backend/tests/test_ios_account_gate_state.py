@@ -16,7 +16,9 @@ gated LOAD now owns a pair of FLAGS, set from that typed refusal and never re-de
 string.
 
 ⚠️ Set from the OUTCOME, never from a pre-flight `auth.status` read. The first version of this
-pass used `guard AppActions.shared.isSignedIn` up front, the way `ResearchViewModel` does, and
+pass used `guard AppActions.shared.isSignedIn` up front, the way `ResearchViewModel.loadReports`
+then did (it moved to the same outcome-driven shape after TestFlight 1.0 (9); its row is in
+`_GATED_LOADS` below and `test_ios_reports_gate_from_refusal.py` pins the rest), and
 the adversarial review measured what it cost: on every signed-in cold launch
 `primeStoredCredential` arms the token while the status still reads `.restoring`, so the guard
 refused requests that would have succeeded and Home showed "Reconnecting…" instead of the
@@ -49,6 +51,7 @@ _UPDATES_VIEW = _IOS / "Views/Screens/UpdatesView.swift"
 _UPDATES_VM = _IOS / "ViewModels/UpdatesViewModel.swift"
 _TRACKING_VIEW = _IOS / "Views/Screens/TrackingView.swift"
 _TRACKING_VM = _IOS / "ViewModels/TrackingViewModel.swift"
+_RESEARCH_VM = _IOS / "ViewModels/ResearchViewModel.swift"
 _REPORTS_LIST = _IOS / "Views/Organisms/ReportsListSection.swift"
 _LEARN_VIEW = _IOS / "Views/Screens/LearnView.swift"
 
@@ -129,6 +132,9 @@ _VM_CLASS = {
     _HOME_VM: "final class HomeDashboardViewModel: ObservableObject",
     _UPDATES_VM: "final class UpdatesViewModel: ObservableObject",
     _TRACKING_VM: "class TrackingViewModel: ObservableObject",
+    # ⚠️ `_decl_block` balances braces on the RAW text, comments included, across this whole
+    # ~1,500-line class. One unbalanced brace in a comment would cut the class block short.
+    _RESEARCH_VM: "class ResearchViewModel: ObservableObject",
 }
 
 # Every load that can be REFUSED for want of an armed token, and the flag pair it owns.
@@ -145,6 +151,12 @@ _GATED_LOADS = {
                         "assetsIsReconnecting", "assetsRequiresSignIn"),
     "Tracking/Whales": (_TRACKING_VM, "private func loadWhaleList(retryCount: Int = 3) async",
                         "whalesIsReconnecting", "whalesRequiresSignIn"),
+    # Until TestFlight 1.0 (9) this load opened with an `isSignedIn` guard, which refused the
+    # ARMED launch request and latched Reconnecting with nothing left to re-run it. Its
+    # stale-outcome ordering, the credits twin and the identity-change reload are pinned in
+    # test_ios_reports_gate_from_refusal.py.
+    "Reports": (_RESEARCH_VM, "func loadReports() async",
+                "isReconnectingReports", "requiresSignInForReports"),
 }
 
 
@@ -245,6 +257,12 @@ def test_each_load_clears_its_own_gate_when_it_is_not_refused(load):
         )
 
 
+# Research is deliberately NOT in this table. Its `handleIdentityChange` clears the list but
+# leaves a latched Reconnecting or Sign In gate up over the cleared list until the reload
+# decides: clearing the flags there would draw "No analyses yet", which is false for an account
+# whose reports simply have not been fetched yet. A hidden tab is still healed, because the
+# reset nils `lastLoadedAt` and activation then reloads. That reload is pinned in
+# test_ios_reports_gate_from_refusal.py instead.
 _IDENTITY_RESETS = {
     "Home": (_HOME_VM, ("requiresSignIn", "isReconnecting")),
     "Updates": (_UPDATES_VM, ("requiresSignIn", "isReconnecting")),

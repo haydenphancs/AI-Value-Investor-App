@@ -334,6 +334,12 @@ actor TaskPollingManager {
     /// being re-validated — it heals on re-arm). Terminal by exclusion: the report is gone
     /// (`.notFound`, `RESEARCH_DELETED`), the session is over (`.tokenExpired`,
     /// `.sessionEnded`), the DTO drifted (see the `.unknown` arm), or the task was cancelled.
+    ///
+    /// `.tokenExpired` stays terminal on purpose. A refresh that could not complete now arrives as
+    /// `.authUnavailable` (transient), so `.tokenExpired` here means the refresh was ANSWERED with a
+    /// rejection. Retrying it spins a headless monitor to `maxPollDuration` — a new refresh per tick,
+    /// or `.signInRequired` pre-flight refusals once the token is cleared — whose `.timeout` arm then
+    /// re-adds the ended account's report id to `ResearchViewModel.inFlightReportIds`.
     nonisolated static func isTransientPollFailure(_ error: AppError) -> Bool {
         switch error {
         case .noConnection, .timeout, .serverError, .rateLimited, .authUnavailable,

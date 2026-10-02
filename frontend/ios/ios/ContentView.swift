@@ -12,7 +12,10 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
     @State private var selectedTab: HomeTab = .home
     @State private var researchTickerSymbol: String? = nil
-    @State private var researchSubTab: ResearchTab = .research
+    /// Bumped (never reset) on EVERY "AI Deep Research" handoff. The Research tab observes it
+    /// together with the ticker, so a handoff of the ticker it already holds still lands on the
+    /// Research segment with that ticker shown — observing the ticker alone fired only on a change.
+    @State private var researchHandoffSeq = 0
 
     /// The ONE general-purpose Cay AI conversation, owned here so it survives tab switches and
     /// the chat resumes wherever it is reopened from.
@@ -79,7 +82,7 @@ struct ContentView: View {
             ResearchViewWithBinding(
                 selectedTab: $selectedTab,  
                 prefilledTicker: researchTickerSymbol,
-                initialSubTab: researchSubTab
+                handoffSeq: researchHandoffSeq
             )
             .opacity(selectedTab == .research ? 1 : 0)
             .allowsHitTesting(selectedTab == .research)
@@ -160,12 +163,12 @@ struct ContentView: View {
         // read. `initial: true` matches the push handler — a cold launch could park the intent
         // before this view exists.
         //
-        // Order matters: seed the ticker BEFORE switching tabs, so the Research tab's own
-        // `onChange(of: prefilledTicker)` sees a non-nil value the moment it comes forward.
+        // All three writes land in one update; the token is what makes a repeat of the same
+        // ticker a change at all, so the Research tab's handoff observer always fires.
         .onChange(of: appState.pendingResearchTicker, initial: true) { _, ticker in
             guard let ticker, !ticker.isEmpty else { return }
             researchTickerSymbol = ticker
-            researchSubTab = .research
+            researchHandoffSeq &+= 1
             selectedTab = .research
             appState.pendingResearchTicker = nil
         }
@@ -193,10 +196,10 @@ struct ContentView: View {
             // is a low-cardinality dimension, not free text.
             Analytics.shared.track(.screenView, ["tab": .string(newValue.rawValue)])
 
-            // Clear the research ticker when leaving research tab
+            // Clear the research ticker when leaving research tab. NOT the token: it only ever
+            // increases, and a reset would itself be a change the Research tab reacts to.
             if oldValue == .research && newValue != .research {
                 researchTickerSymbol = nil
-                researchSubTab = .research
             }
         }
     }
@@ -279,6 +282,14 @@ private struct DeepLinkTrigger: Equatable {
     let ready: Bool
 }
 
+/// What the Research tab's handoff observer watches: the ticker AND the handoff that delivered
+/// it, in one value (the `DeepLinkTrigger` shape). A repeat of the same ticker still changes it,
+/// and the handler reads the ticker from the NEW value, never from a view property.
+private struct ResearchHandoff: Equatable {
+    let ticker: String?
+    let seq: Int
+}
+
 // MARK: - ResearchView with Binding Support
 struct ResearchViewWithBinding: View {
     @Environment(AppState.self) private var appState
@@ -289,18 +300,24 @@ struct ResearchViewWithBinding: View {
     @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
-    let initialSubTab: ResearchTab
+    /// See `ContentView.researchHandoffSeq`.
+    let handoffSeq: Int
     // Carry the full AnalysisReport (not just ticker) so the detail view
     // receives backendId + persona and can short-circuit to the cached
     // ticker_report_data JSONB instead of regenerating.
     @State private var selectedReport: AnalysisReport?
     @State private var selectedTrendingAnalysis: TrendingAnalysis?
     @State private var showProfile = false
+    /// True once `researchTabDidActivate()` has run for the CURRENT visit to this tab; cleared
+    /// only when the tab goes inactive. `.task` re-runs on every re-APPEARANCE, not just on an id
+    /// change, so if closing a cover re-appears this view the activation task runs again with
+    /// `isActiveTab` still true and would wipe the analyst the user just tapped.
+    @State private var hasActivatedThisVisit = false
 
-    init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil, initialSubTab: ResearchTab = .research) {
+    init(selectedTab: Binding<HomeTab>, prefilledTicker: String? = nil, handoffSeq: Int = 0) {
         self._selectedTab = selectedTab
         self.prefilledTicker = prefilledTicker
-        self.initialSubTab = initialSubTab
+        self.handoffSeq = handoffSeq
         self._viewModel = StateObject(wrappedValue: ResearchViewModel(prefilledTicker: prefilledTicker))
     }
 
@@ -328,14 +345,15 @@ struct ResearchViewWithBinding: View {
                     unreadNotifications: appState.unreadNotificationCount
                 )
             }
-
-            if viewModel.isLoading {
-                LoadingOverlay()
-            }
+            // No full-screen LoadingOverlay here. Pull-to-refresh already shows the system
+            // refresh control; a dark scrim plus a second spinner over the whole tab is what a
+            // TestFlight tester reported as "the whole screen here is blink".
         }
-        .onAppear {
-            viewModel.selectedTab = initialSubTab
-        }
+        // NO appear-time segment seed. This view is mounted once and never re-created, so an
+        // appear hook here re-runs whenever SwiftUI re-appears it after a cover (report reader,
+        // Profile, Trending, the shell's chat or push destination); a seed snapped Reports back to
+        // Research. The segment starts at the ViewModel's default and the handoff below sets it.
+        //
         // The `init` seed below covers a COLD LAUNCH only, and nothing else did.
         //
         // `prefilledTicker` reaches the ViewModel through
@@ -345,8 +363,16 @@ struct ResearchViewWithBinding: View {
         // tab and then presented an EMPTY search field, which is indistinguishable from the
         // button having done nothing. This is the half of the bug that survived even on the one
         // entry point that was wired up.
-        .onChange(of: prefilledTicker) { _, ticker in
-            guard let ticker, !ticker.isEmpty else { return }
+        //
+        // Keyed on the ticker AND the handoff token: a repeat of the ticker this tab already holds
+        // is not a ticker change. Deliberately no `initial: true`: a cold launch is covered by the
+        // init seed and the shell's own initial run, and an initial run here could re-fire on a
+        // re-appear, re-applying an old handoff over the user's later choices.
+        .onChange(of: ResearchHandoff(ticker: prefilledTicker, seq: handoffSeq)) { _, handoff in
+            guard let ticker = handoff.ticker, !ticker.isEmpty else { return }
+            // Land on the Research segment: arriving from Reports (Generate switches there) would
+            // otherwise hide the ticker the user just asked for.
+            viewModel.selectedTab = .research
             // Through the ViewModel, NOT `viewModel.searchText = ticker`. The chip renders
             // `selectedTarget` and falls back to `searchText` only when it is nil, while
             // `generateAnalysis()` reads `searchText` — so writing one of them left the screen
@@ -372,6 +398,11 @@ struct ResearchViewWithBinding: View {
         .onChange(of: viewModel.selectedTab) { _, tab in
             if tab == .reports { viewModel.startReportsPolling() }
         }
+        // The stop below fires if SwiftUI sends this view a disappear when a cover goes up, so the
+        // matching appear must re-arm it, or a processing card stays frozen after the cover
+        // closes. Gated on the tab: a hidden tab re-arms through the activation task above.
+        // Cheap: startReportsPolling cancels any running poll first and exits once idle.
+        .onAppear { if isActiveTab { viewModel.startReportsPolling() } }
         .onDisappear { viewModel.stopReportsPolling() }
         // Heals a load that raced session restore. The ViewModel's only unconditional load is
         // in `init`, and all five tabs mount eagerly in one ZStack — so it runs at launch, while
@@ -389,9 +420,15 @@ struct ResearchViewWithBinding: View {
         // running; this covers the rest — a value hydrated from the server, and the promise the
         // setting's own subtitle makes ("Pre-selected for new research"). It also clears the
         // manual-override flag, which is what makes a one-off pick last for the visit it was
-        // made in rather than for the whole app process.
+        // made in rather than for the whole app process. Latched per visit, see
+        // `hasActivatedThisVisit`.
         .task(id: isActiveTab) {
-            guard isActiveTab else { return }
+            guard isActiveTab else {
+                hasActivatedThisVisit = false
+                return
+            }
+            guard !hasActivatedThisVisit else { return }
+            hasActivatedThisVisit = true
             viewModel.researchTabDidActivate()
         }
         // The direct case, and the one that has no other cure: signing in or out from THIS

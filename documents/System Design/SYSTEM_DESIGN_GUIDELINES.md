@@ -807,7 +807,7 @@ that matters: two errors with the same HTTP status can need opposite handling (s
 | Server (5xx) | upstream 502 | **GET only**, ≤2×, fixed 1 s | see §6.4 — the method guard is a money guard |
 | Auth — no credential | `AUTH_REQUIRED` | no | prompt sign-in; **never** clear a stored token |
 | Auth — bad credential | `AUTH_TOKEN_INVALID` | refresh once | retry after single-flight refresh |
-| Auth — dead session | `AUTH_SESSION_EXPIRED` | refresh once | it is in `triggersTokenRefresh`: one single-flight refresh + replay; only if that fails, clear the token and discard session data |
+| Auth — dead session | `AUTH_SESSION_EXPIRED` | refresh once | it is in `triggersTokenRefresh`: one single-flight refresh + replay; only if the refresh is REJECTED, clear the token and discard session data — a refresh that cannot complete (429/5xx/offline) surfaces `AUTH_UNAVAILABLE` and keeps the session |
 | Forbidden | `AUTH_FORBIDDEN` (403) | no | not an auth failure — do not refresh, do not sign out |
 | Credits | `INSUFFICIENT_CREDITS` (**402**) | no | route to Buy Credits, not the paywall (§9b.7) |
 | Capacity | `SYSTEM_BUSY` (409) | no | show Retry — transient by construction and never burns credits (§5), but there is no automatic backoff loop |
@@ -973,8 +973,9 @@ above the slowest server guard. There is still no `RetryPolicy` type.
 │  │      ├── [String: CacheEntry], capped by ENTRY COUNT (not bytes)     │    │
 │  │      ├── TTL per resource class (see 7.2), 25 s … 24 h               │    │
 │  │      ├── FIFO eviction (the "LRU" comment is wrong)                  │    │
-│  │      └── + two small uncapped dicts: UpdatesViewModel.feedCache,     │    │
-│  │          AudioManager.artworkCache                                    │    │
+│  │      ├── + two small uncapped dicts: UpdatesViewModel.feedCache,     │    │
+│  │      │   AudioManager.artworkCache                                   │    │
+│  │      └── + CompanyLogoCache: [String: UIImage] logos, 16 MB cap      │    │
 │  │                                                                       │    │
 │  │  Persistence: Keychain (tokens) + UserDefaults (preferences)          │    │
 │  │      ├── NO Core Data, NO SwiftData, NO NSCache, no local database   │    │

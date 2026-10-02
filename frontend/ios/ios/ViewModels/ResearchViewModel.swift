@@ -35,7 +35,6 @@ class ResearchViewModel: ObservableObject {
     @Published var creditBalance: CreditBalance?
     @Published var trendingAnalyses: [TrendingAnalysis] = TrendingAnalysis.mockTrending
     @Published var analysisCost: AnalysisCost = .standard
-    @Published var isLoading: Bool = false
     /// Backend ids of reports this session has launched that are still in
     /// flight (pending/processing). Bounded by `maxConcurrentGenerations` —
     /// drives the Generate button's enable/spinner state and gates new runs.
@@ -68,10 +67,9 @@ class ResearchViewModel: ObservableObject {
     /// Persona keys selected as filter tags (empty = show all personas).
     @Published var selectedPersonaKeys: Set<String> = []
     @Published var isSelectingReports: Bool = false
-    /// Keyed by `backendId` (NOT the per-load `AnalysisReport.id` UUID, which is
-    /// reminted on every `loadReports()`), so a selection survives the 5s poll
-    /// reload. Mock rows have no `backendId` and are therefore not selectable —
-    /// which is fine, they can't be deleted either.
+    /// Keyed by `backendId` — the server row id, which `AnalysisReport.id` now also derives
+    /// from — so a selection survives the 5s poll reload. Mock rows have no `backendId` and
+    /// are therefore not selectable — which is fine, they can't be deleted either.
     @Published var selectedReportIds: Set<String> = []
     @Published var isDeletingReports: Bool = false
     @Published var showDeleteConfirm: Bool = false
@@ -85,19 +83,35 @@ class ResearchViewModel: ObservableObject {
     /// previously written once from `init` — which runs at launch, while session restore is
     /// still in flight — and nothing ever recomputed it, so a signed-in user was told to sign
     /// in for the rest of the app run. Anything that changes auth MUST re-run `loadReports()`;
-    /// `ResearchViewWithBinding` does that on `.task(id: isActiveTab)` and on an
-    /// `auth.status` transition to `.authenticated`.
-    @Published var requiresSignInForReports: Bool = false
+    /// `ResearchViewWithBinding` does that on `.task(id: isActiveTab)` and through
+    /// `.reloadOnIdentityChange`. A pass is only ever gated by APIClient REFUSING the request
+    /// (no token armed), and the disarm that causes that bumps `identityGeneration`, so the
+    /// heal that re-arms it always reaches `handleIdentityChange`.
+    /// `private(set)`: the gate is decided ONLY from a list outcome inside `loadReports()`, so no
+    /// view can write it from a pre-flight auth read (the defect this whole pass removed).
+    @Published private(set) var requiresSignInForReports: Bool = false
 
     /// A credential is stored but not yet armed. Renders as "Reconnecting…", never as the
     /// sign-in prompt: this user is not signed out, and `AppState.requestSignIn` deliberately
     /// refuses to prompt in this window anyway, so the button would do nothing.
-    @Published var isReconnectingReports: Bool = false
+    @Published private(set) var isReconnectingReports: Bool = false
 
     /// When `loadBackendData()` last completed. Drives `loadIfStale()` so re-entering the tab
-    /// does not refetch on every switch. Deliberately NOT set on the signed-out / reconnecting
-    /// early-returns — those must stay eligible for an immediate reload.
+    /// does not refetch on every switch. Deliberately NOT set on a pass APIClient refused
+    /// (signed out / reconnecting) — those must stay eligible for an immediate reload.
     private var lastLoadedAt: Date?
+
+    /// Request ordering for `loadReports()`. Its callers overlap (the 5 s poll, every running
+    /// generation's stream, pull-to-refresh, retry, delete), and nothing orders their answers:
+    /// a list GET sent before a report completed but answered after the completion reload
+    /// flipped the finished card back to a dimmed PROCESSING card for one poll. An outcome is
+    /// applied only when it is newer than the last one applied.
+    private var reportsRequestSeq = 0
+    private var reportsAppliedSeq = 0
+
+    /// Bumped on every identity change, so a load that started under the previous identity
+    /// never stamps `lastLoadedAt` for the new one.
+    private var identityEpoch = 0
 
     /// How long a completed load stays fresh.
     ///
@@ -320,6 +334,7 @@ class ResearchViewModel: ObservableObject {
     }
 
     private func performBackendLoad() async {
+        let epoch = identityEpoch
         async let reportsTask: () = loadReports()
         async let creditsTask: () = loadCredits()
         async let trendingTask: () = loadTrending()
@@ -329,6 +344,9 @@ class ResearchViewModel: ObservableObject {
         // Only a load that actually saw the account counts as fresh. Marking the signed-out or
         // reconnecting pass as fresh would let the 5-minute window suppress the reload that
         // heals it — i.e. the staleness guard would re-create the bug it is sitting next to.
+        // Nor a load that straddled an identity change: its reports answer was dropped as
+        // superseded, so stamping it would let the window suppress the new account's load.
+        guard epoch == identityEpoch else { return }
         if !requiresSignInForReports && !isReconnectingReports {
             lastLoadedAt = Date()
         }
@@ -359,6 +377,10 @@ class ResearchViewModel: ObservableObject {
         isSelectingReports = false
         creditBalance = nil
         lastLoadedAt = nil
+        identityEpoch &+= 1
+        // Every list answer still in flight was asked for by the PREVIOUS identity: none of
+        // them may land in this ViewModel (auth.md §7), so mark them all as superseded.
+        reportsAppliedSeq = reportsRequestSeq
         error = nil
         // The previous account's in-flight bookkeeping must not gate or poll for the next
         // one: a non-empty `locallyTimedOutReportIds` keeps the 5 s list poll alive against
@@ -379,7 +401,15 @@ class ResearchViewModel: ObservableObject {
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
         guard isActiveTab else { return }
+        // Wait out a load already in flight instead of JOINING it: its reports answer was just
+        // marked superseded, so joining would end this reload with nothing applied.
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+        }
         await loadBackendData()
+        // The poll was stopped above; re-arm it for this identity. It exits on its own once
+        // nothing is in flight.
+        startReportsPolling()
     }
 
     /// Fetch active personas from GET /research/personas.
@@ -492,22 +522,19 @@ class ResearchViewModel: ObservableObject {
 
     /// Fetch user's research reports from GET /research/reports
     func loadReports() async {
-        // Reports belong to an account now, so a signed-out user has none to load — say that,
-        // rather than firing a request that will be refused.
+        // Reports belong to an account, so a signed-out user has none to load. THREE outcomes,
+        // not two — "not armed right now" is not "signed out" — and all three are decided from
+        // the OUTCOME of the request, never from a pre-flight `auth.status` read (the same shape
+        // as HomeDashboardViewModel.performLoad and TrackingViewModel.loadTrackingFeed).
         //
-        // THREE outcomes, not two. "Not armed right now" is not the same as "signed out": at
-        // launch this runs while session restore is still in flight, and a restore that keeps
-        // failing backs off forever. Collapsing that into the sign-in prompt is what told a
-        // signed-in user to sign in — with their own avatar loaded in the header above it.
-        guard AppActions.shared.isSignedIn else {
-            reports = []
-            let reconnecting = AppActions.shared.isRestoringSession
-            isReconnectingReports = reconnecting
-            requiresSignInForReports = !reconnecting
-            return
-        }
-        requiresSignInForReports = false
-        isReconnectingReports = false
+        // At launch `primeStoredCredential` arms the token while the status still reads
+        // `.restoring`. An up-front `isSignedIn` check refused that ARMED request, showed
+        // "Reconnecting…", and nothing re-ran the load once the restore succeeded — the tab
+        // stayed stuck until a pull-to-refresh. `.getMyReports` is `.signInRequired`, so an
+        // UNARMED call is refused by `APIClient.buildRequest` before any I/O (never sent as a
+        // guest) and arrives here typed as `AppError.signInRequired`.
+        reportsRequestSeq &+= 1
+        let seq = reportsRequestSeq
 
         print("📋 ResearchVM: Loading reports from backend...")
         do {
@@ -515,6 +542,17 @@ class ResearchViewModel: ObservableObject {
                 endpoint: .getMyReports(limit: 50),
                 responseType: [BackendReportListItem].self
             )
+            // Older than the last APPLIED outcome: a newer answer is already on screen. Dropped
+            // BEFORE the drain, the slot release and the assignment below, so a stale list cannot
+            // revert a finished card to processing. Ordering is by SEND time: a list read before a
+            // new report's row was committed can still miss that row (see releaseFinishedSlots).
+            guard seq > reportsAppliedSeq else {
+                print("ℹ️ ResearchVM: superseded list answer dropped (seq \(seq) ≤ \(reportsAppliedSeq))")
+                return
+            }
+            reportsAppliedSeq = seq
+            requiresSignInForReports = false
+            isReconnectingReports = false
             print("✅ ResearchVM: Loaded \(backendReports.count) reports from backend")
             // DRAIN the local-timeout set to ids the server still lists — against the RAW
             // list, before the dismissed filter, so a retry's pre-check still sees a row it
@@ -522,7 +560,7 @@ class ResearchViewModel: ObservableObject {
             // id retired by Retry, by a bulk delete, or by a delete on another device never
             // came back through the pass and its flag never cleared: `startReportsPolling`
             // read the non-empty set as "something in flight" and issued the list GET every
-            // 5 s for the rest of the process (~720/h), reminting every row's UUID each time.
+            // 5 s for the rest of the process (~720/h).
             // The pass below re-inserts any row that is still genuinely stuck.
             locallyTimedOutReportIds.formIntersection(Set(backendReports.map(\.id)))
             // Release client concurrency slots the SERVER has finished with: an id whose
@@ -544,6 +582,30 @@ class ResearchViewModel: ObservableObject {
             // A cancelled tick (tab switch mid-load) is nobody's failure: no sync-failed
             // analytics, and never a blank "cancelled" alert over the list.
             guard !appError.isCancellation else { return }
+            // An outcome older than the last applied one says nothing about now: it must not
+            // clear, gate or alert over a newer list. Logged, never swallowed.
+            guard seq > reportsAppliedSeq else {
+                print("ℹ️ ResearchVM: superseded list outcome dropped (seq \(seq) ≤ \(reportsAppliedSeq), \(appError.analyticsCode))")
+                return
+            }
+            if case .signInRequired = appError {
+                // No token armed, so APIClient refused before any I/O. The newest truth about
+                // the session: an OLDER armed answer landing later must not lift this gate.
+                reportsAppliedSeq = seq
+                // Drop rows nothing can refresh, and say WHY the list is empty: "Reconnecting…"
+                // for a stored credential that is healing (auth.md §5), the sign-in prompt
+                // otherwise. A refusal is neither a sync failure nor an alert — the 5 s poll
+                // would raise one per tick — and it never stamps `lastLoadedAt`
+                // (`performBackendLoad` reads these two flags).
+                reports = []
+                let reconnecting = AppActions.shared.isRestoringSession
+                isReconnectingReports = reconnecting
+                requiresSignInForReports = !reconnecting
+                return
+            }
+            // A real failure is not an account gate.
+            requiresSignInForReports = false
+            isReconnectingReports = false
             Analytics.shared.track(.backgroundSyncFailed, [
                 "op": .string("load_reports"),
                 "code": .string(appError.analyticsCode),
@@ -562,42 +624,55 @@ class ResearchViewModel: ObservableObject {
 
     /// Fetch user's credit balance from GET /users/me/credits
     func loadCredits() async {
-        // A signed-out caller resolves to the shared guest sentinel, which is seeded with
-        // 100,000 credits — so the Research tab told guests they had "99,999,530 credits
-        // remaining" while the Generate button now asks them to sign in. That number was never
-        // theirs and is not spendable; leaving the balance unknown hides the badge entirely,
-        // which is the honest state.
-        guard AppActions.shared.isSignedIn else {
-            creditBalance = nil
-            return
-        }
-
+        // No up-front `isSignedIn` check — it refused the ARMED request during `.restoring` and
+        // left the balance hidden after the restore succeeded (see `loadReports`).
+        // `.getUserCredits` is `.signInRequired`, so a caller with no token armed is refused by
+        // `APIClient` before any I/O and can never reach the shared guest sentinel's 100,000
+        // seeded credits (which once showed guests "99,999,530 credits remaining").
+        let epoch = identityEpoch
         print("💳 ResearchVM: Loading credits from backend...")
         do {
             let backendCredits: BackendCreditsResponse = try await apiClient.request(
                 endpoint: .getUserCredits,
                 responseType: BackendCreditsResponse.self
             )
+            // Asked for by the PREVIOUS identity: `handleIdentityChange` cleared the balance and
+            // reloads it for the new one, so this answer must not land (auth.md §7).
+            guard epoch == identityEpoch else {
+                print("ℹ️ ResearchVM: credits answer from a previous identity dropped")
+                return
+            }
             print("✅ ResearchVM: Credits loaded — \(backendCredits.remaining) remaining of \(backendCredits.total)")
             self.creditBalance = CreditBalance.from(backendCredits)
         } catch {
+            if case .signInRequired = AppError.from(error) {
+                // Refused for want of an armed token: hide the badge rather than keep a balance
+                // this session can no longer refresh. Not a failure — no warning per poll. Only
+                // for the identity that asked: a refusal from before an identity change must not
+                // hide the new account's balance.
+                guard epoch == identityEpoch else {
+                    print("ℹ️ ResearchVM: credits refusal from a previous identity dropped")
+                    return
+                }
+                creditBalance = nil
+                return
+            }
             // Leave `creditBalance` nil rather than inventing a number — the UI hides
             // the badge/card instead of showing a balance the user doesn't have.
             print("⚠️ ResearchVM: Failed to load credits — \(error). Leaving balance unknown.")
         }
     }
 
+    /// Pull-to-refresh. Deliberately raises no loading flag: the system refresh control IS the
+    /// indicator. This used to also drive a full-screen dark scrim plus a second spinner over
+    /// the whole tab (TestFlight 1.0 (9): "the whole screen here is blink").
     func refresh() async {
         guard !isDeletingReports else { return }   // don't race the delete fan-out
-        isLoading = true
         await loadBackendData()
-        isLoading = false
     }
 
     // MARK: - Reports Tab Live Polling
 
-    /// Poll the reports list every 5s while any report is in-flight.
-    /// Called when the user switches to the Reports tab. Self-terminates
     /// Drop every in-flight id whose server row is terminal ("completed" / "failed")
     /// or absent from the raw list. "pending" and "processing" keep their slot.
     private func releaseFinishedSlots(against backendReports: [BackendReportListItem]) {
@@ -617,6 +692,8 @@ class ResearchViewModel: ObservableObject {
         }
     }
 
+    /// Poll the reports list every 5s while any report is in-flight.
+    /// Called when the user switches to the Reports tab. Self-terminates
     /// once no processing/pending reports remain — no need to cancel
     /// manually in that case.
     func startReportsPolling() {
@@ -638,8 +715,8 @@ class ResearchViewModel: ObservableObject {
                 if !hasInflight {
                     return
                 }
-                // Don't churn the list mid-selection — a reload remints row
-                // UUIDs and can reorder rows under the user. Skip this tick;
+                // Don't churn the list mid-selection — a reload can reorder rows
+                // under the user. Skip this tick;
                 // the task stays alive and resumes once selection ends.
                 if self.isSelectingReports { continue }
                 await self.loadReports()

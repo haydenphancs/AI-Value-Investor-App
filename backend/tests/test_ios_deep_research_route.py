@@ -31,6 +31,10 @@ _INDEX = _IOS / "Views/Screens/IndexDetailView.swift"
 _ROUTER = _IOS / "Views/Molecules/AssetDetailRouter.swift"
 _APP_STATE = _IOS / "Core/State/AppState.swift"
 _CONTENT = _IOS / "ContentView.swift"
+# The Research tab's handoff observer. Keyed on the ticker AND a handoff token since a repeat of
+# the same ticker never fired `.onChange(of: prefilledTicker)` (see ResearchHandoff in
+# ContentView.swift and tests/test_ios_research_segment_survives_covers.py).
+_PREFILL_OBSERVER = ".onChange(of: ResearchHandoff("
 
 
 def _src(path: Path) -> str:
@@ -145,7 +149,7 @@ def test_the_research_tab_reacts_to_a_later_prefill():
     directly — see `test_the_prefill_goes_through_the_single_writer` for why that matters. This
     test still owns the "reacts at all" half.
     """
-    body = _decl_body(_code(_CONTENT), ".onChange(of: prefilledTicker)")
+    body = _decl_body(_code(_CONTENT), _PREFILL_OBSERVER)
     assert "ticker" in body and "viewModel." in body, "the observer no longer forwards the ticker"
 
 
@@ -342,7 +346,7 @@ def test_the_prefill_goes_through_the_single_writer():
     """`TargetSelectionSection` renders `selectedTarget` and falls back to `searchText` only when
     it is nil, while `generateAnalysis()` reads `searchText`. Writing one of them left the chip
     showing a STALE company while Generate spent 20 credits on the new one."""
-    body = _decl_body(_code(_CONTENT), ".onChange(of: prefilledTicker)")
+    body = _decl_body(_code(_CONTENT), _PREFILL_OBSERVER)
     assert "applyPrefilledTicker" in body, "the prefill no longer goes through the ViewModel"
     assert "viewModel.searchText =" not in body, (
         "the prefill assigns searchText directly again, so selectedTarget can shadow it and the "
@@ -383,7 +387,7 @@ def test_the_guards_are_not_vacuous():
     assert "///" not in ticker_code, "_code() is not stripping doc comments"
 
     # (3) The prefill guard's negative assertion must be able to fail.
-    prefill = _decl_body(content_code, ".onChange(of: prefilledTicker)")
+    prefill = _decl_body(content_code, _PREFILL_OBSERVER)
     assert "viewModel.searchText =" not in prefill
     assert "viewModel.searchText = ticker" in prefill.replace(
         "viewModel.applyPrefilledTicker(ticker)", "viewModel.searchText = ticker"

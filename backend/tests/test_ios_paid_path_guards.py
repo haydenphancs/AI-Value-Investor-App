@@ -273,10 +273,13 @@ def test_research_view_model_refreshes_credits_when_an_entitlement_lands():
 
 
 def test_profile_view_model_does_not_load_the_guest_sentinel_balance():
-    """`/users/me/credits` is `.guestAllowed`, and a signed-out caller resolves to the SHARED
-    guest sentinel — seeded ~100,000 credits. Loading it writes a balance that is not the
-    user's into `AppState.user.credits`, which every other surface then renders as theirs.
-    `ResearchViewModel.loadCredits` already guards; Profile did not."""
+    """A signed-out caller of `/users/me/credits` once resolved to the SHARED guest sentinel —
+    seeded ~100,000 credits. Loading it writes a balance that is not the user's into
+    `AppState.user.credits`, which every other surface then renders as theirs. The route is
+    `.signInRequired` now, so APIClient refuses an unarmed call pre-flight —
+    `ResearchViewModel.loadCredits` relies on that refusal instead of an up-front check (an
+    up-front `isSignedIn` read refused the ARMED request during `.restoring`); Profile keeps
+    its explicit guard."""
     src = _strip_swift_comments(_src(_PROFILE_VM))
     body = src[src.index("func loadCredits("):]
     body = body[:body.index("\n    func ", 1)] if "\n    func " in body[1:] else body

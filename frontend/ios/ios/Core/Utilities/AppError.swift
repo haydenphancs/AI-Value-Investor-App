@@ -510,8 +510,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             case "AUTH_REQUIRED":
                 return .signInRequired(feature: nil)
             case "AUTH_TOKEN_INVALID":
-                // The refresh already ran and failed by the time this surfaces (the interceptor
-                // owns the retry), so the session really is over.
+                // Reaching here means the interceptor got a VERDICT, or was told not to ask: the
+                // refresh was answered with a rejection (`handleUnrecoverableAuthFailure` already
+                // ended the session), the post-refresh retry was refused too, or the caller passed
+                // `allowAuthRetry: false` and owns the decision (`AppState.performRestore`). A
+                // refresh that merely could not COMPLETE never gets here —
+                // `APIClient.transientRefreshError()` surfaces it as AUTH_UNAVAILABLE, because this
+                // case is `isAuthError` and `AppState.handleError` signs out on it.
+                // It is also what the REFRESH ENDPOINT itself answers (`.refreshToken` is an auth
+                // endpoint, so no interceptor runs) — the refresher in iosApp.swift turns exactly
+                // this `isAuthError` into `.credentialRejected`, so this case must stay in
+                // `isAuthError` — and what a 401 surfaces as before the refresher is wired.
                 return .tokenExpired
             case "AUTH_SESSION_EXPIRED", "AUTH_ACCOUNT_NOT_FOUND":
                 return .sessionEnded(message: message)
@@ -893,6 +902,8 @@ enum APIError: Error, @unchecked Sendable {
     /// A 401 that carried the structured `{error_code, ...}` body — one of the `AUTH_*` codes.
     /// Separate from `.businessError` so auth failures keep their identity instead of being
     /// indistinguishable from a 404 or a credits error.
+    /// One instance is client-made: `APIClient.transientRefreshError()` (a 401 whose refresh
+    /// could not complete, surfaced as AUTH_UNAVAILABLE).
     case authError(code: String, message: String)
 }
 

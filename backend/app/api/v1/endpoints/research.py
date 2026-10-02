@@ -737,8 +737,8 @@ async def rate_report(
 
     Reports 404 when the UPDATE matches nothing. It used to answer
     "Report rated successfully" unconditionally, so rating a report that had been
-    deleted moments earlier — the Reports list reloads every few seconds and rows are
-    reminted on each load — or one belonging to a previous signed-in identity looked
+    deleted moments earlier — the Reports list reloads every few seconds while anything
+    is in flight — or one belonging to a previous signed-in identity looked
     like it worked and simply did not persist. Silent no-ops on a user-initiated
     mutation are exactly what the client cannot detect.
     """

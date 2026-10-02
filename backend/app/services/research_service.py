@@ -448,8 +448,12 @@ class ResearchService:
                 )
                 raise DegradedReportError(degraded, ticker=ticker, persona=persona_key)
 
-            # Extract legacy fields for backward compatibility
-            await self._update_status_async(report_id, "processing", 92, "Saving report...")
+            # Extract legacy fields for backward compatibility.
+            # 96, not 92: the deep path's last agent tick is 95 ("Validating and finalizing...",
+            # research_agent.py) and the progress bar must never step backwards. Every path is
+            # non-decreasing — deep 2→5→5→5…95→96→100, cache hit 2→5→90→96→100, follower
+            # 2→5→5→96→100. Pinned by tests/test_report_progress_monotonic.py.
+            await self._update_status_async(report_id, "processing", 96, "Saving report...")
 
             # Persona-weighted overall score (deterministic, server-side).
             # Overrides whatever quality_score the AI emitted in Stage A so

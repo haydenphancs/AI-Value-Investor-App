@@ -609,7 +609,13 @@ enum ReportStatus: String {
 
 // MARK: - Analysis Report
 struct AnalysisReport: Identifiable, Hashable {
-    let id = UUID()
+    /// The server row id, so a card keeps its identity across reloads. It used to be a fresh
+    /// `UUID` minted on every construction — and `loadReports()` rebuilds every row on the 5 s
+    /// poll, so SwiftUI tore down and re-inserted every card each tick, and every company logo
+    /// flashed back to its initials tile (TestFlight 1.0 (9): "the whole screen here is
+    /// blink"). Mock / UI-only rows have no `backendId`; their (ticker, persona) pairs are
+    /// unique by construction. Never ticker alone: one ticker under two analysts is two rows.
+    var id: String { backendId ?? "mock:\(ticker):\(persona.key)" }
     /// Backend `research_reports.id` UUID. Optional because mock data
     /// (and any UI-only AnalysisReport) won't have one. Used by
     /// TickerReportViewModel to fetch the cached `ticker_report_data`
@@ -674,13 +680,9 @@ struct AnalysisReport: Identifiable, Hashable {
         )
     }
 
-    static func == (lhs: AnalysisReport, rhs: AnalysisReport) -> Bool {
-        lhs.id == rhs.id
-    }
-
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
+    // Equatable / Hashable are SYNTHESIZED (memberwise) on purpose — no hand-written `==`.
+    // SwiftUI compares a row's `report` with `==`; an id-only `==` over a stable id would call
+    // a card "unchanged" when only its progress, step text or status moved, and freeze it.
 
     static let mockReports: [AnalysisReport] = [
         AnalysisReport(

@@ -180,7 +180,20 @@ TABLE_NAME = "ticker_report_cache"
 #     new fields are Optional, so an old row decodes — and keeps the wrong numbers. Set
 #     to the commit time on deploy day (2026-10-01 UTC), a PAST instant just before the
 #     deploy, per the paragraph above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 1, 13, 4, 0, tzinfo=timezone.utc)
+# 2026-10-02 (01:15 UTC): bumped for the competitor-selection fix (TestFlight #57,
+#     AVGO). `CollectedTickerData` gained `peer_source` ("intel" | "heuristic"),
+#     `peer_details` (per-peer "competes in" segment) and `focal_roic_ttm` (the focal's TTM ROIC, so it is compared with the
+#     peers' TTM ROIC instead of an annual figure up to ~3 quarters old); the report's
+#     `moat_competition` gained the order marker `competitor_order` ("direct" | "threat")
+#     and `competitor_source`, and competitor rows gained `segment` / `score_basis`. An
+#     older cached collection deserializes `peer_source` to its DEFAULT "heuristic" — the
+#     "additive field laundering" trap: a research-ranked peer list would be rebuilt as a
+#     market-cap/threat list — and `_lookup_shared_cache` would copy a pre-change
+#     (threat-ordered, top-5-by-market-cap) report to new users. Set to a PAST instant
+#     just before the deploy, per the 2026-07-04 paragraph; if the deploy commit lands
+#     later, move it to the commit time. Deploy after the 18:00 ET close so the
+#     invalidated day's reports regenerate on the next close cycle anyway.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 2, 1, 15, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

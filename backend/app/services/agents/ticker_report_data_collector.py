@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import copy
+import inspect
 import json
 import logging
 import math
@@ -398,13 +399,34 @@ class CollectedTickerData:
     # revenue_growth into `_build_competitors` per-peer scoring (replaces
     # the old proxy that scored every peer off intraday %-change).
     peer_ratios: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    # Peer ranks keyed by uppercased ticker (1 = most central competitor
-    # per the source's ordering). Populated from Phase 2 Gemini grounded
-    # suggested order when available, or from Phase 1's FMP + industry-
-    # universe heuristic order otherwise. `_build_competitors()` feeds
-    # this into `_relative_peer_score`'s directness blend so the most
-    # directly competing peer (per grounded research) leads the display.
+    # Peer ranks keyed by uppercased ticker (1 = first in the source's list).
+    # `peer_source == "intel"`: the grounded-research order, most direct
+    # competitor first — `_build_competitors()` keeps the 5 lowest ranks and
+    # DISPLAYS them in this order. `peer_source == "heuristic"`: FMP
+    # `/stock-peers` list order + industry-universe augments — NOT a
+    # directness rank, only a scoring input; those rows display highest
+    # threat score first. Both feed `_relative_peer_score`'s directness blend.
     peer_ranks: Dict[str, int] = field(default_factory=dict)
+    # Which source produced `peer_ranks`: "intel" (competitor_intel_service
+    # answered with a list extracted under the current, most-direct-first
+    # prompt), "intel_stale" (it served an OLDER cached list after a failed
+    # re-extraction — selected by rank like "intel", but displayed highest
+    # threat first, since that prompt never asked for an order) or "heuristic"
+    # (the Phase-1 fallback). Drives the report's
+    # `moat_competition.competitor_order` marker ("direct" only for "intel").
+    # ⚠️ A collection cached before this field existed deserializes to the
+    # DEFAULT "heuristic" — CACHE_SCHEMA_FLOOR was bumped with it.
+    peer_source: str = "heuristic"
+    # {TICKER: {"segment": "<competes in, ≤48 chars>"}} for intel peers, from
+    # `competitor_intel_service.get_competitor_details`; {} on the heuristic
+    # path or when the service has none.
+    peer_details: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # The focal company's TTM ROIC (fraction) for the competitor scorer, so it
+    # is compared with the peers' TTM ROIC rather than an annual figure up to
+    # ~3 quarters old. Fetched in pass 2 only when peers exist; chain:
+    # key-metrics-ttm ROIC → ROCE → ratios-ttm ROCE. None → the scorer falls
+    # back to the annual focal ROIC (warns: mixed periods).
+    focal_roic_ttm: Optional[float] = None
     sector_aggregates: Optional[SectorAggregates] = None
     # Pre-computed sector-median HISTORY ({period_type: {sector_metric_name:
     # {period_label: value}}}) for the "*" card metrics, read from the
@@ -1629,30 +1651,50 @@ class TickerReportDataCollector:
         # Lazy import so the test paths and any code path that doesn't
         # touch Moat data don't pay the Gemini-client import cost.
         peers: List[str] = []
+        intel_svc: Any = None
         try:
             from app.services.competitor_intel_service import (
                 get_competitor_intel_service,
             )
-            intel_peers = await get_competitor_intel_service().get_competitors(
+            intel_svc = get_competitor_intel_service()
+            intel_peers = await intel_svc.get_competitors(
                 ticker, profile_data,
             )
         except Exception as exc:
             logger.warning(
                 "Collector pass 2: competitor_intel call failed for %s: "
-                "%s — falling back to Phase 1 deterministic path",
-                ticker, exc,
+                "%s: %s — falling back to Phase 1 deterministic path",
+                ticker, type(exc).__name__, exc,
             )
             intel_peers = None
 
-        if intel_peers:
-            # Trust Phase-2 list verbatim — already FMP-validated +
-            # capped at 7 inside the service AND already in Gemini's
-            # grounded-research order (preserved by the service's
-            # post-validation trim). Downstream `_build_competitors()`
-            # still computes per-peer scores, just from this curated
-            # list with the rank fed in as a directness signal.
-            peers = intel_peers
+        # Only non-empty strings, uppercased and de-duplicated: a duplicate
+        # would otherwise get the LATER index as its rank below. A non-list
+        # answer counts as none (a bare "MRVL" would iterate into letters).
+        if not isinstance(intel_peers, (list, tuple)):
+            intel_peers = None
+        intel_list = list(dict.fromkeys(
+            p.strip().upper() for p in (intel_peers or [])
+            if isinstance(p, str) and p.strip()
+        ))
+        if intel_list:
+            # Trust the Phase-2 list's membership and ORDER — already
+            # FMP-validated + capped at 7 inside the service, and listed
+            # most direct competitor first by the grounded research (the
+            # service's post-validation trim preserves that order).
+            # `_build_competitors()` keeps the 5 lowest ranks, displays them
+            # in rank order, and still scores each row (rank = directness).
+            peers = intel_list
+            out.peer_source = (
+                "intel" if await _intel_list_is_ranked(intel_svc, ticker)
+                else "intel_stale"
+            )
+            out.peer_details = await _fetch_intel_peer_details(
+                intel_svc, ticker, peers,
+            )
         else:
+            out.peer_source = "heuristic"
+            out.peer_details = {}
             # ── Phase 1 fallback (deterministic peer assembly) ──
             #
             # FMP's `/stock-peers` is unreliable — micro-cap noise,
@@ -1660,8 +1702,9 @@ class TickerReportDataCollector:
             # always augment from same-industry universe constituents
             # when industry is known; FMP peers stay first in the
             # dedup'd list, universe peers are supplemental. The
-            # "don't fabricate" guarantee is preserved by the $27.3B
-            # floor + 7-row cap in `_build_competitors()`.
+            # "don't fabricate" guarantee is preserved by the
+            # max(focal × 5%, $5B) market-cap floor + the 5-row
+            # (`_COMPETITOR_MAX_N`) cap in `_build_competitors()`.
             peers = (out.peer_tickers or [])[:8]
             if industry:
                 augment = _industry_universe_peers(
@@ -1671,9 +1714,11 @@ class TickerReportDataCollector:
                 peers = list(dict.fromkeys(peers + augment))[:12]
 
         # Persist 1-based rank per peer ticker so downstream scoring
-        # (in a different method on the same class) can blend Gemini's
-        # directness signal into the threat score. Stored uppercased to
-        # match the casing convention `_build_competitors` uses to look
+        # (in a different method on the same class) can blend the list
+        # order into the threat score as directness. Only the intel list's
+        # order is a real directness rank (most direct first); the Phase-1
+        # order is FMP's list order + universe augments. Stored uppercased
+        # to match the casing convention `_build_competitors` uses to look
         # up peer ratios + moats.
         out.peer_ranks = {
             p.upper(): i + 1 for i, p in enumerate(peers) if p
@@ -1686,6 +1731,15 @@ class TickerReportDataCollector:
         peer_ratios_task = (
             self._fetch_peer_ratios(peers)
             if peers else asyncio.sleep(0, result={})
+        )
+        # The focal's own TTM key metrics, so its ROIC is the same period as
+        # the peers' (`_fetch_peer_ratios` reads /key-metrics-ttm). One call,
+        # only when there are peers to score — and NEVER by adding the focal
+        # to `peers`, which would shift `n_total_peers` (the directness
+        # denominator) and fetch a profile the scorer then drops.
+        focal_km_ttm_task = (
+            self.fmp.get_key_metrics_ttm(ticker)
+            if peers else asyncio.sleep(0, result=None)
         )
         sector_agg_task = (
             get_sector_aggregates(sector)
@@ -1716,12 +1770,16 @@ class TickerReportDataCollector:
             if sector else asyncio.sleep(0, result={})
         )
 
-        peer_profiles, peer_ratios, sector_agg, industry_tam, sector_bench = await asyncio.gather(
+        (
+            peer_profiles, peer_ratios, sector_agg, industry_tam, sector_bench,
+            focal_km_ttm,
+        ) = await asyncio.gather(
             peer_profiles_task,
             peer_ratios_task,
             sector_agg_task,
             industry_tam_task,
             sector_bench_task,
+            focal_km_ttm_task,
             return_exceptions=True,
         )
 
@@ -1744,6 +1802,18 @@ class TickerReportDataCollector:
             out.peer_ratios = {}
         else:
             out.peer_ratios = peer_ratios or {}
+
+        if peers:
+            if isinstance(focal_km_ttm, Exception):
+                logger.warning(
+                    f"Collector pass 2: focal key-metrics-ttm failed for {ticker}: "
+                    f"{type(focal_km_ttm).__name__}: {focal_km_ttm} — focal ROIC "
+                    f"falls back to ratios-ttm, then annual"
+                )
+                focal_km_ttm = None
+            out.focal_roic_ttm = _resolve_focal_roic_ttm(
+                focal_km_ttm, out.ratios_ttm,
+            )
 
         if isinstance(sector_agg, Exception):
             logger.warning(
@@ -2788,11 +2858,20 @@ class TickerReportDataCollector:
             peer_ranks=out.peer_ranks,
             # n_total_peers stays at the ORIGINAL upstream peer count
             # (Phase 2: usually 4-7; Phase 1: up to 12) so the directness
-            # denominator is stable even when the mkt-cap floor drops
-            # peers downstream. Rank 1 is always 10.0 directness, rank n
-            # is 10/n — regardless of how many survive scoring.
+            # denominator is stable even when peers are dropped downstream
+            # (mkt-cap floor on the heuristic path, unscorable on either).
+            # Rank 1 is always 10.0 directness, rank n is 10/n — regardless
+            # of how many survive scoring.
             n_total_peers=len(out.peer_ranks),
+            peer_source=out.peer_source,
+            peer_details=out.peer_details,
+            focal_roic_ttm=out.focal_roic_ttm,
         )
+        # The ORDER MARKER every "most direct first" claim depends on (chat,
+        # iOS caption, Stage-B prompts, PDF). Only the research list is
+        # ordered by directness; anything else is ordered by threat score.
+        competitors_are_direct = out.peer_source == "intel"
+        competitors_from_research = out.peer_source in _INTEL_PEER_SOURCES
         # Coverage-aware insight + durability note: when one or more
         # pillars fall flat because the industry's real moats live
         # outside the financial-statement lens (mining, banks, insurers,
@@ -2800,9 +2879,10 @@ class TickerReportDataCollector:
         # user understands a low radar corner is industry-normal rather
         # than a company weakness. The same note is appended to BOTH
         # the durability note (rendered as "Insight" under the radar)
-        # AND the competitive insight (rendered under Competitors) —
-        # whichever section the user reads first, the reassurance is
-        # there. Suffix is suppressed on the "Data unavailable"
+        # AND the competitive insight (iOS no longer renders it — its
+        # `competitiveInsightSection` was removed in 5672700d and stays
+        # removed — but the PDF and the report chat still read it).
+        # Suffix is suppressed on the "Data unavailable"
         # placeholder for each field, since appending to a placeholder
         # reads awkwardly.
         ai_competitive_insight = ai_moat.get("competitive_insight")
@@ -2830,6 +2910,12 @@ class TickerReportDataCollector:
             "competitive_insight": (
                 base_competitive_insight
                 + (coverage_note if (coverage_note and ai_competitive_insight) else "")
+            ),
+            # Declared Optional on MoatCompetitionResponse; None on every report
+            # stored before 2026-10-01 (consumers read None as "threat").
+            "competitor_order": "direct" if competitors_are_direct else "threat",
+            "competitor_source": (
+                "research" if competitors_from_research else "industry_peers"
             ),
         }
         moat_vital = _derive_moat_vital(moat_dims, deterministic_competitors)
@@ -8266,10 +8352,12 @@ def _directness_from_rank(
     downstream (mkt-cap floor, ratios gap, etc.); ranks are absolute,
     not relative to the surviving set.
 
-    Returns the neutral 5.0 anchor when rank or n_peers is missing —
-    Phase 1 fallback paths and peers we couldn't position in the
-    Gemini list both fall back to "average directness" rather than
-    silently penalizing.
+    Returns the neutral 5.0 anchor when rank or n_peers is missing (a
+    peer we couldn't position in the source list) rather than silently
+    penalizing. NOTE: Phase-1 (heuristic) peers DO carry ranks — FMP's
+    `/stock-peers` list order + industry-universe augments — which is a
+    list order, not a directness judgement; whether they should get the
+    neutral anchor instead is an open owner decision (it changes scores).
     """
     if gemini_rank is None or n_peers <= 0:
         return 5.0
@@ -8287,10 +8375,10 @@ def _relative_peer_score(
     """Blended directness + ROIC score with moat-as-durability multiplier.
 
     Inputs are ROIC as fractions (0.15 for 15%) — same shape FMP emits.
-    `gemini_rank` is 1-indexed (1 = most direct competitor per Gemini's
-    grounded research); when None, directness defaults to the neutral
-    5.0 anchor so Phase 1 fallback peers (FMP `/stock-peers` heuristic)
-    aren't silently penalized for lacking a Gemini rank.
+    `gemini_rank` is 1-indexed (1 = first in the source list: the most
+    direct competitor on the grounded-research path, FMP list order on
+    the Phase-1 path); when None, directness defaults to the neutral 5.0
+    anchor so a peer missing from the list isn't silently penalized.
 
     Returns None when either ROIC is missing so the caller can fall
     back to the absolute path — a peer with no ROIC signal shouldn't
@@ -8370,14 +8458,21 @@ def _latest_sector_medians(
     return out
 
 
+# HEURISTIC path only (FMP `/stock-peers` + industry universe): those lists
+# carry micro-cap misclassifications, so a size floor guards them. The
+# research ("intel") list has no size floor — it is curated and FMP-validated
+# (mktCap > 0) by competitor_intel_service, and a $3B company's real rivals
+# may be $1-2B.
 _COMPETITOR_MKT_CAP_FLOOR_RATIO = 0.05    # 5% of focal mkt cap
 _COMPETITOR_MKT_CAP_FLOOR_ABS = 5_000_000_000.0   # $5B hard floor
-# Variable count: take EVERY peer that survives the mkt-cap floor, up to
-# this ceiling. With absolute sector-relative scoring (no min-max), there's
-# no longer a "someone must be at 10" pathology to worry about, so a tighter
-# cap of 5 keeps the card list scannable. WDAY-style edge-of-floor peers
-# get cleanly dropped at the cap.
+# Variable count, at most this many rows. Heuristic path: the top N by mkt
+# cap that survive the floor (WDAY-style edge-of-floor peers drop at the
+# cap). Intel path: the N LOWEST-RANKED (most direct) scorable peers —
+# never the N largest, which let a customer outrank a direct rival.
 _COMPETITOR_MAX_N = 5
+# Mirrors competitor_intel_service.SEGMENT_MAX_CHARS (the service cleans the
+# label; the collector re-checks it so a bad cache row can't widen a row).
+_COMPETITOR_SEGMENT_MAX_CHARS = 48
 
 
 # ── Industry-universe peer fallback ────────────────────────────────────
@@ -8440,6 +8535,124 @@ def _industry_universe_peers(industry: str, exclude: Set[str]) -> List[str]:
     return [t for t in sorted_tickers if t not in exclude][:20]
 
 
+def _clean_competitor_segment(raw: Any) -> Optional[str]:
+    """Defensive re-check of a peer's "competes in" label (competitor_intel_service
+    already cleans it): a non-empty str with control characters removed, whitespace
+    collapsed, and at most `_COMPETITOR_SEGMENT_MAX_CHARS` chars, cut at a word
+    boundary. Anything else → None (the row renders without a segment)."""
+    if not isinstance(raw, str):
+        return None
+    seg = " ".join(
+        "".join(ch if (ch.isprintable() or ch.isspace()) else " " for ch in raw).split()
+    )
+    if len(seg) > _COMPETITOR_SEGMENT_MAX_CHARS:
+        cut = seg[:_COMPETITOR_SEGMENT_MAX_CHARS]
+        space = cut.rfind(" ")
+        seg = (cut[:space] if space > 0 else cut).rstrip(" ,;:-–—&/(")
+    return seg or None
+
+
+def _clean_peer_details(
+    raw: Any, peers: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """`{TICKER: {"segment": str}}` restricted to `peers`, every segment re-checked.
+    A non-dict answer, a non-str key, a non-dict value or an unusable segment is
+    skipped — the row simply renders without a segment."""
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {p.upper() for p in peers if isinstance(p, str)}
+    cleaned: Dict[str, Dict[str, Any]] = {}
+    for key, val in raw.items():
+        if not isinstance(key, str) or not isinstance(val, dict):
+            continue
+        sym = key.strip().upper()
+        if sym not in allowed:
+            continue
+        seg = _clean_competitor_segment(val.get("segment"))
+        if seg:
+            cleaned[sym] = {"segment": seg}
+    return cleaned
+
+
+# `peer_source` values whose peers came from competitor_intel_service (selected by
+# research rank, no size floor). Only "intel" is DISPLAYED in rank order.
+_INTEL_PEER_SOURCES = frozenset({"intel", "intel_stale"})
+
+
+async def _intel_list_is_ranked(svc: Any, ticker: str) -> bool:
+    """Whether the intel list just served is in most-direct-first order
+    (`competitor_intel_service.is_ranked_list`). A service or stub without the
+    method is trusted (True); a failed check is not (False → the rows display
+    highest threat first and the report never claims "most direct first")."""
+    checker = getattr(svc, "is_ranked_list", None)
+    if checker is None or not callable(checker):
+        return True
+    try:
+        raw = checker(ticker)
+        if inspect.isawaitable(raw):
+            raw = await raw
+    except Exception as exc:
+        logger.warning(
+            "Collector pass 2: competitor list-order check failed for %s: %s: %s — "
+            "displaying the research peers highest threat first",
+            ticker, type(exc).__name__, exc,
+        )
+        return False
+    return raw is True
+
+
+async def _fetch_intel_peer_details(
+    svc: Any, ticker: str, peers: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Per-peer details from `competitor_intel_service.get_competitor_details`.
+
+    Looked up with `getattr` so a service (or a test stub) without the method still
+    works; never raises — the details are decoration on rows the list already holds,
+    so a failed read costs only the "competes in" labels."""
+    getter = getattr(svc, "get_competitor_details", None)
+    if getter is None or not callable(getter):
+        return {}
+    try:
+        raw = getter(ticker)
+        if inspect.isawaitable(raw):
+            raw = await raw
+    except Exception as exc:
+        logger.warning(
+            "Collector pass 2: competitor details read failed for %s: %s: %s — "
+            "competitor rows render without a segment",
+            ticker, type(exc).__name__, exc,
+        )
+        return {}
+    return _clean_peer_details(raw, peers)
+
+
+def _first_dict_row(rows: Any) -> Dict[str, Any]:
+    """The first row of an FMP list answer (or a bare dict answer); {} otherwise."""
+    if isinstance(rows, dict):
+        return rows
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        return rows[0]
+    return {}
+
+
+def _resolve_focal_roic_ttm(km_ttm: Any, ratios_ttm: Any) -> Optional[float]:
+    """The focal company's TTM ROIC (fraction), the same period the peers' ROIC
+    comes from (`_fetch_peer_ratios`): /key-metrics-ttm ROIC → its ROCE →
+    /ratios-ttm ROCE. None when none resolves to a finite number — the scorer then
+    falls back to the ANNUAL focal ROIC and warns about the mixed periods."""
+    km0 = _first_dict_row(km_ttm)
+    for key in ("returnOnInvestedCapitalTTM", "returnOnCapitalEmployedTTM"):
+        val = _finite_or_none(km0.get(key))
+        if val is not None:
+            return val
+    r0 = _first_dict_row(ratios_ttm)
+    for key in ("returnOnCapitalEmployedTTM", "returnOnCapitalEmployed"):
+        val = _finite_or_none(r0.get(key))
+        if val is not None:
+            return val
+    return None
+
+
 def _build_competitors(
     my_ticker: str,
     my_profile: Dict[str, Any],
@@ -8454,46 +8667,56 @@ def _build_competitors(
     peer_moats: Optional[Dict[str, float]] = None,
     peer_ranks: Optional[Dict[str, int]] = None,
     n_total_peers: int = 0,
+    peer_source: str = "heuristic",
+    peer_details: Optional[Dict[str, Dict[str, Any]]] = None,
+    focal_roic_ttm: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Real competitor list from FMP peer profiles, ranked by blended
-    directness × financial × moat threat score.
+    """Real competitor list from FMP peer profiles, each row scored by a
+    blended directness × financial × moat threat score.
 
-    Scoring is a two-path hybrid:
-      * Preferred — `_relative_peer_score`: blends Gemini grounded-
-        research directness rank (60%) with ROIC delta vs focal (40%),
+    Scoring is a two-path hybrid (unchanged by the selection rules below):
+      * Preferred — `_relative_peer_score`: blends the peer's rank in the
+        source list as directness (60%) with ROIC delta vs focal (40%),
         then scales by the peer's aggregate moat (mean of 5 cached
-        pillar scores) as a durability multiplier (0.7–1.3×). Captures
-        BOTH "how directly does this peer compete with the focal" AND
-        "does this peer have the firepower to do so."
-      * Fallback — `_absolute_peer_score`: original sector-relative
-        composite of op margin, ROE, and revenue growth. Used when the
-        peer (or focal) lacks ROIC coverage in FMP.
+        pillar scores) as a durability multiplier (0.7–1.3×). Row gets
+        `score_basis = "relative"`.
+      * Fallback — `_absolute_peer_score`: sector-relative composite of op
+        margin, ROE, and revenue growth vs the PEER's own sector median.
+        Used when the peer (or focal) lacks ROIC. `score_basis = "absolute"`.
 
-    Pipeline:
-      1. Drop any peer whose mktCap is below max(focal × 5%, $5B).
-      2. Sort survivors by mktCap desc and cap at `_COMPETITOR_MAX_N`.
-      3. Score each survivor via the relative path when ROIC is on
-         both sides; absolute path otherwise. Pass each peer's Gemini
-         rank into the relative scorer so the most directly competing
-         peer (per grounded research) gets a directness boost.
-      4. Drop peers we cannot score at all.
-      5. Bucket threat by absolute score thresholds (≥7.0 high, ≤3.0
-         low, else moderate) and sort by score desc — the most
-         threatening peer leads the display.
+    Selection depends on `peer_source`:
+      * "intel" (the grounded-research list, ranks = most direct first):
+        no market-cap floor (a peer only needs a positive mktCap), score
+        EVERY peer, drop the unscorable, keep the `_COMPETITOR_MAX_N` with
+        the LOWEST rank, and return them IN RANK ORDER. The caller marks
+        the report `competitor_order = "direct"`. (Market cap must not pick
+        the rows: it dropped AVGO's #2 rival for its #7 suggestion, a
+        customer, and swapped rows on 2-3% price moves.)
+      * anything else ("heuristic" — FMP `/stock-peers` + industry universe,
+        whose ranks are list order, not directness): drop peers below
+        max(focal × 5%, $5B), keep the top `_COMPETITOR_MAX_N` by mktCap,
+        score, drop the unscorable, return highest score first. The caller
+        marks it `competitor_order = "threat"`.
+
+    Threat buckets read off the final score (≥7.0 high, ≤3.0 low, else
+    moderate) on both paths.
+
+    The focal ROIC is `focal_roic_ttm` (the same TTM period as the peers')
+    when given; otherwise the annual /ratios → /key-metrics chain, with a
+    warning that the periods are mixed.
 
     `peer_moats` is `{ticker: aggregate_moat (0-10)}` from
     `get_aggregate_moat_for_tickers`. Missing tickers default to a
     neutral 5.0 → multiplier 1.0 (no boost or penalty), keeping cache
     misses honest.
 
-    `peer_ranks` is `{ticker: 1-based-rank}` from the upstream peer
-    source (Phase 2 = Gemini's grounded suggested order; Phase 1 =
-    FMP `/stock-peers` + industry-universe heuristic order). Earlier
-    rank = more direct competitor. `n_total_peers` is the denominator
-    for the directness math — kept fixed at the original peer count
-    so scores remain stable when peers get dropped by the mkt-cap
-    floor downstream. Both default to None/0 → directness defaults to
-    the neutral 5.0 anchor, preserving the pre-blend behavior.
+    `peer_ranks` is `{ticker: 1-based-rank}` from the upstream peer list.
+    `n_total_peers` is the directness denominator — kept at the original
+    peer count so scores stay stable when peers are dropped downstream.
+    Both default to None/0 → directness defaults to the neutral 5.0 anchor.
+
+    `peer_details` is `{ticker: {"segment": str}}`; a row carries `segment`
+    only when a usable one is known.
 
     `market_share_percent` is emitted as 0.0 for every peer for
     backwards compatibility with the iOS DTO; iOS no longer renders
@@ -8504,46 +8727,80 @@ def _build_competitors(
     `_latest_sector_medians(...)`. Used only on the absolute-path
     fallback.
 
-    Returns [] when no peer survives the floor or the rankable-data
-    drop.
+    Returns [] when no peer survives selection or the rankable-data drop.
     """
     if not peer_profiles:
         return []
     peer_ratios = peer_ratios or {}
     peer_moats = peer_moats or {}
     peer_ranks = peer_ranks or {}
+    peer_details = peer_details or {}
+    # Selection by research rank for both intel sources; DISPLAY in rank order
+    # only for a current ("intel") list — a stale one shows highest threat first.
+    is_intel = peer_source in _INTEL_PEER_SOURCES
+    display_by_rank = peer_source == "intel"
+    focal_sym = (my_ticker or "").upper()
 
-    focal_mkt_cap = float((my_profile or {}).get("mktCap") or 0.0)
+    def _rank_of(sym: str) -> int:
+        """Rank for ordering; an unranked peer sorts after every ranked one
+        (the stable sort keeps its list position among the unranked)."""
+        r = peer_ranks.get(sym)
+        if isinstance(r, int) and not isinstance(r, bool):
+            return r
+        return 10 ** 9
+
+    focal_mkt_cap = _finite_or_none((my_profile or {}).get("mktCap")) or 0.0
     floor = max(
         focal_mkt_cap * _COMPETITOR_MKT_CAP_FLOOR_RATIO,
         _COMPETITOR_MKT_CAP_FLOOR_ABS,
     )
 
-    # ── 1. Filter + cap to top N by mktCap ────────────────────────────
+    # ── 1. Candidates (floor + top N by mktCap on the heuristic path only) ─
     survivors: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
     for p in peer_profiles:
-        sym = (p.get("symbol") or "").upper()
-        if not sym or sym == my_ticker.upper():
+        if not isinstance(p, dict):
             continue
-        mkt_cap = float(p.get("mktCap") or 0.0)
-        if mkt_cap < floor:
+        raw_sym = p.get("symbol")
+        sym = raw_sym.strip().upper() if isinstance(raw_sym, str) else ""
+        if not sym or sym == focal_sym or sym in seen:
             continue
+        mkt_cap = _finite_or_none(p.get("mktCap")) or 0.0
+        if is_intel:
+            # No size floor, but a peer FMP now reports with no market cap
+            # (delisted / acquired since the research ran) is not a live rival.
+            if mkt_cap <= 0:
+                continue
+        elif mkt_cap < floor:
+            continue
+        seen.add(sym)
         survivors.append({"profile": p, "symbol": sym, "mkt_cap": mkt_cap})
 
     if not survivors:
-        logger.info(
-            f"_build_competitors({my_ticker}): no peers passed mkt-cap "
-            f"floor ${floor / 1e9:.1f}B (had {len(peer_profiles)} candidates)"
-        )
+        if is_intel:
+            logger.info(
+                f"_build_competitors({my_ticker}): no research peer had a "
+                f"positive market cap (had {len(peer_profiles)} candidates)"
+            )
+        else:
+            logger.info(
+                f"_build_competitors({my_ticker}): no peers passed mkt-cap "
+                f"floor ${floor / 1e9:.1f}B (had {len(peer_profiles)} candidates)"
+            )
         return []
 
-    survivors.sort(key=lambda s: s["mkt_cap"], reverse=True)
-    survivors = survivors[:_COMPETITOR_MAX_N]
+    if is_intel:
+        # Score ALL of them (the cap is applied after the unscorable drop, so an
+        # unscorable rank-2 peer is replaced by the next rank, not by nothing).
+        survivors.sort(key=lambda s: _rank_of(s["symbol"]))
+    else:
+        survivors.sort(key=lambda s: s["mkt_cap"], reverse=True)
+        survivors = survivors[:_COMPETITOR_MAX_N]
 
     total_peer_cap = sum(s["mkt_cap"] for s in survivors)
     if total_peer_cap <= 0:
-        # Defensive: should never hit because the floor is > 0, but logs
-        # surface a field-name regression in FMP profile responses.
+        # Defensive: should never hit because every survivor has mkt_cap > 0,
+        # but logs surface a field-name regression in FMP profile responses.
         logger.warning(
             f"_build_competitors({my_ticker}): total_peer_cap is 0 after "
             f"filtering — peer profiles may be missing mktCap field"
@@ -8564,82 +8821,86 @@ def _build_competitors(
         sector = _normalize_sector(raw_sector) if raw_sector else ""
         return sector_medians_by_sector.get(sector, {})
 
+    def _pct(v: Any) -> Optional[float]:
+        """A 0-1 fraction as percent; None for missing / non-finite / bool."""
+        f = _finite_or_none(v)
+        return None if f is None else f * 100
+
     # ── 2a. Focal absolute components (for the absolute-path fallback) ─
     my_op_margin: Optional[float] = None
     my_roe: Optional[float] = None
     my_roic_frac: Optional[float] = None
-    if my_ratios:
-        r0 = my_ratios[0]
-        omp = r0.get("operatingProfitMargin")
-        if omp is not None:
-            my_op_margin = float(omp) * 100  # ratios endpoint uses 0-1
-        roe = r0.get("returnOnEquity")
-        if roe is not None:
-            my_roe = float(roe) * 100
+    r0 = my_ratios[0] if my_ratios and isinstance(my_ratios[0], dict) else None
+    if r0 is not None:
+        my_op_margin = _pct(r0.get("operatingProfitMargin"))  # ratios use 0-1
+        my_roe = _pct(r0.get("returnOnEquity"))
         # ROIC stays as a fraction for `_relative_peer_score`; the helper
         # converts to percentage points internally. Try annual /ratios
-        # first as a fallback, but the canonical 2026 source is
-        # /key-metrics-ttm (read below) — FMP's /ratios endpoint stopped
-        # carrying `returnOnCapitalEmployed` and `returnOnInvestedCapital`
-        # at some point, which silently disabled the relative-path
-        # scoring for every ticker before this fix.
-        roic_raw = r0.get("returnOnCapitalEmployed")
-        if roic_raw is None:
-            roic_raw = r0.get("returnOnInvestedCapital")
-        if roic_raw is not None:
-            my_roic_frac = float(roic_raw)
-    # /key-metrics(-ttm) is the canonical ROIC source. Always check it,
-    # and let it override the /ratios fallback (which is usually None
-    # anyway for ROIC). Prefer ROIC (investedCapital denominator) over
-    # ROCE (capitalEmployed denominator) — they differ slightly, but
-    # ROIC is the textbook formula and what the comment in
-    # `_relative_peer_score` documents.
-    if my_key_metrics:
-        km0 = my_key_metrics[0]
-        km_roic = km0.get("returnOnInvestedCapitalTTM")
-        if km_roic is None:
-            km_roic = km0.get("returnOnInvestedCapital")
-        if km_roic is None:
-            km_roic = km0.get("returnOnCapitalEmployedTTM")
-        if km_roic is None:
-            km_roic = km0.get("returnOnCapitalEmployed")
-        if km_roic is not None:
-            my_roic_frac = float(km_roic)
+        # first as a fallback, but FMP's /ratios endpoint stopped carrying
+        # `returnOnCapitalEmployed` / `returnOnInvestedCapital` at some
+        # point, which silently disabled relative-path scoring before the
+        # /key-metrics read below.
+        my_roic_frac = _finite_or_none(r0.get("returnOnCapitalEmployed"))
+        if my_roic_frac is None:
+            my_roic_frac = _finite_or_none(r0.get("returnOnInvestedCapital"))
+    # /key-metrics (ANNUAL here) overrides the /ratios fallback. Prefer ROIC
+    # (investedCapital denominator) over ROCE (capitalEmployed denominator).
+    km0 = (
+        my_key_metrics[0]
+        if my_key_metrics and isinstance(my_key_metrics[0], dict) else None
+    )
+    if km0 is not None:
+        for key in (
+            "returnOnInvestedCapitalTTM", "returnOnInvestedCapital",
+            "returnOnCapitalEmployedTTM", "returnOnCapitalEmployed",
+        ):
+            km_roic = _finite_or_none(km0.get(key))
+            if km_roic is not None:
+                my_roic_frac = km_roic
+                break
+    # The focal's TTM ROIC wins: the peers' ROIC is TTM (`_fetch_peer_ratios`),
+    # and an annual focal figure can be ~3 quarters older than theirs.
+    ttm_roic = _finite_or_none(focal_roic_ttm)
+    if ttm_roic is not None:
+        my_roic_frac = ttm_roic
+    elif my_roic_frac is not None:
+        logger.warning(
+            f"_build_competitors({my_ticker}): no focal TTM ROIC — scoring "
+            f"against the focal's ANNUAL ROIC while peers use TTM (mixed periods)"
+        )
     # FMP stopped emitting returnOnEquity on /ratios in late 2025;
     # /key-metrics still carries it. Fall through so the focal isn't
     # under-scored vs peers (who already get ROE via /key-metrics-ttm).
-    if my_roe is None and my_key_metrics:
-        km0 = my_key_metrics[0]
-        km_roe = km0.get("returnOnEquity")
-        if km_roe is not None:
-            my_roe = float(km_roe) * 100
+    if my_roe is None and km0 is not None:
+        my_roe = _pct(km0.get("returnOnEquity"))
     # Focal absolute score is computed only as the fallback anchor for
-    # peers without ROIC; the new relative path keeps the focal at the
+    # peers without ROIC; the relative path keeps the focal at the
     # 5.0 anchor by construction.
     my_abs_score = _absolute_peer_score(
         my_op_margin, my_roe, my_revenue_growth,
         _sector_medians_for(my_profile),
     )
 
-    # ── 3. Score each surviving peer ──────────────────────────────────
+    # ── 3. Score each candidate ───────────────────────────────────────
     peer_data: List[Dict[str, Any]] = []
     for s in survivors:
         sym = s["symbol"]
         p = s["profile"]
         ratios_row = peer_ratios.get(sym, {}) or {}
+        if not isinstance(ratios_row, dict):
+            ratios_row = {}
 
-        peer_roic_frac: Optional[float] = None
-        roic_raw = ratios_row.get("returnOnCapitalEmployed")
-        if roic_raw is not None:
-            peer_roic_frac = float(roic_raw)
+        # NOTE: the legacy key name — `_fetch_peer_ratios` stores TTM ROIC
+        # (preferred) or ROCE under `returnOnCapitalEmployed`. Not renamed:
+        # cached collections and tests read it.
+        peer_roic_frac = _finite_or_none(ratios_row.get("returnOnCapitalEmployed"))
 
         # Prefer the blended directness + ROIC path with moat-as-
         # durability multiplier. Falls back to the absolute composite
         # when either ROIC is missing so a peer with a coverage gap
         # still renders a number rather than disappearing from the list.
-        # `peer_ranks.get(sym)` returns None for peers we couldn't
-        # position (e.g. an industry-universe augment that wasn't in
-        # Gemini's suggested list); the scorer then falls back to the
+        # `peer_ranks.get(sym)` returns None for a peer we couldn't
+        # position in the source list; the scorer then falls back to the
         # neutral 5.0 directness anchor for that peer alone.
         score_relative = _relative_peer_score(
             peer_roic_frac, my_roic_frac, peer_moats.get(sym),
@@ -8650,29 +8911,20 @@ def _build_competitors(
             score = score_relative
             scoring_path = "relative"
         else:
-            op_margin: Optional[float] = None
-            roe_val: Optional[float] = None
-            rev_growth: Optional[float] = None
-            omp = ratios_row.get("operatingProfitMargin")
-            if omp is not None:
-                op_margin = float(omp) * 100
-            roe_v = ratios_row.get("returnOnEquity")
-            if roe_v is not None:
-                roe_val = float(roe_v) * 100
-            rg = ratios_row.get("revenueGrowth")
-            if rg is not None:
-                rev_growth = float(rg) * 100
             score = _absolute_peer_score(
-                op_margin, roe_val, rev_growth,
+                _pct(ratios_row.get("operatingProfitMargin")),
+                _pct(ratios_row.get("returnOnEquity")),
+                _pct(ratios_row.get("revenueGrowth")),
                 _sector_medians_for(p),
             )
             scoring_path = "absolute"
 
+        name = p.get("companyName")
         peer_data.append({
-            "name": p.get("companyName") or sym,
+            "name": name if isinstance(name, str) and name.strip() else sym,
             "ticker": sym,
             "mkt_cap": s["mkt_cap"],
-            "score": score,
+            "score": _finite_or_none(score),
             "scoring_path": scoring_path,
         })
 
@@ -8687,6 +8939,9 @@ def _build_competitors(
             f"ratio data — returning empty list"
         )
         return []
+    if is_intel:
+        # Already in rank order (survivors were sorted); keep the most direct.
+        peer_data = peer_data[:_COMPETITOR_MAX_N]
 
     # ── 5. Emit rows with threat thresholds on the score ─────────────
     # Relative-path scores are already focal-anchored at 5.0, so threat
@@ -8695,14 +8950,14 @@ def _build_competitors(
     # median, so the same thresholds apply with comparable semantics.
     out: List[Dict[str, Any]] = []
     for p in peer_data:
-        competitive_score = round(p["score"], 1)
+        competitive_score = round(max(0.0, min(10.0, p["score"])), 1)
         if competitive_score >= _THREAT_HIGH_THRESHOLD:
             threat = "high"
         elif competitive_score <= _THREAT_LOW_THRESHOLD:
             threat = "low"
         else:
             threat = "moderate"
-        out.append({
+        row: Dict[str, Any] = {
             "name": p["name"],
             "ticker": p["ticker"],
             "competitive_score": competitive_score,
@@ -8710,10 +8965,20 @@ def _build_competitors(
             # still required — emit 0.0 so old cached reports decode.
             "market_share_percent": 0.0,
             "threat_level": threat,
-        })
+            "score_basis": p["scoring_path"],
+        }
+        detail = peer_details.get(p["ticker"])
+        segment = _clean_competitor_segment(
+            detail.get("segment") if isinstance(detail, dict) else None
+        )
+        if segment:
+            row["segment"] = segment
+        out.append(row)
 
-    # Sort strongest threats first.
-    out.sort(key=lambda c: c["competitive_score"], reverse=True)
+    if not display_by_rank:
+        # Heuristic or stale research list: strongest threats first (its order
+        # is not a most-direct-first ranking).
+        out.sort(key=lambda c: c["competitive_score"], reverse=True)
     return out
 
 

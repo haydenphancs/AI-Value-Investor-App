@@ -746,6 +746,9 @@ def build_context(
             "market_dynamics": _project_market_dynamics(moat.get("market_dynamics") or {}),
             "dimensions": dims,
             "competitors": moat.get("competitors") or [],
+            # "direct" | "threat" | None (reports stored before 2026-10-01, which
+            # are threat-ordered) — the template's order note reads None as threat.
+            "competitor_order": moat.get("competitor_order"),
             "durability_note": moat.get("durability_note") or "",
             "competitive_insight": moat.get("competitive_insight") or "",
             "radar_max": radar_max,

@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ReportMoatCompetitionSection: View {
     let data: ReportMoatCompetitionData
+    @State private var showCompetitorsInfo = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -311,10 +312,43 @@ struct ReportMoatCompetitionSection: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             } else {
+                competitorOrderLegend
                 ForEach(data.competitors) { competitor in
                     ReportPeerComparisonRow(competitor: competitor)
                 }
             }
+        }
+        .sheet(isPresented: $showCompetitorsInfo) {
+            CompetitorsInfoSheet(order: data.competitorOrder)
+        }
+    }
+
+    /// What the row order and the score mean (TestFlight #57: "Is NVIDIA the main
+    /// competitor? How did we get the competitors?"). The caption follows the report's
+    /// own order marker, so a threat-ordered report never claims "most direct first".
+    private var competitorOrderLegend: some View {
+        HStack(alignment: .center, spacing: AppSpacing.xs) {
+            Text(data.competitorOrder.caption)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                showCompetitorsInfo = true
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(AppTypography.iconSmall).fontWeight(.medium)
+                    .foregroundColor(AppColors.textMuted)
+                    // Size the box to the minimum target first (slop alone is clipped by
+                    // a parent that fits it tightly); `.trailing` keeps the glyph flush
+                    // with the rows' right edge.
+                    .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget,
+                           alignment: .trailing)
+                    .hitSlop(reaching: HitSlop.minimumTarget)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("How competitors are chosen")
         }
     }
 

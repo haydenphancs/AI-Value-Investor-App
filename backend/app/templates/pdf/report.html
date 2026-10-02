@@ -503,8 +503,12 @@
   {% endif %}
   {% if moat.competitors %}
   <div class="sub-h" style="margin-top:8px">Competitive Landscape</div>
+  {# The order note needs the report's order marker. Only "direct" may say "most direct"; a None
+     marker (every report stored before 2026-10-01) is threat-ordered. No note at all when the
+     render context does not carry the key, so a missing wire-up can never mislabel the order. #}
+  {% if moat.competitor_order is defined %}<div class="caption-note" style="margin:-4px 0 4px">{% if moat.competitor_order == "direct" %}Most direct competitor first · threat score 0–10 (5 = neutral){% else %}Highest threat score first · threat score 0–10 (5 = neutral){% endif %}</div>{% endif %}
   <table class="kv"><thead><tr><th>Competitor</th><th>Ticker</th><th class="r">Threat (0–10)</th><th class="r">Level</th></tr></thead><tbody>
-  {% for c in moat.competitors[:5] %}<tr><td class="name">{{ c.name }}</td><td class="muted">{{ c.ticker }}</td><td class="r">{{ "%.1f"|format(c.competitive_score) }}</td><td class="r" style="text-transform:capitalize">{{ c.threat_level }}</td></tr>{% endfor %}
+  {% for c in moat.competitors[:5] %}<tr><td class="name">{{ c.name }}{% if c.segment %}<div class="caption-note">Competes in: {{ c.segment }}</div>{% endif %}</td><td class="muted">{{ c.ticker }}</td><td class="r">{{ "%.1f"|format(c.competitive_score) }}</td><td class="r" style="text-transform:capitalize">{{ c.threat_level }}</td></tr>{% endfor %}
   </tbody></table>{% endif %}
   {% if moat.competitive_insight %}<div class="insight">{{ moat.competitive_insight }}</div>{% endif %}
 

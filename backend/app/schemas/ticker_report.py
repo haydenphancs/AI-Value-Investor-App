@@ -386,13 +386,22 @@ class MoatDimensionResponse(BaseModel):
 class CompetitorResponse(BaseModel):
     name: str
     ticker: str
-    # 0–10 — peer's competitive threat to the focal company, computed
-    # from ROIC delta vs focal × moat-as-durability multiplier
-    # (`_relative_peer_score` in ticker_report_data_collector). 5.0 is
-    # the "equal threat" anchor; >6.5 = high, <3.5 = low.
+    # 0–10 — peer's competitive threat to the focal company: 60% directness
+    # rank + 40% ROIC delta vs focal, × a moat-as-durability multiplier
+    # (`_relative_peer_score` in ticker_report_data_collector; see `score_basis`).
+    # 5.0 is the "equal threat" anchor; ≥ 7.0 = high, ≤ 3.0 = low
+    # (`_THREAT_HIGH_THRESHOLD` / `_THREAT_LOW_THRESHOLD`).
     competitive_score: float
     market_share_percent: float
     threat_level: str  # "low" | "moderate" | "high"
+    # Short "competes in" label (≤ 48 chars, cleaned by competitor_intel_service) for a
+    # research-sourced peer; None when unknown and on every report stored before
+    # 2026-10-01. Declared so the direct door's re-dump keeps it (undeclared keys drop).
+    segment: Optional[str] = None
+    # How `competitive_score` was computed: "relative" (0.6 × directness rank + 0.4 ×
+    # ROIC vs the focal, × moat 0.7–1.3; 5 = neutral midpoint) or "absolute" (op margin /
+    # ROE / revenue growth vs the peer's own sector median; 5 = median). None on old rows.
+    score_basis: Optional[str] = None
 
 
 class MoatCompetitionResponse(BaseModel):
@@ -401,6 +410,14 @@ class MoatCompetitionResponse(BaseModel):
     durability_note: str
     competitors: List[CompetitorResponse]
     competitive_insight: str
+    # The ORDER MARKER for `competitors`: "direct" = the grounded-research list, rows most
+    # direct first; "threat" = the industry-peer fallback, rows highest threat score
+    # first. None on every report stored before 2026-10-01 — those rows are threat
+    # ordered, so a consumer treats None as "threat" and never says "most direct" unless
+    # this is exactly "direct".
+    competitor_order: Optional[str] = None
+    # "research" | "industry_peers"; None on old reports.
+    competitor_source: Optional[str] = None
 
 
 # ── Deep Dive: Macro & Geopolitical ───────────────────────────────────────────

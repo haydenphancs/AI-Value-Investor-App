@@ -247,3 +247,120 @@ def test_client_context_wrapped_with_framing():
     )
     assert "CLIENT CONTEXT" in si
     assert "AAPL grounding facts here" in si
+
+
+# ── The trusted report rule through BOTH doors (TestFlight #57) ───────────────
+#
+# `report_grounded` is a SERVER verdict: the context type is TICKER_REPORT and the resolver BUILT
+# the block (`server_grounded`). A pass-through / timed-out resolve hands back the client's own
+# string — `grounded` is true for that too, which is exactly why the rule never keys on it.
+
+_RULE = ChatService._REPORT_GROUNDING_RULE
+_SENTINEL = "THE REPORT ON SCREEN:"
+_BUILT = "The user is viewing the in-depth Cay research report for Broadcom Inc. (AVGO)."
+_STOCK_CHART = {"widget_type": "stock_chart", "ticker": "AVGO", "current_price": 364.54,
+                "change": -1.25, "change_percent": -0.34}
+
+
+def _assert_rule_once_before_fence(instr: str):
+    assert instr.count(_SENTINEL) == 1 and instr.count(_RULE) == 1
+    assert instr.index(_SENTINEL) < instr.index("<<<CLIENT_CONTEXT>>>")
+
+
+@pytest.mark.asyncio
+async def test_stream_door_adds_the_rule_to_both_instructions_and_keeps_the_live_quote(monkeypatch):
+    _patch_resolver(monkeypatch, _BUILT)
+    svc = _make_service(widget=_STOCK_CHART)
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="is NVIDIA the main competitor?",
+        stock_id="AVGO", context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman",
+    )
+    assert out["server_grounded"] is True
+    for key in ("system_instruction", "system_instruction_no_tools"):
+        instr = out[key]
+        _assert_rule_once_before_fence(instr)
+        # Coexists with the LIVE QUOTE line, which stays AFTER the fence.
+        assert instr.count("LIVE QUOTE shown on") == 1
+        assert instr.index("<<<END_CLIENT_CONTEXT>>>") < instr.index("LIVE QUOTE shown on")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ctype, client_ctx, block", [
+    ("TICKER_REPORT", "client typed this", None),   # resolver fell back / timed out → pass-through
+    ("TICKER_REPORT", None, None),                  # nothing resolved, nothing sent
+    ("STOCK", None, _BUILT),                        # a server block, but not a report screen
+    ("COMMODITY", "client ctx", "client ctx\n\nCommodity profile: gold"),
+    ("ETF", None, "The user is viewing the ETF detail screen for X (X)."),
+])
+async def test_stream_door_omits_the_rule_without_a_server_built_report(monkeypatch, ctype, client_ctx, block):
+    _patch_resolver(monkeypatch, block)
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", stock_id="AVGO", context=client_ctx,
+        context_type=ctype, reference_id="AVGO|bill_ackman",
+    )
+    assert _SENTINEL not in out["system_instruction"]
+    assert _SENTINEL not in out["system_instruction_no_tools"]
+
+
+def _generate_service(monkeypatch, block, *, tools_raise: bool):
+    from unittest.mock import AsyncMock
+
+    seen = {}
+
+    class _Gem:
+        async def generate_with_tools(self, **kw):
+            seen["tools"] = kw["system_instruction"]
+            if tools_raise:
+                raise RuntimeError("function calling exploded")
+            return {"text": "answer", "tokens_used": 3, "tool_results": [], "finish_reason": "STOP"}
+
+        async def generate_text(self, **kw):
+            seen["fallback"] = kw["system_instruction"]
+            return {"text": "plain answer", "tokens_used": 2, "finish_reason": "STOP"}
+
+    svc = ChatService.__new__(ChatService)
+    svc.supabase = object()
+    svc.fmp = object()
+    svc.gemini = _Gem()
+    _patch_resolver(monkeypatch, block)
+    svc._get_recent_messages = lambda *a, **k: []
+    svc._retrieve_context = AsyncMock(return_value=([], []))
+    svc._condense_history = AsyncMock(return_value="")
+    svc._get_profit_summary = AsyncMock(return_value=None)
+    svc._get_snapshot_summary = AsyncMock(return_value=None)
+    svc._get_company_profile_summary = AsyncMock(return_value=None)
+    svc._deterministic_widget = AsyncMock(return_value=None)
+    return svc, seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_raise", [False, True])
+async def test_non_stream_door_adds_the_rule_to_the_tool_round_and_the_fallback(monkeypatch, tools_raise):
+    svc, seen = _generate_service(monkeypatch, _BUILT, tools_raise=tools_raise)
+    out = await svc.generate_response(
+        "sess", "is NVIDIA the main competitor?", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman",
+    )
+    _assert_rule_once_before_fence(seen["tools"])
+    if tools_raise:
+        assert out.get("degraded") == "no_tools"
+        _assert_rule_once_before_fence(seen["fallback"])
+        # The fallback is the TOOL-LESS build: no tool is named in it.
+        from app.services.agents.chat_tools import TOOL_DESCRIPTIONS
+        assert not any(name in seen["fallback"] for name in TOOL_DESCRIPTIONS)
+    else:
+        assert "fallback" not in seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_raise", [False, True])
+async def test_non_stream_door_omits_the_rule_on_a_pass_through(monkeypatch, tools_raise):
+    svc, seen = _generate_service(monkeypatch, None, tools_raise=tools_raise)
+    await svc.generate_response(
+        "sess", "q", stock_id="AVGO", context="client typed this",
+        context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman",
+    )
+    for instr in seen.values():
+        assert _SENTINEL not in instr
+        assert "client typed this" in instr        # the context is still there, just not promoted

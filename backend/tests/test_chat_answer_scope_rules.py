@@ -167,3 +167,86 @@ def test_the_old_over_general_wording_is_gone_from_the_prompt_tree():
     for asset_type in _ASSET_TYPES:
         for granted in (True, False):
             assert "Never supply a reason a tool did not give you" not in _instr(asset_type, tools_granted=granted)
+
+
+# ── The trusted report-grounding rule (TestFlight #57, 2026-09-26) ───────────
+#
+# "Chat with the report" on AVGO answered "NVIDIA is not the main competitor" from memory and
+# then said the report does not mention it. The only "use the report" line sat inside the
+# untrusted fence. `_REPORT_GROUNDING_RULE` is the trusted half: present ONLY when the server
+# built the report block (`report_grounded`), placed after the shared guards and BEFORE the
+# fence, exactly once on every turn shape.
+
+_REPORT_RULE = ChatService._REPORT_GROUNDING_RULE
+_REPORT_SENTINEL = "THE REPORT ON SCREEN:"
+_REPORT_BLOCK = "The user is viewing the in-depth Cay research report for Broadcom Inc. (AVGO)."
+
+
+def test_the_report_rule_is_substantive_and_clean():
+    assert _REPORT_RULE.startswith("\n" + _REPORT_SENTINEL) and len(_REPORT_RULE) >= 400
+    low = _REPORT_RULE.lower()
+    for word in _FORBIDDEN:
+        assert word not in low, word
+    for name in TOOL_DESCRIPTIONS:
+        assert not re.search(rf"\b{re.escape(name)}\b", _REPORT_RULE), name
+    for vendor in ("gemini", "google", "openai", "gpt", "anthropic", "llm", "fmp",
+                   "financial modeling prep", "language model"):
+        assert vendor not in low, vendor
+    # What it must say: the report first, its own definitions, never deny it, the honest exit.
+    assert "the report data in the CLIENT CONTEXT block below" in _REPORT_RULE
+    assert "answer from that report data first and explain the report's own definition" in _REPORT_RULE
+    assert "must never contradict or deny what the report shows" in _REPORT_RULE
+    assert "as of the report date" in _REPORT_RULE
+    assert "say it is not in what you were given" in _REPORT_RULE
+    assert "never that the report lacks it" in _REPORT_RULE
+
+
+@pytest.mark.parametrize("asset_type", _ASSET_TYPES)
+@pytest.mark.parametrize("tools_granted", [True, False])
+@pytest.mark.parametrize("is_deep_dive", [False, True])
+@pytest.mark.parametrize("replayed", [False, True])
+def test_the_report_rule_appears_once_after_the_guards_and_before_the_fence(
+    asset_type, tools_granted, is_deep_dive, replayed,
+):
+    instr = _instr(asset_type, tools_granted=tools_granted, is_deep_dive=is_deep_dive,
+                   client_context=_REPORT_BLOCK, context_is_replayed=replayed,
+                   report_grounded=True)
+    assert instr.count(_REPORT_SENTINEL) == 1
+    assert instr.count(_REPORT_RULE) == 1
+    pos = instr.index(_REPORT_SENTINEL)
+    assert instr.index(ADVICE_BOUNDARY) < pos
+    assert instr.index("WHAT YOU KNOW:") < pos
+    assert pos < instr.index("<<<CLIENT_CONTEXT>>>") < instr.index(_REPORT_BLOCK)
+    # Never inside the fenced span.
+    fenced = instr[instr.index("<<<CLIENT_CONTEXT>>>"):instr.index("<<<END_CLIENT_CONTEXT>>>")]
+    assert _REPORT_SENTINEL not in fenced
+
+
+@pytest.mark.parametrize("asset_type", _ASSET_TYPES)
+def test_the_report_rule_follows_the_reader_lens(asset_type):
+    instr = _instr(asset_type, reader_lens="\nTopics they follow: value investing.\n",
+                   client_context=_REPORT_BLOCK, report_grounded=True)
+    assert instr.index("Topics they follow:") < instr.index(_REPORT_SENTINEL) < \
+        instr.index("<<<CLIENT_CONTEXT>>>")
+
+
+@pytest.mark.parametrize("kw", [
+    {"client_context": _REPORT_BLOCK},                              # not server-built
+    {"client_context": _REPORT_BLOCK, "report_grounded": False},
+    {"client_context": None, "report_grounded": True},              # nothing to describe
+    {"client_context": "", "report_grounded": True},
+    {},
+])
+def test_the_report_rule_is_absent_unless_the_server_built_the_block(kw):
+    for asset_type in _ASSET_TYPES:
+        assert _REPORT_SENTINEL not in _instr(asset_type, **kw), (asset_type, kw)
+
+
+def test_the_assembled_report_instruction_carries_no_injection_words():
+    for asset_type in _ASSET_TYPES:
+        for granted in (True, False):
+            low = _instr(asset_type, tools_granted=granted, client_context=_REPORT_BLOCK,
+                         report_grounded=True).lower()
+            low = low.split("<<<client_context>>>", 1)[0]
+            for word in ("disregard", "ignore all previous", "ignore previous", "new system prompt"):
+                assert word not in low, (asset_type, word)

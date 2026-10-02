@@ -572,6 +572,105 @@ Grounding rules — STRICT:
 3. If a metric shows "—" or "N/A" in the cards, do not invent a number for it — pick a different metric to anchor on."""
 
 
+# ── Competitor context for the two Stage-B moat prompts and `_digest_moat` ──
+#
+# `moat_competition.competitors` arrives in one of two orders, named by the report's
+# ORDER MARKER `competitor_order`: "direct" (the research list, most direct rival first)
+# or "threat" / None (highest threat score first — every report stored before
+# 2026-10-01 is None). So "the biggest threat" is computed over the FULL list BEFORE any
+# slice (on a "direct" list the highest score can sit at any row — AVGO: NVDA at row 4),
+# and "closest rival" is claimed only when the marker is exactly "direct".
+
+
+def _competitor_rows(moat: Any) -> List[Dict[str, Any]]:
+    """The competitor rows that are dicts; [] for a missing / malformed list."""
+    rows = moat.get("competitors") if isinstance(moat, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [c for c in rows if isinstance(c, dict)]
+
+
+def _competitor_score(c: Dict[str, Any]) -> Optional[float]:
+    """`competitive_score` when it is a real 0-10 number, else None (bool, NaN, inf,
+    out of range and unparseable values never rank as the biggest threat)."""
+    v = c.get("competitive_score")
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and 0.0 <= f <= 10.0 else None
+
+
+def _competitor_name(c: Dict[str, Any]) -> str:
+    return str(c.get("name") or c.get("ticker") or "?")
+
+
+def _competitor_prompt_line(c: Dict[str, Any]) -> str:
+    """`Name (TICK, threat=high, score 9.0/10, competes in: <segment>)`."""
+    bits = [f"threat={c.get('threat_level')}"]
+    sc = _competitor_score(c)
+    if sc is not None:
+        bits.append(f"score {sc:.1f}/10")
+    seg = c.get("segment")
+    if isinstance(seg, str) and seg.strip():
+        bits.append(f"competes in: {seg.strip()}")
+    return f"{c.get('name')} ({c.get('ticker')}, {', '.join(bits)})"
+
+
+def _biggest_competitor_threat(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The row with the highest valid score over the WHOLE list (first on a tie)."""
+    best: Optional[Dict[str, Any]] = None
+    best_score: Optional[float] = None
+    for c in rows:
+        sc = _competitor_score(c)
+        if sc is not None and (best_score is None or sc > best_score):
+            best, best_score = c, sc
+    return best
+
+
+def _competitors_are_direct(moat: Any) -> bool:
+    return isinstance(moat, dict) and moat.get("competitor_order") == "direct"
+
+
+def _competitor_focus_lines(moat: Any) -> List[str]:
+    """`Biggest threat: <name> (<score>/10, <level>)` whenever a row has a score, and
+    `Closest rival: <row 0>` only on a "direct" list."""
+    rows = _competitor_rows(moat)
+    lines: List[str] = []
+    big = _biggest_competitor_threat(rows)
+    if big is not None:
+        level = str(big.get("threat_level") or "unrated")
+        lines.append(
+            f"Biggest threat: {_competitor_name(big)} "
+            f"({_competitor_score(big):.1f}/10, {level})"
+        )
+    if rows and _competitors_are_direct(moat):
+        lines.append(f"Closest rival: {_competitor_name(rows[0])}")
+    return lines
+
+
+def _competitor_prompt_block(moat: Any, limit: int = 4) -> str:
+    """The competitor lines for a Stage-B moat prompt, the order stated, the focus
+    lines computed over the full list, and the one rule that keeps the two apart."""
+    rows = _competitor_rows(moat)
+    direct = _competitors_are_direct(moat)
+    order = "most direct first" if direct else "highest threat score first"
+    comp_str = ", ".join(_competitor_prompt_line(c) for c in rows[:limit]) or "none listed"
+    lines = [f"KEY COMPETITORS ({order}): {comp_str}"]
+    lines.extend(_competitor_focus_lines(moat))
+    if rows:
+        lines.append(
+            "Only the Closest rival may be called the closest, most direct or main "
+            "competitor; the Biggest threat may be a different company."
+            if direct else
+            "This list is ordered by threat score, not by how directly they compete — never "
+            "call any of them the closest, most direct or main competitor."
+        )
+    return "\n".join(lines)
+
+
 def _moat_durability_note_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -605,12 +704,14 @@ def _moat_durability_note_prompt(
     # Competitor + relative-moat context so the insight can speak to HOW the
     # company competes, not just how strong its moat is in isolation. At
     # Stage B time `shell` is the assembled report, so competitors and the
-    # per-dimension peer_score baselines are already populated.
-    competitors = moat.get("competitors", []) or []
-    comp_str = ", ".join(
-        f"{c.get('name')} ({c.get('ticker')}, threat={c.get('threat_level')})"
-        for c in competitors[:4]
-    ) or "none listed"
+    # per-dimension peer_score baselines are already populated. The biggest
+    # threat is computed over the FULL list inside the block, before the slice.
+    competitor_block = _competitor_prompt_block(moat)
+    threat_hint = (
+        "the Biggest threat line above — the highest threat score"
+        if _biggest_competitor_threat(_competitor_rows(moat)) is not None
+        else "the highest threat score"
+    )
     edges = [
         d for d in dims
         if d.get("peer_score") is not None
@@ -637,28 +738,24 @@ ALL DIMENSIONS: {", ".join(f"{d.get('name')} {d.get('score')}/10" for d in dims)
 MOAT STRENGTH: {strength_hint}
 WHERE IT OUT-DEFENDS PEERS (focal vs peer-avg): {edge_str}
 WHERE IT TRAILS PEERS: {gap_str}
-KEY COMPETITORS: {comp_str}
+{competitor_block}
 
 {_style_block(persona)}
 {_lens_directive(persona, want_metrics=True)}
 LENGTH: Write 2-3 sentences, total under 55 words.
 
 Sentence 1 — judge how durable the moat is (its staying power or the specific threat to it); weave the moat-strength tone naturally, don't just restate the score.
-Sentence 2-3 — how it competes with the named rivals: where its moat out-defends them (use the edge above) and which competitor is the real threat (the highest threat_level). Name actual competitors, not "peers" in the abstract."""
+Sentence 2-3 — how it competes with the named rivals: where its moat out-defends them (use the edge above) and which competitor is the biggest threat ({threat_hint}). Name actual competitors, not "peers" in the abstract."""
 
 
 def _moat_competitive_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
     moat = shell.get("moat_competition", {})
-    competitors = moat.get("competitors", [])
-    comp_str = ", ".join(
-        f"{c.get('name')} ({c.get('ticker')}, threat={c.get('threat_level')})"
-        for c in competitors[:4]
-    ) or "none listed"
+    competitor_block = _competitor_prompt_block(moat)
     return f"""Summarize the competitive landscape for this stock in one sentence.
 
-COMPETITORS: {comp_str}
+{competitor_block}
 
 EVIDENCE:
 {evidence}
@@ -2385,18 +2482,25 @@ def _digest_moat(report: Dict[str, Any]) -> List[str]:
         if mbits:
             out.append("  Market structure: " + ", ".join(mbits))
     comp_strs: List[str] = []
-    for cp in (moat.get("competitors") or [])[:3]:
-        if not isinstance(cp, dict):
-            continue
-        piece = cp.get("name") or cp.get("ticker") or "?"
-        cs = _f_num(cp.get("competitive_score"), "{:.1f}")
+    rows = _competitor_rows(moat)
+    for cp in rows[:3]:
+        piece = _competitor_name(cp)
+        cs = _competitor_score(cp)
         if cs is not None:
-            piece += f" {cs}/10"
+            piece += f" {cs:.1f}/10"
         if cp.get("threat_level"):
             piece += f" {cp['threat_level']} threat"
         comp_strs.append(piece)
     if comp_strs:
-        out.append("  Competitors: " + ", ".join(comp_strs))
+        order = (
+            "most direct first" if _competitors_are_direct(moat)
+            else "highest threat first"
+        )
+        out.append(f"  Competitors ({order}): " + ", ".join(comp_strs))
+        # Computed over the FULL list, so a biggest threat past row 3 still reaches
+        # the thesis (it used to be sliced away on a most-direct-first list).
+        for line in _competitor_focus_lines(moat):
+            out.append("  " + line)
     return out
 
 

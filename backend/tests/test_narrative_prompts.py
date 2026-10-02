@@ -312,3 +312,92 @@ def test_the_forecast_insight_summarises_surprises_by_the_median():
     prompt = np_._revenue_forecast_insight_prompt(PERSONA, "EVIDENCE", shell)
     assert "median EPS surprise +3.0% over the last 10 quarters" in prompt
     assert "avg EPS surprise" not in prompt
+
+
+# ── Competitors: the biggest threat is computed over the FULL list ────────────
+#
+# On a research ("direct") list the rows are most direct first, so the highest threat can
+# sit at any index — AVGO: NVDA (9.0) is row 4. The prompts used to slice `[:4]` and the
+# digest `[:3]` before anyone looked at the scores, and told the model "the real threat is
+# the highest threat_level". "Closest rival" may be claimed only when the report's order
+# marker is exactly "direct" (every report stored before 2026-10-01 has none).
+
+def _comp(ticker, score, level, segment=None):
+    row = {"name": f"{ticker} Inc", "ticker": ticker, "competitive_score": score,
+           "market_share_percent": 0.0, "threat_level": level}
+    if segment is not None:
+        row["segment"] = segment
+    return row
+
+
+def _moat_shell(order="direct", rows=None):
+    rows = rows if rows is not None else [
+        _comp("MRVL", 7.1, "high", "Custom AI chips & networking"),
+        _comp("QCOM", 5.0, "moderate"),
+        _comp("INTC", 4.4, "moderate"),
+        _comp("MSFT", 6.2, "moderate"),
+        _comp("NVDA", 9.0, "high", "AI data-center networking"),
+    ]
+    moat = {"dimensions": [{"name": "Switching Costs", "score": 8.5, "peer_score": 6.0}],
+            "market_dynamics": {}, "competitors": rows}
+    if order is not None:
+        moat["competitor_order"] = order
+    return {"moat_competition": moat}
+
+
+_MOAT_PROMPTS = [np_._moat_durability_note_prompt, np_._moat_competitive_insight_prompt]
+
+
+@pytest.mark.parametrize("build", _MOAT_PROMPTS)
+@pytest.mark.parametrize("order", ["direct", "threat", None])
+def test_the_biggest_threat_past_the_slice_reaches_every_moat_prompt(build, order):
+    prompt = build(PERSONA, "EVIDENCE", _moat_shell(order))
+    assert "Biggest threat: NVDA Inc (9.0/10, high)" in prompt
+    assert "score 7.1/10, competes in: Custom AI chips & networking" in prompt
+    assert ("Closest rival: MRVL Inc" in prompt) == (order == "direct")
+    if order == "direct":
+        assert "KEY COMPETITORS (most direct first)" in prompt
+    else:
+        assert "most direct first" not in prompt
+        assert "KEY COMPETITORS (highest threat score first)" in prompt
+        assert "never call any of them the closest" in prompt
+    assert "the real threat (the highest threat_level)" not in prompt
+
+
+@pytest.mark.parametrize("order", ["direct", "threat", None])
+def test_the_digest_names_the_biggest_threat_from_the_full_list(order):
+    lines = np_._digest_moat(_moat_shell(order))
+    text = "\n".join(lines)
+    assert "Biggest threat: NVDA Inc (9.0/10, high)" in text       # row 4, past the [:3]
+    assert ("Closest rival: MRVL Inc" in text) == (order == "direct")
+    expected = "most direct first" if order == "direct" else "highest threat first"
+    assert f"Competitors ({expected}): MRVL Inc 7.1/10 high threat" in text
+
+
+@pytest.mark.parametrize("bad", [True, float("nan"), float("inf"), 11.0, -1.0, "high", None])
+def test_a_bad_score_never_becomes_the_biggest_threat(bad):
+    rows = [_comp("AAA", bad, "high"), _comp("BBB", 4.0, "moderate")]
+    for build in _MOAT_PROMPTS:
+        prompt = build(PERSONA, "EVIDENCE", _moat_shell("direct", rows))
+        assert "Biggest threat: BBB Inc (4.0/10, moderate)" in prompt
+    assert "Biggest threat: BBB Inc (4.0/10, moderate)" in "\n".join(
+        np_._digest_moat(_moat_shell("direct", rows)))
+
+
+@pytest.mark.parametrize("rows", [[], "garbage", None, [None, "x", 5]])
+def test_malformed_competitor_lists_degrade_to_no_focus_lines(rows):
+    shell = _moat_shell("direct", rows)
+    shell["moat_competition"]["competitors"] = rows
+    for build in _MOAT_PROMPTS:
+        prompt = build(PERSONA, "EVIDENCE", shell)
+        assert "KEY COMPETITORS (most direct first): none listed" in prompt
+        assert "Biggest threat:" not in prompt and "Closest rival:" not in prompt
+        assert "Biggest threat line above" not in prompt     # no dangling reference
+    assert not any("Competitors" in ln or "Biggest" in ln
+                   for ln in np_._digest_moat(shell))
+
+
+def test_a_tie_for_the_biggest_threat_names_the_first_row():
+    rows = [_comp("AAA", 6.0, "moderate"), _comp("BBB", 6.0, "moderate")]
+    assert "Biggest threat: AAA Inc (6.0/10, moderate)" in "\n".join(
+        np_._digest_moat(_moat_shell("threat", rows)))

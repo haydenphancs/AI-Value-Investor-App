@@ -246,6 +246,10 @@ class ChatService:
         context, _server_grounded, context_is_replayed, cache_safe = await self._resolve_grounding(
             context_type, reference_id, context, user_id, context_is_replayed,
         )
+        _ctype = (context_type or "").strip().upper()
+        # The trusted report rule is earned by a block the SERVER built for a report screen —
+        # never by `grounded`, which a client pass-through satisfies too.
+        report_grounded = _ctype == "TICKER_REPORT" and _server_grounded
 
         # Step 1: Conversation history (off the loop — a sync postgrest call on the single
         # Railway worker stalls every other request for a Supabase RTT).
@@ -284,8 +288,11 @@ class ChatService:
                 self._check_deep_dive_cache, stock_id, context, user_message, asset_type
             )
 
-        system_instruction = self._build_system_instruction(
-            session_type, stock_id, profit_summary=profit_summary,
+        # ONE kwargs dict for both builds on this door (the tool round and the tool-less
+        # fallback below), like the stream door's — so a new argument cannot reach one and
+        # silently miss the other.
+        instr_kwargs = dict(
+            profit_summary=profit_summary,
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context,
@@ -294,7 +301,9 @@ class ChatService:
             reader_lens=reader_lens,
             is_deep_dive=is_deep_dive,
             reference_id=reference_id,
+            report_grounded=report_grounded,
         )
+        system_instruction = self._build_system_instruction(session_type, stock_id, **instr_kwargs)
         prompt = self._build_prompt(user_message, conversation_block, chunks)
 
         # Step 4: Generate with function-calling tools
@@ -304,7 +313,6 @@ class ChatService:
         # The same `sources` pills the stream door persists (`prepare_stream_generation`),
         # computed with the same `grounded` rule — so a turn re-POSTed through this door
         # after a stream verdict no longer renders bare beside its neighbours (F03-9).
-        _ctype = (context_type or "").strip().upper()
         _enrichment_arrived = bool(profit_summary or company_profile_summary) or \
             self._snapshot_summary_has_data(snapshot_summary)
         sources = self._build_sources(
@@ -395,13 +403,7 @@ class ChatService:
                 # says "you have explain_price_move" to a model with nothing attached is an
                 # invitation to supply the tool's output from memory.
                 system_instruction=self._build_system_instruction(
-                    session_type, stock_id, profit_summary=profit_summary,
-                    snapshot_summary=snapshot_summary,
-                    company_profile_summary=company_profile_summary,
-                    client_context=context, asset_type=asset_type,
-                    context_is_replayed=context_is_replayed, reader_lens=reader_lens,
-                    is_deep_dive=is_deep_dive, reference_id=reference_id,
-                    tools_granted=False,
+                    session_type, stock_id, tools_granted=False, **instr_kwargs,
                 ),
                 max_output_tokens=_chat_output_cap(is_deep_dive),
                 thinking_budget=_chat_thinking_budget(),
@@ -549,6 +551,9 @@ class ChatService:
                 self._get_company_profile_summary(stock_id),
             )
 
+        # Server-side verdict only (see generate_response): the resolver BUILT a report block.
+        ctype = (context_type or "").strip().upper()
+        report_grounded = ctype == "TICKER_REPORT" and server_grounded
         instr_kwargs = dict(
             profit_summary=profit_summary,
             snapshot_summary=snapshot_summary,
@@ -557,6 +562,7 @@ class ChatService:
             context_is_replayed=context_is_replayed, reader_lens=reader_lens,
             is_deep_dive=is_deep_dive,
             reference_id=reference_id,
+            report_grounded=report_grounded,
         )
         system_instruction = self._build_system_instruction(session_type, stock_id, **instr_kwargs)
         # The same instruction WITHOUT tool claims, for the calls on this turn that carry no
@@ -584,7 +590,6 @@ class ChatService:
         # the same live enrichment, and "Cay research report · AAPL" must not be earned by
         # a company profile. And only enrichment that actually arrived counts: the
         # all-snapshots-missing marker is text for the model, not grounding.
-        ctype = (context_type or "").strip().upper()
         enrichment_arrived = bool(profit_summary or company_profile_summary) or \
             self._snapshot_summary_has_data(snapshot_summary)
         grounded = bool(context) or (ctype == "STOCK" and enrichment_arrived)
@@ -2266,6 +2271,29 @@ class ChatService:
         "so plainly ('I don't have reliable background on X') and never invent a founder, a "
         "date, a mechanism or a figure to fill the gap. "
     )
+    # ── Report grounding (TestFlight #57, 2026-09-26) ────────────────────────────
+    # "Chat with the report" on AVGO: the report listed NVIDIA first; Cay AI answered "NVIDIA
+    # is not the main competitor" from memory (the WHAT YOU KNOW rule above licenses company
+    # background from general knowledge) and then said the report does not mention it. The
+    # only "answer from the report" line sat INSIDE the untrusted fence, where — by design —
+    # it steers nothing. This is the trusted half: static server text, placed BEFORE the
+    # <<<CLIENT_CONTEXT>>> fence (a block after it would read as part of the untrusted span),
+    # and only when the server itself built the report block (`report_grounded`): on a
+    # pass-through or timed-out resolve the fenced text is the client's, and must never be
+    # promoted to "what the report shows". No tool identifiers (test_chat_capability_block)
+    # and none of the injection words test_chat_prompt_fencing forbids.
+    _REPORT_GROUNDING_RULE = (
+        "\nTHE REPORT ON SCREEN: The user is reading a Cay research report, and the report data "
+        "in the CLIENT CONTEXT block below is what that report shows. When a question is about "
+        "the report itself — its lists, rankings, scores, thesis, competitors and risks, or how "
+        "it defines a score or an order — answer from that report data first and explain the "
+        "report's own definition. Your general knowledge may add a second point, clearly "
+        "labelled as your broader view, but it must never contradict or deny what the report "
+        "shows. For today's price or anything else that moves with the market, use the LIVE "
+        "QUOTE line or a tool result when you have one, and give the report's own figure as of "
+        "the report date. If the report data you were given does not cover something, say it "
+        "is not in what you were given — never that the report lacks it or does not mention it. "
+    )
 
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
@@ -2279,7 +2307,12 @@ class ChatService:
         is_deep_dive: bool = False,
         reference_id: Optional[str] = None,
         tools_granted: bool = True,
+        report_grounded: bool = False,
     ) -> str:
+        # `report_grounded`: the caller's server-side verdict that `client_context` is a
+        # TICKER_REPORT block the resolver BUILT (never the client's own text) — it adds the
+        # trusted `_REPORT_GROUNDING_RULE` ahead of the fence.
+        #
         # The tools this chat is ACTUALLY granted. Every tool the prompt names below is
         # conditioned on this set: a clause that says "when you have access to the X tool"
         # on a chat that has no X tool is an invitation to supply X from memory.
@@ -2458,6 +2491,11 @@ class ChatService:
             context_is_replayed = False
 
         if client_context:
+            # Trusted, and therefore BEFORE the fence it describes: after the shared guards
+            # (identity, advice boundary) so it cannot override them, and outside the
+            # untrusted span so it still steers. See `_REPORT_GROUNDING_RULE`.
+            if report_grounded:
+                base += self._REPORT_GROUNDING_RULE
             # Spotlighting (OWASP LLM01, indirect injection): client_context is
             # UNTRUSTED — it can carry attacker-controlled text (crafted request body or
             # hostile on-screen data) yet it lands in the SYSTEM instruction. Fence it

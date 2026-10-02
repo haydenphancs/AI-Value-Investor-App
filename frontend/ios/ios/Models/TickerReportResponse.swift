@@ -603,12 +603,16 @@ struct CompetitorDTO: Codable {
     let competitiveScore: Double
     let marketSharePercent: Double
     let threatLevel: String
+    /// Short "competes in" label (≤ 48 chars, cleaned server-side). Optional: the key is
+    /// absent on every report stored before 2026-10-01 and whenever research gave none.
+    let segment: String?
 
     enum CodingKeys: String, CodingKey {
         case name, ticker
         case competitiveScore = "competitive_score"
         case marketSharePercent = "market_share_percent"
         case threatLevel = "threat_level"
+        case segment
     }
 }
 
@@ -618,6 +622,9 @@ struct MoatCompetitionDTO: Codable {
     let durabilityNote: String
     let competitors: [CompetitorDTO]
     let competitiveInsight: String
+    /// "direct" (rows most direct first) or "threat" (highest threat score first).
+    /// Absent on every report stored before 2026-10-01 — those are threat-ordered.
+    let competitorOrder: String?
 
     enum CodingKeys: String, CodingKey {
         case marketDynamics = "market_dynamics"
@@ -625,6 +632,7 @@ struct MoatCompetitionDTO: Codable {
         case durabilityNote = "durability_note"
         case competitors
         case competitiveInsight = "competitive_insight"
+        case competitorOrder = "competitor_order"
     }
 }
 
@@ -1024,10 +1032,12 @@ extension TickerReportAPIResponse {
                     name: c.name, ticker: c.ticker,
                     competitiveScore: c.competitiveScore,
                     marketSharePercent: c.marketSharePercent,
-                    threatLevel: Self.mapCompetitorThreat(c.threatLevel)
+                    threatLevel: Self.mapCompetitorThreat(c.threatLevel),
+                    segment: Self.mapCompetitorSegment(c.segment)
                 )
             },
-            competitiveInsight: moatCompetition.competitiveInsight
+            competitiveInsight: moatCompetition.competitiveInsight,
+            competitorOrder: CompetitorListOrder(wireValue: moatCompetition.competitorOrder)
         )
 
         // Macro Data
@@ -1234,6 +1244,13 @@ extension TickerReportAPIResponse {
         case "moderate": return .moderate
         default: return .low
         }
+    }
+
+    /// A blank or whitespace-only label becomes nil, so the row never draws an empty line.
+    private static func mapCompetitorSegment(_ s: String?) -> String? {
+        guard let trimmed = s?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     private static func mapMacroCategory(_ s: String) -> MacroRiskCategory {

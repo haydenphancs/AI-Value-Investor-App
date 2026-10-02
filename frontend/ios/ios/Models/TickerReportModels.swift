@@ -1330,6 +1330,34 @@ struct CompetitorComparison: Identifiable {
     let competitiveScore: Double       // 0-10
     let marketSharePercent: Double
     let threatLevel: CompetitorThreatLevel
+    /// Short "competes in" label (≤ 48 chars). LAST and defaulted, so a row built
+    /// without one — every report stored before 2026-10-01 — still compiles and renders.
+    var segment: String? = nil
+}
+
+/// How the report ordered its competitor rows (`moat_competition.competitor_order`).
+///
+/// Only the exact wire value "direct" means the research list, most direct rival first.
+/// Everything else — "threat", an unknown value, and the ABSENT key on every report
+/// stored before 2026-10-01 — is threat-ordered, and must never be described as
+/// "most direct": the tester's AVGO report is one of those.
+enum CompetitorListOrder {
+    case mostDirect
+    case highestThreat
+
+    init(wireValue: String?) {
+        self = wireValue == "direct" ? .mostDirect : .highestThreat
+    }
+
+    /// The one-line legend under the "Competitors" title.
+    var caption: String {
+        switch self {
+        case .mostDirect:
+            return "Most direct first · badge and score = competitive threat (0–10)"
+        case .highestThreat:
+            return "Highest threat first · score 0–10"
+        }
+    }
 }
 
 struct ReportMoatCompetitionData {
@@ -1338,6 +1366,8 @@ struct ReportMoatCompetitionData {
     let durabilityNote: String
     let competitors: [CompetitorComparison]
     let competitiveInsight: String
+    /// LAST and defaulted to the safe reading (see `CompetitorListOrder`).
+    var competitorOrder: CompetitorListOrder = .highestThreat
 
     // Computed: Overall rating based on Max-Score Rule
     var overallRating: MoatOverallRating {
@@ -1825,8 +1855,8 @@ extension TickerReportData {
             ],
             durabilityNote: "Oracle's moat is anchored by extremely high switching costs in enterprise database and ERP. Customers face multi-year migration timelines and significant retraining costs, creating durable lock-in.",
             competitors: [
-                CompetitorComparison(name: "Amazon Web Services", ticker: "AMZN", competitiveScore: 9.0, marketSharePercent: 31.0, threatLevel: .high),
-                CompetitorComparison(name: "Microsoft Azure", ticker: "MSFT", competitiveScore: 8.5, marketSharePercent: 25.0, threatLevel: .high),
+                CompetitorComparison(name: "Amazon Web Services", ticker: "AMZN", competitiveScore: 9.0, marketSharePercent: 31.0, threatLevel: .high, segment: "Cloud infrastructure, databases and AI platforms"),
+                CompetitorComparison(name: "Microsoft Azure", ticker: "MSFT", competitiveScore: 8.5, marketSharePercent: 25.0, threatLevel: .high, segment: "Enterprise cloud applications & ERP"),
                 CompetitorComparison(name: "Google Cloud", ticker: "GOOGL", competitiveScore: 7.2, marketSharePercent: 11.0, threatLevel: .moderate),
                 CompetitorComparison(name: "SAP", ticker: "SAP", competitiveScore: 7.0, marketSharePercent: 5.0, threatLevel: .low)
             ],

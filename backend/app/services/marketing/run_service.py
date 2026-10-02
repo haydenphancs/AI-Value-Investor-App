@@ -8,6 +8,10 @@ Who calls this
   claim the day, checkpoint stages, register artefacts and hand over the day's posts.
 * `app/services/marketing/publisher_service.py` — the PUBLISHER loop in the web lifespan,
   which claims `approved` posts one at a time before any external call.
+* The review bot (`review_service.py`: verdicts, reject reasons, retract requests), the measure step
+  (`metrics_service.py`: `merge_post_metrics`, the ONE writer of `marketing_posts.metrics`) and the
+  weekly digest / run-health alert (`digest_service.py`: reads only) — all inside that same loop or
+  its webhook.
 
 The two processes never share a clock or a filesystem; every "have I already done this"
 question is answered by a row here, never by inference from the boot time (the lesson of
@@ -29,11 +33,14 @@ Supabase is reached through `sb_exec` (never a bare `.execute()` on the loop —
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from app.config import settings
 from app.database import get_supabase
@@ -63,6 +70,9 @@ RUNS = "marketing_runs"
 ASSETS = "marketing_assets"
 POSTS = "marketing_posts"
 SCRIPTS = "marketing_scripts"
+#: `/go/{campaign}` taps per (campaign, ET day) — written by `smart_link` (migration 173); read here
+#: only for the weekly digest.
+LINK_HITS = "marketing_link_hits"
 
 # Claim reasons — the worker branches on these strings, so they are part of the wire contract.
 CLAIMED = "claimed"
@@ -88,10 +98,24 @@ _SWEEP_LIMIT = 20
 # Columns a post write may set (`transition_post` uses this minus `metadata`, which it only ever
 # MERGES; the legacy `mark_post` takes it whole). A whitelist, so an adapter result dict
 # can never smuggle a column (or a typo that PostgREST would 400 on) into the ledger.
+# `metrics` is deliberately NOT here: its one writer is `merge_post_metrics`, fenced on its own
+# `metrics->>rev` and never touching `updated_at` (the publisher's fence).
 _POST_WRITABLE = frozenset({
-    "external_id", "external_url", "attempts", "last_error", "cost_micros", "metrics",
+    "external_id", "external_url", "attempts", "last_error", "cost_micros",
     "metadata", "claimed_at", "published_at", "approved_at", "approved_by",
 })
+
+#: Why the owner rejected a post (`metadata.review.reason`, written by `record_reject_reason` from the
+#: review bot's reason keyboard). The bot's labels (`review_service.REJECT_REASONS`) are keyed by
+#: exactly these codes — pinned equal by tests/test_marketing_review_bot.py.
+REJECT_REASON_CODES = ("tone", "accuracy", "compliance", "weak", "other")
+
+#: Why `close_finished_runs` closed a run (`metadata.closed.reason`, from `close_summary`).
+CLOSE_REASONS = ("posted", "all_rejected", "expired_unreviewed", "approved_unsent", "failed", "no_posts",
+                 "mixed")
+
+#: `link_hits_between` reads at most this many (campaign, day) rows — ~15 campaigns × a month is ~465.
+_LINK_HITS_LIMIT = 2000
 
 
 class MarketingRunError(Exception):
@@ -327,22 +351,194 @@ def month_start_utc(now: Optional[datetime] = None) -> datetime:
     return now.astimezone(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-def charges_since(post: Dict[str, Any], since: datetime) -> int:
-    """Sum of a post's `metadata.charges` entries dated at or after `since` (micro-dollars). An
-    entry whose time cannot be read is COUNTED — an over-count can only pause X early."""
+#: The op a journal entry is counted under when it carries none (or junk): it still counts, so the
+#: per-op breakdown always sums to `charges_since`.
+UNKNOWN_CHARGE_OP = "unknown"
+_CHARGE_OP_MAX_CHARS = 64
+
+
+def _dated_charges(post: Dict[str, Any], since: datetime) -> Iterator[Tuple[str, int]]:
+    """(op, micros) of every `metadata.charges` entry of `post` dated at or after `since` — the ONE
+    reading rule behind `charges_since` and `charges_by_op_since`. An entry whose time cannot be read
+    is COUNTED (an over-count can only pause X early); one whose amount is missing or cannot be read
+    (a bool, not a number, one too large for an int) is skipped — never an `op: 0` line in the
+    digest; a missing or junk op is `UNKNOWN_CHARGE_OP`."""
     meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
-    total = 0
-    for entry in meta.get("charges") or []:
+    journal = meta.get("charges")
+    if not isinstance(journal, list):
+        return
+    if since.tzinfo is None:   # naive = UTC, as everywhere here (an aware/naive compare would raise)
+        since = since.replace(tzinfo=timezone.utc)
+    for entry in journal:
         if not isinstance(entry, dict):
             continue
+        raw = entry.get("micros")
+        if raw is None or isinstance(raw, bool):
+            continue
         try:
-            micros = int(entry.get("micros") or 0)
-        except (TypeError, ValueError):
+            micros = int(raw)
+        except (TypeError, ValueError, OverflowError):
             continue
         at = _parse_ts(entry.get("at"))
         if at is None or at >= since:
-            total += micros
-    return total
+            op = entry.get("op")
+            op = op[:_CHARGE_OP_MAX_CHARS] if isinstance(op, str) and op.strip() else UNKNOWN_CHARGE_OP
+            yield op, micros
+
+
+def charges_since(post: Dict[str, Any], since: datetime) -> int:
+    """Sum of a post's `metadata.charges` entries dated at or after `since` (micro-dollars). An
+    entry whose time cannot be read is COUNTED — an over-count can only pause X early."""
+    return sum(micros for _op, micros in _dated_charges(post, since))
+
+
+def charges_by_op_since(post: Dict[str, Any], since: datetime) -> Dict[str, int]:
+    """`charges_since` broken down by journal op (`x_create`, `x_metrics_read`, …). The same reading
+    rule, so the values always sum to `charges_since(post, since)`."""
+    out: Dict[str, int] = {}
+    for op, micros in _dated_charges(post, since):
+        out[op] = out.get(op, 0) + micros
+    return out
+
+
+def metrics_rev(metrics: Any) -> Tuple[Optional[str], int]:
+    """(fence, next rev) for a write of `marketing_posts.metrics` whose stored value is `metrics`.
+
+    `fence` is `metrics->>rev` exactly as PostgREST's `->>` renders the stored JSON value as text (a
+    string as itself, anything else as its JSON), or None for a missing / JSON-null rev (`IS NULL`).
+    The next rev is the stored one + 1 when it is a non-negative int, else 1: a hand-edited rev (a
+    string, a bool, a float, a negative) is still fenced on exactly what is stored — or the write could
+    never land — and the counter restarts. Pure."""
+    if not isinstance(metrics, dict) or metrics.get("rev") is None:
+        return None, 1
+    rev = metrics["rev"]
+    fence = rev if isinstance(rev, str) else json.dumps(rev)
+    if type(rev) is int and rev >= 0:
+        return fence, rev + 1
+    return fence, 1
+
+
+def expired_unreviewed(post: Dict[str, Any]) -> bool:
+    """Did `post` expire WITHOUT a review decision? `metadata.expired_from` (the status it expired
+    from, written by `expire_stale_posts` since 2026-10-01) decides; an older row without it is
+    unreviewed when it carries no `metadata.review` decision. A post the publisher expired after an
+    unknown outcome (queued → skipped) was approved, so it is not unreviewed."""
+    if post.get("status") != "skipped":
+        return False
+    meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    if meta.get("skip_reason") != "expired":
+        return False
+    was = meta.get("expired_from")
+    if was is not None:
+        return was == "pending_review"
+    review = meta.get("review")
+    return not (isinstance(review, dict) and review.get("decision"))
+
+
+#: The statuses an APPROVED post expires from without being sent: `approved` (never claimed —
+#: the X cap, a dry run, an unwired platform; `expire_stale_posts`) and `queued` (an unknown
+#: outcome the platform turned out not to hold, past its day; the publisher's reconcile).
+_APPROVED_UNSENT_FROM = ("approved", "queued")
+
+
+def expired_approved_unsent(post: Dict[str, Any]) -> bool:
+    """Did `post` expire after the owner APPROVED it, without ever reaching a platform?
+    `metadata.expired_from` in (`approved`, `queued`) decides; an older row without it counts when
+    it carries a review decision `approved` (`expired_unreviewed`'s legacy rule, the other way
+    round). A junk `expired_from` is neither this nor unreviewed. Pure."""
+    if post.get("status") != "skipped":
+        return False
+    meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    if meta.get("skip_reason") != "expired":
+        return False
+    was = meta.get("expired_from")
+    if was is not None:
+        return was in _APPROVED_UNSENT_FROM
+    review = meta.get("review")
+    return isinstance(review, dict) and review.get("decision") == "approved"
+
+
+_SUMMARY_KEY_RE = re.compile(r"[a-z0-9_]{1,40}", re.ASCII)
+
+
+def _summary_key(value: Any) -> str:
+    """A status / skip reason as a digest-safe key: code-written values pass, anything else (a hand
+    edit, a newline, a non-string) is `unknown`."""
+    return value if isinstance(value, str) and _SUMMARY_KEY_RE.fullmatch(value) else "unknown"
+
+
+def _offered_for_review(post: Dict[str, Any]) -> bool:
+    """Was the owner asked about `post` — sent it with buttons, or recorded a decision on it? A
+    read-only preview (an unwired platform) never was."""
+    meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    return bool(meta.get("review_notified_at")) or isinstance(meta.get("review"), dict)
+
+
+def close_summary(posts: List[Dict[str, Any]], *, now: Optional[str] = None) -> Dict[str, Any]:
+    """What `close_finished_runs` records as `metadata.closed` on a run it closes. Pure.
+
+    `{"at", "reason", "posts": {status: n}, "skip_reasons": {reason: n}}`; `reason` is one of
+    CLOSE_REASONS:
+
+    * `no_posts` — the run recorded none;
+    * `posted` — at least one post reached a platform (published, or published then retracted);
+    * otherwise judged over the posts the owner was ASKED about (sent with buttons or decided; all of
+      them when none was) — read-only previews of unwired platforms always expire unreviewed, and
+      would otherwise turn every day into `mixed`:
+      `all_rejected` (every one rejected), `failed` (every one failed), `expired_unreviewed` (every
+      one expired without a decision — `expired_unreviewed()`), `approved_unsent` (every one was
+      approved and expired unsent: the X cap, a dry run, an unwired platform, or an unknown outcome
+      the platform did not hold — `expired_approved_unsent()`), else `mixed`."""
+    rows = [p for p in (posts or []) if isinstance(p, dict)]
+    statuses = Counter(_summary_key(p.get("status")) for p in rows)
+    skip_reasons: Counter = Counter()
+    for p in rows:
+        if p.get("status") == "skipped":
+            meta = p.get("metadata") if isinstance(p.get("metadata"), dict) else {}
+            skip_reasons[_summary_key(meta.get("skip_reason"))] += 1
+    if not rows:
+        reason = "no_posts"
+    elif any(p.get("status") in ("published", "retracted") for p in rows):
+        reason = "posted"
+    else:
+        basis = [p for p in rows if _offered_for_review(p)] or rows
+        if all(p.get("status") == "rejected" for p in basis):
+            reason = "all_rejected"
+        elif all(p.get("status") == "failed" for p in basis):
+            reason = "failed"
+        elif all(expired_unreviewed(p) for p in basis):
+            reason = "expired_unreviewed"
+        elif all(expired_approved_unsent(p) for p in basis):
+            reason = "approved_unsent"
+        else:
+            reason = "mixed"
+    return {"at": now or _now_iso(), "reason": reason, "posts": dict(statuses),
+            "skip_reasons": dict(skip_reasons)}
+
+
+def _as_date(value: Any, name: str) -> date:
+    """A calendar date argument (ET days, as the ledger stores them): a `date` or an ISO string. A
+    datetime is refused — which day it falls on depends on a time zone the caller did not say."""
+    if isinstance(value, datetime):
+        raise ValueError(f"{name} must be a calendar date, not a datetime ({value!r})")
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"{name} {value!r} is not an ISO date") from None
+    raise ValueError(f"{name} must be a date, not {type(value).__name__}")
+
+
+def _as_instant(value: Any, name: str) -> datetime:
+    """An instant argument: an aware datetime (a naive one is UTC, as everywhere in this module) or
+    an ISO timestamp string. A bare date is refused — midnight WHERE?"""
+    if isinstance(value, datetime) or (isinstance(value, str) and "T" in value):
+        parsed = _parse_ts(value)
+        if parsed is not None:
+            return parsed
+    raise ValueError(f"{name} must be a datetime or an ISO timestamp, not {value!r}")
 
 
 def decide_claim(
@@ -779,7 +975,8 @@ class MarketingRunService:
         may only write its OWN live run — `in_progress`, fenced in the UPDATE itself, not
         read-then-checked — may set only WORKER_RUN_STATUSES, may only move `stage` forward
         (also fenced on the observed stage), and may not write the server-owned metadata keys
-        (`claim_nonce` is trusted by `decide_claim` ahead of the attempts cap).
+        (SERVER_OWNED_RUN_METADATA: `claim_nonce` is trusted by `decide_claim` ahead of the
+        attempts cap; `closed` is `close_finished_runs`' record of why it closed the run).
 
         The worker RETRIES every call after a transport error or a 502/503/504, so a worker
         write must be idempotent: a PATCH whose effect is already there — the run already holds
@@ -1567,6 +1764,10 @@ class MarketingRunService:
         # `metadata` is written ONLY through the merge (`meta` / `publish` / `charge`): a raw
         # `metadata=` field would replace the whole document — the review record, the dry-run flag
         # and the cost journal the X cap sums.
+        if "metrics" in fields:
+            # Its only writer is `merge_post_metrics` (fenced on `metrics->>rev`); a write from here
+            # would race the measure step's merge and drop its history.
+            raise ValueError("transition_post: `metrics` is written only by merge_post_metrics")
         unknown = set(fields) - (_POST_WRITABLE - {"metadata"})
         if unknown:
             raise ValueError(f"transition_post: not writable: {sorted(unknown)}")
@@ -1619,7 +1820,8 @@ class MarketingRunService:
 
     async def expire_stale_posts(self, today: date, *, limit: int = 100) -> int:
         """Close `approved` / `pending_review` posts whose run day is neither today nor yesterday
-        (ET) as `skipped` (`metadata.skip_reason = expired`) — the owner's rule: a post goes out
+        (ET) as `skipped` (`metadata.skip_reason = expired`, `metadata.expired_from` = the status it
+        had) — the owner's rule: a post goes out
         on its day or the next, never as part of a backlog. Oldest first and bounded, so a large
         backlog is drained over a few ticks. `queued` rows are never expired (their outcome may
         be live on a platform — reconcile owns them). Returns how many were closed."""
@@ -1633,7 +1835,11 @@ class MarketingRunService:
             if not isinstance(row, dict) or is_fresh(row, today):
                 continue
             meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            patch_meta: Dict[str, Any] = {"skip_reason": "expired", "expired_at": _now_iso()}
+            # `expired_from`: the status it expired FROM — the digest tells "the owner never looked"
+            # (pending_review) from "approved but never sent" (approved). The write is fenced on
+            # exactly this status, so it is the status the post had when it closed.
+            patch_meta: Dict[str, Any] = {"skip_reason": "expired", "expired_at": _now_iso(),
+                                          "expired_from": row.get("status")}
             unset: Tuple[str, ...] = ()
             if row.get("status") == "approved" and meta.get("dry_run") is False:
                 # A post the owner APPROVED that never went out: say so in Telegram (the publish feed
@@ -1783,7 +1989,12 @@ class MarketingRunService:
         `published` if any post reached a platform (published or later retracted), otherwise
         `skipped`. Only outside the claim window, so it can never meet `decide_claim`; never
         `failed`; never while a post is still pending, approved or queued. One compare-and-swap
-        per run on its status and updated_at."""
+        per run on its status and updated_at.
+
+        It also says WHY (`metadata.closed`, `close_summary`: the reason, the post counts by status
+        and the skip reasons), merged into the metadata it observed — safe under the CAS, since
+        every run write moves `updated_at`. `finished_at` is KEPT when the worker set it (the run's
+        own wall time); it is filled only when NULL. The close time is `metadata.closed.at`."""
         res = await _exec(
             self.sb.table(RUNS).select("*").eq("status", "media_ready")
             .lt("run_date", (today - timedelta(days=1)).isoformat()).order("run_date").limit(limit),
@@ -1793,22 +2004,211 @@ class MarketingRunService:
         for run in getattr(res, "data", None) or []:
             if not isinstance(run, dict):
                 continue
-            posts = await _exec(self.sb.table(POSTS).select("status").eq("run_id", run["id"]),
+            posts = await _exec(self.sb.table(POSTS).select("status,metadata").eq("run_id", run["id"]),
                                 op="close_finished_runs.posts", run_id=run["id"])
-            statuses = [str(p.get("status")) for p in (getattr(posts, "data", None) or [])]
+            rows = [p for p in (getattr(posts, "data", None) or []) if isinstance(p, dict)]
+            statuses = [str(p.get("status")) for p in rows]
             if any(s in _OPEN_POST_STATUSES for s in statuses):
                 continue
             final = "published" if any(s in ("published", "retracted") for s in statuses) else "skipped"
             now = _now_iso()
-            query = self.sb.table(RUNS).update({"status": final, "finished_at": now, "updated_at": now}) \
-                .eq("id", run["id"]).eq("status", "media_ready")
-            if run.get("updated_at"):
-                query = query.eq("updated_at", _ts_filter(run["updated_at"]))
+            summary = close_summary(rows, now=now)
+            meta = dict(run["metadata"]) if isinstance(run.get("metadata"), dict) else {}
+            meta["closed"] = summary
+            patch: Dict[str, Any] = {"status": final, "updated_at": now, "metadata": meta}
+            if not run.get("finished_at"):
+                patch["finished_at"] = now
+            query = self.sb.table(RUNS).update(patch).eq("id", run["id"]).eq("status", "media_ready")
+            # The fence the metadata merge rests on: an observed NULL is fenced as NULL, never skipped.
+            query = (query.eq("updated_at", _ts_filter(run["updated_at"])) if run.get("updated_at")
+                     else query.is_("updated_at", "null"))
             if _one(await _exec(query, op="close_finished_runs.update", run_id=run["id"])) is not None:
                 closed += 1
-                logger.info("marketing run CLOSED run_id=%s run_date=%s status=%s posts=%s",
-                            run["id"], run.get("run_date"), final, statuses)
+                logger.info("marketing run CLOSED run_id=%s run_date=%s status=%s reason=%s posts=%s "
+                            "skip_reasons=%s", run["id"], run.get("run_date"), final, summary["reason"],
+                            summary["posts"], summary["skip_reasons"])
         return closed
+
+    # measurement + digest (2026-10-01) ------------------------------------------------------------
+    # `merge_post_metrics` is the ONLY writer of `marketing_posts.metrics`; `record_reject_reason`
+    # records the review bot's reason keyboard; everything else here is a bounded read for the weekly
+    # digest and the run-health alert, every filter IN the query (before its LIMIT).
+
+    async def merge_post_metrics(
+        self, post_id: str, *, observed: Optional[Dict[str, Any]],
+        merge: Callable[[Dict[str, Any]], Dict[str, Any]], expect_status: Any = "published",
+        retries: int = 1,
+    ) -> Optional[Dict[str, Any]]:
+        """Write a post's `metrics` document — and nothing else: one UPDATE of the `metrics` column
+        only (never `metadata`, never `updated_at`, so the publisher's `updated_at` fence on the same
+        row is untouched — marketing_posts has no trigger, which tests/test_marketing_run_service.py
+        pins against the schema snapshot and every migration), fenced on the status (`expect_status`, a
+        status or a tuple) AND the observed `metrics->>rev` (IS NULL on the first write).
+
+        `merge(old_metrics) -> new_metrics` is a pure function of the stored document (`{}` when it is
+        missing or not an object); it gets a deep copy. The writer owns `rev`: the new document's
+        `rev` is the old one + 1 (1 when there was none — `metrics_rev`). A lost fence re-reads the
+        row and re-applies `merge` to the FRESH document, up to `retries` times.
+
+        Returns the updated row, or None when the post is gone, not in `expect_status`, or the fence
+        was lost every time (logged WARNING). A ledger error raises `MarketingRunError`; a `merge`
+        that returns anything but a dict raises ValueError before any write."""
+        expected = (expect_status,) if isinstance(expect_status, str) else tuple(expect_status)
+        row = observed
+        tries = max(retries, 0) + 1
+        for attempt in range(tries):
+            if row is None or attempt > 0:
+                row = await self.get_post(post_id)
+            if row is None or row.get("status") not in expected:
+                return None
+            old = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            fence, next_rev = metrics_rev(old)
+            new = merge(copy.deepcopy(old))
+            if not isinstance(new, dict):
+                raise ValueError(f"merge_post_metrics: merge returned a {type(new).__name__}, not a dict "
+                                 f"(post {post_id})")
+            new = {**new, "rev": next_rev}
+            query = self.sb.table(POSTS).update({"metrics": new}).eq("id", post_id).eq("status", row["status"])
+            query = (query.is_("metrics->>rev", "null") if fence is None
+                     else query.eq("metrics->>rev", fence))
+            updated = _one(await _exec(query, op="merge_post_metrics", post_id=post_id, rev=next_rev))
+            if updated is not None:
+                return updated
+        logger.warning("marketing post metrics NOT written post_id=%s: the rev fence was lost %d time(s) — "
+                       "another writer kept moving it; the next measure retries", post_id, tries)
+        return None
+
+    async def list_measurable_posts(
+        self, *, since: Any, platforms: Optional[List[str]] = None, limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """`published` posts with `published_at` at or after `since`, oldest published first. Every
+        filter is in the query, before the LIMIT. `platforms=[]` is nothing (no read)."""
+        since_at = _as_instant(since, "since")
+        if limit <= 0:
+            return []
+        query = (self.sb.table(POSTS).select("*").eq("status", "published")
+                 .gte("published_at", _ts_filter(since_at)))
+        if platforms is not None:
+            if not platforms:
+                return []
+            query = query.in_("platform", list(platforms))
+        res = await _exec(query.order("published_at").limit(limit), op="list_measurable_posts",
+                          since=_ts_filter(since_at))
+        return [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+
+    async def list_posts_created_between(self, start: Any, end: Any, *, limit: int = 500) -> List[Dict[str, Any]]:
+        """Posts of any status created in [start, end) — instants, a naive one being UTC — oldest
+        first. An empty or inverted window reads nothing."""
+        start_at, end_at = _as_instant(start, "start"), _as_instant(end, "end")
+        if limit <= 0 or start_at >= end_at:
+            return []
+        res = await _exec(
+            self.sb.table(POSTS).select("*")
+            .gte("created_at", _ts_filter(start_at)).lt("created_at", _ts_filter(end_at))
+            .order("created_at").limit(limit),
+            op="list_posts_created_between", start=_ts_filter(start_at), end=_ts_filter(end_at),
+        )
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) >= limit:
+            logger.warning("marketing list_posts_created_between: %d rows hit the limit for %s..%s — the "
+                           "newest may be missing", len(rows), _ts_filter(start_at), _ts_filter(end_at))
+        return rows
+
+    async def get_run_for_date(self, run_date: Any) -> Optional[Dict[str, Any]]:
+        """The run of one ET day (`run_date` UNIQUE), or None — `get_run_by_date` with its argument
+        checked (a `date` or an ISO date string; never a datetime)."""
+        return await self.get_run_by_date(_as_date(run_date, "run_date"))
+
+    async def list_runs_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
+        """Runs dated `start_date`..`end_date` INCLUSIVE (ET days), oldest first. `run_date` is
+        UNIQUE, so the window's day count bounds the read exactly; an inverted window reads nothing."""
+        start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
+        if start > end:
+            return []
+        res = await _exec(
+            self.sb.table(RUNS).select("*")
+            .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
+            .order("run_date").limit((end - start).days + 1),
+            op="list_runs_between", start=start, end=end,
+        )
+        return [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+
+    async def spend_by_op_since(self, platform: str, since: Any) -> Dict[str, int]:
+        """`spend_since` broken down by journal op ({op: micro-dollars}): the same read (rows of
+        `platform` touched since `since` — any charge bumps `updated_at`) and the same entry rule
+        (`charges_by_op_since`), so the values always sum to `spend_since(platform, since)`."""
+        since_at = _as_instant(since, "since")
+        res = await _exec(
+            self.sb.table(POSTS).select("id,cost_micros,metadata,updated_at")
+            .eq("platform", platform).gte("updated_at", _ts_filter(since_at)).limit(1000),
+            op="spend_by_op_since", platform=platform,
+        )
+        out: Dict[str, int] = {}
+        for r in getattr(res, "data", None) or []:
+            if not isinstance(r, dict):
+                continue
+            for op, micros in charges_by_op_since(r, since_at).items():
+                out[op] = out.get(op, 0) + micros
+        return out
+
+    async def link_hits_between(self, start_day: Any, end_day: Any) -> List[Dict[str, Any]]:
+        """`/go` taps — `{campaign, day, hits}` rows of `marketing_link_hits` for ET days
+        `start_day`..`end_day` INCLUSIVE, oldest day first. Raw values: the caller sanitises `hits`.
+        An inverted window reads nothing."""
+        start, end = _as_date(start_day, "start_day"), _as_date(end_day, "end_day")
+        if start > end:
+            return []
+        res = await _exec(
+            self.sb.table(LINK_HITS).select("campaign,day,hits")
+            .gte("day", start.isoformat()).lte("day", end.isoformat())
+            .order("day").order("campaign").limit(_LINK_HITS_LIMIT),
+            op="link_hits_between", start=start, end=end,
+        )
+        rows = [{"campaign": r.get("campaign"), "day": r.get("day"), "hits": r.get("hits")}
+                for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) >= _LINK_HITS_LIMIT:
+            logger.warning("marketing link_hits_between: %d rows hit the limit for %s..%s — counts may be "
+                           "short", len(rows), start, end)
+        return rows
+
+    async def record_reject_reason(self, post_id: str, reason: str, *, by: str) -> str:
+        """The owner's reason for a rejection (the review bot's reason keyboard) — only on a
+        `rejected` post. `metadata.review` is rebuilt from a FRESH read (its decision / by / at kept)
+        with `reason`, `reason_at` and `reason_by`, written by the fenced, merging `transition_post`;
+        two tries.
+
+        Returns `recorded`, `unchanged` (that reason is already there — a double tap writes nothing),
+        `already_<status>` (the post is not rejected; nothing written), `not_found`, or `busy` (the
+        fence was lost twice). A different later reason wins. A reason outside
+        REJECT_REASON_CODES raises ValueError before any read."""
+        if reason not in REJECT_REASON_CODES:
+            raise ValueError(f"unknown reject reason {reason!r} (expected one of {REJECT_REASON_CODES})")
+        for _ in range(2):
+            row = await self.get_post(post_id)
+            if row is None:
+                return "not_found"
+            if row.get("status") != "rejected":
+                return f"already_{row.get('status')}"
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            review = dict(meta["review"]) if isinstance(meta.get("review"), dict) else {}
+            was = review.get("reason")
+            if was == reason:
+                return "unchanged"
+            review.update({"reason": reason, "reason_at": _now_iso(), "reason_by": str(by)[:64]})
+            updated = await self.transition_post(post_id, expect_status="rejected", observed=row, retries=0,
+                                                 meta={"review": review})
+            if updated is not None:
+                logger.info("marketing post REJECT REASON post_id=%s platform=%s reason=%s by=%s (was %r)",
+                            post_id, row.get("platform"), reason, by, was)
+                return "recorded"
+        row = await self.get_post(post_id)
+        if row is None:
+            return "not_found"
+        if row.get("status") != "rejected":
+            return f"already_{row.get('status')}"
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        review = meta.get("review") if isinstance(meta.get("review"), dict) else {}
+        return "unchanged" if review.get("reason") == reason else "busy"
 
 
     # scripts (migration 173) --------------------------------------------------

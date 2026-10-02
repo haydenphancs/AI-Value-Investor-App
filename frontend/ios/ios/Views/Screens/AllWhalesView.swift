@@ -36,14 +36,37 @@ private enum WhaleSortOption: String, CaseIterable {
         case .followers: return "person.2.fill"
         }
     }
+
+    /// What `caydex_all_whales_sort` stores — NEVER `rawValue`, a display label ("A–Z", with
+    /// an en dash) that a copy edit would change and orphan every saved choice. A storage
+    /// contract: never change an id.
+    var storageID: String {
+        switch self {
+        case .alphabetical: return "alphabetical"
+        case .followers: return "followers"
+        }
+    }
+
+    /// An absent or garbage id reads as the default, Followers — without being written back.
+    init(storageID: String) {
+        self = Self.allCases.first { $0.storageID == storageID } ?? .followers
+    }
 }
 
 // MARK: - AllWhalesView
 struct AllWhalesView: View {
     @ObservedObject var viewModel: TrackingViewModel
     @Environment(\.appState) private var appState
+    /// Session-local on purpose: the category chip is navigation within this screen, not a
+    /// setting. Only the sort below is kept.
     @State private var selectedFilter: WhaleCategoryFilter = .all
-    @State private var sortOption: WhaleSortOption = .followers
+    /// The saved sort (TestFlight 1.0 (9): "set up once and permanently keep them" — it was
+    /// `@State` and fell back to Followers every time the screen opened). A device display
+    /// preference, deliberately NOT cleared by `AppState.discardDataForEndedSession()` — the
+    /// same standing as `TrackingView.sortOption`. Read through `sortOption`; written only by
+    /// the Sort tap.
+    @AppStorage("caydex_all_whales_sort") private var storedSortID: String = WhaleSortOption.followers.storageID
+    private var sortOption: WhaleSortOption { WhaleSortOption(storageID: storedSortID) }
     @State private var isSearching: Bool = false
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
@@ -140,7 +163,8 @@ struct AllWhalesView: View {
                     HStack {
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
-                                sortOption = sortOption == .alphabetical ? .followers : .alphabetical
+                                let next: WhaleSortOption = sortOption == .alphabetical ? .followers : .alphabetical
+                                storedSortID = next.storageID
                             }
                         } label: {
                             HStack(spacing: 4) {

@@ -325,7 +325,10 @@ def test_the_building_poll_is_bounded_and_cancelled():
     assert "if !trend.isBuildingHistory { trendCache[key] = (Date(), trend) }" in load
     identity = _decl_block(vm, "func handleIdentityChange(")
     gate = identity.index("guard isActiveTab")
-    for token in ("trendPollTask?.cancel()", "userPickedWindow = false"):
+    # 2026-10-01: the window pick is a saved DEVICE preference now, so an identity change
+    # re-adopts it (or auto mode when none is saved) instead of forcing auto mode;
+    # `test_ios_sticky_list_preferences.py` pins what the restore does.
+    for token in ("trendPollTask?.cancel()", "restoreTrendWindowPreference()"):
         assert identity.index(token) < gate
     assert "trendPollTask?.cancel()" in _decl_block(vm, "    deinit {")
     start = _decl_block(vm, "private func startTrendLoad(")

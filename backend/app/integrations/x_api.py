@@ -1,11 +1,14 @@
 """
 X API v2 — a thin client for the marketing PUBLISHER's X outlet (design doc §12.10).
 
-ONE caller: `app/services/marketing/outlet_x.py`, driven by the publisher loop in
-`app/services/marketing/publisher_service.py`, in the WEB process. It posts text to the brand
-account that owns the X developer app, reads that account's own timeline to reconcile a post
-whose outcome is unknown, and deletes a post the owner retracts. The media worker never holds
-these credentials — it holds no social secret at all (rules/marketing.md §2).
+Two callers, both driven by the publisher loop in `app/services/marketing/publisher_service.py`, in
+the WEB process: `app/services/marketing/outlet_x.py` posts text to the brand account that owns the
+X developer app, reads that account's own timeline to reconcile a post whose outcome is unknown,
+and deletes a post the owner retracts; `app/services/marketing/metrics_service.py` (the measure
+step) reads the account's own posts' public counts (`list_user_posts_metrics`) and its follower
+count (`get_me`). Every read is billed by X — the budget and the charge journal live in the callers.
+The media worker never holds these credentials — it holds no social secret at all
+(rules/marketing.md §2).
 
 Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
 lazy module-level `httpx.AsyncClient` closed in the app lifespan (`close_x_client`); no caching,
@@ -32,8 +35,8 @@ leave this process. Nothing here logs a header or a request body, every transpor
 re-raised `from None` (an httpx exception carries its request), and every message is built from
 the method name, the HTTP status and X's own problem type / title / detail — with each configured
 credential replaced and `app.log_redaction.redact_secrets` applied as a backstop, capped at 300
-characters. No URL here carries a secret (the query is `start_time` / `max_results` /
-`tweet.fields` only), so httpx's own INFO request line needs no filter.
+characters. No URL here carries a secret (the query is `start_time` / `end_time` / `max_results` /
+`tweet.fields` / `exclude` / `user.fields` only), so httpx's own INFO request line needs no filter.
 
 X facts this module relies on — VERIFIED 2026-09-30 (the page text, not memory):
   * Base https://api.x.com; POST /2/tweets accepts "UserToken (HTTP OAuth)" (OAuth 1.0a user
@@ -64,6 +67,22 @@ X facts this module relies on — VERIFIED 2026-09-30 (the page text, not memory
     403 "You are not allowed to create a Tweet with duplicate content." vs the generic anti-spam
     403 "You are not permitted to perform this action."; a user's access token is
     "<numeric user id>-<rest>".
+
+The metrics reads — VERIFIED 2026-10-01 against the same pages:
+  * GET /2/users/{id}/tweets also takes `end_time` ("When both are provided, `start_time` must be
+    earlier than `end_time`"; both "Must be on or after 2010-11-06") and `exclude` (`replies`,
+    `retweets`; comma-joined), and `public_metrics` among the post fields adds
+    `{"impression_count", "like_count", "reply_count", "quote_count", "bookmark_count", <reposts>}`
+    to each post. THE TWO PAGES DISAGREE ON NAMES: the generated reference
+    (https://docs.x.com/x-api/users/get-posts) prints the parameter as `post.fields` and the repost
+    count as `repost_count`; the Fields guide (https://docs.x.com/x-api/fundamentals/fields) and
+    every example URL say `tweet.fields` and `retweet_count`, and no changelog entry announces a
+    rename. This client sends `tweet.fields` (as `list_user_posts` does) and returns
+    `public_metrics` untouched, so the caller must read either repost name.
+  * GET /2/users/me accepts "UserToken" (OAuth 1.0a user context); `user.fields=public_metrics` adds
+    `{"followers_count", "following_count", "tweet_count" (the reference: `post_count`),
+    "listed_count", …}` to `data` beside `id` / `username` / `name`.
+    https://docs.x.com/x-api/users/get-my-user
 """
 
 from __future__ import annotations
@@ -104,6 +123,18 @@ _client: Optional[httpx.AsyncClient] = None
 _ID_RE = re.compile(r"[0-9]{1,25}")
 _ACCESS_TOKEN_USER_RE = re.compile(r"([0-9]{1,25})-")
 _INT_RE = re.compile(r"[0-9]{1,12}")
+#: An X username (15 characters today; a looser cap so an older account is not dropped).
+_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,50}")
+#: A pagination token: visible ASCII, bounded (X's are short base32 strings).
+_NEXT_TOKEN_RE = re.compile(r"[\x21-\x7e]{1,256}")
+
+#: The post fields a metrics read asks for, under the parameter name every X example uses (see the
+#: module docstring: the generated reference page now prints it as `post.fields`).
+METRICS_POST_FIELDS = "created_at,public_metrics"
+#: The brand account's own posts only — no replies, no reposts.
+METRICS_EXCLUDE = "replies,retweets"
+#: The earliest `start_time` / `end_time` X accepts ("Must be on or after 2010-11-06").
+EARLIEST_WINDOW = datetime(2010, 11, 6, tzinfo=timezone.utc)
 
 
 # ── Exception hierarchy ────────────────────────────────────────────────
@@ -427,7 +458,7 @@ def _retry_at(headers: httpx.Headers) -> Optional[datetime]:
 def _json_or_none(resp: httpx.Response) -> Any:
     try:
         return resp.json()
-    except ValueError:
+    except (ValueError, RecursionError):  # JSONDecodeError / UnicodeDecodeError; absurd nesting
         return None
 
 
@@ -537,6 +568,48 @@ def _ambiguous_body(method: str, status: int, why: str) -> XApiAmbiguousError:
     return XApiAmbiguousError(f"x {method}: HTTP {status} {why}", method=method, status=status)
 
 
+def _errors_only_problem(method: str, status: int, errors: List[Any], hidden: Any) -> str:
+    """One line for a 2xx that carries `errors` and no `data`: the first problem object's title /
+    detail / type, and how many there were — folded onto ONE line (X's text is upstream-controlled:
+    a line break or control character in it would forge a log line here, and the caller stores the
+    text as a note), scrubbed of every credential, at most 300 characters."""
+    ptype, title, detail = _problem({"errors": errors}, hidden)
+    described = _describe(method, status, ptype, title, detail)
+    text = f"{described} (no data; {len(errors)} error object(s))"
+    one_line = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    return _scrub(one_line, hidden)
+
+
+def _page_size(value: Any) -> int:
+    """`max_results` clamped to X's 5-100. Anything unreadable (None, text, NaN, infinity) is 5 —
+    the cheapest page, since X bills every post a read returns."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return MIN_LIST_RESULTS
+    return max(MIN_LIST_RESULTS, min(MAX_LIST_RESULTS, n))
+
+
+def _window_time(method: str, value: Any, name: str) -> datetime:
+    """A window bound as an aware UTC datetime, truncated to the second (X's granularity); a naive
+    datetime is UTC, never the local zone. XApiRefusedError (nothing sent) when it is not a
+    datetime, cannot be expressed in UTC, or falls before 2010-11-06."""
+    if not isinstance(value, datetime):
+        raise XApiRefusedError(f"x {method}: {name} must be a datetime — not sent", method=method)
+    utc: Optional[datetime] = None
+    try:
+        utc = (value.replace(tzinfo=timezone.utc) if value.utcoffset() is None
+               else value.astimezone(timezone.utc)).replace(microsecond=0)
+    except (OverflowError, ValueError, TypeError):
+        pass  # refused below, outside this block
+    if utc is None:
+        raise XApiRefusedError(f"x {method}: {name} cannot be expressed in UTC — not sent", method=method)
+    if utc < EARLIEST_WINDOW:
+        raise XApiRefusedError(f"x {method}: {name} is before 2010-11-06, the earliest X accepts — not sent",
+                               method=method)
+    return utc
+
+
 # ── API methods ────────────────────────────────────────────────────────
 
 
@@ -632,3 +705,103 @@ async def list_user_posts(user_id: str, *, start_time: datetime, max_results: in
         posts.append({"id": raw_id, "text": item["text"],
                       "created_at": created if isinstance(created, str) else None})
     return {"posts": posts, "result_count": count if count is not None else len(posts)}
+
+
+async def list_user_posts_metrics(
+    user_id: str,
+    *,
+    start_time: datetime,
+    end_time: datetime,
+    max_results: int = 5,
+) -> Dict[str, Any]:
+    """GET /2/users/{id}/tweets for the window [start_time, end_time] — one page, the account's own
+    posts only (`exclude=replies,retweets`), with `tweet.fields=created_at,public_metrics`. X bills
+    every post the read returns, so keep the window narrow; `max_results` is clamped to 5-100 and
+    anything unreadable is 5. Naive datetimes are UTC; both bounds are sent to the second.
+
+    Returns {"posts": [{"id": str, "created_at": str | None, "public_metrics": dict}],
+    "result_count": int, "next_token": str | None}. `public_metrics` is X's object exactly as sent
+    ({} when absent or not an object) — a count may be missing, a string or negative, and the
+    repost count may be `retweet_count` or `repost_count`: normalising is the caller's job. The post
+    text is never returned.
+
+    A 2xx with no `data` but a non-empty top-level `errors` list (X's partial-error shape: a
+    suspended or protected account, a resource X could not return) is NOT an empty window: it
+    returns {"posts": [], "result_count": 0, "next_token": None, "problem": str} — the first error's
+    title / detail / type, scrubbed, at most 300 characters — and logs a warning. Only that answer
+    carries a "problem" key.
+
+    A malformed item raises XApiAmbiguousError exactly as `list_user_posts` does. A non-numeric
+    user id, or a window that is not two datetimes on or after 2010-11-06 with end_time after
+    start_time (to the second), raises XApiRefusedError with status None — nothing was sent."""
+    method = "list_user_posts_metrics"
+    uid = _require_id(method, user_id, "user_id")
+    start = _window_time(method, start_time, "start_time")
+    end = _window_time(method, end_time, "end_time")
+    if end <= start:
+        raise XApiRefusedError(f"x {method}: end_time must be after start_time (to the second) — not sent",
+                               method=method)
+    query = {
+        "start_time": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end_time": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "max_results": str(_page_size(max_results)),
+        "tweet.fields": METRICS_POST_FIELDS,
+        "exclude": METRICS_EXCLUDE,
+    }
+    resp, body, hidden = await _call(method, "GET", f"/2/users/{uid}/tweets", query=query)
+    status = resp.status_code
+    if not isinstance(body, dict):
+        raise _ambiguous_body(method, status, "with an unreadable body")
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    count = meta.get("result_count")
+    count = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
+    token = meta.get("next_token")
+    next_token = token if isinstance(token, str) and _NEXT_TOKEN_RE.fullmatch(token) else None
+    data = body.get("data")
+    if data is None:
+        if count:
+            raise _ambiguous_body(method, status, f"with result_count={count} and no data")
+        errors = body.get("errors")
+        if isinstance(errors, list) and errors:
+            # Read as an empty window, this would mark the post "deleted" and use up its checkpoints
+            # while the real problem is the account or the resource (review 2026-10-01).
+            problem = _errors_only_problem(method, status, errors, hidden)
+            logger.warning("%s — returned as a problem, not as an empty window", problem)
+            return {"posts": [], "result_count": 0, "next_token": None, "problem": problem}
+        return {"posts": [], "result_count": 0, "next_token": next_token}
+    if not isinstance(data, list):
+        raise _ambiguous_body(method, status, "with a non-list data")
+    posts: List[Dict[str, Any]] = []
+    for item in data:
+        raw_id = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(raw_id, str) or not _ID_RE.fullmatch(raw_id) or not isinstance(item.get("text"), str):
+            raise _ambiguous_body(method, status, "with a malformed post item")
+        created = item.get("created_at")
+        metrics = item.get("public_metrics")
+        posts.append({"id": raw_id,
+                      "created_at": created if isinstance(created, str) else None,
+                      "public_metrics": dict(metrics) if isinstance(metrics, dict) else {}})
+    return {"posts": posts, "result_count": count if count is not None else len(posts),
+            "next_token": next_token}
+
+
+async def get_me() -> Dict[str, Any]:
+    """GET /2/users/me?user.fields=public_metrics — the authenticated (brand) account. X bills it as
+    a User read; the caller journals the charge.
+
+    Returns {"id": str, "username": str | None, "public_metrics": dict}: `public_metrics` is X's
+    object exactly as sent ({} when absent or not an object; the post count may be `tweet_count` or
+    `post_count` — normalising is the caller's job); `username` is None unless it looks like one. A
+    2xx without a readable numeric `data.id` raises XApiAmbiguousError."""
+    method = "get_me"
+    resp, body, _hidden = await _call(method, "GET", "/2/users/me", query={"user.fields": "public_metrics"})
+    data = body.get("data") if isinstance(body, dict) else None
+    raw_id = data.get("id") if isinstance(data, dict) else None
+    uid = str(raw_id) if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else ""
+    if not _ID_RE.fullmatch(uid):
+        raise _ambiguous_body(method, resp.status_code, "without a readable data.id")
+    username = data.get("username")
+    metrics = data.get("public_metrics")
+    return {"id": uid,
+            "username": username if isinstance(username, str) and _USERNAME_RE.fullmatch(username) else None,
+            "public_metrics": dict(metrics) if isinstance(metrics, dict) else {}}

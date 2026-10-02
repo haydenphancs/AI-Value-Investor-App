@@ -58,6 +58,9 @@ class ETFDetailViewModel: ObservableObject {
     /// present a view itself.
     @Published var browserLink: BrowserLink?
     @Published var chartSettings = ChartSettings()
+    /// The ONE place this screen names its asset class: the screen passes it to
+    /// `TickerChartView`, and init resolves the remembered range/interval against it.
+    let chartAssetContext: ChartAssetContext = .etf
     @Published var chartDataVersion: Int = 0
 
     // MARK: - Live Price
@@ -95,21 +98,24 @@ class ETFDetailViewModel: ObservableObject {
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
 
-        // Seed the interval from the range's own default BEFORE the sinks are wired.
+        // Seed the range AND interval as a resolved pair BEFORE the sinks are wired — the
+        // user's remembered range and that range's interval, resolved for an ETF (a 2Y
+        // picked on crypto opens 1Y; the ETF routes 400 "2Y"), else 3M + its default.
         //
-        // `selectedChartRange` defaults to 3M (daily) while `ChartSettings.selectedInterval`
-        // defaults to `.fiveMin`, and the range sink is `.dropFirst()`-ed so it never fires
-        // for the initial value. Every cold open therefore requested `?range=3M&interval=5min`
-        // — a pair the picker cannot produce (`ChartTimeRange.allowedIntervals` excludes it),
-        // so the backend silently fell back to `daily` and cached the response under a key no
-        // later request would ever reuse. It also made `selectedInterval.isIntraday` true on a
-        // daily chart, which un-gated the 30-second refresh timer.
+        // The interval must never be left at `ChartSettings.selectedInterval`'s `.fiveMin`:
+        // every cold open used to request `?range=3M&interval=5min` — a pair the picker cannot
+        // produce (`ChartTimeRange.allowedIntervals` excludes it), so the backend silently
+        // fell back to `daily` and cached the response under a key no later request would
+        // ever reuse. It also made `selectedInterval.isIntraday` true on a daily chart, which
+        // un-gated the 30-second refresh timer.
         //
         // Assigning here fires nothing: both sinks are registered below and drop their first
-        // value at subscribe time.
-        chartSettings.selectedInterval = selectedChartRange.defaultInterval
+        // value at subscribe time. Read-only — a fallback is never stored over the preference.
+        let restored = ChartSelectionMemory.restoredSelection(in: chartAssetContext, screenDefault: selectedChartRange)
+        selectedChartRange = restored.range
+        chartSettings.selectedInterval = restored.interval
 
-        // Observe chart range changes: auto-set default interval and manage timer
+        // Observe chart range changes: auto-set the interval and manage timer
         $selectedChartRange
             .dropFirst()
             .removeDuplicates()
@@ -119,7 +125,7 @@ class ETFDetailViewModel: ObservableObject {
                 // its reload so a range change drives exactly one fetch (not two when
                 // the new range crosses an interval boundary).
                 self.suppressIntervalReload = true
-                self.chartSettings.selectedInterval = newRange.defaultInterval
+                self.chartSettings.selectedInterval = ChartSelectionMemory.rememberedInterval(for: newRange, in: self.chartAssetContext)
                 self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range

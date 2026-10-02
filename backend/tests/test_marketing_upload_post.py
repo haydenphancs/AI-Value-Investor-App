@@ -25,7 +25,7 @@ import inspect
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -762,6 +762,230 @@ async def test_get_usage_request_failures_still_raise(monkeypatch, creds):
         await upload_post.get_usage()
 
 
+# ── get_post_analytics (the measure step) ─────────────────────────────
+
+
+TIKTOK_ERROR = "TikTok video not found (ID: 7123456789). The token may need to be refreshed."
+#: The docs' example answer (docs.upload-post.com/api/get-analytics, read 2026-10-01), our request id.
+ANALYTICS = {
+    "success": True,
+    "post": {"request_id": REQUEST_ID, "profile_username": PROFILE, "post_title": "My Video",
+             "post_caption": "Check this out!", "media_type": "video", "upload_timestamp": "2026-02-10 14:30:00"},
+    "platforms": {
+        "youtube": {
+            "success": True, "platform_post_id": "dQw4w9WgXcQ", "post_url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+            "post_metrics": {"views": 5200, "likes": 120, "comments": 8, "favorites": 3},
+            "post_metrics_source": "platform_api",
+            "profile_snapshot_at_post_date": {"followers": 1500, "impressions": 45000, "likes": 320, "comments": 15,
+                                              "shares": 8},
+            "profile_snapshot_latest": {"followers": 1650, "impressions": 52000, "likes": 410, "comments": 22,
+                                        "shares": 12},
+            "profile_snapshot_latest_date": "2026-02-20",
+        },
+        "tiktok": {
+            "success": True, "platform_post_id": "7123456789", "post_url": "https://tiktok.com/@user/video/7123456789",
+            "post_metrics_error": TIKTOK_ERROR,
+            "profile_snapshot_at_post_date": {"followers": 800, "impressions": 12000, "likes": 500, "comments": 30},
+            "profile_snapshot_latest": {"followers": 950, "impressions": 18500, "likes": 780, "comments": 45},
+            "profile_snapshot_latest_date": "2026-02-20",
+        },
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_reads_the_documented_answer(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, ANALYTICS))
+    res = await upload_post.get_post_analytics(REQUEST_ID)
+    # `followers_date` is the latest snapshot's OWN date (02-20), never the upload's (02-10) nor the read's.
+    assert res == {"platforms": {
+        "youtube": {"post_metrics": {"views": 5200, "likes": 120, "comments": 8, "favorites": 3},
+                    "post_metrics_error": None, "followers": 1650, "followers_date": "2026-02-20"},
+        "tiktok": {"post_metrics": None, "post_metrics_error": TIKTOK_ERROR, "followers": 950,
+                   "followers_date": "2026-02-20"},
+    }}
+    req = fake.last
+    assert req.method == "GET" and str(req.url) == f"{BASE}/uploadposts/post-analytics/{REQUEST_ID}"
+    assert req.url.query == b"" and req.content == b""
+    assert req.headers["authorization"] == f"Apikey {API_KEY}"
+    assert "idempotency-key" not in req.headers
+    # The caption, title, URL, profile name, upload time and the stale at-post-date snapshot never
+    # leave the client.
+    for text in ("Check this out!", "My Video", "youtube.com/watch", PROFILE, "1500", "2026-02-10"):
+        assert text not in repr(res), text
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_can_be_narrowed_to_one_platform(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, {"success": True,
+                                               "platforms": {"tiktok": ANALYTICS["platforms"]["tiktok"]}}))
+    res = await upload_post.get_post_analytics(REQUEST_ID, platform="tiktok")
+    assert list(res["platforms"]) == ["tiktok"]
+    assert fake.last.url.params.multi_items() == [("platform", "tiktok")]
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_returns_rich_metrics_exactly_as_sent(monkeypatch, creds):
+    # TikTok's breakdown, plus counts that should never come (string, negative, null): untouched —
+    # the service picks and normalises the counts.
+    rich = {"views": 40218, "likes": "3184", "comments": -1, "shares": None, "reach": 37904,
+            "full_video_watched_rate": 0.184, "is_ai_generated": False,
+            "retention": [{"second": "1", "percentage": 0.75}], "audience": {"countries": {"US": 0.5}}}
+    _install(monkeypatch, _answer(200, {"platforms": {"tiktok": {"post_metrics": rich}}}))
+    res = await upload_post.get_post_analytics(REQUEST_ID)
+    assert res == {"platforms": {"tiktok": {"post_metrics": rich, "post_metrics_error": None, "followers": None,
+                                            "followers_date": None}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot, expected", [
+    ({"followers": 1650}, 1650), ({"followers": 0}, 0), ({"followers": "1650"}, 1650), ({"followers": " 12 "}, 12),
+    ({"followers": -1}, None), ({"followers": True}, None), ({"followers": 1650.0}, None), ({"followers": 1.5}, None),
+    ({"followers": "many"}, None), ({"followers": "1" * 16}, None), ({"followers": None}, None), ({}, None),
+    (None, None), ("1650", None), ([1650], None),
+])
+async def test_post_analytics_followers_is_a_count_or_none_never_a_guess(monkeypatch, creds, snapshot, expected):
+    entry: Dict[str, Any] = {"post_metrics": {"likes": 1}}
+    if snapshot is not None:
+        entry["profile_snapshot_latest"] = snapshot
+    _install(monkeypatch, _answer(200, {"platforms": {"x": entry}}))
+    res = await upload_post.get_post_analytics(REQUEST_ID)
+    assert res["platforms"]["x"]["followers"] == expected
+    if expected is None:
+        assert res["platforms"]["x"]["followers"] is None
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_a_nan_follower_count_is_none(monkeypatch, creds):
+    # Python's JSON reader accepts the NaN literal: the count must not become a number.
+    _install(monkeypatch, _answer(200, b'{"platforms": {"x": {"profile_snapshot_latest": {"followers": NaN}}}}'))
+    res = await upload_post.get_post_analytics(REQUEST_ID)
+    assert res["platforms"]["x"] == {"post_metrics": None, "post_metrics_error": None, "followers": None,
+                                     "followers_date": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw, expected", [
+    ("", None), ("   ", None), (5, None), (None, None), (["x"], None), ("  Token expired  ", "Token expired"),
+])
+async def test_post_analytics_error_text_is_a_string_or_none(monkeypatch, creds, raw, expected):
+    _install(monkeypatch, _answer(200, {"platforms": {"x": {"post_metrics_error": raw}}}))
+    assert (await upload_post.get_post_analytics(REQUEST_ID))["platforms"]["x"]["post_metrics_error"] == expected
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_error_text_is_scrubbed_and_capped(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"platforms": {"x": {"post_metrics_error": f"token {API_KEY} " + "z" * 5000}}}))
+    err = (await upload_post.get_post_analytics(REQUEST_ID))["platforms"]["x"]["post_metrics_error"]
+    assert API_KEY not in err and "<redacted>" in err and len(err) == 300
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_platform_keys_are_lowercased_and_junk_skipped(monkeypatch, creds, caplog):
+    caplog.set_level(logging.WARNING, logger=upload_post.__name__)
+    entry = {"post_metrics": {"likes": 1}}
+    _install(monkeypatch, _answer(200, {"platforms": {
+        "TikTok": entry, " youtube ": entry, "Not A Platform": entry, "": entry, "x" * 40: entry,
+        "tiktok": {"post_metrics": {"likes": 99999}},     # a repeat after normalising: the first one wins
+    }}))
+    res = await upload_post.get_post_analytics(REQUEST_ID)
+    assert set(res["platforms"]) == {"tiktok", "youtube"}
+    assert res["platforms"]["tiktok"]["post_metrics"] == {"likes": 1}
+    assert sum("skipped platforms key" in r.getMessage() for r in caplog.records) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {"success": True}, {"success": True, "platforms": None}, {}, {"success": True, "platforms": {}},
+    {"post": {"request_id": REQUEST_ID}, "platforms": {}},
+    {"post": {"request_id": None}}, {"post": {"request_id": ""}}, {"post": {"request_id": 5}}, {"post": "x"},
+])
+async def test_post_analytics_without_platforms_is_empty(monkeypatch, creds, body):
+    _install(monkeypatch, _answer(200, body))
+    assert await upload_post.get_post_analytics(REQUEST_ID) == {"platforms": {}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, body", [
+    (200, b""), (200, b"not json"), (200, b"null"), (200, [1, 2]), (204, None),
+    (200, {"success": False, "message": "Analytics are unavailable for this post"}),
+    (200, {"success": False}),
+    (200, {"platforms": [{"tiktok": {}}]}), (200, {"platforms": "tiktok"}),
+    (200, {"platforms": {"tiktok": None}}), (200, {"platforms": {"tiktok": "n/a"}}),
+    (200, {"platforms": {"tiktok": [1]}}),
+    # Another upload's numbers must never pass for this one's.
+    (200, {"post": {"request_id": "2026-09-30:tiktok:video:a1"},
+           "platforms": {"tiktok": {"post_metrics": {"likes": 99999}}}}),
+])
+async def test_post_analytics_an_unreadable_answer_is_ambiguous(monkeypatch, creds, status, body):
+    _install(monkeypatch, _answer(status, body))
+    with pytest.raises(upload_post.UploadPostAmbiguousError) as ei:
+        await upload_post.get_post_analytics(REQUEST_ID)
+    e = ei.value
+    assert type(e) is upload_post.UploadPostAmbiguousError
+    assert e.status == status and e.method == "get_post_analytics"
+    assert "99999" not in str(e)
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_success_false_names_the_reason(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"success": False, "message": f"Analytics unavailable {API_KEY}"}))
+    with pytest.raises(upload_post.UploadPostAmbiguousError) as ei:
+        await upload_post.get_post_analytics(REQUEST_ID)
+    assert "Analytics unavailable" in str(ei.value) and API_KEY not in str(ei.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, body, expected", [
+    (401, {"success": False, "message": "Invalid or expired token"}, upload_post.UploadPostAuthError),
+    (402, {"success": False, "message": "Upgrade your plan"}, upload_post.UploadPostRefusedError),
+    (402, None, upload_post.UploadPostRefusedError),
+    (403, {"success": False, "message": "Analytics are not available on the Free plan."},
+     upload_post.UploadPostPlanError),
+    (403, None, upload_post.UploadPostPlanError),
+    (404, {"success": False, "message": "No post found with the given request ID"}, upload_post.UploadPostRefusedError),
+    (404, b"<html>Not Found</html>", upload_post.UploadPostRefusedError),
+    (400, {"success": False, "message": "Invalid platform"}, upload_post.UploadPostRefusedError),
+    (429, {"success": False, "message": "Too many requests"}, upload_post.UploadPostRateLimitError),
+    (408, None, upload_post.UploadPostAmbiguousError),
+    (500, {"success": False, "error": "Unexpected error occurred"}, upload_post.UploadPostAmbiguousError),
+    (502, b"<html>bad gateway</html>", upload_post.UploadPostAmbiguousError),
+    (301, None, upload_post.UploadPostAmbiguousError),
+])
+async def test_post_analytics_status_mapping(monkeypatch, creds, status, body, expected):
+    _install(monkeypatch, _answer(status, body))
+    with pytest.raises(upload_post.UploadPostException) as ei:
+        await upload_post.get_post_analytics(REQUEST_ID)
+    e = ei.value
+    assert type(e) is expected, (status, body, type(e).__name__)
+    assert e.status == status and e.method == "get_post_analytics" and f"HTTP {status}" in str(e)
+    assert e.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_429_reads_the_window_reset(monkeypatch, creds):
+    reset = int(time.time()) + 240
+    _install(monkeypatch, _answer(429, {"success": False}, {"X-RateLimit-Reset": str(reset)}))
+    with pytest.raises(upload_post.UploadPostRateLimitError) as ei:
+        await upload_post.get_post_analytics(REQUEST_ID)
+    assert ei.value.retry_at == datetime.fromtimestamp(reset, tz=timezone.utc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc_type, expected", [
+    *[(t, upload_post.UploadPostNotSentError) for t in NOT_SENT],
+    *[(t, upload_post.UploadPostAmbiguousError) for t in MAYBE_SENT],
+])
+async def test_post_analytics_transport_split(monkeypatch, creds, exc_type, expected):
+    _install(monkeypatch, _raising(exc_type))
+    with pytest.raises(upload_post.UploadPostException) as ei:
+        await upload_post.get_post_analytics(REQUEST_ID)
+    e = ei.value
+    assert type(e) is expected and e.status is None
+    assert e.__cause__ is None and e.__context__ is None
+    assert API_KEY not in str(e)
+
+
 # ── refusals before anything is sent ──────────────────────────────────
 
 
@@ -772,6 +996,7 @@ _CALLS = {
     "get_history": lambda: upload_post.get_history(REQUEST_ID),
     "unpublish": lambda: upload_post.unpublish(platform="youtube", post_id="abc"),
     "get_usage": lambda: upload_post.get_usage(),
+    "get_post_analytics": lambda: upload_post.get_post_analytics(REQUEST_ID, platform="tiktok"),
 }
 
 
@@ -829,6 +1054,21 @@ async def test_not_configured_never_sends(monkeypatch, call, key, profile, missi
     lambda: upload_post.unpublish(platform="youtube", post_id=""),
     lambda: upload_post.unpublish(platform="youtube", post_id="a\nb"),
     lambda: upload_post.unpublish(platform="", post_id="abc"),
+    lambda: upload_post.get_post_analytics(""),
+    lambda: upload_post.get_post_analytics(None),
+    lambda: upload_post.get_post_analytics(" " + REQUEST_ID),
+    lambda: upload_post.get_post_analytics("a/b"),                       # the id is a PATH segment
+    lambda: upload_post.get_post_analytics("../uploadposts/me"),
+    lambda: upload_post.get_post_analytics("id?platform=x"),
+    lambda: upload_post.get_post_analytics("id#frag"),
+    lambda: upload_post.get_post_analytics("id%2Fme"),
+    lambda: upload_post.get_post_analytics("x" * 201),
+    lambda: upload_post.get_post_analytics("cached"),                    # a sibling route, not an upload
+    lambda: upload_post.get_post_analytics("Cached"),
+    lambda: upload_post.get_post_analytics(REQUEST_ID, platform=""),
+    lambda: upload_post.get_post_analytics(REQUEST_ID, platform="Tik Tok"),
+    lambda: upload_post.get_post_analytics(REQUEST_ID, platform="tiktok\n"),
+    lambda: upload_post.get_post_analytics(REQUEST_ID, platform=5),
 ])
 async def test_bad_arguments_are_refused_without_sending(monkeypatch, creds, call):
     fake = _install(monkeypatch, _answer(200, ASYNC_ACK))
@@ -876,25 +1116,32 @@ async def test_no_api_key_in_any_exception_or_log(monkeypatch, creds, caplog):
         echo(400, {"success": False, "error_code": "account_reauth_required", "message": "LEAK"}),
         echo(500, {"success": False, "error": "LEAK"}),
         echo(200, {"success": True, "results": {"LEAK": {}}}),
+        # The analytics answer: an echoed key in a platform NAME (logged when skipped), in an error
+        # text that is RETURNED, and in a success:false message.
+        echo(200, {"success": True, "platforms": {"LEAK": {}, "x": {"post_metrics_error": "LEAK"}}}),
+        echo(200, {"success": False, "message": "LEAK"}),
         raise_with_leak(httpx.ConnectError),
         raise_with_leak(httpx.ReadTimeout),
         raise_with_leak(httpx.RemoteProtocolError),
     ]
     raised: List[BaseException] = []
+    returned: List[Any] = []
     for respond in scenarios:
         _install(monkeypatch, respond)
         for call in (_video, _text, lambda: upload_post.get_status(REQUEST_ID),
                      lambda: upload_post.get_history(REQUEST_ID),
                      lambda: upload_post.unpublish(platform="youtube", post_id="abc"),
-                     upload_post.get_usage):
+                     upload_post.get_usage, lambda: upload_post.get_post_analytics(REQUEST_ID)):
             try:
-                await call()
+                returned.append(await call())
             except upload_post.UploadPostException as e:
                 raised.append(e)
 
-    assert len(raised) >= 60
-    assert len(seen_headers) >= 60
-    texts = [caplog.text]
+    assert len(raised) >= 75
+    assert len(seen_headers) == 16 * 7
+    # The analytics read RETURNED the echoed error text — scrubbed too.
+    assert any(isinstance(r, dict) and r.get("platforms", {}).get("x") for r in returned)
+    texts = [caplog.text, repr(returned)]
     for e in raised:
         texts += [str(e), repr(e), repr(vars(e)), repr(e.args)]
     blob = "\n".join(texts)
@@ -1009,3 +1256,110 @@ async def test_status_results_never_carry_an_email(monkeypatch, creds):
                                                      "user_email": "owner@example.com"}]}))
     res = await upload_post.get_status(REQUEST_ID)
     assert all("user_email" not in r for r in res["results"])
+
+
+# ── followers_date: the latest snapshot's OWN date (finding #11) ───────────────
+# `profile_snapshot_latest` is a STORED snapshot with its own date (the docs example: uploaded 02-10,
+# snapshot dated 02-20). Without that date the digest would date a follower count by the read.
+
+
+_NO_DATE = object()
+
+
+def _utc_day(offset_days: int) -> str:
+    return (datetime.now(timezone.utc).date() + timedelta(days=offset_days)).isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw, expected", [
+    # A calendar date, or an ISO date-time whose OWN calendar date is kept as written — never shifted
+    # to UTC (that would move an evening snapshot west of Greenwich to the next day).
+    ("2026-02-20", "2026-02-20"),
+    ("  2026-02-20\n", "2026-02-20"),
+    ("2026-02-20T14:30:00Z", "2026-02-20"),
+    ("2026-02-20t14:30:00z", "2026-02-20"),
+    ("2026-02-20 14:30:00", "2026-02-20"),
+    ("2026-02-20T14", "2026-02-20"),
+    ("2026-02-20T14:30:00.123456+05:30", "2026-02-20"),
+    ("2026-02-20T23:30:00-05:00", "2026-02-20"),            # 04:30 UTC on the 21st: still the 20th
+    ("2026-02-20T00:30:00+09:00", "2026-02-20"),            # 15:30 UTC on the 19th: still the 20th
+    ("2026-02-20T14:30:00.12345678901234+05:30", "2026-02-20"),   # 40 characters: the longest read
+    # Unreadable — None, never a guess.
+    (_NO_DATE, None), (None, None), ("", None), ("   ", None), ("yesterday", None), ("02/20/2026", None),
+    ("2026-2-20", None), ("20260220", None), ("2026-W08-5", None), ("2026-051", None),   # basic / week / ordinal
+    ("2026-02-30", None), ("2026-13-01", None), ("0000-01-01", None),                 # impossible dates
+    ("2026-02-20T25:00:00", None), ("2026-02-20T14:30:00+24:00", None),              # impossible time / offset
+    ("2026-02-20T", None), ("2026-02-20 garbage", None), ("2026-02-20T14:30:00ZZ", None),
+    ("2026-02-20X14:30", None),                    # Python's own parser takes ANY separator; this does not
+    ("2026-02-20​", None), ("2026-02-20\x00", None),
+    ("２０２６-０２-２０", None), ("٢٠٢٦-٠٢-٢٠", None), ("2026-02-20T١٤:30", None),             # non-ASCII digits
+    ("2026-02-20T14:30:00.123456789012345+05:30", None),   # 41 characters: valid ISO, over the cap
+    (f"2026-02-20 {API_KEY}", None), ("2026-02-20 UPkeyTEST", None),                  # echoed text never rides along
+    (20260220, None), (1.5, None), (True, None), (["2026-02-20"], None), ({"date": "2026-02-20"}, None),
+])
+async def test_post_analytics_followers_date_is_the_snapshots_own_date_or_none(monkeypatch, creds, raw, expected):
+    entry: Dict[str, Any] = {"post_metrics": {"likes": 1}, "profile_snapshot_latest": {"followers": 1650}}
+    if raw is not _NO_DATE:
+        entry["profile_snapshot_latest_date"] = raw
+    _install(monkeypatch, _answer(200, {"platforms": {"tiktok": entry}}))
+    res = await upload_post.get_post_analytics(REQUEST_ID)
+    out = res["platforms"]["tiktok"]
+    assert set(out) == {"post_metrics", "post_metrics_error", "followers", "followers_date"}
+    assert out["followers_date"] == expected
+    assert out["followers"] == 1650                   # an unreadable date never costs the count
+    assert API_KEY not in repr(res)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot", [None, {}, {"followers": -1}, {"followers": "many"}, "1650"])
+async def test_post_analytics_followers_date_is_read_apart_from_the_count(monkeypatch, creds, snapshot):
+    # Each field degrades on its own: the date is reported as read, and the caller pairs it with a count.
+    entry: Dict[str, Any] = {"profile_snapshot_latest_date": "2026-02-20"}
+    if snapshot is not None:
+        entry["profile_snapshot_latest"] = snapshot
+    _install(monkeypatch, _answer(200, {"platforms": {"youtube": entry}}))
+    out = (await upload_post.get_post_analytics(REQUEST_ID))["platforms"]["youtube"]
+    assert (out["followers"], out["followers_date"]) == (None, "2026-02-20")
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_followers_date_is_per_platform(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"platforms": {
+        "youtube": {"profile_snapshot_latest": {"followers": 10}, "profile_snapshot_latest_date": "2026-09-29"},
+        "tiktok": {"profile_snapshot_latest": {"followers": 20}, "profile_snapshot_latest_date": "2026-09-12"},
+        "threads": {"profile_snapshot_latest": {"followers": 30}, "profile_snapshot_latest_date": "n/a"},
+    }}))
+    res = (await upload_post.get_post_analytics(REQUEST_ID))["platforms"]
+    assert {p: (v["followers"], v["followers_date"]) for p, v in res.items()} == {
+        "youtube": (10, "2026-09-29"), "tiktok": (20, "2026-09-12"), "threads": (30, None)}
+
+
+@pytest.mark.asyncio
+async def test_post_analytics_a_snapshot_dated_in_the_future_is_unreadable(monkeypatch, creds):
+    # A snapshot cannot postdate the read, and one that claimed to would look fresh forever. Today and
+    # tomorrow (a zone east of UTC is already there) are read; far-future dates are not. The margins
+    # keep this independent of a UTC midnight falling between the test's clock and the client's.
+    cases = [(_utc_day(-1), _utc_day(-1)), (_utc_day(0), _utc_day(0)), (_utc_day(1), _utc_day(1)),
+             (_utc_day(30), None), (_utc_day(30) + "T00:00:00Z", None), (_utc_day(3650), None),
+             ("9999-12-31", None)]
+    current: Dict[str, Any] = {}
+    fake = _install(monkeypatch, lambda _request: httpx.Response(200, json={"platforms": {"tiktok": {
+        "profile_snapshot_latest": {"followers": 5}, "profile_snapshot_latest_date": current["raw"]}}}))
+    for raw, expected in cases:
+        current["raw"] = raw
+        out = (await upload_post.get_post_analytics(REQUEST_ID))["platforms"]["tiktok"]
+        assert out["followers_date"] == expected, raw
+        assert out["followers"] == 5
+    assert len(fake.requests) == len(cases)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2026-10-01", "2026-10-01"),                      # today (UTC)
+    ("2026-10-02", "2026-10-02"),                      # tomorrow: UTC+14 is already there
+    ("2026-10-02T23:59:59-12:00", "2026-10-02"),       # written in its own zone, read as written
+    ("2026-10-03", None),                              # two days ahead: no time zone is
+    ("2026-10-03T00:00:00+14:00", None),
+    ("1999-01-01", "1999-01-01"),                      # old is a fact for the caller to judge, not junk
+])
+def test_snapshot_date_reads_up_to_tomorrow_and_no_further(raw, expected):
+    assert upload_post._snapshot_date(raw, date(2026, 10, 1)) == expected

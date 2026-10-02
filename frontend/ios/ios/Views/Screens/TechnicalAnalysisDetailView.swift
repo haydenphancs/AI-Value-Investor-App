@@ -10,7 +10,16 @@ import SwiftUI
 struct TechnicalAnalysisDetailView: View {
     let detailData: TechnicalAnalysisDetailData
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedTimeframe: TechnicalTimeframe = .daily
+    /// The SAME key the Analysis tab's `TechnicalMeter` reads. This was its own
+    /// `@State .daily`, so a meter showing Weekly opened Details on Daily — and a Weekly
+    /// picked here was gone on the next open. One stored choice keeps the two in step.
+    @AppStorage(TechnicalTimeframe.storageKey) private var timeframeID: String = TechnicalTimeframe.defaultChoice.storageID
+
+    /// Resolved for display only (an unknown stored id reads as the default, never
+    /// written back); the picker's setter is the only writer.
+    private var selectedTimeframe: TechnicalTimeframe {
+        TechnicalTimeframe.stored(timeframeID)
+    }
 
     var body: some View {
         ZStack {
@@ -28,7 +37,7 @@ struct TechnicalAnalysisDetailView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: AppSpacing.lg) {
                         // Daily / Weekly picker
-                        Picker("Timeframe", selection: $selectedTimeframe) {
+                        Picker("Timeframe", selection: TechnicalTimeframe.binding($timeframeID)) {
                             ForEach(TechnicalTimeframe.allCases, id: \.self) { tf in
                                 Text(tf.rawValue).tag(tf)
                             }

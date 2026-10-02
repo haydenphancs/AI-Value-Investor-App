@@ -116,12 +116,15 @@ class TickerDetailViewModel: ObservableObject {
 
     // Chart settings
     @Published var chartSettings = ChartSettings()
+    /// The ONE place this screen names its asset class: the screen passes it to
+    /// `TickerChartView`, and init resolves the remembered range/interval against it.
+    let chartAssetContext: ChartAssetContext = .stock
     @Published var chartDataVersion: Int = 0
     @Published var chartEventDates: ChartEventDates?
 
-    // Analysis tab state
-    @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
-    @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
+    // Analysis tab toggles (6M/1Y, 24H/7D) are NOT here: they are device preferences held
+    // in `@AppStorage` by `TickerDetailView`. A per-ViewModel copy reset them on every pushed
+    // ticker and relaunch — do not re-add one, or seed one from UserDefaults at init.
 
     // MARK: - API Data (live from backend)
     @Published var stockDetail: StockDetail?
@@ -173,6 +176,15 @@ class TickerDetailViewModel: ObservableObject {
         self.selectedTab = initialTab
         self.initialHoldersSection = initialHoldersSection
 
+        // Open on the user's last range and that range's interval, resolved for a STOCK
+        // (a 2Y picked on crypto opens 1Y here — the stock routes 400 "2Y"). Done BEFORE
+        // the sinks below: they are `.dropFirst()`-ed, so this fires nothing and `.task`'s
+        // first core + overview requests already carry the restored pair. Read-only — a
+        // fallback is never stored over the preference.
+        let restored = ChartSelectionMemory.restoredSelection(in: chartAssetContext, screenDefault: selectedChartRange)
+        selectedChartRange = restored.range
+        chartSettings.selectedInterval = restored.interval
+
         // Observe chart range changes: auto-set default interval and fetch new chart data
         $selectedChartRange
             .dropFirst() // Skip initial value
@@ -184,7 +196,7 @@ class TickerDetailViewModel: ObservableObject {
                 // suppress its re-fetch so a range change drives exactly one chart
                 // request (not two when the range crosses an interval boundary).
                 self.suppressIntervalReload = true
-                self.chartSettings.selectedInterval = range.defaultInterval
+                self.chartSettings.selectedInterval = ChartSelectionMemory.rememberedInterval(for: range, in: self.chartAssetContext)
                 self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range
@@ -226,6 +238,13 @@ class TickerDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
+                // The flag only reaches the request on an intraday interval
+                // (`showExtendedHours && selectedInterval.isIntraday`), so on a daily chart a
+                // refetch would be byte-identical. The visible screen cannot get here on daily
+                // (the toggle is hidden), but a stacked screen now does — `ChartSettings`
+                // syncs a change made on the screen above. Moving to 1D/1W later refetches
+                // through the range sink with the current flag.
+                guard self.chartSettings.selectedInterval.isIntraday else { return }
                 Task { [weak self] in
                     guard let self = self else { return }
                     await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)

@@ -6,6 +6,7 @@
 //  holdings, trades, and sentiment analysis.
 //
 
+import OSLog
 import SwiftUI
 
 // MARK: - Whale Profile View
@@ -1076,6 +1077,17 @@ struct WhaleHoldingRow: View {
 struct WhaleTickerIcon: View {
     let ticker: String
     var logoURL: String? = nil
+    /// The logo this view loaded, held so it stays on screen even after the cache evicts it,
+    /// and tagged with its symbol so a row reused for another holding never draws the old logo.
+    @State private var fetched: (symbol: String, image: UIImage)? = nil
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "company-logo")
+
+    /// The cache key for the server's `logo_url` — the symbol in its FMP file name, so the
+    /// logo is the one the server sent. nil (letter tile, no fetch) when the server sent no
+    /// URL, or one that is not an FMP logo file.
+    private var logoSymbol: String? {
+        logoURL.flatMap(CompanyLogoCache.symbol(forLogoURL:))
+    }
 
     private var backgroundColor: Color {
         let colors: [Color] = [
@@ -1089,22 +1101,42 @@ struct WhaleTickerIcon: View {
         return colors[index]
     }
 
+    /// Resolved SYNCHRONOUSLY, so a rebuilt row (LazyVStack recycling, re-entering the
+    /// profile) draws a logo shown this session on its FIRST frame. It used to be an
+    /// `AsyncImage`, which starts every new view at `.empty` (the letter tile).
+    private func remoteImage(for symbol: String) -> UIImage? {
+        if let cached = CompanyLogoCache.shared.image(for: symbol) { return cached }
+        guard let fetched, fetched.symbol == symbol else { return nil }
+        return fetched.image
+    }
+
     var body: some View {
-        if let urlString = logoURL, let url = URL(string: urlString) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 40, height: 40)
-                        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
-                default:
-                    letterFallback
-                }
+        ZStack {
+            if let symbol = logoSymbol, let logo = remoteImage(for: symbol) {
+                Image(uiImage: logo)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 40, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+            } else {
+                letterFallback
             }
-        } else {
-            letterFallback
+        }
+        .task(id: logoSymbol) {
+            guard let symbol = logoSymbol else {
+                // The server only sends the FMP profile `image`; anything else is contract drift.
+                if let logoURL, !logoURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Self.log.warning("logo_url for \(ticker, privacy: .public) is not an FMP logo file: \(logoURL, privacy: .public)")
+                }
+                return
+            }
+            guard let image = await CompanyLogoCache.shared.load(symbol),
+                  !Task.isCancelled else { return }
+            // Only on a change: a cache hit re-assigning the same logo would cost an extra body
+            // pass per row appearance (a tuple @State cannot be compared for equality).
+            if fetched?.symbol != symbol {
+                fetched = (symbol: symbol, image: image)
+            }
         }
     }
 

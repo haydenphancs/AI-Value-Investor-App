@@ -21,6 +21,26 @@ social secrets live, is the ONLY thing that ever calls a platform (rules/marketi
    `metadata.publish.state = sending`) and the platform call.
 5. **Telegram** (bot configured) — the review sweep (`review_service`), then the publish feed
    (`publish_feed`: "Posted …" with Retract, retract confirmations, alerts).
+6. **Measure** (MARKETING_ENABLED and MARKETING_METRICS_ENABLED) — once per ET day from 06:00 ET,
+   the engagement counts of our published posts into `marketing_posts.metrics`
+   (`metrics_service.measure_cycle`): Bluesky from the public AppView (free); X BILLED, charged
+   before each read and held under the X cap with four posts of headroom at the current post price
+   ($0.015 a text post, $0.20 while MARKETING_X_ALLOW_URLS is on — `outlet_x.metrics_headroom_micros`),
+   never under DRY_RUN; Upload-Post best-effort.
+7. **Reports** (bot configured) — the run-health alert (`digest_service.health_cycle`, two day jobs
+   timed from the web's mirror of the worker's MARKETING_RUN_HOUR_ET): the nightly check at the first
+   tick at/after the run hour + MARKETING_MAX_RUN_ATTEMPTS, capped at 23, on a posting day (22:00 ET by
+   default, `marketing_run_health`), and the next day's final word at the first tick at/after the run hour
+   (16:00 ET by default, `marketing_run_health_final`), which reads when that nightly check judged the
+   run and speaks only when it left something unsaid or never went out. Then, with
+   MARKETING_DIGEST_ENABLED, the weekly digest on Monday from 09:00 ET (`digest_service.digest_cycle`).
+   Built from our own ledger only: none of them calls a platform.
+
+Steps 6 and 7 run LAST, so they never delay a post or a review message. Each is a day-keyed job
+(`metrics_service.run_day_job` over `notification_jobs.claimed_scheduled_job`): one claimed run at a
+time across instances (a deploy overlaps two), recorded done for the ET day only after its work
+succeeded, so a failure is retried on a later tick. Each step imports its module when it runs: a
+broken module fails that step alone (`_step` logs it), never the publisher's import at boot.
 
 Outcome rules (outlet_base): PUBLISHED → `published`; NOT_SENT (provably never left) → back to
 `approved` with a back-off, `failed` after MARKETING_PUBLISH_MAX_ATTEMPTS; REFUSED (a definite 4xx)
@@ -635,7 +655,7 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
             await svc.transition_post(
                 str(row["id"]), expect_status="queued", observed=checking, status="skipped", retries=1,
                 charge=charge, publish={"state": "absent_expired", "reconcile": rec_meta},
-                meta={"skip_reason": "expired",
+                meta={"skip_reason": "expired", "expired_from": "queued",   # as `expire_stale_posts` records
                       **_alert("expired", f"⏰ {platform.upper()} post not published: its outcome was unknown, "
                                           f"the platform has no copy of it, and its day has passed.")},
                 unset=("alert_notified_at",),
@@ -831,10 +851,33 @@ async def _expire_step() -> Dict[str, int]:
     return out
 
 
+async def _measure_step() -> Dict[str, int]:
+    """The measure step (`metrics_service.measure_cycle`). The module is imported and the function
+    looked up when the step runs, so a broken module fails this step alone (`_step` logs it, the
+    steps after it still run) and never the publisher's import at boot."""
+    from app.services.marketing import metrics_service
+    return await metrics_service.measure_cycle()
+
+
+async def _health_step() -> Dict[str, int]:
+    """The run-health alert (`digest_service.health_cycle`: the nightly check and the next day's final
+    word), imported when it runs, like `_measure_step`."""
+    from app.services.marketing import digest_service
+    return await digest_service.health_cycle()
+
+
+async def _digest_step() -> Dict[str, int]:
+    """The weekly digest (`digest_service.digest_cycle`), imported when it runs, like `_measure_step`."""
+    from app.services.marketing import digest_service
+    return await digest_service.digest_cycle()
+
+
 async def publisher_tick() -> None:
     """One wake of the loop. Order: expire → retract → (publishing on) reconcile → publish →
-    (bot configured) review sweep → publish feed. Publishing runs BEFORE the Telegram I/O so a slow
-    Telegram never delays a post."""
+    (bot configured) review sweep → publish feed → (publishing and metrics on) measure →
+    (bot configured) run health → (and the digest switch on) weekly digest. Publishing runs BEFORE
+    the Telegram I/O so a slow Telegram never delays a post, and the measure step and the two reports
+    run LAST, so they never delay a post or a review message."""
     for name, fn in (("expire", _expire_step), ("retract", retract_cycle)):
         counters = await _step(name, fn)
         if counters and any(counters.values()):
@@ -844,13 +887,25 @@ async def publisher_tick() -> None:
             counters = await _step(name, fn)
             if counters and any(counters.values()):
                 logger.info("marketing publisher %s: %s", name, counters)
-    if review_service.is_configured():
+    bot = review_service.is_configured()
+    if bot:
         review = await _step("review", review_service.review_cycle)
         if review and (review.get("pending") or review.get("failed") or review.get("rate_limited")):
             logger.info("marketing review sweep: %s", review)
         feed = await _step("feed", publish_feed.feed_cycle)
         if feed and any(feed.values()):
             logger.info("marketing publish feed: %s", feed)
+    late = []
+    if settings.MARKETING_ENABLED and settings.MARKETING_METRICS_ENABLED:
+        late.append(("measure", _measure_step))     # paid X reads: its own switch
+    if bot:
+        late.append(("health", _health_step))       # no switch, like the feed's alerts
+        if settings.MARKETING_DIGEST_ENABLED:
+            late.append(("digest", _digest_step))
+    for name, fn in late:
+        counters = await _step(name, fn)
+        if isinstance(counters, dict) and any(counters.values()):
+            logger.info("marketing publisher %s: %s", name, counters)
 
 
 async def run_marketing_publisher_loop() -> None:
@@ -861,5 +916,13 @@ async def run_marketing_publisher_loop() -> None:
     await asyncio.sleep(60)  # stagger past the startup pre-warm burst
     interval = max(int(settings.MARKETING_PUBLISHER_INTERVAL_SECONDS), 30)
     while True:
-        await publisher_tick()
+        try:
+            await publisher_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Every step is isolated by `_step`; this catches a raise BETWEEN them (a gate, a log line).
+            # Without it one such raise ends the loop for good: no post, retract or review again.
+            logger.error("marketing publisher tick FAILED (%s: %s) — the loop goes on", type(e).__name__, e,
+                         exc_info=True)
         await publisher_wake.wait(interval)

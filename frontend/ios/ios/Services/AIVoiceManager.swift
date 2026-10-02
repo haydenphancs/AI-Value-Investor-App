@@ -358,7 +358,24 @@ class AIVoiceManager: NSObject, ObservableObject {
 
         activateAudioSession()
         isPlaying = true
+        // Honour Settings → Playback → "Default Speed — For book & lesson narration". This
+        // engine used a bare `play()` (rate 1.0), so the setting reached books and Money Moves
+        // (AudioManager) but never a Journey lesson. `play()` starts at `defaultRate`, and so
+        // does `resume()`'s `player.play()` on this same player, so start and resume agree.
+        // The read-along tick reads the MEDIA clock (`player.currentTime()`), so highlighting
+        // stays aligned at any rate. The AVSpeech fallback keeps its own rate on purpose.
+        newPlayer.defaultRate = Self.narrationRate()
         newPlayer.play()
+    }
+
+    /// The stored narration speed, read at each start so a change in Settings applies to the
+    /// next card. Same key and same resolution as `AudioManager.adoptStoredPlaybackSpeed()`:
+    /// only a known `PlaybackSpeed` is honoured, and an absent or unknown value plays at 1x
+    /// (read-only — the fallback is never written back over the preference).
+    private static func narrationRate() -> Float {
+        let stored = UserDefaults.standard.object(forKey: "playback_speed") as? Double
+        let speed = stored.flatMap { PlaybackSpeed(rawValue: $0) } ?? .normal
+        return Float(speed.rawValue)
     }
 
     /// Pause the current speech (synth or clip) — the USER's pause.

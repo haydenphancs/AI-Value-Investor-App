@@ -802,6 +802,32 @@ enum ReportSortOption: String, CaseIterable {
     case ratingLow = "Lowest Rated"
 }
 
+extension ReportSortOption {
+    /// What `ResearchViewModel` persists for the Reports sort — NEVER `rawValue`.
+    ///
+    /// `rawValue` is the menu label ("Newest First") and `ReportsListSection` renders it, so
+    /// rewording the menu would silently orphan every stored choice and drop users back on
+    /// the default. A storage contract: never change an id; a new case gets its own (the switch
+    /// has no `default:`, so it cannot compile without one).
+    var storageID: String {
+        switch self {
+        case .dateNewest: return "date_newest"
+        case .dateOldest: return "date_oldest"
+        case .ratingHigh: return "rating_high"
+        case .ratingLow: return "rating_low"
+        }
+    }
+
+    /// nil for an absent, retired or garbage id — the caller shows the default and leaves
+    /// the stored value alone (it is only ever overwritten by the user's next pick).
+    init?(storageID: String) {
+        guard let match = Self.allCases.first(where: { $0.storageID == storageID }) else {
+            return nil
+        }
+        self = match
+    }
+}
+
 // MARK: - Report Time Section
 /// Time bands used to group the Reports list for scannability. `allCases`
 /// order IS the display order (newest → oldest). Bucketing uses lower date

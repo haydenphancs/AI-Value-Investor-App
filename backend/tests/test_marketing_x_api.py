@@ -15,7 +15,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qsl, unquote
 
@@ -530,6 +530,299 @@ async def test_list_refusals(monkeypatch, creds):
         await x_api.list_user_posts("99", start_time=datetime(2026, 9, 30, tzinfo=timezone.utc))
 
 
+# ── list_user_posts_metrics + get_me (the measure step's paid reads) ───
+
+
+M_START = datetime(2026, 10, 3, 20, 5, 0, tzinfo=timezone.utc)
+M_END = datetime(2026, 10, 3, 20, 25, 0, tzinfo=timezone.utc)
+_ABSENT = object()
+
+
+async def _metrics(user_id: Any = "1234567890", **over: Any) -> Dict[str, Any]:
+    kw: Dict[str, Any] = {"start_time": M_START, "end_time": M_END}
+    kw.update(over)
+    return await x_api.list_user_posts_metrics(user_id, **kw)
+
+
+_READS = {
+    "list_user_posts_metrics": lambda: _metrics(),
+    "get_me": lambda: x_api.get_me(),
+}
+
+
+@pytest.mark.asyncio
+async def test_metrics_read_request_is_exact_and_signed(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, {"meta": {"result_count": 0}}))
+    await _metrics()
+
+    (req,) = fake.requests
+    assert req.method == "GET" and req.url.host == "api.x.com"
+    assert req.url.path == "/2/users/1234567890/tweets"
+    # On the wire: RFC 3986, sorted — the commas and colons percent-encoded exactly as signed.
+    assert req.url.query == (b"end_time=2026-10-03T20%3A25%3A00Z&exclude=replies%2Cretweets&max_results=5"
+                             b"&start_time=2026-10-03T20%3A05%3A00Z&tweet.fields=created_at%2Cpublic_metrics")
+    sent = dict(parse_qsl(req.url.query.decode()))
+    assert sent == {"start_time": "2026-10-03T20:05:00Z", "end_time": "2026-10-03T20:25:00Z",
+                    "max_results": "5", "tweet.fields": "created_at,public_metrics",
+                    "exclude": "replies,retweets"}
+    assert req.content == b""
+
+    oauth = _oauth_params(req.headers["Authorization"])
+    assert oauth["oauth_consumer_key"] == CK and oauth["oauth_token"] == AT
+    signature = oauth.pop("oauth_signature")
+    base = x_api.signature_base_string("GET", "https://api.x.com/2/users/1234567890/tweets", {**sent, **oauth})
+    assert x_api.hmac_sha1_signature(base, CS, ATS) == signature
+
+
+@pytest.mark.asyncio
+async def test_metrics_read_returns_public_metrics_exactly_as_sent(monkeypatch, creds):
+    # Both repost spellings the docs show, and counts X should never send (strings, null, negative,
+    # bool): the client hands them over untouched — normalising (and omitting) is the service's job.
+    documented = {"retweet_count": 1, "reply_count": 0, "like_count": 4, "quote_count": 0,
+                  "bookmark_count": 2, "impression_count": 310}
+    odd = {"repost_count": 3, "like_count": "7", "impression_count": -1, "reply_count": None,
+           "quote_count": True, "bookmark_count": 1.5}
+    _install(monkeypatch, _answer(200, {
+        "data": [
+            {"id": "1850000000000000002", "text": "the second caption", "created_at": "2026-10-03T20:15:02.000Z",
+             "edit_history_tweet_ids": ["1850000000000000002"], "public_metrics": documented},
+            {"id": "1850000000000000001", "text": "the first caption", "public_metrics": odd},
+        ],
+        "meta": {"result_count": 2, "newest_id": "1850000000000000002", "oldest_id": "1850000000000000001",
+                 "next_token": "7140dibdnow9c7btw423x9h8b8ay4b2v6xrg4n4fwakv5"},
+    }))
+    out = await _metrics()
+    assert out == {
+        "posts": [
+            {"id": "1850000000000000002", "created_at": "2026-10-03T20:15:02.000Z", "public_metrics": documented},
+            {"id": "1850000000000000001", "created_at": None, "public_metrics": odd},
+        ],
+        "result_count": 2,
+        "next_token": "7140dibdnow9c7btw423x9h8b8ay4b2v6xrg4n4fwakv5",
+    }
+    # The post text never leaves the client on the metrics path.
+    assert "caption" not in repr(out)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metrics", [_ABSENT, None, "lots", ["like_count", 3], 5, True])
+async def test_metrics_read_unreadable_public_metrics_are_empty_not_zero(monkeypatch, creds, metrics):
+    item: Dict[str, Any] = {"id": "9", "text": "t"}
+    if metrics is not _ABSENT:
+        item["public_metrics"] = metrics
+    _install(monkeypatch, _answer(200, {"data": [item], "meta": {"result_count": 1}}))
+    out = await _metrics()
+    assert out["posts"] == [{"id": "9", "created_at": None, "public_metrics": {}}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{"meta": {"result_count": 0}}, {}, {"meta": {}}, {"meta": "junk"}, {"data": []}])
+async def test_metrics_read_empty_window(monkeypatch, creds, body):
+    _install(monkeypatch, _answer(200, body))
+    assert await _metrics() == {"posts": [], "result_count": 0, "next_token": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token, expected", [
+    ("b26v89c19zqg8o3fo7gesq314yb9l2l4ptqy", "b26v89c19zqg8o3fo7gesq314yb9l2l4ptqy"),
+    (None, None), (5, None), ("", None), ("has space", None), ("tab\there", None),
+    ("x" * 257, None), ("ünïcode", None), (["a"], None),
+])
+async def test_metrics_read_next_token_is_kept_only_when_it_looks_like_one(monkeypatch, creds, token, expected):
+    _install(monkeypatch, _answer(200, {"data": [{"id": "9", "text": "t"}],
+                                        "meta": {"result_count": 1, "next_token": token}}))
+    assert (await _metrics())["next_token"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {"meta": {"result_count": 3}},                       # says 3, shows none
+    {"data": {"id": "1", "text": "x"}},                  # not a list
+    {"data": "1"},
+    {"data": [{"id": "1"}]},                             # no text
+    {"data": [{"text": "x"}]},                           # no id
+    {"data": [{"id": 1, "text": "x"}]},                  # id not a string
+    {"data": [{"id": "1a", "text": "x"}]},
+    {"data": [{"id": "", "text": "x"}]},
+    {"data": [{"id": "1" * 26, "text": "x"}]},
+    {"data": [{"id": "1", "text": "x"}, None]},          # one good item does not excuse a bad one
+    {"data": ["1"]},
+    b"not json",
+    b"[1, 2]",
+    b"null",
+    b"",
+])
+async def test_metrics_read_malformed_is_ambiguous_not_silently_skipped(monkeypatch, creds, body):
+    _install(monkeypatch, _answer(200, body))
+    with pytest.raises(x_api.XApiAmbiguousError) as ei:
+        await _metrics()
+    assert type(ei.value) is x_api.XApiAmbiguousError
+    assert ei.value.status == 200 and ei.value.method == "list_user_posts_metrics"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked, sent", [
+    (1, "5"), (-3, "5"), (0, "5"), (5, "5"), (50, "50"), (100, "100"), (1000, "100"), (10 ** 30, "100"),
+    (True, "5"), (7.9, "7"), ("50", "50"), ("5.5", "5"), (None, "5"), ("lots", "5"), ("9" * 5000, "5"),
+    (float("nan"), "5"), (float("inf"), "5"), (float("-inf"), "5"),
+])
+async def test_metrics_read_max_results_is_clamped_and_never_crashes(monkeypatch, creds, asked, sent):
+    fake = _install(monkeypatch, _answer(200, {"meta": {"result_count": 0}}))
+    await _metrics(max_results=asked)
+    assert dict(parse_qsl(fake.requests[0].url.query.decode()))["max_results"] == sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start, end, sent_start, sent_end", [
+    (datetime(2026, 10, 3, 16, 5, 9, 123456, tzinfo=timezone(timedelta(hours=-4))),
+     datetime(2026, 10, 3, 16, 25, 9, 999999, tzinfo=timezone(timedelta(hours=-4))),
+     "2026-10-03T20:05:09Z", "2026-10-03T20:25:09Z"),
+    (datetime(2026, 10, 3, 20, 5, 9), datetime(2026, 10, 3, 20, 25, 9),          # naive = UTC
+     "2026-10-03T20:05:09Z", "2026-10-03T20:25:09Z"),
+    (datetime(2026, 10, 4, 5, 5, tzinfo=timezone(timedelta(hours=9))), datetime(2026, 10, 3, 20, 6),
+     "2026-10-03T20:05:00Z", "2026-10-03T20:06:00Z"),                            # mixed zones
+])
+async def test_metrics_read_window_is_sent_in_utc_to_the_second(monkeypatch, creds, start, end, sent_start,
+                                                               sent_end):
+    fake = _install(monkeypatch, _answer(200, {"meta": {"result_count": 0}}))
+    await _metrics(start_time=start, end_time=end)
+    sent = dict(parse_qsl(fake.requests[0].url.query.decode()))
+    assert (sent["start_time"], sent["end_time"]) == (sent_start, sent_end)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", [
+    {"end_time": M_START},                                                        # an empty window
+    {"end_time": M_START + timedelta(milliseconds=900)},                          # the same second
+    {"end_time": M_START - timedelta(minutes=1)},                                 # backwards
+    {"start_time": "2026-10-03T20:05:00Z"},                                       # a string
+    {"start_time": None},
+    {"end_time": None},
+    {"end_time": date(2026, 10, 3)},                                              # a date, not a datetime
+    {"start_time": 1_759_521_900},                                                # an epoch number
+    {"start_time": datetime(2010, 11, 5, 23, 59, 59, tzinfo=timezone.utc)},      # before X's first day
+    {"start_time": datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1)))},      # not expressible in UTC
+    {"end_time": datetime(9999, 12, 31, 23, 0, tzinfo=timezone(timedelta(hours=-5)))},
+    {"user_id": ""}, {"user_id": "12a"}, {"user_id": "../2/users"}, {"user_id": None}, {"user_id": True},
+    {"user_id": "١٢٣"}, {"user_id": -5},
+])
+async def test_metrics_read_refuses_bad_arguments_without_sending(monkeypatch, creds, over):
+    fake = _install(monkeypatch, _answer(200, {"meta": {"result_count": 0}}))
+    user_id = over.pop("user_id", "1234567890")
+    with pytest.raises(x_api.XApiRefusedError) as ei:
+        await _metrics(user_id, **over)
+    e = ei.value
+    assert type(e) is x_api.XApiRefusedError and e.status is None and "not sent" in str(e)
+    assert e.__context__ is None and e.__cause__ is None
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read", sorted(_READS))
+@pytest.mark.parametrize("status, body, expected", [
+    (400, {"title": "Invalid Request", "detail": "One or more parameters to your request was invalid.",
+           "type": "https://api.x.com/2/problems/invalid-request"}, x_api.XApiRefusedError),
+    (401, {"title": "Unauthorized", "detail": "Unauthorized", "type": "about:blank"}, x_api.XApiAuthError),
+    (402, {"title": "Payment Required", "type": CREDITS_TYPE}, x_api.XApiCreditsDepletedError),
+    (402, None, x_api.XApiCreditsDepletedError),
+    (403, {"title": "Forbidden", "detail": GENERIC_403}, x_api.XApiForbiddenError),
+    (404, {"title": "Not Found Error", "detail": "Could not find user"}, x_api.XApiRefusedError),
+    (408, None, x_api.XApiAmbiguousError),
+    (500, {"title": "Internal Error"}, x_api.XApiAmbiguousError),
+    (503, b"Service Unavailable", x_api.XApiAmbiguousError),
+    (302, None, x_api.XApiAmbiguousError),
+])
+async def test_reads_status_mapping(monkeypatch, creds, read, status, body, expected):
+    _install(monkeypatch, _answer(status, body))
+    with pytest.raises(x_api.XApiException) as ei:
+        await _READS[read]()
+    e = ei.value
+    assert type(e) is expected, (read, status, type(e))
+    assert e.status == status and e.method == read and f"HTTP {status}" in str(e)
+    assert e.__context__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read", sorted(_READS))
+async def test_reads_429_carry_retry_at(monkeypatch, creds, read):
+    reset = int((datetime.now(timezone.utc) + timedelta(minutes=15)).timestamp())
+    _install(monkeypatch, _answer(429, {"title": "Too Many Requests"}, {"x-rate-limit-reset": str(reset)}))
+    with pytest.raises(x_api.XApiRateLimitError) as ei:
+        await _READS[read]()
+    assert ei.value.retry_at == datetime.fromtimestamp(reset, tz=timezone.utc)
+    assert ei.value.status == 429 and ei.value.method == read
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read", sorted(_READS))
+@pytest.mark.parametrize("exc_type, expected", [
+    *[(t, x_api.XApiNotSentError) for t in NOT_SENT],
+    *[(t, x_api.XApiAmbiguousError) for t in MAYBE_SENT],
+])
+async def test_reads_transport_split(monkeypatch, creds, read, exc_type, expected):
+    _install(monkeypatch, _raising(exc_type))
+    with pytest.raises(x_api.XApiException) as ei:
+        await _READS[read]()
+    e = ei.value
+    assert type(e) is expected and e.status is None and e.method == read
+    assert exc_type.__name__ in str(e)
+    # Raised OUTSIDE the except block (the httpx exception holds the Authorization header).
+    assert e.__cause__ is None and e.__context__ is None
+    assert AT not in str(e)
+
+
+@pytest.mark.asyncio
+async def test_get_me_request_is_exact_and_signed(monkeypatch, creds):
+    metrics = {"followers_count": 1, "following_count": 0, "tweet_count": 3, "listed_count": 0,
+               "like_count": 0, "media_count": 0}
+    fake = _install(monkeypatch, _answer(200, {"data": {"id": "1234567890", "name": "Caydex",
+                                                        "username": "caydexapp", "public_metrics": metrics}}))
+    assert await x_api.get_me() == {"id": "1234567890", "username": "caydexapp", "public_metrics": metrics}
+
+    (req,) = fake.requests
+    assert req.method == "GET" and str(req.url) == "https://api.x.com/2/users/me?user.fields=public_metrics"
+    assert req.content == b""
+    oauth = _oauth_params(req.headers["Authorization"])
+    signature = oauth.pop("oauth_signature")
+    base = x_api.signature_base_string("GET", "https://api.x.com/2/users/me",
+                                       {"user.fields": "public_metrics", **oauth})
+    assert x_api.hmac_sha1_signature(base, CS, ATS) == signature
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data, expected", [
+    # Raw counts, the reference page's renamed key included — the caller normalises.
+    ({"id": "42", "username": "caydex", "public_metrics": {"followers_count": "12", "post_count": -1}},
+     {"id": "42", "username": "caydex", "public_metrics": {"followers_count": "12", "post_count": -1}}),
+    ({"id": 42, "username": "caydex"}, {"id": "42", "username": "caydex", "public_metrics": {}}),
+    ({"id": "42", "public_metrics": None}, {"id": "42", "username": None, "public_metrics": {}}),
+    ({"id": "42", "public_metrics": [1, 2]}, {"id": "42", "username": None, "public_metrics": {}}),
+    ({"id": "42", "username": ""}, {"id": "42", "username": None, "public_metrics": {}}),
+    ({"id": "42", "username": "has space"}, {"id": "42", "username": None, "public_metrics": {}}),
+    ({"id": "42", "username": "evil\nline"}, {"id": "42", "username": None, "public_metrics": {}}),
+    ({"id": "42", "username": "x" * 51}, {"id": "42", "username": None, "public_metrics": {}}),
+    ({"id": "42", "username": 7}, {"id": "42", "username": None, "public_metrics": {}}),
+])
+async def test_get_me_answers_degrade_field_by_field(monkeypatch, creds, data, expected):
+    _install(monkeypatch, _answer(200, {"data": data}))
+    assert await x_api.get_me() == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {}, {"data": None}, {"data": []}, {"data": "42"}, {"data": {}}, {"data": {"id": None}},
+    {"data": {"id": True}}, {"data": {"id": "abc"}}, {"data": {"id": -5}}, {"data": {"id": ""}},
+    {"data": {"id": "1" * 26}}, {"data": {"id": 1.5}}, {"errors": [{"title": "Not Found Error"}]},
+    b"not json", b"[1]", b"",
+])
+async def test_get_me_without_a_readable_id_is_ambiguous(monkeypatch, creds, body):
+    _install(monkeypatch, _answer(200, body))
+    with pytest.raises(x_api.XApiAmbiguousError) as ei:
+        await x_api.get_me()
+    assert type(ei.value) is x_api.XApiAmbiguousError
+    assert ei.value.status == 200 and ei.value.method == "get_me"
+
+
 # ── configuration ──────────────────────────────────────────────────────
 
 
@@ -544,6 +837,8 @@ async def test_not_configured_never_sends(monkeypatch, creds, missing, blank):
         x_api.create_post("t"),
         x_api.delete_post("1"),
         x_api.list_user_posts("1", start_time=datetime(2026, 9, 30, tzinfo=timezone.utc)),
+        x_api.list_user_posts_metrics("1", start_time=M_START, end_time=M_END),
+        x_api.get_me(),
     ]
     for coro in calls:
         with pytest.raises(x_api.XApiNotConfiguredError) as ei:
@@ -618,17 +913,17 @@ async def test_no_secret_in_any_exception_or_log(monkeypatch, creds, caplog):
     raised: List[BaseException] = []
     for respond in scenarios:
         _install(monkeypatch, respond)
-        try:
-            await x_api.create_post("t")
-        except x_api.XApiException as e:
-            raised.append(e)
-        try:
-            await x_api.delete_post("9")
-        except x_api.XApiException as e:
-            raised.append(e)
+        for call in (lambda: x_api.create_post("t"), lambda: x_api.delete_post("9"),
+                     lambda: x_api.list_user_posts_metrics("9", start_time=M_START, end_time=M_END),
+                     x_api.get_me):
+            try:
+                await call()
+            except x_api.XApiException as e:
+                raised.append(e)
 
-    assert len(raised) >= 15
-    assert len(seen_signatures) >= 18
+    # 9 scenarios × 4 calls; only create_post and get_me succeed on the 201 scenario.
+    assert len(raised) == 34
+    assert len(seen_signatures) == 36
     texts = [caplog.text]
     for e in raised:
         texts += [str(e), repr(e), repr(vars(e)), repr(e.args)]
@@ -726,3 +1021,156 @@ def test_credentials_never_render_in_a_frame_dump(creds):
     hidden = x_api._Redacted((CK, CS, AT, ATS))
     for rendered in (repr(creds_obj), str(creds_obj), repr(hidden), str(hidden)):
         assert all(s not in rendered for s in (CK, CS, AT, ATS))
+
+
+# ── review 2026-10-01 follow-ups ──────────────────────────────────────────────────
+
+
+#: Valid JSON nested far past the interpreter's recursion limit: `resp.json()` raises RecursionError
+#: (a RuntimeError, not a ValueError), which used to escape `_call` untyped (finding #9).
+DEEP_ARRAY = b"[" * 100_000 + b"]" * 100_000
+DEEP_OBJECT = b'{"a":' * 100_000 + b"1" + b"}" * 100_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deep", [DEEP_ARRAY, DEEP_OBJECT], ids=["array", "object"])
+@pytest.mark.parametrize("name, status, call, why", [
+    ("list_user_posts_metrics", 200, lambda: _metrics(), "with an unreadable body"),
+    ("get_me", 200, lambda: x_api.get_me(), "without a readable data.id"),
+    ("create_post", 201, lambda: x_api.create_post("t"), "without a readable data.id"),
+    ("list_user_posts", 200, lambda: x_api.list_user_posts("99", start_time=M_START), "with an unreadable body"),
+    ("delete_post", 200, lambda: x_api.delete_post("42"), "without data.deleted == true"),
+])
+async def test_a_deeply_nested_2xx_body_is_the_documented_ambiguous_error(monkeypatch, creds, deep, name, status,
+                                                                         call, why):
+    _install(monkeypatch, _answer(status, deep))
+    with pytest.raises(x_api.XApiAmbiguousError) as ei:
+        await call()
+    e = ei.value
+    assert type(e) is x_api.XApiAmbiguousError
+    assert (e.method, e.status) == (name, status) and why in str(e)
+    # Raised after the parse failure was handled — nothing chained, nothing holding the request.
+    assert e.__context__ is None and e.__cause__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, expected", [
+    (401, x_api.XApiAuthError), (403, x_api.XApiForbiddenError), (402, x_api.XApiCreditsDepletedError),
+    (404, x_api.XApiRefusedError), (429, x_api.XApiRateLimitError), (503, x_api.XApiAmbiguousError),
+])
+async def test_a_deeply_nested_error_body_still_maps_by_status(monkeypatch, creds, status, expected):
+    # The parse runs before the status is read, so a deep 4xx/5xx body escaped untyped too.
+    _install(monkeypatch, _answer(status, DEEP_ARRAY))
+    for call in (lambda: _metrics(), x_api.get_me, lambda: x_api.create_post("t")):
+        with pytest.raises(x_api.XApiException) as ei:
+            await call()
+        assert type(ei.value) is expected and ei.value.status == status
+        assert ei.value.problem_type is None and ei.value.detail is None
+
+
+#: X's partial-error 200 for a resource it could not return (tweepy's `Response.errors` shape).
+SUSPENDED = {"value": "1234567890", "detail": "User has been suspended: [1234567890].", "title": "Forbidden",
+             "resource_type": "user", "parameter": "id",
+             "type": "https://api.twitter.com/2/problems/resource-not-found"}
+_SHAPE = {"posts", "result_count", "next_token"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, described", [
+    ({"errors": [SUSPENDED]}, ("Forbidden", "User has been suspended: [1234567890].", "resource-not-found")),
+    ({"errors": [SUSPENDED], "data": None, "meta": {"result_count": 0}}, ("Forbidden", "suspended", "problems")),
+    # A next_token beside no data paginates nothing.
+    ({"errors": [SUSPENDED], "meta": {"result_count": 0, "next_token": "b26v89c19zqg8o3fo7gesq314yb9l2l4ptqy"}},
+     ("Forbidden",)),
+    # The FIRST problem object is described; the count says there were more.
+    ({"errors": [SUSPENDED, {"title": "Not Found Error", "detail": "second"}]}, ("Forbidden", "2 error object(s)")),
+    ({"errors": [None, "junk", SUSPENDED]}, ("Forbidden", "3 error object(s)")),
+    # The legacy shape: the message is the detail.
+    ({"errors": [{"code": 34, "message": "Sorry, that page does not exist."}]}, ("Sorry, that page does not exist.",)),
+    # Nothing readable inside — still a problem, never an empty window.
+    ({"errors": ["oops", 5, None]}, ("HTTP 200", "3 error object(s)")),
+    ({"errors": [{}]}, ("HTTP 200", "1 error object(s)")),
+])
+async def test_metrics_read_an_errors_only_200_is_a_problem_not_an_empty_window(monkeypatch, creds, caplog, body,
+                                                                                 described):
+    caplog.set_level(logging.WARNING, logger=x_api.__name__)
+    _install(monkeypatch, _answer(200, body))
+    out = await _metrics()
+    assert set(out) == _SHAPE | {"problem"}
+    assert (out["posts"], out["result_count"], out["next_token"]) == ([], 0, None)
+    problem = out["problem"]
+    assert isinstance(problem, str) and 0 < len(problem) <= 300
+    assert problem.startswith("x list_user_posts_metrics: HTTP 200")
+    for text in described:
+        assert text in problem, (text, problem)
+    logged = [r.getMessage() for r in caplog.records if r.name == x_api.__name__ and r.levelno == logging.WARNING]
+    assert any(problem in line for line in logged)
+
+
+@pytest.mark.asyncio
+async def test_metrics_read_problem_is_scrubbed_and_capped(monkeypatch, creds, caplog):
+    caplog.set_level(logging.DEBUG)
+    signatures: List[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        # A hostile/buggy upstream echoing every credential and the signed header into the problem.
+        header = request.headers["Authorization"]
+        signatures.append(_oauth_params(header)["oauth_signature"])
+        leak = f"{CK} {CS} {AT} {ATS} {header}"
+        return httpx.Response(200, json={"errors": [{"title": f"Forbidden {leak}", "detail": leak + " z" * 3000,
+                                                     "type": f"about:blank {leak}"}]})
+
+    _install(monkeypatch, respond)
+    problem = (await _metrics())["problem"]
+    assert len(problem) == 300 and problem.startswith("x list_user_posts_metrics: HTTP 200 Forbidden <redacted>")
+    for secret in (CK, CS, AT, ATS, *signatures):
+        assert secret not in problem and secret not in caplog.text, secret[:6]
+
+
+@pytest.mark.asyncio
+async def test_metrics_read_problem_is_one_line(monkeypatch, creds, caplog):
+    # X's title / detail / type are upstream-controlled: a line break or control character in them
+    # would forge a log line (the problem is logged) and break the one-line note the caller stores.
+    caplog.set_level(logging.WARNING, logger=x_api.__name__)
+    hostile = {"title": "Forbidden\nINFO app.main: forged line", "detail": "User\r\nsuspended\x1b[31m ‮\x00\tend",
+               "type": "https://api.x.com/2/problems/x\x85y"}
+    _install(monkeypatch, _answer(200, {"errors": [hostile]}))
+    problem = (await _metrics())["problem"]
+    assert problem == ("x list_user_posts_metrics: HTTP 200 Forbidden INFO app.main: forged line - User suspended [31m "
+                       "end [https://api.x.com/2/problems/x y] (no data; 1 error object(s))")
+    assert problem.isprintable() and "  " not in problem
+    logged = [r.getMessage() for r in caplog.records if r.name == x_api.__name__]
+    assert logged and all(m.isprintable() for m in logged)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, expected", [
+    # Data beside errors is a normal answer: the posts are what X returned.
+    ({"data": [{"id": "9", "text": "t", "public_metrics": {"like_count": 2}}], "errors": [SUSPENDED],
+      "meta": {"result_count": 1}},
+     {"posts": [{"id": "9", "created_at": None, "public_metrics": {"like_count": 2}}], "result_count": 1,
+      "next_token": None}),
+    # X omits `data` when it has no posts, so an explicit empty list is an (empty) answer, not its
+    # partial-error shape.
+    ({"data": [], "errors": [SUSPENDED]}, {"posts": [], "result_count": 0, "next_token": None}),
+    # An empty window, and `errors` that hold nothing or are not X's list: read as before.
+    ({}, {"posts": [], "result_count": 0, "next_token": None}),
+    ({"meta": {"result_count": 0}}, {"posts": [], "result_count": 0, "next_token": None}),
+    ({"errors": []}, {"posts": [], "result_count": 0, "next_token": None}),
+    ({"errors": None}, {"posts": [], "result_count": 0, "next_token": None}),
+    ({"errors": {"title": "Forbidden"}}, {"posts": [], "result_count": 0, "next_token": None}),
+    ({"errors": "Forbidden"}, {"posts": [], "result_count": 0, "next_token": None}),
+])
+async def test_metrics_read_only_the_errors_only_answer_carries_a_problem(monkeypatch, creds, body, expected):
+    _install(monkeypatch, _answer(200, body))
+    out = await _metrics()
+    assert out == expected and "problem" not in out
+
+
+@pytest.mark.asyncio
+async def test_metrics_read_a_count_without_data_stays_ambiguous_even_beside_errors(monkeypatch, creds):
+    # "Says 3, shows none" is malformed whatever rides along: the read may have been billed for 3.
+    _install(monkeypatch, _answer(200, {"errors": [SUSPENDED], "meta": {"result_count": 3}}))
+    with pytest.raises(x_api.XApiAmbiguousError) as ei:
+        await _metrics()
+    assert "result_count=3 and no data" in str(ei.value)

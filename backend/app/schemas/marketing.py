@@ -80,8 +80,11 @@ ASSET_KIND_EXTENSIONS: Dict[str, Tuple[str, ...]] = {
 WORKER_RUN_STATUSES = ("failed", "skipped", "media_ready")
 
 #: Metadata keys the server owns on `marketing_runs.metadata`; a worker PATCH may not write
-#: them. `claim_nonce` is trusted by `decide_claim` AHEAD of the attempts cap.
-SERVER_OWNED_RUN_METADATA = ("claim_nonce",)
+#: them (`run_service.update_run` drops them, logged WARNING). `claim_nonce` is trusted by
+#: `decide_claim` AHEAD of the attempts cap; `closed` is `close_finished_runs`' record of why it
+#: closed a run (`close_summary`), which the weekly digest prints — a worker-written one would
+#: let the least-trusted process explain a day it did not close.
+SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed")
 
 #: The formats the server will record a post in, per platform. The accepted package composes
 #: ONE caption per platform (`post_copy.PLATFORMS`) and carries no format, so this map is what

@@ -1617,7 +1617,12 @@ def _fake_fmp_counter():
     # every commodity. A symbol-blind counter cannot tell "we refetched the expensive one"
     # from "we fetched the shared benchmark once", and that is the whole point of these
     # tests.
-    calls = {"quote": 0, "hist": 0, "news": 0, "intraday": 0, "hist_by_symbol": {}}
+    # `eod_window` counts the SHORT (≤10-day) EOD reads separately: since 2026-10-01 a metal
+    # screen reads its fund's session Open/High/Low from a 7-day EOD window
+    # (`stock_overview_service.session_ohl_for`). That is a different, tiny request; folding
+    # it into `hist_by_symbol` would make "the 972 KB history was fetched once" unassertable.
+    calls = {"quote": 0, "hist": 0, "news": 0, "intraday": 0, "hist_by_symbol": {},
+             "eod_window": {}}
     today = _dt.date.today()
 
 
@@ -1641,6 +1646,13 @@ def _fake_fmp_counter():
             }
 
         async def get_historical_prices(self, sym, f, t):
+            try:
+                span = (_dt.date.fromisoformat(str(t)[:10]) - _dt.date.fromisoformat(str(f)[:10])).days
+            except (TypeError, ValueError):
+                span = None
+            if span is not None and span <= 10:
+                calls["eod_window"][sym] = calls["eod_window"].get(sym, 0) + 1
+                return _rows()
             calls["hist"] += 1
             calls["hist_by_symbol"][sym] = calls["hist_by_symbol"].get(sym, 0) + 1
             return _rows()
@@ -1665,10 +1677,18 @@ async def test_browsing_every_range_shares_one_history_fetch(monkeypatch):
     they must be fetched once per symbol and shared by every range pill.
     """
     from app.services import commodity_service as M
+    from app.services import stock_overview_service as sos
+    import datetime as _dt
 
     M._cache.clear()
     M._inflight.clear()
     _isolate_tier2(monkeypatch)
+    # Pin the session the metal's Open/High/Low step targets to the date the fake's EOD rows
+    # end on. With the real clock on a weekend that session is Friday, today's row never
+    # matches, and the single-day rescue adds an intraday call — the count below then
+    # depended on the day of the week.
+    monkeypatch.setattr(sos, "session_phase", lambda now=None: sos.SESSION_AFTERHOURS)
+    monkeypatch.setattr(sos, "session_trading_date", lambda now=None: _dt.date.today())
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
     svc.price = PriceFromFMPFake(svc.fmp)

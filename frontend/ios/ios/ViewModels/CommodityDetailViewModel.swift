@@ -63,6 +63,9 @@ class CommodityDetailViewModel: ObservableObject {
     /// present a view itself.
     @Published var browserLink: BrowserLink?
     @Published var chartSettings = ChartSettings()
+    /// The ONE place this screen names its asset class: the screen passes it to
+    /// `TickerChartView`, and init resolves the remembered range/interval against it.
+    let chartAssetContext: ChartAssetContext = .commodity
     @Published var chartDataVersion: Int = 0
 
     // Analysis tab state
@@ -113,6 +116,20 @@ class CommodityDetailViewModel: ObservableObject {
     init(commoditySymbol: String) {
         self.commoditySymbol = commoditySymbol
 
+        // Seed the range AND interval as a resolved pair BEFORE the `.dropFirst()`-ed sinks
+        // (so it fires nothing): the user's remembered range and that range's interval,
+        // resolved for a commodity (a 2Y picked on crypto opens 1Y), else 3M + its default.
+        //
+        // This screen used to seed NO interval at all — the only fix the ETF and index
+        // screens had and this one lacked. Every cold open requested
+        // `?range=3M&interval=5min` (the backend quietly served daily), and because 5min is
+        // intraday the 30-second timer pulled bars on a daily chart and bumped
+        // `chartDataVersion`, resetting pinch-zoom every 30 s during market hours.
+        // Read-only — a fallback is never stored over the preference.
+        let restored = ChartSelectionMemory.restoredSelection(in: chartAssetContext, screenDefault: selectedChartRange)
+        selectedChartRange = restored.range
+        chartSettings.selectedInterval = restored.interval
+
         $selectedChartRange
             .dropFirst()
             .removeDuplicates()
@@ -121,7 +138,7 @@ class CommodityDetailViewModel: ObservableObject {
                 // Assigning the interval fires the interval sink SYNCHRONOUSLY;
                 // suppress its reload so a range change drives exactly one fetch.
                 self.suppressIntervalReload = true
-                self.chartSettings.selectedInterval = range.defaultInterval
+                self.chartSettings.selectedInterval = ChartSelectionMemory.rememberedInterval(for: range, in: self.chartAssetContext)
                 self.suppressIntervalReload = false
                 Task { await self.refreshLiveSlice(includeChart: true, userInitiated: true) }
             }
@@ -383,7 +400,12 @@ class CommodityDetailViewModel: ObservableObject {
             if let related = light.relatedCommodities, !related.isEmpty {
                 data.relatedCommodities = related.map { $0.toModel() }
             }
-            if includeChart, !light.chartData.isEmpty {
+            // A timer TICK keeps the previous bars on an empty answer — a transient miss must
+            // not blank a populated chart. A USER range/interval change must not: those bars
+            // belong to the PREVIOUS range, so keeping them drew 3M dailies under a 1D pill
+            // and hid the "no intraday chart" note on WTI / Henry Hub, whose 1D/1W answer is
+            // empty by design (`commodity_service`). The empty answer is the true one there.
+            if includeChart, userInitiated || !light.chartData.isEmpty {
                 data.chartPricePoints = light.chartData.map {
                     StockPricePoint(
                         date: $0.date, close: $0.close, open: $0.open,

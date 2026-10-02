@@ -420,7 +420,15 @@ def test_any_other_failure_still_aborts_the_sector(failure):
 async def test_every_run_re_probes_after_the_migration_is_applied(monkeypatch):
     svc = _industry_svc(_DB(_POST_184))
     svc._calendar_quarter_blocked = True            # left over from a pre-184 run
-    monkeypatch.setattr(svc, "_load_universe", lambda: [])
+    # A one-sector universe whose sector writes one row: an EMPTY universe, or a run that
+    # writes nothing, raises `IndustryBenchmarkRecomputeSkipped`
+    # (test_benchmark_empty_universe_unsettled.py, test_benchmark_nothing_written_unsettled.py).
+    monkeypatch.setattr(svc, "_load_universe", lambda: [("Technology", [("Software", [("AAA", 1.0)])])])
+
+    async def _one_row(*_a, **_k):
+        return 1
+
+    monkeypatch.setattr(svc, "_compute_sector", _one_row)
     summary = await svc.recompute_all()
     assert summary["calendar_quarter_blocked"] is False
     assert svc._calendar_quarter_blocked is False

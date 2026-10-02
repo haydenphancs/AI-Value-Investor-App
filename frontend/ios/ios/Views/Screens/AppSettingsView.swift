@@ -51,7 +51,76 @@ struct AppSettingsView: View {
     @StateObject private var personalizationConsent = PersonalizationConsentViewModel()
     @State private var showWithdrawAIConsentConfirmation = false
 
+    // `body` is split in two on purpose: as ONE modifier chain (content + the synced-row
+    // `.onChange` pushes + seven alerts) it exceeded the type checker's budget — "unable to
+    // type-check this expression in reasonable time" — once the per-row pushes were added.
+    // `settingsScreen` carries the content and its change handlers; `body` adds the alerts.
     var body: some View {
+        settingsScreen
+            .alert("No App Store", isPresented: $appStoreUnavailable) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("This device can't open the App Store. Manage your subscription in iOS Settings → your name → Subscriptions.")
+            }
+            // Worded to stay true for TestFlight, App Review and Xcode builds, before AND after
+            // launch — so it never has to be edited or removed. And deliberately NEUTRAL: App
+            // Review installs are sandbox installs too, so a reviewer who taps the row reads this,
+            // and a build that calls itself "pre-release" / "beta" / "not available" invites a
+            // Guideline 2.2 / 2.1 rejection.
+            .alert("Rate Caydex", isPresented: $showPreReleaseRating) {
+                Button("Send Feedback") { showFeedback = true }
+                Button("Not Now", role: .cancel) {}
+            } message: {
+                Text("Ratings are left on the App Store version of Caydex. Want to tell us what you think here instead?")
+            }
+            // This screen is pushed inside ProfileView's NavigationStack — the same stack that
+            // pushes FeedbackView from "Help Us Improve".
+            .navigationDestination(isPresented: $showFeedback) {
+                FeedbackView()
+            }
+            .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Clear", role: .destructive) { clearCache() }
+            } message: {
+                Text("This will clear cached images and data. Your account, settings, and saved research will not be affected.")
+            }
+            .alert("Withdraw AI Chat Permission", isPresented: $showWithdrawAIConsentConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Withdraw", role: .destructive) { aiConsent.withdraw() }
+            } message: {
+                Text("Cay AI chat will stop working until you allow it again. Everything else in Caydex keeps working. Conversations you've already saved are not deleted — you can remove those individually from chat history.")
+            }
+            .alert("Restore Purchases", isPresented: restoreFinished) {
+                Button("OK", role: .cancel) { restoreMessage = nil }
+            } message: {
+                Text(restoreMessage ?? "")
+            }
+            .alert("Delete Account", isPresented: $showDeleteConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Delete Forever", role: .destructive) { deleteAccount() }
+                    .disabled(isDeleting)
+            } message: {
+                // The subscription sentence is Apple's account-deletion guidance for apps that sell
+                // auto-renewable subscriptions: billing is Apple's, so deleting the account here
+                // cannot stop it, and the user must be told how to.
+                Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.\n\nDeleting your account does not cancel a Pro or Max subscription billed by Apple. Cancel it first under Manage Subscription, or in Settings › your name › Subscriptions.")
+            }
+            // Local, for the reason spelled out in `deleteAccount()`: `appState.currentError` renders
+            // on the root, which this fullScreenCover is drawn above.
+            .alert(
+                "Couldn't delete your account",
+                isPresented: Binding(
+                    get: { deleteError != nil },
+                    set: { if !$0 { deleteError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { deleteError = nil }
+            } message: {
+                Text(deleteError ?? "")
+            }
+    }
+
+    private var settingsScreen: some View {
         ZStack {
             AppColors.background.ignoresSafeArea()
 
@@ -98,18 +167,34 @@ struct AppSettingsView: View {
         // The consent record is server-side, so it has to be fetched — the row must show
         // what the backend will actually honour, not a local guess.
         .task { await personalizationConsent.load() }
-        // Sync general prefs to the backend when leaving (no-op for guests).
+        // Sync general prefs to the backend when leaving (no-op for guests). A backstop now,
+        // not the only push — see the per-row `.onChange` pushes below.
         .onDisappear { SettingsSyncManager.shared.push() }
+        // Every synced row PUSHES ON CHANGE, not only on leaving.
+        //
+        // These four are synced keys, and the next cold launch's hydrate overwrites any synced
+        // key the server does not already hold. With the push only in `.onDisappear`, a change
+        // made here and then backgrounded/killed before the screen closed never reached the
+        // server (and was never marked dirty), so the next launch put the old value back.
+        // `push()` marks the keys dirty durably BEFORE its PUT, so a kill mid-request replays.
+        //
         // Tell the Research tab immediately. Its ViewModel is a `@StateObject` on a view
         // `ContentView` mounts once for the whole app process, and this screen is a
         // `fullScreenCover` above that tree — so nothing here rebuilds it and, without this
         // post, the new analyst would not apply until the next cold launch.
         .onChange(of: defaultPersona) { _, _ in
             NotificationCenter.default.post(name: .caydexDefaultPersonaChanged, object: nil)
+            SettingsSyncManager.shared.push()
         }
-        .onChange(of: playbackSpeedRaw) { _, newValue in
-            AudioManager.shared.playbackSpeed = PlaybackSpeed(rawValue: newValue) ?? .normal
+        // @AppStorage has already written the key; the live player only has to catch up.
+        // `adoptStoredPlaybackSpeed()` reads, never writes, so an unknown stored speed is
+        // played at the default without being recorded as a choice.
+        .onChange(of: playbackSpeedRaw) { _, _ in
+            AudioManager.shared.adoptStoredPlaybackSpeed()
+            SettingsSyncManager.shared.push()
         }
+        .onChange(of: autoplayNext) { _, _ in SettingsSyncManager.shared.push() }
+        .onChange(of: hapticFeedback) { _, _ in SettingsSyncManager.shared.push() }
         .onChange(of: appLockEnabled) { _, newValue in
             // Ignore programmatic reverts (state already matches the manager).
             guard newValue != AppLockManager.shared.isEnabled else { return }
@@ -117,67 +202,6 @@ struct AppSettingsView: View {
                 let ok = await AppLockManager.shared.setEnabled(newValue)
                 if newValue && !ok { appLockEnabled = false }  // enable cancelled → revert
             }
-        }
-        .alert("No App Store", isPresented: $appStoreUnavailable) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("This device can't open the App Store. Manage your subscription in iOS Settings → your name → Subscriptions.")
-        }
-        // Worded to stay true for TestFlight, App Review and Xcode builds, before AND after
-        // launch — so it never has to be edited or removed. And deliberately NEUTRAL: App
-        // Review installs are sandbox installs too, so a reviewer who taps the row reads this,
-        // and a build that calls itself "pre-release" / "beta" / "not available" invites a
-        // Guideline 2.2 / 2.1 rejection.
-        .alert("Rate Caydex", isPresented: $showPreReleaseRating) {
-            Button("Send Feedback") { showFeedback = true }
-            Button("Not Now", role: .cancel) {}
-        } message: {
-            Text("Ratings are left on the App Store version of Caydex. Want to tell us what you think here instead?")
-        }
-        // This screen is pushed inside ProfileView's NavigationStack — the same stack that
-        // pushes FeedbackView from "Help Us Improve".
-        .navigationDestination(isPresented: $showFeedback) {
-            FeedbackView()
-        }
-        .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Clear", role: .destructive) { clearCache() }
-        } message: {
-            Text("This will clear cached images and data. Your account, settings, and saved research will not be affected.")
-        }
-        .alert("Withdraw AI Chat Permission", isPresented: $showWithdrawAIConsentConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Withdraw", role: .destructive) { aiConsent.withdraw() }
-        } message: {
-            Text("Cay AI chat will stop working until you allow it again. Everything else in Caydex keeps working. Conversations you've already saved are not deleted — you can remove those individually from chat history.")
-        }
-        .alert("Restore Purchases", isPresented: restoreFinished) {
-            Button("OK", role: .cancel) { restoreMessage = nil }
-        } message: {
-            Text(restoreMessage ?? "")
-        }
-        .alert("Delete Account", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Delete Forever", role: .destructive) { deleteAccount() }
-                .disabled(isDeleting)
-        } message: {
-            // The subscription sentence is Apple's account-deletion guidance for apps that sell
-            // auto-renewable subscriptions: billing is Apple's, so deleting the account here
-            // cannot stop it, and the user must be told how to.
-            Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.\n\nDeleting your account does not cancel a Pro or Max subscription billed by Apple. Cancel it first under Manage Subscription, or in Settings › your name › Subscriptions.")
-        }
-        // Local, for the reason spelled out in `deleteAccount()`: `appState.currentError` renders
-        // on the root, which this fullScreenCover is drawn above.
-        .alert(
-            "Couldn't delete your account",
-            isPresented: Binding(
-                get: { deleteError != nil },
-                set: { if !$0 { deleteError = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) { deleteError = nil }
-        } message: {
-            Text(deleteError ?? "")
         }
     }
 

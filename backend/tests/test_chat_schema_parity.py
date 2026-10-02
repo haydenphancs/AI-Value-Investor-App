@@ -71,6 +71,10 @@ _MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {
     # RECITATION after real text) that no continuation completed; rich_content-backed,
     # None on every legacy row and every complete turn. iOS decodes `Bool?`.
     "truncated",
+    # `context_grounded` — the server's verdict on whether the screen's grounding reached
+    # the turn (TICKER_REPORT today). True/False/None, rich_content-backed; iOS decodes
+    # `Bool?` and keeps its "Grounded on …" chip on None.
+    "context_grounded",
 }
 
 # iOS StockChartWidgetData / MarketOverviewWidgetData non-optional properties.
@@ -209,6 +213,52 @@ def test_worst_case_message_row_has_null_futuristic_fields():
     assert dumped["suggestions"] is None
     assert dumped["thinking"] is None
     assert dumped["truncated"] is None
+    assert dumped["context_grounded"] is None
+
+
+@pytest.mark.parametrize("stored,expected", [
+    ({"context_grounded": True}, True),
+    ({"context_grounded": False}, False),   # a REAL answer here, unlike `truncated`
+    ({"context_grounded": None}, None),
+    ({"context_grounded": "false"}, None),  # a non-bool is no verdict, never a coerced one
+    ({"context_grounded": "true"}, None),
+    ({"context_grounded": 1}, None),
+    ({"context_grounded": 0}, None),
+    ({"context_grounded": []}, None),
+    ({}, None),
+])
+def test_context_grounded_passes_only_a_real_bool(stored, expected):
+    """iOS decodes `context_grounded` as `Bool?` and softens the chip on `false`. A
+    hand-edited 0 / "false" must not read as a verdict either way — and because the
+    schema field is `Optional[bool]`, Pydantic's lax mode would COERCE such a value if
+    `_row_to_message` passed it through, so the filter has to happen before it."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "answer",
+        "created_at": "2026-10-01T00:00:00.000000+00:00",
+        "rich_content": {"thinking": {"stages": [], "elapsed_ms": 1}, **stored},
+    }
+    assert _row_to_message(row).model_dump()["context_grounded"] is expected
+
+
+def test_context_grounded_survives_a_non_dict_rich_content():
+    for rc in (None, "garbage", ["x"], 3):
+        row = {"id": "m", "session_id": "s", "role": "assistant", "content": "a",
+               "created_at": "2026-10-01T00:00:00.000000+00:00", "rich_content": rc}
+        assert _row_to_message(row).model_dump()["context_grounded"] is None
+
+
+@pytest.mark.parametrize("verdict,present", [
+    (True, True), (False, True), (None, False), (1, False), ("true", False),
+])
+def test_the_turn_blob_writes_the_verdict_only_as_a_bool(verdict, present):
+    """The ONE builder both doors persist through. No verdict → the blob is the one it
+    always was (byte-identical for every non-report chat); a bool → written as-is."""
+    from app.api.v1.endpoints.chat import _rich_content_for_turn
+    rich = _rich_content_for_turn({"stages": []}, None, None, context_grounded=verdict)
+    assert ("context_grounded" in rich) is present
+    if present:
+        assert rich["context_grounded"] is verdict
+    assert _rich_content_for_turn({"stages": []}, None, None) == {"thinking": {"stages": []}}
 
 
 @pytest.mark.parametrize("stored,expected", [

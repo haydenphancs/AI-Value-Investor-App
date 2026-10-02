@@ -773,7 +773,15 @@ the reports list, so runs started on another device or in a previous app run cou
 server — that tap reaches `POST /research/generate` and gets the `409 TOO_MANY_CONCURRENT_REPORTS`
 alert with the server's own `user_message` (§6.1). A run that outlives the 300 s poll deadline keeps
 its client slot (the server is still counting it); the 5 s list poll releases the slot once the row is
-completed, failed or gone. What the design does NOT give a queued user is a position or ETA: past
+completed, failed or gone. Slots and monitors belong to the ACCOUNT that tapped: since 2026-10-02 each
+monitor is registered per tap (`generationMonitors`) and stamped with `AppActions.currentAccountId`
+(the profile id, kept through `.restoring`). `handleIdentityChange` cancels every monitor another
+account owns before it clears anything (ending the stream, whose `onTermination` cancels the status
+poller), keeps the slots only for an unchanged account (`inFlightOwnerId`), and every arm — and
+`retryReport` after each await, since its last step charges whoever is signed in — re-checks the
+owner. A reconnect of the same account keeps its monitors. Before that, a monitor that outlived a
+sign-out ran to the deadline on `.signInRequired` refusals (transient), and its deadline arm put the
+ended account's report id into the next account's slots. What the design does NOT give a queued user is a position or ETA: past
 that deadline a report parked behind the agent semaphore simply reads "processing" until the list
 poll sees it land — a recorded product gap, not a defect.
 
@@ -1272,6 +1280,13 @@ regenerates; everyone that session shares the result. The stock detail's history
 in-progress bar before storing, and a bundle cut before the current close cycle is a miss, so
 the Performance / Benchmark cards and the 3M–2Y chart never end on a mid-session price.
 
+`ticker_data_cache` writes a row only after reading its payload back the way the reader will
+(`_serialize_readable`), and each typed field must be registered as exactly the class its
+producer returns. A row that probes fresh but reads as a miss is worse than no row: the
+pre-warmer skips it and every report re-collects cold. That happened from 2026-06-16 to
+2026-10-01 for every stock with an FMP industry, because `industry_tam` holds an
+`IndustryDossier` and was registered as `IndustryTAM`.
+
 - **`CACHE_SCHEMA_FLOOR`** is a deploy-time schema-version floor: any report cached before it is
   treated as stale and re-collected, so a shape/semantics change (e.g. the TTM benchmark rollout)
   takes effect immediately rather than waiting for the next close. **Invariant: the floor literal
@@ -1354,11 +1369,19 @@ GLOBAL figures for a curated list.
 
 - **Only an industry-specific figure is shown.** Each row carries `source_grain`. A FRED series
   counts as `industry` only when it measures the industry itself (`FRED_SERIES_MATCHES_INDUSTRY`
-  in `industry_tam_service.py`); most industry→FRED mappings are whole 2-digit NAICS sectors
-  (all of US manufacturing for "Industrial - Machinery") and get `sector`. `_apply_tam_source`
+  in `industry_tam_service.py`); the remaining industry→FRED mappings are whole 2-digit NAICS
+  sectors (all of US manufacturing for "Computer Hardware") and get `sector`. `_apply_tam_source`
   hides the TAM, CAGR and scope prefix of any `sector` / `all_industry` row — an honest "—"
   instead of an airline's "TAM" being all of US manufacturing GDP (owner decision, 2026-10-01).
   The dossier's concentration still applies; it comes from the industry's constituents.
+- **Coverage is one NAICS argument per industry.** 85 of the 156 universe industries have an
+  industry-level source: Census AIES revenue for 84 (3- to 6-digit NAICS 2017 codes) and the BEA
+  rail series for Railroads, which the Economic Census does not cover. The other 66 show "—"
+  (or Phase B's global figure when curated): mixed constituents, import-heavy markets that US
+  plant shipments undercount, or AIES publishing mining and construction only at 3 digits.
+  Every mapped Census code and allow-listed BEA series is pinned to a live-verified figure in
+  `tests/fixtures/industry_tam/`, and `test_industry_tam_narrow_sources.py` lists each deliberately
+  unmapped industry with its reason.
 - **Phase A never replaces a curated Phase-B global row's TAM** (`tam_scope='global'`, TAM > 0;
   it still refreshes the row's concentration columns). Phase B refreshes the TAM itself, and its
   floor is fed THIS run's Phase-A figure (`phase_a_baseline`), never the row's own previous
@@ -1381,6 +1404,15 @@ GLOBAL figures for a curated list.
   hole (read failure, live compute raised / timed out, FRED down) is recorded on the
   collection's `degraded_sections` (`industry_tam:transient`), so that report is delivered
   but never shared-cached for the rest of the close cycle.
+- **A run that cannot start does not consume the quarter.** With an empty universe
+  (the industry universe file is not in git: a failed download from the `universe-data` bucket
+  yields `[]`) or
+  with neither a FRED nor a Census key, `recompute_all` logs an ERROR, writes nothing, and RAISES
+  `IndustryDossierRecomputeSkipped`. It used to return `{"status": "skipped"}`, which
+  `_run_claimed_phase` recorded as a successful claim: the quarter was spent, and the in-memory
+  heal above hid the stale rows from every report. Raising leaves the claim unsettled, so the
+  phase is retried inside the chain's catch-up window (§7.4), and the ledger row's `error`
+  names the reason.
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
@@ -1419,13 +1451,26 @@ whether any of it runs:
 | news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
 | Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
-| marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep and feed: the `MARKETING_TELEGRAM_*` settings (unset = off) / — |
+| marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
 catch-up window (30 min apart, at most 3 times); phases that already ran are skipped by
-their own claims. The owner-facing view of all of this — what runs itself and what must be
-done by hand — is `documents/OWNER_TASKS.md`.
+their own claims. A phase that cannot start must RAISE, not return a "skipped" summary: any
+return settles its claim (the dossier phase's `IndustryDossierRecomputeSkipped`, 2026-10-01). The
+same holds for an empty universe file (neither is in git, so a failed `universe-data` download
+loads as `[]`): the moat phase raises `IndustryMoatBenchmarkRecomputeSkipped`, and the fiscal
+and TTM benchmark sweeps raise `IndustryBenchmarkRecomputeSkipped`, each before any write.
+The same exceptions are raised when a sweep ATTEMPTED work but wrote nothing (reason
+`nothing written`, or `every sector failed` / `every industry failed`): every fetch layer turns
+an FMP failure into an empty result, so an outage used to "complete" each sector or industry
+with zero rows and settle the claim. A partial run (at least one row written) still settles;
+the retry resumes only the unwritten sectors/industries, since only written ones count as
+fresh. Moat industries with too few scorable peers never write and are not failures, so a
+same-day re-run that attempts only those settles. Fresh-skips, the industries-only validation
+path and `dry_run` still return. The owner-facing
+view of all of this — what runs itself and what must be done by hand — is
+`documents/OWNER_TASKS.md`.
 
 ---
 
@@ -2407,7 +2452,7 @@ What follows is the set with no other home.
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
-| The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have adapters (Upload-Post, Stage 2) but none is listed or configured, so their posts reach Telegram as read-only previews and expire until the owner's Free-tier checks pass. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s, Kokoro peak 1.65 GB of a 3.8 GB limit). |
+| The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have adapters (Upload-Post, Stage 2; its credentials were set on 2026-10-01) but none is listed in `MARKETING_PUBLISH_PLATFORMS`, so their posts reach Telegram as read-only previews and expire until the owner's Free-tier checks pass. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s; production cgroup peak 2,587 MB of the 3,814 MiB limit, against 1,563 MB on 09-29 — the cgroup figure includes page cache; the run-health alert reports any stage peak above 3,200 MB, §12.11). |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -2547,8 +2592,12 @@ and class-A content — selection, writer, validators, server-authored captions,
 and the landing page (Phase 2, 2026-09-23; §12.5-12.6) — then, on 2026-09-26, the semantic
 compliance judge (§12.5), the caller-claim fence and asset read-back (§12.2) and the narration
 with word timings (Phase 3, §12.7); and on 2026-09-29 the render and the day's posts (Phase 4,
-§12.8) and the Telegram review bot (§12.9); and on 2026-09-30 the first publishing stage — X and
-Bluesky text posts, with reconciliation, retraction and a Telegram feed (§12.10).
+§12.8) and the Telegram review bot (§12.9); on 2026-09-30 the first publishing stage — X and
+Bluesky text posts, with reconciliation, retraction and a Telegram feed (§12.10); and on
+2026-10-01 the second stage — Upload-Post for TikTok, YouTube, Instagram, Facebook, LinkedIn and
+Threads (§12.10, deployed, no platform enabled yet) — and measurement and run health: per-post
+metrics, a weekly digest, a nightly run-health alert with a next-day final word, and reject
+reasons (§12.11, both switches off by default).
 
 ### 12.1 The content is gated by licence and regulation, not by tooling
 
@@ -2679,7 +2728,9 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     claim in between leaves only an orphan `pending_upload` row, which completion refuses.
   - a PATCH writes only an `in_progress` run, only the statuses `failed`, `skipped` and
     `media_ready`, moves `stage` only to the observed or the requested value (never "any
-    stage ahead"), and may not write `metadata.claim_nonce`. A terminal PATCH whose effect is already present (the same
+    stage ahead"), and may not write `metadata.claim_nonce` or `metadata.closed` — both
+    server-owned (`SERVER_OWNED_RUN_METADATA`): a PATCH carrying either has it dropped with a
+    WARNING (§12.11). A terminal PATCH whose effect is already present (the same
     status, and the same stage if one is named) answers 200 and writes nothing — the worker
     retries a PATCH whose response was lost, so a 409 there logged a failure for a write
     that had landed. Anything else on a run that is not `in_progress` answers 409
@@ -2706,9 +2757,10 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     `metadata.review`), so a double tap or two reviewers can never flip a decided post — or
     through the publisher's fenced expiry (`expire_stale_posts`, §12.10). `review_post`'s only
     caller is the Telegram review bot (§12.9). Every publisher write is `transition_post` (fenced,
-    merging); the older unconditional `mark_post`, which replaces `metadata` wholesale, has no
-    caller and must not be used for a publisher outcome — it would drop the cost journal the X cap
-    sums.
+    merging) — except the metrics column, which has its own fenced writer that never touches
+    `metadata` or `updated_at` (§12.11); the older unconditional `mark_post`, which replaces
+    `metadata` wholesale, has no caller and must not be used for a publisher outcome — it would
+    drop the cost journal the X cap sums.
   - the day's script is generated only for a HELD run — `in_progress`, dated today or
     yesterday ET, claim touched within `MARKETING_RUN_STALE_SECONDS`; otherwise the kick
     answers 409 `MARKETING_RUN_NOT_HELD` and spends nothing. The worker treats that code as
@@ -3206,7 +3258,9 @@ passkey domain), and a chat app renders the text and plays the video without any
 - **The webhook** (`POST /marketing/telegram/webhook`, a root route outside the licence gate —
   it serves no data) is gated by Telegram's secret-token header, compared in constant time and
   fail-closed when unset, and by an allow-list of the owner's chat and user id. A tap calls
-  `review_post` (§12.2). Plain text only — no parse mode, so model text can never become markup —
+  `review_post` (§12.2). After a Reject the message offers a one-tap reason (Tone, Accuracy,
+  Compliance, Weak / boring, Other), stored in `metadata.review.reason` (2026-10-01, §12.11).
+  Plain text only — no parse mode, so model text can never become markup —
   and the bot token, which Telegram puts in the URL path, is redacted from logs.
 - **Setup** is three settings on the web service (`MARKETING_TELEGRAM_BOT_TOKEN`,
   `MARKETING_TELEGRAM_REVIEW_CHAT_ID`, `MARKETING_TELEGRAM_WEBHOOK_SECRET`); the webhook registers
@@ -3215,20 +3269,25 @@ passkey domain), and a chat app renders the text and plays the video without any
   the same chat is also the publish feed (§12.10): a post whose platform cannot publish yet
   arrives as a read-only preview (no buttons), and every publish, retract and alert follows.
 
-### 12.10 Publishing (Phase 5, 2026-09-30): X and Bluesky, reconciliation, retract
+### 12.10 Publishing (Phase 5, 2026-09-30 / 10-01): X, Bluesky and Upload-Post, reconciliation, retract
 
 The publisher loop (`app/services/marketing/publisher_service.py`) is the ONLY code that calls a
-platform. Each platform is a thin client (`app/integrations/x_api.py`, `app/integrations/bluesky.py`)
-and an adapter (`app/services/marketing/outlet_x.py`, `app/services/marketing/outlet_bluesky.py`)
-registered in `app/services/marketing/outlets.py`. A platform publishes only when it is listed in
+platform. Each platform is a thin client (`app/integrations/x_api.py`, `app/integrations/bluesky.py`,
+and `app/integrations/upload_post.py` for the six Upload-Post platforms) and an adapter
+(`app/services/marketing/outlet_x.py`, `app/services/marketing/outlet_bluesky.py`, and
+`app/services/marketing/outlet_upload_post.py`, one adapter per Upload-Post platform) registered
+in `app/services/marketing/outlets.py`. A platform publishes only when it is listed in
 `MARKETING_PUBLISH_PLATFORMS` AND its credentials are complete — one predicate that also decides
 whether its posts get Approve buttons in Telegram or arrive as a read-only preview.
 
 - **One tick:** expire (posts outside their run day or the next, ET, close `skipped`; finished runs
   dated before yesterday close `published`/`skipped`) → retract → (with `MARKETING_ENABLED`)
-  reconcile → publish → the review sweep → the publish feed (`app/services/marketing/publish_feed.py`).
-  Each step is isolated, and publishing runs before the Telegram I/O. An Approve or a confirmed
-  Retract wakes the loop (`app/services/marketing/publisher_wake.py`, in-process: one uvicorn worker).
+  reconcile → publish → the review sweep → the publish feed (`app/services/marketing/publish_feed.py`)
+  → measure → health → digest (§12.11). Each step is isolated (`_step`), and the loop also catches
+  a raise between steps (a gate, a log line), so one bad tick never ends it; publishing runs before
+  the Telegram I/O, and the three measurement steps run last, so they never delay a post or a
+  review message. An Approve or a confirmed Retract wakes the loop
+  (`app/services/marketing/publisher_wake.py`, in-process: one uvicorn worker).
 - **The state machine needs no migration** (`retracted` was in migration 170's CHECK): approved →
   queued (the write-ahead claim) → published | back to approved (provably NOT sent: a connect error,
   a 429, a bad credential; with a back-off, `failed` after `MARKETING_PUBLISH_MAX_ATTEMPTS`) |
@@ -3247,11 +3306,17 @@ whether its posts get Approve buttons in Telegram or arrive as a read-only previ
 - **X spending** is capped by our own ledger (`MARKETING_X_MONTHLY_BUDGET_USD`, 0 = X off): each
   create attempt is charged at the claim (refused 403s too — X bills them), reads and deletes
   before the call, and the month's journaled charges must stay within the budget before any claim.
+  A reconcile read is corrected afterwards to the posts X returned; X's own `result_count` counts
+  only up to the five-post page, so a corrupt count cannot journal a charge that caps X for the
+  month.
   X's console cap and prepaid balance have failed to hold for other developers, so ours is the limit.
   A post with any URL — including a bare domain — is refused before the claim unless
   `MARKETING_X_ALLOW_URLS` (it would cost $0.20 instead of $0.015). New pay-per-use apps often get a
-  generic 403 on every post (X anti-spam); it is never retried. The account needs X's "Automated"
-  label (X staff, 2026-09-15, for exactly this human-approved design).
+  generic 403 on every post (X anti-spam); it is never retried. The account carries no X
+  "Automated" label: X staff said on 2026-09-15 that it applies to exactly this human-approved
+  design, and the owner skipped it on 2026-10-01, accepting the risk that X restricts the account;
+  it is turned on if X ever flags the account. Metric reads are charged the same way, with a
+  headroom that keeps posting funded (§12.11).
 - **Retract** is two taps in Telegram (Retract → Confirm). The webhook only records the request
   (`run_service.request_retract`); the publisher deletes it on the platform — even with publishing
   switched off — and marks the row `retracted`. A delete that keeps failing, or a platform with no
@@ -3287,12 +3352,248 @@ whether its posts get Approve buttons in Telegram or arrive as a read-only previ
   TikTok is sent public, direct-post, with no inbox fallback and the "Your brand" and AI labels;
   Instagram Reels carry the AI label; YouTube Shorts are public and marked synthetic. Facebook and
   LinkedIn stay off until their Page / organization ids are set (LinkedIn would otherwise post to
-  the member's personal profile). Each submit records Upload-Post's usage before and after — the
-  Free tier's quota counting is undocumented.
+  the member's personal profile). Each submit still asks for Upload-Post's usage before and after,
+  but this account's usage answer and an async upload's acknowledgement carry none (checked
+  2026-10-01), so those fields stay empty and the owner's dashboard upload count is the
+  measurement; only a 429 at the quota reports usage. The Free tier's quota counting is
+  undocumented.
 - **Limits:** Bluesky has no AI-content flag (the caption's disclaimer is the disclosure); X's
   `made_with_ai` is sent (`MARKETING_X_MADE_WITH_AI`) though X documents it for media; the X go-live
   gate is one real post plus a retract, by the owner; the Upload-Post free-tier checks (YouTube lands
   public, the bucket URL is fetched, the quota count) are the owner's, before paying for TikTok.
+
+### 12.11 Measurement and run health (2026-10-01)
+
+Posting went live with two blind spots. Nothing measured anything: `marketing_posts.metrics`
+(migration 170) was never written, no client could read engagement, and nothing read
+`marketing_link_hits`. And a failed posting day was silent: the worker has no Sentry, a writer
+outage closes the day `writer_unavailable` with a WARNING only, and Telegram spoke only about
+posts, so a broken day looked exactly like a quiet one. The fix is web-only — no migration, no
+worker change, nothing public — in `app/services/marketing/metrics_service.py` (the measure step,
+its pure helpers and the shared day-job runner) and `app/services/marketing/digest_service.py`
+(the weekly digest and the run-health checks, which read only our own database).
+
+- **Three more steps, last in the publisher tick:** measure (`MARKETING_ENABLED` and
+  `MARKETING_METRICS_ENABLED`), health (whenever the review bot is configured — no switch, like the
+  feed's alerts) and digest (the bot and `MARKETING_DIGEST_ENABLED`, which `digest_cycle` also
+  checks itself, so a direct call with the switch off reads and claims nothing); both switches
+  default off. They live in the tick because the publisher is the only code that calls a platform
+  (§12.2), and they run after the feed so they never delay a post or a review message. Each is a
+  day-keyed job claimed through `notification_jobs.claimed_scheduled_job` on the ET calendar:
+  `marketing_metrics_daily` from 06:00; `marketing_run_health` on a posting day and
+  `marketing_run_health_final` on the day after one, both timed from the worker's run hour (22:00
+  and 16:00 with the defaults; the run-health bullets below); and `marketing_digest_weekly` on
+  Monday from 09:00 with a Tuesday catch-up. The hour and weekday are checked BEFORE the claim (a
+  tick just after midnight must not claim and settle the day early),
+  and a job is marked done only after its work — and its Telegram send — succeeded, so a failure
+  is retried on a later tick: at most three claimed attempts per ET day per process
+  (`metrics_service.run_day_job`), and no database read at all for a job that is not due, that
+  this process already finished today, or that has used its three attempts. A job whose `enabled`
+  is false in `notification_job_state` is skipped without a deploy (re-read every 30 minutes); an
+  unreadable state skips the tick. An error the work returns WITH success is kept as the job's
+  `last_error`: a note on a day that succeeded (the measure step names there every platform it
+  stopped or found paused), so a degraded day never reads as a clean one.
+- **One writer for the metrics column.** `run_service.merge_post_metrics` UPDATEs
+  `marketing_posts.metrics` and nothing else — never `metadata`, never `updated_at` — fenced on
+  the status and on `metrics->>rev` (NULL before the first write); a lost fence re-reads the row
+  and re-applies the pure merge. Every publisher write is fenced on `updated_at` (§12.10) and the
+  table has no trigger to bump it — a ledger test scans the schema snapshot and every migration
+  for one — so a metrics write cannot make a concurrent publish, reconcile, retract or review
+  write lose its fence; `transition_post` refuses a metrics argument, so nothing else writes the
+  column. The JSON is versioned (`v` 1): the ET day measured, a status (`ok`, `missing`, `error`,
+  `unavailable`, `capped`, `no_external_id`), the latest snapshot, one history entry per ET day (a
+  rerun the same day replaces it; at most 30, four on X), on the newest post per platform the
+  account's follower snapshot, and the platform-wide back-off dates, each on the post that was the
+  newest of its platform when the refusal came: `x_reads_refused_until` (a refused X post read),
+  `x_account_refused_until` (a refused X account read) and `upload_post_plan_refused_until` (a
+  plan refusal, on the newest Upload-Post post of any platform). They sit beside `status` and
+  `account`, never in them; their one writer, `metrics_service.apply_backoff`, refuses any other
+  key. A count that is missing, negative, a bool, NaN or infinite, fractional, or a string that is
+  not a short run of digits is OMITTED,
+  never stored as 0; a snapshot with no count at all records `error` and is not added to the
+  history.
+- **X: owned reads at four checkpoints.** A post is read when it has crossed a checkpoint — 1, 3,
+  7 or 28 days after publishing — not yet measured, once for the largest one crossed, from our own
+  timeline (`x_api.list_user_posts_metrics`: owned reads, $0.001 per post returned, a window of
+  ten minutes either side of X's own creation time — read from the post id, since a post found by
+  reconcile can carry a later `published_at` — matched on our external id). Reading every recent
+  post daily would have cost about $0.51 a month, a quarter of the cap. Each read is charged
+  before the call through `transition_post` — a five-post reserve (`x_metrics_read`), as
+  reconcile's reads are — corrected afterwards to the posts X returned
+  (`x_metrics_read_correction`, dated at the reserve so it lands in the same month; X's own
+  `result_count` counts only up to the five-post page), and refunded only when the error proves
+  nothing was billed (not sent, not configured, rate limited, credits depleted, refused before
+  sending). A read starts only while the month's journal leaves the reserve plus a headroom of
+  four posts at the price a post would reserve now (`outlet_x.metrics_headroom_micros()`, read at
+  call time: $0.06 for $0.015 text posts; $0.80 while `MARKETING_X_ALLOW_URLS` is on, when each X
+  post carries the link and reserves $0.20) under `MARKETING_X_MONTHLY_BUDGET_USD`, so posting
+  always wins; otherwise the post records `capped`, with no read and no charge. The follower count
+  comes from `x_api.get_me`, which is not on X's owned-read list and bills as a User read
+  ($0.010, `x_account_read`), so it runs only on Mondays or when the stored snapshot is more than
+  eight days old. X bills a resource once per UTC day (its pricing page calls this a soft
+  guarantee), so a same-day retry costs nothing more on X's side; our journal still counts it,
+  which can only pause X early. Paid reads never run while the web's `MARKETING_DRY_RUN` is on.
+- **X failures back off.** A 429, a 5xx, a 408, a duplicate-content 403 or a transport error stops
+  X for the tick and leaves the day open; a 402 (no credits — refunded) stops it for the day. A
+  definite refusal — X answered 400, 401, 403 or 404, or any other 4xx not named above, so the
+  same read would be refused tomorrow — keeps its reserve, records the post `unavailable` for
+  seven days and pauses EVERY X read, the account's included, until then: one reserve a week, not
+  one a day. The pause is also kept as a marker on the NEWEST X post (`x_reads_refused_until`),
+  written before the refused post's own record, and the latest date in force on either one
+  rules. The refused post is
+  usually the OLDEST due one (at its 28-day checkpoint: the listing is oldest first), so it leaves
+  the 30-day listing within a day or two, and a pause kept only on it went with it: the re-review
+  of 2026-10-02 counted 16 reserves in 28 days of refusal at the real posting cadence; with the
+  marker, four. A refused `get_me` gets its own seven-day back-off (`x_account_refused_until` on the
+  newest X post): its charge stands and the post reads go on. A 200 carrying only `errors` (a
+  suspended or protected account) is not an empty window: `x_api` returns it as a `problem`, the
+  post records `error` with no checkpoint used (it stays due; the correction refunds the whole
+  reserve), and X stops for the day. A stored back-off date more than seven days ahead — a hand
+  edit, a corrupt row — is ignored, never obeyed.
+- **Bluesky: daily and free.** `bluesky.get_posts` reads up to 25 posts a call from the public
+  AppView (`bluesky.APPVIEW_URL`) with no auth header — the account session never goes there; a
+  batch the AppView refuses is retried one post at a time, and a post it omits (deleted by hand)
+  is `missing`, never zeros. A definite refusal stops Bluesky for the day; the read is free, so it
+  needs no back-off. `bluesky.get_profile` on the newest post gives the follower count. A mirror
+  is good enough for counting, where a lag only delays a number; reconcile (§12.10) still asks the
+  account's own PDS, because there a lagging "not found" could close a live post or license a
+  resend.
+- **Upload-Post: best-effort.** Only when configured, at most ten posts a day, least recently
+  measured first, looked up by the post's Upload-Post id (`upload_post.get_post_analytics`). A
+  plan refusal (402 or 403 — the Free plan may refuse analytics) records `unavailable` and pauses
+  every Upload-Post read for seven days (one call a week), the pause kept, as on X, as a marker on
+  the newest Upload-Post post of any platform (`upload_post_plan_refused_until`); a 404 is
+  `missing`; an unknown outcome for one post (a 5xx, an odd 2xx, a timeout) records `error` on it,
+  so it moves to the back of
+  the queue and one failing post never starves the others; a 429 or a request that never left
+  stops Upload-Post for the tick and records nothing. The follower count comes with its stored
+  snapshot's own date (`followers_date`), and one dated more than a day before the read is not
+  stored: the digest dates a snapshot by when we read it. No Upload-Post failure holds the day
+  open.
+- **On every platform** only posts younger than 30 days are read; retracted rows, `queued` rows
+  (outcome unknown) and rows with a retract requested are skipped; the daily Bluesky and
+  Upload-Post reads wait until a post is an hour old (an AppView that has not indexed it yet would
+  call it missing; X starts at its 1-day checkpoint); and no new read starts after 120 s in one
+  tick. The day stays open for a later tick after a transient X or Bluesky failure, an unreadable
+  X spend, a lost fence or a ledger error (after three in one run nothing more is read or written
+  that tick), or when the 120 s are spent. Every stop and pause is named in the job's
+  `last_error`, on a day that succeeds too, so the digest shows it as a note and a refused
+  platform never looks like a clean day.
+- **The weekly digest** (`digest_service.digest_cycle`) is one plain-text Telegram message (no
+  parse mode; at most 4,096 UTF-16 units, rows capped first) about the previous Monday–Sunday in
+  ET dates: each day's run (its status; a failure named after its last completed stage, a skipped
+  day by its skip or close reason) and the week's highest stage memory peak; posts by status;
+  rejections with their reasons; posts that expired unreviewed against those that expired after
+  an approval (`metadata.expired_from`); engagement totals and the top post per platform (its
+  link, never its caption); followers now and the change against a snapshot at least six days
+  older; smart-link taps per campaign (§12.6), noting that every tap lands on the "Coming soon"
+  page while `MARKETING_APP_STORE_URL` is unset; X spend this month by operation against the cap
+  (with a zero budget it says X is OFF — no posts or reads, since X is then not an enabled
+  platform); review latency (median and longest); the pool's runway (lessons not yet used and the
+  date of the first repeat); posts still waiting for an "outcome unknown" answer (escalated posts
+  only); and the metrics job's last state, its `last_error` shown as a note after a day that
+  succeeded. It reads only our own database — spend from the journal, followers from stored
+  snapshots — so it calls no platform and costs nothing. Delivery follows the publish feed: the
+  bot and its review chat, the shared Telegram back-off, the pacer.
+- **The run-health alert** (`digest_service.health_cycle`; the decision is the pure
+  `evaluate_run_health`) checks today's run once, at the first tick at or after the run hour plus
+  `MARKETING_MAX_RUN_ATTEMPTS` on a posting day, capped at 23:00 ET (23:00 too when no attempts cap
+  applies). The run hour is the web's `MARKETING_RUN_HOUR_ET`: the web cannot read the worker's
+  variable of the same name, so it keeps a mirror that the owner sets with it (a test pins the two
+  defaults equal; an hour outside 0-23 fails the web deploy). It is read at call time, and every
+  hour a message names is derived from it. With the defaults, 16 and 6, the check comes at 22:00
+  ET, when the six hourly attempts from 16:15 ET are spent (about 21:30), on a day with no missed
+  tick: a retry after a missed tick, or a sum past 23, carries attempts past the check, and the
+  worker also resumes a failed or abandoned run on the next day's ticks before its run hour. At
+  run hour 23 there is no nightly check (it would come before the worker's first tick, 23:15, and
+  could only say "no run"); the final word reports that day alone. No run: the
+  worker never claimed the day (check its cron). `failed`: named after its last completed stage
+  ("after stage X" — `stage` is the last COMPLETED stage, so a failure is never "at" it), the
+  attempts against `MARKETING_MAX_RUN_ATTEMPTS` and the last error; "this day's posts will not go
+  out" only at the cap, else "attempt N of M" and that the worker retries hourly until midnight ET
+  and on tomorrow's early ticks. `skipped` for any reason but `rest_day`: the reason and where to
+  look (`writer_unavailable` → the Gemini key or model; `content_rejected` → the rejected draft in
+  `marketing_scripts`; `judge_not_enforced` → `MARKETING_JUDGE_MODE`; an empty or ineligible pool
+  → the content pool; a narration or rendering reason → the video stage; anything else is named
+  plainly). `planned` or `in_progress`: still running while its liveness — `decide_claim`'s, the
+  later of `started_at` and `updated_at` within `MARKETING_RUN_STALE_SECONDS` — is fresh; once
+  stale it was abandoned, with no retry left at the cap (the day will close failed) and an hourly
+  retry below it. An unreadable attempt count promises neither, and a verdict that is not final
+  promises a final word the next day. A finished run says nothing, except one line when a stage's
+  cgroup memory peak passed 3,200 MB (2,587 MB of the 3,814 MiB limit on 2026-10-01).
+- **The final word** (`marketing_run_health_final`, the pure `evaluate_run_final`) re-reads
+  yesterday's run at the first tick at or after the run hour on the day after a posting day (16:00
+  ET by default): the worker resumes a day's failed or abandoned run only on ticks before its run
+  hour, so its (run hour − 1):15 tick is the last that can touch it. It first reads WHEN the
+  nightly check judged that run, from that check's own `notification_job_state` row
+  (`nightly_check_time`): `last_run_at` is the claim instant of the successful attempt, which reads
+  the run right after its claim. A fixed 22:00 was wrong both ways (re-review 2026-10-02): the
+  check runs at the first publisher tick after its hour, up to ten minutes late and later again on
+  a retry, so a run that failed in between was reported twice and one that finished in between
+  "recovered" from a trouble nobody had been told about; and a night whose alert never went out
+  was taken as told. When the row records that day's success but a later day's failed attempt has
+  overwritten `last_run_at`, the word judges from the earliest the check could have run. After a
+  check that went out, it speaks only when the run recovered after it ("recovered at <time>"),
+  changed after it (ended failed or skipped, was abandoned, or is still running with no retry
+  left), or was left where the nightly verdict could not be final (failed below the cap with no
+  retry since — check the cron; still unfinished — the day is lost). When no check succeeded for
+  that day — every send failed, the bot was not set up that night, the job was disabled, or run
+  hour 23 has none — the owner heard nothing, so the word reports every outcome but a good day,
+  once: no run, failed, skipped (any reason but `rest_day`), unfinished or an unexpected status,
+  and for a good day only a stage memory peak above 3,200 MB. An unreadable row fails closed: it
+  is read before the run, the attempt fails with its stack logged, the day stays open and a later
+  tick retries — never a word on a guess. A tick that runs both jobs runs the final word first, so
+  it reads the record before today's check can claim it. It has its own job key because
+  `run_day_job` keys a day by the ET day it runs on: sharing `marketing_run_health` would mark that
+  day's own nightly check done. At most one message per job per ET day; every server or model
+  string in either message is scrubbed (`outlet_base.scrub`), folded onto one line and
+  length-capped.
+- **Reject reasons** (§12.9). A reason tap, from the same owner allow-list as Approve, goes
+  through `run_service.record_reject_reason`: on a `rejected` row only, it rebuilds
+  `metadata.review` from a fresh read and writes the reason, who chose it and when through
+  `transition_post`; the same reason again writes nothing, and a later, different one wins. Each
+  reason is a one-letter callback verb, so the callback grammar stays one character class and
+  every callback fits Telegram's 64 bytes. The digest lists the reasons; the judge round will
+  calibrate against them.
+- **Closing a run says why.** `close_finished_runs` now records `metadata.closed` — when, why
+  (`posted`, `all_rejected`, `expired_unreviewed`, `approved_unsent`, `failed`, `no_posts` or
+  `mixed`) and the counts of post statuses and skip reasons — and no longer overwrites the
+  worker's `finished_at`, which is the run's wall time (the close time is `closed.at`; a NULL
+  `finished_at` is still filled). `approved_unsent`: every post the owner was asked about was
+  approved and expired unsent (the X cap, a dry run, an unwired platform, or an unknown outcome
+  the platform turned out not to hold). `closed` is server-owned like `claim_nonce`
+  (`SERVER_OWNED_RUN_METADATA` in `app/schemas/marketing.py`): a worker PATCH that carries it has
+  it dropped with a WARNING. Expiry records `metadata.expired_from`, the status a post had before
+  it expired — `pending_review`, `approved`, or `queued` when reconcile expires an unknown outcome
+  the platform does not hold — which is what separates "never reviewed" from "approved but never
+  sent".
+- **Cost:** about $0.11 a month on top of posting — roughly 17 X posts × 4 reads × $0.001 ≈ $0.07,
+  plus the weekly $0.010 follower read ≈ $0.04. Bluesky, Telegram and the digest are free.
+- **Accepted gaps** (review 2026-10-01; re-review 2026-10-02):
+  - A claim that straddles ET midnight: `run_day_job` takes the day from the tick's time, but the
+    claim stamps `run_day` from its own clock, so a claim in the ~100 ms around midnight could mark
+    the next day done. Practically unreachable: every job is due at least an hour before midnight
+    (the nightly check from 23:00 at the latest), and three failed attempts end its day.
+  - A Telegram 429 inside a claimed attempt spends one of that day's three attempts (an open
+    back-off claims nothing); the digest still has its Tuesday catch-up, and a nightly check whose
+    attempts all failed is reported by the next day's final word, which has no catch-up of its own.
+  - The follower history lives on the posts — each platform's snapshot is kept on its newest post
+    and replaced daily — so the weekly change needs a post at least every six days or so: across a
+    longer gap it spans the gap (the dates are shown), and with too few posts in the 21-day
+    lookback there is no baseline.
+  - The reports are at least once: a message sent just before its job's done-record failed can go
+    out again (after a restart, or from a second instance).
+  - A back-off marker lives on one row, the platform's newest post. If that post is retracted, or
+    its retract is requested, during the pause after the refused post has left the 30-day listing,
+    or if the marker write itself failed (logged at ERROR with the post id; it never holds the
+    day), the pause ends early: one more $0.005 X reserve, or one more Upload-Post call.
+    `x_account_refused_until` has the same property.
+  - The final word errs toward speaking. When a later posting day's nightly check succeeded before
+    the word went out, or a nightly check's claim straddled midnight (above), the record no longer
+    says whether that night's alert went out, so the word reports every outcome but a good day and
+    may repeat an alert. A run write in the instant between the nightly check's claim and its read
+    of the run counts as after the check: a possible duplicate, never a miss.
+
 ---
 
 ## Appendix A: Where things live
@@ -3318,7 +3619,7 @@ backend/
 │   │   ├── error_response.py     # the {error_code, message, user_message, action, details} contract
 │   │   └── v1/
 │   │       ├── api.py            # router registration
-│   │       └── endpoints/        # 23 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
+│   │       └── endpoints/        # 24 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
 │   ├── integrations/             # 16 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
@@ -3327,7 +3628,8 @@ backend/
 │   │   ├── agents/               # the multi-agent research pipeline
 │   │   │   └── book_voice_prompt.py   # per-book method voice for Learn BOOK chats
 │   │   └── marketing/            # WEB-side half of the marketing engine: ledger, publisher loop,
-│   │                             #   content pool, selection, writer + validators, smart link (§12)
+│   │                             #   content pool, selection, writer + validators, smart link (§12),
+│   │                             #   measurement: metrics_service, digest_service (§12.11)
 │   ├── templates/                # PDF (WeasyPrint), legal pages, the landing page (site/)
 │   ├── utils/
 │   ├── config.py                 # NOT app/core/config.py
@@ -3345,7 +3647,7 @@ backend/
 │   ├── main.py                   #   entrypoint (`python -m marketing.main`) — nothing here imports app.*
 │   └── assets/fonts/             #   vendored OFL fonts for the caption burn
 ├── scripts/
-├── tests/                        # FLAT — ~470 test_*.py + one tests/services/ subdir
+├── tests/                        # FLAT — ~800 test_*.py + one tests/services/ subdir
 └── conftest.py                   # rootdir; forces SENTRY_DSN="" and blocks outbound sockets
 ```
 
@@ -3391,6 +3693,12 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-09-28 | Marketing may show FMP data except price display: financial statements, earnings and estimates, company info, filings, valuation figures (market cap, P/E, EV, yield) and news in screenshots are allowed; a price itself, % price moves, price charts and ETF data are not | FMP's emailed reply to a consent request allowed "select datasets" (example: certain financial statement fields) and refused price-related data (a separate public-display licence). Owner accepted the email as sufficient and reads it as everything except price display. MAR, real-person and congressional-counsel limits unchanged; supersedes the EDGAR-only class C of the 2026-09-16 row | Request a signed consent listing each dataset; treat price-derived figures as price data; buy a price public-display licence |
 | 2026-09-28 | Congressional-trade marketing needs no lawyer's sign-off. The rules: never name a member (a count of at least 2); write "disclosed purchases/sales" with the disclosure month, never "bought/sold"; the counts may name a ticker the Pro Congressional Buys card shows | The researched legal position (§12.1): 5 U.S.C. §13107(c) probably covers commercial use, and there is no exception for aggregates. But no enforcement has been found since 1978, the industry uses the data openly, and the in-app Pro feature is already the same use. Names add right-of-publicity and false-light risk; "bought" can be false, because a report covers spouses' trades, uses ranges and lags up to 45 days. Supersedes the counsel gate in the row above | Keep the lawyer gate (rejected: the owner accepts the low enforcement risk); allow names (rejected: they add claims and engage the privacy interest the statute protects); keep the congressional tickers Pro-only (rejected by the owner: "the only rule is no names") |
 | 2026-10-01 | Industry TAM/CAGR shown only when industry-specific; a zero dossier row heals in memory, never written from the request path; Phase A never replaces a Phase-B global row | TestFlight: PLUG showed CAGR/TAM "—" because 138 dossier rows held the July zero placeholder and the read path served it as data; fixing that alone would have shown whole-sector GDP (e.g. all US manufacturing) as an industry's TAM | Show every stand-in (with or without an iOS caption); write the healed row back to Supabase; wait for the quarterly job; a manual admin refresh (pays Phase B's Gemini calls twice) |
+| 2026-09-26 | A semantic judge is the second gate on marketing copy: a different model from the writer (`gemini-3.8-flash`, thinking off, temperature 0) grading a written rubric, `enforce` by default and fail-closed (an unreadable answer is a writer failure, never a pass); `create_posts` refuses a class-A package the judge did not check in `enforce` | Three adversarial review rounds found natural-language bypasses of the regex validators each time, and each over-blocking relaxation reopened one; a grader on the writer's own model shares its blind spots. Its pre-registered calibration gate is still not met (§12.5), so a human approves every post | More regex rows; the writer's model as the grader; `shadow` as the default; human review alone |
+| 2026-09-29 | Every post is reviewed in Telegram (a bot in the web process: plain text, an owner allow-list, Approve / Reject buttons); the day's only media is ONE 9:16 video for TikTok, YouTube and Instagram, with Facebook and LinkedIn as text; the Instagram carousel is deferred | The owner reviews from a phone; model text must never render on caydexinvest.com, the passkey domain (§12.9), and a chat app plays the video with no page of ours. The disclaimer is composed per platform, not per format, so a carousel would carry the video's wording; its slides are still generated and judged but unused | A review page on caydexinvest.com; email review; a carousel now |
+| 2026-09-30 | X and Bluesky are published through their own APIs (thin clients, web process only); an X post whose outcome is unknown is never resent automatically — reconcile reads our own timeline, then the owner decides — while Bluesky is exactly-once (a record key derived from the idempotency key, written only if absent); X spending is capped by our own ledger | X accepts no idempotency key and its duplicate-content 403 proves nothing either way, so a blind resend can double-post; X's console cap and prepaid balance have failed to hold for other developers | Postiz (needs a Temporal stack) or Upload-Post for X; resending X after a timeout; X's console cap as the only limit |
+| 2026-10-01 | Upload-Post publishes TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads (Phase 5 stage 2): one request per post row, its `request_id` doubling as the 24 h Idempotency-Key and never overwritten; an acknowledged job is never resent, an unacknowledged one only within 20 h; reconcile owns the verdict | The only sub-$50 route to public TikTok (an audited client); uploads are asynchronous, so an accepted request is only SUBMITTED. Credentials set on 2026-10-01; no platform is enabled until the owner's Free-tier checks pass | Each platform's own API and app review; Postiz; resending any job that later reads "not found" |
+| 2026-10-01 | The X account carries no "Automated" label (owner decision) | X staff said on 2026-09-15 that the label applies to this human-approved setup; the owner accepted the risk that X restricts the account for unlabelled automation, and turns the label on if X ever flags it | Turn the label on before the first post |
+| 2026-10-01 | Measurement and run health are the publisher tick's last three steps (§12.11): per-post metrics written only by `merge_post_metrics` (fenced on `metrics->>rev`, never touching `updated_at`); X read at 1/3/7/28-day checkpoints, charged up front with four posts kept free under the cap at the price a post would reserve now, and a definite refusal backed off for a week by a marker on the platform's newest post; a weekly Telegram digest built only from our own database; a nightly alert when a posting day failed, was skipped or never ran, with a final word the next day that reads when that check ran and whether it went out, both timed from a web mirror of the worker's run hour (`MARKETING_RUN_HOUR_ET`); a reason on every reject; the run close keeps `finished_at` and records why it closed | Nothing measured anything, and a failed posting day looked exactly like a quiet one. Only the publisher may call a platform; a metrics write that bumped `updated_at` would break the publisher's fence. A fixed $0.06 headroom left less than one $0.20 URL post, and a refusal with no back-off was paid for again every day. A back-off kept only on the refused post (usually the oldest) left the 30-day listing within days: 16 reserves in 28 days instead of four (re-review 2026-10-02). The nightly check runs at the first tick after its hour, so a final word that assumed 22:00 repeated verdicts, announced recoveries nobody had been warned of, and stayed silent after a night whose alert never went out | A weekly read of every post; daily X reads of every recent post (≈ $0.51/month, a quarter of the cap); metrics written through `transition_post`; follower counts read live by the digest; a fixed text-post headroom; the back-off on the refused post only; a fixed 22:00 check time for the final word |
 
 ---
 

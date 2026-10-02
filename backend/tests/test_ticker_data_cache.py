@@ -4,8 +4,13 @@ The only fragile part is the fail-safe serialization round-trip: a
 CollectedTickerData must survive serialize → (JSONB) → deserialize with every
 field that assemble_report / build_financial_context RE-READS intact — dates
 back as `date` objects (downstream does calendar math), the two flat dataclasses
-(SectorAggregates incl. its datetime, IndustryTAM), and the Pydantic registry.
+(SectorAggregates incl. its datetime, IndustryDossier), and the Pydantic registry.
 Any failure must degrade to a MISS (None), never a half-built / corrupt object.
+
+Build every fixture with the type PRODUCTION puts on the field. `_sample()` used a
+plain `IndustryTAM` for `industry_tam`, matching the wrong registry entry, while the
+producer returns an `IndustryDossier` — so every cached collection for an equity with
+an FMP industry read as a miss (2026-06-16 → 2026-10-01) with this file green.
 
 Pure / offline — no network, no Supabase.
 """
@@ -23,6 +28,7 @@ from app.services.ticker_data_cache import (
     _serialize,
 )
 from app.services.agents.ticker_report_data_collector import CollectedTickerData
+from app.services.industry_dossier_service import IndustryDossier
 from app.services.industry_tam_service import IndustryTAM
 from app.services.sector_aggregates_service import SectorAggregates
 from app.schemas.profit_power import ProfitPowerResponse, ProfitPowerDataPointSchema
@@ -32,6 +38,46 @@ from app.schemas.dcf_fair_value import DcfFairValueResponse
 
 def _field_names():
     return {f.name for f in dataclasses.fields(CollectedTickerData)}
+
+
+_PLACEHOLDER_LABEL = "No public data available — FRED/Census unreachable at compute time"
+
+
+def _dossier(**over) -> IndustryDossier:
+    """The production `industry_tam` type, every field off its default."""
+    kw = dict(
+        current_tam=500.0, future_tam=900.0, current_year="2025", future_year="2030",
+        source_label="BEA (via FRED)", cagr_5y_pct=12.5,
+        industry="Software - Infrastructure", sector="Technology",
+        lifecycle_phase="secular_growth", hhi=1834.5, top1_share_pct=31.2,
+        top2_share_pct=44.9, concentration_label="oligopoly", constituent_count=56,
+        source_grain="industry", tam_scope="global",
+    )
+    kw.update(over)
+    return IndustryDossier(**kw)
+
+
+# The shapes `get_or_compute_dossier` really returns (industry_dossier_service.py).
+_DOSSIER_SHAPES = {
+    # A stored row with a real TAM, returned untouched.
+    "stored_real": _dossier(),
+    # The July zero placeholder (138 of 158 production rows until the 2026-10-01 fix):
+    # TAM 0, CAGR None, all-industry grain. Rows cached before that fix hold this.
+    "zero_placeholder": _dossier(
+        current_tam=0.0, future_tam=0.0, current_year="2026", future_year="2031",
+        source_label=_PLACEHOLDER_LABEL, cagr_5y_pct=None, lifecycle_phase="mature",
+        source_grain="all_industry", tam_scope="us",
+    ),
+    # No stored row: a live compute with no constituents → concentration None (never
+    # the "fragmented" default) and no HHI / shares / count.
+    "live_no_row": _dossier(
+        current_tam=195.0, future_tam=270.9, current_year="2024", future_year="2029",
+        source_label="US Census AIES (NAICS 335)", cagr_5y_pct=6.8,
+        industry="Electrical Equipment & Parts", sector="Industrials",
+        lifecycle_phase="mature", hhi=None, top1_share_pct=None, top2_share_pct=None,
+        concentration_label=None, constituent_count=None, tam_scope="us",
+    ),
+}
 
 
 def _sample() -> CollectedTickerData:
@@ -56,10 +102,7 @@ def _sample() -> CollectedTickerData:
         hhi=0.12, top1_share_pct=20.0, top2_share_pct=15.0,
         num_constituents=60, computed_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
     )
-    out.industry_tam = IndustryTAM(
-        current_tam=500.0, future_tam=900.0, current_year="2025",
-        future_year="2030", source_label="BEA (via FRED)", cagr_5y_pct=12.5,
-    )
+    out.industry_tam = _dossier()
     # ⚠️ At least one REGISTERED PYDANTIC field must be populated, or this whole file
     # is vacuous with respect to `_PYDANTIC_FIELDS`. `_serialize` tests `if val is None`
     # BEFORE the registry lookup, so a sample that leaves every model field None never
@@ -120,7 +163,8 @@ def test_roundtrip_flat_dataclasses():
     assert isinstance(back.sector_aggregates, SectorAggregates)
     assert back.sector_aggregates.computed_at == datetime(2026, 6, 1, tzinfo=timezone.utc)
     assert back.sector_aggregates.num_constituents == 60
-    assert isinstance(back.industry_tam, IndustryTAM)
+    assert type(back.industry_tam) is IndustryDossier
+    assert back.industry_tam == _dossier()                 # every field, not just the TAM
     assert back.industry_tam.future_tam == 900.0
     assert back.industry_tam.cagr_5y_pct == 12.5
 
@@ -163,7 +207,7 @@ def test_no_field_hides_a_model_behind_any():
     here with a reason."""
     import typing
 
-    allowed = {"industry_tam": "IndustryTAM, imported lazily — registered in _DATACLASS_FIELDS"}
+    allowed = {"industry_tam": "IndustryDossier, imported lazily — registered in _DATACLASS_FIELDS"}
     hints = typing.get_type_hints(CollectedTickerData)
     opaque = []
     for f in dataclasses.fields(CollectedTickerData):
@@ -345,3 +389,178 @@ def test_unknown_field_in_cached_data_is_ignored():
     back = _deserialize(blob, _field_names())
     assert back is not None
     assert not hasattr(back, "some_removed_field")
+
+
+# ── industry_tam: the production type, end to end (2026-10-01) ───────────────
+#
+# The producer (`get_or_compute_dossier`) returns an IndustryDossier; the registry said
+# IndustryTAM. The write succeeded, `IndustryTAM(**d)` raised on the dossier's extra keys,
+# and every read was a MISS — while `is_cached_collection_fresh` reported the row fresh,
+# so the pre-warmer skipped it and every report re-ran the cold collection.
+
+import ast
+import asyncio
+import inspect
+import typing
+
+import pytest
+
+import app.services.ticker_data_cache as tdc
+
+
+@pytest.mark.parametrize("shape", sorted(_DOSSIER_SHAPES))
+def test_every_real_dossier_shape_round_trips_exactly(shape):
+    """Same TYPE and every field back — the zero placeholder and a None concentration
+    included (`==` on a dataclass also requires the same class)."""
+    out = _sample()
+    out.industry_tam = _DOSSIER_SHAPES[shape]
+    blob = _serialize(out)
+    assert blob is not None
+    back = _deserialize(json.loads(json.dumps(blob)), _field_names())   # through JSONB
+    assert back is not None, f"{shape}: a cached collection read as a MISS"
+    assert type(back.industry_tam) is IndustryDossier
+    assert back.industry_tam == out.industry_tam
+
+
+def test_a_narrower_compatible_dataclass_is_refused_at_write(caplog):
+    """IndustryDossier is a SUPERSET of IndustryTAM, so a TAM-shaped dict would construct
+    one — silently gaining source_grain='industry', lifecycle 'mature' and tam_scope 'us'
+    from the defaults. The writer refuses anything but the registered type instead."""
+    out = _sample()
+    out.industry_tam = IndustryTAM(
+        current_tam=500.0, future_tam=900.0, current_year="2025",
+        future_year="2030", source_label="BEA (via FRED)", cagr_5y_pct=12.5,
+    )
+    assert _serialize(out) is None
+    assert "industry_tam holds IndustryTAM; _DATACLASS_FIELDS registers IndustryDossier" in caplog.text
+
+
+def test_a_dossier_blob_with_an_unknown_key_is_a_miss_not_a_crash():
+    blob = _serialize(_sample())
+    blob["industry_tam"]["field_removed_later"] = 1
+    assert _deserialize(blob, _field_names()) is None
+
+
+def test_dataclass_registry_matches_each_producer():
+    """Each `_DATACLASS_FIELDS` class must be EXACTLY what the collector's producer returns.
+
+    Two halves, both needed: the producers' return annotations name the registered class,
+    and the collector really calls those producers for those fields (AST, so a comment
+    cannot satisfy it). The old registry tests checked only that entries exist."""
+    from app.services.industry_dossier_service import IndustryDossierService
+    from app.services.sector_aggregates_service import get_sector_aggregates
+    from app.services.agents import ticker_report_data_collector as collector
+
+    producers = {
+        "industry_tam": ("industry_tam_task", IndustryDossierService.get_or_compute_dossier),
+        "sector_aggregates": ("sector_agg_task", get_sector_aggregates),
+    }
+    assert set(producers) == set(_DATACLASS_FIELDS)
+
+    called_by_task: dict = {}
+    for node in ast.walk(ast.parse(inspect.getsource(collector))):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            names = {
+                (c.func.attr if isinstance(c.func, ast.Attribute) else getattr(c.func, "id", None))
+                for c in ast.walk(node.value) if isinstance(c, ast.Call)
+            }
+            called_by_task.setdefault(node.targets[0].id, []).append(names)
+
+    for field_name, (task, fn) in producers.items():
+        assert len(called_by_task.get(task, [])) == 1, f"{task} assigned {called_by_task.get(task)}"
+        assert fn.__name__ in called_by_task[task][0], f"{task} no longer calls {fn.__name__}"
+        ret = typing.get_type_hints(fn)["return"]
+        returned = [a for a in typing.get_args(ret) if a is not type(None)] or [ret]
+        assert returned == [_DATACLASS_FIELDS[field_name][0]], (
+            f"{fn.__qualname__} returns {returned}, but _DATACLASS_FIELDS[{field_name!r}] "
+            f"registers {_DATACLASS_FIELDS[field_name][0].__name__}"
+        )
+
+
+class _FakeCacheDB:
+    """One-row `ticker_data_cache`: upsert stores (through a JSON round-trip, like JSONB),
+    select returns the selected columns."""
+
+    def __init__(self):
+        self.row = None
+        self.upserts = 0
+
+    def table(self, _name):
+        return _FakeCacheQuery(self)
+
+
+class _FakeCacheQuery:
+    def __init__(self, db):
+        self.db, self._upsert, self._cols = db, None, None
+
+    def upsert(self, row, **_kw):
+        self._upsert = json.loads(json.dumps(row))
+        return self
+
+    def select(self, cols):
+        self._cols = [c.strip() for c in cols.split(",")]
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def execute(self):
+        if self._upsert is not None:
+            self.db.row, self.db.upserts = self._upsert, self.db.upserts + 1
+            return type("R", (), {"data": []})()
+        if self.db.row is None:
+            return type("R", (), {"data": []})()
+        return type("R", (), {"data": [{c: self.db.row.get(c) for c in self._cols}]})()
+
+
+@pytest.mark.parametrize("shape", sorted(_DOSSIER_SHAPES))
+def test_a_stored_collection_that_probes_fresh_is_a_hit(monkeypatch, shape):
+    """The invariant the outage broke: the pre-warmer's probe says fresh ⇒ the reader hits.
+    Real store_collection → JSONB → real probe and reader, with the REAL close-cycle
+    freshness (a row written now is fresh)."""
+    from app.config import settings
+
+    db = _FakeCacheDB()
+    monkeypatch.setattr(tdc, "get_supabase", lambda: db)
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)      # _sample() is stamped "caydex"
+    out = _sample()
+    out.industry_tam = _DOSSIER_SHAPES[shape]
+
+    asyncio.run(tdc.store_collection("plug", out))
+    assert db.upserts == 1
+    assert asyncio.run(tdc.is_cached_collection_fresh("PLUG")) is True
+    hit = asyncio.run(tdc.get_cached_collection("PLUG"))
+    assert hit is not None, f"{shape}: fresh row, but the reader MISSED"
+    assert hit.industry_tam == out.industry_tam
+
+
+def _incomplete(out):
+    out.computed = {}                        # serializes, but `_deserialize` refuses it
+
+
+def _pydantic_registered_under_the_wrong_class(monkeypatch):
+    # The Pydantic twin of the industry_tam bug: model_dump uses the INSTANCE, so the
+    # write succeeds; model_validate uses the REGISTERED class, so the read fails.
+    monkeypatch.setitem(tdc._PYDANTIC_FIELDS, "profit_power", SnapshotItemResponse)
+
+
+@pytest.mark.parametrize("case", ["incomplete", "pydantic_wrong_class"])
+def test_store_never_writes_a_row_that_would_read_as_a_miss(monkeypatch, caplog, case):
+    """A fresh-but-unreadable row is worse than no row: no row lets the pre-warmer warm it."""
+    db = _FakeCacheDB()
+    monkeypatch.setattr(tdc, "get_supabase", lambda: db)
+    out = _sample()
+    if case == "incomplete":
+        _incomplete(out)
+    else:
+        _pydantic_registered_under_the_wrong_class(monkeypatch)
+    assert _serialize(out) is not None       # anti-vacuity: only the READ-BACK can stop it
+
+    asyncio.run(tdc.store_collection("ORCL", out))
+    assert db.upserts == 0
+    assert asyncio.run(tdc.is_cached_collection_fresh("ORCL")) is False
+    assert "does not read back" in caplog.text

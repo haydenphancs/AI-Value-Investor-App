@@ -344,6 +344,14 @@ struct AllocationChangeText: View {
 // MARK: - Trade Ticker Logo
 struct TradeTickerLogo: View {
     let ticker: String
+    /// The logo this view loaded, held so it stays on screen even after the cache evicts it,
+    /// and tagged with its symbol so a card reused for another trade never draws the old logo.
+    @State private var fetched: (symbol: String, image: UIImage)? = nil
+
+    /// The FMP CDN logo's cache key (trimmed, uppercased ticker); nil for a blank ticker.
+    private var logoSymbol: String? {
+        CompanyLogoCache.symbol(for: ticker)
+    }
 
     private var backgroundColor: Color {
         let colors: [Color] = [
@@ -357,26 +365,36 @@ struct TradeTickerLogo: View {
         return colors[index]
     }
 
-    private var logoURL: URL? {
-        URL(string: "https://images.financialmodelingprep.com/symbol/\(ticker.uppercased()).png")
+    /// Resolved SYNCHRONOUSLY, so a rebuilt card (re-entering the trade group) draws a logo
+    /// shown this session on its FIRST frame. It used to be an `AsyncImage`, which starts
+    /// every new view at `.empty` (the letter tile).
+    private func remoteImage(for symbol: String) -> UIImage? {
+        if let cached = CompanyLogoCache.shared.image(for: symbol) { return cached }
+        guard let fetched, fetched.symbol == symbol else { return nil }
+        return fetched.image
     }
 
     var body: some View {
-        if let url = logoURL {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
-                default:
-                    letterFallback
-                }
+        ZStack {
+            if let symbol = logoSymbol, let logo = remoteImage(for: symbol) {
+                Image(uiImage: logo)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 48, height: 48)
+                    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+            } else {
+                letterFallback
             }
-        } else {
-            letterFallback
+        }
+        .task(id: logoSymbol) {
+            guard let symbol = logoSymbol,
+                  let image = await CompanyLogoCache.shared.load(symbol),
+                  !Task.isCancelled else { return }
+            // Only on a change: a cache hit re-assigning the same logo would cost an extra body
+            // pass per card appearance (a tuple @State cannot be compared for equality).
+            if fetched?.symbol != symbol {
+                fetched = (symbol: symbol, image: image)
+            }
         }
     }
 

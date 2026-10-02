@@ -88,6 +88,43 @@ struct AnalysisMomentumSection: View {
     }
 }
 
+// MARK: - Remembered period
+
+/// The 6M/1Y choice is a device display preference (TestFlight 1.0 (9): "set up once and
+/// permanently keep them"). It used to be a `@Published` copy on each detail ViewModel with
+/// a hard 6M default, so every pushed ticker and every relaunch reset it. The screens now
+/// hold it in `@AppStorage` under this key and bind it down; every screen in the stack reads
+/// the same value, so going back never shows a stale period.
+///
+/// Device-only, and deliberately NOT cleared by `AppState.discardDataForEndedSession()`: a
+/// display choice of this phone, not account data (same standing as
+/// `caydex_preferred_chart_type`).
+extension AnalystMomentumPeriod {
+    static let storageKey = "caydex_analyst_momentum_period"
+    static let defaultChoice: AnalystMomentumPeriod = .sixMonths
+
+    /// What is stored — NOT `rawValue`, which is the toggle LABEL ("6M"); relabelling the
+    /// pill would silently reset everyone's choice. A storage contract: never change an id.
+    var storageID: String {
+        switch self {
+        case .sixMonths: return "six_months"
+        case .oneYear:   return "one_year"
+        }
+    }
+
+    /// The period a stored id names; the default for a missing or unknown id. Display-only —
+    /// never written back, so a garbage value cannot overwrite anything.
+    static func stored(_ id: String) -> AnalystMomentumPeriod {
+        allCases.first { $0.storageID == id } ?? defaultChoice
+    }
+
+    /// `@AppStorage`'s string as the toggle's binding: reads resolve through `stored(_:)`,
+    /// and only a tap (the setter) writes.
+    static func binding(_ id: Binding<String>) -> Binding<AnalystMomentumPeriod> {
+        Binding(get: { Self.stored(id.wrappedValue) }, set: { id.wrappedValue = $0.storageID })
+    }
+}
+
 #Preview {
     ZStack {
         AppColors.background

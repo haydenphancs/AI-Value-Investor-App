@@ -86,6 +86,9 @@ struct DailyScannersSection: View {
                                             )
                                         }
                                     )
+                                    // Stable per kind (`DailyScanner.id`). When it was minted per
+                                    // fetch, this `.id` and the ForEach key changed on every 60 s
+                                    // Home refresh and rebuilt each card from scratch.
                                     .id(scanner.id)
                             }
                         }

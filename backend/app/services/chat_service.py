@@ -66,6 +66,30 @@ logger = logging.getLogger(__name__)
 # the model through the resolver's context instead.
 _QUOTED_WIDGET_ASSET_TYPES = frozenset({"STOCK", "ETF", "CRYPTO"})
 
+# Context types whose ONLY grounding source is the block the resolver builds server-side, so
+# `server_grounded` is the whole answer to "did this screen's data reach the model?". iOS
+# reads the verdict (`context_grounded`) to stop its "Grounded on Research Report · AAPL"
+# chip claiming a report the turn never saw — the direct door with no report id, once the
+# close-aligned `ticker_report_cache` rolls over at the next weekday 18:00 ET close.
+# Deliberately not the other types, where `server_grounded` is NOT that answer: STOCK is
+# grounded by live enrichment (`_resolve_stock` always returns None), COMMODITY appends to
+# the caller's string, BOOK is a pass-through, and the asset/Learn screens can fall back to
+# a persisted on-screen snapshot that still grounds the turn. Each needs its own verdict
+# before it joins this set.
+_CONTEXT_VERDICT_TYPES = frozenset({"TICKER_REPORT"})
+
+
+def context_grounding_verdict(context_type: Optional[str], server_grounded: bool) -> Optional[bool]:
+    """Whether the screen's own grounding reached the model this turn, for iOS's chip.
+
+    True / False only for a context type in `_CONTEXT_VERDICT_TYPES`, from `server_grounded`
+    (the resolver BUILT the block) — never from `grounded`, which a client pass-through
+    satisfies too. None means "no verdict for this type": iOS keeps its chip as it is.
+    """
+    if (context_type or "").strip().upper() not in _CONTEXT_VERDICT_TYPES:
+        return None
+    return server_grounded is True
+
 
 def _chat_output_cap(is_deep_dive: bool) -> int:
     """Output ceiling for a chat turn.
@@ -250,6 +274,10 @@ class ChatService:
         # The trusted report rule is earned by a block the SERVER built for a report screen —
         # never by `grounded`, which a client pass-through satisfies too.
         report_grounded = _ctype == "TICKER_REPORT" and _server_grounded
+        # This door's own verdict for the iOS chip. On the stream→non-stream FALLBACK the
+        # resolver runs again here, and this — not the aborted stream's prep — is what the
+        # persisted answer was grounded on.
+        context_grounded = context_grounding_verdict(context_type, _server_grounded)
 
         # Step 1: Conversation history (off the loop — a sync postgrest call on the single
         # Railway worker stalls every other request for a Supabase RTT).
@@ -334,6 +362,7 @@ class ChatService:
                 "citations": citations if citations else None,
                 "tokens_used": 0,
                 "sources": sources if sources else None,
+                "context_grounded": context_grounded,
             }
             if hit_widget:
                 out["widget"] = hit_widget
@@ -470,6 +499,7 @@ class ChatService:
             "tokens_used": response.get("tokens_used"),
             "sources": sources if sources else None,
             "finish_reason": finish_reason,
+            "context_grounded": context_grounded,
         }
         if degraded:
             result["degraded"] = degraded
@@ -605,10 +635,12 @@ class ChatService:
             "widget": widget,
             "sources": sources if sources else None,
             "asset_type": asset_type,
-            # Did grounding actually arrive? The `sources` pill above is the consumer today;
-            # the iOS chip still keys on the context TYPE and is a follow-up.
+            # Did grounding actually arrive? `grounded` earns the `sources` pill above;
+            # `context_grounded` is the server-only verdict iOS's "Grounded on …" chip reads
+            # (None for a context type that gets no verdict — see `context_grounding_verdict`).
             "grounded": grounded,
             "server_grounded": server_grounded,
+            "context_grounded": context_grounding_verdict(context_type, server_grounded),
             # The endpoint uses these to serve a cache hit without touching Gemini, and to
             # write the answer back after a successful stream.
             "is_deep_dive": is_deep_dive,

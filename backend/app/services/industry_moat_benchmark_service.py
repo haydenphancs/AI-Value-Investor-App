@@ -57,6 +57,32 @@ from app.services.moat_scoring_service import (
 logger = logging.getLogger(__name__)
 
 
+class IndustryMoatBenchmarkRecomputeSkipped(RuntimeError):
+    """`recompute_all` wrote NOTHING. RAISED, never returned as a summary. Three reasons:
+
+      * "empty universe" — the industry universe loaded as `[]` (checked before any write);
+      * "every industry failed" — every attempted industry FAILED (see `_zero_write_failure`);
+      * "nothing written" — no industry wrote a pillar and at least one failed; the rest
+        legitimately had too few scorable peers.
+
+    All three used to return a zero summary, and the quarterly chain's `_run_claimed_phase`
+    (main.py) marks any phase that RETURNS as settled: the day-keyed claim recorded success
+    and the quarter was consumed, so the Moat radar's "Peer Avg" pentagon kept last
+    quarter's rows (or the flat 5.0 baseline) until the next one. Raising releases the
+    claim unsettled, so the chain retries the phase inside its catch-up window and the
+    ledger row carries this message as its `error`. Same contract as
+    `IndustryDossierRecomputeSkipped`.
+
+    Still returns: every industry skipped as fresh, every attempted industry short of
+    peers (an industry with fewer than MIN_SAMPLE_SIZE scorable peers never writes and so
+    is never fresh — a same-day re-run attempts exactly those), and a PARTIAL run.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        super().__init__(f"industry_moat_benchmark recompute SKIPPED ({reason}) — {detail}")
+
+
 # ── Constants ───────────────────────────────────────────────────────
 
 MIN_SAMPLE_SIZE = 5
@@ -115,6 +141,24 @@ def _percentile(sorted_values: List[float], pct: float) -> Optional[float]:
     hi = min(lo + 1, len(sorted_values) - 1)
     weight = k - lo
     return sorted_values[lo] * (1 - weight) + sorted_values[hi] * weight
+
+
+def _zero_write_failure(pillars_written: int, stats: Dict[str, int]) -> Optional[str]:
+    """Why an attempted industry that wrote no pillar counts as FAILED, or None.
+
+    None also when it legitimately had nothing to write: some peers were scored, but no
+    pillar reached MIN_SAMPLE_SIZE (a small industry — it never writes, so it is never
+    fresh, and a same-day re-run attempts it again). Failed when its pillars met the floor
+    but every upsert failed, or when no peer could be scored at all: `_score_one_ticker`
+    turns an FMP failure on the profile into None, so an outage looks like an empty result.
+    """
+    if pillars_written:
+        return None
+    if stats.get("eligible", 0):
+        return "every upsert failed"
+    if not stats.get("scored", 0):
+        return "no peer could be scored"
+    return None
 
 
 def _load_universe_industries() -> List[Tuple[str, List[Tuple[str, float]]]]:
@@ -247,6 +291,7 @@ class IndustryMoatBenchmarkService:
     async def compute_for_industry(
         self, industry: str, *, run_id: Optional[str] = None,
         skip_if_fresh_hours: Optional[int] = None,
+        stats: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Compute peer averages for one industry. Upserts one row per
         pillar that meets the sample-size threshold. Returns a summary
@@ -258,7 +303,14 @@ class IndustryMoatBenchmarkService:
         function returns `{"_skipped": "fresh"}` without re-computing.
         Used by `recompute_all` to resume a partially-finished backfill
         after a Ctrl-C / rate-limit abort.
+
+        `stats`, when given, is filled with `peers` (tickers tried), `scored` (peers the
+        scorer ran on) and `eligible` (pillars that met the sample floor, i.e. were sent
+        to the upsert) — what `recompute_all` needs to tell an outage from a small
+        industry when nothing was written (`_zero_write_failure`).
         """
+        st: Dict[str, int] = stats if stats is not None else {}
+        st.update(peers=0, scored=0, eligible=0)
         run_id = run_id or str(uuid.uuid4())
 
         if skip_if_fresh_hours:
@@ -309,6 +361,8 @@ class IndustryMoatBenchmarkService:
               for t in tickers],
             return_exceptions=True,
         )
+        st["peers"] = len(tickers)
+        st["scored"] = sum(1 for row in per_ticker_scores if isinstance(row, dict))
 
         # Collect per-pillar score lists.
         pillar_scores: Dict[str, List[float]] = {p: [] for p in PILLAR_ORDER}
@@ -352,6 +406,7 @@ class IndustryMoatBenchmarkService:
                 "computed_at": datetime.now(timezone.utc).isoformat(),
                 "model_version": MODEL_VERSION,
             }
+            st["eligible"] += 1
             try:
                 await asyncio.to_thread(
                     lambda r=row: self.supabase.table(TABLE_NAME)
@@ -381,10 +436,29 @@ class IndustryMoatBenchmarkService:
         skipped. Pass 0 / None to force a full recompute. The CLI
         default (24h) means a Ctrl-C abort can be resumed by simply
         re-running the same command without re-doing finished work.
+
+        Raises `IndustryMoatBenchmarkRecomputeSkipped` (after an ERROR log) when the
+        universe yields no industry (before any write), or when no attempted industry wrote
+        a pillar and at least one of them FAILED (`_zero_write_failure`) — the quarterly
+        chain's claim stays UNSETTLED and the phase is retried. Industries skipped as fresh,
+        industries legitimately short of peers, and a partial run are settled returns.
         """
         run_id = run_id or str(uuid.uuid4())
         started = time.time()
         universe = _load_universe_industries()
+        if not universe:
+            # `load_universe` already logged the Storage/parse reason at ERROR when the file
+            # itself failed; this line names the consequence (and covers a file that loaded
+            # but holds no industry with market caps).
+            exc = IndustryMoatBenchmarkRecomputeSkipped(
+                "empty universe",
+                f"{INDUSTRY_UNIVERSE} yielded no industry with market caps (it is not in "
+                "git: the Supabase Storage download failed, or the file holds no "
+                "market_caps). Nothing was written; the previous industry_moat_benchmarks "
+                "rows are left untouched.",
+            )
+            logger.error("%s", exc)
+            raise exc
         industries = [ind for ind, _ in universe]
         logger.info(
             "industry_moat_benchmark: recompute_all starting — "
@@ -397,42 +471,82 @@ class IndustryMoatBenchmarkService:
         skipped_low_sample = 0
         skipped_fresh = 0
 
-        async def _one(ind: str) -> Tuple[str, int, int, bool]:
+        # (industry, pillars written, pillars short of the floor, fresh-skipped, failure)
+        async def _one(ind: str) -> Tuple[str, int, int, bool, Optional[str]]:
+            stats: Dict[str, int] = {}
             async with sem:
                 try:
                     written = await self.compute_for_industry(
                         ind, run_id=run_id,
                         skip_if_fresh_hours=skip_if_fresh_hours,
+                        stats=stats,
                     )
                 except Exception as exc:
                     logger.error(
                         "industry_moat_benchmark: compute_for_industry "
-                        "failed for %r: %s", ind, exc,
+                        "failed for %r: %s: %s", ind, type(exc).__name__, exc,
                     )
-                    return ind, 0, len(PILLAR_ORDER), False
+                    return ind, 0, len(PILLAR_ORDER), False, "raised"
                 if written.get("_skipped") == "fresh":
-                    return ind, 0, 0, True
+                    return ind, 0, 0, True, None
                 wp = len(written)
-                return ind, wp, len(PILLAR_ORDER) - wp, False
+                failure = _zero_write_failure(wp, stats)
+                if failure == "no peer could be scored":
+                    # The per-ticker failures are DEBUG-only (one line per peer would flood
+                    # an outage); this is the line that names it. Upsert failures were
+                    # already logged at ERROR per pillar.
+                    logger.warning(
+                        "industry_moat_benchmark: %r — none of its %d peers could be "
+                        "scored (every profile fetch failed or came back empty; FMP "
+                        "unreachable or refusing?); no pillar written", ind,
+                        stats.get("peers", 0),
+                    )
+                return ind, wp, len(PILLAR_ORDER) - wp, False, failure
 
         results = await asyncio.gather(
             *[_one(ind) for ind in industries], return_exceptions=True,
         )
-        for r in results:
-            if isinstance(r, tuple):
-                pillars_written += r[1]
-                skipped_low_sample += r[2]
-                if r[3]:
-                    skipped_fresh += 1
+        failures: Dict[str, int] = {}
+        for ind, r in zip(industries, results):
+            if not isinstance(r, tuple):
+                # `_one` catches Exception, so this is a BaseException escaping it.
+                logger.error(
+                    "industry_moat_benchmark: %r ended without a result: %s: %s",
+                    ind, type(r).__name__, r,
+                )
+                failures["raised"] = failures.get("raised", 0) + 1
+                continue
+            pillars_written += r[1]
+            skipped_low_sample += r[2]
+            if r[3]:
+                skipped_fresh += 1
+            if r[4]:
+                failures[r[4]] = failures.get(r[4], 0) + 1
+        failed = sum(failures.values())
 
         summary = {
             "run_id": run_id,
             "industries": len(industries),
             "pillars_written": pillars_written,
+            "industries_failed": failed,
             "skipped_low_sample": skipped_low_sample,
             "skipped_fresh": skipped_fresh,
             "elapsed_seconds": round(time.time() - started, 1),
         }
+        if pillars_written == 0 and failed:
+            attempted = len(industries) - skipped_fresh
+            reason = "every industry failed" if failed >= attempted else "nothing written"
+            breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(failures.items()))
+            exc = IndustryMoatBenchmarkRecomputeSkipped(
+                reason,
+                f"{attempted} industr{'y' if attempted == 1 else 'ies'} attempted, 0 pillar "
+                f"rows written; {failed} failed ({breakdown}), {attempted - failed} short of "
+                f"{MIN_SAMPLE_SIZE} scorable peers. FMP was unreachable or refusing for the "
+                "whole run, or every write failed — the per-industry lines above name the "
+                "cause. No industry got a fresh row, so a retry recomputes them all.",
+            )
+            logger.error("%s", exc)
+            raise exc
         logger.info("industry_moat_benchmark recompute_all summary: %s", summary)
         return summary
 

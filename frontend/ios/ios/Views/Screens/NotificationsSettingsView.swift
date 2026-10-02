@@ -226,8 +226,17 @@ struct NotificationsSettingsView: View {
         )) { _ in
             Task { await viewModel.refreshPermission() }
         }
-        // Belt and braces behind the ViewModel's debounced sync. `push()` no-ops when
-        // nothing is dirty, so this costs nothing on a screen the user only read.
+        // Re-read when the synced store changes underneath us — a hydrate landing while this
+        // screen is open, or a session ending (`clearLocalForEndedSession` posts the same
+        // signal). `load()` used to run once, in `.task`, so a hydrate that arrived after it
+        // left every row showing the PRE-hydrate values; the next tap then wrote that stale
+        // copy back and pushed it, overwriting what the account's other device had set.
+        .onReceive(NotificationCenter.default.publisher(for: .caydexSettingsHydrated)) { _ in
+            viewModel.load()
+        }
+        // Belt and braces behind the ViewModel's per-change push. Not free: `push()` PUTs the
+        // whole blob whenever the session is authenticated and hydrated (it is a no-op only
+        // for a guest), so this costs one request even on a screen the user only read.
         .onDisappear { viewModel.pushNow() }
     }
 

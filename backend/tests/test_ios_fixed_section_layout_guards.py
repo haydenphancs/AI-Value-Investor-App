@@ -73,7 +73,9 @@ _EAGER = [
     ("Views/Screens/ProfileView.swift", "var body: some View", "creditManagementSection",
      "userIdentitySection is a 3-way async branch in SLOT 0 and the credits section is inserted "
      "on the same flag"),
-    ("Views/Screens/AppSettingsView.swift", "var body: some View", "generalSection",
+    # `settingsScreen`, not `body`: `body` was split in two (2026-10-01) because the single
+    # modifier chain exceeded the type checker's budget; the sections live in this half.
+    ("Views/Screens/AppSettingsView.swift", "private var settingsScreen: some View", "generalSection",
      "the password row switches between Change Password and Set a Password, two different "
      "heights, on `hasPassword` arriving from GET /users/me"),
     ("ContentView.swift", "private var researchTabContent: some View", "PersonaSelectionSection",

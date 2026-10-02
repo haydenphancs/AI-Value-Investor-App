@@ -1324,6 +1324,12 @@ final class AppState {
         // UserDefaults key with no user id in it, so the next account to sign in on this
         // phone would open Alerts onto a list already narrowed by someone else's filter.
         UserDefaults.standard.removeObject(forKey: ActivityFilter.storageKey)
+        // The Reports persona filter and the Updates News filter: the same bug class — FILTERS
+        // on device-global keys. Their ViewModels outlive the session and re-read these stores
+        // in `handleIdentityChange`, which drops the in-memory copies too. The two sorts, the
+        // news-tone window and the All Whales sort are display preferences and stay.
+        UserDefaults.standard.removeObject(forKey: ResearchViewModel.personaFilterKey)
+        UserDefaults.standard.removeObject(forKey: NewsFilterOptions.storageKey)
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()
 

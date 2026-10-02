@@ -150,7 +150,7 @@ actor TaskPollingManager {
         persona: String
     ) -> AsyncThrowingStream<TaskProgress<ResearchReportDetail>, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 do {
                     // 1. Start generation
                     let response = try await apiClient.request(
@@ -245,13 +245,17 @@ actor TaskPollingManager {
                     continuation.finish()
                 }
             }
+            // A consumer that stops listening (cancelled on an identity change, or gone) ends
+            // the poll too. The producer is unstructured, so nothing else cancels it: it kept
+            // polling `/status` with whatever token was armed next until `maxPollDuration`.
+            continuation.onTermination = { _ in producer.cancel() }
         }
     }
 
     /// Monitor an existing research report by ID
     func monitorResearch(reportId: String) -> AsyncThrowingStream<TaskProgress<ResearchReportDetail>, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 let startTime = Date()
 
                 while true {
@@ -324,6 +328,8 @@ actor TaskPollingManager {
                     }
                 }
             }
+            // Same as `generateAndMonitorResearch`: the poll ends with its consumer.
+            continuation.onTermination = { _ in producer.cancel() }
         }
     }
 

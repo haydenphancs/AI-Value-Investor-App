@@ -64,9 +64,12 @@ struct UpdatesView: View {
                     )
 
                     // Static "Live News" Header (non-scrolling, stays at top)
+                    // The EFFECTIVE filter, not the saved one: a saved publisher this feed
+                    // does not carry is not narrowing anything, and counting it would show
+                    // "1 filter" over a list nothing is filtering.
                     LiveNewsHeader(
-                        filterLabel: viewModel.filterOptions.chipLabel,
-                        hasActiveFilters: viewModel.filterOptions.hasActiveFilters,
+                        filterLabel: viewModel.effectiveFilterOptions.chipLabel,
+                        hasActiveFilters: viewModel.effectiveFilterOptions.hasActiveFilters,
                         onFilterTapped: handleFilterTapped
                     )
 
@@ -816,6 +819,26 @@ struct NewsFilterSheet: View {
     @State private var selectedSources: Set<String> = []
     @State private var selectedSentiments: Set<NewsSentiment> = []
 
+    /// Case-insensitive, like `NewsFilterOptions.matches(_:)` and `restrictingSources(to:)`. One
+    /// publisher can be spelled two ways ("Reuters" from FMP's `publisher`, "reuters" from its
+    /// `site`), and a saved "reuters" IS filtering this feed's "Reuters" rows — an exact-case
+    /// test showed no checkmark on a row that was narrowing the list.
+    private func isSourceSelected(_ source: String) -> Bool {
+        let key = source.lowercased()
+        return selectedSources.contains { $0.lowercased() == key }
+    }
+
+    /// Unticking drops EVERY spelling of the publisher: leaving "reuters" behind after unticking
+    /// "Reuters" would keep filtering with no row checked.
+    private func toggleSource(_ source: String) {
+        let key = source.lowercased()
+        if isSourceSelected(source) {
+            selectedSources = selectedSources.filter { $0.lowercased() != key }
+        } else {
+            selectedSources.insert(source)
+        }
+    }
+
     /// Section headers, styled to match `TickerSearchSheet`'s. `Section("…")`
     /// alone renders UIKit's default grouped header, which is a different grey
     /// and a different weight from the rest of the app's chrome.
@@ -859,18 +882,14 @@ struct NewsFilterSheet: View {
 
                                 Spacer()
 
-                                if selectedSources.contains(source) {
+                                if isSourceSelected(source) {
                                     Image(systemName: "checkmark")
                                         .foregroundColor(AppColors.primaryBlue)
                                 }
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                if selectedSources.contains(source) {
-                                    selectedSources.remove(source)
-                                } else {
-                                    selectedSources.insert(source)
-                                }
+                                toggleSource(source)
                             }
                             .listRowBackground(AppColors.cardBackground)
                         }
@@ -931,6 +950,9 @@ struct NewsFilterSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") {
+                        // `selectedSources` still holds saved publishers this feed does not
+                        // list (seeded in `onAppear`). Keep them: the filter is saved across
+                        // tickers, and only Reset is meant to drop what the sheet cannot show.
                         filterOptions.sources = Array(selectedSources)
                         filterOptions.sentiments = Array(selectedSentiments)
                         onApply?()
@@ -942,7 +964,13 @@ struct NewsFilterSheet: View {
         }
         .presentationDetents([.medium, .large])
         .onAppear {
-            selectedSources = Set(filterOptions.sources)
+            // Each saved source in this feed's own spelling (case-insensitive), so case
+            // duplicates collapse into the one row they tick; a source this feed does not list
+            // is kept as saved (see Apply).
+            selectedSources = Set(filterOptions.sources.map { (saved: String) -> String in
+                let key = saved.lowercased()
+                return availableSources.first(where: { $0.lowercased() == key }) ?? saved
+            })
             selectedSentiments = Set(filterOptions.sentiments)
         }
     }

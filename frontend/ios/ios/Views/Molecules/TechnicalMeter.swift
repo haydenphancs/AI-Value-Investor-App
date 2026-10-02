@@ -9,11 +9,16 @@ import SwiftUI
 
 struct TechnicalMeter: View {
     let technicalData: TechnicalAnalysisData
-    @State private var selectedPeriod: TechnicalPeriod = .daily
+    /// Daily/Weekly, remembered on this device and SHARED with `TechnicalAnalysisDetailView`
+    /// through the one key. This was a private `@State` over a private copy of
+    /// `TechnicalTimeframe`, and the Details screen started its own `@State .daily` — so the
+    /// meter could read Weekly while Details opened on Daily, and both reset on every screen
+    /// and relaunch. Both views now read the same `@AppStorage`, so they always agree.
+    @AppStorage(TechnicalTimeframe.storageKey) private var timeframeID: String = TechnicalTimeframe.defaultChoice.storageID
 
-    enum TechnicalPeriod {
-        case daily
-        case weekly
+    /// Resolved for display only; a tap writes `timeframeID`, nothing else does.
+    private var selectedPeriod: TechnicalTimeframe {
+        TechnicalTimeframe.stored(timeframeID)
     }
 
     // Active signal based on selected period
@@ -83,7 +88,7 @@ struct TechnicalMeter: View {
                 )
                 .onTapGesture {
                     withAnimation(.easeInOut(duration: 0.6)) {
-                        selectedPeriod = .daily
+                        timeframeID = TechnicalTimeframe.daily.storageID
                     }
                 }
 
@@ -95,7 +100,7 @@ struct TechnicalMeter: View {
                 )
                 .onTapGesture {
                     withAnimation(.easeInOut(duration: 0.6)) {
-                        selectedPeriod = .weekly
+                        timeframeID = TechnicalTimeframe.weekly.storageID
                     }
                 }
             }
@@ -113,6 +118,39 @@ struct TechnicalMeter: View {
                 labels: ["Strong\nSell", "Sell", "Neutral", "Buy", "Strong\nBuy"]
             )
         }
+    }
+}
+
+// MARK: - Remembered timeframe
+
+/// One key for the Daily/Weekly choice, read by `TechnicalMeter` (every host: the stock and
+/// crypto Analysis tabs, Index, Commodity) and `TechnicalAnalysisDetailView`. Weekly is
+/// always displayable: `weeklySignal` is non-optional (no history reads "Not enough
+/// history"), the detail's weekly rows are built from the same daily bars, and its weekly
+/// summaries fall back to daily in the model.
+///
+/// Device-only, and deliberately NOT cleared by `AppState.discardDataForEndedSession()`: a
+/// display choice of this phone, not account data.
+extension TechnicalTimeframe {
+    static let storageKey = "caydex_technical_timeframe"
+    static let defaultChoice: TechnicalTimeframe = .daily
+
+    /// What is stored — NOT `rawValue`, which is the picker LABEL ("Daily"). Never change an id.
+    var storageID: String {
+        switch self {
+        case .daily:  return "daily"
+        case .weekly: return "weekly"
+        }
+    }
+
+    /// The default for a missing or unknown id. Display-only — never written back.
+    static func stored(_ id: String) -> TechnicalTimeframe {
+        allCases.first { $0.storageID == id } ?? defaultChoice
+    }
+
+    /// `@AppStorage`'s string as a picker binding; only a user change writes.
+    static func binding(_ id: Binding<String>) -> Binding<TechnicalTimeframe> {
+        Binding(get: { Self.stored(id.wrappedValue) }, set: { id.wrappedValue = $0.storageID })
     }
 }
 

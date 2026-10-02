@@ -43,6 +43,31 @@ enum TechnicalIndicatorType: String, CaseIterable, Identifiable, Hashable {
 
     var id: String { rawValue }
 
+    /// What `ChartSettings` stores — NOT `rawValue`, which is the sheet LABEL
+    /// ("MACD(9-12-26)"). Storing the label meant relabelling or retuning a pane would
+    /// silently switch it off for everyone who had it on. A storage contract: never change
+    /// an id; a new case gets its own (the switch has no `default:`, so it cannot compile
+    /// without one).
+    var storageID: String {
+        switch self {
+        case .ma20:           return "ma20"
+        case .ma50:           return "ma50"
+        case .ma200:          return "ma200"
+        case .bollingerBands: return "bollinger_bands"
+        case .volume:         return "volume"
+        case .rsi14:          return "rsi14"
+        case .macd:           return "macd"
+        case .stochastic:     return "stochastic"
+        }
+    }
+
+    /// `nil` for an id this build does not know (a pane removed in a later version) — the
+    /// caller drops it rather than guessing.
+    init?(storageID: String) {
+        guard let match = Self.allCases.first(where: { $0.storageID == storageID }) else { return nil }
+        self = match
+    }
+
     var isOverlay: Bool {
         switch self {
         case .ma20, .ma50, .ma200, .bollingerBands: return true
@@ -186,6 +211,34 @@ enum ChartAssetContext {
         }
     }
 
+    /// The range a screen of this class opens on, given the user's remembered range.
+    ///
+    /// The remembered range is ONE choice shared by every asset class (product decision,
+    /// 2026-10-01), but the classes do not offer the same pills: 2Y exists only on crypto,
+    /// and crypto has no 5Y/ALL. Opening on a range the backend 400s (2Y on a stock) or the
+    /// source cannot serve is never acceptable, so an unoffered range falls back to the
+    /// LONGEST offered range that is not longer than it — 2Y → 1Y elsewhere, 5Y/ALL → 2Y on
+    /// crypto. `ChartTimeRange` is declared shortest → longest, so declaration order IS
+    /// window length (pinned by a test). Nothing remembered → the screen's own default.
+    ///
+    /// Pure: the fallback is for DISPLAY only and is never written back over the memory.
+    func resolvedRange(preferred: ChartTimeRange?, screenDefault: ChartTimeRange) -> ChartTimeRange {
+        guard let preferred else { return screenDefault }
+        if allowedRanges.contains(preferred) { return preferred }
+        let rank = { (range: ChartTimeRange) in ChartTimeRange.allCases.firstIndex(of: range) ?? 0 }
+        return allowedRanges.filter { rank($0) <= rank(preferred) }.max { rank($0) < rank($1) } ?? screenDefault
+    }
+
+    /// The interval a range opens on, given the interval the user last picked for it.
+    /// One this class cannot serve for that range (a stock's 1D = 1 min on crypto, whose
+    /// 1D feed is 5-minute only) falls back to the range's default. Pure, like
+    /// `resolvedRange` — a coerced interval is never stored.
+    func resolvedInterval(preferred: ChartInterval?, for range: ChartTimeRange) -> ChartInterval {
+        let allowed = allowedIntervals(for: range)
+        if let preferred, allowed.contains(preferred) { return preferred }
+        return allowed.contains(range.defaultInterval) ? range.defaultInterval : (allowed.first ?? range.defaultInterval)
+    }
+
     /// The chart TYPES this asset class can draw honestly.
     ///
     /// CoinGecko rows carry close + volume only — no open/high/low — and the candle /
@@ -203,38 +256,114 @@ enum ChartAssetContext {
 
 // MARK: - Chart Settings
 
-class ChartSettings: ObservableObject {
+/// The chart preferences the Chart Settings sheet edits — every one of them persisted on
+/// this device, and kept in step across every live chart.
+///
+/// TestFlight 1.0 (9): "I did change Extended hours to off but it turns on again. For
+/// everything in here, it should … set up once and permanently keep them." Only `chartType`
+/// and (from build 10) `showExtendedHours` were stored; overlays, sub-charts and earnings
+/// markers reset on every screen. And because each of the five detail ViewModels owns its
+/// OWN instance that read UserDefaults only at init, a change on a detail screen pushed
+/// over another (header search, a related ticker, a news chip) left the screen underneath
+/// showing its stale copy — the toggle "turned back on" the moment the user went back.
+///
+/// Now every sheet setting writes through and announces itself; every other live instance
+/// re-reads the store (the single source of truth) and assigns only what differs, so a
+/// sink downstream never sees a phantom change. `isApplyingStoredSettings` makes a re-read
+/// unable to write or announce, so the echo cannot loop.
+///
+/// Device-only by product decision (2026-10-01), and deliberately NOT cleared by
+/// `AppState.discardDataForEndedSession()`: these are display preferences of this phone,
+/// not account data — the same standing `caydex_preferred_chart_type` always had.
+final class ChartSettings: ObservableObject {
     private static let chartTypeKey = "caydex_preferred_chart_type"
     private static let showExtendedHoursKey = "caydex_show_extended_hours"
+    private static let showEarningsDatesKey = "caydex_show_earnings_dates"
+    /// Sorted `[String]` of `TechnicalIndicatorType.storageID` — never the display label.
+    private static let enabledIndicatorsKey = "caydex_chart_indicators"
+    private static let didChangeNotification = Notification.Name("caydexChartSettingsDidChange")
 
-    @Published var chartType: ChartType {
+    @Published var chartType: ChartType = .line {
         didSet {
+            guard !isApplyingStoredSettings, chartType != oldValue else { return }
             UserDefaults.standard.set(chartType.rawValue, forKey: Self.chartTypeKey)
+            announceChange()
         }
     }
+    /// Per-SCREEN state, deliberately unobserved and unpersisted here. The range sinks
+    /// assign it a COERCED value whenever a range changes (crypto's 1D is 5-minute only),
+    /// so persisting on assignment would store those over the user's real choice. The
+    /// remembered interval lives in `ChartSelectionMemory`, written only from a tap.
     @Published var selectedInterval: ChartInterval = .fiveMin
-    @Published var enabledIndicators: Set<TechnicalIndicatorType> = []
+    @Published var enabledIndicators: Set<TechnicalIndicatorType> = [] {
+        didSet {
+            guard !isApplyingStoredSettings, enabledIndicators != oldValue else { return }
+            UserDefaults.standard.set(enabledIndicators.map(\.storageID).sorted(), forKey: Self.enabledIndicatorsKey)
+            announceChange()
+        }
+    }
     /// Extended Hours is OPT-IN (product decision, 2026-09-17). It defaulted to `true`
     /// while it was inert; now that it works, a default of `true` would make every 1D
     /// stock chart span 16 hours with the regular session squeezed into ~40% of the
     /// width. Persisted like `chartType` so a user's choice survives relaunch.
     @Published var showExtendedHours: Bool = false {
         didSet {
+            guard !isApplyingStoredSettings, showExtendedHours != oldValue else { return }
             UserDefaults.standard.set(showExtendedHours, forKey: Self.showExtendedHoursKey)
+            announceChange()
         }
     }
-    @Published var showEarningsDates: Bool = false
+    @Published var showEarningsDates: Bool = false {
+        didSet {
+            guard !isApplyingStoredSettings, showEarningsDates != oldValue else { return }
+            UserDefaults.standard.set(showEarningsDates, forKey: Self.showEarningsDatesKey)
+            announceChange()
+        }
+    }
+
+    /// True while `applyStoredSettings()` assigns — the property observers above then
+    /// neither write (the value came FROM the store) nor announce (which would echo).
+    private var isApplyingStoredSettings = false
+    private var syncSubscription: AnyCancellable?
 
     init() {
-        // Restore persisted chart type, default to .line
-        if let saved = UserDefaults.standard.string(forKey: Self.chartTypeKey),
-           let type = ChartType(rawValue: saved) {
-            self.chartType = type
-        } else {
-            self.chartType = .line
-        }
+        applyStoredSettings()
+        // Another instance changed a setting: re-read the store. The poster skips its own
+        // announcement (its in-memory value already IS the stored one).
+        syncSubscription = NotificationCenter.default.publisher(for: Self.didChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self, (notification.object as AnyObject?) !== self else { return }
+                self.applyStoredSettings()
+            }
+    }
+
+    private func announceChange() {
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+    }
+
+    /// Load every persisted setting, assigning ONLY a value that differs — `@Published`
+    /// emits on every assignment, and the stock screen refetches on `$showExtendedHours`.
+    private func applyStoredSettings() {
+        isApplyingStoredSettings = true
+        defer { isApplyingStoredSettings = false }
+
+        let storedType = UserDefaults.standard.string(forKey: Self.chartTypeKey)
+            .flatMap(ChartType.init(rawValue:)) ?? .line
+        if chartType != storedType { chartType = storedType }
+
         // `bool(forKey:)` is false for an absent key, which is exactly the default.
-        self.showExtendedHours = UserDefaults.standard.bool(forKey: Self.showExtendedHoursKey)
+        let storedExtended = UserDefaults.standard.bool(forKey: Self.showExtendedHoursKey)
+        if showExtendedHours != storedExtended { showExtendedHours = storedExtended }
+
+        let storedEarnings = UserDefaults.standard.bool(forKey: Self.showEarningsDatesKey)
+        if showEarningsDates != storedEarnings { showEarningsDates = storedEarnings }
+
+        // An id this build does not know is dropped, never guessed; it is rewritten away
+        // the next time the user toggles a pane (never on a read).
+        let storedIDs = UserDefaults.standard.stringArray(forKey: Self.enabledIndicatorsKey) ?? []
+        let storedIndicators = Set(storedIDs.compactMap(TechnicalIndicatorType.init(storageID:)))
+        if enabledIndicators != storedIndicators { enabledIndicators = storedIndicators }
     }
 
     var activeOverlays: [TechnicalIndicatorType] {
@@ -245,6 +374,82 @@ class ChartSettings: ObservableObject {
         let displayOrder: [TechnicalIndicatorType] = [.volume, .rsi14, .macd, .stochastic]
         return displayOrder.filter { enabledIndicators.contains($0) }
     }
+}
+
+// MARK: - Chart Selection Memory (range + interval)
+
+/// The range the user last picked, and the interval they last picked for each range —
+/// ONE choice across all five detail screens (product decision, 2026-10-01).
+///
+/// Restored when a screen OPENS, never synced into a screen already on the stack: a live
+/// range change would fire that hidden screen's range sink, which refetches and re-arms the
+/// 30-second poller its `onDisappear` had stopped. Going back returns the screen the user
+/// left.
+///
+/// The two `rememberUser…` writers are called ONLY from `TickerChartView`'s taps. Restore,
+/// the per-asset fallbacks and every ViewModel sink only READ — so a coerced value (crypto
+/// shows 5-minute bars on 1D) can never overwrite a real preference (a stock's 1D = 1 min).
+/// Device-only, like `ChartSettings`.
+enum ChartSelectionMemory {
+    private static let rangeKey = "caydex_chart_range"
+    /// `[ChartTimeRange.rawValue: ChartInterval.rawValue]`, e.g. `["1D": "1min"]`.
+    private static let intervalByRangeKey = "caydex_chart_interval_by_range"
+
+    private static var storedRange: ChartTimeRange? {
+        UserDefaults.standard.string(forKey: rangeKey).flatMap(ChartTimeRange.init(rawValue:))
+    }
+
+    private static var storedIntervals: [String: String] {
+        UserDefaults.standard.dictionary(forKey: intervalByRangeKey) as? [String: String] ?? [:]
+    }
+
+    /// The range + interval a screen of `context` opens on. Read-only.
+    static func restoredSelection(
+        in context: ChartAssetContext,
+        screenDefault: ChartTimeRange
+    ) -> (range: ChartTimeRange, interval: ChartInterval) {
+        let range = context.resolvedRange(preferred: storedRange, screenDefault: screenDefault)
+        return (range, rememberedInterval(for: range, in: context))
+    }
+
+    /// The interval `range` opens on for `context` — what each range sink assigns. Read-only.
+    static func rememberedInterval(for range: ChartTimeRange, in context: ChartAssetContext) -> ChartInterval {
+        let preferred = storedIntervals[range.rawValue].flatMap(ChartInterval.init(rawValue:))
+        return context.resolvedInterval(preferred: preferred, for: range)
+    }
+
+    /// A range pill was tapped — always a choice, so always stored, re-taps included.
+    ///
+    /// There used to be one exception: a re-tap of a pill shown only because the remembered
+    /// range is not offered here (5Y remembered → crypto shows 2Y) was skipped. But the
+    /// remembered range and the shown range cannot tell that apart from a stacked screen
+    /// that is merely showing an OLDER choice (stock on 1Y, the user picks 2Y on a crypto
+    /// screen above it, comes back and re-taps 1Y) — and that lost a real choice. A tap is
+    /// what the user last picked; the coercions this memory must never store come from code
+    /// paths (restore, fallback, range sinks), and none of those call this.
+    static func rememberUserRange(_ range: ChartTimeRange) {
+        UserDefaults.standard.set(range.rawValue, forKey: rangeKey)
+    }
+
+    /// An interval row was tapped. Always a real choice: the picker lists only
+    /// `allowedIntervals(for:)`, and the only coerced intervals (crypto 1D/1W) have a single
+    /// option, so the picker is hidden there.
+    static func rememberUserInterval(_ interval: ChartInterval, for range: ChartTimeRange) {
+        var map = storedIntervals
+        map[range.rawValue] = interval.rawValue
+        UserDefaults.standard.set(map, forKey: intervalByRangeKey)
+    }
+}
+
+// MARK: - Chart Placeholder
+
+/// What the main chart frame shows while it has no bars, instead of an empty 140 pt box.
+enum ChartPlaceholder: Equatable {
+    /// The bars are still on their way (the stock fast-core carries no chart on a daily
+    /// range, so a remembered 3M opens on 2–5 s of nothing without this).
+    case loading
+    /// The source has no bars for this range, and says so.
+    case note(String)
 }
 
 // MARK: - Chart Viewport State (pinch-to-zoom + pan)

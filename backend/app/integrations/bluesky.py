@@ -1,9 +1,11 @@
 """
 Bluesky (atproto XRPC) — a thin client for the marketing PUBLISHER (design doc §12.10).
 
-ONE caller: `app/services/marketing/outlet_bluesky.py`, the Bluesky adapter that the publisher loop
-in `app/services/marketing/publisher_service.py` drives, in the WEB process. The media worker never
-holds these credentials — it holds no social secret at all (rules/marketing.md §2).
+Two callers, both driven by the publisher loop in `app/services/marketing/publisher_service.py`, in
+the WEB process: `app/services/marketing/outlet_bluesky.py` (publish, reconcile, retract — the
+account session) and `app/services/marketing/metrics_service.py` (the measure step: `get_posts` /
+`get_profile` on the PUBLIC AppView, which take no credential at all). The media worker never holds
+these credentials — it holds no social secret at all (rules/marketing.md §2).
 
 Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
 lazy module-level `httpx.AsyncClient` closed in the app lifespan (`close_bluesky_client`); no
@@ -62,6 +64,19 @@ PDS source (https://github.com/bluesky-social/atproto — `lexicons/com/atproto/
     `{"error": "RecordNotFound"}`. The output's `cid` is optional in the lexicon.
   * com.atproto.repo.deleteRecord {repo, collection, rkey} is idempotent: 200 with `{}` when the
     record is already absent, else `{"commit": {…}}` — `commit` is never required.
+
+The metrics reads — VERIFIED 2026-10-01 against the lexicons (`lexicons/app/bsky/feed/getPosts.json`,
+`feed/defs.json#postView`, `actor/getProfile.json`, `actor/defs.json#profileViewDetailed`) and the
+"API Hosts and Auth" guide (https://docs.bsky.app/docs/advanced-guides/api-directory):
+  * Public endpoints "can be made directly against the Bluesky AppView, preferably via the
+    https://public.api.bsky.app hostname, which includes additional caching" — no auth, so none is
+    ever sent there (counts may lag the app by a few minutes).
+  * app.bsky.feed.getPosts?uris=…&uris=… (a query ARRAY repeats the parameter name; `uris` has
+    maxLength 25, each an at-uri) → {"posts": [postView]}. A postView requires uri, cid, author,
+    record, indexedAt and MAY carry the integer counts likeCount, repostCount, replyCount,
+    quoteCount, bookmarkCount. A post that no longer exists is simply absent from `posts`.
+  * app.bsky.actor.getProfile?actor=<handle or DID> → profileViewDetailed: did and handle are
+    required; followersCount, followsCount and postsCount are optional integers.
 """
 
 from __future__ import annotations
@@ -69,9 +84,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import httpx
 
@@ -88,6 +104,37 @@ _REFRESH_SESSION = "com.atproto.server.refreshSession"
 _PUT_RECORD = "com.atproto.repo.putRecord"
 _GET_RECORD = "com.atproto.repo.getRecord"
 _DELETE_RECORD = "com.atproto.repo.deleteRecord"
+_GET_POSTS = "app.bsky.feed.getPosts"
+_GET_PROFILE = "app.bsky.actor.getProfile"
+
+#: The PUBLIC Bluesky AppView: unauthenticated, cached reads of post views and profiles. Nothing here
+#: ever sends it a credential — it needs none, and the account session belongs to the PDS alone.
+APPVIEW_URL = "https://public.api.bsky.app"
+#: app.bsky.feed.getPosts takes at most this many URIs per call (`uris.maxLength` in its lexicon).
+MAX_GET_POSTS = 25
+#: The post-view keys `get_posts` returns — each only when the answer carries it, its value exactly
+#: as sent (a count may be missing, null, a string or negative: normalising is the caller's job).
+POST_VIEW_KEYS = ("uri", "cid", "likeCount", "repostCount", "replyCount", "quoteCount",
+                  "bookmarkCount", "indexedAt")
+#: The profile keys `get_profile` returns (None when absent; values exactly as sent).
+PROFILE_KEYS = ("did", "handle", "followersCount", "followsCount", "postsCount")
+
+#: DID syntax (https://atproto.com/specs/did): "did:", a lowercase method, ":", then an identifier of
+#: [A-Za-z0-9._:%-] that does not end in ":" or "%"; at most 2 KB. Every length is checked BEFORE a
+#: regex runs, and every match is a fullmatch (a `$` anchor would let a trailing newline through).
+_DID_RE = re.compile(r"did:[a-z]+:[A-Za-z0-9._:%-]*[A-Za-z0-9._-]")
+_MAX_DID_LEN = 2048
+#: Record-key syntax (https://atproto.com/specs/record-key): 1-512 of [A-Za-z0-9._:~-], never "."/"..".
+_RKEY_RE = re.compile(r"[A-Za-z0-9._:~-]{1,512}")
+_MAX_RKEY_LEN = 512
+#: Handle syntax (https://atproto.com/specs/handle): dot-separated labels of ≤ 63 characters, the last
+#: one starting with a letter; at most 253 characters in all.
+_HANDLE_RE = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+_MAX_HANDLE_LEN = 253
+_AT_PREFIX = "at://"
+#: The longest post at-URI those parts allow: "at://" + DID + "/" + collection + "/" + record key.
+_MAX_POST_URI_LEN = len(_AT_PREFIX) + _MAX_DID_LEN + len(POST_COLLECTION) + _MAX_RKEY_LEN + 2
 
 #: Cap on the platform's own `message` (and on a transport error's text) in our messages.
 _DETAIL_CAP = 300
@@ -320,12 +367,13 @@ async def _xrpc(
     *,
     bearer: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
-    params: Optional[Dict[str, str]] = None,
+    params: Optional[Union[Mapping[str, str], Sequence[Tuple[str, str]]]] = None,
     secrets: Iterable[str] = (),
     empty_ok: bool = False,
 ) -> Dict[str, Any]:
     """One XRPC call. Returns the JSON object of a 2xx answer (`{}` for an empty 2xx when
-    `empty_ok`); raises the typed exception family otherwise."""
+    `empty_ok`); raises the typed exception family otherwise. `params` is a mapping, or a sequence
+    of (name, value) pairs for a query ARRAY (XRPC repeats the parameter name: `uris=a&uris=b`)."""
     secrets = tuple(s for s in secrets if s)
     url = f"{_https_base(host, method)}/xrpc/{method}"
     headers = {"Accept": "application/json"}
@@ -556,3 +604,109 @@ async def delete_record(pds: str, access_jwt: str, *, repo: str, collection: str
         secrets=(access_jwt, _app_password()), empty_ok=True,
     )
     return {"deleted": True}
+
+
+# ── public AppView reads (the measure step) — never a credential ─────────
+
+
+def is_post_uri(value: Any) -> bool:
+    """True for `at://did:<method>:<id>/app.bsky.feed.post/<rkey>` — the only URI shape `get_posts`
+    sends. A handle-based URI is NOT one: a handle can change hands, a DID cannot."""
+    if not isinstance(value, str) or len(value) > _MAX_POST_URI_LEN or not value.startswith(_AT_PREFIX):
+        return False
+    parts = value[len(_AT_PREFIX):].split("/")
+    if len(parts) != 3:
+        return False
+    did, collection, rkey = parts
+    return (collection == POST_COLLECTION
+            and len(did) <= _MAX_DID_LEN and _DID_RE.fullmatch(did) is not None
+            and rkey not in (".", "..") and _RKEY_RE.fullmatch(rkey) is not None)
+
+
+def _actor(value: Any) -> Optional[str]:
+    """A DID, or a handle (surrounding whitespace and one leading "@" dropped); None otherwise."""
+    ident = value.strip() if isinstance(value, str) else ""
+    if ident.startswith("@"):
+        ident = ident[1:]
+    if ident.startswith("did:"):
+        return ident if len(ident) <= _MAX_DID_LEN and _DID_RE.fullmatch(ident) else None
+    return ident if len(ident) <= _MAX_HANDLE_LEN and _HANDLE_RE.fullmatch(ident) else None
+
+
+async def get_posts(uris: Sequence[str], *, host: str = APPVIEW_URL) -> List[Dict[str, Any]]:
+    """app.bsky.feed.getPosts on the public AppView — NO Authorization header, ever — for 1-25 post
+    at-URIs (a URI given twice is asked for once). Returns the answer's post views in its order, each
+    restricted to the `POST_VIEW_KEYS` it carries with the values exactly as sent; the caller
+    normalises the counts. A post that no longer exists (deleted, or its account gone) is simply
+    absent.
+
+    An empty list returns [] without a call. `uris` that is not a list/tuple, more than 25 URIs, or
+    any URI that is not `at://did:<method>:<id>/app.bsky.feed.post/<rkey>` raises
+    BlueskyRefusedError (status None) BEFORE anything is sent. An answer without a `posts` list, or
+    with an item that is not an object carrying a string `uri`, raises BlueskyAmbiguousError: a
+    skipped item would read as a deleted post."""
+    method = _GET_POSTS
+    if not isinstance(uris, (list, tuple)):
+        raise BlueskyRefusedError(
+            f"bluesky {method}: uris must be a list of post at:// URIs (got {type(uris).__name__}); "
+            f"nothing was sent", method=method)
+    if not uris:
+        return []
+    if len(uris) > MAX_GET_POSTS:
+        raise BlueskyRefusedError(
+            f"bluesky {method}: {len(uris)} URIs, at most {MAX_GET_POSTS} per call; nothing was sent",
+            method=method)
+    for index, uri in enumerate(uris):
+        if not is_post_uri(uri):
+            shown = repr(uri[:60]) if isinstance(uri, str) else type(uri).__name__
+            raise BlueskyRefusedError(
+                f"bluesky {method}: uris[{index}] is not an at://did:<method>:<id>/{POST_COLLECTION}/<rkey> "
+                f"URI ({_scrub(shown, (_app_password(),), 120)}); nothing was sent", method=method)
+    body = await _xrpc("GET", host, method, params=[("uris", uri) for uri in dict.fromkeys(uris)],
+                       secrets=(_app_password(),))
+    posts = body.get("posts")
+    if not isinstance(posts, list):
+        raise BlueskyAmbiguousError(f"bluesky {method}: HTTP 200 without a posts list",
+                                    method=method, status=200)
+    views: List[Dict[str, Any]] = []
+    for item in posts:
+        uri = item.get("uri") if isinstance(item, dict) else None
+        if not isinstance(uri, str) or not uri:
+            raise BlueskyAmbiguousError(f"bluesky {method}: HTTP 200 with a post view that has no uri",
+                                        method=method, status=200)
+        views.append({key: item[key] for key in POST_VIEW_KEYS if key in item})
+    return views
+
+
+async def get_profile(actor: str, *, host: str = APPVIEW_URL) -> Dict[str, Any]:
+    """app.bsky.actor.getProfile on the public AppView — NO Authorization header, ever — for a DID or
+    a handle. Returns {"did", "handle", "followersCount", "followsCount", "postsCount"}: values
+    exactly as sent, None when absent (the caller normalises the counts).
+
+    An `actor` that is neither a DID nor a handle raises BlueskyRefusedError (status None) before
+    anything is sent. An answer without a usable `did`, or about ANOTHER account (a different DID
+    for a DID, a different handle for a handle), raises BlueskyAmbiguousError — never that
+    account's numbers."""
+    method = _GET_PROFILE
+    ident = _actor(actor)
+    if ident is None:
+        raise BlueskyRefusedError(f"bluesky {method}: actor must be a DID or a handle; nothing was sent",
+                                  method=method)
+    body = await _xrpc("GET", host, method, params={"actor": ident}, secrets=(_app_password(),))
+    did, handle = body.get("did"), body.get("handle")
+    if not (isinstance(did, str) and len(did) <= _MAX_DID_LEN and _DID_RE.fullmatch(did)):
+        raise BlueskyAmbiguousError(f"bluesky {method}: HTTP 200 without a usable did",
+                                    method=method, status=200)
+    if ident.startswith("did:"):
+        same = did == ident
+    else:
+        same = isinstance(handle, str) and handle.lower() == ident.lower()
+    if not same:
+        answered = _scrub(did, (_app_password(),), 80)   # a DID: the regex above admits no newline
+        if isinstance(handle, str):
+            # Upstream text, unvalidated: repr() so a newline in it cannot forge a log line.
+            answered += f" / {_scrub(repr(handle[:80]), (_app_password(),), 100)}"
+        raise BlueskyAmbiguousError(
+            f"bluesky {method}: HTTP 200 about another account (asked {ident}, answered {answered})",
+            method=method, status=200)
+    return {key: body.get(key) for key in PROFILE_KEYS}

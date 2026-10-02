@@ -1,10 +1,11 @@
 """
 Upload-Post — a thin client for the marketing PUBLISHER's Stage 2 outlets (design doc §12.10).
 
-ONE caller: `app/services/marketing/outlet_upload_post.py` (TikTok, YouTube, Instagram, Facebook,
-LinkedIn, Threads through one middleman API), driven by the publisher loop in
-`app/services/marketing/publisher_service.py`, in the WEB process. The media worker never holds this
-key — it holds no social secret at all (rules/marketing.md §2).
+Two callers, both driven by the publisher loop in `app/services/marketing/publisher_service.py`, in
+the WEB process: `app/services/marketing/outlet_upload_post.py` (TikTok, YouTube, Instagram,
+Facebook, LinkedIn, Threads through one middleman API) and `app/services/marketing/metrics_service.py`
+(the measure step's `get_post_analytics`). The media worker never holds this key — it holds no social
+secret at all (rules/marketing.md §2).
 
 Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
 lazy module-level `httpx.AsyncClient` closed in the app lifespan (`close_upload_post_client`); no
@@ -88,6 +89,17 @@ text, `/llms-full.txt` and `/openapi.json`, not memory):
     authorized, 404 no such post. The supported list differs between pages (see the outlet).
   * GET /uploadposts/me → `{success, message, email, plan, …}`; "the response includes
     `api_usage.count`" (rate-limits guide) — parsed tolerantly.
+  * GET /uploadposts/post-analytics/{request_id}[?platform=] (`platform`: "Filter to a single
+    platform … significantly faster") → `{"success": true, "post": {request_id, profile_username,
+    post_title, post_caption, media_type, upload_timestamp}, "platforms": {<platform>: {success,
+    platform_post_id, post_url, post_metrics?: {views, likes, comments, favorites, shares, reach,
+    saves, …}, post_metrics_source, post_metrics_error?: "<why>", profile_snapshot_at_post_date,
+    profile_snapshot_latest: {followers, impressions, …}, profile_snapshot_latest_date}}}`.
+    TikTok's `post_metrics` also carries ratios and lists; "A missing field is not a zero … omitted,
+    never filled with 0". Documented errors: 401, 404 "No post found with the given request ID",
+    500. The live per-post reads are "limited to 100 requests per 5 minutes". No plan rule is
+    documented for this route: a 403 reads as a plan refusal like every 403 here.
+    https://docs.upload-post.com/api/get-analytics (VERIFIED 2026-10-01, the page's markdown)
 """
 
 from __future__ import annotations
@@ -95,7 +107,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -142,6 +154,12 @@ _PLATFORM_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 _FIELD_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{0,62}(?:\[\])?")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _DIGITS_RE = re.compile(r"[0-9]{1,15}")
+#: The calendar-date head of `profile_snapshot_latest_date` (ISO-8601 extended form only).
+_ISO_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+#: Longest snapshot-date text read ("2026-02-20T14:30:00.123456+05:30" is 32 characters).
+_DATE_TEXT_CAP = 40
+#: A snapshot dated more than this after today (UTC) is junk: no time zone is that far ahead.
+_SNAPSHOT_DATE_AHEAD = timedelta(days=1)
 
 #: Form fields this client owns: a caller's `fields` may not set them.
 _OWN_FIELDS = frozenset({"user", "platform", "platform[]", "async_upload", "request_id", "external_id"})
@@ -354,6 +372,33 @@ def _count(raw: Any) -> Optional[int]:
     if isinstance(raw, str) and _DIGITS_RE.fullmatch(raw.strip()):
         return int(raw.strip())
     return None
+
+
+def _snapshot_date(raw: Any, today: Optional[date] = None) -> Optional[str]:
+    """`profile_snapshot_latest_date` as "YYYY-MM-DD", else None.
+
+    Read: a calendar date "YYYY-MM-DD", or an ISO-8601 date-time ("T", "t" or a space between date and
+    time; "Z" or an offset allowed) whose own calendar date is kept AS WRITTEN — never shifted to UTC,
+    which would move an evening snapshot west of Greenwich to the next day. Not read (None): anything
+    not a string, the basic or week forms ("20260220", "2026-W08-5"), an impossible date or time, text
+    longer than 40 characters, and a date more than one day after `today` (UTC) — a snapshot cannot be
+    from the future, and one that claimed to be would look fresh forever."""
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s or len(s) > _DATE_TEXT_CAP or not _ISO_DATE_RE.match(s):
+        return None
+    if len(s) > 10 and s[10] not in "Tt ":
+        return None
+    try:
+        day = date.fromisoformat(s[:10])
+        if len(s) > 10:
+            datetime.fromisoformat(s.replace("Z", "+00:00").replace("z", "+00:00"))  # validates the time
+    except ValueError:
+        return None
+    if day > (today or datetime.now(timezone.utc).date()) + _SNAPSHOT_DATE_AHEAD:
+        return None
+    return day.isoformat()
 
 
 def _bounded(at: datetime, now: datetime) -> Optional[datetime]:
@@ -872,3 +917,68 @@ async def get_usage() -> Optional[Dict[str, Any]]:
         if usage is not None:
             return usage
     return None
+
+
+async def get_post_analytics(request_id: str, *, platform: Optional[str] = None) -> Dict[str, Any]:
+    """GET /uploadposts/post-analytics/{request_id}[?platform=] — the per-post metrics Upload-Post
+    reads LIVE from each platform for one upload (Upload-Post allows 100 such reads per 5 minutes; a
+    429 raises UploadPostRateLimitError). `platform` narrows the read to one platform (faster).
+
+    Returns {"platforms": {<platform>: {"post_metrics": dict | None, "post_metrics_error": str | None,
+    "followers": int | None, "followers_date": str | None}}}: `post_metrics` is the platform's object
+    exactly as sent (a count it did not report is omitted, never 0; TikTok adds ratios and lists —
+    normalising is the caller's job), None when absent; `post_metrics_error` is Upload-Post's reason
+    when it could not read them (scrubbed, capped); `followers` is the latest profile snapshot's
+    follower count when it is a non-negative integer, else None; `followers_date` is that snapshot's
+    own date (`profile_snapshot_latest_date` — a STORED snapshot, possibly days older than the read)
+    as "YYYY-MM-DD", or None when absent or unreadable (`_snapshot_date`). Platform keys are
+    lower-cased; a key that is not a platform name is skipped. The post's caption, title, URL and
+    profile are never returned.
+
+    HTTP 403 → UploadPostPlanError; 402 and 404 ("No post found with the given request ID") →
+    UploadPostRefusedError with that status (an `error_code` the shared mapping knows — reconnect,
+    account_restricted — wins, as on every route). A 2xx that is not an object, says
+    `success: false`, carries a malformed `platforms`, or answers for ANOTHER request id raises
+    UploadPostAmbiguousError. A bad request id or platform raises UploadPostRefusedError (status
+    None) before anything is sent."""
+    method = "get_post_analytics"
+    key, _profile = _credentials(method)
+    rid = _check_request_id(method, request_id)
+    if rid.lower() == "cached":
+        # `/post-analytics/cached` is a sibling route (the cached replay), not an upload.
+        raise _refuse(method, "request_id 'cached' names a route, not an upload")
+    params = None if platform is None else {"platform": _check_platform(method, platform)}
+    status, body = await _call(method, "GET", f"/uploadposts/post-analytics/{rid}", params=params)
+    if not isinstance(body, dict):
+        raise _ambiguous(method, status, "with an unreadable body")
+    if body.get("success") is False:
+        why = _text_or_none(body.get("message"), key) or _text_or_none(body.get("error"), key)
+        raise _ambiguous(method, status, f"with success: false{f' ({why})' if why else ''}")
+    post = body.get("post")
+    answered = post.get("request_id") if isinstance(post, dict) else None
+    if isinstance(answered, str) and answered and answered != rid:
+        # Another upload's numbers must never pass for this one's.
+        raise _ambiguous(method, status, f"for another request_id ({_scrub(answered, key, 80)!r}, asked {rid})")
+    raw = body.get("platforms")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise _ambiguous(method, status, "with a malformed platforms")
+    platforms: Dict[str, Dict[str, Any]] = {}
+    for name, entry in raw.items():
+        p = name.strip().lower() if isinstance(name, str) else ""
+        if not _PLATFORM_RE.fullmatch(p) or p in platforms:
+            logger.warning("upload-post %s: skipped platforms key %s (not a platform name, or a repeat) "
+                           "request_id=%s", method, _scrub(repr(name), key, 60), rid)
+            continue
+        if not isinstance(entry, dict):
+            raise _ambiguous(method, status, f"with a malformed platforms entry for {p}")
+        metrics = entry.get("post_metrics")
+        snapshot = entry.get("profile_snapshot_latest")
+        platforms[p] = {
+            "post_metrics": dict(metrics) if isinstance(metrics, dict) else None,
+            "post_metrics_error": _text_or_none(entry.get("post_metrics_error"), key),
+            "followers": _count(snapshot.get("followers")) if isinstance(snapshot, dict) else None,
+            "followers_date": _snapshot_date(entry.get("profile_snapshot_latest_date")),
+        }
+    return {"platforms": platforms}

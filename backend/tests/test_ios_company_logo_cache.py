@@ -26,12 +26,17 @@ Fix (pinned here):
 * The Reports screen itself: the row (`ReportCard`) and the open report's header
   (`ReportHeaderBar`) draw through `CompanyLogoView`, never an `AsyncImage`.
 * A tree-wide scan: the CDN URL (any `financialmodelingprep.com/` path, the legacy
-  `/image-stock/` logo included) is built in exactly two places — the cache, and the one recorded
-  holdout `TradeGroupDetailView.TradeTickerLogo` (its own AsyncImage, a different visual
-  contract). A second scan records every file where an `AsyncImage` sits beside a logo URL:
-  that holdout plus `WhaleProfileView.WhaleTickerIcon`, which draws the server's FMP `logo_url`
-  (the same CDN) and so still starts on its initials when rebuilt. Adopting the cache in either
-  is a deliberate update to this test.
+  `/image-stock/` logo included) is built in exactly one place — the cache. A second scan finds
+  no `AsyncImage` beside a logo URL anywhere; the one declared exemption is `WhaleAvatarView`,
+  the whale's own avatar (`avatar_url`), not a company logo.
+* The two former holdouts (2026-10-02) read the cache the way the atom does, each keeping its
+  own tile: `TradeGroupDetailView.TradeTickerLogo` (48 pt, keyed on the normalised ticker) and
+  `WhaleProfileView.WhaleTickerIcon` (40 pt). The whale icon draws the server's `logo_url` —
+  FMP's profile `image` — so it is keyed on the symbol in that FMP file name
+  (`CompanyLogoCache.symbol(forLogoURL:)`: the CDN's `/symbol/<SYM>.png` or the legacy
+  `/image-stock/<SYM>.png`), sharing the entry with every `CompanyLogoView` for that ticker. No
+  URL keeps the letter tile with no fetch (as before); a non-FMP URL keeps it too, with a
+  warning — swapping in the CDN file for a symbol could draw a different security's logo.
 
 There is no XCTest target (testing.md §3), so this pins the Swift source: comments are stripped
 before every assertion (the fix's own comments name `AsyncImage`, `NSCache` and `Task`), every
@@ -115,7 +120,12 @@ def _block(src: str, header: str, open_: str = "{", close: str = "}") -> str:
     `[`/`]` bound an array literal, `{`/`}` a declaration.
     """
     assert src.count(header) == 1, f"expected exactly one `{header}`, found {src.count(header)}"
-    start = src.index(open_, src.index(header) + len(header))
+    return _balanced(src, src.index(open_, src.index(header) + len(header)), open_, close)
+
+
+def _balanced(src: str, start: int, open_: str = "{", close: str = "}") -> str:
+    """The balanced `open_`…`close` body that opens at `src[start]`."""
+    assert src[start] == open_, f"expected `{open_}` at offset {start}, found {src[start]!r}"
     depth = 0
     for i in range(start, len(src)):
         if src[i] == open_:
@@ -124,7 +134,7 @@ def _block(src: str, header: str, open_: str = "{", close: str = "}") -> str:
             depth -= 1
             if depth == 0:
                 return src[start: i + 1]
-    raise AssertionError(f"unbalanced `{open_}{close}` after `{header}`")
+    raise AssertionError(f"unbalanced `{open_}{close}` from offset {start}")
 
 
 def _norm(src: str) -> str:
@@ -524,23 +534,61 @@ def test_fetch_remembers_only_the_cdns_own_no_logo():
         f"found {fetch.count('Self.log.')} log calls")
 
 
+def test_a_server_logo_url_maps_to_its_fmp_symbol():
+    """`WhaleTickerIcon` draws the server's `logo_url` (FMP's profile `image`) through the cache,
+    keyed on the symbol in the FMP file name. Only FMP's two logo paths may map: a non-FMP image
+    swapped for the CDN file of a symbol can be a different security's logo."""
+    cache = _cache()
+    header = "static func symbol(forLogoURL logoURL: String) -> String?"
+    assert _has(cache, header), (
+        "CompanyLogoCache.symbol(forLogoURL:) is gone — WhaleTickerIcon has no cache key for the "
+        "server's logo_url")
+    mapper = _decl(cache, header, "CompanyLogoCache.symbol(forLogoURL:)")
+    assert "url.pathComponents" in mapper and "url.host?.lowercased()" in mapper, (
+        "not the real symbol(forLogoURL:) (`url.host?.lowercased()` / `url.pathComponents` missing)")
+    assert _has(mapper, 'guard parts.count == 3, parts[0] == "/" else { return nil }'), (
+        "symbol(forLogoURL:) must accept only a one-directory path (`/symbol/<SYM>.png`, "
+        "`/image-stock/<SYM>.png`): `guard parts.count == 3, parts[0] == \"/\" else { return nil }`")
+    cdn = 'let isCDN = host == "images.financialmodelingprep.com" && parts[1] == "symbol"'
+    legacy = 'let isLegacy = host == "financialmodelingprep.com" && parts[1] == "image-stock"'
+    assert _has(mapper, cdn) and _has(mapper, legacy), (
+        "symbol(forLogoURL:) must accept only FMP's two logo files — the CDN's "
+        "`images.financialmodelingprep.com/symbol/` and the legacy `financialmodelingprep.com/image-stock/`, "
+        "each host paired with its own directory")
+    assert _has(mapper, 'guard isCDN || isLegacy, parts[2].lowercased().hasSuffix(".png") else { return nil }'), (
+        "symbol(forLogoURL:) must refuse anything but an FMP `.png` logo file "
+        "(`guard isCDN || isLegacy, parts[2].lowercased().hasSuffix(\".png\") else { return nil }`)")
+    assert re.search(r"return\s+symbol\(for:\s*String\(parts\[2\]\.dropLast\(4\)\)\)\s*\}\s*$", mapper), (
+        "symbol(forLogoURL:) must normalise through symbol(for:) "
+        "(`return symbol(for: String(parts[2].dropLast(4)))`) — the key must match the one "
+        "CompanyLogoView stores for the same ticker")
+    assert len(_returns(mapper)) == 0 and len(re.findall(r"\breturn\b", mapper)) == 4, (
+        "symbol(forLogoURL:) must have exactly three `return nil` refusals and one normalised return")
+
+
 # ── 3. One place builds the CDN logo URL ─────────────────────────────────────
+
+
+# Declarations that draw an `AsyncImage` beside a logo URL but are NOT a company logo — exempt by
+# declaration, never by file, so a logo AsyncImage added elsewhere in the same file still counts.
+_NOT_A_COMPANY_LOGO = {
+    # The whale's own avatar (`avatar_url`). Its file also holds `WhaleTickerIcon`'s `logoURL`.
+    _WHALE: "struct WhaleAvatarView: View",
+}
 
 
 def test_the_cdn_logo_url_is_built_in_one_place():
     """The cache fixes the flash only for views that use it. Scans the app, `Shared/` and the
     widget for anything else that builds the CDN logo URL — or any other `financialmodelingprep.com/`
     path, such as the legacy `/image-stock/` logo — (or resolves it through the cache to draw it
-    itself). `TradeGroupDetailView.TradeTickerLogo` is the one recorded holdout: its own
-    AsyncImage, a different visual contract. Adopting the cache there means updating both
-    lists below deliberately.
+    itself). Only the cache may; `TradeTickerLogo`, the last holdout, adopted it on 2026-10-02.
 
-    A server-sent logo URL never contains the CDN string in Swift, so a second scan records
-    every file where an `AsyncImage` sits beside ANY logo URL, with its `AsyncImage(` count:
-    that holdout (1) and `WhaleProfileView` (2 — `WhaleTickerIcon`, the backend's FMP
-    `logo_url` from the same CDN, plus the whale's own avatar). A count, not just the file: a
-    logo AsyncImage added beside the avatar, or `WhaleTickerIcon` adopting the cache, would
-    otherwise leave a file-level record unchanged."""
+    A server-sent logo URL never contains the CDN string in Swift, so a second scan finds every
+    file where an `AsyncImage` sits beside ANY logo URL (`logo_url` / `logoURL` / the CDN). There
+    are none: `WhaleTickerIcon` (the backend's FMP `logo_url`) adopted the cache too. The one
+    `AsyncImage` left beside a logo URL is the whale's own avatar, exempted by DECLARATION in
+    `_NOT_A_COMPANY_LOGO` — each exemption must still hold exactly one `AsyncImage(`, so a stale
+    entry, or a logo draw slipped into the avatar, fails here."""
     root = _IOS.parent  # frontend/ios: ios/, Shared/, CaydexWidgets/
     files = sorted(root.rglob("*.swift"))
     assert len(files) > 500 and {_ATOM, _CACHE, _TRADE, _WIDGET, _WHALE, _REPORT_CARD} <= set(files), (
@@ -551,6 +599,13 @@ def test_the_cdn_logo_url_is_built_in_one_place():
     for f in files:
         src = _strip_swift_comments(f.read_text(encoding="utf-8"))
         rel = str(f.relative_to(root))
+        if f in _NOT_A_COMPANY_LOGO:
+            exempt = _decl(src, _NOT_A_COMPANY_LOGO[f], f"the exempt `{_NOT_A_COMPANY_LOGO[f]}` in {f.name}")
+            n_exempt = exempt.count("AsyncImage(")
+            assert n_exempt == 1, (
+                f"the exempt `{_NOT_A_COMPANY_LOGO[f]}` holds {n_exempt} AsyncImage( draws (expected its one "
+                "avatar) — drop a stale exemption, or draw a company logo through the cache")
+            src = src.replace(exempt, "{}")
         # Any FMP path, not just `_CDN`: the legacy `financialmodelingprep.com/image-stock/`
         # logo path drawn through a new AsyncImage is the same blink.
         if _FMP_PATH in src:
@@ -562,23 +617,22 @@ def test_the_cdn_logo_url_is_built_in_one_place():
         if "AsyncImage(" in src and _LOGO_URL.search(src):
             logo_async[rel] = src.count("AsyncImage(")
 
-    cache_rel, trade_rel = str(_CACHE.relative_to(root)), str(_TRADE.relative_to(root))
-    whale_rel = str(_WHALE.relative_to(root))
-    assert builds == sorted([cache_rel, trade_rel]), (
+    cache_rel = str(_CACHE.relative_to(root))
+    assert builds == [cache_rel], (
         f"a second place builds the FMP logo URL: {builds} (any `{_FMP_PATH}` path, the legacy "
         "`/image-stock/` one included) — draw it through CompanyLogoView / CompanyLogoCache, or "
         "every rebuilt view flashes its initials again")
-    assert holdouts == [trade_rel], (
-        f"the CDN-logo AsyncImage holdouts changed: {holdouts} (expected only {trade_rel}) — "
-        "update this record deliberately")
+    assert not holdouts, (
+        f"an AsyncImage draws beside a built FMP logo URL in {holdouts} — the CDN-logo holdouts are "
+        "gone (TradeTickerLogo adopted the cache on 2026-10-02); read CompanyLogoCache.shared instead")
     assert not resolvers, (
         f"only CompanyLogoCache may resolve the CDN logo URL; {resolvers} call "
         "CompanyLogoCache.url(for:) to draw it themselves — read CompanyLogoCache.shared instead")
-    recorded = {trade_rel: 1, whale_rel: 2}
-    assert logo_async == recorded, (
-        f"the AsyncImage draws beside a company-logo URL changed: {logo_async} (recorded: {recorded}) — "
+    assert not logo_async, (
+        f"the AsyncImage draws beside a company-logo URL changed: {logo_async} (recorded: none) — "
         "a new one restarts at `.empty` and flashes its initials on every rebuild; draw it through "
-        "CompanyLogoView, or update this record deliberately")
+        "CompanyLogoView or CompanyLogoCache, or exempt a non-logo image by declaration in "
+        "_NOT_A_COMPANY_LOGO")
 
 
 # ── 3b. The Reports screen's own logo draws ──────────────────────────────────
@@ -608,6 +662,123 @@ def test_the_reports_screen_draws_logos_through_the_atom():
             f"{path.name} must draw its company logo through `CompanyLogoView(ticker: {ticker}, …)` "
             "inside the view itself — the Reports screen is where every logo flipped to its initials "
             "and back")
+
+
+# ── 3c. The whale-holding and trade tiles (the two former AsyncImage holdouts) ─
+
+_CACHED_TILES = [
+    # (file, view header, its `logoSymbol` body, tile side in pt, letter-tile fill opacity)
+    (_WHALE, "struct WhaleTickerIcon: View", "logoURL.flatMap(CompanyLogoCache.symbol(forLogoURL:))", 40, "0.2"),
+    (_TRADE, "struct TradeTickerLogo: View", "CompanyLogoCache.symbol(for: ticker)", 48, "0.15"),
+]
+
+
+def test_whale_and_trade_tiles_draw_the_cached_logo_synchronously():
+    """`WhaleTickerIcon` (whale profile holdings, a LazyVStack) and `TradeTickerLogo` (a trade
+    group's cards) drew the FMP CDN logo through their own `AsyncImage`, so every rebuilt row
+    started on its letter tile. They now read `CompanyLogoCache` exactly as the atom does —
+    synchronous read, symbol-tagged `fetched`, one `.task(id: logoSymbol)` — and keep their own
+    look: an un-chipped logo at the tile's side, the same corner radius, the tinted letter tile."""
+    for path, header, symbol_body, side, opacity in _CACHED_TILES:
+        name = header.split()[1].rstrip(":")
+        view = _decl(_code(path), header, f"the {name} view")
+        assert "letterFallback" in view and "backgroundColor" in view, (
+            f"not the real {name} (letterFallback / backgroundColor missing)")
+
+        assert "AsyncImage" not in view, (
+            f"{name} draws through AsyncImage again — every rebuilt row restarts at `.empty` and "
+            "flashes its letter tile")
+        for token in ("URLSession", "URL(string:", "UIImage(data:", "DownsampledImageLoader"):
+            assert token not in view, (
+                f"{name} reaches `{token}` itself — the logo must come from CompanyLogoCache")
+
+        assert re.search(
+            r"@State\s+private\s+var\s+fetched\s*:\s*\(\s*symbol\s*:\s*String\s*,\s*image\s*:\s*UIImage\s*\)\?",
+            view), (
+            f"{name} must hold the logo it loaded, tagged with its symbol: "
+            "`@State private var fetched: (symbol: String, image: UIImage)?`")
+        key = _decl(view, "private var logoSymbol: String?", f"{name}.logoSymbol")
+        assert _norm(key) == _norm("{ " + symbol_body + " }"), (
+            f"{name} must key the cache on `{symbol_body}`, got `{_norm(key)}`")
+
+        assert re.search(r"\bfunc\s+remoteImage\(\s*for\s+symbol\s*:\s*String\s*\)\s*->\s*UIImage\?\s*\{", view), (
+            f"{name}.remoteImage(for:) must stay synchronous: `func remoteImage(for symbol: String) -> UIImage?`")
+        resolver = _block(view, "func remoteImage(")
+        assert not re.search(r"\b(await|async|Task)\b", resolver), (
+            f"{name}.remoteImage(for:) must stay synchronous — its body awaits or starts a Task")
+        assert re.match(
+            r"\{\s*if\s+let\s+cached\s*=\s*CompanyLogoCache\.shared\.image\(for:\s*symbol\)\s*\{\s*return\s+cached\s*\}",
+            resolver), (
+            f"{name}.remoteImage(for:) must read CompanyLogoCache.shared.image(for: symbol) FIRST — "
+            "that process-wide read puts a logo shown this session on a rebuilt row's first frame")
+        assert re.search(
+            r"guard\s+let\s+fetched\s*,\s*fetched\.symbol\s*==\s*symbol\s+else\s*\{\s*return\s+nil\s*\}\s*"
+            r"return\s+fetched\.image\s*\}\s*$",
+            resolver), (
+            f"{name}: the held logo must be matched to the symbol (`guard let fetched, fetched.symbol == "
+            "symbol else { return nil }`) — a recycled row would draw the previous holding's logo")
+
+        body = _decl(view, "var body: some View", f"{name}.body")
+        draw = "if let symbol = logoSymbol, let logo = remoteImage(for: symbol)"
+        assert re.match(r"\{\s*ZStack\s*\{\s*" + re.escape(draw) + r"\s*\{", body), (
+            f"{name}.body must draw `{draw}` first inside its ZStack — a logo read anywhere else (e.g. "
+            "only from the task's result) is not on the rebuilt row's first frame")
+        chip = _block(body, draw)
+        lines = [ln.strip() for ln in chip.strip()[1:-1].splitlines() if ln.strip()]
+        expected = ["Image(uiImage: logo)", ".resizable()", ".aspectRatio(contentMode: .fit)",
+                    f".frame(width: {side}, height: {side})",
+                    ".clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))"]
+        assert lines == expected, f"{name}'s logo tile drifted from its old AsyncImage `.success` draw: {lines}"
+        after = body[body.index(chip) + len(chip):]
+        assert re.match(r"\s*else\s*\{\s*letterFallback\s*\}\s*\}", after), (
+            f"{name}.body must fall back to `else {{ letterFallback }}` while loading or with no logo")
+        assert view.count("Image(uiImage:") == 1, f"{name} draws a second remote logo outside its tile"
+
+        assert len(re.findall(r"\.task\b", view)) == 1 and ".task(id: logoSymbol) {" in body, (
+            f"{name}: the logo load must be `.task(id: logoSymbol)` — the ONE task, restarted when the "
+            "symbol changes and cancelled with the row")
+        assert not re.search(r"\bTask(?:\.detached)?\s*(?:\([^)]*\))?\s*\{", view), (
+            f"{name} starts its own unstructured Task — the only load is `.task(id: logoSymbol)`")
+        task = _block(body, ".task(id: logoSymbol)")
+        assert re.match(r"\{\s*guard\s+let\s+symbol\s*=\s*logoSymbol\b", task), (
+            f"{name}: the task must start `guard let symbol = logoSymbol` — the symbol body drew")
+        loaded = re.search(
+            r"let\s+image\s*=\s*await\s+CompanyLogoCache\.shared\.load\(symbol\)\s*,\s*"
+            r"!\s*Task\.isCancelled\s+else\s*\{\s*return\s*\}", task)
+        assert loaded, (
+            f"{name}: the task must not write `fetched` after it was cancelled — "
+            "`let image = await CompanyLogoCache.shared.load(symbol), !Task.isCancelled else { return }`")
+        write = re.search(
+            r"if\s+fetched\?\.symbol\s*!=\s*symbol\s*\{\s*fetched\s*=\s*\(\s*symbol:\s*symbol\s*,\s*image:\s*image\s*\)\s*\}",
+            task)
+        assert write, (
+            f"{name}: assign `fetched` only when the symbol changes — a cache hit re-assigning the tuple "
+            "costs an extra body pass on every row appearance")
+        n_writes = len(re.findall(r"\bfetched\s*=(?!=)", view))
+        assert n_writes == 1 and loaded.end() <= write.start(), (
+            f"{name}: `fetched` is written in {n_writes} place(s); the only write must follow the "
+            "load-and-cancellation guard")
+
+        letter = _decl(view, "private var letterFallback: some View", f"{name}.letterFallback")
+        for literal in (f".fill(backgroundColor.opacity({opacity}))", f".frame(width: {side}, height: {side})",
+                        "Text(String(ticker.prefix(1)))", "RoundedRectangle(cornerRadius: AppCornerRadius.medium)"):
+            assert _has(letter, literal), f"{name}'s letter tile drifted: `{literal}` missing"
+
+
+def test_whale_icon_logs_a_logo_url_it_cannot_key():
+    """A non-FMP `logo_url` is contract drift (the server sends FMP's profile `image`). It keeps
+    the letter tile — never swallowed silently (CLAUDE.md)."""
+    view = _decl(_code(_WHALE), "struct WhaleTickerIcon: View", "the WhaleTickerIcon view")
+    task = _block(view, ".task(id: logoSymbol)")
+    refusal = re.match(r"\{\s*guard\s+let\s+symbol\s*=\s*logoSymbol\s+else\s*(\{)", task)
+    assert refusal, "WhaleTickerIcon's task must open `guard let symbol = logoSymbol else { … }`"
+    branch = _balanced(task, refusal.start(1))
+    assert "Self.log.warning(" in branch and re.search(r"\breturn\s*\}\s*$", branch), (
+        "WhaleTickerIcon must log a logo_url that is not an FMP logo file (`Self.log.warning(…)`) "
+        "before keeping the letter tile")
+    assert re.search(r"if\s+let\s+logoURL\s*,\s*!\s*logoURL\.trimmingCharacters\(", branch), (
+        "WhaleTickerIcon must warn only when a logo_url was SENT — a holding with none is the "
+        "normal no-logo case")
 
 
 # ── 4. The mutations above, re-run in memory on every pass ──────────────────
@@ -774,8 +945,13 @@ _MUTATIONS = [
      test_the_cdn_logo_url_is_built_in_one_place, "a second place builds the FMP logo URL"),
     (_WIDGET, "import SwiftUI\n", "import SwiftUI\n\nprivate let moverLogo = " + _CDN_LITERAL + "\n",
      test_the_cdn_logo_url_is_built_in_one_place, "a second place builds the FMP logo URL"),
-    (_TRADE, "AsyncImage(url: url) { phase in", "CachedLogoImage(url: url) { phase in",
-     test_the_cdn_logo_url_is_built_in_one_place, "the CDN-logo AsyncImage holdouts changed"),
+    # The former holdout building the CDN URL again (re-derived 2026-10-02: it adopted the cache).
+    (_TRADE, "struct TradeTickerLogo: View {",
+     "private let legacyLogo = " + _CDN_LITERAL + "\n\nstruct TradeTickerLogo: View {",
+     test_the_cdn_logo_url_is_built_in_one_place, "a second place builds the FMP logo URL"),
+    (_CACHE, "import UIKit\n",
+     'import UIKit\nimport SwiftUI\n\nprivate let logoPreview = AsyncImage(url: CompanyLogoCache.url(for: "AAPL"))\n',
+     test_the_cdn_logo_url_is_built_in_one_place, "an AsyncImage draws beside a built FMP logo URL"),
     (_ATOM, "struct CompanyLogoView: View {",
      'private let legacy = CompanyLogoCache.url(for: "AAPL")\n\nstruct CompanyLogoView: View {',
      test_the_cdn_logo_url_is_built_in_one_place, "only CompanyLogoCache may resolve the CDN logo URL"),
@@ -852,10 +1028,17 @@ _MUTATIONS = [
      "struct WhaleTickerIcon: View {",
      test_the_cdn_logo_url_is_built_in_one_place,
      "the AsyncImage draws beside a company-logo URL changed"),
-    # WhaleTickerIcon adopting the cache: the record must be updated deliberately.
-    (_WHALE, "AsyncImage(url: url) { phase in", "CachedLogoImage(url: url) { phase in",
+    # The avatar exemption (re-derived 2026-10-02: WhaleTickerIcon adopted the cache, so the
+    # avatar is the file's one AsyncImage). Stale when the avatar stops using one…
+    (_WHALE, "AsyncImage(url: imageURL) { phase in", "CachedAvatarImage(url: imageURL) { phase in",
      test_the_cdn_logo_url_is_built_in_one_place,
-     "the AsyncImage draws beside a company-logo URL changed"),
+     "the exempt `struct WhaleAvatarView: View` holds 0 AsyncImage("),
+    # …and a logo AsyncImage slipped INSIDE the exempt declaration still counts.
+    (_WHALE, "    private var initialsAvatar: some View {\n",
+     "    private func holdingLogo(_ url: URL) -> some View { AsyncImage(url: url) }\n\n"
+     "    private var initialsAvatar: some View {\n",
+     test_the_cdn_logo_url_is_built_in_one_place,
+     "the exempt `struct WhaleAvatarView: View` holds 2 AsyncImage("),
     # ── review round 3: gaps the second table left open ──
     # load: an early return after the shared fetch ends skips the store (M1), or skips clearing
     # `inflight` too, so every later load joins a finished task that never stores (M1b).
@@ -882,6 +1065,138 @@ _MUTATIONS = [
      '    var body: some View { AsyncImage(url: URL(string: "https://financialmodelingprep.com/image-stock/\\(ticker).png")) }\n'
      "}\n",
      test_the_cdn_logo_url_is_built_in_one_place, "a second place builds the FMP logo URL"),
+    # ── 2026-10-02: the whale-holding and trade tiles adopt the cache ──
+    # A server logo URL drawn through a new AsyncImage beside the adopted trade tile.
+    (_TRADE, "struct TradeTickerLogo: View {",
+     "private struct ServerLogo: View {\n    let logoUrl: String?\n"
+     '    var body: some View { AsyncImage(url: URL(string: logoUrl ?? "")) }\n}\n\n'
+     "struct TradeTickerLogo: View {",
+     test_the_cdn_logo_url_is_built_in_one_place, "the AsyncImage draws beside a company-logo URL changed"),
+    # Each tile: back to AsyncImage, no synchronous read, unmatched or task-only logo.
+    (_WHALE, "            } else {\n                letterFallback\n            }\n",
+     "            } else {\n                AsyncImage(url: nil) { $0.resizable() } placeholder: { letterFallback }\n            }\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "WhaleTickerIcon draws through AsyncImage again"),
+    (_TRADE, "            } else {\n                letterFallback\n            }\n",
+     "            } else {\n                AsyncImage(url: nil) { $0.resizable() } placeholder: { letterFallback }\n            }\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo draws through AsyncImage again"),
+    (_WHALE, "        if let cached = CompanyLogoCache.shared.image(for: symbol) { return cached }\n", "",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon.remoteImage(for:) must read CompanyLogoCache.shared.image(for: symbol) FIRST"),
+    (_TRADE, "        if let cached = CompanyLogoCache.shared.image(for: symbol) { return cached }\n", "",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo.remoteImage(for:) must read CompanyLogoCache.shared.image(for: symbol) FIRST"),
+    (_WHALE, "private func remoteImage(for symbol: String) -> UIImage? {",
+     "private func remoteImage(for symbol: String) async -> UIImage? {",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon.remoteImage(for:) must stay synchronous: "),
+    (_TRADE, "if let cached = CompanyLogoCache.shared.image(for: symbol) { return cached }",
+     "if let cached = await CompanyLogoCache.shared.load(symbol) { return cached }",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo.remoteImage(for:) must stay synchronous — its body"),
+    (_WHALE, "guard let fetched, fetched.symbol == symbol else { return nil }", "guard let fetched else { return nil }",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon: the held logo must be matched to the symbol"),
+    (_TRADE, "guard let fetched, fetched.symbol == symbol else { return nil }", "guard let fetched else { return nil }",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo: the held logo must be matched to the symbol"),
+    (_WHALE, "if let symbol = logoSymbol, let logo = remoteImage(for: symbol) {",
+     "if let symbol = logoSymbol, let logo = fetched?.image {",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon.body must draw `if let symbol = logoSymbol, let logo = remoteImage(for: symbol)` first"),
+    (_TRADE, "if let symbol = logoSymbol, let logo = remoteImage(for: symbol) {",
+     "if let symbol = logoSymbol, let logo = fetched?.image {",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo.body must draw `if let symbol = logoSymbol, let logo = remoteImage(for: symbol)` first"),
+    (_WHALE, "@State private var fetched: (symbol: String, image: UIImage)? = nil",
+     "@State private var fetched: UIImage? = nil",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon must hold the logo it loaded, tagged with its symbol"),
+    (_TRADE, "    private var logoSymbol: String? {\n",
+     '    private var logoURL: URL? { URL(string: "https://example.com/x.png") }\n\n    private var logoSymbol: String? {\n',
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo reaches `URL(string:` itself"),
+    # Each tile's cache key: the whale tile's server URL, the trade tile's normalised ticker.
+    (_WHALE, "logoURL.flatMap(CompanyLogoCache.symbol(forLogoURL:))", "CompanyLogoCache.symbol(for: ticker)",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon must key the cache on `logoURL.flatMap(CompanyLogoCache.symbol(forLogoURL:))`"),
+    (_TRADE, "        CompanyLogoCache.symbol(for: ticker)\n", "        ticker\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo must key the cache on `CompanyLogoCache.symbol(for: ticker)`"),
+    # Each tile's task.
+    (_WHALE, ".task(id: logoSymbol) {", ".task {",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon: the logo load must be `.task(id: logoSymbol)`"),
+    (_TRADE, ".task(id: logoSymbol) {", ".task(id: ticker) {",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo: the logo load must be `.task(id: logoSymbol)`"),
+    (_TRADE, ".task(id: logoSymbol) {\n",
+     '.task(id: logoSymbol) {\n            Task { _ = await CompanyLogoCache.shared.load("X") }\n',
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo starts its own unstructured Task"),
+    (_TRADE, ".task(id: logoSymbol) {\n", ".task(id: logoSymbol) {\n            fetched = nil\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo: the task must start `guard let symbol = logoSymbol`"),
+    (_WHALE, "                  !Task.isCancelled else { return }", "                  true else { return }",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon: the task must not write `fetched` after it was cancelled"),
+    (_TRADE, "                  !Task.isCancelled else { return }", "                  true else { return }",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo: the task must not write `fetched` after it was cancelled"),
+    (_WHALE, "            if fetched?.symbol != symbol {\n                fetched = (symbol: symbol, image: image)\n            }\n",
+     "            fetched = (symbol: symbol, image: image)\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon: assign `fetched` only when the symbol changes"),
+    (_TRADE, "            if fetched?.symbol != symbol {\n                fetched = (symbol: symbol, image: image)\n            }\n",
+     "            fetched = (symbol: symbol, image: image)\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "TradeTickerLogo: assign `fetched` only when the symbol changes"),
+    (_WHALE, "    private var letterFallback: some View {\n",
+     "    private func reset() { fetched = nil }\n\n    private var letterFallback: some View {\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously,
+     "WhaleTickerIcon: `fetched` is written in 2 place(s)"),
+    # Each tile's look: side, corner radius, no atom chip; the tinted letter tile.
+    (_WHALE, "                    .frame(width: 40, height: 40)\n", "                    .frame(width: 44, height: 44)\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "WhaleTickerIcon's logo tile drifted"),
+    (_TRADE, "                    .frame(width: 48, height: 48)\n", "                    .frame(width: 52, height: 52)\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo's logo tile drifted"),
+    (_WHALE, ".clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))", ".clipShape(Circle())",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "WhaleTickerIcon's logo tile drifted"),
+    (_TRADE, "                    .aspectRatio(contentMode: .fit)\n",
+     "                    .aspectRatio(contentMode: .fit)\n                    .padding(8)\n",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo's logo tile drifted"),
+    (_WHALE, ".fill(backgroundColor.opacity(0.2))", ".fill(backgroundColor.opacity(0.35))",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "WhaleTickerIcon's letter tile drifted"),
+    (_TRADE, ".fill(backgroundColor.opacity(0.15))", ".fill(backgroundColor.opacity(0.3))",
+     test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo's letter tile drifted"),
+    # The whale tile's warning for a logo_url it cannot key.
+    (_WHALE, "                    Self.log.warning(", "                    _ = (",
+     test_whale_icon_logs_a_logo_url_it_cannot_key,
+     "WhaleTickerIcon must log a logo_url that is not an FMP logo file"),
+    (_WHALE, "if let logoURL, !logoURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {", "if true {",
+     test_whale_icon_logs_a_logo_url_it_cannot_key, "WhaleTickerIcon must warn only when a logo_url was SENT"),
+    (_WHALE, "            guard let symbol = logoSymbol else {\n", "            guard let symbol = logoSymbol, true else {\n",
+     test_whale_icon_logs_a_logo_url_it_cannot_key,
+     "WhaleTickerIcon's task must open `guard let symbol = logoSymbol else { … }`"),
+    # The cache's server-URL → symbol mapping.
+    (_CACHE, "static func symbol(forLogoURL logoURL: String) -> String? {",
+     "static func symbol(fromLogo logoURL: String) -> String? {",
+     test_a_server_logo_url_maps_to_its_fmp_symbol, "CompanyLogoCache.symbol(forLogoURL:) is gone"),
+    (_CACHE, 'host == "images.financialmodelingprep.com" && parts[1] == "symbol"', 'parts[1] == "symbol"',
+     test_a_server_logo_url_maps_to_its_fmp_symbol, "symbol(forLogoURL:) must accept only FMP's two logo files"),
+    (_CACHE, 'host == "financialmodelingprep.com" && parts[1] == "image-stock"',
+     'host.hasSuffix("financialmodelingprep.com")',
+     test_a_server_logo_url_maps_to_its_fmp_symbol, "symbol(forLogoURL:) must accept only FMP's two logo files"),
+    (_CACHE, '        guard parts.count == 3, parts[0] == "/" else { return nil }\n',
+     "        guard parts.count >= 3 else { return nil }\n",
+     test_a_server_logo_url_maps_to_its_fmp_symbol, "symbol(forLogoURL:) must accept only a one-directory path"),
+    (_CACHE, 'parts[2].lowercased().hasSuffix(".png")', "true",
+     test_a_server_logo_url_maps_to_its_fmp_symbol,
+     "symbol(forLogoURL:) must refuse anything but an FMP `.png` logo file"),
+    (_CACHE, "return symbol(for: String(parts[2].dropLast(4)))", "return String(parts[2].dropLast(4))",
+     test_a_server_logo_url_maps_to_its_fmp_symbol, "symbol(forLogoURL:) must normalise through symbol(for:)"),
+    (_CACHE, "        let parts = url.pathComponents\n",
+     '        if host.hasSuffix(".cloudfront.net") { return symbol(for: url.lastPathComponent) }\n'
+     "        let parts = url.pathComponents\n",
+     test_a_server_logo_url_maps_to_its_fmp_symbol,
+     "symbol(forLogoURL:) must have exactly three `return nil` refusals"),
 ]
 
 

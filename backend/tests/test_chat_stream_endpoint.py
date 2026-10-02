@@ -2212,3 +2212,124 @@ def test_the_non_stream_door_asks_the_rows_too(harness):
     r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
     assert r.status_code == 200, r.text
     assert _FakeChatService.instances[-1].fallback_kwargs["attach_base_widget"] is True
+
+
+# ── the chip's grounding verdict (`context_grounded`) on the wire ────────────
+#
+# iOS's "Grounded on Research Report · AAPL" chip keyed on the context TYPE alone. The server's
+# verdict (prep / `generate_response` → `context_grounded`) now reaches it three ways: an early
+# `grounding` frame, the `done` message, and the persisted row a history reload replays.
+
+def _report_session(db):
+    db.session_row.update({"context_type": "TICKER_REPORT", "reference_id": "AAPL|warren_buffett",
+                           "stock_id": "AAPL"})
+
+
+def _assistant_rich(db) -> Dict[str, Any]:
+    return [m for m in db.inserted_messages if m.get("role") == "assistant"][0]["rich_content"]
+
+
+def _stream_dies(monkeypatch):
+    async def _boom(*a, **k):
+        yield ("answer", "partial…")
+        raise RuntimeError("stream died")
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", lambda self, prompt, **kw: _boom())
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_the_verdict_rides_an_early_frame_the_done_message_and_the_row(harness, verdict):
+    client, db, quota, _ = harness
+    _report_session(db)
+    _FakeChatService.prep_overrides = {"context_grounded": verdict}
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    names = [f[0] for f in frames]
+    grounding = [d for e, d in frames if e == "grounding"]
+    assert grounding == [{"context_grounded": verdict}]
+    # Early: right after prep, before a single answer token — the chip is corrected while
+    # the answer streams, not after it.
+    assert names.index("meta") < names.index("grounding") < names.index("token")
+    assert frames[-1][1]["message"]["context_grounded"] is verdict
+    assert _assistant_rich(db)["context_grounded"] is verdict
+    assert quota.delivered == 1 and quota.refunds == []
+
+
+@pytest.mark.parametrize("prep_value", ["absent", None, 1, "false"])
+def test_no_verdict_means_no_frame_no_field_and_an_unchanged_row(harness, prep_value):
+    """A context type with no verdict (and a malformed prep value) must not invent one —
+    iOS keeps the chip it has, and the persisted blob is the one it always was."""
+    client, db, quota, _ = harness
+    if prep_value != "absent":
+        _FakeChatService.prep_overrides = {"context_grounded": prep_value}
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    assert "grounding" not in [f[0] for f in frames]
+    assert frames[-1][1]["message"]["context_grounded"] is None
+    assert "context_grounded" not in _assistant_rich(db)
+
+
+def test_the_fallback_answer_carries_its_own_verdict(harness, monkeypatch):
+    """prep found the report, the stream died, and `generate_response` re-resolved WITHOUT
+    it (the cache rolled over in between). The persisted answer was grounded on the
+    fallback's resolve, so `done` and the row say False even though the early frame said True."""
+    client, db, quota, _ = harness
+    _report_session(db)
+    _FakeChatService.prep_overrides = {"context_grounded": True}
+    _FakeChatService.fallback_result = {"content": "General answer. " * 3, "tokens_used": 40,
+                                        "context_grounded": False}
+    _stream_dies(monkeypatch)
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    assert [d for e, d in frames if e == "grounding"] == [{"context_grounded": True}]
+    assert frames[-1][1]["message"]["context_grounded"] is False
+    assert _assistant_rich(db)["context_grounded"] is False
+
+
+def test_a_fallback_without_a_verdict_keeps_preps(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _report_session(db)
+    _FakeChatService.prep_overrides = {"context_grounded": False}
+    _FakeChatService.fallback_result = {"content": "General answer. " * 3, "tokens_used": 40}
+    _stream_dies(monkeypatch)
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _parse_sse(r.text)[-1][1]["message"]["context_grounded"] is False
+
+
+def test_a_prep_failure_takes_the_fallbacks_verdict(harness, monkeypatch):
+    """prep raised before it could assign anything: the verdict is unbound there, so the
+    turn must still persist with the fallback's (and never crash on an unbound name)."""
+    client, db, quota, _ = harness
+    _report_session(db)
+
+    async def _prep_boom(self, **kw):
+        raise RuntimeError("prep exploded")
+    monkeypatch.setattr(_FakeChatService, "prepare_stream_generation", _prep_boom)
+    _FakeChatService.fallback_result = {"content": "General answer. " * 3, "tokens_used": 40,
+                                        "context_grounded": False}
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    assert "grounding" not in [f[0] for f in frames]
+    assert frames[-1][0] == "done"
+    assert frames[-1][1]["message"]["context_grounded"] is False
+    assert _assistant_rich(db)["context_grounded"] is False
+
+
+@pytest.mark.parametrize("verdict", [True, False, None])
+def test_the_non_stream_door_returns_and_persists_the_same_verdict(harness, verdict):
+    client, db, quota, _ = harness
+    _report_session(db)
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30,
+                                        "context_grounded": verdict}
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assert r.json()["context_grounded"] is verdict
+    rich = _assistant_rich(db)
+    if verdict is None:
+        assert "context_grounded" not in rich
+    else:
+        assert rich["context_grounded"] is verdict

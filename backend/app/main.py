@@ -1846,6 +1846,9 @@ async def _run_industry_dossier_job():
         retries.entered(next_run)
         settled = True  # AND of every phase below; one unsettled phase re-enters the chain
 
+        # A run that cannot start (empty universe, no FRED/Census key) RAISES
+        # `IndustryDossierRecomputeSkipped`: a RETURNED skip summary would settle the claim
+        # and lose the quarter while the read path's in-memory self-heal hid it.
         async def _dossier():
             from app.services.industry_dossier_service import get_industry_dossier_service
             return await get_industry_dossier_service().recompute_all()

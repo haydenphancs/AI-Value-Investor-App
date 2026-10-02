@@ -66,6 +66,23 @@ from app.utils.inflight import fail_shared_future
 logger = logging.getLogger(__name__)
 
 
+class IndustryDossierRecomputeSkipped(RuntimeError):
+    """`recompute_all` could not run and wrote NOTHING (empty universe, or no upstream
+    credentials). RAISED, never returned as a summary.
+
+    It used to return `{"status": "skipped"}`, and the quarterly chain's
+    `_run_claimed_phase` (main.py) marks any phase that RETURNS as settled: the day-keyed
+    claim recorded success, the quarter was consumed, and the dossier stayed stale or zero
+    until the next quarter — while the read path's in-memory self-heal of zero rows hid it
+    from every report. Raising releases the claim unsettled, so the chain retries the phase
+    inside its catch-up window and the ledger row carries this message as its `error`.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        super().__init__(f"industry_dossier recompute SKIPPED ({reason}) — {detail}")
+
+
 # ── Sector-level FRED fallback ─────────────────────────────────────────
 #
 # When an industry isn't in INDUSTRY_TO_CENSUS or INDUSTRY_TO_FRED_SERIES,
@@ -250,9 +267,10 @@ def _load_universe() -> List[Dict[str, Any]]:
 
     Returns a list of {industry, sector, tickers: [...]} entries. Empty
     list when the universe file hasn't been generated yet (first deploy
-    before `scripts/discover_industries.py` has run). In that case
-    `recompute_all` logs a warning and bails — there's nothing to do
-    until discovery runs.
+    before `scripts/discover_industries.py` has run) or could not be
+    pulled from Supabase Storage (it is not in git). In that case
+    `recompute_all` raises `IndustryDossierRecomputeSkipped` — there's
+    nothing to compute, and the quarterly chain must retry, not settle.
     """
     # `load_universe` resolves the path, pulls from Supabase Storage on a local miss, and
     # logs at ERROR with the reason when it cannot. It returns [] rather than raising: this
@@ -629,10 +647,24 @@ class IndustryDossierService:
         `force` is accepted for parity with the sector_benchmarks job's
         signature but currently has no freshness gate (this job only
         fires weekly from main.py — there's nothing to skip).
+
+        Raises `IndustryDossierRecomputeSkipped` (after an ERROR log) when the
+        run cannot start — an empty universe or no upstream credentials — so the
+        quarterly chain's claim stays UNSETTLED and the phase is retried. Nothing
+        is written on that path; the previous snapshot stays in place.
         """
         universe = _load_universe()
         if not universe:
-            return {"status": "skipped", "reason": "empty universe"}
+            # `load_universe` already logged the Storage/parse reason at ERROR; this line
+            # names the consequence for the dossier.
+            exc = IndustryDossierRecomputeSkipped(
+                "empty universe",
+                "industry_universe.json could not be loaded (it is not in git: the Supabase "
+                "Storage download failed, or discover_industries.py never published it). "
+                "Nothing was written; the previous snapshot is left untouched.",
+            )
+            logger.error("%s", exc)
+            raise exc
 
         # ⚠️ REFUSE TO RUN WITH NO UPSTREAM CREDENTIALS.
         #
@@ -654,13 +686,14 @@ class IndustryDossierService:
         from app.integrations.fred import get_fred_client      # noqa: PLC0415
 
         if not get_fred_client().is_configured and not get_census_client().is_configured:
-            logger.error(
-                "industry_dossier recompute SKIPPED — neither FRED_API_KEY nor "
-                "CENSUS_API_KEY is configured, so every industry would resolve to a "
-                "zero-TAM placeholder and OVERWRITE the existing rows. Set the keys and "
-                "re-run; the previous snapshot is left untouched."
+            exc = IndustryDossierRecomputeSkipped(
+                "no upstream credentials",
+                "neither FRED_API_KEY nor CENSUS_API_KEY is configured, so every industry "
+                "would resolve to a zero-TAM placeholder and OVERWRITE the existing rows. "
+                "Set the keys and re-run; the previous snapshot is left untouched.",
             )
-            return {"status": "skipped", "reason": "no upstream credentials"}
+            logger.error("%s", exc)
+            raise exc
 
         started = time.time()
 

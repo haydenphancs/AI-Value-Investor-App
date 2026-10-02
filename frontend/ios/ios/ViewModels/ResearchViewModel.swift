@@ -52,9 +52,14 @@ class ResearchViewModel: ObservableObject {
 
     // Reports Tab Properties
     @Published var reports: [AnalysisReport] = []
+    /// Set once, kept: restored in `init` and written on every pick (TestFlight 1.0 (9),
+    /// "set up once and permanently keep them" — the sort used to fall back to Newest First on
+    /// every launch). The restore in `init` does not fire this observer, which is fine: `reports`
+    /// is empty then, and every rebuild of it in `loadReports()` ends in `sortReports()`.
     @Published var reportSortOption: ReportSortOption = .dateNewest {
         didSet {
             sortReports()
+            UserDefaults.standard.set(reportSortOption.storageID, forKey: Self.reportSortKey)
         }
     }
     @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
@@ -64,8 +69,23 @@ class ResearchViewModel: ObservableObject {
     /// search + generateAnalysis). This one only filters the Reports list.
     @Published var reportSearchText: String = ""
     @Published var isReportSearchActive: Bool = false
-    /// Persona keys selected as filter tags (empty = show all personas).
-    @Published var selectedPersonaKeys: Set<String> = []
+    /// The persona filter tags the user chose, exactly as persisted — including a tag whose chip
+    /// is not on screen right now. Changed only by `togglePersonaTag(_:)`, which also saves it;
+    /// READ from the store in `init` and again in `handleIdentityChange`. No `didSet` save on
+    /// purpose: that re-read must not write the store back.
+    @Published private var savedPersonaKeys: Set<String> = []
+
+    /// Persona keys selected as filter tags (empty = show all personas): the SAVED tags that
+    /// have a chip in the row, i.e. a persona `personas` still serves.
+    ///
+    /// Derived, never written back. Now that the tags survive a relaunch, a saved tag for an
+    /// analyst the backend has since stopped serving would otherwise keep filtering the list
+    /// with no chip anywhere to switch it off — this screen has no "clear filters" control, so
+    /// the user could never get their other reports back. Intersecting here hides it instead,
+    /// and keeps it in the store so it comes back if that analyst is served again.
+    var selectedPersonaKeys: Set<String> {
+        savedPersonaKeys.intersection(personas.map(\.key))
+    }
     @Published var isSelectingReports: Bool = false
     /// Keyed by `backendId` — the server row id, which `AnalysisReport.id` now also derives
     /// from — so a selection survives the 5s poll reload. Mock rows have no `backendId` and
@@ -143,6 +163,32 @@ class ResearchViewModel: ObservableObject {
     private let pollingManager: TaskPollingManager
     private var searchTask: Task<Void, Never>?
     private var reportsPollTask: Task<Void, Never>?
+    /// One status monitor per `generateAnalysis()` tap, keyed by a per-tap token (the report id
+    /// is not known until the POST answers) and stamped with the ACCOUNT that tapped. Each
+    /// removes itself when it ends.
+    ///
+    /// `handleIdentityChange` cancels every monitor another account owns, and every arm checks
+    /// its owner is still `AppActions.shared.currentAccountId`. Left running, a monitor outlived
+    /// the account that started it: after sign-out every `/status` tick is refused pre-flight as
+    /// `.signInRequired`, which the poller treats as transient, so it ran to its 300 s deadline
+    /// and the poll-timeout arm re-inserted the ENDED account's report id into
+    /// `inFlightReportIds` (the next account's Generate cap) and restarted the list poll.
+    ///
+    /// Keyed on the account, not on `identityEpoch`, so a reconnect of the SAME account (the
+    /// `.restoring → .authenticated` heal also reaches `handleIdentityChange`) keeps its monitors:
+    /// live progress, the completion reload and the refund adoption all keep working.
+    private var generationMonitors: [UUID: GenerationMonitor] = [:]
+
+    private struct GenerationMonitor {
+        /// `AppActions.shared.currentAccountId` at the tap.
+        let ownerId: String
+        let task: Task<Void, Never>
+    }
+
+    /// The account whose runs `inFlightReportIds` / `liveProgress` hold (every insert comes from
+    /// a monitor, so from a known owner). `handleIdentityChange` keeps the slots only while the
+    /// account is unchanged — a reconnect is not a reason to under-count the Generate cap.
+    private var inFlightOwnerId: String?
     private var cancellables = Set<AnyCancellable>()
 
     /// Backend report IDs the client has locally given up on because they've
@@ -206,6 +252,36 @@ class ResearchViewModel: ObservableObject {
     /// pre-read cannot spawn a second DELETE + a second 20-credit generation (W2 E-1).
     private var retryInFlightIds: Set<String> = []
 
+    // MARK: - Reports list preferences (device-only)
+
+    /// The Reports tab's sort and persona filter, kept on THIS device (product decision,
+    /// 2026-10-01).
+    ///
+    /// The SORT is a display preference, the same standing as `caydex_preferred_chart_type` and
+    /// `TrackingView.sortOption`: never cleared at session end or on identity change.
+    /// Stored as `ReportSortOption.storageID`, never the menu label.
+    private static let reportSortKey = "caydex_reports_sort"
+    /// A sorted `[String]` of persona keys. A FILTER, so unlike the sort it does not outlive the
+    /// session: `AppState.discardDataForEndedSession()` removes it (auth.md §7, like the Activity
+    /// chip's `ActivityFilter.storageKey`) — the next account would otherwise open Reports
+    /// already narrowed by the previous user's tags. Not private for that reason.
+    static let personaFilterKey = "caydex_reports_persona_filter"
+
+    /// The saved sort, or nil when nothing usable is stored. A garbage id is NOT repaired
+    /// here — the default is shown and the store keeps whatever it holds until the next pick.
+    private static func storedReportSort() -> ReportSortOption? {
+        UserDefaults.standard.string(forKey: reportSortKey).flatMap(ReportSortOption.init(storageID:))
+    }
+
+    /// The saved persona filter, minus any key `AnalysisPersona.allCases` does not know. Such a
+    /// key can never match a row: `AnalysisReport.from` maps an unknown backend persona to
+    /// Buffett, so every report's `persona.key` is one of `allCases`.
+    private static func storedPersonaFilter() -> Set<String> {
+        let known = Set(AnalysisPersona.allCases.map(\.key))
+        let stored = UserDefaults.standard.stringArray(forKey: personaFilterKey) ?? []
+        return Set(stored).intersection(known)
+    }
+
     // MARK: - Initialization
     init(prefilledTicker: String? = nil, apiClient: APIClient = .shared) {
         self.apiClient = apiClient
@@ -214,6 +290,13 @@ class ResearchViewModel: ObservableObject {
         if let ticker = prefilledTicker {
             _searchText = Published(initialValue: ticker)
         }
+        // Restore the Reports list's saved sort + persona filter. Through the wrappers, so the
+        // sort's `didSet` does not run: nothing is written back, and a coerced fallback can never
+        // overwrite the stored choice. The sort reaches the rows through `loadReports()`.
+        if let savedSort = Self.storedReportSort() {
+            _reportSortOption = Published(initialValue: savedSort)
+        }
+        _savedPersonaKeys = Published(initialValue: Self.storedPersonaFilter())
         // Start with static data immediately, then load real data
         quickTickers = QuickTicker.defaults
         personas = AnalysisPersona.allCases
@@ -372,6 +455,18 @@ class ResearchViewModel: ObservableObject {
         // CLEAR FIRST, UNCONDITIONALLY — before the `isActiveTab` gate below. The reload is
         // deferred for a hidden tab, but the previous account's data must not survive in this
         // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
+        //
+        // Stop every generation monitor ANOTHER account owns, BEFORE the clears below: each holds
+        // this ViewModel and would otherwise write its report id back into the slots and the
+        // poll this method is about to reset (see `generationMonitors`). Cancelling the consumer
+        // ends its stream, whose `onTermination` cancels the `/status` poller too. A cancelled
+        // monitor raises no alert, and the server-side run is untouched: the reload below lists
+        // it, and the 5 s list poll carries it. Signed out (`account == nil`) matches no owner,
+        // so every monitor stops; a reconnect of the same account keeps its own.
+        let account = AppActions.shared.currentAccountId
+        let kept = generationMonitors.filter { $0.value.ownerId == account }
+        for (key, monitor) in generationMonitors where kept[key] == nil { monitor.task.cancel() }
+        generationMonitors = kept
         reports = []
         selectedReportIds = []
         isSelectingReports = false
@@ -389,14 +484,26 @@ class ResearchViewModel: ObservableObject {
         stopReportsPolling()
         locallyTimedOutReportIds = []
         dismissedReportIds = []
-        inFlightReportIds = []
-        liveProgress = [:]
+        // The slots and live progress belong to `inFlightOwnerId`: kept for a reconnect of that
+        // same account (its runs are still running, and still counted by the server), dropped
+        // for anyone else.
+        if account == nil || account != inFlightOwnerId {
+            inFlightReportIds = []
+            liveProgress = [:]
+            inFlightOwnerId = nil
+        }
         // The analyst is per-ACCOUNT, so it must not survive a sign-out or an account switch
         // either. `SettingsSyncManager.clearLocalForEndedSession()` removes the stored key on
         // sign-out and the next account's `hydrate()` writes its own, so re-deriving here is
         // what keeps this ViewModel from rendering the previous user's choice. `force` because
         // their manual pick is exactly what must not carry over.
         applyDefaultPersona(force: true)
+        // The persona filter tags, by the same re-derive: `discardDataForEndedSession()` removes
+        // the stored tags when a session ends, so re-reading the store drops the ended account's
+        // tags from this long-lived ViewModel too. A RE-READ, never `= []`: a transient-restore
+        // heal of the SAME account also lands here, and clearing would erase that user's filter.
+        // The sort is a device preference and is deliberately left alone.
+        savedPersonaKeys = Self.storedPersonaFilter()
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -943,8 +1050,28 @@ class ResearchViewModel: ObservableObject {
         // `startedId` is captured per-Task so terminal cleanup targets the
         // right report id. TaskPollingManager is an actor handing back an
         // independent stream per call, so concurrent monitors are safe.
-        Task { [weak self] in
+        //
+        // Registered in `generationMonitors` and stamped with the ACCOUNT that tapped, so it never
+        // outlives that account: `handleIdentityChange` cancels it once another account (or
+        // nobody) holds the session, and every arm below re-checks `monitorMayAct(owner)` before
+        // it touches this ViewModel. `isSignedIn` above implies a profile (`applyProfile` runs
+        // before `.authenticated` is published), so a nil here is a broken invariant, not a
+        // signed-out user: refuse loudly rather than run an unowned monitor.
+        guard let owner = AppActions.shared.currentAccountId else {
+            print("❌ ResearchVM: generateAnalysis — signed in with no profile id; refusing the tap")
+            error = "Your account is still loading. Try again in a moment."
+            return
+        }
+        let monitorKey = UUID()
+        let task = Task { [weak self] in
             guard let self = self else { return }
+            defer { self.generationMonitors[monitorKey] = nil }
+            // The account may have changed between the tap and this Task's first run. The POST
+            // below would then charge 20 credits to the NEXT account for the previous one's tap.
+            guard self.monitorMayAct(owner) else {
+                print("🛑 ResearchVM: generation for \(ticker) dropped — the account that tapped is no longer signed in")
+                return
+            }
             var startedId: String?
             let tapTime = Date()
 
@@ -959,6 +1086,11 @@ class ResearchViewModel: ObservableObject {
                 var lastListRefreshPercent = -1
 
                 for try await progress in stream {
+                    // Every arm below writes this ViewModel's per-account bookkeeping.
+                    guard self.monitorMayAct(owner) else {
+                        print("🛑 ResearchVM: monitor for \(ticker) outlived its identity — stopped")
+                        return
+                    }
                     switch progress {
                     case .started(let taskId):
                         Analytics.shared.track(.reportRequested, [
@@ -968,6 +1100,7 @@ class ResearchViewModel: ObservableObject {
                         print("🔬 ResearchVM: Research started — report ID: \(taskId)")
                         startedId = taskId
                         self.inFlightReportIds.insert(taskId)
+                        self.inFlightOwnerId = owner
                         self.liveProgress[taskId] = (progress: 0, step: "Research initiated...")
                         // Surface the new pending row in the Reports list
                         // immediately so the processing card appears the
@@ -1060,8 +1193,11 @@ class ResearchViewModel: ObservableObject {
                             // pending/processing (`loadReports`).
                             if let id = startedId {
                                 self.inFlightReportIds.insert(id)
+                                self.inFlightOwnerId = owner
                             }
                             await self.loadReports()
+                            // The identity can end during that await; its poll was reset then.
+                            guard self.monitorMayAct(owner) else { return }
                             self.startReportsPolling()
                         } else if case .timeout = appError {
                             // The POST to /research/generate timed out BEFORE a report id
@@ -1079,6 +1215,8 @@ class ResearchViewModel: ObservableObject {
                             print("⏳ ResearchVM: POST timed out before a report id — reconciling with the list")
                             await self.loadReports()
                             await self.loadCredits()
+                            // Never adopt from, or alert over, the NEXT account's list.
+                            guard self.monitorMayAct(owner) else { return }
                             // A minute of slack on the row's stamp: the phone's clock and
                             // the server's need not agree to the second.
                             let adopted = self.reports.first {
@@ -1117,6 +1255,7 @@ class ResearchViewModel: ObservableObject {
                 }
             } catch {
                 print("❌ ResearchVM: Research stream error — \(type(of: error)): \(error)")
+                guard self.monitorMayAct(owner) else { return }
                 if let id = startedId {
                     self.inFlightReportIds.remove(id)
                     self.liveProgress[id] = nil
@@ -1129,6 +1268,16 @@ class ResearchViewModel: ObservableObject {
                 self.error = AppError.from(error).message
             }
         }
+        // Registered before the Task's first run: both are main-actor, and this method is
+        // synchronous, so the body cannot start until this assignment has happened.
+        generationMonitors[monitorKey] = GenerationMonitor(ownerId: owner, task: task)
+    }
+
+    /// Whether work started by `owner` (a generation monitor, a retry) may still write this
+    /// ViewModel: that account still holds the session (a LIVE read, so the window between a
+    /// sign-out and `handleIdentityChange` running is covered too) and the task was not cancelled.
+    private func monitorMayAct(_ owner: String) -> Bool {
+        owner == AppActions.shared.currentAccountId && !Task.isCancelled
     }
 
     func addMoreCredits() {
@@ -1167,9 +1316,11 @@ class ResearchViewModel: ObservableObject {
     var filteredReports: [AnalysisReport] {
         var result = reports
 
-        // Persona filter tags (OR across selected personas; empty = all).
-        if !selectedPersonaKeys.isEmpty {
-            result = result.filter { selectedPersonaKeys.contains($0.persona.key) }
+        // Persona filter tags (OR across selected personas; empty = all). Read once: it is
+        // derived (an intersection), so reading it inside the closure would rebuild it per row.
+        let personaKeys = selectedPersonaKeys
+        if !personaKeys.isEmpty {
+            result = result.filter { personaKeys.contains($0.persona.key) }
         }
 
         // Search query.
@@ -1199,13 +1350,15 @@ class ResearchViewModel: ObservableObject {
 
     var selectedReportCount: Int { selectedReportIds.count }
 
-    /// Toggle a persona filter tag on/off.
+    /// Toggle a persona filter tag on/off. The only place the saved filter CHANGES (the identity
+    /// handler only re-reads it), and the only place it is saved — so it changes only on a tap.
     func togglePersonaTag(_ persona: AnalysisPersona) {
         if selectedPersonaKeys.contains(persona.key) {
-            selectedPersonaKeys.remove(persona.key)
+            savedPersonaKeys.remove(persona.key)
         } else {
-            selectedPersonaKeys.insert(persona.key)
+            savedPersonaKeys.insert(persona.key)
         }
+        UserDefaults.standard.set(savedPersonaKeys.sorted(), forKey: Self.personaFilterKey)
     }
 
     // MARK: - Reports Tab: Selection + Delete
@@ -1362,6 +1515,15 @@ class ResearchViewModel: ObservableObject {
             AppActions.shared.requestSignIn(for: "retry this analysis")
             return
         }
+        // Stamped like a generation monitor (see `generationMonitors`): every await in the Task
+        // below is a window in which the account can change, and its last step charges 20
+        // credits to whoever holds the session by then — a retry tapped by one account must
+        // never delete, adopt or charge for another.
+        guard let owner = AppActions.shared.currentAccountId else {
+            print("❌ ResearchVM: retryReport — signed in with no profile id; refusing the tap")
+            error = "Your account is still loading. Try again in a moment."
+            return
+        }
         // Re-entry guard, taken BEFORE the Task: the F09-9 reorder moved the card's dismissal
         // behind an await, so the enabled button stayed on screen during the credits read
         // and a double tap ran the whole path twice (two DELETEs, two charges).
@@ -1380,6 +1542,13 @@ class ResearchViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             defer { if let backendId { self.retryInFlightIds.remove(backendId) } }
+            @MainActor func stillOwner(_ step: String) -> Bool {
+                guard self.monitorMayAct(owner) else {
+                    print("🛑 ResearchVM: retry for \(ticker) stopped after \(step) — the account that tapped is no longer signed in")
+                    return false
+                }
+                return true
+            }
             if backendId != nil, report.isRefunded {
                 // An already-refunded row's DELETE is a plain soft-delete — no refund is
                 // coming — so the balance guard can run up front: a fresh read below the
@@ -1388,6 +1557,7 @@ class ResearchViewModel: ObservableObject {
                 // refuse a retry the refund is about to fund; that case keeps the
                 // post-DELETE reload below and lets the backend's 402 be the authority.
                 await self.loadCredits()
+                guard stillOwner("the credits read") else { return }
                 if let balance = self.creditBalance, balance.credits < self.analysisCost.credits {
                     print("⚠️ ResearchVM: retry refused before the delete — insufficient credits (\(balance.credits) < \(self.analysisCost.credits))")
                     self.error = "Insufficient credits"
@@ -1407,14 +1577,21 @@ class ResearchViewModel: ObservableObject {
                 // plain, unrefundable soft-delete followed by a second 20-credit charge.
                 if self.locallyTimedOutReportIds.contains(backendId),
                    await self.serverSaysCompleted(backendId) {
+                    guard stillOwner("the status check") else { return }
                     print("🔄 ResearchVM: \(backendId) completed on the server — showing it instead of retrying")
                     self.adoptCompletedInsteadOfRetrying(backendId)
                     return
                 }
+                // The status check above may have suspended; the DELETE goes out with whatever
+                // token is armed NOW.
+                guard stillOwner("the status check") else { return }
                 do {
                     try await self.apiClient.request(
                         endpoint: .deleteReport(reportId: backendId, forRetry: true)
                     )
+                    // The refund went to the account that tapped; nothing below is theirs to do
+                    // under another account.
+                    guard stillOwner("the delete") else { return }
                     print("🔄 ResearchVM: released prior report \(backendId) before retrying")
                     // Deleted rows never come back through the list, so the flag would
                     // otherwise outlive the card and keep the 5 s poll running for good.
@@ -1422,6 +1599,7 @@ class ResearchViewModel: ObservableObject {
                     // gates the completed pre-check.
                     self.locallyTimedOutReportIds.remove(backendId)
                 } catch {
+                    guard stillOwner("the delete") else { return }
                     let appError = AppError.from(error)
                     // The server's belt for the race the status check above can lose: the
                     // report completed between the check and the delete. Nothing was
@@ -1449,6 +1627,8 @@ class ResearchViewModel: ObservableObject {
                 self.creditBalance = nil
                 await self.loadCredits()
             }
+            // The last step charges 20 credits to whoever holds the session NOW.
+            guard stillOwner("the delete") else { return }
             // Set the target as late as possible so an await above cannot let the
             // user's own selection be overwritten by a stale one.
             //

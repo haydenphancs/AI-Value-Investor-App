@@ -265,7 +265,9 @@ struct GlobalMiniPlayer: View {
         let speeds = PlaybackSpeed.allCases
         if let currentIndex = speeds.firstIndex(of: audioManager.playbackSpeed) {
             let nextIndex = (currentIndex + 1) % speeds.count
-            audioManager.playbackSpeed = speeds[nextIndex]
+            // The user path (persist + sync) — a bare assignment would be reverted by the
+            // next launch's hydrate. See `AudioManager.setPlaybackSpeedFromUser`.
+            audioManager.setPlaybackSpeedFromUser(speeds[nextIndex])
         }
     }
 }

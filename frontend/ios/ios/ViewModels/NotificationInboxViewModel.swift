@@ -98,23 +98,21 @@ final class NotificationInboxViewModel: ObservableObject {
     private func performLoad() async {
         isFullLoadInFlight = true
         defer { isFullLoadInFlight = false }
-        // THREE outcomes, not two. `GET /users/me/notifications` is `.signInRequired`, so a
-        // signed-out caller is refused PRE-FLIGHT by APIClient and the raw failure would render
-        // as a generic error blob. Worse, "not armed right now" is not "signed out": at launch
-        // this can run while session restore is still in flight. Same guard shape as
-        // `ResearchViewModel.loadReports`.
+        // THREE outcomes, not two — "not armed right now" is not "signed out" — and all three
+        // are decided from the OUTCOME of the request, never from a pre-flight `auth.status`
+        // read (the same shape as `HomeDashboardViewModel.performLoad` and
+        // `ResearchViewModel.loadReports`).
+        //
+        // This used to open with `guard AppActions.shared.isSignedIn`. At launch
+        // `primeStoredCredential` arms the token while the status still reads `.restoring`, so
+        // that guard refused an ARMED request that would have succeeded and drew
+        // "Reconnecting…" — on the screen a cold-launch push tap lands on. `GET
+        // /users/me/notifications` is `.signInRequired`, so an UNARMED call is refused by
+        // `APIClient.buildRequest` before any I/O and arrives here typed as
+        // `AppError.signInRequired`; asking it costs nothing.
         //
         // This mattered less when Profile → Notification History was a second door to the same
         // list; it is the only door now.
-        guard AppActions.shared.isSignedIn else {
-            items = []
-            nextCursor = nil
-            state = AppActions.shared.isRestoringSession ? .reconnecting : .signedOut
-            // Deliberately does NOT publish an unread count. A signed-out read proves nothing
-            // about what is unread, and zeroing the badge here would be the second-writer bug
-            // documented in `AlertsTabContent` wearing different clothes.
-            return
-        }
         do {
             let page = try await repository.fetchNotifications(limit: 30, before: nil)
             guard !Task.isCancelled else { return }
@@ -130,6 +128,22 @@ final class NotificationInboxViewModel: ObservableObject {
             // nested. `Task.isCancelled` is the reliable check (the same trap
             // SettingsSyncManager documents).
             let appError = AppError.from(error)
+            if case .signInRequired = appError {
+                // No token armed, so APIClient refused before any I/O. Drop rows nothing can
+                // refresh, and say WHY: "Reconnecting…" for a stored credential that is healing
+                // (auth.md §5), the sign-in prompt otherwise. `AlertsTabContent` heals it on
+                // `.authenticated` and on an identity change.
+                items = []
+                nextCursor = nil
+                let reconnecting = AppActions.shared.isRestoringSession
+                state = reconnecting ? .reconnecting : .signedOut
+                // The designed path while no credential is armed — info, not a failure.
+                log.info("load notifications refused — no armed credential (reconnecting: \(reconnecting, privacy: .public))")
+                // Deliberately does NOT publish an unread count. A refused read proves nothing
+                // about what is unread, and zeroing the badge here would be the second-writer
+                // bug documented in `AlertsTabContent` wearing different clothes.
+                return
+            }
             log.error("load notifications failed: \(String(describing: type(of: error))): \(appError.message, privacy: .public)")
             // An EMPTY inbox and a BROKEN inbox must not look alike: the backend answers
             // 503 NOTIFICATIONS_UNAVAILABLE rather than an empty 200 precisely so this
@@ -190,6 +204,13 @@ final class NotificationInboxViewModel: ObservableObject {
     /// nothing about what is unread, and zeroing the badge here would be the second-writer bug in
     /// different clothes.
     func refreshUnreadCount() async {
+        // The one status read left in this file, kept on purpose: this is not the pre-flight
+        // GATE `performLoad` dropped. It latches nothing — no state, no rows, no badge write —
+        // so skipping it cannot strand a screen, and the launch skip heals by construction:
+        // `AppState.establishAuthenticatedSession` publishes `.authenticated` BEFORE it calls
+        // `onAuthenticated`, whose fan-out calls this. A cold-launch `didBecomeActive` landing
+        // while the status still reads `.restoring` is skipped, and the fan-out's call a moment
+        // later refreshes the badge for the identity that actually settled.
         guard AppActions.shared.isSignedIn else { return }
         // A full page load is authoritative and already publishes; racing it buys nothing.
         guard !isFullLoadInFlight else { return }

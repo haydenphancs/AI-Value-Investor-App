@@ -103,7 +103,16 @@ struct ScannerEntry: Identifiable, Hashable {
 
 /// One card in the "Daily Scanners" swipeable carousel.
 struct DailyScanner: Identifiable {
-    let id = UUID()
+    /// Stable identity = the kind. Each kind appears at most once per payload
+    /// (`HomeRepository.mapScanners` builds one card per kind, and so does the mock).
+    ///
+    /// ⚠️ Never a fresh `UUID()` again. `mapScanners` re-runs on every fetch and the Home
+    /// ViewModel re-assigns `data` on its 60 s auto-refresh, so a minted id gave every card a
+    /// NEW identity once a minute: `DailyScannersSection` keys the carousel and `.id(...)` on
+    /// it, SwiftUI rebuilt each `ScannerCard`, and its local state reset — the Gainers/Losers
+    /// toggle snapped back to Gainers (TestFlight 1.0 (9)), and the expanded-card set on the
+    /// Home screen held ids that no longer existed, so open cards closed by themselves.
+    var id: ScannerKind { kind }
     let kind: ScannerKind
     let title: String
     let subtitle: String
@@ -189,7 +198,16 @@ struct SignalLeader: Identifiable, Hashable {
 
 /// One row in the glowing "App-Exclusive Signals" card.
 struct ExclusiveSignal: Identifiable {
-    let id = UUID()
+    /// Stable identity = the kind, plus the lock state. A fresh `UUID()` re-minted every row
+    /// on the 60 s Home refresh, so an expanded row closed itself (the Home screen's
+    /// `expandedSignalIDs` held ids that no longer existed) — see `DailyScanner.id`.
+    ///
+    /// Why not the kind alone: `HomeRepository.mapSignals` emits one row per kind, but the
+    /// `SignalDisclosureRow` preview lists `signals + lockedSignals` side by side, and two
+    /// equal ids in one `ForEach` is undefined behaviour. The lock is also a genuinely
+    /// different row (it never expands; its tap opens the paywall), so an upgrade mid-session
+    /// rebuilding the row is correct, not a cost.
+    var id: String { isLocked ? "\(kind)#locked" : kind }
     /// "congress" | "whale" | "earnings" | "ceo" — routes the leader tap (the
     /// `drillDownKinds` open the per-ticker detail; earnings opens TickerDetailView).
     let kind: String

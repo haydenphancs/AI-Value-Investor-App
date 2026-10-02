@@ -276,26 +276,42 @@ final class NotificationSettingsViewModel: ObservableObject {
     func setToggle(_ key: String, _ value: Bool) {
         toggles[key] = value
         UserDefaults.standard.set(value, forKey: key)
-        scheduleSync()
+        pushNow()
     }
 
+    /// Each quiet-hours setter writes ONLY the key it changed.
+    ///
+    /// They used to share one `writeQuietTimes()` that wrote BOTH ends from this ViewModel's
+    /// copy. That copy is loaded once and can be stale (a hydrate landed after `load()`, or the
+    /// other device moved the other end), so changing "From" also rewrote "Until" with the old
+    /// value and pushed it — silently reverting the account's other end on every device.
     func setQuietHoursEnabled(_ value: Bool) {
         quietHoursEnabled = value
-        UserDefaults.standard.set(value, forKey: "notify_quiet_hours_enabled")
-        writeQuietTimes()
-        scheduleSync()
+        let defaults = UserDefaults.standard
+        defaults.set(value, forKey: "notify_quiet_hours_enabled")
+        // Record the window the screen is SHOWING, but only an end that has never been stored —
+        // the first time quiet hours are switched on, so the backend evaluates the hours the
+        // user sees. A stored end is left alone: rewriting it from this copy is the revert above.
+        if defaults.object(forKey: "notify_quiet_start") == nil {
+            writeQuietTime(quietStart, forKey: "notify_quiet_start")
+        }
+        if defaults.object(forKey: "notify_quiet_end") == nil {
+            writeQuietTime(quietEnd, forKey: "notify_quiet_end")
+        }
+        SettingsSyncManager.shared.refreshDeviceTimezone()
+        pushNow()
     }
 
     func setQuietStart(_ date: Date) {
         quietStart = date
-        writeQuietTimes()
-        scheduleSync()
+        writeQuietTime(date, forKey: "notify_quiet_start")
+        pushNow()
     }
 
     func setQuietEnd(_ date: Date) {
         quietEnd = date
-        writeQuietTimes()
-        scheduleSync()
+        writeQuietTime(date, forKey: "notify_quiet_end")
+        pushNow()
     }
 
     /// True when the user has set both ends of the window to the same time.
@@ -307,10 +323,9 @@ final class NotificationSettingsViewModel: ObservableObject {
         quietHoursEnabled && Self.hhmm(from: quietStart) == Self.hhmm(from: quietEnd)
     }
 
-    private func writeQuietTimes() {
-        let defaults = UserDefaults.standard
-        defaults.set(Self.hhmm(from: quietStart), forKey: "notify_quiet_start")
-        defaults.set(Self.hhmm(from: quietEnd), forKey: "notify_quiet_end")
+    /// Write ONE end of the window. Never both — see the note on the setters above.
+    private func writeQuietTime(_ date: Date, forKey key: String) {
+        UserDefaults.standard.set(Self.hhmm(from: date), forKey: key)
         // The backend needs the DEVICE's zone to know when 22:00 is.
         //
         // This is no longer the ONLY writer, and it could not be: it runs only when the user
@@ -325,25 +340,25 @@ final class NotificationSettingsViewModel: ObservableObject {
 
     // MARK: Sync
 
-    private var syncTask: Task<Void, Never>?
-
-    /// Debounced push to the backend.
+    /// Push NOW. Every setter above ends here, synchronously, AFTER its UserDefaults write.
     ///
     /// The old screen synced ONLY in `.onDisappear`, so a user who flipped a toggle and
-    /// force-quit lost the change with no trace. Debouncing at ~500ms means dragging a
-    /// picker or flipping several rows costs one PUT — and `SettingsSyncManager.push()`
-    /// is already cancel-and-replace, so even a burst that beats the debounce collapses.
-    private func scheduleSync() {
-        syncTask?.cancel()
-        syncTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            guard !Task.isCancelled else { return }
-            self?.pushNow()
-        }
-    }
-
-    /// Flush immediately. Called from `.onDisappear` as a belt-and-braces backstop for
-    /// the debounce, and it is cheap: `push()` no-ops when nothing is dirty.
+    /// force-quit lost the change with no trace. Its replacement was a ~500ms debounce, and
+    /// the debounce was the next hole: a change is recorded as UNSAVED only inside `push()` —
+    /// `pendingKeys`, durable, written before any request goes out (or by `deferLocalChange()`
+    /// while the session is un-hydrated or `.restoring`). For those 500ms the new value sat in
+    /// UserDefaults marked as nothing, so a launch hydrate landing inside them overwrote it with
+    /// the server's older value (the row visibly flipped back), and a kill inside them let the
+    /// next launch's hydrate do the same. Calling `push()` in the same step as the write closes
+    /// both. Never put a delay back between the write and this call.
+    ///
+    /// Cost: while un-hydrated, none (a deferral sends nothing). Once hydrated, one PUT per
+    /// change — the same per-change policy as `AppSettingsView`'s rows — and `push()` is
+    /// cancel-and-replace, so only the newest blob of a burst is ever committed as confirmed.
+    ///
+    /// Also the screen's `.onDisappear` backstop. One PUT there, not free: `push()` sends the
+    /// whole blob whenever the session is authenticated and hydrated, dirty or not (it is a
+    /// no-op only for a guest).
     func pushNow() {
         SettingsSyncManager.shared.push()
     }

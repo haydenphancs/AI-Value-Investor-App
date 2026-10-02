@@ -20,14 +20,60 @@ struct ProfitPowerSectionCard: View {
 
     // MARK: - State
 
-    @State private var selectedPeriod: ProfitPowerPeriodType = .annual
+    /// The Annual/Quarterly choice, saved on this device so the card opens the way the user
+    /// last left it (it was `@State`, reset by every tab switch, ticker and relaunch — see
+    /// `GrowthSectionCard`). Its OWN key: tapping Quarterly on Growth must not flip this card.
+    /// A stable token, never the toggle wording; "" or an unknown token reads as Annual.
+    /// A display preference of this phone, not account data: deliberately NOT cleared by
+    /// `AppState.discardDataForEndedSession()`.
+    @AppStorage("caydex_profit_power_period") private var storedPeriodToken: String = ""
+    /// Set by a toggle tap on THIS card. From then on the tapped period is shown as is, even
+    /// one with no margins (its empty state says why, as it always did) — otherwise that tap
+    /// would do nothing. Until then the card shows the SAVED period only where it has data.
+    @State private var periodWasTapped: Bool = false
     @State private var showInfoSheet: Bool = false
     @State private var selectedDataPoint: ProfitPowerDataPoint? = nil
 
     // MARK: - Computed Properties
 
+    /// The saved period (or Annual). Assigned only from a toggle tap, which saves it.
+    private var selectedPeriod: ProfitPowerPeriodType {
+        get { ProfitPowerPeriodType(preferenceToken: storedPeriodToken) ?? .annual }
+        nonmutating set { storedPeriodToken = newValue.preferenceToken }
+    }
+
+    /// The period on screen. A saved Quarterly opened on a ticker with no quarterly margins
+    /// (annual filings only, or a failed quarterly leg) would land on "Margin data isn't
+    /// available for this company." — false, with annual margins one tap away. So, until
+    /// the user taps, fall back to the period that HAS margins. Derived, never written back:
+    /// the next ticker with quarterly margins opens on Quarterly again.
+    private var displayedPeriod: ProfitPowerPeriodType {
+        if periodWasTapped || hasCompanyMargins(selectedPeriod) { return selectedPeriod }
+        return ProfitPowerPeriodType.allCases.first(where: { hasCompanyMargins($0) }) ?? selectedPeriod
+    }
+
+    /// The toggle shows the period on screen; a tap saves it and is shown as is.
+    private var periodSelection: Binding<ProfitPowerPeriodType> {
+        Binding(
+            get: { displayedPeriod },
+            set: { period in
+                periodWasTapped = true
+                selectedPeriod = period
+            }
+        )
+    }
+
+    /// Whether `period` has a COMPANY margin to plot — the same test `ProfitPowerChartView`
+    /// applies before its empty state (a peer line alone is not a Profit Power chart).
+    private func hasCompanyMargins(_ period: ProfitPowerPeriodType) -> Bool {
+        profitPowerData.dataPoints(for: period).contains { p in
+            [p.grossMargin, p.operatingMargin, p.fcfMargin, p.netMargin]
+                .contains { $0?.isFinite == true }
+        }
+    }
+
     private var currentDataPoints: [ProfitPowerDataPoint] {
-        profitPowerData.dataPoints(for: selectedPeriod)
+        profitPowerData.dataPoints(for: displayedPeriod)
     }
 
     // MARK: - Body
@@ -39,10 +85,15 @@ struct ProfitPowerSectionCard: View {
 
             // Period toggle (Annual / Quarterly). Switching clears the tooltip: the
             // selection outlived the toggle and drew the other tab's period (e.g. the
-            // 2024 annual margins) over the new series until its 2.5s timer fired.
-            ProfitPowerPeriodToggle(selectedPeriod: $selectedPeriod)
+            // 2024 annual margins) over the new series until its 2.5s timer fired. The
+            // period ON SCREEN can also change with no new choice (a reload brings back the
+            // saved period's margins), so that clears it too.
+            ProfitPowerPeriodToggle(selectedPeriod: periodSelection)
                 .padding(.leading, AppSpacing.xs)
                 .onChange(of: selectedPeriod) {
+                    selectedDataPoint = nil
+                }
+                .onChange(of: displayedPeriod) {
                     selectedDataPoint = nil
                 }
 
@@ -104,6 +155,24 @@ struct ProfitPowerSectionCard: View {
     }
 }
 
+// MARK: - Saved-choice token
+
+/// What the saved period is stored as: the case name, never `rawValue` (the toggle's
+/// wording). An unknown token decodes to nil, so the card shows Annual and leaves the store alone.
+private extension ProfitPowerPeriodType {
+    var preferenceToken: String {
+        switch self {
+        case .annual: return "annual"
+        case .quarterly: return "quarterly"
+        }
+    }
+
+    init?(preferenceToken: String) {
+        guard let match = Self.allCases.first(where: { $0.preferenceToken == preferenceToken }) else { return nil }
+        self = match
+    }
+}
+
 // MARK: - Preview
 
 #Preview {
@@ -122,8 +191,9 @@ struct ProfitPowerSectionCard: View {
 }
 
 #Preview("Quarterly leg failed upstream") {
-    // A degraded build: annual margins are real, the quarterly statement leg failed. The
-    // Quarterly tab reads "temporarily unavailable" instead of a fact about the company.
+    // A degraded build: annual margins are real, the quarterly statement leg failed. A saved
+    // Quarterly opens on Annual; TAPPING Quarterly reads "temporarily unavailable" instead
+    // of a fact about the company.
     let data = ProfitPowerSectionData(
         annualData: ProfitPowerSectionData.sampleData.annualData,
         quarterlyData: [],

@@ -19,6 +19,10 @@ struct RecentActivitiesSection: View {
 
     // MARK: - Constants
 
+    private static let institutionsSortKey = "caydex_holders_sort"
+    private static let insiderFilterKey = "caydex_holders_insider_filter"
+    private static let congressSortKey = "caydex_holders_congress_sort"
+
     private let initialDisplayCount = 10
     private let expandedListHeight: CGFloat = 500
 
@@ -29,9 +33,17 @@ struct RecentActivitiesSection: View {
     /// DEEP LINK can preselect the list it is about — "Insider activity in ACHR" opens
     /// on Insiders, "Josh Gottheimer bought GOOGL" on Congress.
     @State private var selectedTab: RecentActivitiesTab
-    @State private var selectedSort: RecentActivitiesSortOption = .byValue
-    @State private var selectedFilter: InsiderActivityFilterOption = .all
-    @State private var congressSort: RecentActivitiesSortOption = .byValue
+    /// Institutions sort, Insiders filter and Congress sort — remembered on this device
+    /// (TestFlight 1.0 (9): set once, keep). They were `@State` with hard defaults, so every
+    /// ticker opened on By Value / All again. Stored as ids, never the pill LABELS ("By Value
+    /// ($)" is a rawValue): see the `storageID` mappings at the bottom of this file. The
+    /// sub-tab above stays `@State` on purpose — a notification deep link seeds it.
+    ///
+    /// Device-only, and deliberately NOT cleared by `AppState.discardDataForEndedSession()`:
+    /// display choices of this phone, not account data.
+    @AppStorage(RecentActivitiesSection.institutionsSortKey) private var institutionsSortID: String = RecentActivitiesSortOption.byValue.storageID
+    @AppStorage(RecentActivitiesSection.insiderFilterKey) private var insiderFilterID: String = InsiderActivityFilterOption.all.storageID
+    @AppStorage(RecentActivitiesSection.congressSortKey) private var congressSortID: String = RecentActivitiesSortOption.byValue.storageID
     @State private var showInfoSheet: Bool = false
     @State private var showPaywall: Bool = false
     @State private var institutionsExpanded: Bool = false
@@ -50,6 +62,12 @@ struct RecentActivitiesSection: View {
 
 
     // MARK: - Computed Properties
+
+    /// The stored choices, resolved for display only — an unknown id reads as the default
+    /// and is never written back. Only a selector tap (the bindings below) writes.
+    private var selectedSort: RecentActivitiesSortOption { .stored(institutionsSortID) }
+    private var selectedFilter: InsiderActivityFilterOption { .stored(insiderFilterID) }
+    private var congressSort: RecentActivitiesSortOption { .stored(congressSortID) }
 
     private var sortedInstitutionalActivities: [InstitutionalActivity] {
         data.sortedInstitutionalActivities(by: selectedSort)
@@ -162,7 +180,7 @@ struct RecentActivitiesSection: View {
             RecentActivitiesNetFlowBadge(summary: data.institutionalFlowSummary)
 
             // Sort selector
-            RecentActivitiesSortSelector(selectedSort: $selectedSort)
+            RecentActivitiesSortSelector(selectedSort: RecentActivitiesSortOption.binding($institutionsSortID))
 
             // Activity list
             if institutionsExpanded {
@@ -218,7 +236,7 @@ struct RecentActivitiesSection: View {
             InsiderNetFlowBadge(summary: data.insiderActivities.summary)
 
             // Filter selector (All / Informative)
-            InsiderFilterSelector(selectedFilter: $selectedFilter)
+            InsiderFilterSelector(selectedFilter: InsiderActivityFilterOption.binding($insiderFilterID))
 
             // Activity list
             if insidersExpanded {
@@ -274,7 +292,7 @@ struct RecentActivitiesSection: View {
             CongressNetFlowBadge(summary: data.congressActivities.summary)
 
             // Sort selector (By Value / By Date)
-            RecentActivitiesSortSelector(selectedSort: $congressSort)
+            RecentActivitiesSortSelector(selectedSort: RecentActivitiesSortOption.binding($congressSortID))
 
             // Activity list
             if congressExpanded {
@@ -329,6 +347,49 @@ struct RecentActivitiesSection: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Remembered choices
+
+/// Storage ids for the Recent Activities pills — NOT `rawValue`, which is the pill LABEL
+/// ("By Value ($)", "Informative"); relabelling a pill must not reset anyone's choice. A
+/// storage contract: never change an id. File-private: only this section stores them.
+private extension RecentActivitiesSortOption {
+    var storageID: String {
+        switch self {
+        case .byValue: return "by_value"
+        case .byDate:  return "by_date"
+        }
+    }
+
+    /// By Value (the old default) for a missing or unknown id. Display-only.
+    static func stored(_ id: String) -> RecentActivitiesSortOption {
+        allCases.first { $0.storageID == id } ?? .byValue
+    }
+
+    /// `@AppStorage`'s string as the selector's binding; only a tap writes.
+    static func binding(_ id: Binding<String>) -> Binding<RecentActivitiesSortOption> {
+        Binding(get: { Self.stored(id.wrappedValue) }, set: { id.wrappedValue = $0.storageID })
+    }
+}
+
+private extension InsiderActivityFilterOption {
+    var storageID: String {
+        switch self {
+        case .all:         return "all"
+        case .informative: return "informative"
+        }
+    }
+
+    /// All (the old default) for a missing or unknown id. Display-only.
+    static func stored(_ id: String) -> InsiderActivityFilterOption {
+        allCases.first { $0.storageID == id } ?? .all
+    }
+
+    /// `@AppStorage`'s string as the selector's binding; only a tap writes.
+    static func binding(_ id: Binding<String>) -> Binding<InsiderActivityFilterOption> {
+        Binding(get: { Self.stored(id.wrappedValue) }, set: { id.wrappedValue = $0.storageID })
     }
 }
 

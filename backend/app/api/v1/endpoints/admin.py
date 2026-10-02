@@ -4,12 +4,19 @@ Admin endpoints — operational triggers for background jobs.
 
 import asyncio
 import logging
+import math
 import secrets
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app.api.error_response import ErrorCode, auth_error
+from app.api.error_response import (
+    ErrorCode,
+    auth_error,
+    error_response_from_exception,
+    make_error_response,
+)
 from app.config import settings
 from app.dependencies import GUEST_USER_ID, get_current_user_or_guest
 from app.utils.supabase_async import sb_exec
@@ -17,6 +24,38 @@ from app.utils.supabase_async import sb_exec
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ── Background work started by the routes below ─────────────────────────────
+#
+# `asyncio.create_task` keeps only a WEAK reference to its task, so a bare fire-and-forget
+# recompute can be garbage-collected mid-run (the documented CPython caveat), and nothing
+# retrieves its exception: a recompute that raised after the route answered
+# `200 {"status": "started"}` left no trace at all. This is the per-request counterpart of
+# `main._spawn` — hold the handle until it finishes, and say how it ended.
+_admin_tasks: set[asyncio.Task] = set()
+
+
+def _on_admin_task_done(task: asyncio.Task) -> None:
+    _admin_tasks.discard(task)
+    if task.cancelled():
+        logger.warning("Admin background task %r was CANCELLED before it finished", task.get_name())
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "Admin background task %r FAILED (%s: %s)",
+            task.get_name(), type(exc).__name__, exc, exc_info=exc,
+        )
+    else:
+        logger.info("Admin background task %r completed: %.500s", task.get_name(), task.result())
+
+
+def _spawn_admin_task(coro, name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    _admin_tasks.add(task)
+    task.add_done_callback(_on_admin_task_done)
+    return task
 
 
 def _authorize_admin(
@@ -157,7 +196,10 @@ async def refresh_sector_benchmarks(
         service = get_industry_benchmark_service()
         # `force` has no analogue here; freshness is expressed as a window.
         skip_hours = None if backfill else 24
-        asyncio.create_task(service.recompute_all(skip_if_fresh_hours=skip_hours))
+        _spawn_admin_task(
+            service.recompute_all(skip_if_fresh_hours=skip_hours),
+            "admin_refresh_sector_benchmarks",
+        )
         mode = "backfill (ignore freshness)" if backfill else "daily (skip rows fresher than 24h)"
         return {"status": "started", "message": f"Sector + industry benchmark computation started in background — mode: {mode}"}
     except Exception as e:
@@ -187,7 +229,10 @@ async def refresh_industry_benchmarks(
 
         service = get_industry_benchmark_service()
         skip = skip_recent_hours if skip_recent_hours and skip_recent_hours > 0 else None
-        asyncio.create_task(service.recompute_all(skip_if_fresh_hours=skip))
+        _spawn_admin_task(
+            service.recompute_all(skip_if_fresh_hours=skip),
+            "admin_refresh_industry_benchmarks",
+        )
         return {
             "status": "started",
             "message": "Industry benchmark recompute started in background — ~1-3 hrs; re-trigger to resume.",
@@ -270,31 +315,246 @@ async def industry_benchmarks_status(
         raise HTTPException(status_code=500, detail="Failed to read industry benchmark status")
 
 
+# Operator copy for a refused claim, keyed by the reason `_dossier_claim_refusal` reads off
+# the job ledger. Admin-facing (curl / scripts), never shown in the app.
+_DOSSIER_REFUSAL_COPY: dict[str, str] = {
+    "held": (
+        "An industry dossier recompute is already running (the quarterly chain or an earlier "
+        "manual refresh). Nothing new was started — wait for it to finish."
+    ),
+    "already_ran_today": (
+        "The industry dossier already completed a run today (UTC). A second run would pay "
+        "Phase B's AI research again, so nothing was started. Retry after 00:00 UTC, or "
+        "clear run_day for this job in notification_job_state if a re-run is truly needed."
+    ),
+    "disabled": (
+        "The industry dossier job is switched off (notification_job_state.enabled = false). "
+        "Nothing was started."
+    ),
+    "claim_failed": (
+        "Could not take the industry dossier job claim (the ledger RPC failed). Nothing was "
+        "started — retry shortly."
+    ),
+    "ledger_unreadable": (
+        "Could not take or read the industry dossier job claim. Nothing was started — "
+        "retry shortly."
+    ),
+}
+
+
+def _dossier_claim_refusal(state: Optional[dict], today: str) -> str:
+    """Why `claim_scheduled_job` said no, read off the ledger row — the same three-way split
+    `main._run_claimed_phase` makes (ran today / held / RPC failed), plus the kill switch.
+    `state` is `notification_jobs.scheduled_job_state(...)`: None when unreadable."""
+    if state is None:
+        return "ledger_unreadable"
+    if not state.get("enabled", True):
+        return "disabled"
+    if str(state.get("run_day") or "")[:10] == today:
+        return "already_ran_today"
+    if state.get("claim_at"):
+        return "held"
+    # Enabled, not run today, nobody holding it — and still refused: `claim_scheduled`
+    # returns False on any RPC error (fail closed). (Or the holder released it between our
+    # claim and this read; either way a retry is the right answer.)
+    return "claim_failed"
+
+
+async def _run_claimed_dossier_refresh(job: str, claimed_at: datetime) -> dict:
+    """Body of the manual refresh: run `recompute_all` while holding `job`'s claim, then
+    release it with the outcome.
+
+    This is `notification_jobs.claimed_scheduled_job` split across the request and the
+    background task — the claim must be taken IN the request, so a refusal can be answered
+    with a 409 instead of a `200 started` that silently does nothing. Same semantics: the
+    release is stamped with the claim time, shielded from cancellation, and records a
+    failure (so the day stays open for a retry) unless the run provably did its job.
+    """
+    from app.services import notification_jobs
+    from app.services.industry_dossier_service import (
+        IndustryDossierRecomputeSkipped,
+        get_industry_dossier_service,
+    )
+
+    success, items, error = False, 0, None
+    try:
+        summary = await get_industry_dossier_service().recompute_all(force=True)
+        status = summary.get("status") if isinstance(summary, dict) else None
+        upserted = summary.get("rows_upserted") if isinstance(summary, dict) else None
+        items = upserted if isinstance(upserted, int) and not isinstance(upserted, bool) else 0
+        # Success is "it ran AND wrote rows". A run that returned but upserted nothing (the
+        # pre-read failed, every upsert failed, or every industry resolved to a placeholder
+        # over a real row) leaves the day OPEN: marking it would refuse a same-day re-run
+        # and, on a quarter-start Sunday, make the scheduled phase skip a run that changed
+        # nothing.
+        success = status == "ok" and items > 0
+        if not success:
+            error = f"manual refresh returned status={status!r}, rows_upserted={upserted!r}"
+            logger.warning(
+                "Manual industry dossier refresh did not settle the %s claim: %s", job, error,
+            )
+        return summary
+    except IndustryDossierRecomputeSkipped as exc:
+        # The service already logged the cause at ERROR; this ties it to the trigger. Not
+        # re-raised: it is a refusal to run, not a crash, and the done-callback would
+        # otherwise log it a second time at ERROR.
+        error = str(exc)
+        logger.warning("Manual industry dossier refresh did not run: %s", exc)
+        return {"status": "skipped", "reason": error}
+    except asyncio.CancelledError:
+        error = "cancelled (shutdown)"
+        raise
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise  # logged with its stack by `_on_admin_task_done`
+    finally:
+        # SHIELDED for the same reason as `claimed_scheduled_job`: CancelledError would
+        # otherwise abort the release and park the claim for the whole stale window, which
+        # the quarterly chain then waits out.
+        await asyncio.shield(
+            asyncio.to_thread(
+                notification_jobs.finish_scheduled,
+                job,
+                success=success,
+                items=items,
+                error=error,
+                now=claimed_at,
+            )
+        )
+
+
 @router.post("/refresh-industry-dossier")
 async def refresh_industry_dossier(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     user: dict = Depends(get_current_user_or_guest),
 ):
-    """Manually trigger the industry_dossier weekly recompute. Returns
-    immediately; the recompute runs in the background and takes ~5-10
-    minutes depending on universe size and FMP rate.
+    """Manually trigger the industry_dossier recompute (Phase A + Phase B). Returns
+    immediately; the recompute runs in the background and takes ~5-10 minutes.
 
-    Auth: pass `X-Admin-Token: <settings.ADMIN_TOKEN>` OR sign in with an
-    email on the admin allowlist.
+    Runs under the QUARTERLY CHAIN'S OWN day-keyed claim (`JOB_INDUSTRY_DOSSIER_QUARTERLY`,
+    migration 147). It used to run outside it, so a manual refresh could overlap the
+    scheduled phase — two Phase A upserts racing on the same rows, and Phase B's Gemini
+    research paid twice. Now:
+
+      * the scheduled phase is running (or an earlier manual one is) → 409, nothing started;
+      * a run already completed today (UTC) → 409; a second would only re-pay Phase B;
+      * the job's kill switch is off → 409;
+      * the scheduled phase starting while this runs finds the claim HELD, waits, and —
+        when this run settled the day — skips instead of re-running.
+
+    Refusals are `SYSTEM_BUSY` bodies whose `details.reason` is one of `held`,
+    `already_ran_today`, `disabled`, `claim_failed` (409) or `ledger_unreadable` (503).
+
+    Auth: `X-Admin-Token: <settings.ADMIN_TOKEN>` OR a signed-in user with `users.is_admin`.
     """
     _authorize_admin(user, x_admin_token)
     try:
-        from app.services.industry_dossier_service import get_industry_dossier_service
+        from app.main import _CHAIN_PHASE_STALE_SECONDS, JOB_INDUSTRY_DOSSIER_QUARTERLY
+        from app.services import notification_jobs
+        # Imported BEFORE the claim, though only the task uses it: the task imports it again
+        # outside its try/finally, and an import that failed THERE would leave the claim
+        # unreleased for the whole stale window. Here it fails as a 500 with nothing held.
+        from app.services.industry_dossier_service import (  # noqa: F401
+            IndustryDossierRecomputeSkipped,
+            get_industry_dossier_service,
+        )
 
-        service = get_industry_dossier_service()
-        asyncio.create_task(service.recompute_all(force=True))
+        job = JOB_INDUSTRY_DOSSIER_QUARTERLY
+        claimed_at = datetime.now(timezone.utc)
+        granted = await asyncio.to_thread(
+            notification_jobs.claim_scheduled,
+            job,
+            now=claimed_at,
+            stale_seconds=_CHAIN_PHASE_STALE_SECONDS,
+        )
+        if not granted:
+            state = await asyncio.to_thread(notification_jobs.scheduled_job_state, job)
+            reason = _dossier_claim_refusal(state, claimed_at.date().isoformat())
+            details: dict[str, Any] = {"job": job, "reason": reason}
+            # `details` values must be flat scalars (auth.md §3) — omit the absent ones.
+            for key in ("claim_at", "run_day"):
+                if state and state.get(key):
+                    details[key] = str(state[key])
+            logger.warning(
+                "Manual industry dossier refresh REFUSED: job=%s reason=%s claim_at=%s run_day=%s",
+                job, reason, details.get("claim_at"), details.get("run_day"),
+            )
+            return make_error_response(
+                ErrorCode.SYSTEM_BUSY,
+                status_code=503 if reason == "ledger_unreadable" else 409,
+                message=f"industry dossier claim refused: {reason}",
+                user_message=_DOSSIER_REFUSAL_COPY[reason],
+                details=details,
+            )
+
+        try:
+            _spawn_admin_task(
+                _run_claimed_dossier_refresh(job, claimed_at), "admin_refresh_industry_dossier",
+            )
+        except BaseException:
+            # The claim is ours and nothing will release it — do it now, or the quarterly
+            # chain waits out the whole stale window.
+            await asyncio.to_thread(
+                notification_jobs.finish_scheduled,
+                job, success=False, error="manual refresh failed to start", now=claimed_at,
+            )
+            raise
+        logger.info("Manual industry dossier refresh started under claim %s", job)
         return {
             "status": "started",
+            "job": job,
+            "claimed_at": claimed_at.isoformat(),
             "message": "Industry dossier recompute started in background — typically ~5-10 minutes",
         }
     except Exception as e:
-        logger.error(f"Manual industry dossier refresh failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start industry dossier refresh")
+        logger.error(
+            "Manual industry dossier refresh failed to start (%s: %s)",
+            type(e).__name__, e, exc_info=True,
+        )
+        return error_response_from_exception(e, step="refresh_industry_dossier")
+
+
+def _row_tam_is_placeholder(row: dict) -> bool:
+    """True when an `industry_dossier` row carries no usable TAM: the "No public data
+    available — FRED/Census unreachable at compute time" placeholder (`current_tam_b = 0`),
+    a NULL, or anything non-finite / non-numeric.
+
+    Decided on the NUMBER, never the label text — the same rule as the read path's
+    `industry_dossier_service._is_placeholder` (a parity test pins the two together), so the
+    audit counts exactly the rows the self-heal treats as a miss. A malformed value counts as
+    a placeholder rather than raising: one bad row must not 500 the audit that exists to
+    find bad rows.
+    """
+    v = row.get("current_tam_b")
+    if v is None or isinstance(v, bool):
+        return True
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return True
+    return not (math.isfinite(f) and f > 0)
+
+
+def _dossier_tam_audit(rows: list[dict]) -> dict[str, Any]:
+    """The TAM-health half of the audit summary.
+
+    `summary` counts rows per `source_grain` only, and the zero-TAM placeholder is written
+    with `source_grain = 'all_industry'` — so from 2026-07-05, when 138 of 158 rows were
+    placeholders, the view read as a healthy "all_industry: 1xx" and hid the outage. These
+    counts make a placeholder visible on its own line.
+    """
+    from collections import Counter
+
+    placeholders = [r for r in rows if _row_tam_is_placeholder(r)]
+    global_rows = [r for r in rows if r.get("tam_scope") == "global"]
+    return {
+        "tam_placeholder_count": len(placeholders),
+        "tam_placeholder_industries": sorted(str(r.get("industry") or "") for r in placeholders),
+        "tam_placeholder_by_grain": dict(Counter(r.get("source_grain") for r in placeholders)),
+        # Phase B (Gemini grounded research) rows: a GLOBAL TAM, not the US Census/FRED one.
+        "global_scope_count": len(global_rows),
+        "global_scope_industries": sorted(str(r.get("industry") or "") for r in global_rows),
+    }
 
 
 @router.get("/industry-dossier")
@@ -309,6 +569,11 @@ async def list_industry_dossier(
         {
           "summary": {"industry": 65, "sector": 83, "all_industry": 8},
           "total": 156,
+          "tam_placeholder_count": 2,
+          "tam_placeholder_industries": ["...", "..."],
+          "tam_placeholder_by_grain": {"all_industry": 2},
+          "global_scope_count": 21,
+          "global_scope_industries": ["Semiconductors", ...],
           "computed_at_latest": "...",
           "last_override_run": {
               "run_id": "...",
@@ -319,9 +584,11 @@ async def list_industry_dossier(
           "rows": [...]
         }
 
-    Use this after triggering /refresh-industry-dossier to verify the
-    quarterly recompute produced sane values. Public-readable from
-    Supabase too — this endpoint bundles it with the summary counts.
+    `summary` is per `source_grain` and counts zero-TAM placeholder rows like real ones
+    (the placeholder is stored as `all_industry`); read `tam_placeholder_count` for TAM
+    health. Use this after triggering /refresh-industry-dossier to verify the recompute
+    produced sane values. The table is service-role only (migration 164), so this endpoint
+    is the operator's read path.
     """
     _authorize_admin(user, x_admin_token)
     try:
@@ -337,7 +604,7 @@ async def list_industry_dossier(
                 .order("industry", desc=False)
             ))
         )
-        rows = res.data or []
+        rows = [r for r in (res.data or []) if isinstance(r, dict)]
         summary = dict(Counter(r.get("source_grain") for r in rows))
         latest_computed = max(
             (r.get("computed_at") for r in rows if r.get("computed_at")),
@@ -366,18 +633,24 @@ async def list_industry_dossier(
                     "rows": run_rows,
                 }
         except Exception as audit_exc:
-            logger.warning(f"Failed to load override audit log: {audit_exc}")
+            logger.warning(
+                "industry-dossier audit: override audit log read failed (%s: %s) — "
+                "last_override_run is null", type(audit_exc).__name__, audit_exc,
+            )
 
         return {
             "summary": summary,
             "total": len(rows),
+            **_dossier_tam_audit(rows),
             "computed_at_latest": latest_computed,
             "last_override_run": last_override_run,
             "rows": rows,
         }
     except Exception as e:
-        logger.error(f"List industry dossier failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load industry dossier")
+        logger.error(
+            "List industry dossier failed (%s: %s)", type(e).__name__, e, exc_info=True,
+        )
+        return error_response_from_exception(e, step="list_industry_dossier")
 
 
 @router.post("/refresh-industry-moat-benchmarks")
@@ -417,8 +690,9 @@ async def refresh_industry_moat_benchmarks(
         service = get_industry_moat_benchmark_service()
         # Coerce 0/negative to None so the service treats it as "no skip".
         skip = skip_recent_hours if skip_recent_hours and skip_recent_hours > 0 else None
-        asyncio.create_task(
-            service.recompute_all(skip_if_fresh_hours=skip)
+        _spawn_admin_task(
+            service.recompute_all(skip_if_fresh_hours=skip),
+            "admin_refresh_industry_moat_benchmarks",
         )
         return {
             "status": "started",

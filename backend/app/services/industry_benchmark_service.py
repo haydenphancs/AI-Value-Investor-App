@@ -49,6 +49,71 @@ from app.utils.supabase_errors import is_check_violation
 
 logger = logging.getLogger(__name__)
 
+
+class IndustryBenchmarkRecomputeSkipped(RuntimeError):
+    """A full `recompute_all` / `recompute_all_ttm` sweep wrote NOTHING. RAISED, never
+    returned as a summary. Three reasons:
+
+      * "empty universe" — the benchmark universe loaded as `[]` (checked before any write);
+      * "every sector failed" — every attempted sector raised (an upsert failure);
+      * "nothing written" — sectors were attempted but none wrote a row: with FMP down,
+        `_fetch_company_data` / `_fetch_ttm` turn every failed call into an empty result,
+        so each sector "completes" with 0 rows.
+
+    All three used to return a zero summary, and `_run_claimed_phase` (main.py) marks any
+    phase that RETURNS as settled: the quarterly (fiscal) or weekly (TTM) claim recorded
+    success and the run was consumed, so every "Industry/Sector Avg" stayed a quarter (or a
+    week) stale. Raising releases the claim unsettled, so the loop retries the phase inside
+    its catch-up window and the ledger row carries this message as its `error`. Same
+    contract as `IndustryDossierRecomputeSkipped`.
+
+    Still returns: a run where every sector was skipped as fresh (nothing attempted), a run
+    where at least one sector wrote rows (a PARTIAL run settles), and the operator-only
+    industries-only validation path and `dry_run` (neither is ever run by the scheduler,
+    and a dry run writes nothing either way).
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        super().__init__(f"industry_benchmark recompute SKIPPED ({reason}) — {detail}")
+
+
+def _empty_universe_skip(rows: str) -> IndustryBenchmarkRecomputeSkipped:
+    """Log the empty-universe refusal at ERROR and return it for the caller to raise."""
+    # `load_universe` already logged the Storage/parse reason at ERROR when the file itself
+    # failed; this line names the consequence (and covers a file that loaded but holds no
+    # usable sector/industry with market caps).
+    exc = IndustryBenchmarkRecomputeSkipped(
+        "empty universe",
+        f"{BENCHMARK_UNIVERSE} yielded no sector with a usable industry (it is not in git: "
+        "the Supabase Storage download failed, or the file holds no market_caps). Nothing "
+        f"was written; the previous {rows} rows in sector_benchmarks are left untouched.",
+    )
+    logger.error("%s", exc)
+    return exc
+
+
+def _nothing_written_skip(
+    rows: str, *, attempted: int, failed: int,
+) -> IndustryBenchmarkRecomputeSkipped:
+    """Log the nothing-written refusal at ERROR and return it for the caller to raise.
+
+    Only for a sweep that ATTEMPTED sectors (fresh-skips are not attempts). A failed sector
+    never adds to `rows_upserted`, so "every sector failed" is the all-raised case and
+    "nothing written" is the mix (or all) of sectors that completed with zero rows."""
+    reason = "every sector failed" if failed >= attempted else "nothing written"
+    exc = IndustryBenchmarkRecomputeSkipped(
+        reason,
+        f"{attempted} sector(s) attempted ({failed} raised, {attempted - failed} computed "
+        f"zero rows); no completed sector wrote a {rows} row. FMP was unreachable or "
+        "refusing for the whole run, or every write failed — each sector's own ERROR/WARNING "
+        "above names its cause. No sector's aggregate row was refreshed, so none counts as "
+        "fresh and a retry recomputes them all.",
+    )
+    logger.error("%s", exc)
+    return exc
+
+
 # Single resolver — see `app/services/universe_data.py`. There were FOUR different
 # path idioms for this one directory, and the file is FMP-derived so it has to be
 # able to move out of the repo (ToS §2.6.1) without a hunt.
@@ -602,7 +667,14 @@ class IndustryBenchmarkService:
         dry_run: bool = False,
     ) -> Dict[str, Any]:
         """Compute the TTM current-snapshot medians (period_type='ttm') for every
-        industry + sector aggregate. Additive — leaves the fiscal rows intact."""
+        industry + sector aggregate. Additive — leaves the fiscal rows intact.
+
+        Raises `IndustryBenchmarkRecomputeSkipped` (after an ERROR log) when the full
+        sweep's universe is empty (before any write), or when it attempted sectors and
+        wrote no row (`_fetch_ttm` turns an FMP failure into all-None values, so an outage
+        "completes" every sector with 0 rows) — the weekly claim stays UNSETTLED. A run
+        where every sector was fresh, a partial run, the industries-only path and `dry_run`
+        still return."""
         start = datetime.now(timezone.utc)
         now = start.isoformat()
         sem = asyncio.Semaphore(_TTM_CONCURRENCY)
@@ -628,9 +700,13 @@ class IndustryBenchmarkService:
             logger.info("ttm benchmark (industries-only) complete: %s", summary)
             return summary
 
+        # Checked BEFORE the `sectors` filter: an operator's filter matching nothing is
+        # their input, not a failed universe.
+        if not universe and not dry_run:
+            raise _empty_universe_skip("TTM (period_type='ttm')")
         if sectors:
             universe = [(s, inds) for s, inds in universe if s in sectors]
-        total_rows = done = skipped_fresh = 0
+        total_rows = done = skipped_fresh = failed = 0
         for sector, inds in universe:
             if not dry_run and (await asyncio.to_thread(self._ttm_sector_is_fresh, sector, skip_if_fresh_hours)):
                 skipped_fresh += 1
@@ -650,14 +726,29 @@ class IndustryBenchmarkService:
                 n += self._emit(self._ttm_rows(sector, "", sector_acc, now), f"TTM {sector} (aggregate)", dry_run)
                 total_rows += n
                 done += 1
-                logger.info("ttm: %s done — %d rows", sector, n)
+                if n == 0 and not dry_run:
+                    logger.warning(
+                        "ttm: %s computed ZERO rows — no company returned a usable TTM value "
+                        "(FMP unreachable or refusing?); the sector is not marked fresh", sector,
+                    )
+                else:
+                    logger.info("ttm: %s done — %d rows", sector, n)
             except Exception as e:
-                logger.error("ttm: %s failed: %s", sector, e, exc_info=True)
+                failed += 1
+                logger.error("ttm: %s failed: %s: %s", sector, type(e).__name__, e, exc_info=True)
         summary = {
-            "mode": "ttm", "sectors_done": done, "sectors_skipped_fresh": skipped_fresh,
+            "mode": "ttm", "sectors_done": done, "sectors_failed": failed,
+            "sectors_skipped_fresh": skipped_fresh,
             "rows_upserted": total_rows, "dry_run": dry_run,
             "elapsed_seconds": round((datetime.now(timezone.utc) - start).total_seconds(), 1),
         }
+        # Attempted sectors (not fresh-skipped) that wrote nothing must not settle the
+        # weekly claim. A dry run writes nothing by design.
+        attempted = done + failed
+        if attempted and total_rows == 0 and not dry_run:
+            raise _nothing_written_skip(
+                "TTM (period_type='ttm')", attempted=attempted, failed=failed,
+            )
         logger.info("ttm benchmark complete: %s", summary)
         return summary
 
@@ -682,9 +773,13 @@ class IndustryBenchmarkService:
             return summary
 
         universe = self._load_universe()
+        # Before any write, and before the `sectors` filter (see recompute_all_ttm). A
+        # scheduled run must not settle its quarterly claim having iterated nothing.
+        if not universe and not dry_run:
+            raise _empty_universe_skip("fiscal (annual + calendar-quarter)")
         if sectors:
             universe = [(s, inds) for s, inds in universe if s in sectors]
-        total_rows = done = skipped_fresh = 0
+        total_rows = done = skipped_fresh = failed = 0
         for sector, inds in universe:
             if not dry_run and (await asyncio.to_thread(self._sector_is_fresh, sector, skip_if_fresh_hours)):
                 skipped_fresh += 1
@@ -698,12 +793,24 @@ class IndustryBenchmarkService:
                 n = await self._compute_sector(sector, inds, al, ql, dry_run)
                 total_rows += n
                 done += 1
-                logger.info("industry_benchmark: %s done — %d rows", sector, n)
+                if n == 0 and not dry_run:
+                    logger.warning(
+                        "industry_benchmark: %s computed ZERO rows — no company returned "
+                        "usable statements (FMP unreachable or refusing?); the sector is not "
+                        "marked fresh", sector,
+                    )
+                else:
+                    logger.info("industry_benchmark: %s done — %d rows", sector, n)
             except Exception as e:
-                logger.error("industry_benchmark: %s failed: %s", sector, e, exc_info=True)
+                failed += 1
+                logger.error(
+                    "industry_benchmark: %s failed: %s: %s", sector, type(e).__name__, e,
+                    exc_info=True,
+                )
         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
         summary = {
             "sectors_done": done,
+            "sectors_failed": failed,
             "sectors_skipped_fresh": skipped_fresh,
             "rows_upserted": total_rows,
             "dry_run": dry_run,
@@ -711,6 +818,15 @@ class IndustryBenchmarkService:
             "calendar_quarter_blocked": self._calendar_quarter_blocked,
             "elapsed_seconds": round(elapsed, 1),
         }
+        # Attempted sectors (not fresh-skipped) that wrote nothing must not settle the
+        # quarterly claim (`_fetch_company_data` turns every FMP failure into an empty
+        # list, so an outage "completes" each sector with 0 rows). A dry run writes
+        # nothing by design.
+        attempted = done + failed
+        if attempted and total_rows == 0 and not dry_run:
+            raise _nothing_written_skip(
+                "fiscal (annual + calendar-quarter)", attempted=attempted, failed=failed,
+            )
         logger.info("industry_benchmark complete: %s", summary)
         return summary
 

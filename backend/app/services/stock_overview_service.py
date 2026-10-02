@@ -508,6 +508,51 @@ def _session_ohl_from_bars(bars: Any, session_iso: str, *, ticker: str = "") -> 
     )
 
 
+async def session_ohl_for(fmp: Any, ticker: str, *, bars: Any = None) -> Dict[str, float]:
+    """`{open, dayHigh, dayLow}` for the session the header price describes, else ``{}``.
+
+    The session-selection half of `StockOverviewService._get_session_ohl`, at module level
+    so every screen priced from a profile-backed quote shares ONE implementation — the
+    commodity screen's metal funds (GLD/SLV/PPLT/PALL) read "—" for these three rows for
+    the same reason stocks did (TestFlight 1.0 (9)). Takes the caller's FMP client so each
+    service keeps its own seam. RAISES on an upstream failure; callers own the fallback
+    and the cache. Sources, in order:
+      1. ``bars`` already in hand, when they describe today's session — no extra call;
+      2. the session's EOD row (``historical-price-eod/full``, ≤7-day window, date-gated);
+      3. one single-day 5-minute fetch while today's EOD row has not been written yet.
+    """
+    phase = session_phase()
+    session = session_trading_date()
+    # `session_trading_date()` flips to today at 04:00 ET (pre-market), but the
+    # numbers on screen still describe the LAST COMPLETED session until 09:30.
+    target = previous_trading_day(session) if phase == SESSION_PREMARKET else session
+    target_iso = target.isoformat()
+    # The bars in hand (and the single-day rescue below) describe TODAY's
+    # session; pre-market and a weekend describe an earlier one. `target ==
+    # session` is that test — not the phase, which reads `closed` on a half-day
+    # afternoon and after 20:00 while the session's own bars still exist.
+    describes_todays_session = target == session
+
+    result: Dict[str, float] = {}
+    if describes_todays_session and bars:
+        result = _session_ohl_from_bars(bars, target_iso, ticker=ticker)
+    if not result:
+        frm = (target - timedelta(days=_OHL_LOOKBACK_DAYS)).isoformat()
+        rows = await fmp.get_historical_prices(ticker, frm, target_iso)
+        result = _session_ohl_from_eod(rows, target_iso, ticker=ticker)
+    # The single-day rescue applies whenever the numbers on screen describe
+    # TODAY's session and FMP has not written its EOD row yet — not only while
+    # the phase is live: on a half-day afternoon `session_phase()` is already
+    # `closed` while `session_trading_date()` is today, and the same gap exists
+    # after 20:00 until the row lands.
+    if not result and describes_todays_session:
+        fresh = await fmp.get_intraday_prices(
+            ticker, interval="5min", from_date=target_iso, to_date=target_iso
+        )
+        result = _session_ohl_from_bars(fresh, target_iso, ticker=ticker)
+    return result
+
+
 def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[Dict]:
     """Extract OHLCV data for the requested chart range.
 
@@ -1238,18 +1283,6 @@ class StockOverviewService:
             return hit
 
         try:
-            phase = session_phase()
-            session = session_trading_date()
-            # `session_trading_date()` flips to today at 04:00 ET (pre-market), but the
-            # numbers on screen still describe the LAST COMPLETED session until 09:30.
-            target = previous_trading_day(session) if phase == SESSION_PREMARKET else session
-            target_iso = target.isoformat()
-            # The bars in hand (and the single-day rescue below) describe TODAY's
-            # session; pre-market and a weekend describe an earlier one. `target ==
-            # session` is that test — not the phase, which reads `closed` on a half-day
-            # afternoon and after 20:00 while the session's own bars still exist.
-            describes_todays_session = target == session
-
             bars = chart_data
             if bars is None and volatile is not None:
                 try:
@@ -1258,23 +1291,7 @@ class StockOverviewService:
                 except Exception:
                     bars = None   # the overview reports that failure itself
 
-            result: Dict[str, float] = {}
-            if describes_todays_session and bars:
-                result = _session_ohl_from_bars(bars, target_iso, ticker=sym)
-            if not result:
-                frm = (target - timedelta(days=_OHL_LOOKBACK_DAYS)).isoformat()
-                rows = await self.fmp.get_historical_prices(sym, frm, target_iso)
-                result = _session_ohl_from_eod(rows, target_iso, ticker=sym)
-            # The single-day rescue applies whenever the numbers on screen describe
-            # TODAY's session and FMP has not written its EOD row yet — not only while
-            # the phase is live: on a half-day afternoon `session_phase()` is already
-            # `closed` while `session_trading_date()` is today, and the same gap exists
-            # after 20:00 until the row lands.
-            if not result and describes_todays_session:
-                fresh = await self.fmp.get_intraday_prices(
-                    sym, interval="5min", from_date=target_iso, to_date=target_iso
-                )
-                result = _session_ohl_from_bars(fresh, target_iso, ticker=sym)
+            result = await session_ohl_for(self.fmp, sym, bars=bars)
             _cache_set(key, result)
             return result
         except Exception as e:

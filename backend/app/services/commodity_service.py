@@ -9,7 +9,7 @@ import asyncio
 import logging
 import math
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 
@@ -76,6 +76,17 @@ _INTRADAY_CHART_TTL = 60 # 1D/1W bars; the only genuinely per-range fetch
 # series is a daily settlement published days behind, so the cut is a no-op for it.
 _HISTORY_TTL = 43_200    # 12h — daily EOD bars, close-cycle aligned
 _DERIVED_TTL = 43_200    # 12h — performance / benchmark / daily key stats, all from history
+# Shape version of the `derived` bundle, part of BOTH tiers' keys. Bumped whenever a key
+# is ADDED that the response reads: a bundle persisted by the previous build lacks it,
+# and `.get()` would render "—" for the new rows for up to 12h after a deploy.
+# v2 (2026-10-01): `high_52w` / `low_52w` / `ma_50` / `last_date` for the FRED rows.
+_DERIVED_SHAPE = "v2"
+
+# 52-week range from daily settlements: the trailing 365 calendar days ending at the last
+# row. A series that does not reach back that far (within the gap) has no 52-week range —
+# a six-month-old series must not print its half-year range under a "52-Week" label.
+_52W_DAYS = 365
+_52W_MAX_START_GAP_DAYS = 14
 
 # Hard cap: `_cache_get` only evicts a key when that same key is read again after
 # expiry, so on a long-lived Railway process a symbol fetched once would sit resident
@@ -97,6 +108,35 @@ _CACHE_MAX_ENTRIES = 1024
 # `_cache_get_settled` / `_tier2_is_fresh` treat an entry written before the current
 # cycle as a MISS whatever the rolling TTL says, so the completed bar lands as soon as the
 # cycle turns instead of up to 12h later.
+
+
+def _trailing_year_range(historical: List[Dict]) -> tuple:
+    """``(low, high)`` of the positive, finite daily closes in the 365 days ending at the
+    last dated row, or ``(None, None)``.
+
+    None when the series does not reach back a full year (its first row is more than
+    `_52W_MAX_START_GAP_DAYS` after the window start) or has no usable rows. Malformed
+    rows (non-dict, bad date, NaN/zero/negative close) are skipped, never counted."""
+    dated: List[tuple] = []
+    for row in historical or []:
+        if not isinstance(row, dict):
+            continue
+        close = _finite_or_none(row.get("close"))
+        if close is None or close <= 0:
+            continue
+        try:
+            day = date.fromisoformat(str(row.get("date") or "")[:10])
+        except ValueError:
+            continue
+        dated.append((day, close))
+    if not dated:
+        return (None, None)
+    dated.sort(key=lambda dc: dc[0])
+    start = dated[-1][0] - timedelta(days=_52W_DAYS)
+    if dated[0][0] > start + timedelta(days=_52W_MAX_START_GAP_DAYS):
+        return (None, None)
+    window = [c for d, c in dated if d >= start]
+    return (min(window), max(window))
 
 
 def _settled_cutoff_date(now: Optional[datetime] = None) -> str:
@@ -710,7 +750,9 @@ class CommodityService:
                 (entry.get("cached_at") or "").replace("Z", "+00:00")
             )
             if not CommodityService._tier2_is_fresh(
-                str(entry.get("category") or cache_key.split(":", 1)[-1]), cached_at
+                # rsplit: a key may carry a shape version (`{sym}:v2:derived`); the
+                # section name is always the LAST segment.
+                str(entry.get("category") or cache_key.rsplit(":", 1)[-1]), cached_at
             ):
                 return None
             return entry.get("response_json")
@@ -792,6 +834,39 @@ class CommodityService:
         # the whole TTL, which is the degradation gate this service never had.
         _cache_set(key, quote, _QUOTE_TTL)
         return quote
+
+    async def _get_session_ohl(self, fmp_symbol: str) -> Dict[str, float]:
+        """`{open, dayHigh, dayLow}` of the fund behind an ETF-sourced metal, else ``{}``.
+
+        The quote for GLD/SLV/PPLT/PALL comes from `price_service` (`/stable/profile`),
+        which carries no `open`/`dayHigh`/`dayLow` since `/stable/quote` left the licence —
+        so the three Key Statistics rows read "—" on every metal screen, all day. The
+        stock screen solved exactly this; `session_ohl_for` IS that solution (same session
+        gate, same EOD/bars sources), called with this service's own FMP client.
+
+        A FRED series has no session at all — one settled price a day — so it returns
+        ``{}`` without a call; its rows are replaced, not filled (see the key-stats step).
+        Never raises: three stat rows are not worth the screen. A legitimate ``{}``
+        (pre-open, no bars yet) is cached like a hit; a failure is not.
+        """
+        if _source_of(fmp_symbol) != _COMMODITY_SOURCE_ETF:
+            return {}
+        key = f"com:ohl:{fmp_symbol}"
+        hit = _cache_get(key)
+        if hit is not None:
+            return hit
+        ref = _ref_of(fmp_symbol)
+        try:
+            from app.services.stock_overview_service import session_ohl_for
+            result = await session_ohl_for(self.fmp, ref)
+        except Exception as e:
+            logger.warning(
+                "[ohl-unavailable] commodity %s (%s): %s: %s — Open / Day High / Day Low "
+                "read as unknown for this request", fmp_symbol, ref, type(e).__name__, e,
+            )
+            return {}
+        _cache_set(key, result, _QUOTE_TTL)
+        return result
 
     async def _get_history(self, fmp_symbol: str) -> List[Dict[str, Any]]:
         """FULL daily history, oldest-first. Range-independent and 12h-cached.
@@ -928,12 +1003,14 @@ class CommodityService:
         the LIVE price, and persisting it would put a stale price in Tier 2 — the one
         thing this design refuses to do.
         """
-        key = f"com:derived:{fmp_symbol}"
+        key = f"com:derived:{_DERIVED_SHAPE}:{fmp_symbol}"
         cached = _cache_get_settled(key)
         if cached is not None:
             return cached
 
-        tier2_key = f"{fmp_symbol}:derived"
+        # The version sits BEFORE the section name: readers (and tests) recognise a derived
+        # row by its `:derived` suffix.
+        tier2_key = f"{fmp_symbol}:{_DERIVED_SHAPE}:derived"
         db = await asyncio.to_thread(self._tier2_get, tier2_key)
         if db is not None:
             logger.info("Commodity derived tier-2 HIT for %s", fmp_symbol)
@@ -973,6 +1050,17 @@ class CommodityService:
         """Pure: daily history -> the JSON-serialisable scalars every section needs."""
         closes = [p.get("close", 0) for p in historical if p.get("close")]
         ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
+        ma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
+        # The 52-week band from the settled daily closes. The metal funds already get one
+        # from `/stable/profile`; a FRED spot series (crude, gas) has no quote that could
+        # carry one, so this is its only source — and it is honest there: one settled
+        # price a day IS the whole series, so its range is the range of those prints.
+        low_52w, high_52w = _trailing_year_range(historical)
+        last_date = next(
+            (str(p.get("date"))[:10] for p in reversed(historical)
+             if isinstance(p, dict) and p.get("date") and _finite_or_none(p.get("close"))),
+            None,
+        )
 
         avg_volume_30d = None
         volumes_30d = [
@@ -1022,6 +1110,10 @@ class CommodityService:
 
         return {
             "ma_200": _finite_or_none(ma_200),
+            "ma_50": _finite_or_none(ma_50),
+            "high_52w": high_52w,
+            "low_52w": low_52w,
+            "last_date": last_date,
             "avg_volume_30d": _finite_or_none(avg_volume_30d),
             "last_close": _finite_or_none(closes[-1]) if closes else None,
             "prev_close": _finite_or_none(closes[-2]) if len(closes) >= 2 else None,
@@ -1243,6 +1335,58 @@ class CommodityService:
             ))
         return out
 
+    @staticmethod
+    def _fred_key_statistics(
+        *,
+        price: float,
+        prev_close: float,
+        quote: Dict[str, Any],
+        derived: Dict[str, Any],
+        price_per_unit: str,
+        fmt: Any,
+    ) -> List[KeyStatisticsGroupResponse]:
+        """Key Statistics for a FRED spot series (WTI, Henry Hub) — rows it can FILL.
+
+        The equity layout asked a once-a-day settlement for an Open, a Day High/Low, a
+        Volume and a 30-day average volume. None of those exists for an EIA spot price, so
+        the card was half "—" forever (TestFlight follow-up, 2026-10-01). These rows are
+        all computed from the series itself:
+          * 50/200-day averages and the 52-week band — from the settled daily prints
+            (`_derive_from_history`); the band is widened to include the live print, so
+            the price can never sit outside its own 52-week range between refreshes;
+          * "As Of" — the date of the latest settlement. FRED publishes EIA spot ~5
+            business days behind, and nothing else on the screen says how old the price
+            is (the header shows only "Market Closed");
+          * "Source" — why there is no intraday range: a daily spot assessment.
+        """
+        high = _finite_or_none(derived.get("high_52w"))
+        low = _finite_or_none(derived.get("low_52w"))
+        if high is not None and low is not None and price and price > 0:
+            high, low = max(high, price), min(low, price)
+
+        as_of = "—"
+        for raw in (quote.get("asOf"), derived.get("last_date")):
+            try:
+                as_of = date.fromisoformat(str(raw or "")[:10]).strftime("%b %-d, %Y")
+                break
+            except ValueError:
+                continue
+
+        return [
+            KeyStatisticsGroupResponse(statistics=[
+                KeyStatisticItem(label="Price/Unit", value=price_per_unit),
+                KeyStatisticItem(label="Previous Close", value=fmt(prev_close)),
+                KeyStatisticItem(label="50-Day Avg", value=fmt(derived.get("ma_50"))),
+                KeyStatisticItem(label="200-Day Avg", value=fmt(derived.get("ma_200"))),
+            ]),
+            KeyStatisticsGroupResponse(statistics=[
+                KeyStatisticItem(label="52-Week High", value=fmt(high)),
+                KeyStatisticItem(label="52-Week Low", value=fmt(low)),
+                KeyStatisticItem(label="As Of", value=as_of),
+                KeyStatisticItem(label="Source", value="EIA daily spot"),
+            ]),
+        ]
+
     async def _build_commodity_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> CommodityDetailResponse:
@@ -1275,12 +1419,17 @@ class CommodityService:
         # is itself cached, so the second caller gets the first one's list rather than a
         # second 972 KB fetch. On a Tier-2 derived HIT with a non-daily range, the history
         # is never fetched at all.
-        quote, derived, chart_points, related_quotes = await asyncio.gather(
+        quote, derived, chart_points, related_quotes, session_ohl = await asyncio.gather(
             self._get_quote(fmp_symbol),
             self._get_derived(fmp_symbol),
             self._get_chart(fmp_symbol, chart_range, interval),
             self._get_related(symbol, related_symbols),
+            self._get_session_ohl(fmp_symbol),
         )
+        # Merged into a NEW dict: `price_service` and `_get_quote` cache the quote row by
+        # reference, and a write into it would leak these keys into every other reader.
+        if session_ohl:
+            quote = {**quote, **session_ohl}
         news_raw: List[Dict[str, Any]] = []
         # Only the paths that genuinely need raw bars still touch the history; everything
         # else now reads the small `derived` bundle.
@@ -1415,24 +1564,30 @@ class CommodityService:
         if not avg_volume:
             avg_volume = derived.get("avg_volume_30d") or 0
 
-        key_statistics_groups = [
-            # Left column (matches Index layout)
-            KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="Price/Unit", value=price_per_unit),
-                KeyStatisticItem(label="Open", value=_fmt(open_price)),
-                KeyStatisticItem(label="Previous Close", value=_fmt(prev_close)),
-                KeyStatisticItem(label="Day High", value=_fmt(day_high)),
-                KeyStatisticItem(label="Day Low", value=_fmt(day_low)),
-            ]),
-            # Right column
-            KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
-                KeyStatisticItem(label="52-Week Low", value=_fmt(year_low)),
-                KeyStatisticItem(label="200-Day Avg", value=_fmt(ma_200)),
-                KeyStatisticItem(label="Volume", value=_fmt_vol(volume)),
-                KeyStatisticItem(label="Avg. Volume (30D)", value=_fmt_vol(avg_volume)),
-            ]),
-        ]
+        if _source_of(fmp_symbol) == _COMMODITY_SOURCE_FRED:
+            key_statistics_groups = self._fred_key_statistics(
+                price=price, prev_close=prev_close, quote=quote, derived=derived,
+                price_per_unit=price_per_unit, fmt=_fmt,
+            )
+        else:
+            key_statistics_groups = [
+                # Left column (matches Index layout)
+                KeyStatisticsGroupResponse(statistics=[
+                    KeyStatisticItem(label="Price/Unit", value=price_per_unit),
+                    KeyStatisticItem(label="Open", value=_fmt(open_price)),
+                    KeyStatisticItem(label="Previous Close", value=_fmt(prev_close)),
+                    KeyStatisticItem(label="Day High", value=_fmt(day_high)),
+                    KeyStatisticItem(label="Day Low", value=_fmt(day_low)),
+                ]),
+                # Right column
+                KeyStatisticsGroupResponse(statistics=[
+                    KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
+                    KeyStatisticItem(label="52-Week Low", value=_fmt(year_low)),
+                    KeyStatisticItem(label="200-Day Avg", value=_fmt(ma_200)),
+                    KeyStatisticItem(label="Volume", value=_fmt_vol(volume)),
+                    KeyStatisticItem(label="Avg. Volume (30D)", value=_fmt_vol(avg_volume)),
+                ]),
+            ]
 
         # ── Step 5: Build performance periods ─────────────────────
         # Rebuilt from the persisted bundle. `_build_performance` baselines off the last

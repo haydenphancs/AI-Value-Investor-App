@@ -28,6 +28,8 @@ struct TickerAnalysisContent: View {
     var isFearGreedLoaded: Bool = true
     let isSentimentLoaded: Bool
     let isTechnicalLoaded: Bool
+    /// These three are device preferences: the host screen binds its `@AppStorage`
+    /// (`<Type>.binding(_:)`), never a per-screen copy that resets on the next push.
     @Binding var selectedMomentumPeriod: AnalystMomentumPeriod
     @Binding var selectedSentimentTimeframe: SentimentTimeframe
     var selectedFearGreedTimeframe: Binding<FearGreedTimeframe>? = nil

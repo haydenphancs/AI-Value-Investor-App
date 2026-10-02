@@ -25,7 +25,9 @@ Environment (all MARKETING_* so they never collide with the web service's variab
                              networking is NOT a drop-in: the web binds IPv4 0.0.0.0, and older
                              private networks are IPv6-only.)
   MARKETING_WORKER_TOKEN     shared secret, same value as the web service's setting
-  MARKETING_RUN_HOUR_ET      first hour (ET, 0-23) a tick may start today's run; default 16
+  MARKETING_RUN_HOUR_ET      first hour (ET, 0-23) a tick may start today's run; default 16. The web
+                             service keeps a mirror of the same name for its run-health timing:
+                             change both together.
   MARKETING_WORKER_VERSION   free-form tag recorded on the run row; default "phase4"
   MARKETING_RENDER_THREADS   optional x264 thread count (default: the cgroup CPU quota, max 4)
   MARKETING_DRY_RUN          "true" (default) — recorded on the run; the publisher honours it

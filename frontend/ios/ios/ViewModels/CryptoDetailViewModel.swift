@@ -76,11 +76,14 @@ class CryptoDetailViewModel: ObservableObject {
     /// present a view itself.
     @Published var browserLink: BrowserLink?
 
-    // Analysis tab state
-    @Published var selectedFearGreedTimeframe: FearGreedTimeframe = .today
-    @Published var selectedMomentumPeriod: AnalystMomentumPeriod = .sixMonths
-    @Published var selectedSentimentTimeframe: SentimentTimeframe = .last24h
+    // Analysis tab toggles (Fear & Greed 1D/7D/30D, 6M/1Y, 24H/7D) are NOT here: they are
+    // device preferences held in `@AppStorage` by `CryptoDetailView`. A per-ViewModel copy
+    // reset them on every pushed coin and relaunch — do not re-add one, or seed one from
+    // UserDefaults at init.
     @Published var chartSettings = ChartSettings()
+    /// The ONE place this screen names its asset class: the screen passes it to
+    /// `TickerChartView`, and init resolves the remembered range/interval against it.
+    let chartAssetContext: ChartAssetContext = .crypto
     @Published var chartDataVersion: Int = 0
 
     // MARK: - Private Properties
@@ -121,6 +124,15 @@ class CryptoDetailViewModel: ObservableObject {
         // does not exist. See `CryptoSymbol`.
         self.cryptoSymbol = CryptoSymbol.bare(cryptoSymbol)
 
+        // Open on the user's last range and that range's interval, resolved for CRYPTO:
+        // a 5Y/ALL picked elsewhere opens 2Y (the CoinGecko cap), and a stock's 1D = 1 min
+        // opens on the 5-minute bars, the only 1D granularity the source has. Done BEFORE
+        // the `.dropFirst()`-ed sinks, so it fires nothing. Read-only — neither coercion is
+        // ever stored over the preference.
+        let restored = ChartSelectionMemory.restoredSelection(in: chartAssetContext, screenDefault: selectedChartRange)
+        selectedChartRange = restored.range
+        chartSettings.selectedInterval = restored.interval
+
         $selectedChartRange
             .dropFirst()
             .removeDuplicates()
@@ -129,7 +141,7 @@ class CryptoDetailViewModel: ObservableObject {
                 // Assigning the interval fires the interval sink SYNCHRONOUSLY;
                 // suppress its reload so a range change drives exactly one fetch.
                 self.suppressIntervalReload = true
-                self.chartSettings.selectedInterval = range.defaultInterval
+                self.chartSettings.selectedInterval = ChartSelectionMemory.rememberedInterval(for: range, in: self.chartAssetContext)
                 self.suppressIntervalReload = false
                 Task { await self.fetchChartForRange() }
             }

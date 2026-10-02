@@ -82,6 +82,39 @@ struct CryptoFearGreedSection: View {
     }
 }
 
+// MARK: - Remembered timeframe
+
+/// The 1D/7D/30D choice, remembered on this device; `CryptoDetailView` holds it in
+/// `@AppStorage` under this key (it was a per-ViewModel copy that reset to 1D on every
+/// pushed coin and relaunch). `CryptoFearGreedData` always carries all three scores, so any
+/// stored value is displayable.
+///
+/// Device-only, and deliberately NOT cleared by `AppState.discardDataForEndedSession()`: a
+/// display choice of this phone, not account data.
+extension FearGreedTimeframe {
+    static let storageKey = "caydex_fear_greed_timeframe"
+    static let defaultChoice: FearGreedTimeframe = .today
+
+    /// What is stored — NOT `rawValue`, which is the pill LABEL ("1D"). Never change an id.
+    var storageID: String {
+        switch self {
+        case .today:     return "today"
+        case .sevenDay:  return "seven_day"
+        case .thirtyDay: return "thirty_day"
+        }
+    }
+
+    /// The default for a missing or unknown id. Display-only — never written back.
+    static func stored(_ id: String) -> FearGreedTimeframe {
+        allCases.first { $0.storageID == id } ?? defaultChoice
+    }
+
+    /// `@AppStorage`'s string as the toggle's binding; only a tap writes.
+    static func binding(_ id: Binding<String>) -> Binding<FearGreedTimeframe> {
+        Binding(get: { Self.stored(id.wrappedValue) }, set: { id.wrappedValue = $0.storageID })
+    }
+}
+
 // MARK: - Timeframe Toggle
 
 private struct FearGreedTimeframeToggle: View {

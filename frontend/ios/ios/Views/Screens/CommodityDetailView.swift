@@ -121,9 +121,19 @@ struct CommodityDetailView: View {
                             isPositive: commodityData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
-                            assetContext: .commodity,
+                            assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
-                            previousClose: commodityData.chartPreviousClose
+                            previousClose: commodityData.chartPreviousClose,
+                            // FRED-sourced WTI and Henry Hub publish one settled value per day,
+                            // so the backend answers 1D/1W with no bars by design
+                            // (`commodity_service`), and a remembered 1D can now be the range this
+                            // screen OPENS on. The same empty answer also comes back when an
+                            // ETF-backed metal's intraday fetch FAILS (the service returns [] on
+                            // an upstream error), so the wording claims only what is true in
+                            // both cases — never "no intraday prices" about gold.
+                            placeholder: viewModel.selectedChartRange.defaultInterval.isIntraday
+                                ? .note("Intraday chart unavailable for this commodity. Try 3M or longer.")
+                                : nil
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {

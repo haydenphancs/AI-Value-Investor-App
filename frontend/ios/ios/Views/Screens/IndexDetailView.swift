@@ -133,7 +133,7 @@ struct IndexDetailView: View {
                             isPositive: indexData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
-                            assetContext: .index,
+                            assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
                             chartEventDates: viewModel.chartEventDates,
                             previousClose: indexData.chartPreviousClose

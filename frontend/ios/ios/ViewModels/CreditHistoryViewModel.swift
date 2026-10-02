@@ -110,18 +110,16 @@ final class CreditHistoryViewModel: ObservableObject {
     }
 
     private func performLoad() async {
-        // THREE outcomes, not two. `GET /users/me/credits/history` is `.signInRequired`, so a
-        // signed-out caller is refused PRE-FLIGHT by APIClient and the raw failure would render
-        // as a generic error blob. And "not armed right now" is not "signed out": at launch this
-        // can run while session restore is still in flight.
-        guard AppActions.shared.isSignedIn else {
-            invalidateLoadMore()
-            items = []
-            regroup()
-            nextCursor = nil
-            state = AppActions.shared.isRestoringSession ? .reconnecting : .signedOut
-            return
-        }
+        // THREE outcomes, not two — "not armed right now" is not "signed out" — and all three
+        // are decided from the OUTCOME of the request, never from a pre-flight `auth.status`
+        // read (the shape of `NotificationInboxViewModel.performLoad`, which this mirrors).
+        //
+        // This used to open with `guard AppActions.shared.isSignedIn`. `performRestore` arms
+        // the stored token while the status still reads `.restoring` — at launch and on every
+        // heal — so that guard refused an ARMED request that would have succeeded and latched
+        // "Reconnecting…". `GET /users/me/credits/history` is `.signInRequired`, so an UNARMED
+        // call is refused by `APIClient.buildRequest` before any I/O and arrives here typed as
+        // `AppError.signInRequired`; asking it costs nothing.
         do {
             let page = try await repository.fetchCreditHistory(limit: Self.pageSize, before: nil)
             guard !Task.isCancelled else { return }
@@ -139,6 +137,22 @@ final class CreditHistoryViewModel: ObservableObject {
             // anything unknown into `APIError.networkError`, so cancellation arrives nested.
             // `Task.isCancelled` is the reliable check.
             let appError = AppError.from(error)
+            if case .signInRequired = appError {
+                // No token armed, so APIClient refused before any I/O. Drop rows nothing can
+                // refresh (another account's spending must not survive under the gate), and
+                // say WHY: "Reconnecting…" for a stored credential that is healing (auth.md §5),
+                // the sign-in prompt otherwise. `CreditHistoryView` heals it on `.authenticated`
+                // and on an identity change.
+                invalidateLoadMore()
+                items = []
+                regroup()
+                nextCursor = nil
+                let reconnecting = AppActions.shared.isRestoringSession
+                state = reconnecting ? .reconnecting : .signedOut
+                // The designed path while no credential is armed — info, not a failure.
+                log.info("load credit history refused — no armed credential (reconnecting: \(reconnecting, privacy: .public))")
+                return
+            }
             log.error("load credit history failed: \(String(describing: type(of: error))): \(appError.message, privacy: .public)")
             // An EMPTY statement and a BROKEN statement must not look alike — the backend
             // answers SYSTEM_BUSY rather than an empty 200 precisely so this branch can exist.

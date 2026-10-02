@@ -649,6 +649,333 @@ async def test_delete_record_failures(bsky, answer, exc):
         await bluesky.delete_record(PDS, ACCESS, repo=DID, collection=bluesky.POST_COLLECTION, rkey=RKEY)
 
 
+# ── the public AppView: getPosts / getProfile (the measure step) ──────────────
+
+
+URI2 = f"at://{DID}/app.bsky.feed.post/3lb2c4d5e6f7h"
+INDEXED = "2026-10-03T20:15:03.000Z"
+
+
+def _view(uri: str = URI, **counts: Any) -> dict:
+    """A post view as the AppView sends it — author, record (the TEXT) and viewer state included."""
+    return {"uri": uri, "cid": CID, "author": {"did": DID, "handle": HANDLE, "displayName": "Caydex"},
+            "record": dict(RECORD), "indexedAt": INDEXED, "labels": [], "viewer": {}, **counts}
+
+
+def _uris(n: int) -> List[str]:
+    return [f"at://{DID}/app.bsky.feed.post/3lb2c4d5e{i:04d}" for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_get_posts_asks_the_public_appview_without_a_credential(bsky, configured):
+    bsky.answers = [(200, {"posts": [
+        _view(URI, likeCount=4, repostCount=1, replyCount=0, quoteCount=0, bookmarkCount=2),
+        _view(URI2, likeCount=0),
+    ]})]
+    out = await bluesky.get_posts([URI, URI2])
+
+    assert out == [
+        {"uri": URI, "cid": CID, "likeCount": 4, "repostCount": 1, "replyCount": 0, "quoteCount": 0,
+         "bookmarkCount": 2, "indexedAt": INDEXED},
+        {"uri": URI2, "cid": CID, "likeCount": 0, "indexedAt": INDEXED},
+    ]
+    req = bsky.last
+    assert req.method == "GET"
+    assert req.url.scheme == "https" and req.url.host == "public.api.bsky.app"
+    assert req.url.path == "/xrpc/app.bsky.feed.getPosts"
+    # A query ARRAY repeats the parameter name.
+    assert req.url.params.multi_items() == [("uris", URI), ("uris", URI2)]
+    assert "authorization" not in req.headers
+    assert req.content == b""
+    # Neither the post text nor the author leaves the client.
+    assert "Hello" not in repr(out) and HANDLE not in repr(out)
+
+
+def test_the_appview_is_the_documented_public_host():
+    assert bluesky.APPVIEW_URL == "https://public.api.bsky.app"
+
+
+@pytest.mark.asyncio
+async def test_get_posts_returns_counts_exactly_as_sent(bsky):
+    # Counts the lexicon calls integers but a hostile or buggy answer sends otherwise: untouched.
+    odd = {"likeCount": "12", "repostCount": None, "replyCount": -3, "quoteCount": True, "bookmarkCount": 1.5}
+    bsky.answers = [(200, {"posts": [_view(URI, **odd)]})]
+    (view,) = await bluesky.get_posts([URI])
+    assert {k: view[k] for k in odd} == odd
+    assert set(view) == {"uri", "cid", "indexedAt", *odd}
+
+
+@pytest.mark.asyncio
+async def test_get_posts_a_view_without_counts_has_no_count_keys_not_zeros(bsky):
+    bsky.answers = [(200, {"posts": [{"uri": URI}]})]
+    assert await bluesky.get_posts([URI]) == [{"uri": URI}]
+
+
+@pytest.mark.asyncio
+async def test_get_posts_a_deleted_post_is_simply_absent(bsky):
+    bsky.answers = [(200, {"posts": [_view(URI2, likeCount=1)]}), (200, {"posts": []})]
+    assert [v["uri"] for v in await bluesky.get_posts([URI, URI2])] == [URI2]
+    assert await bluesky.get_posts([URI]) == []
+
+
+@pytest.mark.parametrize("empty", [[], ()])
+@pytest.mark.asyncio
+async def test_get_posts_with_no_uris_makes_no_call(bsky, empty):
+    assert await bluesky.get_posts(empty) == []
+    assert bsky.requests == []
+
+
+@pytest.mark.asyncio
+async def test_get_posts_takes_25_and_refuses_26_before_sending(bsky):
+    bsky.answers = [(200, {"posts": []})]
+    assert await bluesky.get_posts(_uris(25)) == []
+    assert bsky.last.url.params.get_list("uris") == _uris(25)
+    with pytest.raises(bluesky.BlueskyRefusedError) as info:
+        await bluesky.get_posts(_uris(26))
+    assert type(info.value) is bluesky.BlueskyRefusedError and info.value.status is None
+    assert "26" in str(info.value) and len(bsky.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_posts_asks_for_a_repeated_uri_once(bsky):
+    bsky.answers = [(200, {"posts": [_view(URI)]})]
+    await bluesky.get_posts((URI, URI2, URI))
+    assert bsky.last.url.params.get_list("uris") == [URI, URI2]
+
+
+_BAD_URIS = [
+    "http://bsky.app/profile/caydex.bsky.social/post/3lb2c4d5e6f7g",
+    f"https://bsky.app/profile/{DID}/post/{RKEY}",
+    f"at://{HANDLE}/app.bsky.feed.post/{RKEY}",                 # a handle can change hands
+    f"at://{DID}/app.bsky.feed.like/{RKEY}",                     # wrong collection
+    f"at://{DID}/app.bsky.feed.repost/{RKEY}",
+    f"at://{DID}/app.bsky.feed.post/",                            # empty record key
+    f"at://{DID}/app.bsky.feed.post",
+    f"at://{DID}",
+    f"at://{DID}/app.bsky.feed.post/{RKEY}/extra",
+    f"at://{DID}/app.bsky.feed.post/{RKEY}\n",                    # a trailing newline ($ would pass it)
+    f"at://{DID}/app.bsky.feed.post/{RKEY}\nX-Evil: 1",
+    f" {URI}", f"{URI} ",
+    f"at://{DID}/app.bsky.feed.post/.", f"at://{DID}/app.bsky.feed.post/..",
+    f"at://{DID}/app.bsky.feed.post/a b",
+    f"at://{DID}/app.bsky.feed.post/{RKEY}?x=1",
+    f"at://{DID}/app.bsky.feed.post/{RKEY}#frag",
+    f"at://{DID}/app.bsky.feed.post/{'r' * 513}",                 # record key over 512
+    f"at://did:plc:{'a' * 3000}/app.bsky.feed.post/{RKEY}",       # DID over 2 KB
+    "at://" + "x" * 10_000,
+    "at://did:PLC:abc123xyz789/app.bsky.feed.post/3lb",          # the method is lowercase
+    "at://did:plc:/app.bsky.feed.post/3lb",                      # empty identifier
+    "at://did:plc:abc:/app.bsky.feed.post/3lb",                  # ends in ":"
+    "at://did:plc:abc%/app.bsky.feed.post/3lb",                  # ends in "%"
+    "at:///app.bsky.feed.post/3lb",
+    "AT://did:plc:abc/app.bsky.feed.post/3lb",
+    "",
+    None, 123, b"at://did:plc:abc/app.bsky.feed.post/3lb", {"uri": URI},
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_URIS)
+@pytest.mark.asyncio
+async def test_get_posts_refuses_a_malformed_uri_before_sending(bsky, bad):
+    with pytest.raises(bluesky.BlueskyRefusedError) as info:
+        await bluesky.get_posts([URI, bad])
+    e = info.value
+    assert type(e) is bluesky.BlueskyRefusedError and e.status is None
+    assert e.method == "app.bsky.feed.getPosts" and "uris[1]" in str(e) and "nothing was sent" in str(e)
+    assert len(str(e)) < 400 and "\n" not in str(e)
+    assert bsky.requests == []
+
+
+@pytest.mark.parametrize("uris", [URI, None, 5, {URI}, {URI: 1}, (u for u in [URI]), URI.encode()])
+@pytest.mark.asyncio
+async def test_get_posts_needs_a_list_or_tuple(bsky, uris):
+    with pytest.raises(bluesky.BlueskyRefusedError) as info:
+        await bluesky.get_posts(uris)
+    assert info.value.status is None
+    assert bsky.requests == []
+
+
+@pytest.mark.parametrize("good", [
+    URI, URI2, "at://did:web:example.com/app.bsky.feed.post/3lb2c4d5e6f7g",
+    "at://did:web:localhost%3A8080/app.bsky.feed.post/self", f"at://{DID}/app.bsky.feed.post/a.b_c:d~e-f",
+    f"at://{DID}/app.bsky.feed.post/{'r' * 512}",
+])
+def test_is_post_uri_accepts_the_spec_shapes(good):
+    assert bluesky.is_post_uri(good) is True
+
+
+@pytest.mark.parametrize("bad", _BAD_URIS)
+def test_is_post_uri_refuses_everything_else(bad):
+    assert bluesky.is_post_uri(bad) is False
+
+
+@pytest.mark.parametrize("answer", [
+    (200, {}),                                          # no posts list: NOT "every post deleted"
+    (200, {"posts": None}),
+    (200, {"posts": {}}),
+    (200, {"posts": "x"}),
+    (200, {"feed": [{"uri": URI}]}),
+    (200, {"posts": ["x"]}),
+    (200, {"posts": [None]}),
+    (200, {"posts": [{"cid": CID, "likeCount": 3}]}),   # a view without a uri
+    (200, {"posts": [{"uri": 5}]}),
+    (200, {"posts": [{"uri": ""}]}),
+    (200, {"posts": [{"uri": URI}, {"likeCount": 3}]}),
+    (200, b"not json"),
+    (200, b"[1, 2]"),
+    (200, b""),
+])
+@pytest.mark.asyncio
+async def test_get_posts_an_unreadable_answer_is_ambiguous(bsky, answer):
+    bsky.answers = [answer]
+    with pytest.raises(bluesky.BlueskyAmbiguousError) as info:
+        await bluesky.get_posts([URI])
+    assert type(info.value) is bluesky.BlueskyAmbiguousError and info.value.status == 200
+    assert info.value.method == "app.bsky.feed.getPosts"
+
+
+@pytest.mark.asyncio
+async def test_get_profile_by_did_reads_the_counts_without_a_credential(bsky, configured):
+    bsky.answers = [(200, {"did": DID, "handle": HANDLE, "displayName": "Caydex", "description": "bio text",
+                           "followersCount": 12, "followsCount": 3, "postsCount": 40, "indexedAt": INDEXED})]
+    out = await bluesky.get_profile(DID)
+
+    assert out == {"did": DID, "handle": HANDLE, "followersCount": 12, "followsCount": 3, "postsCount": 40}
+    req = bsky.last
+    assert req.method == "GET" and req.url.host == "public.api.bsky.app"
+    assert req.url.path == "/xrpc/app.bsky.actor.getProfile"
+    assert req.url.params.multi_items() == [("actor", DID)]
+    assert "authorization" not in req.headers and req.content == b""
+
+
+@pytest.mark.parametrize("given, sent", [
+    (HANDLE, HANDLE), (f"@{HANDLE}", HANDLE), (f"  {HANDLE}\n", HANDLE), ("Caydex.Bsky.Social", "Caydex.Bsky.Social"),
+])
+@pytest.mark.asyncio
+async def test_get_profile_by_handle(bsky, given, sent):
+    bsky.answers = [(200, {"did": DID, "handle": HANDLE, "followersCount": 1})]
+    out = await bluesky.get_profile(given)
+    assert bsky.last.url.params.multi_items() == [("actor", sent)]
+    # Absent counts are None — never 0.
+    assert out == {"did": DID, "handle": HANDLE, "followersCount": 1, "followsCount": None, "postsCount": None}
+
+
+@pytest.mark.asyncio
+async def test_get_profile_returns_counts_exactly_as_sent(bsky):
+    body = {"did": DID, "handle": HANDLE, "followersCount": "12", "followsCount": -1, "postsCount": True}
+    bsky.answers = [(200, body)]
+    assert await bluesky.get_profile(DID) == body
+
+
+@pytest.mark.parametrize("actor", [
+    "", "   ", "@", None, 42, b"did:plc:abc", ["did:plc:abc"],
+    "did:", "did:plc:", "did:PLC:abc", "did:plc:abc:", f"did:plc:{'a' * 3000}",
+    "not a handle", "caydex", "caydex.", ".caydex.bsky.social", "caydex..bsky.social",
+    "-caydex.bsky.social", "caydex.bsky.123", f"{'a' * 64}.bsky.social", "a." * 130 + "social",
+    f"{HANDLE}\nX-Evil: 1", "https://bsky.app/profile/caydex.bsky.social", "@@caydex.bsky.social",
+])
+@pytest.mark.asyncio
+async def test_get_profile_refuses_an_actor_that_is_neither_a_did_nor_a_handle(bsky, actor):
+    with pytest.raises(bluesky.BlueskyRefusedError) as info:
+        await bluesky.get_profile(actor)
+    e = info.value
+    assert type(e) is bluesky.BlueskyRefusedError and e.status is None and "nothing was sent" in str(e)
+    assert bsky.requests == []
+
+
+@pytest.mark.parametrize("actor, answer", [
+    (DID, (200, {})),                                                       # no did
+    (DID, (200, {"handle": HANDLE, "followersCount": 99999})),
+    (DID, (200, {"did": None, "handle": HANDLE})),
+    (DID, (200, {"did": "plc:abc123xyz789", "handle": HANDLE})),           # not a DID
+    (DID, (200, {"did": 5})),
+    (DID, (200, {"did": "did:plc:someoneelse0000", "handle": HANDLE, "followersCount": 99999})),
+    (HANDLE, (200, {"did": DID, "handle": "someone.else.social", "followersCount": 99999})),
+    (HANDLE, (200, {"did": DID, "handle": "handle.invalid", "followersCount": 99999})),
+    (HANDLE, (200, {"did": DID, "followersCount": 99999})),                # nothing to compare with
+    (HANDLE, (200, {"did": DID, "handle": 5})),
+    (DID, (200, b"not json")),
+    (DID, (200, [DID])),
+])
+@pytest.mark.asyncio
+async def test_get_profile_about_another_account_or_unreadable_is_ambiguous(bsky, actor, answer):
+    bsky.answers = [answer]
+    with pytest.raises(bluesky.BlueskyAmbiguousError) as info:
+        await bluesky.get_profile(actor)
+    e = info.value
+    assert type(e) is bluesky.BlueskyAmbiguousError and e.status == 200
+    assert e.method == "app.bsky.actor.getProfile"
+    assert "99999" not in str(e)   # another account's numbers never travel
+
+
+@pytest.mark.asyncio
+async def test_get_profile_another_account_message_cannot_forge_a_log_line(bsky):
+    bsky.answers = [(200, {"did": DID, "handle": "evil.example\nERROR forged: line " + "z" * 500})]
+    with pytest.raises(bluesky.BlueskyAmbiguousError) as info:
+        await bluesky.get_profile(HANDLE)
+    text = str(info.value)
+    assert "another account" in text and "\n" not in text and len(text) < 400
+
+
+_APPVIEW_READS = {
+    "posts": lambda: bluesky.get_posts([URI]),
+    "profile": lambda: bluesky.get_profile(DID),
+}
+
+
+@pytest.mark.parametrize("read", sorted(_APPVIEW_READS))
+@pytest.mark.parametrize("answer, exc, status", [
+    ((400, {"error": "InvalidRequest", "message": "uris/0 must be a valid at-uri"}), bluesky.BlueskyRefusedError, 400),
+    ((400, {"error": "AccountDeactivated", "message": "Account is deactivated"}), bluesky.BlueskyRefusedError, 400),
+    ((401, {"error": "AuthenticationRequired"}), bluesky.BlueskyAuthError, 401),
+    ((404, b"<html>not found</html>"), bluesky.BlueskyRefusedError, 404),
+    ((408, b""), bluesky.BlueskyAmbiguousError, 408),
+    ((500, {"error": "InternalServerError"}), bluesky.BlueskyAmbiguousError, 500),
+    ((502, b"<html>bad gateway</html>"), bluesky.BlueskyAmbiguousError, 502),
+    ((302, b"", {"location": "https://elsewhere.example"}), bluesky.BlueskyAmbiguousError, 302),
+    (_rate_limited({}), bluesky.BlueskyRateLimitError, 429),
+    (_raiser(httpx.ConnectError), bluesky.BlueskyNotSentError, None),
+    (_raiser(httpx.ReadTimeout), bluesky.BlueskyAmbiguousError, None),
+])
+@pytest.mark.asyncio
+async def test_appview_reads_map_every_answer(bsky, read, answer, exc, status):
+    bsky.answers = [answer]
+    with pytest.raises(exc) as info:
+        await _APPVIEW_READS[read]()
+    e = info.value
+    assert type(e) is exc and e.status == status
+    assert len(bsky.requests) == 1   # never retried, never followed a redirect
+    assert e.__cause__ is None and e.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_appview_429_carries_retry_at(bsky):
+    reset = int(time.time()) + 120
+    bsky.answers = [_rate_limited({"ratelimit-reset": str(reset)})]
+    with pytest.raises(bluesky.BlueskyRateLimitError) as info:
+        await bluesky.get_posts([URI])
+    assert info.value.retry_at == datetime.fromtimestamp(reset, tz=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_appview_reads_take_another_https_host(bsky):
+    bsky.answers = [(200, {"posts": []}), (200, {"did": DID, "handle": HANDLE})]
+    await bluesky.get_posts([URI], host="https://api.bsky.app/")
+    await bluesky.get_profile(DID, host="https://api.bsky.app")
+    assert [(r.url.host, r.url.path) for r in bsky.requests] == [
+        ("api.bsky.app", "/xrpc/app.bsky.feed.getPosts"), ("api.bsky.app", "/xrpc/app.bsky.actor.getProfile")]
+
+
+@pytest.mark.parametrize("host", ["http://public.api.bsky.app", "public.api.bsky.app", "", "https://", None])
+@pytest.mark.asyncio
+async def test_a_non_https_appview_is_refused_before_sending(bsky, host):
+    with pytest.raises(bluesky.BlueskyNotConfiguredError):
+        await bluesky.get_posts([URI], host=host)
+    with pytest.raises(bluesky.BlueskyNotConfiguredError):
+        await bluesky.get_profile(DID, host=host)
+    assert bsky.requests == []
+
+
 # ── not configured ────────────────────────────────────────────────────────────
 
 
@@ -711,6 +1038,14 @@ _SECRET_CASES = [
     ("delete", _echo(400, "InvalidRequest")),
     ("delete", _raiser(httpx.RemoteProtocolError)),
     ("get", _echo(400, "InvalidRequest")),
+    ("posts", _echo(400, "InvalidRequest")),
+    ("posts", _echo(503, "UpstreamFailure")),
+    ("posts", _echo(429, "RateLimitExceeded", {"ratelimit-reset": "x"})),
+    ("posts", _raiser(httpx.ConnectError)),
+    ("posts", _raiser(httpx.ReadTimeout)),
+    ("profile", _echo(400, "InvalidRequest")),
+    ("profile", _echo(401, "AuthenticationRequired")),
+    ("profile", _raiser(httpx.PoolTimeout)),
 ]
 
 
@@ -728,6 +1063,10 @@ async def test_no_secret_in_any_exception_or_log(bsky, configured, caplog, call,
             await _put(token=OPAQUE)
         elif call == "delete":
             await bluesky.delete_record(PDS, ACCESS, repo=DID, collection=bluesky.POST_COLLECTION, rkey=RKEY)
+        elif call == "posts":
+            await bluesky.get_posts([URI])
+        elif call == "profile":
+            await bluesky.get_profile(DID)
         else:
             await _get()
     e = info.value
@@ -736,6 +1075,9 @@ async def test_no_secret_in_any_exception_or_log(bsky, configured, caplog, call,
         for secret in SECRETS:
             assert secret not in surface, (call, secret, surface[:200])
     assert e.__cause__ is None
+    if call in ("posts", "profile"):
+        # The AppView never receives a credential to echo in the first place.
+        assert all("authorization" not in r.headers for r in bsky.requests)
 
 
 @pytest.mark.asyncio

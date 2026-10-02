@@ -208,6 +208,12 @@ class ChatViewModel: ObservableObject {
     /// "Grounded on …" chip. @Published so the chip updates on start/load.
     @Published var currentContextType: ChatContextType?
     @Published private(set) var currentReferenceId: String?
+    /// The SERVER's verdict on whether the screen's grounding actually reached the latest
+    /// turn (the `grounding` frame, then `done` / the non-stream reply / history). The chip
+    /// used to key on `currentContextType` alone, so a report chat whose report could not be
+    /// found still read "Grounded on Research Report". nil = no verdict yet (or an old
+    /// server): the chip stays as it was. Cleared wherever the context type is (re)assigned.
+    @Published private(set) var contextGrounded: Bool?
     /// Starter chips supplied by the screen that opened this chat (the Updates tab passes
     /// questions about the feed it is showing). Shown only while the chat is empty; empty
     /// means `AIChatScreen` falls back to its own derived set. Cleared with the conversation.
@@ -365,6 +371,7 @@ class ChatViewModel: ObservableObject {
         currentContext = context
         currentContextType = contextType
         currentReferenceId = referenceId
+        contextGrounded = nil
         self.starterChips = starterChips
     }
 
@@ -413,6 +420,7 @@ class ChatViewModel: ObservableObject {
         currentContext = context
         currentContextType = contextType
         currentReferenceId = referenceId
+        contextGrounded = nil
         // A seeded chat is never empty, and another screen's chips must not outlive it.
         starterChips = []
 
@@ -578,6 +586,7 @@ class ChatViewModel: ObservableObject {
         currentContext = nil
         currentContextType = nil
         currentReferenceId = nil
+        contextGrounded = nil
         starterChips = []
         messages = []
         isLoadingSession = true
@@ -600,6 +609,9 @@ class ChatViewModel: ObservableObject {
                 currentStockId = history.session.stockId
                 currentContextType = history.session.chatContextType
                 currentReferenceId = history.session.referenceId
+                // The last answered turn's verdict, so a reopened report chat whose report
+                // was already gone does not open claiming it.
+                contextGrounded = ChatMessageDTO.latestGroundingVerdict(in: history.messages)
                 // The BOOK client-context string isn't persisted server-side; a
                 // resumed book chat stays grounded via its message history instead.
                 currentContext = nil
@@ -816,6 +828,7 @@ class ChatViewModel: ObservableObject {
         currentContext = nil
         currentContextType = nil
         currentReferenceId = nil
+        contextGrounded = nil
         starterChips = []
         messages = []
         isAITyping = false
@@ -892,6 +905,7 @@ class ChatViewModel: ObservableObject {
             }
             let richMessage = response.toRichChatMessage()
             messages.append(richMessage)
+            adoptGroundingVerdict(response.contextGrounded)
             isAITyping = false
 
             let hasWidget = response.widget != nil
@@ -918,6 +932,7 @@ class ChatViewModel: ObservableObject {
                                                 knownAssistantServerIds: known) {
                         print("✅ [ChatVM] Send timed out but the turn was persisted — adopting history")
                         messages = history.messages.map { $0.toRichChatMessage() }
+                        adoptGroundingVerdict(ChatMessageDTO.latestGroundingVerdict(in: history.messages))
                         isAITyping = false
                         refreshCreditsIfMoved(nil)
                         return
@@ -1065,6 +1080,13 @@ class ChatViewModel: ObservableObject {
                     else { continue }
                     appendThinkingStage(id: ensureBubble(), stage: Self.thinkingLabel(forTool: name))
 
+                case "grounding":
+                    // The server's verdict on whether this screen's grounding reached the
+                    // turn, sent right after it resolved — so the chip stops claiming a
+                    // report while the answer streams, not after it. `done` carries the
+                    // final one (a fallback re-resolves). Not a bubble event: no ensureBubble.
+                    adoptGroundingVerdict(Self.decodeGroundingVerdict(event.data))
+
                 case "sources":
                     // Grounded-context source pills for the thinking card.
                     guard let srcs = Self.decodeSources(event.data), !srcs.isEmpty else { continue }
@@ -1139,6 +1161,9 @@ class ChatViewModel: ObservableObject {
                     } else {
                         messages.append(base)
                     }
+                    // The PERSISTED verdict: on a stream→non-stream fallback it can differ
+                    // from the early `grounding` frame, and this is the one history replays.
+                    adoptGroundingVerdict(dto.contextGrounded)
                     finishStreaming()
                     // After the answer is on screen, never before — a balance refresh must
                     // not delay what the user is reading.
@@ -1316,6 +1341,7 @@ class ChatViewModel: ObservableObject {
                                             knownAssistantServerIds: known) {
                     // The stream DID persist this turn — adopt server state, don't re-send.
                     messages = history.messages.map { $0.toRichChatMessage() }
+                    adoptGroundingVerdict(ChatMessageDTO.latestGroundingVerdict(in: history.messages))
                     isAITyping = false
                     // The `credits` frame never arrived (it precedes `done`), so the
                     // balance was last read BEFORE this charged turn; the non-stream
@@ -1637,6 +1663,27 @@ class ChatViewModel: ObservableObject {
         struct Payload: Decodable { let sources: [ChatSource] }
         guard let data = json.data(using: .utf8) else { return nil }
         return (try? JSONDecoder().decode(Payload.self, from: data))?.sources
+    }
+
+    /// `{"context_grounded": Bool}` from the `grounding` frame. A malformed frame is nil —
+    /// "no verdict" — never a decode failure that aborts the stream.
+    private static func decodeGroundingVerdict(_ json: String) -> Bool? {
+        struct Payload: Decodable {
+            let contextGrounded: Bool?
+            enum CodingKeys: String, CodingKey { case contextGrounded = "context_grounded" }
+        }
+        guard let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Payload.self, from: data))?.contextGrounded
+    }
+
+    /// Record the server's grounding verdict for the chip. nil (an old server, a context type
+    /// with no verdict, a malformed frame) never clears one already known for this chat.
+    private func adoptGroundingVerdict(_ verdict: Bool?) {
+        guard let verdict else { return }
+        if !verdict {
+            print("⚠️ [ChatVM] Server reports \(currentContextType?.rawValue ?? "nil") grounding did not reach the turn (ref: \(currentReferenceId ?? "nil")) — softening the chip")
+        }
+        contextGrounded = verdict
     }
 
     /// Group sessions into TODAY / YESTERDAY / OLDER for the history panel.

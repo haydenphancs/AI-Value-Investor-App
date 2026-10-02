@@ -52,6 +52,9 @@ _UPDATES_VM = _IOS / "ViewModels/UpdatesViewModel.swift"
 _TRACKING_VIEW = _IOS / "Views/Screens/TrackingView.swift"
 _TRACKING_VM = _IOS / "ViewModels/TrackingViewModel.swift"
 _RESEARCH_VM = _IOS / "ViewModels/ResearchViewModel.swift"
+_INBOX_VM = _IOS / "ViewModels/NotificationInboxViewModel.swift"
+_PRICE_ALERTS = _IOS / "Core/Services/PriceAlertStore.swift"
+_CREDIT_HISTORY_VM = _IOS / "ViewModels/CreditHistoryViewModel.swift"
 _REPORTS_LIST = _IOS / "Views/Organisms/ReportsListSection.swift"
 _LEARN_VIEW = _IOS / "Views/Screens/LearnView.swift"
 
@@ -135,6 +138,9 @@ _VM_CLASS = {
     # ⚠️ `_decl_block` balances braces on the RAW text, comments included, across this whole
     # ~1,500-line class. One unbalanced brace in a comment would cut the class block short.
     _RESEARCH_VM: "class ResearchViewModel: ObservableObject",
+    _INBOX_VM: "final class NotificationInboxViewModel: ObservableObject",
+    _PRICE_ALERTS: "final class PriceAlertStore: ObservableObject",
+    _CREDIT_HISTORY_VM: "final class CreditHistoryViewModel: ObservableObject",
 }
 
 # Every load that can be REFUSED for want of an armed token, and the flag pair it owns.
@@ -159,9 +165,30 @@ _GATED_LOADS = {
                 "isReconnectingReports", "requiresSignInForReports"),
 }
 
+# The same rule for the loads whose gate is ONE `State` enum (`.reconnecting` / `.signedOut`)
+# rather than a flag pair — Tracking › Alerts' two account-scoped sections. Both opened with
+# `guard AppActions.shared.isSignedIn` until 2026-10-02, refusing the ARMED launch request.
+# The flag-pair checks above cannot express an enum, so these rows share only
+# `test_no_load_decides_the_gate_from_auth_status` and get their own enum-shaped checks below;
+# the deeper per-load pins (cancellation and epoch ordering, the badge, the freshness stamp,
+# the deliberate status reads left in those files) are in test_ios_alerts_gate_from_refusal.py.
+# Account › Credit History had the same guard until 2026-10-02; its deeper pins (the day
+# groups, the in-flight Load more, the refusal chain, the screen's heal) are in
+# test_ios_credit_history_gate_from_refusal.py.
+_GATED_STATE_LOADS = {
+    "Alerts/Notifications": (_INBOX_VM, "private func performLoad() async"),
+    "Alerts/PriceAlerts": (_PRICE_ALERTS, "private func performLoad() async"),
+    "Account/CreditHistory": (_CREDIT_HISTORY_VM, "private func performLoad() async"),
+}
+
+_ALL_GATED_LOADS = sorted(_GATED_LOADS) + sorted(_GATED_STATE_LOADS)
+
 
 def _load_block(name: str) -> str:
-    path, header, _, _ = _GATED_LOADS[name]
+    if name in _GATED_STATE_LOADS:
+        path, header = _GATED_STATE_LOADS[name]
+    else:
+        path, header, _, _ = _GATED_LOADS[name]
     return _decl_block(_decl_block(_read(path), _VM_CLASS[path]), header)
 
 
@@ -221,7 +248,7 @@ def test_each_load_classifies_the_typed_refusal(load):
     )
 
 
-@pytest.mark.parametrize("load", sorted(_GATED_LOADS), ids=sorted(_GATED_LOADS))
+@pytest.mark.parametrize("load", _ALL_GATED_LOADS, ids=_ALL_GATED_LOADS)
 def test_no_load_decides_the_gate_from_auth_status(load):
     """The regression the adversarial review found in this pass's FIRST version, measured on
     the simulator: every signed-in cold launch showed "Reconnecting…" instead of the dashboard.
@@ -255,6 +282,64 @@ def test_each_load_clears_its_own_gate_when_it_is_not_refused(load):
             f"{load} clears `{flag}` on {cleared} path(s); it must clear on success AND on a "
             "non-auth failure, or a latched gate survives the load that disproved it"
         )
+
+
+_GATE_STATE_WRITE = "state = reconnecting ? .reconnecting : .signedOut"
+
+
+@pytest.mark.parametrize("load", sorted(_GATED_STATE_LOADS), ids=sorted(_GATED_STATE_LOADS))
+def test_every_gate_state_is_observable(load):
+    """`@Published` is load-bearing for the enum exactly as for the flags (a plain `var` never
+    re-renders), and `private(set)` keeps a view from writing the gate from a status read."""
+    path, _ = _GATED_STATE_LOADS[load]
+    cls = _decl_block(_read(path), _VM_CLASS[path])
+    assert re.search(r"@Published\s+private\(set\)\s+var\s+state:\s*State\b", cls), (
+        f"{load}: `state` is not a `@Published private(set)` property, so the gate is either "
+        "invisible to the view or writable from it"
+    )
+
+
+@pytest.mark.parametrize("load", sorted(_GATED_STATE_LOADS), ids=sorted(_GATED_STATE_LOADS))
+def test_each_state_load_classifies_the_typed_refusal(load):
+    """The enum twin of `test_each_load_classifies_the_typed_refusal`: the refusal picks
+    `.reconnecting` vs `.signedOut` from `isRestoringSession`, inside the arm, and stops there."""
+    branch = _refusal_branch(_load_block(load))
+    assert re.search(r"\blet\s+reconnecting\s*=\s*AppActions\.shared\.isRestoringSession\s*\n",
+                     branch), (
+        f"{load} collapses 'reconnecting' into 'signed out' (or inverts the read), so a user "
+        "whose session is merely being restored is offered a Sign In button that requestSignIn "
+        "refuses to act on"
+    )
+    assert branch.count(_GATE_STATE_WRITE) == 1 and len(re.findall(r"\bstate\s*=(?!=)", branch)) == 1, (
+        f"{load}'s refusal does not write the gate exactly once as `{_GATE_STATE_WRITE}`"
+    )
+    assert re.search(r"\breturn\s*\}\s*$", branch), (
+        f"{load}'s refusal falls through into the error path, which overwrites the gate with "
+        "an error the user cannot fix by retrying"
+    )
+
+
+@pytest.mark.parametrize("load", sorted(_GATED_STATE_LOADS), ids=sorted(_GATED_STATE_LOADS))
+def test_each_state_load_leaves_the_gate_on_every_other_outcome(load):
+    """The enum twin of the clears-its-own-gate check: success and a real failure each assign
+    `state`, and nothing outside the refusal arm can write `.reconnecting` / `.signedOut`."""
+    block = _load_block(load)
+    branch = _refusal_branch(block)
+    rest = block.replace(branch, "", 1)
+    assert not re.search(r"\.(reconnecting|signedOut)\b", rest), (
+        f"{load} writes an account-gate state outside its typed-refusal arm — a gate decided "
+        "without the refusal"
+    )
+    do_part = block[block.index("do {"): block.index("} catch {")]
+    assert re.search(r"\bstate\s*=\s*\S", do_part), (
+        f"{load}'s success path never assigns `state`, so a latched gate survives the load "
+        "that disproved it"
+    )
+    after_arm = rest[rest.index("} catch {"):]
+    assert re.search(r"\bstate\s*=\s*\.error\(", after_arm), (
+        f"{load}'s real-failure path never assigns `.error`, so a latched gate survives a "
+        "failure that is not an auth refusal"
+    )
 
 
 # Research is deliberately NOT in this table. Its `handleIdentityChange` clears the list but

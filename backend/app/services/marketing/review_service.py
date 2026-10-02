@@ -32,6 +32,11 @@ next sweep after its platform is enabled. Taps other than Approve/Reject — Ret
 decision (`run_service.request_retract` / `resolve_unknown`) and wake the publisher; the webhook never
 calls a platform (rules/marketing.md §2). The "Posted …" feed and the alerts are `publish_feed.py`.
 
+Reject reasons (2026-10-01): ❌ Reject swaps the buttons for a reason keyboard (REJECT_REASONS — Tone,
+Accuracy, Compliance, Weak / boring, Other; optional). A tap records `metadata.review.reason` on the
+rejected post (`run_service.record_reject_reason`: fenced, a repeat writes nothing, a later different
+reason wins) and closes the keyboard. The weekly digest lists them; the judge round calibrates on them.
+
 Plain text only: no `parse_mode` anywhere, so a caption (model text) can never be read as markup.
 """
 
@@ -87,15 +92,27 @@ SEND_SPACING_SECONDS = 1.1
 _WEBHOOK_REGISTER_TIMEOUT_SECONDS = 20.0
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-#: Callback verbs (one letter + ":" + uuid = 38 bytes, inside Telegram's 64). Never `x` (a test
-#: pins `x:<uuid>` as invalid).
+#: Callback verbs (one letter + ":" + uuid = 38 bytes, inside Telegram's 64). SINGLE lowercase
+#: letters only, so `_CALLBACK_RE` stays a character class (a test pins it). Never `x` (a test pins
+#: `x:<uuid>` as invalid).
 _VERBS = {
     "a": "approve", "r": "reject",                                   # review
     "d": "retract", "k": "confirm_retract", "c": "cancel_retract",   # published post
     "l": "live", "n": "not_posted",                                  # escalated unknown outcome
+    # why a post was rejected (the reason keyboard after ❌; `run_service.record_reject_reason`)
+    "t": "reason_tone", "f": "reason_accuracy", "p": "reason_compliance", "w": "reason_weak",
+    "o": "reason_other",
 }
 _VERB_LETTER = {name: letter for letter, name in _VERBS.items()}
 _CALLBACK_RE = re.compile(rf"([{''.join(_VERBS)}]):({_UUID})", re.ASCII)
+_REASON_VERB_PREFIX = "reason_"
+
+#: Reject reasons → their button label (the weekly digest imports this too). The keys are exactly
+#: `run_service.REJECT_REASON_CODES` (pinned by a test); each has a `reason_<code>` verb above.
+REJECT_REASONS: Dict[str, str] = {
+    "tone": "Tone", "accuracy": "Accuracy", "compliance": "Compliance", "weak": "Weak / boring",
+    "other": "Other",
+}
 _STATUS_WORD_RE = re.compile(r"[a-z_]{1,32}", re.ASCII)
 _KEYBOARD_REMOVED: Dict[str, Any] = {"inline_keyboard": []}
 
@@ -193,7 +210,8 @@ def callback_data(decision: str, post_id: str) -> str:
 
 def parse_callback_data(data: Any) -> Optional[Tuple[str, str]]:
     """`a:<uuid>` → ("approve", uuid); `r:` reject; `d:` retract; `k:` confirm_retract;
-    `c:` cancel_retract; `l:` live; `n:` not_posted; anything else → None.
+    `c:` cancel_retract; `l:` live; `n:` not_posted; `t:` / `f:` / `p:` / `w:` / `o:` the reject
+    reasons (reason_tone / _accuracy / _compliance / _weak / _other); anything else → None.
     Strict: canonical lowercase uuid only, ≤ 64 bytes, a FULL match (no trailing newline)."""
     if not isinstance(data, str) or len(data.encode("utf-8", "replace")) > MAX_CALLBACK_DATA_BYTES:
         return None
@@ -226,6 +244,22 @@ def unknown_outcome_keyboard(post_id: str) -> Dict[str, Any]:
         [{"text": "✅ It's live", "callback_data": callback_data("live", post_id)}],
         [{"text": "❌ Not posted", "callback_data": callback_data("not_posted", post_id)}],
     ]}
+
+
+def reject_reason_keyboard(post_id: str) -> Dict[str, Any]:
+    """One button per REJECT_REASONS entry, in its order — offered after ❌ Reject (optional to tap)."""
+    return {"inline_keyboard": [
+        [{"text": label, "callback_data": callback_data(f"{_REASON_VERB_PREFIX}{code}", post_id)}]
+        for code, label in REJECT_REASONS.items()
+    ]}
+
+
+def _review_reason(row: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The reject reason already recorded on `row` (`metadata.review.reason`), or None."""
+    meta = (row or {}).get("metadata") if isinstance((row or {}).get("metadata"), dict) else {}
+    review = meta.get("review") if isinstance(meta.get("review"), dict) else {}
+    reason = review.get("reason")
+    return reason if isinstance(reason, str) and reason in REJECT_REASONS else None
 
 
 def is_rehearsal(post: Dict[str, Any]) -> bool:
@@ -675,6 +709,9 @@ async def handle_update(update: Any) -> Dict[str, Any]:
         await _answer(cq_id, "Unknown action")
         return {"ok": True, "refused": "unknown_action"}
     decision, post_id = parsed
+    if decision.startswith(_REASON_VERB_PREFIX):
+        return await _handle_reject_reason(decision[len(_REASON_VERB_PREFIX):], post_id, cq_id=cq_id,
+                                           chat_id=chat_id, message=message, by=f"telegram:{from_id}")
     if decision not in ("approve", "reject"):
         return await _handle_post_action(decision, post_id, cq_id=cq_id, chat_id=chat_id, message=message,
                                          by=f"telegram:{from_id}")
@@ -701,24 +738,49 @@ async def handle_update(update: Any) -> Dict[str, Any]:
             toast = f"Approved — but {blocker}: nothing will be sent"   # telegram caps a toast at 200
             line = f"{line} — ⚠️ {blocker}: NOT sent (it expires after its day)"
     await _answer(cq_id, toast, post_id=post_id)
-    await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), line), post_id=post_id)
+    text = append_verdict(message.get("text"), line)
+    # A reject (or a repeated reject tap — a Telegram replay — while no reason is recorded yet) swaps
+    # the buttons for the reason keyboard instead of removing them; optional to tap.
+    if decision == "reject" and (outcome == "rejected"
+                                 or (outcome == "already_rejected" and _review_reason(row) is None)):
+        platform = (row or {}).get("platform")
+        what = f"the {str(platform).upper()} post" if platform else "this post"
+        await _set_keyboard(chat_id, message, reject_reason_keyboard(post_id), post_id=post_id, text=text,
+                            fallback_text=f"Why was {what} rejected? Tap a reason (optional).")
+    else:
+        await _edit(chat_id, message.get("message_id"), text, post_id=post_id)
     return {"ok": True, "outcome": outcome, "post_id": post_id}
 
 
 async def _set_keyboard(chat_id: int, message: Dict[str, Any], keyboard: Dict[str, Any], *, post_id: str,
-                        fallback_text: str) -> None:
-    """Swap the tapped message's keyboard; if it cannot be edited (too old, deleted), send the
-    keyboard on a new message instead so the owner can still act."""
+                        fallback_text: str, text: Optional[str] = None) -> None:
+    """Swap the tapped message's keyboard — and its text too when `text` is given (one
+    editMessageText); if it cannot be edited (too old, deleted), send the keyboard on a new message
+    instead so the owner can still act."""
     message_id = message.get("message_id")
     try:
         if not _is_int(message_id):
-            raise TelegramRequestError("no message_id to edit", method="editMessageReplyMarkup")
-        await telegram.edit_message_reply_markup(chat_id, message_id, keyboard)
+            raise TelegramRequestError("no message_id to edit",
+                                       method="editMessageText" if text is not None else "editMessageReplyMarkup")
+        if text is not None:
+            await telegram.edit_message_text(chat_id, message_id, text, reply_markup=keyboard)
+        else:
+            await telegram.edit_message_reply_markup(chat_id, message_id, keyboard)
         return
     except asyncio.CancelledError:
         raise
     except TelegramException as e:
+        if isinstance(e, TelegramRequestError) and "message is not modified" in str(e.description or "").lower():
+            # A replayed tap: the message already shows exactly this text and keyboard. A new message
+            # would only repeat the buttons the owner is looking at.
+            logger.info("marketing review: keyboard already in place post_id=%s (message is not modified)",
+                        post_id)
+            return
         logger.info("marketing review: keyboard edit failed post_id=%s (%s) — sending a new message", post_id, e)
+    except Exception as e:
+        # Not a Telegram answer (a bug): still offer the keyboard — the webhook never raises.
+        logger.error("marketing review: keyboard edit raised post_id=%s (%s: %s) — sending a new message",
+                     post_id, type(e).__name__, e, exc_info=True)
     try:
         await telegram.send_message(chat_id, fallback_text, reply_markup=keyboard)
     except asyncio.CancelledError:
@@ -726,6 +788,49 @@ async def _set_keyboard(chat_id: int, message: Dict[str, Any], keyboard: Dict[st
     except Exception as e:
         logger.warning("marketing review: could not offer the keyboard for post_id=%s (%s: %s)", post_id,
                        type(e).__name__, e)
+
+
+async def _handle_reject_reason(reason: str, post_id: str, *, cq_id: str, chat_id: int,
+                                message: Dict[str, Any], by: str) -> Dict[str, Any]:
+    """A reason tap on a rejected post: RECORD it (`run_service.record_reject_reason`, fenced and
+    idempotent — the same reason again writes nothing, a different later one wins), answer with a
+    toast, and append "Reason: <label>" to the message with the keyboard removed. A post that is not
+    rejected only gets a toast; a lost fence or a ledger error keeps the keyboard for another tap."""
+    label = REJECT_REASONS.get(reason)
+    if label is None:   # a verb with no label: the two tables drifted (a test pins them equal)
+        logger.error("marketing review webhook: reject reason %r has no label; nothing recorded post_id=%s",
+                     reason, post_id)
+        await _answer(cq_id, "Unknown action", post_id=post_id)
+        return {"ok": True, "refused": "unknown_action"}
+    try:
+        outcome = await get_marketing_run_service().record_reject_reason(post_id, reason, by=by)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("marketing review webhook: record_reject_reason FAILED post_id=%s reason=%s (%s: %s) — "
+                     "the keyboard stays; the owner can tap again", post_id, reason, type(e).__name__, e,
+                     exc_info=True)
+        await _answer(cq_id, "Could not record that — tap again", post_id=post_id)
+        return {"ok": True, "outcome": "error", "post_id": post_id}
+    logger.info("marketing review webhook: reject reason post_id=%s reason=%s outcome=%s by=%s",
+                post_id, reason, outcome, by)
+    if outcome in ("recorded", "unchanged"):
+        toast = f"Reason saved: {label}" if outcome == "recorded" else f"Reason already saved: {label}"
+        await _answer(cq_id, toast, post_id=post_id)
+        await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), f"Reason: {label}"),
+                    post_id=post_id)
+    elif outcome == "not_found":
+        await _answer(cq_id, "Post not found", post_id=post_id)
+        await _edit(chat_id, message.get("message_id"), append_verdict(message.get("text"), "Post not found"),
+                    post_id=post_id)
+    elif outcome == "busy":
+        await _answer(cq_id, "Could not record that — tap again", post_id=post_id)
+    else:   # already_<status>: only a rejected post takes a reason
+        status = outcome[len("already_"):] if outcome.startswith("already_") else ""
+        if not _STATUS_WORD_RE.fullmatch(status):
+            status = "not rejected"
+        await _answer(cq_id, f"No reason recorded — the post is {status}", post_id=post_id)
+    return {"ok": True, "outcome": outcome, "post_id": post_id}
 
 
 async def _handle_post_action(decision: str, post_id: str, *, cq_id: str, chat_id: int,

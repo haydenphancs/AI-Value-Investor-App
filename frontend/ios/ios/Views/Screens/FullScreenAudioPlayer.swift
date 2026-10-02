@@ -555,7 +555,9 @@ struct PlaybackSpeedSheet: View {
             List {
                 ForEach(PlaybackSpeed.allCases) { speed in
                     Button(action: {
-                        audioManager.playbackSpeed = speed
+                        // The user path: persists AND syncs, so the next launch's hydrate
+                        // cannot put the old speed back. See `setPlaybackSpeedFromUser`.
+                        audioManager.setPlaybackSpeedFromUser(speed)
                         dismiss()
                     }) {
                         HStack {

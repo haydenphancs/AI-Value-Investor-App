@@ -602,7 +602,7 @@ def _tam(label="x") -> IndustryTAM:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("industry,expected", [
-    ("Industrial - Machinery", "sector"),       # → all of US manufacturing GDP
+    ("Computer Hardware", "sector"),            # → all of US manufacturing GDP
     ("Banks - Regional", "sector"),             # → all of finance & insurance GDP
     ("Restaurants", "industry"),                # → NAICS 722 itself
     (PLUG_INDUSTRY, "industry"),                # → NAICS 335 itself
@@ -630,7 +630,7 @@ def test_grain_allow_list_and_new_mapping_are_consistent():
     # Phase B's floor skip and `_backfill_global_scope` recognise a US source by
     # these exact markers.
     assert label.startswith("BEA ") and "via FRED" in label
-    assert its.fred_mapping_grain("Industrial - Machinery") == "sector"
+    assert its.fred_mapping_grain("Computer Hardware") == "sector"
     assert its.fred_mapping_grain(PLUG_INDUSTRY) == "industry"
 
 
@@ -1026,8 +1026,10 @@ async def test_recompute_keeps_the_stored_row_when_census_is_unavailable(monkeyp
 
 
 def test_construction_industries_are_not_industry_grain():
-    for industry in ("Construction", "Engineering & Construction",
-                     "Construction Materials", "Residential Construction"):
+    # "Construction Materials" left this list 2026-10-01: it now maps to NAICS 327
+    # (Census, and BEA USNMMPMANNGSP), not to construction GDP — pinned in
+    # test_industry_tam_narrow_sources.py.
+    for industry in ("Construction", "Engineering & Construction", "Residential Construction"):
         assert its.fred_mapping_grain(industry) == "sector", industry
     assert its.expects_industry_grain(PLUG_INDUSTRY)
     assert its.expects_industry_grain("Restaurants")

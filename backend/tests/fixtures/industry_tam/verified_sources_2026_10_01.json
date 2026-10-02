@@ -1,0 +1,589 @@
+{
+ "verified_on": "2026-10-01",
+ "how": "Read-only GETs with the backend/.env keys. Census: api.census.gov/data/2024/aiesbasic (RCPT_TOT_VAL, NAICS2017=<code>, for=us:*) and /data/2017/ecnbasic (RCPTOT, the default all-establishments row); values in $1,000s exactly as returned. FRED: fred/series/observations, nominal $ millions, newest first.",
+ "census": {
+  "211": {
+   "label": "Oil and gas extraction",
+   "aies_2024_thousands": 370576072,
+   "ecn_2017_thousands": 229734250
+  },
+  "212": {
+   "label": "Mining (except oil and gas)",
+   "aies_2024_thousands": 102517437,
+   "ecn_2017_thousands": 84168968
+  },
+  "213": {
+   "label": "Support activities for mining",
+   "aies_2024_thousands": 98972247,
+   "ecn_2017_thousands": 86562392
+  },
+  "221": {
+   "label": "Utilities",
+   "aies_2024_thousands": 790488295,
+   "ecn_2017_thousands": 577100462
+  },
+  "311": {
+   "label": "Food manufacturing",
+   "aies_2024_thousands": 1054261701,
+   "ecn_2017_thousands": 775852927
+  },
+  "313": {
+   "label": "Textile mills",
+   "aies_2024_thousands": 23949792,
+   "ecn_2017_thousands": 27609342
+  },
+  "321": {
+   "label": "Wood product manufacturing",
+   "aies_2024_thousands": 142044209,
+   "ecn_2017_thousands": 107214630
+  },
+  "327": {
+   "label": "Nonmetallic mineral product manufacturing",
+   "aies_2024_thousands": 175358261,
+   "ecn_2017_thousands": 125865521
+  },
+  "333": {
+   "label": "Machinery manufacturing",
+   "aies_2024_thousands": 473891483,
+   "ecn_2017_thousands": 364494993
+  },
+  "335": {
+   "label": "Electrical equipment, appliance, and component manufacturing",
+   "aies_2024_thousands": 195000604,
+   "ecn_2017_thousands": 122950944
+  },
+  "444": {
+   "label": "Building material and garden equipment and supplies dealers",
+   "aies_2024_thousands": 513637269,
+   "ecn_2017_thousands": 346951559
+  },
+  "481": {
+   "label": "Air transportation",
+   "aies_2024_thousands": 335129842,
+   "ecn_2017_thousands": 208830173
+  },
+  "483": {
+   "label": "Water transportation",
+   "aies_2024_thousands": 66680473,
+   "ecn_2017_thousands": 43009420
+  },
+  "484": {
+   "label": "Truck transportation",
+   "aies_2024_thousands": 402827246,
+   "ecn_2017_thousands": 290530869
+  },
+  "492": {
+   "label": "Couriers and messengers",
+   "aies_2024_thousands": 160598836,
+   "ecn_2017_thousands": 90407961
+  },
+  "517": {
+   "label": "Telecommunications",
+   "aies_2024_thousands": 662615115,
+   "ecn_2017_thousands": 616799584
+  },
+  "532": {
+   "label": "Rental and leasing services",
+   "aies_2024_thousands": 239064428,
+   "ecn_2017_thousands": 157950666
+  },
+  "562": {
+   "label": "Waste management and remediation services",
+   "aies_2024_thousands": 159378818,
+   "ecn_2017_thousands": 99588737
+  },
+  "622": {
+   "label": "Hospitals",
+   "aies_2024_thousands": 1610502057,
+   "ecn_2017_thousands": 1070865167
+  },
+  "2211": {
+   "label": "Electric power generation, transmission and distribution",
+   "aies_2024_thousands": 612796300,
+   "ecn_2017_thousands": 461919226
+  },
+  "2212": {
+   "label": "Natural gas distribution",
+   "aies_2024_thousands": 156179859,
+   "ecn_2017_thousands": 100586292
+  },
+  "2213": {
+   "label": "Water, sewage and other systems",
+   "aies_2024_thousands": 21512136,
+   "ecn_2017_thousands": 14594944
+  },
+  "3113": {
+   "label": "Sugar and confectionery product manufacturing",
+   "aies_2024_thousands": 47079525,
+   "ecn_2017_thousands": 36930185
+  },
+  "3122": {
+   "label": "Tobacco manufacturing",
+   "aies_2024_thousands": 60684858,
+   "ecn_2017_thousands": 47546899
+  },
+  "3251": {
+   "label": "Basic chemical manufacturing",
+   "aies_2024_thousands": 303946662,
+   "ecn_2017_thousands": 217963411
+  },
+  "3253": {
+   "label": "Pesticide, fertilizer, and other agricultural chemical manufacturing",
+   "aies_2024_thousands": 48764813,
+   "ecn_2017_thousands": 31410431
+  },
+  "3254": {
+   "label": "Pharmaceutical and medicine manufacturing",
+   "aies_2024_thousands": 259526719,
+   "ecn_2017_thousands": 211208419
+  },
+  "3311": {
+   "label": "Iron and steel mills and ferroalloy manufacturing",
+   "aies_2024_thousands": 100523238,
+   "ecn_2017_thousands": 87557262
+  },
+  "3313": {
+   "label": "Alumina and aluminum production and processing",
+   "aies_2024_thousands": 41067328,
+   "ecn_2017_thousands": 35667186
+  },
+  "3331": {
+   "label": "Agriculture, construction, and mining machinery manufacturing",
+   "aies_2024_thousands": 107508175,
+   "ecn_2017_thousands": 81309301
+  },
+  "3344": {
+   "label": "Semiconductor and other electronic component manufacturing",
+   "aies_2024_thousands": 116150747,
+   "ecn_2017_thousands": 95311200
+  },
+  "3361": {
+   "label": "Motor vehicle manufacturing",
+   "aies_2024_thousands": 424662098,
+   "ecn_2017_thousands": 323440198
+  },
+  "3363": {
+   "label": "Motor vehicle parts manufacturing",
+   "aies_2024_thousands": 290728803,
+   "ecn_2017_thousands": 261318158
+  },
+  "3364": {
+   "label": "Aerospace product and parts manufacturing",
+   "aies_2024_thousands": 246965543,
+   "ecn_2017_thousands": 249793827
+  },
+  "3391": {
+   "label": "Medical equipment and supplies manufacturing",
+   "aies_2024_thousands": 100443977,
+   "ecn_2017_thousands": 88605847
+  },
+  "4238": {
+   "label": "Machinery, equipment, and supplies merchant wholesalers",
+   "aies_2024_thousands": 765694556,
+   "ecn_2017_thousands": 564565181
+  },
+  "4242": {
+   "label": "Drugs and druggists' sundries merchant wholesalers",
+   "aies_2024_thousands": 1556669610,
+   "ecn_2017_thousands": 931670122
+  },
+  "4244": {
+   "label": "Grocery and related product merchant wholesalers",
+   "aies_2024_thousands": 1340663846,
+   "ecn_2017_thousands": 991139790
+  },
+  "4411": {
+   "label": "Automobile dealers",
+   "aies_2024_thousands": 1355098786,
+   "ecn_2017_thousands": 1007025256
+  },
+  "4451": {
+   "label": "Grocery stores",
+   "aies_2024_thousands": 885740445,
+   "ecn_2017_thousands": 649953593
+  },
+  "4481": {
+   "label": "Clothing stores",
+   "aies_2024_thousands": 206790488,
+   "ecn_2017_thousands": 186173965
+  },
+  "4483": {
+   "label": "Jewelry, luggage, and leather goods stores",
+   "aies_2024_thousands": 44094558,
+   "ecn_2017_thousands": 32349206
+  },
+  "4522": {
+   "label": "Department stores",
+   "aies_2024_thousands": 46508272,
+   "ecn_2017_thousands": 66633116
+  },
+  "4523": {
+   "label": "General merchandise stores, including warehouse clubs and supercenters",
+   "aies_2024_thousands": 871893999,
+   "ecn_2017_thousands": 623693308
+  },
+  "4541": {
+   "label": "Electronic shopping and mail-order houses",
+   "aies_2024_thousands": 1211277997,
+   "ecn_2017_thousands": 515727645
+  },
+  "5111": {
+   "label": "Newspaper, periodical, book, and directory publishers",
+   "aies_2024_thousands": 74456041,
+   "ecn_2017_thousands": 91873144
+  },
+  "5112": {
+   "label": "Software publishers",
+   "aies_2024_thousands": 567772378,
+   "ecn_2017_thousands": 276234048
+  },
+  "5151": {
+   "label": "Radio and television broadcasting",
+   "aies_2024_thousands": 93820924,
+   "ecn_2017_thousands": 76869171
+  },
+  "5231": {
+   "label": "Securities and commodity contracts intermediation and brokerage",
+   "aies_2024_thousands": 376012540,
+   "ecn_2017_thousands": 244103832
+  },
+  "5241": {
+   "label": "Insurance carriers",
+   "aies_2024_thousands": 3271776157,
+   "ecn_2017_thousands": 2009769244
+  },
+  "5311": {
+   "label": "Lessors of real estate",
+   "aies_2024_thousands": 373598317,
+   "ecn_2017_thousands": 259372289
+  },
+  "5415": {
+   "label": "Computer systems design and related services",
+   "aies_2024_thousands": 663500505,
+   "ecn_2017_thousands": 442826642
+  },
+  "5416": {
+   "label": "Management, scientific, and technical consulting services",
+   "aies_2024_thousands": 463486454,
+   "ecn_2017_thousands": 258831534
+  },
+  "5418": {
+   "label": "Advertising, public relations, and related services",
+   "aies_2024_thousands": 149867658,
+   "ecn_2017_thousands": 106700230
+  },
+  "5613": {
+   "label": "Employment services",
+   "aies_2024_thousands": 562087713,
+   "ecn_2017_thousands": 377258941
+  },
+  "5615": {
+   "label": "Travel arrangement and reservation services",
+   "aies_2024_thousands": 91749957,
+   "ecn_2017_thousands": 55171678
+  },
+  "7225": {
+   "label": "Restaurants and other eating places",
+   "aies_2024_thousands": 864856048,
+   "ecn_2017_thousands": 596781528
+  },
+  "22111": {
+   "label": "Electric power generation",
+   "aies_2024_thousands": 159501833,
+   "ecn_2017_thousands": 119266332
+  },
+  "42343": {
+   "label": "Computer and computer peripheral equipment and software merchant wholesalers",
+   "aies_2024_thousands": 305467876,
+   "ecn_2017_thousands": 259740873
+  },
+  "52421": {
+   "label": "Insurance agencies and brokerages",
+   "aies_2024_thousands": 232209484,
+   "ecn_2017_thousands": 137747649
+  },
+  "72111": {
+   "label": "Hotels (except casino hotels) and motels",
+   "aies_2024_thousands": 214217080,
+   "ecn_2017_thousands": 184410520
+  },
+  "324110": {
+   "label": "Petroleum refineries",
+   "aies_2024_thousands": 656049694,
+   "ecn_2017_thousands": 499142863
+  },
+  "519130": {
+   "label": "Internet publishing and broadcasting and web search portals",
+   "aies_2024_thousands": 391269686,
+   "ecn_2017_thousands": 165430087
+  },
+  "522110": {
+   "label": "Commercial banking",
+   "aies_2024_thousands": 866989052,
+   "ecn_2017_thousands": 465245474
+  },
+  "522292": {
+   "label": "Real estate credit",
+   "aies_2024_thousands": 104279087,
+   "ecn_2017_thousands": 91028629
+  },
+  "523920": {
+   "label": "Portfolio management",
+   "aies_2024_thousands": 370393336,
+   "ecn_2017_thousands": 245532424
+  },
+  "524113": {
+   "label": "Direct life insurance carriers",
+   "aies_2024_thousands": 661682964,
+   "ecn_2017_thousands": 501786132
+  },
+  "524114": {
+   "label": "Direct health and medical insurance carriers",
+   "aies_2024_thousands": 1566463841,
+   "ecn_2017_thousands": 855939898
+  },
+  "524126": {
+   "label": "Direct property and casualty insurance carriers",
+   "aies_2024_thousands": 875175233,
+   "ecn_2017_thousands": 554818150
+  },
+  "524130": {
+   "label": "Reinsurance carriers",
+   "aies_2024_thousands": 120900082,
+   "ecn_2017_thousands": 66638710
+  },
+  "531110": {
+   "label": "Lessors of residential buildings and dwellings",
+   "aies_2024_thousands": 175080650,
+   "ecn_2017_thousands": 118349533
+  },
+  "531120": {
+   "label": "Lessors of nonresidential buildings (except miniwarehouses)",
+   "aies_2024_thousands": 166088617,
+   "ecn_2017_thousands": 120411787
+  }
+ },
+ "fred": {
+  "USAIRTRANNGSP": {
+   "title": "Air Transportation (481)",
+   "observations_millions": {
+    "2025": 182604.0,
+    "2024": 173542.0,
+    "2023": 167516.0,
+    "2022": 147415.0,
+    "2021": 97563.0,
+    "2020": 64255.0,
+    "2019": 140210.0,
+    "2018": 131141.0
+   }
+  },
+  "USELCEQAPMANNGSP": {
+   "title": "Electrical Equipment, Appliance, and Component Manufacturing (335)",
+   "observations_millions": {
+    "2025": 87092.0,
+    "2024": 82317.0,
+    "2023": 78500.0,
+    "2022": 69599.0,
+    "2021": 61151.0,
+    "2020": 57697.0,
+    "2019": 60072.0,
+    "2018": 59751.0
+   }
+  },
+  "USFOODDPNGSP": {
+   "title": "Food Services and Drinking Places (722)",
+   "observations_millions": {
+    "2025": 708914.0,
+    "2024": 687264.0,
+    "2023": 656864.0,
+    "2022": 588234.0,
+    "2021": 518949.0,
+    "2020": 395898.0,
+    "2019": 490182.0,
+    "2018": 461627.0
+   }
+  },
+  "USINSCRANGSP": {
+   "title": "Insurance Carriers and Related Activities (524)",
+   "observations_millions": {
+    "2025": 942955.0,
+    "2024": 856559.0,
+    "2023": 801342.0,
+    "2022": 707905.0,
+    "2021": 640364.0,
+    "2020": 634610.0,
+    "2019": 631397.0,
+    "2018": 595558.0
+   }
+  },
+  "USMACHMANNGSP": {
+   "title": "Machinery Manufacturing (333)",
+   "observations_millions": {
+    "2025": 220204.0,
+    "2024": 218985.0,
+    "2023": 213864.0,
+    "2022": 175321.0,
+    "2021": 158159.0,
+    "2020": 150069.0,
+    "2019": 160970.0,
+    "2018": 154853.0
+   }
+  },
+  "USMINEXOILGASNGSP": {
+   "title": "Mining (Except Oil and Gas) (212)",
+   "observations_millions": {
+    "2025": 81207.0,
+    "2024": 76755.0,
+    "2023": 77051.0,
+    "2022": 75402.0,
+    "2021": 68246.0,
+    "2020": 57317.0,
+    "2019": 53080.0,
+    "2018": 52512.0
+   }
+  },
+  "USNMMPMANNGSP": {
+   "title": "Nonmetallic Mineral Product Manufacturing (327)",
+   "observations_millions": {
+    "2025": 85094.0,
+    "2024": 84841.0,
+    "2023": 83872.0,
+    "2022": 71585.0,
+    "2021": 67879.0,
+    "2020": 63836.0,
+    "2019": 63032.0,
+    "2018": 59398.0
+   }
+  },
+  "USOILGASNGSP": {
+   "title": "Oil and Gas Extraction (211)",
+   "observations_millions": {
+    "2025": 251712.0,
+    "2024": 267837.0,
+    "2023": 278251.0,
+    "2022": 328979.0,
+    "2021": 225877.0,
+    "2020": 103992.0,
+    "2019": 172794.0,
+    "2018": 189194.0
+   }
+  },
+  "USOTRANEQMANNGSP": {
+   "title": "Other Transportation Equipment Manufacturing (3364-3466, 3369)",
+   "observations_millions": {
+    "2025": 201534.0,
+    "2024": 180062.0,
+    "2023": 173609.0,
+    "2022": 160747.0,
+    "2021": 153392.0,
+    "2020": 144880.0,
+    "2019": 165595.0,
+    "2018": 159355.0
+   }
+  },
+  "USPETCOALMANNGSP": {
+   "title": "Petroleum and Coal Products Manufacturing (324)",
+   "observations_millions": {
+    "2025": 147973.0,
+    "2024": 174765.0,
+    "2023": 195784.0,
+    "2022": 230923.0,
+    "2021": 148415.0,
+    "2020": 61485.0,
+    "2019": 143355.0,
+    "2018": 154243.0
+   }
+  },
+  "USRAILTRANNGSP": {
+   "title": "Rail Transportation (482)",
+   "observations_millions": {
+    "2025": 50585.0,
+    "2024": 52231.0,
+    "2023": 52620.0,
+    "2022": 50285.0,
+    "2021": 45426.0,
+    "2020": 41767.0,
+    "2019": 46186.0,
+    "2018": 46637.0
+   }
+  },
+  "USSAMINNGSP": {
+   "title": "Support Activities for Mining (213)",
+   "observations_millions": {
+    "2025": 65744.0,
+    "2024": 67044.0,
+    "2023": 69773.0,
+    "2022": 62466.0,
+    "2021": 42899.0,
+    "2020": 41535.0,
+    "2019": 68147.0,
+    "2018": 71788.0
+   }
+  },
+  "USTRUCKTRANNGSP": {
+   "title": "Truck Transportation (484)",
+   "observations_millions": {
+    "2025": 248757.0,
+    "2024": 245475.0,
+    "2023": 247139.0,
+    "2022": 259524.0,
+    "2021": 231353.0,
+    "2020": 196753.0,
+    "2019": 197410.0,
+    "2018": 191412.0
+   }
+  },
+  "USUTILNGSP": {
+   "title": "Utilities (22)",
+   "observations_millions": {
+    "2025": 507741.0,
+    "2024": 477342.0,
+    "2023": 478757.0,
+    "2022": 440197.0,
+    "2021": 393068.0,
+    "2020": 345809.0,
+    "2019": 331596.0,
+    "2018": 320369.0
+   }
+  },
+  "USWASTENGSP": {
+   "title": "Waste Management and Remediation Services (562)",
+   "observations_millions": {
+    "2025": 96378.0,
+    "2024": 92721.0,
+    "2023": 84437.0,
+    "2022": 74425.0,
+    "2021": 68265.0,
+    "2020": 60892.0,
+    "2019": 58917.0,
+    "2018": 56956.0
+   }
+  },
+  "USWATTRANNGSP": {
+   "title": "Water Transportation (483)",
+   "observations_millions": {
+    "2025": 26240.0,
+    "2024": 25899.0,
+    "2023": 24620.0,
+    "2022": 21280.0,
+    "2021": 19872.0,
+    "2020": 12807.0,
+    "2019": 15519.0,
+    "2018": 15659.0
+   }
+  },
+  "USWPMANNGSP": {
+   "title": "Wood Product Manufacturing (321)",
+   "observations_millions": {
+    "2025": 55509.0,
+    "2024": 55449.0,
+    "2023": 56777.0,
+    "2022": 64646.0,
+    "2021": 60012.0,
+    "2020": 43000.0,
+    "2019": 36824.0,
+    "2018": 36919.0
+   }
+  }
+ }
+}

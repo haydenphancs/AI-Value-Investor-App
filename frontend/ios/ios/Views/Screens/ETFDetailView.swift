@@ -120,7 +120,7 @@ struct ETFDetailView: View {
                             isPositive: etfData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
-                            assetContext: .etf,
+                            assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
                             previousClose: etfData.chartPreviousClose
                         )

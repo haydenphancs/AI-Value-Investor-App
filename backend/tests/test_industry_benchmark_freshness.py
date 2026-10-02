@@ -15,7 +15,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.services.industry_benchmark_service import IndustryBenchmarkService
+from app.services.industry_benchmark_service import (
+    IndustryBenchmarkRecomputeSkipped,
+    IndustryBenchmarkService,
+)
 
 
 def _iso(dt):
@@ -205,9 +208,12 @@ async def test_recompute_ttm_partial_failure_does_not_write_sector_aggregate(mon
 
     monkeypatch.setattr(svc, "_industry_ttm_values", fake_ttm_vals)
 
-    summary = await svc.recompute_all_ttm(skip_if_fresh_hours=0)
+    # Its only sector failed, so the run RAISES rather than settle the weekly claim
+    # (test_benchmark_nothing_written_unsettled.py).
+    with pytest.raises(IndustryBenchmarkRecomputeSkipped) as info:
+        await svc.recompute_all_ttm(skip_if_fresh_hours=0)
+    assert info.value.reason == "every sector failed"
 
     # IndA upsert raised → the sector aborts BEFORE the '' aggregate is written,
     # so the sector never looks "fresh" and will be retried in full next run.
     assert "" not in svc.supabase.written_industries
-    assert summary["mode"] == "ttm"

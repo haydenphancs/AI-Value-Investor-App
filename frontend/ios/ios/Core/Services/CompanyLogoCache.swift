@@ -79,6 +79,24 @@ final class CompanyLogoCache {
         URL(string: "https://images.financialmodelingprep.com/symbol/\(symbol).png")
     }
 
+    /// The cache key for a server-sent logo URL (the FMP profile `image`, e.g. a whale
+    /// holding's `logo_url`): the symbol its FMP file is named for. The CDN's
+    /// `/symbol/<SYM>.png`, or FMP's legacy `/image-stock/<SYM>.png` (an old stored row) —
+    /// the same company's file, which the CDN now serves. Keyed on the symbol, not the URL,
+    /// so the logo is shared with every `CompanyLogoView` for that ticker. nil for anything
+    /// else: a non-FMP image cannot be swapped for the CDN file of a symbol that may name a
+    /// different security.
+    nonisolated static func symbol(forLogoURL logoURL: String) -> String? {
+        guard let url = URL(string: logoURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let host = url.host?.lowercased() else { return nil }
+        let parts = url.pathComponents
+        guard parts.count == 3, parts[0] == "/" else { return nil }
+        let isCDN = host == "images.financialmodelingprep.com" && parts[1] == "symbol"
+        let isLegacy = host == "financialmodelingprep.com" && parts[1] == "image-stock"
+        guard isCDN || isLegacy, parts[2].lowercased().hasSuffix(".png") else { return nil }
+        return symbol(for: String(parts[2].dropLast(4)))
+    }
+
     /// SYNCHRONOUS on purpose — `CompanyLogoView.body` calls it, so a rebuilt view draws a
     /// logo already shown this session on its first frame instead of the initials.
     func image(for symbol: String) -> UIImage? { images[symbol] }

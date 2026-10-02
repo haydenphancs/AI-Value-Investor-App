@@ -1641,3 +1641,109 @@ async def test_bluesky_a_refresh_without_a_did_document_keeps_the_accounts_own_p
     bsky.add(REFRESH_NSID, (200, {"accessJwt": ACCESS, "refreshJwt": REFRESH, "did": DID, "handle": HANDLE}))
     renewed = await outlet_bluesky._get_session(renew=True)
     assert renewed["pds"] == PDS                       # not the entryway fallback
+
+
+# ── adversarial review 2026-10-01: fixes pinned ───────────────────────────────
+
+
+def _others(n: int) -> List[Dict[str, Any]]:
+    """`n` unrelated posts from our timeline (distinct ids, none matching X_CAPTION)."""
+    return [_tweet(f"Unrelated post {i}", pid=f"17900000000000002{i:02d}") for i in range(n)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned, count, billed", [
+    (1, 1, 1),                  # a normal answer: X bills the posts it returned
+    (3, 3, 3),
+    (1, 4, 4),                  # a count inside the page is X's own figure, as before
+    (1, 5, 5),
+    (1, 6, 5),                  # …but never more than the page we asked for
+    (1, 10 ** 9, 5),            # the corrupt count of finding #0: $0.005, not $1,000,000
+    (1, 2 ** 63, 5),
+    (7, 7, 7),                  # more posts than asked: every one returned is billed
+    (7, 10 ** 9, 7),
+])
+async def test_x_reconcile_bills_the_posts_returned_and_never_more_than_the_page(monkeypatch, x_on, returned, count,
+                                                                                 billed):
+    _x(monkeypatch, _timeline(_tweet(X_CAPTION), *_others(returned - 1), count=count))
+    result = await outlet_x.ADAPTER.reconcile(_queued_x())
+    assert result.kind == FOUND and result.external_id == X_POST_ID
+    assert result.cost_micros == billed * outlet_x.OWNED_READ_MICROS
+
+
+@pytest.mark.asyncio
+async def test_x_reconcile_a_corrupt_count_on_an_absent_post_costs_at_most_the_reserve(monkeypatch, x_on):
+    _x(monkeypatch, _timeline(*_others(2), count=10 ** 9))
+    result = await outlet_x.ADAPTER.reconcile(_queued_x())
+    assert (result.kind, result.resend_safe) == (ABSENT, False)
+    assert result.cost_micros == outlet_x.ADAPTER.reconcile_reserve_micros == 5_000
+
+
+_NO_COUNT = object()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [
+    pytest.param(_NO_COUNT, id="absent"), pytest.param(None, id="None"), pytest.param(-1, id="-1"),
+    pytest.param(-(10 ** 9), id="-1e9"), pytest.param(True, id="True"), pytest.param(False, id="False"),
+    pytest.param("5", id="str-5"), pytest.param("abc", id="str-abc"), pytest.param("", id="str-empty"),
+    pytest.param(b"5", id="bytes-5"), pytest.param(2.5, id="2.5"), pytest.param(3.0, id="3.0"),
+    pytest.param(float("nan"), id="nan"), pytest.param(float("inf"), id="inf"),
+    pytest.param(float("-inf"), id="-inf"), pytest.param([], id="list-empty"), pytest.param([5], id="list-5"),
+    pytest.param({}, id="dict-empty"), pytest.param({"n": 5}, id="dict"), pytest.param(object(), id="object"),
+])
+@pytest.mark.parametrize("returned", [0, 2])
+async def test_x_reconcile_never_raises_on_a_junk_result_count(monkeypatch, x_on, count, returned):
+    # The real client already drops most of these; the adapter must not depend on it. Each one used
+    # to raise (nan, inf, "abc", [5] …), bill a negative read (-1), or bill a count X never gave.
+    posts = [_tweet(X_CAPTION), *_others(1)][:returned]
+    calls: List[str] = []
+
+    async def answered(user_id: str, **_kw: Any) -> Dict[str, Any]:
+        calls.append(user_id)
+        res: Dict[str, Any] = {"posts": [dict(p) for p in posts]}
+        if count is not _NO_COUNT:
+            res["result_count"] = count
+        return res
+
+    monkeypatch.setattr(x_api, "list_user_posts", answered)
+    result = await outlet_x.ADAPTER.reconcile(_queued_x())
+    assert calls == [X_USER_ID]
+    assert result.kind == (FOUND if returned else ABSENT)
+    assert result.cost_micros == returned * outlet_x.OWNED_READ_MICROS
+
+
+def test_x_metrics_headroom_retired_constant_while_it_lasts():
+    assert outlet_x.METRICS_HEADROOM_POSTS == 4
+    # The text-post figure, kept only until the measure step reads `metrics_headroom_micros()`. It is
+    # deleted then — read with a default so that deletion needs no edit here — and must not drift
+    # meanwhile.
+    assert getattr(outlet_x, "METRICS_HEADROOM_MICROS", 60_000) == 60_000
+
+
+@pytest.mark.parametrize("allow_urls, caption, read_edge", [
+    (False, X_CAPTION, 1_935_000),
+    (True, f"{X_CAPTION} {post_copy.LINK_BASE_URL}/x", 1_195_000),   # URLs on: every X caption carries the /go link
+])
+def test_x_metrics_headroom_is_four_posts_at_the_price_prepare_would_reserve(monkeypatch, x_on, allow_urls,
+                                                                             caption, read_edge):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
+    reserve = outlet_x.ADAPTER.prepare(_x_post(caption)).reserve_micros
+    assert reserve == (outlet_x.URL_POST_MICROS if allow_urls else outlet_x.POST_MICROS)
+    assert outlet_x.metrics_headroom_micros() == outlet_x.METRICS_HEADROOM_POSTS * reserve
+    # "Posting always wins" on the $2 cap: the last month-to-date spend at which a read may start,
+    # once the read is charged its full reserve, still leaves exactly four of those posts' money.
+    cap = outlet_x.budget_micros()
+    assert cap == 2_000_000
+    assert cap - outlet_x.METRICS_READ_RESERVE_MICROS - outlet_x.metrics_headroom_micros() == read_edge
+    assert read_edge + outlet_x.METRICS_READ_RESERVE_MICROS + 4 * reserve == cap
+    # Finding #1's numbers: at $1.799 spent with URLs on, the text-post figure let a read start, after
+    # which not one $0.20 post fitted. Now it may start only while text posts are what X costs.
+    may_read = 1_799_000 + outlet_x.METRICS_READ_RESERVE_MICROS + outlet_x.metrics_headroom_micros() <= cap
+    assert may_read is (not allow_urls)
+
+
+def test_x_metrics_headroom_reads_the_url_switch_at_call_time(monkeypatch, x_on):
+    for allow_urls, expected in ((False, 60_000), (True, 800_000), (False, 60_000)):
+        monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
+        assert outlet_x.metrics_headroom_micros() == expected

@@ -180,9 +180,19 @@ TABLE_NAME = "ticker_report_cache"
 #     new fields are Optional, so an old row decodes — and keeps the wrong numbers. Set
 #     to the commit time on deploy day (2026-10-01 UTC), a PAST instant just before the
 #     deploy, per the paragraph above.
+# 2026-10-01 (evening): bumped for the `ticker_data_cache` industry_tam fix. Every
+#     collection for an equity with an FMP industry carried an `IndustryDossier` that the
+#     reader rebuilt as `IndustryTAM` → TypeError → MISS, so none was ever read. Fixed,
+#     every stored row becomes readable, and those rows hold the dossier as it was before
+#     the industry-TAM fix: the July zero placeholder (TAM 0 → "—") for 138 of 158
+#     industries. Reports cached from them carry the same "—". Set to the time the change
+#     was made; if the deploy commit lands later, move it to the commit time (same as
+#     3c315516) — a row the OLD code writes after this instant survives otherwise.
 # 2026-10-02 (01:15 UTC): bumped for the competitor-selection fix (TestFlight #57,
-#     AVGO). `CollectedTickerData` gained `peer_source` ("intel" | "heuristic"),
-#     `peer_details` (per-peer "competes in" segment) and `focal_roic_ttm` (the focal's TTM ROIC, so it is compared with the
+#     AVGO). This ONE bump SUPERSEDES the 22:00 instant above (it also covers the
+#     industry_tam fix, so both changes ship behind a single floor). `CollectedTickerData`
+#     gained `peer_source` ("intel" | "heuristic"), `peer_details` (per-peer "competes in"
+#     segment) and `focal_roic_ttm` (the focal's TTM ROIC, so it is compared with the
 #     peers' TTM ROIC instead of an annual figure up to ~3 quarters old); the report's
 #     `moat_competition` gained the order marker `competitor_order` ("direct" | "threat")
 #     and `competitor_source`, and competitor rows gained `segment` / `score_basis`. An

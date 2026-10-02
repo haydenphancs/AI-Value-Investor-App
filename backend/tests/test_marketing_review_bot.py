@@ -18,6 +18,9 @@ What must never regress:
   * the sweep: video first, then one message per post with the right buttons (on the LAST chunk
     only), a conditional stamp that never overwrites a decision, no re-notification, a 429 stops
     it, a 5xx is retried next cycle, a > 20 MB video becomes a link;
+  * reject reasons (2026-10-01): only ❌ swaps the buttons for the reason keyboard (a new message when
+    the edit fails); a reason tap records once (a repeat writes nothing, a later different reason
+    wins), only on a rejected post, only from the owner;
   * the bot token (it is in the URL PATH) never appears in a log record or an exception message.
 
 Mutation-tested by hand on 2026-09-29 (see the final report of the change): dropping the
@@ -1002,10 +1005,52 @@ async def test_the_bot_token_never_reaches_a_log_record_or_an_exception(ledger, 
 # ── the publisher loop runs the sweep ─────────────────────────────────────────
 
 
+#: The steps that run LAST in the tick (the 2026-10-01 measurement build): step → (module, function).
+#: They are built beside this file; `_late_steps()` finds the ones that exist, and from then on every
+#: assertion below holds them to the contract (order and gates) — strictly, all 16 switch combinations.
+_LATE_STEPS = {"measure": ("metrics_service", "measure_cycle"), "health": ("digest_service", "health_cycle"),
+               "digest": ("digest_service", "digest_cycle")}
+
+
+def _late_steps() -> Dict[str, Any]:
+    """{step: module} for each late step whose module exists."""
+    import importlib
+
+    out: Dict[str, Any] = {}
+    for step, (mod_name, _fn) in _LATE_STEPS.items():
+        dotted = f"app.services.marketing.{mod_name}"
+        try:
+            out[step] = importlib.import_module(dotted)
+        except ModuleNotFoundError as e:
+            if e.name != dotted:
+                raise   # the module exists but one of ITS imports is missing: loud, never "not built"
+    return out
+
+
+def _expected_tick(present, *, enabled: bool, bot: bool, metrics: bool, digest: bool) -> List[str]:
+    """The tick's contract: expire → retract always; [MARKETING_ENABLED] reconcile → publish;
+    [bot configured] review → feed; then LAST, so they never delay a post or a review message:
+    [MARKETING_ENABLED and MARKETING_METRICS_ENABLED] measure, [bot configured] health,
+    [bot configured and MARKETING_DIGEST_ENABLED] digest."""
+    order = ["expire", "retract"]
+    if enabled:
+        order += ["reconcile", "publish"]
+    if bot:
+        order += ["review", "feed"]
+    if "measure" in present and enabled and metrics:
+        order.append("measure")
+    if "health" in present and bot:
+        order.append("health")
+    if "digest" in present and bot and digest:
+        order.append("digest")
+    return order
+
+
 def _stub_steps(monkeypatch, calls, *, fail=()):
-    """Every step of the publisher tick replaced by a recorder (a name in `fail` raises)."""
+    """Every step of the publisher tick replaced by a recorder (a name in `fail` raises) — the late
+    steps too, so no test here ever reaches a real ledger read or a platform call."""
     def make(name, result):
-        async def step():
+        async def step(*_a, **_k):
             calls.append(name)
             if name in fail:
                 raise RuntimeError(f"{name} exploded")
@@ -1019,39 +1064,54 @@ def _stub_steps(monkeypatch, calls, *, fail=()):
     monkeypatch.setattr(pub.review_service, "review_cycle",
                         make("review", {"pending": 0, "sent": 0, "failed": 0, "rate_limited": 0}))
     monkeypatch.setattr(pub.publish_feed, "feed_cycle", make("feed", {"posted": 0}))
+    for step, module in _late_steps().items():
+        fn = _LATE_STEPS[step][1]
+        monkeypatch.setattr(module, fn, make(step, {}))
+        if hasattr(pub, fn):    # a name bound into publisher_service itself
+            monkeypatch.setattr(pub, fn, make(step, {}))
+
+
+def _set_switches(monkeypatch, present, *, enabled: bool, bot: bool, metrics: bool, digest: bool) -> None:
+    monkeypatch.setattr(pub.review_service, "is_configured", lambda: bot)
+    monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", enabled)
+    if "measure" in present:
+        monkeypatch.setattr(pub.settings, "MARKETING_METRICS_ENABLED", metrics)
+    if "digest" in present:
+        monkeypatch.setattr(pub.settings, "MARKETING_DIGEST_ENABLED", digest)
 
 
 @pytest.mark.asyncio
 async def test_the_tick_order_and_its_switches(monkeypatch):
     """expire → retract always; reconcile → publish only with MARKETING_ENABLED; the Telegram
     review sweep and feed only when the bot is configured — and publishing BEFORE Telegram, so a
-    slow Telegram never delays a post."""
-    calls = []
+    slow Telegram never delays a post. The measure / health / digest steps run LAST behind their own
+    gates (`_expected_tick`). Every combination of the four switches."""
+    import itertools
+
+    calls: List[str] = []
     _stub_steps(monkeypatch, calls)
-    monkeypatch.setattr(pub.review_service, "is_configured", lambda: True)
-    monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", False)
-    await pub.publisher_tick()
-    assert calls == ["expire", "retract", "review", "feed"]
-    calls.clear()
-    monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", True)
-    await pub.publisher_tick()
-    assert calls == ["expire", "retract", "reconcile", "publish", "review", "feed"]
-    calls.clear()
-    monkeypatch.setattr(pub.review_service, "is_configured", lambda: False)
-    await pub.publisher_tick()
-    assert calls == ["expire", "retract", "reconcile", "publish"]
+    present = _late_steps()
+    for enabled, bot, metrics, digest in itertools.product((False, True), repeat=4):
+        _set_switches(monkeypatch, present, enabled=enabled, bot=bot, metrics=metrics, digest=digest)
+        calls.clear()
+        await pub.publisher_tick()
+        assert calls == _expected_tick(present, enabled=enabled, bot=bot, metrics=metrics, digest=digest), \
+            dict(enabled=enabled, bot=bot, metrics=metrics, digest=digest)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failing", ["expire", "retract", "reconcile", "publish", "review", "feed"])
+@pytest.mark.parametrize("failing", ["expire", "retract", "reconcile", "publish", "review", "feed",
+                                     *_LATE_STEPS])
 async def test_a_failing_step_never_stops_the_others(monkeypatch, caplog, failing):
-    calls = []
+    present = _late_steps()
+    if failing in _LATE_STEPS and failing not in present:
+        pytest.skip(f"the {failing} step's module is not built yet")
+    calls: List[str] = []
     _stub_steps(monkeypatch, calls, fail=(failing,))
-    monkeypatch.setattr(pub.review_service, "is_configured", lambda: True)
-    monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", True)
+    _set_switches(monkeypatch, present, enabled=True, bot=True, metrics=True, digest=True)
     caplog.set_level(logging.ERROR)
     await pub.publisher_tick()
-    assert calls == ["expire", "retract", "reconcile", "publish", "review", "feed"]
+    assert calls == _expected_tick(present, enabled=True, bot=True, metrics=True, digest=True)
     assert any(f"marketing publisher step {failing} failed" in r.getMessage() and r.exc_info
                for r in caplog.records)
 
@@ -1151,7 +1211,10 @@ from app.services.marketing import outlets  # noqa: E402
 _REAL_ENABLED_PLATFORMS = outlets.enabled_platforms
 
 _ALL_VERBS = [("a", "approve"), ("r", "reject"), ("d", "retract"), ("k", "confirm_retract"),
-              ("c", "cancel_retract"), ("l", "live"), ("n", "not_posted")]
+              ("c", "cancel_retract"), ("l", "live"), ("n", "not_posted"),
+              # the reject-reason keyboard (2026-10-01)
+              ("t", "reason_tone"), ("f", "reason_accuracy"), ("p", "reason_compliance"),
+              ("w", "reason_weak"), ("o", "reason_other")]
 _X_ID = "1840000000000000001"
 _X_URL = f"https://x.com/i/web/status/{_X_ID}"
 _BSKY_URI = "at://did:plc:abcdefghijklmnopqrstuvwx/app.bsky.feed.post/3l6oveex3ii2l"
@@ -1175,6 +1238,9 @@ def test_every_verb_parses_and_round_trips_within_64_bytes(verb, decision):
     f"d:{_PID.upper()}", f"k:{_PID.upper()}", f"c:{_PID.upper()}", f"l:{_PID.upper()}", f"n:{_PID.upper()}",
     f"dk:{_PID}", f"kd:{_PID}", f"d:k:{_PID}",
     f"b:{_PID}", f"e:{_PID}", f"-:{_PID}", f"]:{_PID}", f"^:{_PID}",   # not verbs (and not regex holes)
+    # the reason verbs: single lowercase letters only, never their names, never two letters
+    f"T:{_PID}", f"F:{_PID}", f"P:{_PID}", f"W:{_PID}", f"O:{_PID}", f"t:{_PID.upper()}",
+    f"tone:{_PID}", f"reason_tone:{_PID}", f"tf:{_PID}", f"to:{_PID}", f"t:t:{_PID}", f"t:{_PID}\n", "w:",
     f"d:{_PID}\n", f"k:{_PID} ", f" n:{_PID}", f"l;{_PID}", f"c:{_PID[:-1]}",
     "d:", "k", "d:" + "f" * 100,
 ])
@@ -1187,6 +1253,8 @@ def test_the_new_verbs_are_just_as_strict(data):
     (rs.retract_keyboard, ["retract"]),
     (rs.confirm_retract_keyboard, ["confirm_retract", "cancel_retract"]),
     (rs.unknown_outcome_keyboard, ["live", "not_posted"]),
+    (rs.reject_reason_keyboard, ["reason_tone", "reason_accuracy", "reason_compliance", "reason_weak",
+                                 "reason_other"]),
 ])
 def test_every_keyboard_button_round_trips_to_its_post(build, decisions):
     datas = [b["callback_data"] for row in build(_PID)["inline_keyboard"] for b in row]
@@ -1698,3 +1766,289 @@ def test_retract_on_a_platform_that_cannot_delete_records_nothing(client, ledger
     assert _post(ledger, pid) == before
     assert any("remove it by hand" in m["text"] for m in tg.of("editMessageText"))
     assert platform_apis == []
+
+
+# ══ Reject reasons (2026-10-01): ❌ offers a reason keyboard; a tap records `metadata.review.reason` ══
+
+
+_REASON_VERBS = [("t", "tone", "Tone"), ("f", "accuracy", "Accuracy"), ("p", "compliance", "Compliance"),
+                 ("w", "weak", "Weak / boring"), ("o", "other", "Other")]
+_TEXT = "TIKTOK · video · run 2026-09-28\n\nHello caption"
+
+
+def test_the_reason_labels_are_keyed_by_exactly_the_ledgers_codes():
+    assert tuple(rs.REJECT_REASONS) == mrs.REJECT_REASON_CODES
+    assert [(code, label) for _v, code, label in _REASON_VERBS] == list(rs.REJECT_REASONS.items())
+    for verb, code, _label in _REASON_VERBS:
+        assert rs._VERBS[verb] == f"reason_{code}"
+    # every verb is ONE lowercase ASCII letter (so the callback pattern stays a character class) and
+    # names one decision
+    assert all(len(v) == 1 and v.isascii() and v.islower() and v.isalpha() for v in rs._VERBS)
+    assert len(set(rs._VERBS.values())) == len(rs._VERBS)
+    assert rs._CALLBACK_RE.pattern.startswith("([") and "x" not in rs._VERBS and "e" not in rs._VERBS
+
+
+def test_the_reason_keyboard_is_one_button_per_reason_within_64_bytes():
+    kb = rs.reject_reason_keyboard(_PID)
+    buttons = [b for row in kb["inline_keyboard"] for b in row]
+    assert [b["text"] for b in buttons] == list(rs.REJECT_REASONS.values())
+    assert [b["callback_data"] for b in buttons] == [f"{v}:{_PID}" for v, _c, _l in _REASON_VERBS]
+    assert all(len(b["callback_data"].encode("utf-8")) <= 64 for b in buttons)
+    with pytest.raises(ValueError):
+        rs.reject_reason_keyboard(_PID.upper())
+
+
+def _seed_rejected(svc, *, reason: Optional[str] = None, status: str = "rejected") -> str:
+    review: Dict[str, Any] = {"decision": "rejected", "by": f"telegram:{OWNER}", "at": "2026-09-28T10:05:00+00:00"}
+    if reason:
+        review["reason"] = reason
+    return _seed_post(svc, status=status, meta={"dry_run": False, "review_notified_at": "2026-09-28T10:00:00+00:00",
+                                               "review_message_id": 555, "review": review})
+
+
+def test_a_reject_swaps_the_buttons_for_the_reason_keyboard_on_the_same_message(client, ledger, tg, wakes):
+    pid = _seed_post(ledger)
+    assert _post_hook(client, _tap(pid, "r")).status_code == 200
+    assert _post(ledger, pid)["status"] == "rejected" and wakes == []
+    assert _answers(tg) == ["Rejected ❌"]
+    (edit,) = tg.of("editMessageText")
+    assert edit["message_id"] == 555 and edit["reply_markup"] == rs.reject_reason_keyboard(pid)
+    assert re.fullmatch(re.escape(_TEXT) + r"\n\n❌ Rejected \d\d:\d\d ET", edit["text"])
+    assert "parse_mode" not in edit
+    assert tg.of("sendMessage") == [] and tg.of("editMessageReplyMarkup") == []
+
+
+@pytest.mark.parametrize("how", ["edit_refused", "edit_unavailable", "no_message_id"])
+def test_a_reject_whose_message_cannot_be_edited_offers_the_reasons_on_a_new_message(client, ledger, tg, how):
+    pid = _seed_post(ledger)
+    if how == "edit_refused":
+        tg.script["editMessageText"] = [(400, {"ok": False, "description": "Bad Request: message can't be edited"})]
+    elif how == "edit_unavailable":
+        tg.script["editMessageText"] = [(502, b"")]
+    _post_hook(client, _tap(pid, "r", message_id=None if how == "no_message_id" else 555))
+    assert _post(ledger, pid)["status"] == "rejected"           # the decision stands either way
+    assert len(tg.of("editMessageText")) == (0 if how == "no_message_id" else 1)
+    (msg,) = tg.of("sendMessage")
+    assert msg["text"] == "Why was the TIKTOK post rejected? Tap a reason (optional)."
+    assert msg["reply_markup"] == rs.reject_reason_keyboard(pid) and "parse_mode" not in msg
+
+
+def test_a_reject_whose_fallback_also_fails_still_answers_and_keeps_the_decision(client, ledger, tg, caplog):
+    pid = _seed_post(ledger)
+    tg.script["editMessageText"] = [(400, {"ok": False, "description": "Bad Request: message to edit not found"})]
+    tg.script["sendMessage"] = [(502, b"")]
+    caplog.set_level(logging.WARNING)
+    assert _post_hook(client, _tap(pid, "r")).status_code == 200
+    assert _post(ledger, pid)["status"] == "rejected" and _answers(tg) == ["Rejected ❌"]
+    assert any("could not offer the keyboard" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unexpected_edit_error_still_offers_the_reasons_and_never_raises(client, ledger, tg, monkeypatch, caplog):
+    pid = _seed_post(ledger)
+
+    async def broken_edit(*a, **k):
+        raise RuntimeError("kaput")
+
+    monkeypatch.setattr(rs.telegram, "edit_message_text", broken_edit)
+    caplog.set_level(logging.ERROR)
+    r = _post_hook(client, _tap(pid, "r"))
+    assert r.status_code == 200 and _post(ledger, pid)["status"] == "rejected"
+    assert tg.of("sendMessage")[0]["reply_markup"] == rs.reject_reason_keyboard(pid)
+    assert any("keyboard edit raised" in rec.getMessage() for rec in caplog.records)
+    assert not any("update handling raised" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.parametrize("first, second", [("a", None), ("a", "r"), ("r", "a")])
+def test_only_a_reject_offers_reasons(client, ledger, tg, first, second):
+    """Approve, an approve tap on a rejected post, and a reject tap on an approved one: the buttons are
+    removed, never swapped for reasons. (A reject — and a reject replay — is the one that offers them.)"""
+    pid = _seed_post(ledger)
+    _post_hook(client, _tap(pid, first))
+    if second:
+        _post_hook(client, _tap(pid, second))
+    edits = tg.of("editMessageText")
+    if first == "r":
+        assert edits[0]["reply_markup"] == rs.reject_reason_keyboard(pid)
+        edits = edits[1:]
+    assert edits and all(e["reply_markup"] == {"inline_keyboard": []} for e in edits)
+    assert tg.of("sendMessage") == []
+
+
+def test_an_unknown_post_never_offers_reasons(client, ledger, tg):
+    _post_hook(client, _tap(_PID, "r"))
+    assert _answers(tg) == ["Post not found"]
+    assert tg.of("editMessageText")[0]["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_a_replayed_reject_re_offers_the_reasons_until_one_is_recorded(client, ledger, tg):
+    """Telegram replays an update it thinks we missed: the replay is `already_rejected`, and while no
+    reason is recorded it must not take the reason keyboard away again."""
+    pid = _seed_post(ledger)
+    _post_hook(client, _tap(pid, "r"))
+    snapshot = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, "r"))                      # the replay
+    assert _post(ledger, pid) == snapshot                   # nothing written
+    assert _answers(tg)[1].startswith("Already rejected")
+    assert tg.of("editMessageText")[1]["reply_markup"] == rs.reject_reason_keyboard(pid)
+    _post_hook(client, _tap(pid, "w"))                      # a reason is recorded
+    _post_hook(client, _tap(pid, "r"))                      # another replay: nothing left to ask
+    assert tg.of("editMessageText")[-1]["reply_markup"] == {"inline_keyboard": []}
+
+
+@pytest.mark.parametrize("verb, code, label", _REASON_VERBS)
+def test_each_reason_tap_records_it_and_closes_the_keyboard(client, ledger, tg, wakes, platform_apis, verb, code,
+                                                            label):
+    pid = _seed_post(ledger)
+    _post_hook(client, _tap(pid, "r"))
+    before = _snap(ledger, pid)
+    rejected_text = tg.of("editMessageText")[0]["text"]
+    r = _post_hook(client, _tap(pid, verb, text=rejected_text))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    row = _post(ledger, pid)
+    assert row["status"] == "rejected"
+    review = row["metadata"]["review"]
+    assert (review["reason"], review["reason_by"], review["decision"]) == (code, f"telegram:{OWNER}", "rejected")
+    for key, value in before["metadata"]["review"].items():    # the decision record is kept
+        assert review[key] == value, key
+    assert _answers(tg)[-1] == f"Reason saved: {label}"
+    edit = tg.of("editMessageText")[-1]
+    assert edit["text"] == f"{rejected_text}\n\nReason: {label}"
+    assert edit["reply_markup"] == {"inline_keyboard": []} and edit["message_id"] == 555
+    assert wakes == [] and platform_apis == []                    # a reason wakes and calls nothing
+
+
+def test_a_double_reason_tap_writes_once(client, ledger, tg):
+    pid = _seed_rejected(ledger)
+    _post_hook(client, _tap(pid, "t"))
+    after_first = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, "t"))           # a second tap, or Telegram replaying the update
+    assert _post(ledger, pid) == after_first
+    assert _answers(tg) == ["Reason saved: Tone", "Reason already saved: Tone"]
+    first, second = tg.of("editMessageText")
+    assert first["text"] == second["text"] == f"{_TEXT}\n\nReason: Tone"   # the same message, not appended twice
+
+
+def test_a_later_different_reason_wins(client, ledger, tg):
+    pid = _seed_rejected(ledger)
+    _post_hook(client, _tap(pid, "t"))
+    _post_hook(client, _tap(pid, "w"))
+    assert _post(ledger, pid)["metadata"]["review"]["reason"] == "weak"
+    assert _answers(tg) == ["Reason saved: Tone", "Reason saved: Weak / boring"]
+
+
+@pytest.mark.parametrize("kw", [{"from_id": OWNER + 1}, {"chat_id": OWNER + 1}, {"from_id": str(OWNER)},
+                                {"chat_id": -100123}, {"drop": ("message",)}, {"drop": ("from",)}])
+@pytest.mark.parametrize("verb", ["t", "o"])
+def test_a_reason_tap_from_anyone_but_the_owner_is_refused(client, ledger, tg, wakes, verb, kw):
+    pid = _seed_rejected(ledger)
+    before = _snap(ledger, pid)
+    assert _post_hook(client, _tap(pid, verb, **kw)).status_code == 200
+    assert _post(ledger, pid) == before
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Not allowed"}]
+    assert tg.of("editMessageText") == [] and tg.of("sendMessage") == [] and wakes == []
+
+
+@pytest.mark.parametrize("status", ["pending_review", "approved", "queued", "published", "failed", "skipped",
+                                    "retracted"])
+def test_a_reason_tap_on_a_post_that_is_not_rejected_answers_and_writes_nothing(client, ledger, tg, status):
+    pid = _seed_rejected(ledger, status=status)
+    before = _snap(ledger, pid)
+    assert _post_hook(client, _tap(pid, "f")).status_code == 200
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == [f"No reason recorded — the post is {status}"]
+    assert tg.of("editMessageText") == [] and tg.of("sendMessage") == []
+
+
+def test_a_reason_tap_on_an_unknown_post_is_not_found(client, ledger, tg):
+    assert _post_hook(client, _tap(_PID, "p")).status_code == 200
+    assert _answers(tg) == ["Post not found"]
+    (edit,) = tg.of("editMessageText")
+    assert edit["text"] == f"{_TEXT}\n\nPost not found" and edit["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_a_reason_ledger_failure_keeps_the_keyboard_for_another_tap(client, ledger, tg, monkeypatch, caplog):
+    pid = _seed_rejected(ledger)
+    before = _snap(ledger, pid)
+    ledger.fake.tables[mrs.POSTS].fail_updates.append(RuntimeError("PostgREST 520"))
+    caplog.set_level(logging.ERROR)
+    assert _post_hook(client, _tap(pid, "t")).status_code == 200
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageText") == []
+    assert any("record_reject_reason FAILED" in r.getMessage() for r in caplog.records)
+
+
+def test_a_reason_tap_that_keeps_losing_its_fence_is_busy_and_keeps_the_keyboard(client, ledger, tg, monkeypatch):
+    pid = _seed_rejected(ledger)
+    before = _snap(ledger, pid)
+
+    async def lost_fence(*a, **k):
+        return None
+
+    monkeypatch.setattr(ledger, "transition_post", lost_fence)
+    _post_hook(client, _tap(pid, "t"))
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Could not record that — tap again"] and tg.of("editMessageText") == []
+
+
+def test_telegram_failures_while_answering_a_reason_never_undo_it(client, ledger, tg):
+    pid = _seed_rejected(ledger)
+    tg.script["answerCallbackQuery"] = [(400, {"ok": False, "description": "Bad Request: query is too old"})]
+    tg.script["editMessageText"] = [(502, b"")]
+    assert _post_hook(client, _tap(pid, "o")).status_code == 200
+    assert _post(ledger, pid)["metadata"]["review"]["reason"] == "other"
+
+
+def test_a_reason_tap_without_a_message_still_records_it(client, ledger, tg):
+    pid = _seed_rejected(ledger)
+    _post_hook(client, _tap(pid, "w", message_id=None, text=None))
+    assert _post(ledger, pid)["metadata"]["review"]["reason"] == "weak"
+    assert _answers(tg) == ["Reason saved: Weak / boring"] and tg.of("editMessageText") == []
+
+
+@pytest.mark.parametrize("data", ["T:{pid}", "tone:{pid}", "reason_tone:{pid}", "t:{PID}", "t:{pid}\n", "tf:{pid}",
+                                  "t;{pid}", "t:"])
+def test_malformed_reason_callbacks_decide_nothing(client, ledger, tg, data):
+    pid = _seed_rejected(ledger)
+    before = _snap(ledger, pid)
+    _post_hook(client, _tap(pid, data=data.format(pid=pid, PID=pid.upper())))
+    assert _post(ledger, pid) == before
+    assert _answers(tg) == ["Unknown action"]
+
+
+@pytest.mark.asyncio
+async def test_a_verb_whose_reason_has_no_label_records_nothing(ledger, tg, monkeypatch, caplog):
+    """The two tables drifting (a verb added without its label) is refused loudly, never recorded."""
+    pid = _seed_rejected(ledger)
+    before = _snap(ledger, pid)
+    monkeypatch.setitem(rs._VERBS, "q", "reason_spam")
+    monkeypatch.setattr(rs, "_CALLBACK_RE", re.compile(rf"([{''.join(rs._VERBS)}]):({rs._UUID})", re.ASCII))
+    caplog.set_level(logging.ERROR)
+    out = await rs.handle_update(_tap(pid, data=f"q:{pid}"))
+    assert out == {"ok": True, "refused": "unknown_action"} and _post(ledger, pid) == before
+    assert _answers(tg) == ["Unknown action"]
+    assert any("has no label" in r.getMessage() for r in caplog.records)
+
+
+_NOT_MODIFIED = (400, {"ok": False, "description": "Bad Request: message is not modified: specified new message "
+                                                     "content and reply markup are exactly the same as a current "
+                                                     "content and reply markup of the message"})
+
+
+def test_a_reject_replay_whose_message_already_shows_the_reasons_sends_nothing_new(client, ledger, tg):
+    """Telegram answers "message is not modified" when the edit changes nothing (a second replay of
+    the same update): the reasons are already on screen, so no fallback message repeats them."""
+    pid = _seed_post(ledger)
+    _post_hook(client, _tap(pid, "r"))
+    tg.script["editMessageText"] = [_NOT_MODIFIED]
+    _post_hook(client, _tap(pid, "r"))
+    assert len(tg.of("editMessageText")) == 2 and tg.of("sendMessage") == []
+    assert _post(ledger, pid)["status"] == "rejected"
+
+
+def test_a_retract_replay_whose_keyboard_is_already_in_place_sends_nothing_new(client, ledger, tg, wakes):
+    pid = _seed_published(ledger)
+    tg.script["editMessageReplyMarkup"] = [_NOT_MODIFIED]
+    _post_hook(client, _tap(pid, "d"))
+    assert len(tg.of("editMessageReplyMarkup")) == 1 and tg.of("sendMessage") == []
+    assert _answers(tg) == ["Confirm the delete"] and wakes == []

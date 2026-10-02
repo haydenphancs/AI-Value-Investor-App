@@ -1070,6 +1070,7 @@ _CONTINUE_CHIP = "Continue your answer"
 def _rich_content_for_turn(
     thinking: dict, widgets: Optional[list], sources: Optional[list],
     *, truncated: bool = False, finish_reason: Optional[str] = None,
+    context_grounded: Optional[bool] = None,
 ) -> dict:
     """The `rich_content` blob BOTH doors persist, built in one place.
 
@@ -1082,8 +1083,15 @@ def _rich_content_for_turn(
     real text) that no continuation completed. It is written only when true — a clean
     turn's blob is byte-identical to before — and `_row_to_message` lifts it onto the
     wire so a history reload shows the same "cut short" state the live turn did.
+
+    `context_grounded` is the service's server-side grounding verdict for the iOS chip
+    (`chat_service.context_grounding_verdict`). Written only when it is a real bool —
+    False is meaningful here ("the report did not reach this turn") — so a turn on a
+    context type with no verdict keeps the blob it always had.
     """
     rich: dict = {"thinking": thinking}
+    if isinstance(context_grounded, bool):
+        rich["context_grounded"] = context_grounded
     if widgets:
         rich["widgets"] = list(widgets)
         rich["widget"] = widgets[0]
@@ -1229,6 +1237,11 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
     # Written only on a CUT answer (`_rich_content_for_turn`); `True` or None on the
     # wire, never False, so legacy rows and old builds see nothing new.
     truncated = True if (rc and rc.get("truncated") is True) else None
+    # Unlike `truncated`, False is a real answer here ("the report did not reach this
+    # turn"), so both bools pass. Anything else — absent, a legacy row, a hand-edited
+    # 1 / "yes" — is no verdict, and iOS leaves its chip alone.
+    stored_verdict = rc.get("context_grounded") if rc else None
+    context_grounded = stored_verdict if isinstance(stored_verdict, bool) else None
 
     # Replay strip. Rows persisted before the disclaimer became conditional carry the
     # line on EVERY answer, including "Hi". Rewriting `chat_messages` was rejected —
@@ -1257,6 +1270,7 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
         thinking=thinking,
         credit=credit,
         truncated=truncated,
+        context_grounded=context_grounded,
         created_at=row["created_at"],
     )
 
@@ -1622,6 +1636,7 @@ async def send_chat_message(
         rich_content = _rich_content_for_turn(
             thinking_payload, [widget_payload] if widget_payload else None, sources,
             truncated=truncated, finish_reason=ai_result.get("finish_reason"),
+            context_grounded=ai_result.get("context_grounded"),
         )
         if truncated and is_length_cut(ai_result.get("finish_reason")):
             # The way out of a LENGTH cut; a SAFETY / RECITATION stop gets no chip.
@@ -1899,6 +1914,10 @@ async def stream_chat_message(
         replayed_warm = False                     # the starter-warm answer was actually SERVED
         tool_calls_seen = 0                       # single-mode agentic tool calls this turn
         tool_calls_failed = 0                     # ...of which came back as {error: …}
+        # The server's grounding verdict for the iOS chip (`context_grounding_verdict`):
+        # set from prep, REPLACED by the fallback's own (it re-resolves), persisted on the
+        # row. Bound here because prep can raise before it is ever assigned.
+        context_grounded: Optional[bool] = None
         route: dict = {
             "specialists": ["general"], "mode": "single", "labels": ["General"], "degraded": True,
         }
@@ -1964,6 +1983,13 @@ async def stream_chat_message(
                 prep, warmed = await asyncio.gather(prep_coro, _warm_if_ungrounded())
                 route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
 
+            # The chip's verdict as soon as it is known, so "Grounded on Research Report"
+            # is corrected while the answer streams rather than after it. Only for a type
+            # that HAS a verdict (old builds ignore an unknown frame); `done` carries the
+            # final, persisted one — the fallback may re-resolve differently.
+            context_grounded = prep.get("context_grounded")
+            if isinstance(context_grounded, bool):
+                yield _sse("grounding", {"context_grounded": context_grounded})
             # Capture sources up-front so they survive even if streaming later fails and we
             # fall back to full generation below.
             sources = prep.get("sources")
@@ -2348,6 +2374,10 @@ async def stream_chat_message(
                 stream_signals.pop("continued", None)
                 if ai_result.get("truncated"):
                     stream_signals["finish_reason"] = str(ai_result.get("finish_reason") or "MAX_TOKENS")
+                # …and the grounding verdict: `generate_response` resolved the screen AGAIN,
+                # and the answer being persisted was grounded on THAT resolve, not prep's.
+                if "context_grounded" in ai_result:
+                    context_grounded = ai_result.get("context_grounded")
                 if streamed_any:
                     # Discard any partial tokens before the full answer replaces them.
                     yield _sse("reset", {})
@@ -2448,6 +2478,7 @@ async def stream_chat_message(
             rich_content: dict = _rich_content_for_turn(
                 thinking_payload, widgets, sources,
                 truncated=truncated, finish_reason=stream_signals.get("finish_reason"),
+                context_grounded=context_grounded,
             )
             if continuable:
                 # Known before the write, so it rides the ATOMIC insert like the non-stream

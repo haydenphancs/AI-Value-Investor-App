@@ -54,6 +54,16 @@ final class AppActions {
     /// Use this to choose what to SAY, never to decide whether a write may proceed.
     var isRestoringSession: Bool { appState?.hasUnusedStoredCredential ?? false }
 
+    /// WHOSE session this is: the signed-in profile's id. Set before `.authenticated` is
+    /// published, KEPT through the `.restoring` window (the same account is expected back),
+    /// and nil once a session ends (`user = UserState()` on every sign-out path).
+    ///
+    /// For stamping long-running work with the account that started it, so the work can stop
+    /// when the account changes and survive a reconnect of the same one
+    /// (`ResearchViewModel.generationMonitors`). Never to decide whether a write may proceed —
+    /// that is `isSignedIn`, which is false while restoring.
+    var currentAccountId: String? { appState?.user.profile?.id }
+
     // MARK: - Actions
 
     /// Raise the shared "this needs an account" prompt.

@@ -364,3 +364,92 @@ async def test_non_stream_door_omits_the_rule_on_a_pass_through(monkeypatch, too
     for instr in seen.values():
         assert _SENTINEL not in instr
         assert "client typed this" in instr        # the context is still there, just not promoted
+
+
+# ── The chip's grounding verdict (`context_grounded`) through BOTH doors ──────
+#
+# iOS's "Grounded on Research Report · AAPL" chip used to key on the context TYPE alone, so a
+# report chat whose report could not be found (the direct door with no report id, after the
+# close-aligned `ticker_report_cache` rolled over) still claimed it. The verdict is the
+# SERVER's: True only when the resolver BUILT the block. A client pass-through satisfies
+# `grounded` and must still read False; a context type with no verdict reads None.
+
+@pytest.mark.parametrize("ctype, server_grounded, expected", [
+    ("TICKER_REPORT", True, True),
+    ("TICKER_REPORT", False, False),
+    (" ticker_report ", True, True),      # normalised like the resolver's own dispatch
+    ("ticker_report", False, False),
+    ("TICKER_REPORT", 1, False),          # only a real True vouches
+    ("STOCK", True, None),                # grounded by enrichment, not the resolver
+    ("STOCK", False, None),
+    ("ETF", True, None),
+    ("COMMODITY", True, None),            # appends the caller's string
+    ("BOOK", False, None),                # pass-through by design
+    ("NONE", False, None),
+    ("", False, None),
+    (None, False, None),
+])
+def test_context_grounding_verdict_table(ctype, server_grounded, expected):
+    from app.services.chat_service import context_grounding_verdict
+    assert context_grounding_verdict(ctype, server_grounded) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_ctx, block, expected", [
+    (None, _BUILT, True),                    # the resolver built the report block
+    (None, None, False),                     # no report found, nothing sent: ungrounded
+    ("client typed this", None, False),      # pass-through: `grounded` is True, the verdict is not
+])
+async def test_stream_door_reports_the_report_verdict(monkeypatch, client_ctx, block, expected):
+    _patch_resolver(monkeypatch, block)
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="what is the bear case?", stock_id="AVGO",
+        context=client_ctx, context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman",
+    )
+    assert out["context_grounded"] is expected
+    assert out["context_grounded"] is out["server_grounded"]
+    if client_ctx:
+        assert out["grounded"] is True, "the pass-through still earns the sources pill"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ctype, block", [
+    ("STOCK", None), ("STOCK", _BUILT),
+    ("ETF", "The user is viewing the ETF detail screen for X (X)."),
+    ("NONE", None),
+])
+async def test_stream_door_gives_no_verdict_for_other_context_types(monkeypatch, ctype, block):
+    _patch_resolver(monkeypatch, block)
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", stock_id="AVGO", context_type=ctype, reference_id="AVGO",
+    )
+    assert out["context_grounded"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_raise", [False, True])
+@pytest.mark.parametrize("client_ctx, block, expected", [
+    (None, _BUILT, True),
+    (None, None, False),
+    ("client typed this", None, False),
+])
+async def test_non_stream_door_reports_the_same_verdict(monkeypatch, tools_raise, client_ctx, block, expected):
+    """The stream door's FALLBACK persists this door's verdict, so it must be computed here
+    too — on the tool round AND the tool-less plain-text fallback."""
+    svc, _ = _generate_service(monkeypatch, block, tools_raise=tools_raise)
+    out = await svc.generate_response(
+        "sess", "what is the bear case?", stock_id="AVGO", context=client_ctx,
+        context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman",
+    )
+    assert out["context_grounded"] is expected
+
+
+@pytest.mark.asyncio
+async def test_non_stream_door_gives_no_verdict_for_a_stock_chat(monkeypatch):
+    svc, _ = _generate_service(monkeypatch, None, tools_raise=False)
+    out = await svc.generate_response(
+        "sess", "q", stock_id="AVGO", context_type="STOCK", reference_id="AVGO",
+    )
+    assert out["context_grounded"] is None

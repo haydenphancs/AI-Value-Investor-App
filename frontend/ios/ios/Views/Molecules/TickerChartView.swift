@@ -20,6 +20,10 @@ struct TickerChartView: View {
     /// Previous trading day's close — anchors the 1D dashed baseline. nil → the
     /// baseline falls back to the first visible point (start of the range).
     var previousClose: Double? = nil
+    /// Drawn in the chart frame only while `pricePoints` is empty — a remembered range can
+    /// now be the one a screen OPENS on, so "no bars yet" and "no bars for this range" are
+    /// first-paint states that used to need a tap to reach. nil → the empty frame, as before.
+    var placeholder: ChartPlaceholder? = nil
 
     /// Reference price for the dashed baseline: prior-day close on 1D, else the
     /// first visible point (start of the selected range).
@@ -183,6 +187,74 @@ struct TickerChartView: View {
 
     /// Close prices preceding the visible range so MA/Bollinger
     /// calculations have warm-up data and lines start from the left edge.
+    /// Sub-panes the BARS IN HAND cannot draw honestly, whatever the asset class allows.
+    ///
+    /// The enabled set is now one persisted preference shared by every screen, so a
+    /// Stochastic turned on for a stock arrives on WTI and Henry Hub too — FRED spot
+    /// series, CLOSE ONLY (`commodity_service._fred_history`). The renderer substitutes the
+    /// close for a missing high/low, which draws a close-only oscillator under the
+    /// "Stoch(14,3,3)" label (the defect `allowedSubCharts` already removes on crypto), and
+    /// a series with no volume draws an empty Volume pane. Judged on the FULL series, and
+    /// never written back to `chartSettings` — the preference survives for the next stock.
+    /// An empty series hides nothing, so panes do not jump in when the first bars land.
+    private var unavailableSubCharts: Set<TechnicalIndicatorType> {
+        guard !pricePoints.isEmpty else { return [] }
+        var missing: Set<TechnicalIndicatorType> = []
+        if !pricePoints.contains(where: { $0.high != nil && $0.low != nil }) {
+            missing.insert(.stochastic)
+        }
+        if !pricePoints.contains(where: { ($0.volume ?? 0) > 0 }) {
+            missing.insert(.volume)
+        }
+        return missing
+    }
+
+    /// Chart types the BARS IN HAND cannot draw. Candle and Bar need open/high/low; the
+    /// renderers fill a missing range from the close, so a close-only series (WTI, Henry
+    /// Hub — FRED spot) drew a row of flat dashes under a saved Candle. Same rule as
+    /// `unavailableSubCharts`: judged on the full series, empty hides nothing, and the saved
+    /// type is never rewritten — the next stock still opens on Candle.
+    private var unavailableChartTypes: Set<ChartType> {
+        guard !pricePoints.isEmpty else { return [] }
+        let hasOHLC = pricePoints.contains { $0.open != nil && $0.high != nil && $0.low != nil }
+        return hasOHLC ? [] : [.candle, .bar]
+    }
+
+    /// The type the canvas draws: the saved preference unless this asset class or these
+    /// bars cannot draw it honestly, then Line.
+    private var drawnChartType: ChartType {
+        let preferred = chartSettings.chartType
+        return assetContext.allowedChartTypes.contains(preferred) && !unavailableChartTypes.contains(preferred)
+            ? preferred : .line
+    }
+
+    /// Sub-panes drawn: enabled, offered on this asset class, and drawable from these bars.
+    private var drawnSubCharts: [TechnicalIndicatorType] {
+        let missing = unavailableSubCharts
+        return chartSettings.activeSubCharts.filter { assetContext.allowedSubCharts.contains($0) }
+            .filter { !missing.contains($0) }
+    }
+
+    @ViewBuilder
+    private func chartPlaceholderView(_ placeholder: ChartPlaceholder) -> some View {
+        switch placeholder {
+        case .loading:
+            // Same block as `DetailHeaderChartSkeleton`'s chart placeholder.
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium, style: .continuous)
+                .fill(AppColors.cardBackgroundLight)
+                .shimmer()
+                .accessibilityLabel("Loading chart")
+        case .note(let text):
+            Text(text)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, AppSpacing.lg)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
     private var overlayLookbackCloses: [Double] {
         let start = max(0, min(viewportState.visibleStart, pricePoints.count))
         guard start > 0 else { return [] }
@@ -233,31 +305,36 @@ struct TickerChartView: View {
                 .transition(.opacity)
             }
 
-            // Main price chart with crosshair gesture
+            // Main price chart with crosshair gesture. With no bars and a placeholder, the
+            // placeholder REPLACES the canvas: drawn on top, its note overprinted the canvas's
+            // own centred "No chart data" text (and VoiceOver read both).
             ZStack {
-                MainChartCanvas(
-                    pricePoints: visiblePoints,
-                    isPositive: isPositive,
-                    // A persisted Candle/Bar preference is coerced on a source that has no
-                    // OHLC (crypto) — see `ChartAssetContext.allowedChartTypes`.
-                    chartType: assetContext.allowedChartTypes.contains(chartSettings.chartType)
-                        ? chartSettings.chartType : .line,
-                    overlays: chartSettings.activeOverlays,
-                    showExtendedHours: drawsExtendedHours,
-                    lookbackCloses: overlayLookbackCloses,
-                    chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil,
-                    useIntradayTimeMapping: usesIntradayTimeMapping,
-                    sessionWindow: sessionWindow,
-                    baselineClose: baselineClose
-                )
+                if pricePoints.isEmpty, let placeholder {
+                    chartPlaceholderView(placeholder)
+                } else {
+                    MainChartCanvas(
+                        pricePoints: visiblePoints,
+                        isPositive: isPositive,
+                        // A persisted Candle/Bar preference is coerced on a source that has no
+                        // OHLC (crypto, close-only commodities) — see `drawnChartType`.
+                        chartType: drawnChartType,
+                        overlays: chartSettings.activeOverlays,
+                        showExtendedHours: drawsExtendedHours,
+                        lookbackCloses: overlayLookbackCloses,
+                        chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil,
+                        useIntradayTimeMapping: usesIntradayTimeMapping,
+                        sessionWindow: sessionWindow,
+                        baselineClose: baselineClose
+                    )
 
-                ChartCrosshairGesture(
-                    pricePoints: visiblePoints,
-                    selectedRange: selectedRange,
-                    crosshairState: crosshairState,
-                    viewportState: viewportState,
-                    timeFractions: intradayTimeFractions
-                )
+                    ChartCrosshairGesture(
+                        pricePoints: visiblePoints,
+                        selectedRange: selectedRange,
+                        crosshairState: crosshairState,
+                        viewportState: viewportState,
+                        timeFractions: intradayTimeFractions
+                    )
+                }
             }
             .frame(height: 140)
             .padding(.horizontal, AppSpacing.lg)
@@ -278,8 +355,9 @@ struct TickerChartView: View {
             // Filtered by what this asset class can draw honestly (Stoch needs
             // high/low, which CoinGecko rows lack) — the same coercion idiom as
             // `allowedChartTypes` above, so a stale enabled set never draws a
-            // close-only oscillator under a "Stoch(14,3,3)" label.
-            ForEach(chartSettings.activeSubCharts.filter { assetContext.allowedSubCharts.contains($0) }) { indicator in
+            // close-only oscillator under a "Stoch(14,3,3)" label — and then by
+            // what these bars can draw (`unavailableSubCharts`).
+            ForEach(drawnSubCharts) { indicator in
                 SubChartCanvas(
                     indicator: indicator,
                     pricePoints: visiblePoints,
@@ -300,6 +378,9 @@ struct TickerChartView: View {
                         // source caps at two years. Every other screen's backend 400s it.
                         ForEach(assetContext.allowedRanges, id: \.rawValue) { range in
                             TimeRangeButton(range: range, isSelected: selectedRange == range) {
+                                // The ONLY range write: a tap. The screens' restore and
+                                // fallbacks only read (see `ChartSelectionMemory`).
+                                ChartSelectionMemory.rememberUserRange(range)
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     selectedRange = range
                                 }
@@ -355,7 +436,12 @@ struct TickerChartView: View {
             }
         }
         .sheet(isPresented: $showSettingsSheet) {
-            ChartSettingsSheet(chartSettings: chartSettings, assetContext: assetContext)
+            ChartSettingsSheet(
+                chartSettings: chartSettings,
+                assetContext: assetContext,
+                unavailableSubCharts: unavailableSubCharts,
+                unavailableChartTypes: unavailableChartTypes
+            )
                 .transaction { $0.disablesAnimations = true }
         }
         .onChange(of: selectedRange) {
@@ -440,6 +526,8 @@ struct TickerChartView: View {
 
     private func intervalRow(_ interval: ChartInterval) -> some View {
         Button {
+            // The ONLY interval write: a tap, remembered for the range it was picked on.
+            ChartSelectionMemory.rememberUserInterval(interval, for: selectedRange)
             // Preserve the no-animation interval switch from the old menu.
             var transaction = Transaction()
             transaction.disablesAnimations = true

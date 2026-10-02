@@ -69,6 +69,22 @@ RECONCILE_MAX_RESULTS = 5       # the endpoint's minimum page size
 #: read-after-write ordering; created_at can differ from our clock).
 RECONCILE_LOOKBACK = timedelta(minutes=10)
 
+#: The measure step (`metrics_service`, design doc §12.11). GET /2/users/me is not an owned read:
+#: X bills it as a User read.
+USER_READ_MICROS = 10_000
+#: An X post is read when it has crossed one of these ages (days after it went out) that is not yet
+#: measured — once, for the largest one crossed.
+METRICS_CHECKPOINT_DAYS = (1, 3, 7, 28)
+#: The timeline window read around the post's publish time, either side.
+METRICS_WINDOW = timedelta(minutes=10)
+#: A metrics read starts only while the month's spend leaves the read's reserve PLUS this many posts
+#: (a week of posting days) under the cap — posting always wins. Priced by `metrics_headroom_micros()`
+#: at CALL time (a fixed text-post figure left room for less than one $0.20 URL post — review 2026-10-01).
+METRICS_HEADROOM_POSTS = 4
+#: Charged before one metrics read (a page of at most 5 posts), corrected afterwards to the count
+#: X returned.
+METRICS_READ_RESERVE_MICROS = 5 * OWNED_READ_MICROS
+
 _CASHTAG_RE = re.compile(r"(?<![\w$])\$[A-Za-z]{1,10}(?:[._][A-Za-z]{1,4})?\b")
 #: X's parser also takes the full-width ＠ (U+FF20) as a mention sign.
 _MENTION_RE = re.compile(r"(?<![\w@＠])[@＠][A-Za-z0-9_]{1,15}\b")
@@ -93,6 +109,25 @@ def budget_micros() -> int:
     if usd != usd or usd in (float("inf"), float("-inf")) or usd <= 0:
         return 0
     return int(round(usd * 1_000_000))
+
+
+def metrics_headroom_micros() -> int:
+    """The spend a metrics read must leave under the monthly cap beyond its own reserve:
+    `METRICS_HEADROOM_POSTS` posts at the price a post would reserve right now — $0.20 each while
+    MARKETING_X_ALLOW_URLS is on (read at CALL time, like `prepare`: the switch may change between
+    reads), else $0.015."""
+    per_post = URL_POST_MICROS if settings.MARKETING_X_ALLOW_URLS else POST_MICROS
+    return METRICS_HEADROOM_POSTS * per_post
+
+
+def _billed_reads(result_count: Any, returned: int) -> int:
+    """The posts X bills for one reconcile read (owned reads cost per post RETURNED): the posts it
+    returned, or its own `result_count` when that is larger — but never more than the page we asked
+    for. A count that is not a non-negative int (absent, a bool, a string, a float, negative) is
+    unreadable and reads as 0, so the posts returned decide; a corrupt count (10**9) can no longer
+    journal a charge that caps X for the rest of the month. Never raises."""
+    count = result_count if isinstance(result_count, int) and not isinstance(result_count, bool) else 0
+    return max(returned, min(max(count, 0), RECONCILE_MAX_RESULTS))
 
 
 def normalize_text(text: Any) -> str:
@@ -240,7 +275,7 @@ class XAdapter(Adapter):
                 else self.reconcile_reserve_micros
             return ReconcileResult(UNKNOWN, error=scrub(e), cost_micros=cost)
         posts = res.get("posts") or []
-        cost = int(res.get("result_count") or len(posts)) * OWNED_READ_MICROS
+        cost = _billed_reads(res.get("result_count"), len(posts)) * OWNED_READ_MICROS
         wanted = match_key(post.get("caption"))
         for item in posts:
             if isinstance(item, dict) and match_key(item.get("text")) == wanted and item.get("id"):

@@ -22,6 +22,14 @@ struct CryptoDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showMoreOptions = false
     @State private var showTechnicalAnalysisDetail = false
+    /// The Analysis tab's toggles, remembered on this device (TestFlight 1.0 (9): set once,
+    /// keep). They were `@Published` copies on the ViewModel with hard defaults, so every
+    /// pushed coin and every relaunch reset them. The momentum key is the one the stock
+    /// screen binds; this tab shows no analyst card today, but the shared content requires
+    /// the binding, and a stored choice beats a `.constant` that would swallow a tap.
+    @AppStorage(FearGreedTimeframe.storageKey) private var fearGreedTimeframeID: String = FearGreedTimeframe.defaultChoice.storageID
+    @AppStorage(AnalystMomentumPeriod.storageKey) private var momentumPeriodID: String = AnalystMomentumPeriod.defaultChoice.storageID
+    @AppStorage(SentimentTimeframe.storageKey) private var sentimentTimeframeID: String = SentimentTimeframe.defaultChoice.storageID
     @State private var showSearch = false
     @State private var showShareSheet = false
     @State private var showAIChat = false
@@ -124,7 +132,7 @@ struct CryptoDetailView: View {
                             isPositive: cryptoData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
-                            assetContext: .crypto,
+                            assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
                             previousClose: cryptoData.chartPreviousClose
                         )
@@ -332,9 +340,9 @@ struct CryptoDetailView: View {
                 // shimmer while the request was in flight and left the tab blank on
                 // failure — no card, no message, no retry.
                 isTechnicalLoaded: viewModel.isTechnicalLoaded,
-                selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
-                selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
-                selectedFearGreedTimeframe: $viewModel.selectedFearGreedTimeframe,
+                selectedMomentumPeriod: AnalystMomentumPeriod.binding($momentumPeriodID),
+                selectedSentimentTimeframe: SentimentTimeframe.binding($sentimentTimeframeID),
+                selectedFearGreedTimeframe: FearGreedTimeframe.binding($fearGreedTimeframeID),
                 onSentimentMoreTap: viewModel.handleSentimentMore,
                 onTechnicalDetailTap: {
                     showTechnicalAnalysisDetail = true

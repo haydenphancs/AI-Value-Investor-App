@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -404,12 +405,16 @@ class FakeSupabase:
             mrs.RUNS: _Table([("run_date",)], {"stage": "planned", "status": "planned", "attempts": 0,
                                                 "timings": dict, "metadata": dict, "content_class": "A"}),
             mrs.ASSETS: _Table([("storage_path",)], {"metadata": dict}),
+            # `metrics` defaults to {} like the real column (migration 170: NOT NULL DEFAULT '{}').
             mrs.POSTS: _Table([("idempotency_key",), ("run_id", "platform", "format")],
-                              {"attempts": 0, "cost_micros": 0, "metadata": dict}),
+                              {"attempts": 0, "cost_micros": 0, "metadata": dict, "metrics": dict}),
             # migration 173: run_id is the PRIMARY KEY (first-write-wins selection claim).
             mrs.SCRIPTS: _Table([("run_id",)], {"status": "selected", "fact_sheet": dict,
                                                 "violations": list, "generations": 0,
                                                 "tokens_used": 0}, generated_id=False),
+            # migration 173: PRIMARY KEY (campaign, day); written by smart_link's increment RPC
+            # (not modelled — tests seed rows), read by the weekly digest.
+            mrs.LINK_HITS: _Table([("campaign", "day")], {"hits": 0}, generated_id=False),
         }
         self.storage = _Storage(self.objects, self.object_meta, self.tables[mrs.ASSETS])
 
@@ -1237,6 +1242,11 @@ async def test_the_worker_writes_only_its_own_in_progress_run(svc):
     # claim_nonce is trusted by decide_claim AHEAD of the attempts cap: never the worker's to set
     upd = await svc.update_run(rid, metadata={"claim_nonce": "forged-nonce", "preflight": {"ok": 1}}, worker=True, claim=_holder(svc, rid))
     assert upd["metadata"]["claim_nonce"] == "nonce-real" and upd["metadata"]["preflight"] == {"ok": 1}
+    # K1: nor `closed` — close_finished_runs' record of WHY it closed a day, which the weekly digest prints
+    upd = await svc.update_run(rid, metadata={"closed": {"reason": "posted", "posts": {"published": 9}},
+                                              "voice_asset_id": "a1"}, worker=True, claim=_holder(svc, rid))
+    assert "closed" not in upd["metadata"] and upd["metadata"]["voice_asset_id"] == "a1"
+    assert "closed" not in svc.fake.tables[mrs.RUNS].rows[0]["metadata"]
     _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW,
                                     claim_nonce="forged-nonce")
     assert reason == IN_PROGRESS
@@ -1246,6 +1256,39 @@ async def test_the_worker_writes_only_its_own_in_progress_run(svc):
     assert svc.fake.tables[mrs.RUNS].rows[0]["status"] == "skipped"
     # the SERVER's own writes (the selection mirror) are not fenced
     await svc.update_run(rid, source_ref="journey:x")
+
+
+def test_the_server_owned_run_metadata_keys():
+    """K1: `claim_nonce` (trusted by decide_claim ahead of the attempts cap) and `closed` (why
+    close_finished_runs closed the day — printed by the weekly digest) are written by the server only."""
+    assert set(schemas.SERVER_OWNED_RUN_METADATA) == {"claim_nonce", "closed"}
+
+
+@pytest.mark.asyncio
+async def test_a_worker_patch_can_never_plant_a_close_record(svc, caplog):
+    """K1: the worker closes its own day `skipped` and smuggles `metadata.closed` with it. The digest reads
+    `closed.reason` for a skipped day without a skip_reason, so a planted one would explain the day in
+    the least-trusted process's words. The key is dropped (logged WARNING); every other key lands."""
+    import logging
+
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    planted = {"closed": {"at": "2026-09-17T22:00:00+00:00", "reason": "posted", "posts": {"published": 9},
+                          "skip_reasons": {}},
+               "claim_nonce": "f" * 32, "note": "kept"}
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        upd = await svc.update_run(rid, status="skipped", finished=True, metadata=planted, worker=True,
+                                   claim=_holder(svc, rid))
+    stored = svc.fake.tables[mrs.RUNS].rows[0]
+    assert upd["status"] == stored["status"] == "skipped"
+    assert "closed" not in stored["metadata"] and stored["metadata"]["note"] == "kept"
+    assert stored["metadata"]["claim_nonce"] == row["metadata"]["claim_nonce"]
+    assert any("server-owned metadata" in r.getMessage() and "closed" in r.getMessage() for r in caplog.records)
+    # a PATCH that carries nothing but server-owned keys writes no metadata at all
+    row2, _ = await svc.claim_run(date(2026, 9, 18), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    upd2 = await svc.update_run(row2["id"], stage="selected", metadata={"closed": {"reason": "mixed"}}, worker=True,
+                                claim=_holder(svc, row2["id"]))
+    assert upd2["stage"] == "selected" and "closed" not in upd2["metadata"]
 
 
 @pytest.mark.asyncio
@@ -2211,6 +2254,10 @@ async def test_a_charge_is_journaled_and_added_to_cost_micros_in_the_same_write(
     ({"updated_at": _T1}, "not writable"),
     ({"idempotency_key": "2026-09-30:x:text"}, "not writable"),
     ({"charge": ("x_create", 15000), "cost_micros": 0}, "a charge OR cost_micros"),
+    # the metrics document has ONE writer (merge_post_metrics, fenced on its own rev)
+    ({"metrics": {"likes": 1}}, "merge_post_metrics"),
+    ({"metrics": {}}, "merge_post_metrics"),
+    ({"metrics": None}, "merge_post_metrics"),
 ])
 @pytest.mark.asyncio
 async def test_transition_refuses_a_bad_request_before_any_io(svc, monkeypatch, kwargs, match):
@@ -2708,3 +2755,888 @@ async def test_close_finished_runs_is_bounded_and_oldest_first(svc):
     assert await svc.close_finished_runs(_P5_TODAY, limit=3) == 3
     assert [_stored(svc, r["id"])["status"] for r in runs] == ["skipped", "skipped", "skipped", "media_ready"]
     assert await svc.close_finished_runs(_P5_TODAY, limit=3) == 1
+
+
+# ══ Measurement + run health (2026-10-01): the metrics writer, the digest reads, reject reasons ══
+#
+# `merge_post_metrics` is the ONLY writer of `marketing_posts.metrics` and must never move the
+# publisher's `updated_at` fence; the digest's reads keep every filter in the query; a reject
+# reason is a fenced, idempotent annotation of a REJECTED post; a closed run says why.
+
+
+def _published(svc, **kw) -> Dict[str, Any]:
+    kw.setdefault("published_at", _T0)
+    return _p5_post(svc, status="published", external_id="1", **kw)
+
+
+def _bump_likes(old: Dict[str, Any]) -> Dict[str, Any]:
+    return {**old, "likes": int(old.get("likes") or 0) + 1}
+
+
+# ── metrics_rev (pure) ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("metrics, expected", [
+    ({}, (None, 1)), (None, (None, 1)), ("junk", (None, 1)), (["rev", 3], (None, 1)),
+    ({"rev": None}, (None, 1)),                      # JSON null: `->>` is SQL NULL → IS NULL
+    ({"rev": 0}, ("0", 1)), ({"rev": 1}, ("1", 2)), ({"rev": 41}, ("41", 42)),
+    # hand-edited revs: fenced on EXACTLY what `->>` renders (or the write could never land), and
+    # the counter restarts at 1
+    ({"rev": "7"}, ("7", 1)), ({"rev": "abc"}, ("abc", 1)), ({"rev": True}, ("true", 1)),
+    ({"rev": False}, ("false", 1)), ({"rev": 2.0}, ("2.0", 1)), ({"rev": -3}, ("-3", 1)),
+    ({"rev": [1]}, ("[1]", 1)),
+])
+def test_metrics_rev_fences_on_the_stored_text_and_counts_only_a_real_int(metrics, expected):
+    assert mrs.metrics_rev(metrics) == expected
+
+
+def test_metrics_rev_text_is_what_the_fake_json_path_renders():
+    """Anti-vacuity for the fence tests below: the fake's `->>` (the PostgREST text path) and
+    `metrics_rev` render the same stored value identically."""
+    for value in (0, 7, "7", "abc", True, 2.0, -3, [1]):
+        fence, _ = mrs.metrics_rev({"rev": value})
+        assert _col({"metrics": {"rev": value}}, "metrics->>rev") == fence, value
+
+
+# ── merge_post_metrics: the one writer of the metrics column ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_merge_post_metrics_first_write_is_rev_1_and_each_later_write_bumps_it(svc, monkeypatch):
+    row = _published(svc)
+    assert "metrics" not in row          # a seeded row: the column absent reads as {} with no rev
+    calls = _spy_updates(monkeypatch, svc)
+    out = await svc.merge_post_metrics(row["id"], observed=_read(row), merge=_bump_likes)
+    assert out["metrics"] == {"likes": 1, "rev": 1}
+    for n in (2, 3):
+        out = await svc.merge_post_metrics(row["id"], observed=_read(_live_post(svc, row["id"])),
+                                           merge=_bump_likes)
+        assert out["metrics"] == {"likes": n, "rev": n}
+    # ONE column per write: never metadata, never updated_at
+    assert [sorted(c) for c in calls] == [["metrics"]] * 3
+
+
+@pytest.mark.asyncio
+async def test_a_post_created_through_the_ledger_starts_from_the_column_default(svc):
+    post = await _pending_post(svc)
+    assert post["metrics"] == {}          # the fake's default, like the real column's
+    _live_post(svc, post["id"]).update(status="published", published_at=_T0)
+    out = await svc.merge_post_metrics(post["id"], observed=None, merge=_bump_likes)   # reads it itself
+    assert out["metrics"] == {"likes": 1, "rev": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_metrics_write_never_moves_the_publishers_fence(svc):
+    row = _published(svc, metadata={**_p5_meta(), "publish": {"state": "published"}})
+    publisher_read = _read(row)                    # the publisher read the row BEFORE the metrics write
+    await svc.merge_post_metrics(row["id"], observed=_read(row), merge=lambda old: {"likes": 5})
+    live = _live_post(svc, row["id"])
+    assert live["updated_at"] == _T0 and live["metadata"] == publisher_read["metadata"]
+    # …so the publisher's fenced write still lands, and does not clobber the metrics in between
+    done = await svc.transition_post(row["id"], expect_status="published", observed=publisher_read, retries=0,
+                                     meta={"retract_requested_at": _T1})
+    assert done is not None and done["metadata"]["retract_requested_at"] == _T1
+    assert done["metrics"] == {"likes": 5, "rev": 1}
+    # …and a metrics write whose read predates that publisher write still lands too: its fence is the
+    # rev, and it writes only its own column (the publisher's new key survives)
+    out = await svc.merge_post_metrics(row["id"], observed=_read(live) | {"metadata": {}, "updated_at": _T0},
+                                       merge=_bump_likes)
+    assert out["metrics"] == {"likes": 6, "rev": 2}
+    assert out["metadata"]["retract_requested_at"] == _T1 and out["updated_at"] == done["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_rev_fence_re_reads_and_re_applies_merge_to_the_fresh_document(svc, monkeypatch):
+    row = _published(svc)
+    await svc.merge_post_metrics(row["id"], observed=_read(row), merge=lambda old: {"history": ["d1"]})
+    stale = _read(_live_post(svc, row["id"]))                                  # rev 1
+    await svc.merge_post_metrics(row["id"], observed=_read(stale),
+                                 merge=lambda old: {**old, "history": old["history"] + ["d2"]})   # rev 2 lands
+    seen: List[Dict[str, Any]] = []
+
+    def merge(old):
+        seen.append(copy.deepcopy(old))
+        return {**old, "history": old.get("history", []) + ["d3"]}
+
+    calls = _spy_updates(monkeypatch, svc)
+    out = await svc.merge_post_metrics(row["id"], observed=stale, merge=merge)
+    assert len(calls) == 2 and [s["rev"] for s in seen] == [1, 2]   # re-applied to the FRESH document
+    assert out["metrics"] == {"history": ["d1", "d2", "d3"], "rev": 3}   # the concurrent d2 is kept
+
+
+@pytest.mark.asyncio
+async def test_with_no_retries_a_lost_rev_fence_is_none_and_writes_nothing(svc, monkeypatch):
+    row = _published(svc)
+    seen = _read(row)
+    _live_post(svc, row["id"])["metrics"] = {"likes": 9, "rev": 4}      # someone else wrote meanwhile
+    calls = _spy_updates(monkeypatch, svc)
+    assert await svc.merge_post_metrics(row["id"], observed=seen, merge=_bump_likes, retries=0) is None
+    assert len(calls) == 1 and _live_post(svc, row["id"])["metrics"] == {"likes": 9, "rev": 4}
+
+
+@pytest.mark.asyncio
+async def test_constant_rev_contention_is_none_after_the_budget_and_warns(svc, monkeypatch, caplog):
+    import logging
+
+    row = _published(svc)
+
+    def land(n):
+        _live_post(svc, row["id"])["metrics"] = {"rev": 100 + n}
+
+    calls = _spy_updates(monkeypatch, svc, before=land)
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        assert await svc.merge_post_metrics(row["id"], observed=_read(row), merge=_bump_likes, retries=2) is None
+    assert len(calls) == 3 and _live_post(svc, row["id"])["metrics"] == {"rev": 102}
+    assert any("metrics NOT written" in r.getMessage() and row["id"] in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("status", ["retracted", "queued", "failed", "pending_review", "skipped"])
+@pytest.mark.asyncio
+async def test_merge_post_metrics_writes_nothing_once_the_post_left_published(svc, monkeypatch, status):
+    row = _published(svc)
+    seen = _read(row)
+    _live_post(svc, row["id"])["status"] = status        # e.g. retracted between the read and the write
+    calls = _spy_updates(monkeypatch, svc)
+    assert await svc.merge_post_metrics(row["id"], observed=seen, merge=_bump_likes) is None
+    assert len(calls) == 1          # the fenced attempt missed; the re-read saw the new status and stopped
+    assert "metrics" not in _live_post(svc, row["id"])
+    # an observed row already outside expect_status: no write at all
+    assert await svc.merge_post_metrics(row["id"], observed=_read(_live_post(svc, row["id"])),
+                                        merge=_bump_likes) is None
+    assert len(calls) == 1
+    # …unless the caller expects that status too (a status tuple, like transition_post)
+    out = await svc.merge_post_metrics(row["id"], observed=None, merge=_bump_likes,
+                                       expect_status=("published", status))
+    assert out["metrics"] == {"likes": 1, "rev": 1}
+
+
+@pytest.mark.asyncio
+async def test_merge_post_metrics_on_a_missing_post_is_none(svc, monkeypatch):
+    calls = _spy_updates(monkeypatch, svc)
+    assert await svc.merge_post_metrics(str(uuid.uuid4()), observed=None, merge=_bump_likes) is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("stored", [{"rev": "abc", "likes": 2}, {"rev": True}, {"rev": 2.0}, {"rev": -1},
+                                    {"rev": None, "likes": 3}, ["not", "an", "object"], "junk", None])
+@pytest.mark.asyncio
+async def test_a_hand_edited_or_malformed_metrics_document_is_still_written_and_restarts_the_rev(svc, stored):
+    row = _published(svc, metrics=stored)
+    out = await svc.merge_post_metrics(row["id"], observed=_read(row), merge=_bump_likes)
+    assert out is not None and out["metrics"]["rev"] == 1
+    base = stored.get("likes") if isinstance(stored, dict) else None
+    assert out["metrics"]["likes"] == int(base or 0) + 1
+    again = await svc.merge_post_metrics(row["id"], observed=_read(out), merge=_bump_likes)
+    assert again["metrics"]["rev"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_writer_owns_rev_and_merge_gets_a_private_copy(svc):
+    row = _published(svc, metrics={"history": [{"day": "2026-09-01", "likes": 1}], "rev": 3})
+    seen = _read(row)
+
+    def vandal(old):
+        old["history"].append({"day": "x"})      # mutates its argument…
+        return {**old, "rev": 999}              # …and tries to choose the rev
+
+    out = await svc.merge_post_metrics(row["id"], observed=seen, merge=vandal)
+    assert out["metrics"]["rev"] == 4
+    assert seen["metrics"]["history"] == [{"day": "2026-09-01", "likes": 1}]   # the caller's row untouched
+
+
+@pytest.mark.parametrize("bad", [None, [], "metrics", 7, ({"likes": 1},)])
+@pytest.mark.asyncio
+async def test_a_merge_that_returns_no_dict_raises_before_any_write(svc, monkeypatch, bad):
+    row = _published(svc)
+    calls = _spy_updates(monkeypatch, svc)
+    with pytest.raises(ValueError, match="not a dict"):
+        await svc.merge_post_metrics(row["id"], observed=_read(row), merge=lambda old: bad)
+    assert calls == [] and "metrics" not in _live_post(svc, row["id"])
+
+
+@pytest.mark.asyncio
+async def test_a_metrics_ledger_failure_is_a_marketing_run_error_and_writes_nothing(svc):
+    row = _published(svc)
+    svc.fake.tables[mrs.POSTS].fail_updates.append(RuntimeError("520: origin unreachable"))
+    with pytest.raises(mrs.MarketingRunError, match="merge_post_metrics failed") as info:
+        await svc.merge_post_metrics(row["id"], observed=_read(row), merge=_bump_likes)
+    assert row["id"] in str(info.value)
+    assert "metrics" not in _live_post(svc, row["id"])
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_mark_post_cannot_write_metrics_either(svc, monkeypatch):
+    row = _published(svc)
+    calls = _spy_updates(monkeypatch, svc)
+    with pytest.raises(ValueError, match="not writable"):
+        await svc.mark_post(row["id"], "published", metrics={"likes": 1})
+    assert calls == [] and "metrics" not in mrs._POST_WRITABLE
+
+
+# ── marketing_posts carries NO trigger (#19): the database half of merge_post_metrics' fence ──
+#
+# The payload spies above prove the CODE half: a metrics write sends only `metrics`, never
+# `updated_at`. The DATABASE half is that nothing moves `updated_at` behind it — the repo's standard
+# `BEFORE UPDATE … update_updated_at_column()` trigger (on users, whales, user_credits, agent_personas)
+# would, and every daily metrics write would then break the publisher's `updated_at` fence on the same
+# row (a retract request, a reconcile transition read before the measure write would lose its CAS).
+# FakeSupabase models no triggers, so only a scan of the schema can see one.
+
+_SQL_COMMENT_RE = re.compile(r"('(?:[^']|'')*')|(--[^\n]*)|(/\*.*?\*/)", re.S)
+_CREATE_TRIGGER_RE = re.compile(
+    r"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b[^;]*?\bON\s+(?:ONLY\s+)?"
+    r"((?:\"?[A-Za-z_][A-Za-z0-9_$]*\"?\s*\.\s*)?\"?[A-Za-z_][A-Za-z0-9_$]*\"?)",
+    re.I | re.S,
+)
+
+
+def _sql_without_comments(sql: str) -> str:
+    """`sql` with every `--` and `/* */` comment blanked and every string literal kept whole — so a
+    `/*` INSIDE a string (the snapshot's `COMMENT ON COLUMN public.users.is_admin IS '…/admin/*. …'`)
+    cannot swallow the real SQL after it, which the naive strip of the other scans here would."""
+    return _SQL_COMMENT_RE.sub(lambda m: m.group(1) if m.group(1) is not None else " ", sql)
+
+
+def _trigger_tables(sql: str) -> List[str]:
+    """The table of every CREATE TRIGGER in `sql` (comments stripped), as `schema.table` in lower case;
+    an unqualified table is `public.<table>` (the migrations' search_path)."""
+    out = []
+    for m in _CREATE_TRIGGER_RE.finditer(_sql_without_comments(sql)):
+        name = re.sub(r'["\s]', "", m.group(1)).lower()
+        out.append(name if "." in name else f"public.{name}")
+    return out
+
+
+@pytest.mark.parametrize("sql, tables", [
+    ("CREATE TRIGGER t BEFORE UPDATE ON public.marketing_posts FOR EACH ROW EXECUTE FUNCTION f();",
+     ["public.marketing_posts"]),
+    ("create or replace trigger trg_touch\n  before update\n  on marketing_posts\n  for each row execute function f();",
+     ["public.marketing_posts"]),
+    ('CREATE CONSTRAINT TRIGGER "t" AFTER UPDATE ON "public"."Marketing_Posts" FOR EACH ROW EXECUTE FUNCTION f();',
+     ["public.marketing_posts"]),
+    ("CREATE TRIGGER t AFTER INSERT OR UPDATE OF metrics, status ON ONLY public . marketing_posts EXECUTE FUNCTION f();",
+     ["public.marketing_posts"]),
+    # the trigger name may start with "on_": the ON clause still decides
+    ("CREATE TRIGGER on_auth_user_created\n    AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION g();",
+     ["auth.users"]),
+    # commented out — line and block — is not a trigger
+    ("-- CREATE TRIGGER t BEFORE UPDATE ON public.marketing_posts FOR EACH ROW EXECUTE FUNCTION f();", []),
+    ("/* CREATE TRIGGER t\n BEFORE UPDATE ON public.marketing_posts\n FOR EACH ROW EXECUTE FUNCTION f(); */", []),
+    # a `/*` inside a string literal opens no comment: the trigger after it is still seen
+    ("COMMENT ON COLUMN public.users.is_admin IS 'see /api/v1/admin/*. it''s fine';\n"
+     "CREATE TRIGGER t BEFORE UPDATE ON public.marketing_posts FOR EACH ROW EXECUTE FUNCTION f();\n"
+     "/* a later */ SELECT 1;", ["public.marketing_posts"]),
+    # neighbours are not the table
+    ("CREATE TRIGGER t BEFORE UPDATE ON public.marketing_runs FOR EACH ROW EXECUTE FUNCTION f();",
+     ["public.marketing_runs"]),
+    ("CREATE TRIGGER t BEFORE UPDATE ON public.marketing_posts_archive FOR EACH ROW EXECUTE FUNCTION f();",
+     ["public.marketing_posts_archive"]),
+    ("DROP TRIGGER IF EXISTS t ON public.marketing_posts;", []),
+])
+def test_the_trigger_scanner_reads_real_sql_shapes(sql, tables):
+    assert _trigger_tables(sql) == tables
+
+
+def test_marketing_posts_carries_no_trigger_in_the_snapshot_or_any_migration():
+    """#19. If this fails, a migration added a trigger on marketing_posts. `merge_post_metrics` writes the
+    `metrics` column ONLY and must never move `updated_at` — the fence of every publisher / review write
+    on the same row (rules marketing.md §2: fenced, merging transitions). Drop the trigger, or move the
+    metrics document to its own table before adding it."""
+    from pathlib import Path
+
+    database = Path(__file__).resolve().parents[1] / "database"
+    snapshot = database / "schema_snapshot.sql"
+    migrations = sorted((database / "migrations").glob("[0-9][0-9][0-9]_*.sql"))
+    snapshot_sql = snapshot.read_text()
+    found = {"schema_snapshot.sql": _trigger_tables(snapshot_sql)}
+    for path in migrations:
+        found[path.name] = _trigger_tables(path.read_text())
+    # Anti-vacuity: the scan reads the real files and sees the triggers we know exist, in both formats
+    # (pg_dump one-liners and hand-written multi-line migrations).
+    assert "CREATE TABLE public.marketing_posts" in snapshot_sql and len(migrations) >= 150
+    assert {"public.users", "public.whales", "public.user_credits", "public.agent_personas"} <= set(
+        found["schema_snapshot.sql"])
+    assert "auth.users" in found["044_auth_trigger_bypass_rls.sql"]
+    assert "public.whale_filing_snapshots" in found["143_whale_trades_dedupe.sql"]
+    offenders = sorted(name for name, tables in found.items() if "public.marketing_posts" in tables)
+    assert offenders == [], (
+        f"a CREATE TRIGGER on public.marketing_posts in {offenders}: merge_post_metrics' fence assumes the "
+        f"table has none (a trigger moving updated_at breaks the publisher's updated_at CAS on every "
+        f"metrics write)")
+
+
+# ── list_measurable_posts ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_measurable_posts_filters_in_the_query_oldest_published_first(svc):
+    since = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    at_since = _published(svc, published_at="2026-09-03T00:00:00+00:00")          # the boundary counts
+    _published(svc, published_at="2026-09-02T23:59:59.999999+00:00")               # a microsecond early
+    later = _published(svc, platform="bluesky", published_at="2026-09-10T12:00:00+00:00")
+    mid = _published(svc, published_at="2026-09-05T12:00:00+00:00")
+    et_form = _published(svc, published_at="2026-09-04T08:00:00+00:00")            # 04:00 EDT
+    _p5_post(svc, status="retracted", published_at="2026-09-06T00:00:00+00:00")
+    _p5_post(svc, status="queued", published_at="2026-09-06T00:00:00+00:00")
+    _p5_post(svc, status="published", published_at=None)                          # matches no comparison
+    svc.fake.tables[mrs.POSTS].rows.reverse()                                       # ORDER BY must do it
+
+    def ids(rows):
+        return [r["id"] for r in rows]
+
+    assert ids(await svc.list_measurable_posts(since=since)) == [at_since["id"], et_form["id"], mid["id"],
+                                                                  later["id"]]
+    # the platform filter is in the query, before the LIMIT
+    assert ids(await svc.list_measurable_posts(since=since, platforms=["bluesky"], limit=1)) == [later["id"]]
+    assert ids(await svc.list_measurable_posts(since=since, limit=2)) == [at_since["id"], et_form["id"]]
+    assert await svc.list_measurable_posts(since=since, platforms=[]) == []
+    assert await svc.list_measurable_posts(since=since, platforms=["tiktok"]) == []
+    assert await svc.list_measurable_posts(since=since, limit=0) == []
+    # the same instant written other ways
+    assert ids(await svc.list_measurable_posts(since="2026-09-02T20:00:00-04:00"))[0] == at_since["id"]
+    assert ids(await svc.list_measurable_posts(since=datetime(2026, 9, 3)))[0] == at_since["id"]   # naive = UTC
+
+
+@pytest.mark.asyncio
+async def test_list_measurable_posts_on_an_empty_ledger_and_bad_arguments(svc):
+    assert await svc.list_measurable_posts(since=datetime(2026, 9, 1, tzinfo=timezone.utc)) == []
+    for bad in (date(2026, 9, 1), "2026-09-01", None, 1759000000, "yesterday"):
+        with pytest.raises(ValueError):
+            await svc.list_measurable_posts(since=bad)
+
+
+# ── list_posts_created_between ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_posts_created_between_is_half_open_and_any_status(svc):
+    start = datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc)      # Monday 00:00 EDT
+    end = datetime(2026, 10, 5, 4, 0, tzinfo=timezone.utc)        # the next Monday 00:00 EDT
+
+    def made(at, status="published"):
+        return _p5_post(svc, status=status, created_at=at, updated_at=at)
+
+    at_start = made("2026-09-28T04:00:00+00:00", "rejected")            # included
+    made("2026-09-28T03:59:59.999999+00:00")                            # Sunday 23:59 ET: excluded
+    inside = [made("2026-10-01T12:00:00+00:00", "skipped"), made("2026-10-03T20:15:00+00:00", "pending_review")]
+    made("2026-10-05T04:00:00+00:00")                                   # the end is excluded
+    last = made("2026-10-05T03:59:59.999999+00:00", "failed")
+    svc.fake.tables[mrs.POSTS].rows.reverse()
+    rows = await svc.list_posts_created_between(start, end)
+    assert [r["id"] for r in rows] == [at_start["id"], *(r["id"] for r in inside), last["id"]]
+    # the same window written as ET strings
+    assert [r["id"] for r in await svc.list_posts_created_between("2026-09-28T00:00:00-04:00",
+                                                                  "2026-10-05T00:00:00-04:00")] == \
+        [r["id"] for r in rows]
+    assert [r["id"] for r in await svc.list_posts_created_between(start, end, limit=1)] == [at_start["id"]]
+
+
+@pytest.mark.asyncio
+async def test_list_posts_created_between_reads_nothing_for_an_empty_window(svc, monkeypatch):
+    made = _p5_post(svc, created_at="2026-10-01T12:00:00+00:00")
+    t = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+    reads: List[str] = []
+    real_exec = mrs._exec
+
+    async def counting(query, *, op, **ids):
+        reads.append(op)
+        return await real_exec(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", counting)
+    assert await svc.list_posts_created_between(t, t) == []                         # empty
+    assert await svc.list_posts_created_between(t, t - timedelta(days=1)) == []     # inverted
+    assert await svc.list_posts_created_between(t - timedelta(days=1), t, limit=0) == []
+    assert reads == []
+    assert [r["id"] for r in await svc.list_posts_created_between(t, t + timedelta(microseconds=1))] == [made["id"]]
+    for bad in ((date(2026, 10, 1), t), (t, "2026-10-02"), (None, t), (t, 5)):
+        with pytest.raises(ValueError):
+            await svc.list_posts_created_between(*bad)
+
+
+@pytest.mark.asyncio
+async def test_list_posts_created_between_warns_when_the_limit_may_hide_rows(svc, caplog):
+    import logging
+
+    for i in range(3):
+        _p5_post(svc, created_at=f"2026-10-01T12:00:0{i}+00:00")
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        rows = await svc.list_posts_created_between(datetime(2026, 10, 1, tzinfo=timezone.utc),
+                                                    datetime(2026, 10, 2, tzinfo=timezone.utc), limit=2)
+    assert len(rows) == 2 and any("hit the limit" in r.getMessage() for r in caplog.records)
+
+
+# ── runs by date ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_run_for_date_and_list_runs_between(svc):
+    assert await svc.get_run_for_date(date(2026, 9, 28)) is None          # an empty ledger
+    assert await svc.list_runs_between(date(2026, 9, 1), date(2026, 9, 30)) == []
+    seeded = {d: _seed_run(svc, date(2026, 9, d), "media_ready", touched=datetime(2026, 9, d, tzinfo=timezone.utc))
+              for d in (30, 26, 28, 27, 29)}                                # stored out of order
+    assert (await svc.get_run_for_date(date(2026, 9, 28)))["id"] == seeded[28]["id"]
+    assert (await svc.get_run_for_date("2026-09-28"))["id"] == seeded[28]["id"]
+    assert await svc.get_run_for_date(date(2026, 9, 25)) is None
+    got = await svc.list_runs_between(date(2026, 9, 27), date(2026, 9, 29))     # inclusive both ends
+    assert [r["run_date"] for r in got] == ["2026-09-27", "2026-09-28", "2026-09-29"]
+    assert [r["run_date"] for r in await svc.list_runs_between("2026-09-29", "2026-09-29")] == ["2026-09-29"]
+    assert [r["run_date"] for r in await svc.list_runs_between(date(2026, 9, 1), date(2026, 12, 31))] == \
+        [f"2026-09-{d}" for d in (26, 27, 28, 29, 30)]
+    assert await svc.list_runs_between(date(2026, 9, 29), date(2026, 9, 27)) == []   # inverted
+
+
+@pytest.mark.parametrize("bad", [datetime(2026, 9, 28, tzinfo=timezone.utc), datetime(2026, 9, 28),
+                                 "28/09/2026", "2026-09-31", "", None, 20260928])
+@pytest.mark.asyncio
+async def test_a_run_date_must_be_a_calendar_date(svc, bad):
+    """A datetime is refused: which ET day it is depends on a zone the caller did not say."""
+    with pytest.raises(ValueError):
+        await svc.get_run_for_date(bad)
+    with pytest.raises(ValueError):
+        await svc.list_runs_between(bad, date(2026, 9, 30))
+    with pytest.raises(ValueError):
+        await svc.link_hits_between(date(2026, 9, 1), bad)
+
+
+# ── spend_by_op_since / charges_by_op_since ──────────────────────────────────
+
+
+_MESSY_JOURNAL = [
+    {"at": "2026-09-30T23:59:59.999999+00:00", "op": "x_create", "micros": 15000},   # last month
+    {"at": "2026-10-01T00:00:00Z", "op": "x_create", "micros": 15000},                # the boundary counts
+    {"at": "2026-10-02T10:00:00+00:00", "op": "x_metrics_read", "micros": 5000},
+    {"at": "2026-10-02T10:00:01+00:00", "op": "x_metrics_read_correction", "micros": -4000},
+    {"at": "2026-10-02T10:00:02+00:00", "op": "x_account_read", "micros": "10000"},   # numeric text
+    {"at": "not a time", "op": "x_create", "micros": 15000},                          # unreadable: COUNTED
+    {"op": "x_metrics_read", "micros": 7},                                            # no time: counted
+    {"at": "2026-10-03T00:00:00+00:00", "micros": 3},                                 # no op: `unknown`
+    {"at": "2026-10-03T00:00:00+00:00", "op": None, "micros": 2},
+    {"at": "2026-10-03T00:00:00+00:00", "op": 42, "micros": 1},
+    {"at": "2026-10-03T00:00:00+00:00", "op": "   ", "micros": 1},
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_create"},                            # no amount: skipped
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_ghost"},                             # …so no `x_ghost: 0`
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_ghost", "micros": None},
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_ghost", "micros": True},             # a bool is no amount
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_create", "micros": "abc"},           # junk: skipped
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_create", "micros": [1]},
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_create", "micros": float("inf")},    # too large: skipped
+    {"at": "2026-10-03T00:00:00+00:00", "op": "x_create", "micros": float("nan")},
+    "garbage", 42, None, ["x"],                                                       # not entries
+]
+
+
+@pytest.mark.parametrize("post", [
+    {"metadata": {"charges": _MESSY_JOURNAL}},
+    {"metadata": {"charges": "junk"}}, {"metadata": {"charges": 5}}, {"metadata": {"charges": {"a": 1}}},
+    {"metadata": {"charges": None}}, {"metadata": None}, {"metadata": "junk"}, {},
+])
+def test_charges_by_op_since_always_sums_to_charges_since(post):
+    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    by_op = mrs.charges_by_op_since(post, since)
+    assert sum(by_op.values()) == mrs.charges_since(post, since)
+    assert mrs.charges_by_op_since(post, datetime(2026, 10, 1)) == by_op       # a naive since is UTC
+
+
+def test_charges_by_op_since_breaks_the_messy_journal_down():
+    by_op = mrs.charges_by_op_since({"metadata": {"charges": _MESSY_JOURNAL}}, datetime(2026, 10, 1, tzinfo=timezone.utc))
+    assert by_op == {"x_create": 15000 + 15000, "x_metrics_read": 5000 + 7,
+                     "x_metrics_read_correction": -4000, "x_account_read": 10000,
+                     mrs.UNKNOWN_CHARGE_OP: 3 + 2 + 1 + 1}
+    assert "x_ghost" not in by_op
+
+
+@pytest.mark.asyncio
+async def test_spend_by_op_since_reads_like_spend_since_and_sums_to_it(svc):
+    since = mrs.month_start_utc(datetime(2026, 10, 5, tzinfo=timezone.utc))
+    assert await svc.spend_by_op_since("x", since) == {}                       # an empty ledger
+    _p5_post(svc, status="published", updated_at="2026-10-03T00:00:00+00:00", metadata={"charges": _MESSY_JOURNAL})
+    _p5_post(svc, status="published", updated_at="2026-10-01T00:00:00Z",           # touched at the boundary
+             metadata={"charges": [{"at": "2026-10-01T00:00:00+00:00", "op": "x_create", "micros": 15000}]})
+    _p5_post(svc, status="failed", updated_at="2026-10-04T00:00:00+00:00", metadata=None)
+    _p5_post(svc, status="failed", updated_at="2026-10-04T00:00:00+00:00", metadata={"charges": "junk"})
+    _p5_post(svc, platform="bluesky", status="published", updated_at="2026-10-02T00:00:00+00:00",
+             metadata={"charges": [{"at": "2026-10-02T00:00:00+00:00", "op": "bluesky_x", "micros": 99}]})
+    _p5_post(svc, status="published", updated_at="2026-09-30T23:59:59+00:00",     # not touched since: not read
+             metadata={"charges": [{"at": "2026-10-02T00:00:00+00:00", "op": "x_create", "micros": 777}]})
+    by_op = await svc.spend_by_op_since("x", since)
+    assert by_op == {"x_create": 45000, "x_metrics_read": 5007, "x_metrics_read_correction": -4000,
+                     "x_account_read": 10000, mrs.UNKNOWN_CHARGE_OP: 7}
+    assert sum(by_op.values()) == await svc.spend_since("x", since)
+    assert await svc.spend_by_op_since("bluesky", since) == {"bluesky_x": 99}
+    assert await svc.spend_by_op_since("threads", since) == {}
+
+
+@pytest.mark.parametrize("bad", [date(2026, 10, 1), "2026-10-01", None, 1759276800])
+@pytest.mark.asyncio
+async def test_spend_by_op_since_refuses_a_since_that_is_not_an_instant(svc, bad):
+    with pytest.raises(ValueError):
+        await svc.spend_by_op_since("x", bad)
+
+
+@pytest.mark.asyncio
+async def test_spend_by_op_since_reads_a_naive_since_as_utc(svc):
+    _p5_post(svc, status="published", updated_at="2026-10-02T00:00:00+00:00",
+             metadata={"charges": [{"at": "2026-10-02T00:00:00+00:00", "op": "x_create", "micros": 15000}]})
+    assert await svc.spend_by_op_since("x", datetime(2026, 10, 1)) == {"x_create": 15000}
+    assert await svc.spend_by_op_since("x", "2026-09-30T20:00:00-04:00") == {"x_create": 15000}
+
+
+@pytest.mark.asyncio
+async def test_spend_by_op_since_raises_when_the_read_fails_never_a_silent_empty(svc, monkeypatch):
+    async def unavailable(query):
+        raise RuntimeError("503 from PostgREST")
+
+    monkeypatch.setattr(mrs, "sb_exec", unavailable)
+    with pytest.raises(mrs.MarketingRunError, match="spend_by_op_since"):
+        await svc.spend_by_op_since("x", datetime(2026, 10, 1, tzinfo=timezone.utc))
+
+
+# ── link_hits_between ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_link_hits_between_is_inclusive_ordered_and_projected(svc):
+    assert await svc.link_hits_between(date(2026, 9, 28), date(2026, 10, 4)) == []   # an empty table
+    table = svc.fake.tables[mrs.LINK_HITS].rows
+    for campaign, day, hits in [("x", "2026-10-04", 5), ("tiktok", "2026-09-27", 1), ("x", "2026-09-28", 2),
+                                ("tiktok", "2026-09-28", 3), ("other", "2026-10-05", 9),
+                                ("bluesky", "2026-10-01", 0)]:
+        table.append({"campaign": campaign, "day": day, "hits": hits, "updated_at": _T0})
+    got = await svc.link_hits_between(date(2026, 9, 28), date(2026, 10, 4))
+    assert got == [{"campaign": "tiktok", "day": "2026-09-28", "hits": 3},
+                   {"campaign": "x", "day": "2026-09-28", "hits": 2},
+                   {"campaign": "bluesky", "day": "2026-10-01", "hits": 0},
+                   {"campaign": "x", "day": "2026-10-04", "hits": 5}]
+    assert await svc.link_hits_between("2026-10-05", "2026-10-05") == [{"campaign": "other", "day": "2026-10-05",
+                                                                        "hits": 9}]
+    assert await svc.link_hits_between(date(2026, 10, 4), date(2026, 9, 28)) == []    # inverted
+
+
+# ── record_reject_reason ─────────────────────────────────────────────────────
+
+
+def _rejected(svc, **kw) -> Dict[str, Any]:
+    meta = {"dry_run": False, "review_notified_at": _T0, "review_message_id": 500,
+            "review": {"decision": "rejected", "by": "telegram:42", "at": _T0}}
+    return _p5_post(svc, status="rejected", metadata=kw.pop("metadata", meta), **kw)
+
+
+@pytest.mark.asyncio
+async def test_record_reject_reason_records_keeps_the_review_and_a_repeat_writes_nothing(svc, monkeypatch):
+    post = _rejected(svc)
+    before = _read(post)
+    assert await svc.record_reject_reason(post["id"], "tone", by="telegram:42") == "recorded"
+    live = _live_post(svc, post["id"])
+    review = live["metadata"]["review"]
+    assert {k: review[k] for k in ("decision", "by", "at")} == before["metadata"]["review"]
+    assert review["reason"] == "tone" and review["reason_by"] == "telegram:42"
+    assert mrs._parse_ts(review["reason_at"]) is not None
+    assert {k: v for k, v in live["metadata"].items() if k != "review"} == \
+        {k: v for k, v in before["metadata"].items() if k != "review"}            # everything else kept
+    assert live["status"] == "rejected" and live["approved_by"] is None
+    calls = _spy_updates(monkeypatch, svc)
+    assert await svc.record_reject_reason(post["id"], "tone", by="telegram:42") == "unchanged"   # a double tap
+    assert calls == []
+    # a different later reason wins
+    assert await svc.record_reject_reason(post["id"], "weak", by="telegram:7") == "recorded"
+    review = _live_post(svc, post["id"])["metadata"]["review"]
+    assert (review["reason"], review["reason_by"], review["decision"]) == ("weak", "telegram:7", "rejected")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", ["pending_review", "approved", "queued", "published", "failed", "skipped",
+                                    "retracted"])
+@pytest.mark.asyncio
+async def test_record_reject_reason_never_touches_a_post_that_is_not_rejected(svc, monkeypatch, status):
+    post = _p5_post(svc, status=status)
+    snapshot = _read(post)
+    calls = _spy_updates(monkeypatch, svc)
+    assert await svc.record_reject_reason(post["id"], "accuracy", by="telegram:42") == f"already_{status}"
+    assert calls == [] and _live_post(svc, post["id"]) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_record_reject_reason_on_a_missing_post(svc):
+    assert await svc.record_reject_reason(str(uuid.uuid4()), "other", by="telegram:42") == "not_found"
+
+
+@pytest.mark.parametrize("reason", ["", "Tone", "TONE", "tone ", "spam", "reason_tone", "t", None, 1, ["tone"]])
+@pytest.mark.asyncio
+async def test_an_unknown_reason_is_refused_before_any_read(svc, monkeypatch, reason):
+    post = _rejected(svc)
+    snapshot = _read(post)
+    reads: List[str] = []
+    real_exec = mrs._exec
+
+    async def counting(query, *, op, **ids):
+        reads.append(op)
+        return await real_exec(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", counting)
+    with pytest.raises(ValueError, match="unknown reject reason"):
+        await svc.record_reject_reason(post["id"], reason, by="telegram:42")
+    assert reads == [] and _live_post(svc, post["id"]) == snapshot
+
+
+@pytest.mark.parametrize("metadata", [None, "junk", {}, {"review": "junk"}, {"review": None},
+                                      {"review": {"decision": "rejected", "reason": 5}}])
+@pytest.mark.asyncio
+async def test_a_reason_on_malformed_metadata_writes_a_clean_review(svc, metadata):
+    post = _rejected(svc, metadata=metadata)
+    assert await svc.record_reject_reason(post["id"], "compliance", by="telegram:42") == "recorded"
+    review = _live_post(svc, post["id"])["metadata"]["review"]
+    assert isinstance(review, dict) and review["reason"] == "compliance" and review["reason_by"] == "telegram:42"
+
+
+@pytest.mark.asyncio
+async def test_a_reason_write_that_loses_its_fence_once_is_retried_from_a_fresh_read(svc, monkeypatch):
+    post = _rejected(svc)
+
+    def land(n):
+        if n == 0:   # the review sweep re-stamped the row between our read and our write
+            live = _live_post(svc, post["id"])
+            live.update(updated_at=_T1, metadata={**live["metadata"], "other_key": 1})
+
+    calls = _spy_updates(monkeypatch, svc, before=land)
+    assert await svc.record_reject_reason(post["id"], "other", by="telegram:42") == "recorded"
+    meta = _live_post(svc, post["id"])["metadata"]
+    assert len(calls) == 2 and meta["other_key"] == 1 and meta["review"]["reason"] == "other"
+
+
+@pytest.mark.asyncio
+async def test_a_reason_under_constant_contention_is_busy_and_writes_nothing(svc, monkeypatch):
+    post = _rejected(svc)
+
+    def land(n):
+        _live_post(svc, post["id"])["updated_at"] = f"2026-09-01T13:{n:02d}:00+00:00"
+
+    calls = _spy_updates(monkeypatch, svc, before=land)
+    assert await svc.record_reject_reason(post["id"], "tone", by="telegram:42") == "busy"
+    assert len(calls) == 2 and "reason" not in _live_post(svc, post["id"])["metadata"]["review"]
+
+
+@pytest.mark.parametrize("landing, expected", [
+    # the same reason recorded by a concurrent tap: nothing left to do
+    (lambda live: live.update(updated_at=_T1, metadata={**live["metadata"], "review": {
+        **live["metadata"]["review"], "reason": "tone"}}), "unchanged"),
+    # a hand edit moved it out of rejected
+    (lambda live: live.update(updated_at=_T1, status="skipped"), "already_skipped"),
+], ids=["same-reason", "status-moved"])
+@pytest.mark.asyncio
+async def test_a_reason_against_a_concurrent_write(svc, monkeypatch, landing, expected):
+    post = _rejected(svc)
+
+    def land(n):
+        if n == 0:
+            landing(_live_post(svc, post["id"]))
+
+    _spy_updates(monkeypatch, svc, before=land)
+    assert await svc.record_reject_reason(post["id"], "tone", by="telegram:42") == expected
+
+
+@pytest.mark.asyncio
+async def test_a_reason_ledger_failure_raises_and_writes_nothing(svc):
+    post = _rejected(svc)
+    snapshot = _read(post)
+    svc.fake.tables[mrs.POSTS].fail_updates.append(RuntimeError("PostgREST 520"))
+    with pytest.raises(mrs.MarketingRunError):
+        await svc.record_reject_reason(post["id"], "tone", by="telegram:42")
+    assert _live_post(svc, post["id"]) == snapshot
+
+
+# ── expire_stale_posts records where a post expired FROM ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_expiry_records_the_status_each_post_expired_from(svc):
+    t = _P5_TODAY
+    approved = _p5_post(svc, status="approved", run_day=t - timedelta(days=2))
+    pending = _p5_post(svc, status="pending_review", run_day=t - timedelta(days=3),
+                       metadata={"dry_run": False, "review_notified_at": _T0})
+    preview = _p5_post(svc, status="pending_review", run_day=t - timedelta(days=3), fmt="video",
+                       metadata={"dry_run": False, "review_preview_at": _T0})
+    assert await svc.expire_stale_posts(t) == 3
+    expect = {approved["id"]: "approved", pending["id"]: "pending_review", preview["id"]: "pending_review"}
+    for pid, was in expect.items():
+        meta = _live_post(svc, pid)["metadata"]
+        assert meta["expired_from"] == was and meta["skip_reason"] == "expired"
+    assert [mrs.expired_unreviewed(_live_post(svc, pid)) for pid in expect] == [False, True, True]
+
+
+# ── close_summary / expired_unreviewed (pure) ───────────────────────────────
+
+
+def _row(status, **meta):
+    return {"status": status, "metadata": meta}
+
+
+_ASKED = {"review_notified_at": _T0}
+_PREVIEW_EXPIRED = _row("skipped", skip_reason="expired", expired_from="pending_review", review_preview_at=_T0)
+_APPROVED = {**_ASKED, "review": {"decision": "approved", "by": "telegram:1", "at": _T0}}
+#: Approved, never claimed (the X cap, a dry run, an unwired platform) — `expire_stale_posts`.
+_APPROVED_EXPIRED = _row("skipped", skip_reason="expired", expired_from="approved", **_APPROVED)
+#: Approved, sent with an unknown outcome the platform turned out not to hold, past its day — reconcile.
+_QUEUED_EXPIRED = _row("skipped", skip_reason="expired", expired_from="queued", **_APPROVED,
+                       publish={"state": "absent_expired"})
+
+
+@pytest.mark.parametrize("post, unreviewed", [
+    (_row("skipped", skip_reason="expired", expired_from="pending_review"), True),
+    (_row("skipped", skip_reason="expired", expired_from="approved"), False),
+    # an older row without expired_from: unreviewed iff it carries no review decision
+    (_row("skipped", skip_reason="expired"), True),
+    (_row("skipped", skip_reason="expired", review={"decision": "approved"}), False),
+    (_row("skipped", skip_reason="expired", review="junk"), True),
+    # the publisher's expiry of an unknown outcome (queued → skipped) was approved
+    (_row("skipped", skip_reason="expired", review={"decision": "approved"}, publish={"state": "absent_expired"}),
+     False),
+    (_row("skipped", skip_reason="other"), False), (_row("skipped"), False),
+    (_row("rejected", skip_reason="expired"), False), ({"status": "skipped", "metadata": None}, False), ({}, False),
+])
+def test_expired_unreviewed(post, unreviewed):
+    assert mrs.expired_unreviewed(post) is unreviewed
+
+
+@pytest.mark.parametrize("posts, reason", [
+    ([], "no_posts"),
+    ([_row("published", **_ASKED), _row("rejected", **_ASKED)], "posted"),
+    ([_row("retracted", **_ASKED), _row("failed", **_ASKED)], "posted"),
+    # the real day: two outlets with buttons, six read-only previews that always expire unreviewed
+    ([_row("rejected", **_ASKED), _row("rejected", review={"decision": "rejected"}), *[_PREVIEW_EXPIRED] * 6],
+     "all_rejected"),
+    ([_row("failed", **_ASKED), _row("failed", **_ASKED), _PREVIEW_EXPIRED], "failed"),
+    ([_row("skipped", skip_reason="expired", expired_from="pending_review", **_ASKED), _PREVIEW_EXPIRED],
+     "expired_unreviewed"),
+    ([_PREVIEW_EXPIRED, _PREVIEW_EXPIRED], "expired_unreviewed"),     # the bot was off: nobody was asked
+    ([_row("skipped", skip_reason="expired"), _row("skipped", skip_reason="expired")], "expired_unreviewed"),
+    ([_row("rejected", **_ASKED), _row("skipped", skip_reason="expired", expired_from="approved", **_ASKED)],
+     "mixed"),
+    ([_row("rejected", **_ASKED), _row("failed", **_ASKED)], "mixed"),
+    ([_row("rejected"), _row("failed")], "mixed"),
+    # #6: every post the owner was asked about was APPROVED and expired unsent — the X cap, a dry run, an
+    # unwired platform (expired_from approved), or an unknown outcome the platform did not hold (queued)
+    ([_APPROVED_EXPIRED, _APPROVED_EXPIRED, *[_PREVIEW_EXPIRED] * 6], "approved_unsent"),
+    ([_APPROVED_EXPIRED, _QUEUED_EXPIRED], "approved_unsent"),
+    ([_QUEUED_EXPIRED], "approved_unsent"),
+    # an older row without expired_from counts by its review decision
+    ([_row("skipped", skip_reason="expired", review={"decision": "approved", "by": "telegram:1"}), _PREVIEW_EXPIRED],
+     "approved_unsent"),
+    # the bot was off and nothing was asked: the basis is every post — unsent approvals alone still qualify
+    ([_row("skipped", skip_reason="expired", expired_from="approved")], "approved_unsent"),
+    # …but approved-unsent beside a post the owner never decided, a rejection or a failure is mixed
+    ([_APPROVED_EXPIRED, _row("skipped", skip_reason="expired", expired_from="pending_review", **_ASKED)], "mixed"),
+    ([_APPROVED_EXPIRED, _row("rejected", **_ASKED)], "mixed"),
+    ([_APPROVED_EXPIRED, _row("failed", **_ASKED)], "mixed"),
+    # a hand-edited expired_from is neither unreviewed nor approved-unsent: never a reassuring reason
+    ([_row("skipped", skip_reason="expired", expired_from="published", **_ASKED)], "mixed"),
+    ([_row("skipped", skip_reason="expired", expired_from=7, **_ASKED)], "mixed"),
+    # a legacy row whose decision was a rejection (contradictory) is not an approval
+    ([_row("skipped", skip_reason="expired", review={"decision": "rejected"})], "mixed"),
+    # skipped for a reason other than expiry is not an expiry
+    ([_row("skipped", skip_reason="dry_run", expired_from="approved", **_ASKED)], "mixed"),
+])
+def test_close_summary_reason(posts, reason):
+    out = mrs.close_summary(posts, now=_T1)
+    assert out["reason"] == reason and reason in mrs.CLOSE_REASONS and out["at"] == _T1
+
+
+@pytest.mark.parametrize("post, unsent", [
+    (_row("skipped", skip_reason="expired", expired_from="approved"), True),
+    (_row("skipped", skip_reason="expired", expired_from="queued"), True),
+    (_row("skipped", skip_reason="expired", expired_from="pending_review"), False),
+    (_row("skipped", skip_reason="expired", expired_from="Approved"), False),
+    (_row("skipped", skip_reason="expired", expired_from=["approved"]), False),
+    (_row("skipped", skip_reason="expired", review={"decision": "approved"}), True),      # legacy
+    (_row("skipped", skip_reason="expired", review={"decision": "approved"}, expired_from="pending_review"), False),
+    (_row("skipped", skip_reason="expired"), False),
+    (_row("skipped", skip_reason="expired", review="approved"), False),
+    (_row("skipped", skip_reason="other", expired_from="approved"), False),
+    (_row("approved", skip_reason="expired", expired_from="approved"), False),
+    ({"status": "skipped", "metadata": None}, False), ({}, False),
+])
+def test_expired_approved_unsent(post, unsent):
+    assert mrs.expired_approved_unsent(post) is unsent
+    if unsent:
+        assert mrs.expired_unreviewed(post) is False     # the two never claim the same post
+
+
+def test_close_summary_counts_and_never_emits_an_unsafe_key():
+    posts = [_row("published"), _row("published"), _row("rejected"), _PREVIEW_EXPIRED,
+             _row("skipped", skip_reason="expired"), _row("skipped"), _row("skipped", skip_reason="Bad\nKey"),
+             _row("skipped", skip_reason=7), {"status": None}, {"status": "weird status"}, "junk", None, 5]
+    out = mrs.close_summary(posts)
+    assert out["posts"] == {"published": 2, "rejected": 1, "skipped": 5, "unknown": 2}
+    assert out["skip_reasons"] == {"expired": 2, "unknown": 3}
+    assert mrs._parse_ts(out["at"]) is not None
+    assert json.loads(json.dumps(out)) == out                      # plain JSON for the metadata column
+
+
+# ── close_finished_runs says why, and keeps the worker's finished_at ───────
+
+
+def _run_with(svc, run_day: date, posts, **run_extra) -> Dict[str, Any]:
+    run = _seed_run(svc, run_day, "media_ready", touched=datetime(2026, 9, 1, tzinfo=timezone.utc), **run_extra)
+    for i, (status, meta) in enumerate(posts):
+        _p5_post(svc, status=status, run_id=run["id"], run_day=run_day, fmt=f"f{i}",
+                 metadata=copy.deepcopy(meta))
+    return run
+
+
+@pytest.mark.asyncio
+async def test_close_finished_runs_records_why_and_keeps_the_workers_finished_at(svc):
+    worker_finished = "2026-09-21T20:31:07+00:00"
+    asked, preview = dict(_ASKED), _PREVIEW_EXPIRED["metadata"]
+    runs = {
+        "posted": _run_with(svc, date(2026, 9, 21), [("published", asked), ("skipped", preview)],
+                            finished_at=worker_finished, metadata={"claim_nonce": "n1", "video_asset_id": "v"}),
+        "all_rejected": _run_with(svc, date(2026, 9, 22), [("rejected", asked), ("rejected", asked),
+                                                           ("skipped", preview)]),
+        "failed": _run_with(svc, date(2026, 9, 23), [("failed", asked)], finished_at=None),
+        "expired_unreviewed": _run_with(svc, date(2026, 9, 24), [("skipped", {**asked, "skip_reason": "expired",
+                                                                             "expired_from": "pending_review"})]),
+        "no_posts": _run_with(svc, date(2026, 9, 25), []),
+        "mixed": _run_with(svc, date(2026, 9, 26), [("rejected", asked), ("failed", asked)], metadata="junk"),
+        # #6: X approved but capped, Bluesky approved but its unknown outcome expired, six previews
+        "approved_unsent": _run_with(svc, date(2026, 9, 20), [("skipped", _APPROVED_EXPIRED["metadata"]),
+                                                              ("skipped", _QUEUED_EXPIRED["metadata"]),
+                                                              *[("skipped", preview)] * 6]),
+    }
+    assert await svc.close_finished_runs(_P5_TODAY) == len(runs)
+    for reason, run in runs.items():
+        live = _stored(svc, run["id"])
+        closed = live["metadata"]["closed"]
+        assert closed["reason"] == reason, (reason, closed)
+        assert closed["at"] == live["updated_at"]
+        assert live["status"] == ("published" if reason == "posted" else "skipped")
+    posted = _stored(svc, runs["posted"]["id"])
+    assert posted["finished_at"] == worker_finished                           # KEPT
+    assert posted["metadata"]["claim_nonce"] == "n1" and posted["metadata"]["video_asset_id"] == "v"
+    assert posted["metadata"]["closed"]["posts"] == {"published": 1, "skipped": 1}
+    assert posted["metadata"]["closed"]["skip_reasons"] == {"expired": 1}
+    for reason in ("failed", "all_rejected", "no_posts"):                   # NULL or absent → filled
+        live = _stored(svc, runs[reason]["id"])
+        assert live["finished_at"] == live["updated_at"] == live["metadata"]["closed"]["at"]
+    assert _stored(svc, runs["no_posts"]["id"])["metadata"]["closed"]["posts"] == {}
+    assert set(_stored(svc, runs["mixed"]["id"])["metadata"]) == {"closed"}    # junk metadata replaced cleanly
+    unsent = _stored(svc, runs["approved_unsent"]["id"])["metadata"]["closed"]
+    assert unsent["posts"] == {"skipped": 8} and unsent["skip_reasons"] == {"expired": 8}
+
+
+@pytest.mark.asyncio
+async def test_close_finished_runs_fences_a_null_updated_at_as_null(svc, monkeypatch):
+    """The metadata merge rests on the CAS: an observed NULL updated_at is fenced IS NULL (it used to
+    be no fence at all), so a write landing in between wins."""
+    quiet = _run_with(svc, date(2026, 9, 20), [("failed", dict(_ASKED))], updated_at=None)
+    assert await svc.close_finished_runs(_P5_TODAY) == 1
+    assert _stored(svc, quiet["id"])["metadata"]["closed"]["reason"] == "failed"
+    raced = _run_with(svc, date(2026, 9, 19), [("failed", dict(_ASKED))], updated_at=None)
+
+    def land(n):
+        if n == 0:
+            _stored(svc, raced["id"]).update(updated_at="2026-09-02T00:00:00+00:00",
+                                             metadata={"late": 1})
+
+    calls = _spy_updates(monkeypatch, svc, table=mrs.RUNS, before=land)
+    assert await svc.close_finished_runs(_P5_TODAY) == 0 and len(calls) == 1
+    live = _stored(svc, raced["id"])
+    assert live["status"] == "media_ready" and live["metadata"] == {"late": 1}

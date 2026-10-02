@@ -5,7 +5,8 @@
 //  Molecule: one card in the Home "Daily Scanners" carousel. Renders a header
 //  (with an optional tappable "i" popover for cards that carry an explainer), a
 //  kind-specific hero metric + sparkline, and an expandable leaderboard. Owns its
-//  own ephemeral UI state (gainers/losers toggle, expand, info popover) — the
+//  own ephemeral UI state (the info popover); the Gainers/Losers choice is a saved
+//  device preference and the expand state is lifted to the Home screen — the
 //  data comes from a single `DailyScanner` model.
 //
 
@@ -26,7 +27,29 @@ struct ScannerCard: View {
     /// nothing. Kept because the hook is the natural place for a future caller to react.
     var onBodyTap: (() -> Void)? = nil
 
-    @State private var moversMode: MoversMode = .gainers
+    /// Gainers or Losers — set once and kept, on this device. It used to be `@State`, and it
+    /// snapped back to Gainers once a minute: the 60 s Home refresh minted a new
+    /// `DailyScanner.id`, which rebuilt this card and reset its state (fixed at the id — see
+    /// `DailyScanner.id`). Persisting it is the second half: readers asked for every such
+    /// choice to survive a relaunch, not just a refresh (TestFlight 1.0 (9)).
+    ///
+    /// Stores a TOKEN, never a label: `MoversMode.rawValue` is the bare case name ("gainers" /
+    /// "losers"), not the "Gainers" the toggle draws. Read through `moversMode`, which maps an
+    /// unknown or garbage token to `.gainers` WITHOUT writing that fallback back — only a tap
+    /// on the toggle ever writes this key.
+    ///
+    /// A device display preference (no account data), like `caydex_preferred_chart_type`, so
+    /// it is deliberately NOT cleared in `AppState.discardDataForEndedSession()`. Only the
+    /// movers card reads it; volume/shorts render `entries`.
+    @AppStorage("caydex_home_movers_mode") private var storedMoversMode: String = MoversMode.gainers.rawValue
+
+    private var moversMode: MoversMode { MoversMode(rawValue: storedMoversMode) ?? .gainers }
+
+    /// The toggle's binding: reads the derived mode, writes the token.
+    private var moversModeBinding: Binding<MoversMode> {
+        Binding(get: { moversMode }, set: { storedMoversMode = $0.rawValue })
+    }
+
     /// Lifted to the parent (via `DailyScannersSection` → the Home screen) so a
     /// tap OUTSIDE the card can collapse it, and only one card expands at a time.
     @Binding var isExpanded: Bool
@@ -176,7 +199,7 @@ struct ScannerCard: View {
             Spacer(minLength: 6)
 
             if scanner.kind == .movers {
-                MoversToggle(mode: $moversMode)
+                MoversToggle(mode: moversModeBinding)
             } else if let badge = scanner.badgeText {
                 TintedTagBadge(text: badge, color: scanner.accent)
             }

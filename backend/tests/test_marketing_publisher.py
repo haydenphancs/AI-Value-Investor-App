@@ -22,22 +22,34 @@ What must never regress:
     escalated rows are left alone;
   * retract runs with publishing switched off, retries a bounded number of times, then hands the
     owner a manual alert;
-  * expiry closes stale approved / pending_review rows (00:00 ET boundary) and finished runs.
+  * expiry closes stale approved / pending_review rows (00:00 ET boundary) and finished runs;
+  * the late steps (measure → run health → weekly digest) run after the feed, each behind its own gate
+    (both new switches fail-closed), import their module only when they run (a broken one fails its
+    step alone), and — the real functions behind the real tick — do each day's work once, in order,
+    without calling a platform.
 
-The tick ORDER and step isolation are pinned by tests/test_marketing_review_bot.py — not repeated here.
+The tick ORDER across all 16 switch combinations and step isolation are pinned by
+tests/test_marketing_review_bot.py with every step stubbed; the late steps' wiring is pinned here.
 Dates are computed relative to `run_service.run_date_et()` / the real clock (no freezegun); the
 00:00 ET boundary is driven by patching `publisher_service._now`.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
+import importlib
+import inspect
 import logging
+import sys
+import textwrap
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
 from app.services.marketing import outlet_x, outlets
@@ -63,7 +75,7 @@ from app.services.marketing.outlet_base import (
     backoff_seconds,
     text_sha256,
 )
-from test_marketing_run_service import FakeSupabase
+from test_marketing_run_service import FakeSupabase, _Table
 
 PUB_LOGGER = pub.__name__
 OWNER = "telegram:424242"
@@ -1049,6 +1061,10 @@ async def test_reconcile_absent_and_expired_is_skipped_never_resent(env):
     assert row["status"] == "skipped" and row["metadata"]["skip_reason"] == "expired"
     assert row["metadata"]["publish"]["state"] == "absent_expired" and "absent" in row["last_error"]
     _assert_review_kept(row)
+    # The status it expired FROM, as `expire_stale_posts` records it: an approved post the platform never
+    # got, which the digest and the run's close summary must not count as "the owner never looked".
+    assert row["metadata"]["expired_from"] == "queued"
+    assert mrs.expired_unreviewed(row) is False
 
 
 @pytest.mark.asyncio
@@ -1781,3 +1797,350 @@ async def test_a_lost_submitted_write_leaves_the_request_id_for_reconcile(env, m
     assert any(pid in m for m in _messages(caplog, "outcome submitted NOT RECORDED", logging.ERROR))
     await pub.publish_cycle()
     assert len(up.sends) == 1
+
+
+# ── the tick: the late steps (measure → run health → weekly digest) ───────────
+#
+# tests/test_marketing_review_bot.py pins the whole tick's order over all 16 switch combinations with
+# every step stubbed. These pin the WIRING of the three late steps: the tick's own wrappers reach the
+# module functions (looked up when the step runs), each step's gate and the fail-closed defaults, a
+# module that cannot be imported failing its own step alone, and — the REAL measure / health / digest
+# behind the real tick — each day's work done once, in order, with no platform call.
+
+#: The early steps, in tick order (each stubbed below as a recorder).
+_EARLY = ("expire", "retract", "reconcile", "publish", "review", "feed")
+#: The late steps: step → (module under app.services.marketing, function the tick calls).
+_LATE = {"measure": ("metrics_service", "measure_cycle"), "health": ("digest_service", "health_cycle"),
+         "digest": ("digest_service", "digest_cycle")}
+_NY = ZoneInfo("America/New_York")
+
+
+def _et_time(y: int, mo: int, d: int, h: int, mi: int = 0) -> datetime:
+    """An America/New_York wall-clock time as an aware UTC datetime."""
+    return datetime(y, mo, d, h, mi, tzinfo=_NY).astimezone(timezone.utc)
+
+
+def _record_tick(monkeypatch, *, late: bool = True,
+                 late_result: Optional[Dict[str, Dict[str, int]]] = None) -> List[tuple]:
+    """Every step of the tick replaced by a recorder of (step, args, kwargs). The late steps are
+    replaced on their MODULES, so the tick's own wrappers (`_measure_step` …) run for real; with
+    `late=False` the late steps stay real."""
+    calls: List[tuple] = []
+
+    def make(name: str, result: Dict[str, int]):
+        async def step(*args: Any, **kwargs: Any) -> Dict[str, int]:
+            calls.append((name, args, kwargs))
+            return dict(result)
+        return step
+
+    monkeypatch.setattr(pub, "_expire_step", make("expire", {"expired": 0}))
+    monkeypatch.setattr(pub, "retract_cycle", make("retract", {"retracted": 0}))
+    monkeypatch.setattr(pub, "reconcile_cycle", make("reconcile", {"checked": 0}))
+    monkeypatch.setattr(pub, "publish_cycle", make("publish", {"published": 0}))
+    monkeypatch.setattr(pub.review_service, "review_cycle",
+                        make("review", {"pending": 0, "failed": 0, "rate_limited": 0}))
+    monkeypatch.setattr(pub.publish_feed, "feed_cycle", make("feed", {"posted": 0}))
+    if late:
+        for name, (module, fn) in _LATE.items():
+            monkeypatch.setattr(importlib.import_module(f"app.services.marketing.{module}"), fn,
+                                make(name, (late_result or {}).get(name, {})))
+    return calls
+
+
+def _switches(monkeypatch, *, enabled: bool, bot: bool, metrics: bool, digest: bool) -> None:
+    monkeypatch.setattr(pub.review_service, "is_configured", lambda: bot)
+    monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", enabled)
+    monkeypatch.setattr(pub.settings, "MARKETING_METRICS_ENABLED", metrics)
+    monkeypatch.setattr(pub.settings, "MARKETING_DIGEST_ENABLED", digest)
+
+
+@pytest.mark.asyncio
+async def test_with_everything_on_the_late_steps_run_last_in_contract_order(monkeypatch, caplog):
+    """measure → health → digest after the feed, so none of them ever delays a post or a review
+    message; each is called with no argument (they read the clock themselves); the tick logs a late
+    step's counters only when one of them moved."""
+    calls = _record_tick(monkeypatch, late_result={"measure": {"ran": 1, "measured": 3},
+                                                   "health": {"checked": 0, "sent": 0},
+                                                   "digest": {"sent": 1, "failed": 0}})
+    _switches(monkeypatch, enabled=True, bot=True, metrics=True, digest=True)
+    caplog.set_level(logging.INFO, logger=PUB_LOGGER)
+    await pub.publisher_tick()
+    assert [name for name, _a, _k in calls] == [*_EARLY, "measure", "health", "digest"]
+    assert [(a, k) for name, a, k in calls if name in _LATE] == [((), {})] * 3
+    assert _messages(caplog, "marketing publisher measure: ") == [
+        "marketing publisher measure: {'ran': 1, 'measured': 3}"]
+    assert _messages(caplog, "marketing publisher digest: ") == [
+        "marketing publisher digest: {'sent': 1, 'failed': 0}"]
+    assert _messages(caplog, "marketing publisher health") == []      # all zero: nothing to say
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled, bot, metrics, digest, late", [
+    (True, True, False, True, ["health", "digest"]),     # the metrics switch off: no measure
+    (False, True, True, True, ["health", "digest"]),     # publishing off: no measure either
+    (True, False, True, True, ["measure"]),              # no bot: no run health, no digest
+    (True, True, True, False, ["measure", "health"]),    # the digest switch off
+    (False, False, True, True, []),                      # housekeeping only
+], ids=["metrics_off", "publishing_off", "bot_off", "digest_off", "all_off"])
+async def test_each_late_step_is_skipped_when_its_own_gate_is_off(monkeypatch, enabled, bot, metrics,
+                                                                  digest, late):
+    calls = _record_tick(monkeypatch)
+    _switches(monkeypatch, enabled=enabled, bot=bot, metrics=metrics, digest=digest)
+    await pub.publisher_tick()
+    early = ["expire", "retract", *(["reconcile", "publish"] if enabled else []),
+             *(["review", "feed"] if bot else [])]
+    assert [name for name, _a, _k in calls] == early + late
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bot", [True, False])
+async def test_at_the_settings_defaults_only_the_run_health_check_joins_the_tick(monkeypatch, bot):
+    """Both new switches are fail-closed: at their DECLARED defaults a live tick adds only the run-health
+    check, and only with the bot configured (it has no switch, like the feed's alerts)."""
+    from app.config import Settings
+
+    defaults = {name: Settings.model_fields[name].default
+                for name in ("MARKETING_METRICS_ENABLED", "MARKETING_DIGEST_ENABLED")}
+    assert defaults == {"MARKETING_METRICS_ENABLED": False, "MARKETING_DIGEST_ENABLED": False}
+    calls = _record_tick(monkeypatch)
+    _switches(monkeypatch, enabled=True, bot=bot, metrics=defaults["MARKETING_METRICS_ENABLED"],
+              digest=defaults["MARKETING_DIGEST_ENABLED"])
+    await pub.publisher_tick()
+    expected = [*_EARLY, "health"] if bot else ["expire", "retract", "reconcile", "publish"]
+    assert [name for name, _a, _k in calls] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken, failing", [("metrics_service", ("measure",)),
+                                             ("digest_service", ("health", "digest"))])
+async def test_a_late_step_whose_module_cannot_be_imported_fails_alone(monkeypatch, caplog, broken, failing):
+    """A late step imports its module when it runs: a module that cannot be imported fails that step
+    (logged with the stack) and never the steps after it."""
+    import app.services.marketing as package
+
+    calls = _record_tick(monkeypatch)
+    _switches(monkeypatch, enabled=True, bot=True, metrics=True, digest=True)
+    monkeypatch.delattr(package, broken)
+    monkeypatch.setitem(sys.modules, f"app.services.marketing.{broken}", None)
+    caplog.set_level(logging.ERROR, logger=PUB_LOGGER)
+    await pub.publisher_tick()
+    assert [name for name, _a, _k in calls] == [*_EARLY, *(s for s in _LATE if s not in failing)]
+    for step in failing:
+        assert [r for r in caplog.records if r.exc_info and r.getMessage().startswith(
+            f"marketing publisher step {step} failed (ModuleNotFoundError: ")], step
+
+
+def _imports_run_at_import_time(tree: ast.AST) -> List[ast.AST]:
+    """Every import statement that runs when the module is imported: module level, inside a top-level
+    `if` / `try` / class body — anything but a function or lambda body."""
+    found: List[ast.AST] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                found.append(child)
+            visit(child)
+
+    visit(tree)
+    return found
+
+
+def test_the_publisher_imports_the_late_step_modules_only_when_a_step_runs():
+    """`app/main.py` imports this module inside the lifespan without a guard, so an import-time import
+    of the measure or digest module would let a broken one stop the whole web app from booting. Each
+    late step imports its module when it runs instead (AST, so a comment or docstring cannot satisfy
+    it)."""
+    names = []
+    for node in _imports_run_at_import_time(ast.parse(inspect.getsource(pub))):
+        prefix = f"{node.module or ''}." if isinstance(node, ast.ImportFrom) else ""
+        names += [f"{prefix}{alias.name}".split(".") for alias in node.names]
+    assert names, "sentinel: the module's own imports were not found"
+    for module in ("metrics_service", "digest_service"):
+        assert not [n for n in names if module in n], module
+    for step, module in ((pub._measure_step, "metrics_service"), (pub._health_step, "digest_service"),
+                         (pub._digest_step, "digest_service")):
+        body = ast.parse(textwrap.dedent(inspect.getsource(step)))
+        assert [n for n in ast.walk(body) if isinstance(n, ast.ImportFrom)
+                and n.module == "app.services.marketing" and [a.name for a in n.names] == [module]], step
+
+
+@pytest.mark.asyncio
+async def test_the_real_late_steps_do_each_days_work_once_in_order_and_call_no_platform(env, monkeypatch):
+    """The REAL measure, run-health and digest steps behind the real tick on Monday 2026-10-05, a
+    posting day (the early steps are recorders). Before 06:00 ET nothing is due: no job state is read,
+    nothing is claimed or sent. At 23:00 ET the three day claims are taken in contract order: the
+    measure step stores Saturday's Bluesky counts (the AppView faked at the client function, the
+    publisher's `updated_at` fence untouched); the run-health alert (no run today) and the weekly digest
+    go out as two plain-text messages, the digest already carrying the counts measured earlier in the
+    SAME tick; no platform client is reached. A later tick that evening does no I/O at all."""
+    from app.integrations import bluesky, telegram, upload_post, x_api
+    from app.services import notification_jobs
+    from app.services.marketing import content_pool
+    from app.services.marketing import digest_service as ds
+    from app.services.marketing import metrics_service as ms
+    from test_marketing_metrics import DigestJobs
+    from test_marketing_review_bot import OWNER as CHAT
+    from test_marketing_review_bot import SECRET, TOKEN, FakeTelegram
+
+    calls = _record_tick(monkeypatch, late=False)
+    clock = {"now": _et_time(2026, 10, 5, 5, 59)}
+    jobs = DigestJobs()
+    env.fake.tables[ds._JOB_STATE_TABLE] = _Table([("job",)], {"enabled": True}, generated_id=False)
+    state_rows = env.fake.tables[ds._JOB_STATE_TABLE].rows
+
+    def finish_scheduled(job: str, **kw: Any) -> None:
+        """Migration 147's finish RPC writes the very row the digest reads back: mirrored here."""
+        jobs.finish_scheduled(job, **kw)
+        r = jobs.rows[job]
+        state_rows[:] = [x for x in state_rows if x["job"] != job] + [{
+            "job": job, "enabled": r["enabled"], "run_day": r["run_day"] and r["run_day"].isoformat(),
+            "claim_at": None, "last_run_at": r["last_run_at"].isoformat(), "last_error": r["last_error"],
+            "items_written": r["items_written"]}]
+
+    monkeypatch.setattr(notification_jobs, "claim_scheduled", jobs.claim_scheduled)
+    monkeypatch.setattr(notification_jobs, "finish_scheduled", finish_scheduled)
+    monkeypatch.setattr(notification_jobs, "scheduled_job_state", jobs.scheduled_job_state)
+    for name in ("_DAY_JOBS", "_STOPPED", "_LOGGED", "_LAST"):
+        monkeypatch.setattr(ms, name, {})
+    for module in (ms, ds):
+        monkeypatch.setattr(module, "_now", lambda: clock["now"])
+        monkeypatch.setattr(module, "get_marketing_run_service", lambda: env.svc)
+    monkeypatch.setattr(content_pool, "eligible_keys", lambda: [f"journey:{i}" for i in range(10)])
+    for name, value in (("MARKETING_METRICS_ENABLED", True), ("MARKETING_DIGEST_ENABLED", True),
+                        ("MARKETING_APP_STORE_URL", ""), ("MARKETING_TELEGRAM_BOT_TOKEN", TOKEN),
+                        ("MARKETING_TELEGRAM_REVIEW_CHAT_ID", CHAT), ("MARKETING_TELEGRAM_WEBHOOK_SECRET", SECRET),
+                        ("MARKETING_PUBLIC_BASE_URL", "https://caydexinvest.com"),
+                        # the schedule this test walks (nightly check 22:00, final word 16:00) — pinned, so a
+                        # developer .env with another run hour cannot move it
+                        ("MARKETING_RUN_HOUR_ET", 16), ("MARKETING_MAX_RUN_ATTEMPTS", 6)):
+        monkeypatch.setattr(pub.settings, name, value)
+    monkeypatch.setattr(pub.review_service, "SEND_SPACING_SECONDS", 0.0)
+    monkeypatch.setattr(pub.review_service, "_rate_limited_until", 0.0)
+    monkeypatch.setattr(ds, "_PACER", pub.review_service._Pacer())
+    tg = FakeTelegram()
+    monkeypatch.setattr(telegram, "_client", httpx.AsyncClient(transport=httpx.MockTransport(tg.handler)))
+    reached: List[str] = []
+
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        reached.append(str(request.url))
+        raise AssertionError(f"a platform was called: {request.url}")
+
+    for client_module in (x_api, bluesky, upload_post):
+        monkeypatch.setattr(client_module, "_client", httpx.AsyncClient(transport=httpx.MockTransport(forbidden)))
+    did = "did:plc:caydextick0001"
+    uri = f"at://{did}/app.bsky.feed.post/3lbticktest01"
+    asked: List[Any] = []
+
+    async def get_posts(uris, **_kw):
+        asked.append(list(uris))
+        return [{"uri": u, "likeCount": 7, "repostCount": 2, "replyCount": 1, "quoteCount": 0} for u in uris]
+
+    async def get_profile(actor, **_kw):
+        asked.append(actor)
+        return {"did": did, "handle": "caydex.bsky.social", "followersCount": 42, "followsCount": 3,
+                "postsCount": 9}
+
+    monkeypatch.setattr(bluesky, "get_posts", get_posts)
+    monkeypatch.setattr(bluesky, "get_profile", get_profile)
+    pid = env.seed(platform="bluesky", status="published", meta={"dry_run": False, "publish": {"state": "published"}},
+                   external_id=uri, external_url="https://bsky.app/profile/caydex.bsky.social/post/3lbticktest01",
+                   created_at="2026-10-03T20:30:00+00:00", updated_at="2026-10-03T21:00:05+00:00",
+                   published_at="2026-10-03T21:00:00+00:00", metrics={})
+    before = env.row(pid)
+
+    async def tick(at: datetime) -> None:
+        clock["now"] = jobs.now = at
+        calls.clear()
+        await pub.publisher_tick()
+        assert [name for name, _a, _k in calls] == list(_EARLY)
+
+    await tick(_et_time(2026, 10, 5, 5, 59))
+    assert jobs.state_reads == 0 and jobs.claims == [] and tg.calls == [] and asked == []
+
+    await tick(_et_time(2026, 10, 5, 23, 0))
+    monday = date(2026, 10, 5)
+    assert jobs.claims == [(ms.JOB_METRICS, monday), (ds.JOB_HEALTH, monday), (ds.JOB_DIGEST, monday)]
+    assert [(job, ok) for job, ok, *_ in jobs.finishes] == [(ms.JOB_METRICS, True), (ds.JOB_HEALTH, True),
+                                                            (ds.JOB_DIGEST, True)]
+    row = env.row(pid)
+    assert row["metrics"]["status"] == "ok" and row["metrics"]["measured_day"] == "2026-10-05"
+    assert {k: row["metrics"]["last"][k] for k in ("likes", "reposts", "replies", "quotes")} == {
+        "likes": 7, "reposts": 2, "replies": 1, "quotes": 0}
+    assert row["metrics"]["account"]["followers"] == 42
+    assert {k: v for k, v in row.items() if k != "metrics"} == {k: v for k, v in before.items() if k != "metrics"}
+    assert [uri] in asked and len(asked) == 2
+    sends = tg.of("sendMessage")
+    assert len(sends) == 2 and all(s["chat_id"] == CHAT and "parse_mode" not in s and "reply_markup" not in s
+                                   for s in sends)
+    health, digest = sends[0]["text"], sends[1]["text"]
+    assert health.startswith("⚠️ Marketing: no run for Mon 2026-10-05, a posting day — the worker never claimed it.")
+    assert digest.startswith("📊 Caydex marketing — weekly digest\nMon 2026-09-28 → Sun 2026-10-04 (ET)\n")
+    assert "\n• BLUESKY — 1 of 1 measured: 7 likes · 2 reposts · 1 reply · 0 quotes\n" in digest
+    assert f"\n  Top: {row['external_url']} (" in digest
+    assert "\nFollowers: BLUESKY 42 (as of 10-05;" in digest
+    # The job the measure step finished minutes earlier, read back by name: ONE post written (its counts
+    # and its account snapshot are two writes).
+    assert "\nMetrics job: last completed 2026-10-05 · last attempt 10-05 23:00 ET · 1 post written" in digest
+    assert ms.last_measure()["outcome"] == ms.OK
+    assert reached == []
+
+    reads, n_calls = jobs.state_reads, len(tg.calls)
+    await tick(_et_time(2026, 10, 5, 23, 10))
+    assert jobs.state_reads == reads and len(jobs.claims) == 3 and len(tg.calls) == n_calls and len(asked) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("junk", [None, [], ["measured"], "measured", 0, 7, ("ran", 1)])
+async def test_a_late_step_answering_junk_never_stops_the_steps_after_it(monkeypatch, caplog, junk):
+    """A step result that is not a counters dict is not logged — and never raises between the steps
+    (outside `_step`), so the reports behind it still run."""
+    from app.services.marketing import metrics_service
+
+    calls = _record_tick(monkeypatch)
+    _switches(monkeypatch, enabled=True, bot=True, metrics=True, digest=True)
+
+    async def measure(*_a: Any, **_k: Any) -> Any:
+        calls.append(("measure", (), {}))
+        return junk
+
+    monkeypatch.setattr(metrics_service, "measure_cycle", measure)
+    caplog.set_level(logging.INFO, logger=PUB_LOGGER)
+    await pub.publisher_tick()
+    assert [name for name, _a, _k in calls] == [*_EARLY, "measure", "health", "digest"]
+    assert _messages(caplog, "marketing publisher measure") == []
+
+
+@pytest.mark.asyncio
+async def test_a_tick_that_raises_between_its_steps_never_ends_the_loop(monkeypatch, caplog):
+    """`_step` isolates every step; a raise BETWEEN them (a gate, a log line) is caught by the loop,
+    logged with the stack, and the next tick still runs — a dead publisher would never post, retract or
+    send a review again. Cancellation still ends it."""
+    ticks: List[int] = []
+    waits: List[float] = []
+
+    async def tick() -> None:
+        ticks.append(1)
+        if len(ticks) == 1:
+            raise RuntimeError("a gate exploded")
+        if len(ticks) == 3:
+            raise asyncio.CancelledError
+
+    async def no_sleep(_s: float) -> None:
+        return None
+
+    async def no_wait(timeout: float) -> bool:
+        waits.append(timeout)
+        return False
+
+    monkeypatch.setattr(pub, "publisher_tick", tick)
+    monkeypatch.setattr(pub.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(pub.publisher_wake, "wait", no_wait)
+    monkeypatch.setattr(pub.settings, "MARKETING_PUBLISHER_INTERVAL_SECONDS", 600)
+    caplog.set_level(logging.ERROR, logger=PUB_LOGGER)
+    with pytest.raises(asyncio.CancelledError):
+        await pub.run_marketing_publisher_loop()
+    assert len(ticks) == 3 and waits == [600, 600]
+    assert [r for r in caplog.records if r.exc_info and r.getMessage().startswith(
+        "marketing publisher tick FAILED (RuntimeError: a gate exploded)")]

@@ -54,7 +54,7 @@ from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services.dcf_report_gate import report_dcf_source_matches
 from app.services.sector_aggregates_service import SectorAggregates
-from app.services.industry_tam_service import IndustryTAM
+from app.services.industry_dossier_service import IndustryDossier
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +100,22 @@ _PYDANTIC_FIELDS: Dict[str, Any] = {
 }
 
 # Flat dataclass fields → (class, [datetime field names needing ISO round-trip]).
+#
+# The class must be EXACTLY the type the producer returns — `_serialize` refuses any
+# other. `industry_tam` was registered as `IndustryTAM` from the day this registry was
+# written (2026-06-16), but its producer, `IndustryDossierService.get_or_compute_dossier`,
+# has returned an `IndustryDossier` since 2026-05-21. The write succeeded (`asdict` takes
+# any dataclass) and every read raised `IndustryTAM(**d)` → TypeError on the dossier's
+# extra keys → MISS. Because `is_cached_collection_fresh` saw a fresh row, the pre-warmer
+# skipped it, and every report on an equity with an FMP industry re-ran the full cold
+# collection (found 2026-10-01). Superset or not, never register a "compatible" class:
+# a narrower dict read into a wider class takes its defaults (`source_grain="industry"`)
+# and turns a missing value into a confident one.
+# `tests/test_ticker_data_cache.py::test_dataclass_registry_matches_each_producer` pins
+# each entry to its producer's return annotation.
 _DATACLASS_FIELDS: Dict[str, Any] = {
     "sector_aggregates": (SectorAggregates, ["computed_at"]),
-    "industry_tam": (IndustryTAM, []),
+    "industry_tam": (IndustryDossier, []),
 }
 
 # Concurrent-fetch dedup, keyed by ticker (module-level so it spans collector
@@ -156,7 +169,14 @@ def _serialize(out: Any) -> Optional[Dict[str, Any]]:
             elif name in _PYDANTIC_FIELDS:
                 result[name] = val.model_dump(mode="json")
             elif name in _DATACLASS_FIELDS:
-                _, dt_fields = _DATACLASS_FIELDS[name]
+                cls, dt_fields = _DATACLASS_FIELDS[name]
+                if type(val) is not cls:
+                    # A row the reader cannot rebuild as the same type must never be
+                    # written: it reads as a MISS while the freshness probe calls it fresh.
+                    raise TypeError(
+                        f"{name} holds {type(val).__name__}; _DATACLASS_FIELDS "
+                        f"registers {cls.__name__}"
+                    )
                 d = dataclasses.asdict(val)
                 for k in dt_fields:
                     if isinstance(d.get(k), (datetime, date)):
@@ -178,7 +198,7 @@ def _serialize(out: Any) -> Optional[Dict[str, Any]]:
         logger.error(
             "ticker_data_cache serialize failed — CACHE WRITE SKIPPED, this tier is "
             "returning nothing: %s: %s. A field on CollectedTickerData is missing from "
-            "_PYDANTIC_FIELDS/_DATACLASS_FIELDS.",
+            "_PYDANTIC_FIELDS/_DATACLASS_FIELDS, or registered there under the wrong class.",
             type(e).__name__, e, exc_info=True,
         )
         return None
@@ -343,14 +363,37 @@ async def is_cached_collection_fresh(ticker: str) -> bool:
     return await asyncio.to_thread(_query)
 
 
+def _serialize_readable(ticker: str, out: Any) -> Optional[Dict[str, Any]]:
+    """`_serialize`, then read the payload back exactly as `get_cached_collection` will.
+
+    A row that serializes but cannot be read back is worse than no row: every read
+    MISSES while `is_cached_collection_fresh` reports it fresh, so the pre-warmer skips
+    the ticker and every report re-runs the cold collection — the `industry_tam`
+    outage (see `_DATACLASS_FIELDS`). One extra deserialization per write (at most
+    once per ticker per close cycle) buys the guarantee that a fresh row is a usable row.
+    """
+    payload = _serialize(out)
+    if payload is None:
+        return None
+    if _deserialize(payload, {f.name for f in dataclasses.fields(out)}) is None:
+        logger.error(
+            "ticker_data_cache write SKIPPED for %s — the payload does not read back "
+            "(reason in the preceding deserialize warning); a fresh-but-unreadable row "
+            "would make every read miss while the pre-warmer skips the ticker",
+            ticker,
+        )
+        return None
+    return payload
+
+
 async def store_collection(ticker: str, out: Any) -> None:
     """Write/refresh the cache row. Fire-and-forget: failures are logged, never
-    raised, and a serialization failure simply skips the write."""
+    raised, and a payload that fails to serialize OR to read back skips the write."""
     ticker = ticker.upper().strip()
-    payload = await asyncio.to_thread(_serialize, out)
+    payload = await asyncio.to_thread(_serialize_readable, ticker, out)
     if payload is None:
         logger.warning(
-            "ticker_data_cache write SKIPPED for %s (serialize failed) — every "
+            "ticker_data_cache write SKIPPED for %s (serialize/read-back failed) — every "
             "subsequent read for this ticker will MISS and re-run the full collection",
             ticker,
         )

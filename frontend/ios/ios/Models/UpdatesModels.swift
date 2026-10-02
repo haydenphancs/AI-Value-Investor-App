@@ -390,6 +390,76 @@ struct NewsFilterOptions {
     }
 }
 
+// MARK: - News Filter persistence (device-only)
+
+extension NewsSentiment {
+    /// What the saved News filter stores — NEVER `rawValue`, which is the sheet's row label
+    /// ("Positive") and would orphan every saved filter the day it is reworded. A storage
+    /// contract: never change an id.
+    var storageID: String {
+        switch self {
+        case .positive: return "positive"
+        case .negative: return "negative"
+        case .neutral: return "neutral"
+        }
+    }
+
+    /// nil for an unknown id, which the reader drops.
+    init?(storageID: String) {
+        guard let match = Self.allCases.first(where: { $0.storageID == storageID }) else {
+            return nil
+        }
+        self = match
+    }
+}
+
+extension NewsFilterOptions {
+    /// The Updates News filter, kept on THIS device (product decision, 2026-10-01) for the
+    /// session: a FILTER on a device-global key, so `AppState.discardDataForEndedSession()`
+    /// removes it (auth.md §7, like the Activity chip's) and `UpdatesViewModel` re-reads it on
+    /// identity change. Stored as `["sources": [String], "sentiments": [storageID]]`.
+    ///
+    /// `sectors` is not stored: no control sets it and `matches(_:)` never reads it.
+    static let storageKey = "caydex_updates_news_filter"
+
+    /// The saved filter, or `.default` when nothing usable is stored. Unknown sentiment ids
+    /// and blank sources are dropped on read; the store itself is left alone.
+    static func loadSaved(from defaults: UserDefaults = .standard) -> NewsFilterOptions {
+        guard let stored = defaults.dictionary(forKey: storageKey) else { return .default }
+        let sources = (stored["sources"] as? [String] ?? [])
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let sentiments = (stored["sentiments"] as? [String] ?? [])
+            .compactMap(NewsSentiment.init(storageID:))
+        return NewsFilterOptions(
+            sources: Array(Set(sources)).sorted(),
+            sectors: [],
+            sentiments: NewsSentiment.allCases.filter { sentiments.contains($0) }
+        )
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        defaults.set([
+            "sources": Array(Set(sources)).sorted(),
+            "sentiments": Array(Set(sentiments.map(\.storageID))).sorted(),
+        ], forKey: Self.storageKey)
+    }
+
+    /// These options with `sources` cut down to the publishers present in the loaded feed.
+    ///
+    /// A saved source is a preference that outlives the feed it was picked from: each scope
+    /// has its own publishers, and the sheet lists only the loaded feed's. Applied as saved,
+    /// a source this feed does not carry would empty the timeline behind a filter the sheet
+    /// cannot even show. Case-insensitive, like `matches(_:)`. Display-side only — the
+    /// caller must never write the result back over the saved filter.
+    func restrictingSources(to available: [String]) -> NewsFilterOptions {
+        guard !sources.isEmpty else { return self }
+        let present = Set(available.map { $0.lowercased() })
+        var narrowed = self
+        narrowed.sources = sources.filter { present.contains($0.lowercased()) }
+        return narrowed
+    }
+}
+
 // MARK: - API DTOs
 //
 // The shared `APIClient` decoder deliberately does NOT use
@@ -734,6 +804,40 @@ enum SentimentTrendWindow: String, CaseIterable, Equatable {
         case .month: return 30
         case .quarter: return 90
         }
+    }
+}
+
+extension SentimentTrendWindow {
+    /// The window the user last picked on the news-tone toggle, kept on THIS device (product
+    /// decision, 2026-10-01). Absent = auto mode. A display preference — deliberately NOT
+    /// cleared by `AppState.discardDataForEndedSession()` (the same standing as
+    /// `caydex_preferred_chart_type`). Stores `storageID`, never the toggle label.
+    static let savedPickKey = "caydex_updates_trend_window"
+
+    /// `rawValue` is the toggle's label ("7D"); this is the storage contract. Never change an id.
+    var storageID: String {
+        switch self {
+        case .week: return "week"
+        case .month: return "month"
+        case .quarter: return "quarter"
+        }
+    }
+
+    init?(storageID: String) {
+        guard let match = Self.allCases.first(where: { $0.storageID == storageID }) else {
+            return nil
+        }
+        self = match
+    }
+
+    /// The saved pick, or nil (auto mode) when none — or only garbage — is stored.
+    static func savedPick(from defaults: UserDefaults = .standard) -> SentimentTrendWindow? {
+        defaults.string(forKey: savedPickKey).flatMap(SentimentTrendWindow.init(storageID:))
+    }
+
+    /// Record a TAP. Never call this with a window the code chose (auto mode, a snap-back).
+    func saveAsPick(to defaults: UserDefaults = .standard) {
+        defaults.set(storageID, forKey: Self.savedPickKey)
     }
 }
 

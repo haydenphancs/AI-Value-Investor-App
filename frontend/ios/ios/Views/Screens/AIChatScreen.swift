@@ -222,10 +222,18 @@ struct AIChatScreen: View {
             // Agent" buttons now open an EMPTY grounded chat: the conversation area does not
             // render until there is a message, so a chip nested inside it could never appear
             // on the one screen that most needs to say what it is reading.
+            //
+            // The claim follows the SERVER's verdict (`contextGrounded`), not the context type
+            // alone: a report chat whose report could not be found runs ungrounded, and the chip
+            // then says so instead of "Grounded on Research Report".
             if let ctx = viewModel.currentContextType, ctx != .none {
-                GroundedContextChip(contextType: ctx, referenceLabel: groundingReferenceLabel)
-                    .padding(.top, AppSpacing.sm)
-                    .padding(.bottom, AppSpacing.xs)
+                GroundedContextChip(
+                    contextType: ctx,
+                    referenceLabel: groundingReferenceLabel,
+                    groundingArrived: viewModel.contextGrounded
+                )
+                .padding(.top, AppSpacing.sm)
+                .padding(.bottom, AppSpacing.xs)
             }
 
             if !viewModel.messages.isEmpty || viewModel.isAITyping {

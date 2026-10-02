@@ -10,6 +10,13 @@ import SwiftUI
 struct ChartSettingsSheet: View {
     @ObservedObject var chartSettings: ChartSettings
     let assetContext: ChartAssetContext
+    /// Panes the chart's bars cannot draw (`TickerChartView.unavailableSubCharts` — e.g.
+    /// Stoch and Volume on a close-only FRED commodity). Shown disabled, still reflecting
+    /// the saved choice, so the toggle neither looks broken nor rewrites the preference.
+    var unavailableSubCharts: Set<TechnicalIndicatorType> = []
+    /// Chart types the bars cannot draw (`TickerChartView.unavailableChartTypes` — Candle and
+    /// Bar on a close-only series). Shown disabled; the saved type is left alone.
+    var unavailableChartTypes: Set<ChartType> = []
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -26,12 +33,19 @@ struct ChartSettingsSheet: View {
                         // The type the CANVAS is drawing, not the persisted preference: a
                         // Candle/Bar choice made on a stock is coerced to Line on a source
                         // with no OHLC (crypto) — see `TickerChartView` — so highlighting
-                        // the raw preference left NO row selected while a line was drawn.
+                        // the raw preference left NO row selected while a line was drawn. The
+                        // same coercion applies to a close-only series (WTI, Henry Hub).
                         let effectiveChartType = assetContext.allowedChartTypes.contains(chartSettings.chartType)
+                            && !unavailableChartTypes.contains(chartSettings.chartType)
                             ? chartSettings.chartType : .line
                         HStack(spacing: AppSpacing.sm) {
                             ForEach(assetContext.allowedChartTypes) { type in
                                 Button {
+                                    // Re-tapping the highlighted type writes nothing. On crypto a
+                                    // saved Candle is SHOWN as Line; storing that tap would replace
+                                    // the user's Candle — and, with every live chart now synced, flip
+                                    // each stock screen in the stack to Line as well.
+                                    guard type != effectiveChartType else { return }
                                     var transaction = Transaction()
                                     transaction.disablesAnimations = true
                                     withTransaction(transaction) {
@@ -59,7 +73,16 @@ struct ChartSettingsSheet: View {
                                                          : AppColors.textMuted)
                                 }
                                 .buttonStyle(PlainButtonStyle())
+                                .disabled(unavailableChartTypes.contains(type))
+                                .opacity(unavailableChartTypes.contains(type) ? 0.4 : 1)
                             }
+                        }
+
+                        if !unavailableChartTypes.isEmpty {
+                            Text("Candle and Bar need open, high and low prices, which this asset's data doesn't have.")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
 
@@ -95,17 +118,26 @@ struct ChartSettingsSheet: View {
                             .foregroundColor(AppColors.textPrimary)
 
                         ForEach(assetContext.allowedSubCharts) { indicator in
+                            let isUnavailable = unavailableSubCharts.contains(indicator)
                             Toggle(isOn: indicatorBinding(for: indicator)) {
-                                HStack(spacing: AppSpacing.sm) {
-                                    Circle()
-                                        .fill(indicator.defaultColor)
-                                        .frame(width: 8, height: 8)
-                                    Text(indicator.rawValue)
-                                        .font(AppTypography.body)
-                                        .foregroundColor(AppColors.textPrimary)
+                                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                                    HStack(spacing: AppSpacing.sm) {
+                                        Circle()
+                                            .fill(indicator.defaultColor)
+                                            .frame(width: 8, height: 8)
+                                        Text(indicator.rawValue)
+                                            .font(AppTypography.body)
+                                            .foregroundColor(AppColors.textPrimary)
+                                    }
+                                    if isUnavailable {
+                                        Text("Not available for this asset's data")
+                                            .font(AppTypography.caption)
+                                            .foregroundColor(AppColors.textMuted)
+                                    }
                                 }
                             }
                             .tint(AppColors.primaryBlue)
+                            .disabled(isUnavailable)
                         }
                     }
 

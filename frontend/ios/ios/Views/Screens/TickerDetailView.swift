@@ -20,6 +20,12 @@ struct TickerDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showUpgradesDowngrades = false
     @State private var showTechnicalAnalysisDetail = false
+    /// The Analysis tab's 6M/1Y and 24H/7D toggles, remembered on this device (TestFlight
+    /// 1.0 (9): set once, keep). They were `@Published` copies on the ViewModel with hard
+    /// defaults, so every pushed ticker and every relaunch reset them; here every screen in
+    /// the stack reads the one stored value. Ids, not labels — see each type's `storageID`.
+    @AppStorage(AnalystMomentumPeriod.storageKey) private var momentumPeriodID: String = AnalystMomentumPeriod.defaultChoice.storageID
+    @AppStorage(SentimentTimeframe.storageKey) private var sentimentTimeframeID: String = SentimentTimeframe.defaultChoice.storageID
     @State private var showSearch = false
     @State private var showShareSheet = false
     @State private var showAIChat = false
@@ -140,7 +146,7 @@ struct TickerDetailView: View {
                             isPositive: tickerData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
-                            assetContext: .stock,
+                            assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
                             chartEventDates: viewModel.chartEventDates,
                             previousClose: viewModel.stockQuote?.previousClose
@@ -165,10 +171,15 @@ struct TickerDetailView: View {
                             isPositive: core.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
-                            assetContext: .stock,
+                            assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
                             chartEventDates: viewModel.chartEventDates,
-                            previousClose: viewModel.stockQuote?.previousClose
+                            previousClose: viewModel.stockQuote?.previousClose,
+                            // The fast core carries bars on 1D/1W only, and the screen can
+                            // now OPEN on a remembered 3M+ — so this frame would sit empty for
+                            // the 2–5 s until the full overview lands. Gated on `isLoading` so a
+                            // failed load never leaves a shimmer that cannot resolve.
+                            placeholder: viewModel.isLoading ? .loading : nil
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {
@@ -377,8 +388,8 @@ struct TickerDetailView: View {
                 isAnalystLoaded: viewModel.isAnalystLoaded,
                 isSentimentLoaded: viewModel.isSentimentLoaded,
                 isTechnicalLoaded: viewModel.isTechnicalLoaded,
-                selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
-                selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
+                selectedMomentumPeriod: AnalystMomentumPeriod.binding($momentumPeriodID),
+                selectedSentimentTimeframe: SentimentTimeframe.binding($sentimentTimeframeID),
                 onAnalystRatingsMoreTap: viewModel.handleAnalystRatingsMore,
                 onAnalystActionsTap: {
                     showUpgradesDowngrades = true

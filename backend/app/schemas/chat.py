@@ -247,6 +247,13 @@ class ChatMessageResponse(BaseModel):
     #                   unchanged. iOS renders a "cut short" notice; the `suggestions` list
     #                   then carries the single "Continue your answer" chip.
     truncated: Optional[bool] = None
+    #  • context_grounded — did the screen's grounding reach the model on THIS turn?
+    #                   True / False only for a context type the server can vouch for
+    #                   (TICKER_REPORT today: the resolver BUILT the report block, never a
+    #                   client pass-through); None for every other type, every legacy row
+    #                   and an old server. iOS keeps its "Grounded on …" chip on None and
+    #                   softens it on False. Backed by `rich_content.context_grounded`.
+    context_grounded: Optional[bool] = None
     created_at: str
 
 

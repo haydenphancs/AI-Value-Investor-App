@@ -30,8 +30,30 @@ final class UpdatesViewModel: ObservableObject {
     @Published var insightSummary: NewsInsightSummary?
     @Published var newsArticles: [NewsArticle] = []
     @Published var groupedNews: [GroupedNews] = []
+    /// The News filter the user SAVED — written only by the filter sheet's Apply (or Reset),
+    /// restored in `init` (TestFlight 1.0 (9): "set up once and permanently keep them") and
+    /// re-read from the store in `handleIdentityChange` (a session end clears it — see there).
+    ///
+    /// Not what the timeline applies: that is `effectiveFilterOptions`, cut down to the
+    /// publishers in the loaded feed. Keep the two apart — writing the narrowed copy back here
+    /// would silently delete a publisher the user picked on another ticker's feed.
     @Published var filterOptions: NewsFilterOptions = .default {
-        didSet { applyFiltersAndGroup() }
+        didSet {
+            // Not for the identity handler's re-read: a restore never writes the store back.
+            if !isRereadingSavedFilter { filterOptions.save() }
+            applyFiltersAndGroup()
+        }
+    }
+    /// True only while `handleIdentityChange` re-reads the saved filter into `filterOptions`.
+    private var isRereadingSavedFilter = false
+
+    /// The filter the timeline, the chip and the empty-state copy actually use: the saved one,
+    /// with sources this feed does not carry dropped (`NewsFilterOptions.restrictingSources`).
+    /// Re-derived on every load, page and filter change, so a source drops in once a page
+    /// that carries it arrives — the chip and the sheet's checkmarks always describe exactly
+    /// what is narrowing the list, never a filter the user cannot see.
+    var effectiveFilterOptions: NewsFilterOptions {
+        filterOptions.restrictingSources(to: availableSources)
     }
     @Published var isLoading: Bool = false
     @Published var isRefreshing: Bool = false
@@ -194,7 +216,12 @@ final class UpdatesViewModel: ObservableObject {
     private let trendCacheTTL: TimeInterval = 300
     /// False until the user taps the toggle. Until then the window is chosen per scope from
     /// its history — 7D while it has under a week, else 30D — and the request is always 30D,
-    /// so the 7D view is a free cut of it. Reset on identity change.
+    /// so the 7D view is a free cut of it.
+    ///
+    /// A tap is SAVED on this device (`SentimentTrendWindow.savedPickKey`) and restored as a
+    /// pick by `restoreTrendWindowPreference()` — in `init` and again on identity change — so
+    /// the choice now outlives the session (TestFlight 1.0 (9): "set up once and permanently
+    /// keep them"). With nothing saved, auto mode is unchanged.
     private var userPickedWindow = false
     /// Re-checks a scope whose 90-day history is still being built, backing off, until it is
     /// ready or the delays run out. Cancelled on scope change, identity change and deinit.
@@ -217,10 +244,23 @@ final class UpdatesViewModel: ObservableObject {
 
     init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
+        // The saved News filter, through the wrapper so `didSet` neither re-saves it nor
+        // regroups an empty feed. Applied when the first feed load calls `applyFiltersAndGroup`.
+        _filterOptions = Published(initialValue: NewsFilterOptions.loadSaved())
+        restoreTrendWindowPreference()
         // Deliberately NO load here. `UpdatesView` is instantiated once at app
         // launch for all five tabs (see ContentView), so loading in init would
         // fire network calls for a screen the user may never open. The view
         // calls `loadIfNeeded()` when the tab first becomes active.
+    }
+
+    /// Adopt the device's saved news-tone window as the user's pick, or auto mode when none is
+    /// saved. READ-only: nothing here writes the store, so a garbage value falls back to auto
+    /// without being "repaired" over.
+    private func restoreTrendWindowPreference() {
+        let saved = SentimentTrendWindow.savedPick()
+        userPickedWindow = saved != nil
+        trendWindow = saved ?? .month
     }
 
     deinit {
@@ -297,11 +337,22 @@ final class UpdatesViewModel: ObservableObject {
         trendPollTask = nil
         trendCache.removeAll()
         sentimentTrend = nil
-        userPickedWindow = false
-        trendWindow = .month
+        // Back to the DEVICE's saved window (or auto mode when there is none). The pick is a
+        // display preference of this phone, not the previous account's data, so it carries
+        // over — only the in-memory chart state above is the old identity's.
+        restoreTrendWindowPreference()
         trendPollAttempt = 0
         trendPollExhausted = false
         stalledScopes.removeAll()
+        // The News filter is NOT a device preference like the window: a filter on a device-global
+        // key would open the next account's feed already narrowed (auth.md §7), so
+        // `AppState.discardDataForEndedSession()` removes it from the store when a session ends.
+        // Re-reading the store drops it from this long-lived ViewModel too. A RE-READ, never a
+        // reset to `.default`: a transient-restore heal of the SAME account also lands here, and
+        // a reset would erase that user's filter. The flag keeps the re-read from saving.
+        isRereadingSavedFilter = true
+        filterOptions = NewsFilterOptions.loadSaved()
+        isRereadingSavedFilter = false
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -662,10 +713,16 @@ final class UpdatesViewModel: ObservableObject {
     }
 
     func setTrendWindow(_ window: SentimentTrendWindow) {
-        guard window != trendWindow else { return }
-        // The user's choice wins for the rest of the session, on every scope.
+        // A tap on the window already shown is a no-op only once it is the user's own pick. In
+        // auto mode it is still a choice: unrecorded, the next scope or a relaunch auto-picks
+        // another window — the "it changed back" of TestFlight 1.0 (9).
+        guard window != trendWindow || !userPickedWindow else { return }
+        // The user's choice wins on every scope, and is saved so it survives a relaunch. Saved
+        // HERE only — the auto pick in `present` and the failure snap-back in `loadTrend` assign
+        // `trendWindow` too, and storing either would overwrite the user's real choice.
         userPickedWindow = true
         trendWindow = window
+        window.saveAsPick()
         guard let scope = selectedTab?.scope else { return }
         startTrendLoad(scope: scope, force: false)
     }
@@ -848,6 +905,7 @@ final class UpdatesViewModel: ObservableObject {
             allNewsArticles.append(contentsOf: fresh)
             loadedOffset += dtos.count
             hasMorePages = response.hasMore ?? false
+            // Accepted trade-off: a saved publisher first seen on this page starts filtering mid-scroll.
             applyFiltersAndGroup()
             feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
 
@@ -1035,16 +1093,20 @@ final class UpdatesViewModel: ObservableObject {
     /// True when the source/sentiment sheet is narrowing the feed. Drives the empty state's
     /// copy ("No stories match your filters" vs "No recent stories").
     var hasActiveFeedFilter: Bool {
-        filterOptions.hasActiveFilters
+        effectiveFilterOptions.hasActiveFilters
     }
 
     private func applyFiltersAndGroup() {
-        newsArticles = allNewsArticles.filter { filterOptions.matches($0) }
         // Sources for the filter sheet come from the UNFILTERED feed on purpose —
         // narrowing them by the active keyword would hide togglable publishers.
+        //
+        // FIRST, before filtering: `effectiveFilterOptions` intersects the saved sources with
+        // this list, so filtering ahead of it would apply the previous scope's publishers.
         availableSources = Array(
             Set(allNewsArticles.map { $0.source.displayName })
         ).sorted()
+        let effective = effectiveFilterOptions
+        newsArticles = allNewsArticles.filter { effective.matches($0) }
         groupNewsArticles()
     }
 

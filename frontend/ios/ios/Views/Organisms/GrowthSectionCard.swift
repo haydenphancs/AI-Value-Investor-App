@@ -20,21 +20,37 @@ struct GrowthSectionCard: View {
 
     // MARK: - State
 
-    @State private var selectedMetric: GrowthMetricType
-    @State private var selectedPeriod: GrowthPeriodType
+    /// The metric chip and the Annual/Quarterly choice, saved on this device so the card
+    /// opens the way the user last left it. They were `@State`: `TickerDetailView`'s tab
+    /// switch tears the Financials tab down, so every tab switch, ticker and relaunch put
+    /// them back (TestFlight 1.0 (9): "set up once and permanently keep them").
+    ///
+    /// Stored as a stable token (`preferenceToken`), never the chip wording. "" (nothing
+    /// saved yet) or a token this build does not know reads as the fallback (the metric
+    /// `fallbackSelection` picked; the shown metric's first period — see `selectedPeriod`). Only a
+    /// TAP writes here — the `displayed…` fallbacks below are derived, so a ticker that
+    /// lacks the saved metric or period cannot overwrite it. `@AppStorage` also keeps every
+    /// live card in step, so a screen further down the stack follows the change.
+    ///
+    /// Display preferences of this phone, not account data: deliberately NOT cleared by
+    /// `AppState.discardDataForEndedSession()` (the standing `caydex_preferred_chart_type`
+    /// has). The period key is Growth's own; Profit Power keeps a separate one.
+    @AppStorage("caydex_growth_metric") private var storedMetricToken: String = ""
+    @AppStorage("caydex_growth_period") private var storedPeriodToken: String = ""
     @State private var showInfoSheet: Bool
+
+    /// What the card opens on while nothing usable is saved.
+    private let fallbackSelection: (metric: GrowthMetricType, period: GrowthPeriodType)
 
     // MARK: - Init
 
     init(growthData: GrowthSectionData, onDetailTapped: @escaping () -> Void) {
         self.growthData = growthData
         self.onDetailTapped = onDetailTapped
-        // Open on the first metric that HAS data (on Annual when it has it) — the shared
-        // helper the report's GrowthChartSheet uses. A hard-coded .eps/.annual opened on
-        // an empty chart for a ticker whose EPS is null on every FMP row.
-        let start = growthData.initialSelection()
-        _selectedMetric = State(initialValue: start.metric)
-        _selectedPeriod = State(initialValue: start.period)
+        // With nothing saved, open on the first metric that HAS data (on Annual when it has
+        // it) — the shared helper the report's GrowthChartSheet uses. A hard-coded
+        // .eps/.annual opened on an empty chart for a ticker whose EPS is null on every FMP row.
+        self.fallbackSelection = growthData.initialSelection()
         _showInfoSheet = State(initialValue: false)
     }
 
@@ -45,6 +61,29 @@ struct GrowthSectionCard: View {
     }
 
     // MARK: - Computed Properties
+
+    /// The saved metric (or the fallback). Assigned only from a chip tap, which saves it.
+    private var selectedMetric: GrowthMetricType {
+        get { GrowthMetricType(preferenceToken: storedMetricToken) ?? fallbackSelection.metric }
+        nonmutating set { storedMetricToken = newValue.preferenceToken }
+    }
+
+    /// The saved period. With none saved, the first period the metric ON SCREEN has (Annual
+    /// first) — not `fallbackSelection.period`, which belongs to the metric
+    /// `initialSelection()` picked: with Revenue saved and an EPS that is quarterly-only, that
+    /// opened Revenue on Quarterly although it has Annual. `availablePeriods` reads only
+    /// `displayedMetric`, never this, so there is no cycle. Assigned only from a toggle tap,
+    /// which saves it.
+    private var selectedPeriod: GrowthPeriodType {
+        get { GrowthPeriodType(preferenceToken: storedPeriodToken) ?? (availablePeriods.first ?? fallbackSelection.period) }
+        nonmutating set { storedPeriodToken = newValue.preferenceToken }
+    }
+
+    /// The toggle shows the period on screen and a tap saves it. The toggle is offered only
+    /// when the metric has both periods, where the two always agree.
+    private var periodSelection: Binding<GrowthPeriodType> {
+        Binding(get: { displayedPeriod }, set: { selectedPeriod = $0 })
+    }
 
     /// Chips offered: only metrics with at least one point in either period.
     private var availableMetrics: [GrowthMetricType] {
@@ -65,7 +104,8 @@ struct GrowthSectionCard: View {
 
     /// The period actually shown: the selection when the metric has it, else the period
     /// it does have (Quarterly → Annual when the quarterly leg failed). Derived rather than
-    /// written back, so switching back to a metric with both restores the user's choice.
+    /// written back, so switching back to a metric (or opening a ticker) with both restores
+    /// the user's saved choice.
     private var displayedPeriod: GrowthPeriodType {
         availablePeriods.contains(selectedPeriod) ? selectedPeriod : (availablePeriods.first ?? selectedPeriod)
     }
@@ -104,7 +144,7 @@ struct GrowthSectionCard: View {
 
             // Period toggle (Annual / Quarterly) — only when the metric has both.
             if availablePeriods.count > 1 {
-                GrowthPeriodToggle(selectedPeriod: $selectedPeriod)
+                GrowthPeriodToggle(selectedPeriod: periodSelection)
                     .padding(.leading, AppSpacing.xs)
             }
 
@@ -202,6 +242,43 @@ struct GrowthSectionCard: View {
             // }
             // .buttonStyle(.plain)
         }
+    }
+}
+
+// MARK: - Saved-choice tokens
+
+/// What the saved chip is stored as: the case name, never `rawValue` — that is the chip's
+/// wording ("Net Income"), and rewording a chip must not lose anyone's saved choice. An
+/// unknown token decodes to nil, so the card shows its fallback and leaves the store alone.
+private extension GrowthMetricType {
+    var preferenceToken: String {
+        switch self {
+        case .eps: return "eps"
+        case .revenue: return "revenue"
+        case .netIncome: return "netIncome"
+        case .operatingProfit: return "operatingProfit"
+        case .freeCashFlow: return "freeCashFlow"
+        }
+    }
+
+    init?(preferenceToken: String) {
+        guard let match = Self.allCases.first(where: { $0.preferenceToken == preferenceToken }) else { return nil }
+        self = match
+    }
+}
+
+/// Same contract for the period ("Annual" / "Quarterly" are the toggle's wording).
+private extension GrowthPeriodType {
+    var preferenceToken: String {
+        switch self {
+        case .annual: return "annual"
+        case .quarterly: return "quarterly"
+        }
+    }
+
+    init?(preferenceToken: String) {
+        guard let match = Self.allCases.first(where: { $0.preferenceToken == preferenceToken }) else { return nil }
+        self = match
     }
 }
 

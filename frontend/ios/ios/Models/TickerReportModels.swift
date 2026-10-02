@@ -1150,8 +1150,12 @@ struct MarketDynamics {
 
     /// Market-size column header, scope-prefixed when known:
     /// "US - Market Size (TAM)" / "Global - Market Size (TAM)".
+    /// Unprefixed when no TAM is shown: persisted reports from before
+    /// 2026-10-01 carry `tam_scope = "us"` with a zero TAM, which would
+    /// otherwise put a "US" header over "—".
     var tamHeaderLabel: String {
-        scopeLabel.map { "\($0) - Market Size (TAM)" } ?? "Market Size (TAM)"
+        guard tamIsAvailable, let s = scopeLabel else { return "Market Size (TAM)" }
+        return "\(s) - Market Size (TAM)"
     }
 
     var formattedCAGR: String {

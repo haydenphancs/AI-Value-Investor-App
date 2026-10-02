@@ -15,8 +15,11 @@
 #   MARKETING_API_BASE_URL   https://caydexinvest.com (the PUBLIC URL; Railway private networking
 #                            is not a drop-in — the web binds IPv4 only)
 #   MARKETING_WORKER_TOKEN   same value as the web service's MARKETING_WORKER_TOKEN
-#   MARKETING_RUN_HOUR_ET    e.g. 16 — the ET hour from which a tick may start today's run
-#   MARKETING_DRY_RUN        true until Phase 7 flips it
+#   MARKETING_RUN_HOUR_ET    e.g. 16 — the ET hour from which a tick may start today's run. MIRRORED on
+#                            the WEB service under the same name (its run-health timing): change BOTH
+#                            together (OWNER_TASKS "Marketing go-live" step 4)
+#   MARKETING_DRY_RUN        false since 2026-10-01 (live); true makes the day's posts rehearsals that
+#                            never publish
 #   SUPABASE_PUBLISHABLE_KEY optional (designed to be client-exposed), sent on the signed-upload PUT
 
 [build]

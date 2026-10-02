@@ -178,18 +178,18 @@ final class PriceAlertStore: ObservableObject {
     }
 
     private func performLoad() async {
-        // THREE outcomes, not two. "Not armed right now" is not the same as "signed out": at
-        // launch this runs while session restore is still in flight, and a restore that keeps
-        // failing backs off forever. Collapsing that into the sign-in prompt is what once told
-        // a signed-in user to sign in, with their own avatar loaded above it.
-        guard AppActions.shared.isSignedIn else {
-            alerts = []
-            state = AppActions.shared.isRestoringSession ? .reconnecting : .signedOut
-            // Neither pass saw the account, so neither is ever "fresh" — otherwise the
-            // staleness window would suppress the reload that heals it on sign-in.
-            lastLoadedAt = nil
-            return
-        }
+        // THREE outcomes, not two. "Not armed right now" is not the same as "signed out": a
+        // restore that keeps failing backs off forever, and collapsing that into the sign-in
+        // prompt is what once told a signed-in user to sign in, with their own avatar loaded
+        // above it.
+        //
+        // All three are decided from the OUTCOME of the request, never from a pre-flight
+        // `auth.status` read (the shape of `HomeDashboardViewModel.performLoad`). This used to
+        // open with `guard AppActions.shared.isSignedIn`, and `performRestore` arms the stored
+        // token while the status still reads `.restoring` — at launch and on every heal — so
+        // that guard refused an ARMED request that would have succeeded. `GET /alerts/price` is
+        // `.signInRequired`, so an UNARMED call is refused by `APIClient.buildRequest` before
+        // any I/O and arrives typed as `AppError.signInRequired`.
         let epoch = identityEpoch
         do {
             let page = try await repository.fetchPriceAlerts(ticker: nil)
@@ -202,24 +202,34 @@ final class PriceAlertStore: ObservableObject {
             state = .loaded
             lastLoadedAt = Date()
         } catch {
+            // Before the refusal arm too: a refusal asked for under the previous identity must
+            // not gate the next account's list.
             guard epoch == identityEpoch else { return }
             let appError = AppError.from(error)
+            // Signed out and broken must not look alike: one wants a Sign In button, the other
+            // Try Again, and "you have no price alerts" over an auth refusal is a lie.
+            if case .signInRequired = appError {
+                // No token armed, so APIClient refused before any I/O. "Reconnecting…" for a
+                // stored credential that is healing (auth.md §5), the sign-in prompt otherwise.
+                alerts = []
+                let reconnecting = AppActions.shared.isRestoringSession
+                state = reconnecting ? .reconnecting : .signedOut
+                // A pass that never saw the account is NEVER fresh — otherwise the staleness
+                // window suppresses the very reload that heals the gate.
+                lastLoadedAt = nil
+                // The designed path while no credential is armed — info, not a failure.
+                log.info("load price alerts refused — no armed credential (reconnecting: \(reconnecting, privacy: .public))")
+                return
+            }
             // A failure that is never logged is diagnosed from nothing. Type + operation, so
             // it is greppable without a repro.
             log.error("load price alerts failed: \(String(describing: type(of: error))): \(appError.message, privacy: .public)")
-            // Backstop for a credential that dies MID-FLIGHT — the guard above cannot catch
-            // that. Signed out and broken must not look alike: one wants a Sign In button, the
-            // other Try Again, and "you have no price alerts" over an auth failure is a lie.
-            if case .signInRequired = appError {
-                state = .signedOut
-            } else {
-                // NEVER an empty string. `AppError.message` passes some backend messages
-                // through verbatim (`.apiError`, `.validationFailed`), and an empty one
-                // rendered as a bare warning triangle over a "Try Again" button with no
-                // sentence at all — observed live on this screen.
-                let text = appError.message.trimmingCharacters(in: .whitespacesAndNewlines)
-                state = .error(text.isEmpty ? "We couldn't load your price alerts." : text)
-            }
+            // NEVER an empty string. `AppError.message` passes some backend messages through
+            // verbatim (`.apiError`, `.validationFailed`), and an empty one rendered as a bare
+            // warning triangle over a "Try Again" button with no sentence at all — observed
+            // live on this screen.
+            let text = appError.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            state = .error(text.isEmpty ? "We couldn't load your price alerts." : text)
             alerts = []
             // A pass that never saw the account is NEVER fresh — otherwise the staleness
             // window suppresses the very reload that heals it once the user signs in.

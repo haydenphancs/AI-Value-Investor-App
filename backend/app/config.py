@@ -5,6 +5,7 @@ Environment variables with Pydantic validation.
 
 from pathlib import Path
 from typing import Optional
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
@@ -1085,6 +1086,14 @@ class Settings(BaseSettings):
     # (each attempt re-uploads artefacts and, in later phases, spends Gemini/TTS time). After
     # this many attempts the claim answers `attempts_exhausted` and the day needs a human.
     MARKETING_MAX_RUN_ATTEMPTS: int = 6
+    # The worker's run hour, MIRRORED here: the ET hour (0-23) from which the worker's hourly cron tick may
+    # start a day's run. It MUST equal the worker service's own MARKETING_RUN_HOUR_ET (marketing/main.py,
+    # default 16 there too; tests/test_marketing_metrics.py pins the two defaults equal) — this process
+    # cannot read the worker's environment, so change both together. The run-health alert times itself
+    # from it (services/marketing/digest_service.py): the nightly check from this hour +
+    # MARKETING_MAX_RUN_ATTEMPTS (capped at 23 — 22:00 ET with the defaults; none at all at hour 23), the
+    # next day's final word from this hour (16:00 ET). Anything outside 0-23 fails the deploy at boot.
+    MARKETING_RUN_HOUR_ET: int = Field(16, ge=0, le=23)
     # Publisher cadence. It is an interval loop like notification_dispatch, not a daily claim:
     # posts become `approved` at arbitrary times (a reviewer's Approve) and Upload-Post jobs finish
     # asynchronously, so it must wake often enough to publish and to reconcile.
@@ -1177,6 +1186,20 @@ class Settings(BaseSettings):
     # 2 × the 120 s ledger statement bound plus the client timeouts, so a slow but live publish is
     # never "reconciled" while its own write is still in flight.
     MARKETING_PUBLISH_RECONCILE_AFTER_SECONDS: int = 600
+    # The MEASURE step (services/marketing/metrics_service.py, design doc §12.11): once per ET day,
+    # at the first publisher tick at or after 06:00 ET, it reads the engagement counts of our
+    # published posts (younger than 30 days) into marketing_posts.metrics. Bluesky reads are free;
+    # X reads are BILLED ($0.001 per post returned, $0.010 per account read), journaled and held
+    # under MARKETING_X_MONTHLY_BUDGET_USD with four posts of headroom, priced at what a post would
+    # reserve right now: $0.015 each ($0.06), or $0.20 each ($0.80) while MARKETING_X_ALLOW_URLS is on
+    # (outlet_x.metrics_headroom_micros). Also requires MARKETING_ENABLED. Fail-closed.
+    MARKETING_METRICS_ENABLED: bool = False
+    # The weekly DIGEST (services/marketing/digest_service.py): Monday at or after 09:00 ET, one
+    # Telegram message about the previous week, read from our own ledger only. Also requires the
+    # review bot (the three MARKETING_TELEGRAM_* settings). Fail-closed. The run-health alert has no
+    # switch: it runs whenever the bot is configured, like the publish feed's alerts — a nightly check
+    # on a posting day and a final word the next day, both timed from MARKETING_RUN_HOUR_ET (above).
+    MARKETING_DIGEST_ENABLED: bool = False
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

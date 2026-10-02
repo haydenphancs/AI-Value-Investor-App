@@ -41,7 +41,13 @@ final class AudioManager: ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     // Initial speed from the user's saved default (Settings → Playback); 0.0 when
     // unset falls back to .normal.
-    @Published var playbackSpeed: PlaybackSpeed =
+    //
+    // `private(set)` so there are exactly two writers, and they mean different things:
+    // `setPlaybackSpeedFromUser(_:)` is a person CHOOSING a speed (persisted + synced), and
+    // `adoptStoredPlaybackSpeed()` is the live value catching up with the store (a hydrate, a
+    // session end, the Settings row) and must never write or push. A view assigning the
+    // property directly would be neither, which is how the player's choice used to revert.
+    @Published private(set) var playbackSpeed: PlaybackSpeed =
         PlaybackSpeed(rawValue: UserDefaults.standard.double(forKey: "playback_speed")) ?? .normal
     @Published var sleepTimer: SleepTimerOption = .off
     @Published private(set) var sleepTimerRemaining: TimeInterval = 0
@@ -321,31 +327,27 @@ final class AudioManager: ObservableObject {
         // Observe playback speed changes
         $playbackSpeed
             .sink { [weak self] speed in
+                // Apply the rate ONLY. Persisting lives in `setPlaybackSpeedFromUser(_:)`.
+                //
+                // This sink used to write "playback_speed" on EVERY emission, which was wrong
+                // twice over. It never PUSHED, so a speed picked in the player stayed
+                // local-only and the next cold launch's hydrate (every cold launch hydrates)
+                // overwrote it with the server's older value — the "it turns on again"
+                // complaint, for audio speed. And a `@Published` sink fires once on subscribe
+                // and again after a hydrate or a session-end reset, so it wrote the DEFAULT
+                // 1.0 into a synced key nobody had chosen: "never chose" became "chose 1x",
+                // which then diffs as dirty against an empty `lastServerBlob` and can be
+                // replayed over the next account's real speed.
                 self?.updatePlaybackSpeed(speed)
-                // PERSIST it. `playbackSpeed` was read from UserDefaults once, at property
-                // initialisation, and never written back — so the two speed controls in the
-                // PLAYER (`FullScreenAudioPlayer`, `GlobalMiniPlayer`) were in-memory only.
-                // A user who changed speed in the player lost it on relaunch, and the value
-                // never reached the synced blob at all.
-                UserDefaults.standard.set(speed.rawValue, forKey: "playback_speed")
             }
             .store(in: &cancellables)
 
         // ...and the other direction. This is a process-lifetime singleton, so a hydrate or a
         // session end writing "playback_speed" in UserDefaults never reached the LIVE value:
-        // user B inherited user A's speed in the player for the whole process. `AppSettingsView`
-        // bridged one direction from one screen; this closes both from one place.
+        // user B inherited user A's speed in the player for the whole process.
         NotificationCenter.default.publisher(for: .caydexSettingsHydrated)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                // Absent (cleared at session end) → fall back to the declared default, exactly
-                // as the settings screens do.
-                let stored = UserDefaults.standard.object(forKey: "playback_speed") as? Double
-                let resolved = stored.flatMap { PlaybackSpeed(rawValue: $0) } ?? .normal
-                guard resolved != self.playbackSpeed else { return }   // no write-back loop
-                self.playbackSpeed = resolved
-            }
+            .sink { [weak self] _ in self?.adoptStoredPlaybackSpeed() }
             .store(in: &cancellables)
 
         // Observe sleep timer changes
@@ -844,6 +846,37 @@ final class AudioManager: ObservableObject {
     }
 
     // MARK: - Speed Control
+
+    /// A person picked a speed in the player (`PlaybackSpeedSheet`, the mini player's cycle
+    /// button). The ONLY path that persists and syncs a player-side choice.
+    ///
+    /// "playback_speed" is a SYNCED key (`SettingsSyncManager.doubleKeys`), and a synced key
+    /// that is written without a `push()` is a change the next hydrate silently reverts —
+    /// `push()` is what marks it dirty (durably, before the PUT goes out), so a kill or an
+    /// offline launch replays it instead of losing it. It self-gates: a guest stays local, an
+    /// un-hydrated or `.restoring` session defers it.
+    ///
+    /// Device display preference, synced per account: `clearLocalForEndedSession()` already
+    /// drops it at session end, so nothing here belongs in `discardDataForEndedSession()`.
+    func setPlaybackSpeedFromUser(_ speed: PlaybackSpeed) {
+        playbackSpeed = speed
+        UserDefaults.standard.set(speed.rawValue, forKey: "playback_speed")
+        SettingsSyncManager.shared.push()
+    }
+
+    /// Bring the LIVE speed in line with the stored preference — after a hydrate, a session
+    /// end, or the Settings → Default Speed row (which writes the key itself via @AppStorage).
+    ///
+    /// Read-only on purpose: it never writes the key and never pushes. An absent or unknown
+    /// value (cleared at session end, or a speed this build has no case for) plays at the
+    /// declared default WITHOUT recording it, so "never chose" stays "never chose" and a
+    /// foreign value is not overwritten with a guess.
+    func adoptStoredPlaybackSpeed() {
+        let stored = UserDefaults.standard.object(forKey: "playback_speed") as? Double
+        let resolved = stored.flatMap { PlaybackSpeed(rawValue: $0) } ?? .normal
+        guard resolved != playbackSpeed else { return }
+        playbackSpeed = resolved
+    }
 
     private func updatePlaybackSpeed(_ speed: PlaybackSpeed) {
         if let player {

@@ -433,11 +433,14 @@ class CollectedTickerData:
     # sector_benchmarks table in pass 2. Feeds the drill-down's sector-average
     # line. Plain nested dict → cache-serializes cheaply; {} when unavailable.
     sector_benchmark_history: Dict[str, Any] = field(default_factory=dict)
-    # Industry-size projection from a FRED BEA value-added series, used
-    # as a fallback when AI Stage A didn't extract an explicit TAM quote
-    # from the earnings transcript. None when industry isn't in the
-    # FRED mapping or the FRED API is misconfigured.
-    industry_tam: Optional[Any] = None  # IndustryTAM (imported lazily)
+    # Industry-size projection (the industry dossier: Census → FRED, or a
+    # Phase-B global row), used as a fallback when AI Stage A didn't extract
+    # an explicit TAM quote from the earnings transcript. None when the
+    # profile has no industry or the dossier read failed.
+    # ⚠️ An `IndustryDossier` (from `get_or_compute_dossier`), NOT an
+    # `IndustryTAM`: this comment said IndustryTAM, ticker_data_cache
+    # registered that, and every cached collection read as a miss.
+    industry_tam: Optional[Any] = None  # IndustryDossier (imported lazily)
 
     # ── Earnings call transcript (PR 3 — TAM extraction; PR 6 — guidance) ──
     # Latest available quarterly transcript text from FMP. Empty string when

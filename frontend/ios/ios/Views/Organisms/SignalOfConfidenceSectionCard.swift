@@ -16,8 +16,22 @@ struct SignalOfConfidenceSectionCard: View {
 
     // MARK: - State
 
-    @State private var selectedView: SignalOfConfidenceViewType = .yield
+    /// The Yield % / Capital $ choice, saved on this device so the card opens the way the
+    /// user last left it. It was `@State`: `TickerDetailView`'s tab switch tears the
+    /// Financials tab down, so every tab switch, ticker and relaunch reset it to Yield
+    /// (TestFlight 1.0 (9): "set up once and permanently keep them"). `@AppStorage` keeps
+    /// every live card in step, so a screen further down the stack follows the change.
+    /// A stable token, never the toggle wording ("Yield (%)"); "" or an unknown token reads
+    /// as Yield and is not written back. A display preference of this phone, not account
+    /// data: deliberately NOT cleared by `AppState.discardDataForEndedSession()`.
+    @AppStorage("caydex_capital_return_view") private var storedViewToken: String = ""
     @State private var showInfoSheet: Bool = false
+
+    /// The saved view (or Yield). Assigned only from a toggle tap, which saves it.
+    private var selectedView: SignalOfConfidenceViewType {
+        get { SignalOfConfidenceViewType(preferenceToken: storedViewToken) ?? .yield }
+        nonmutating set { storedViewToken = newValue.preferenceToken }
+    }
 
     // MARK: - Body
 
@@ -27,7 +41,10 @@ struct SignalOfConfidenceSectionCard: View {
             headerSection
 
             // View toggle (Yield % / Capital $)
-            SignalOfConfidenceViewToggle(selectedView: $selectedView)
+            SignalOfConfidenceViewToggle(selectedView: Binding(
+                get: { selectedView },
+                set: { selectedView = $0 }
+            ))
                 .padding(.leading, AppSpacing.xs)
 
             // Main chart
@@ -132,6 +149,25 @@ struct SignalOfConfidenceSectionCard: View {
             // }
             // .buttonStyle(.plain)
         }
+    }
+}
+
+// MARK: - Saved-choice token
+
+/// What the saved view is stored as: the case name, never `rawValue` — that is the toggle's
+/// wording ("Yield (%)"). An unknown token decodes to nil, so the card shows Yield and leaves
+/// the store alone.
+private extension SignalOfConfidenceViewType {
+    var preferenceToken: String {
+        switch self {
+        case .yield: return "yield"
+        case .capital: return "capital"
+        }
+    }
+
+    init?(preferenceToken: String) {
+        guard let match = Self.allCases.first(where: { $0.preferenceToken == preferenceToken }) else { return nil }
+        self = match
     }
 }
 

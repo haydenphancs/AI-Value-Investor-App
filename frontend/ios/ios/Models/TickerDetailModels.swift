@@ -221,9 +221,17 @@ enum ChartDateFormatters {
         return f
     }()
 
+    /// "Mon 10 AM" on a 12-hour phone, "Mon 13:00" on a 24-hour one — never a fixed format.
+    ///
+    /// This was `dateFormat = "EEE h a"`. With Settings › General › Date & Time › 24-Hour Time
+    /// ON, iOS rewrites a fixed `h … a` pattern to `HH` and drops the AM/PM, so the 1W axis
+    /// printed "Mon 07 · Tue 13 · Thu 12" — read as DATES, out of order (TestFlight 1.0 (9),
+    /// AVGO screenshot). A localized template follows the user's 12/24-hour choice, and the
+    /// 24-hour form keeps its minutes so "13:00" can only be a time.
     static let weekdayTime: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "EEE h a"   // "Mon 10 AM"
+        let hourPattern = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: f.locale) ?? "h a"
+        f.setLocalizedDateFormatFromTemplate(hourPattern.contains("a") ? "EEEj" : "EEEjmm")
         return f
     }()
 

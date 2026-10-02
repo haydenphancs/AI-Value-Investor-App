@@ -15,9 +15,22 @@ struct EarningsSectionCard: View {
     /// happened).
     let onRetry: (() -> Void)?
 
-    @State private var selectedDataType: EarningsDataType = .eps
-    @State private var selectedTimeRange: EarningsTimeRange = .oneYear
-    @State private var showPriceLine: Bool = false
+    /// EPS/Revenue, 1Y/3Y and the Price line, saved on this device so the card opens the way
+    /// the user last left it. They were `@State`: `TickerDetailView`'s tab switch tears the
+    /// Financials tab down, so every tab switch, ticker and relaunch reset them (TestFlight
+    /// 1.0 (9): "set up once and permanently keep them"). `@AppStorage` keeps every live card
+    /// in step, so a screen further down the stack follows the change.
+    ///
+    /// The series and range are stable tokens, never the toggle wording; "" or an unknown
+    /// token reads as the default (EPS, 1Y) and is not written back. A saved series a ticker
+    /// lacks needs no fallback: `emptySeriesState` says so, and the other is one tap away.
+    /// The Price line stays OFF until the user turns it on.
+    ///
+    /// Display preferences of this phone, not account data: deliberately NOT cleared by
+    /// `AppState.discardDataForEndedSession()` (the standing `caydex_preferred_chart_type` has).
+    @AppStorage("caydex_earnings_series") private var storedSeriesToken: String = ""
+    @AppStorage("caydex_earnings_range") private var storedRangeToken: String = ""
+    @AppStorage("caydex_earnings_show_price") private var showPriceLine: Bool = false
     @State private var showInfoSheet: Bool = false
 
     init(
@@ -29,6 +42,18 @@ struct EarningsSectionCard: View {
         self.earningsData = earningsData
         self.onDetailTap = onDetailTap
         self.onRetry = onRetry
+    }
+
+    /// The saved series (or EPS). Assigned only from a toggle tap, which saves it.
+    private var selectedDataType: EarningsDataType {
+        get { EarningsDataType(preferenceToken: storedSeriesToken) ?? .eps }
+        nonmutating set { storedSeriesToken = newValue.preferenceToken }
+    }
+
+    /// The saved range (or 1Y). Assigned only from a toggle tap, which saves it.
+    private var selectedTimeRange: EarningsTimeRange {
+        get { EarningsTimeRange(preferenceToken: storedRangeToken) ?? .oneYear }
+        nonmutating set { storedRangeToken = newValue.preferenceToken }
     }
 
     // Get quarters based on selected data type and time range
@@ -210,19 +235,59 @@ struct EarningsSectionCard: View {
     private var controlsRow: some View {
         HStack {
             // EPS / Revenue toggle
-            EarningsDataTypeToggle(selectedType: $selectedDataType)
+            EarningsDataTypeToggle(selectedType: Binding(
+                get: { selectedDataType },
+                set: { selectedDataType = $0 }
+            ))
 
             Spacer()
                 .frame(width: AppSpacing.lg)
 
             // 1Y / 3Y toggle
-            EarningsTimeRangeToggle(selectedRange: $selectedTimeRange)
+            EarningsTimeRangeToggle(selectedRange: Binding(
+                get: { selectedTimeRange },
+                set: { selectedTimeRange = $0 }
+            ))
 
             Spacer()
 
             // Price toggle
             EarningsPriceToggle(isEnabled: $showPriceLine)
         }
+    }
+}
+
+// MARK: - Saved-choice tokens
+
+/// What the saved series and range are stored as: the case name, never `rawValue` — that is
+/// the toggle's wording ("EPS", "1Y") and its ForEach id. An unknown token decodes to nil,
+/// so the card shows its default and leaves the store alone. These live here, not beside the
+/// enums, because only this card persists them.
+private extension EarningsDataType {
+    var preferenceToken: String {
+        switch self {
+        case .eps: return "eps"
+        case .revenue: return "revenue"
+        }
+    }
+
+    init?(preferenceToken: String) {
+        guard let match = Self.allCases.first(where: { $0.preferenceToken == preferenceToken }) else { return nil }
+        self = match
+    }
+}
+
+private extension EarningsTimeRange {
+    var preferenceToken: String {
+        switch self {
+        case .oneYear: return "oneYear"
+        case .threeYears: return "threeYears"
+        }
+    }
+
+    init?(preferenceToken: String) {
+        guard let match = Self.allCases.first(where: { $0.preferenceToken == preferenceToken }) else { return nil }
+        self = match
     }
 }
 

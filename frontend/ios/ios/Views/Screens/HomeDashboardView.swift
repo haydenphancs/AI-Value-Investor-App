@@ -31,6 +31,10 @@ struct HomeDashboardView: View {
     /// A SET, and there is no longer any auto-collapse between cards or between sections:
     /// readers asked to be able to open all three at once. What remains is the one EXPLICIT
     /// dismissal — a tap on the scroll background — plus the pre-paywall collapse below.
+    ///
+    /// The ids are STABLE (the scanner kind, and the signal kind + lock — see
+    /// `DailyScanner.id`). They used to be minted per fetch, so after the 60 s auto-refresh
+    /// these sets held ids that no longer existed and every open card closed by itself.
     @State private var expandedScannerIDs: Set<DailyScanner.ID> = []
     /// Which App-Exclusive Signals rows are expanded. Same ownership and same set semantics.
     @State private var expandedSignalIDs: Set<ExclusiveSignal.ID> = []

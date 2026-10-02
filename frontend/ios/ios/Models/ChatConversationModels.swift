@@ -64,6 +64,18 @@ enum ChatContextType: String {
         self == .book
     }
 
+    /// The softened chip, shown when the server says this screen's grounding did NOT reach
+    /// the turn (`ChatMessageDTO.contextGrounded == false`) — e.g. a report chat after the
+    /// shared report cache rolled over and no saved report id was sent. Claiming "Grounded
+    /// on Research Report" there told the user the answer came from a report it never saw.
+    var groundingUnavailableLabel: String {
+        switch self {
+        case .tickerReport: return "Report not available — answering generally"
+        case .none: return ""
+        default: return "\(groundingLabel) not available — answering generally"
+        }
+    }
+
     var groundingIcon: String {
         switch self {
         case .tickerReport: return "doc.text.magnifyingglass"
@@ -859,6 +871,12 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     /// legacy row and every complete turn → nil → no notice. Optional so a backend that
     /// predates the field decodes unchanged.
     let truncated: Bool?
+    /// The server's verdict on whether this turn's screen grounding actually arrived
+    /// (backend `ChatMessageResponse.context_grounded`, rich_content-backed). `false` means
+    /// the chat ran without it, so the "Grounded on …" chip must not claim it. nil — an old
+    /// server, a legacy row, or a context type the server gives no verdict for — leaves the
+    /// chip as it was. Optional, so a backend that predates the field decodes unchanged.
+    let contextGrounded: Bool?
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
@@ -867,7 +885,14 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         case role, content, widget, widgets, citations
         case tokensUsed = "tokens_used"
         case sources, suggestions, thinking, credit, truncated
+        case contextGrounded = "context_grounded"
         case createdAt = "created_at"
+    }
+
+    /// The newest server grounding verdict among `messages` (assistant rows only), or nil
+    /// when none carries one.
+    static func latestGroundingVerdict(in messages: [ChatMessageDTO]) -> Bool? {
+        messages.last(where: { $0.role == "assistant" && $0.contextGrounded != nil })?.contextGrounded
     }
 
     /// Convert to the UI-facing RichChatMessage.

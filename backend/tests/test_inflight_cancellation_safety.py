@@ -157,6 +157,11 @@ _INFLIGHT_MODULES = [
     # BaseException arm), and `test_earnings_window_service.py` proves both at
     # runtime.
     "earnings_window_service.py",
+    # Added 2026-10-01 with the zero-placeholder self-heal: one bounded live TAM compute
+    # per (industry, sector) is shared by every report collecting that industry, and a
+    # report cancelled mid-collect must not cancel it for the rest
+    # (`test_industry_dossier_self_heal.py` proves leader- and joiner-cancel at runtime).
+    "industry_dossier_service.py",
 ]
 
 

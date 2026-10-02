@@ -2026,7 +2026,8 @@ _ROOT_ROUTES = {
     "/go/{campaign}": "public smart link; campaign normalised to a constant, 302 only",
     "/health": "readiness probe; status flags only, no data",
     "/health/live": "liveness probe; constant body",
-    "/health/pdf": "deploy gate (railway.toml); renderer versions only, memoised",
+    "/health/pdf": "deploy gate (railway.toml); renderer versions only, memoised; "
+                   "503 {status: warming} while the Home boot warm runs (max 45 s), no data",
     "/.well-known/apple-app-site-association": "Apple must fetch it unauthenticated; team+bundle id",
     "/privacy": "App Store-required Privacy Policy URL; static legal page",
     "/terms": "Terms of Use; static legal page",

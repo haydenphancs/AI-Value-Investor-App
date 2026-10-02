@@ -88,7 +88,9 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 
 Note what is deliberately *not* here: "offline-first". The client cache is in-memory and empty on
 cold launch (§7.2). The app requires a network connection, and §10 records that as an accepted gap
-rather than an unfinished feature.
+rather than an unfinished feature. The one thing kept on disk for a cold launch, Home's last
+dashboard (§7.1), is a first paint and not offline support: it is labelled with its save time,
+is shown for at most 96 h, and is replaced by the live answer as soon as that lands.
 
 ---
 
@@ -244,10 +246,18 @@ class behind a wide protocol covering every detail-screen fetch. Four others
 pass-throughs holding no cache at all — verified: zero cache references between them.
 
 Its only dependency is `APIClient`. The flow is `getCached` → `apiClient.request` → `setCache` —
-a single in-memory tier — the repository itself writes nothing to disk (the three on-disk caches the app
+a single in-memory tier — the repository itself writes nothing to disk (the four on-disk caches the app
 does have are named in §7.1 and are not its) — no protocol-per-collaborator, no injected cache or
 persistence manager. §7.1 and §7.2 describe the cache; §10 records that "offline support" is a cold-launch-empty
 in-memory cache and not offline support.
+
+**Home's device snapshot sits beside `HomeRepository`, not inside it (2026-10-01).**
+`HomeRepository` still caches nothing: its fetch returns the decoded dashboard plus the exact
+response bytes (`APIClient.requestReturningBody`), and the Home ViewModel hands those bytes to
+`Core/Repositories/HomeDashboardSnapshotStore.swift` after a successful live load. On the next
+cold launch the store maps the saved bytes back through the same decode-safe DTOs
+(`HomeRepository.dashboard(fromSnapshotBody:)`), so a newer build reads an older file or rejects it
+cleanly. The store's rules (owner, age, clearing) are in §7.1.
 
 The Jan 2026 decision to adopt the repository pattern is recorded in Appendix B and stands; what
 shipped is a much smaller version of it than that entry implies, which is why the shape is spelled
@@ -349,6 +359,74 @@ rather than erroring the whole screen. Every new Home DTO iOS decodes MUST keep 
 optional/defaulted shape (see the schema-parity tests). Each section has its own Tier-1
 cache + `_inflight` dedup + a shielded timeout guard so a slow/cold sub-build never
 blocks the dashboard.
+
+**Nobody pays a cold build: refresh-ahead, honest stale serves, a boot warm (2026-10-01).**
+The response waits for its slowest expired section. Production measured p50 1.43 s and p99
+6.15 s over 4,316 calls, and 8.1–8.5 s on the first request after every deploy (17 of 17).
+Three pieces keep every shared section warm:
+
+- **Refresh-ahead, around the clock.** The Home warmer (`app/main.py::_run_home_dashboard_warmer`,
+  §7.4) calls `HomeDashboardService.refresh_due_sections()` every `HOME_WARM_TICK_SECONDS` (10 s)
+  at all hours. That call never awaits a build: it starts at most one forced background rebuild
+  per section that is due — missing, degraded, stamped in the future, older than its
+  refresh-ahead age, or (scanners and themes, whose rows carry the day's move) built for an
+  earlier trading session. Each age sits below its TTL by more than one tick plus a worst-case
+  build: pulse 40 s (TTL 60), the screener universe 45 s (60), scanners
+  `SCANNER_PREWARM_INTERVAL_SECONDS` = 900 s, clamped to 60–1080 (1200), themes 480 s (600), signals
+  2400 s (2700), Trillion 480 s (600). Inside a closed window (`session_phase` CLOSED at both the
+  sweep and the read: 20:00–04:00 ET, weekends, holidays) equity prices cannot move, so the
+  screener universe — the one large FMP response, ~7,000 rows — lives 900 s and is rebuilt at
+  840 s (`price_service._UNIVERSE_CLOSED_TTL`; a sweep from another phase keeps the 60 s rule, so
+  04:00 pre-market prices are never held back). That is ~1,180 sweeps a trading day and ~100 a
+  closed day instead of ~1,700 every day. The pulse keeps its 40 s cadence and reads its prices
+  from that universe. Its five intraday sparklines (~7-8 trading days of 5-min bars each) are
+  fetched on every build only in the regular session and the 10 minutes after the close: that
+  is ~6 small calls a minute in session, plus the universe sweeps. Outside the session a
+  finished session's regular-hours bars are final, so `HomeDashboardService._spark_memo` keeps
+  them per symbol until the next open, and a pulse rebuild costs ~0 FMP chart calls. The memo
+  takes only a complete series of the latest completed session, fetched at least 10 minutes
+  after its close (13:00 on a half-day), and never a failed, empty or 24/7 one
+  (`tests/test_home_pulse_sparkline_memo.py`). The warmer logs `warm_ordering_violations()` at
+  start, and `tests/test_home_dashboard_warmer.py` pins the ordering. A forced build (`force=True` on the
+  pulse, scanner, theme, signals and Trillion getters) skips only the freshness check and still
+  leads or joins the section's `_inflight` future, so a request and the warmer never build one
+  section twice; forced signals still read their Supabase tier first. A forced pulse, scanner or
+  signals build that comes back degraded or empty never replaces a still-valid good entry, and a
+  warm build that fails, degrades or caches nothing puts its section on a cooldown of 45 s, or
+  its own degraded TTL when longer (signals 300 s).
+- **A timed-out guard serves a cached copy only while it is honest:** under an age ceiling and,
+  for scanners and themes, from the same trading session. Pre-market belongs to the previous
+  session. A scanner or theme entry is stamped when its build STARTS, so a slow build (the shorts
+  leg has no overall timeout) cannot carry pre-open numbers into today. Both the stamp and the
+  clock are read 150 s early: both 60 s universe caches the scanners read through (screener,
+  then `movers:universe`, each stamped when its own build ends), one tick and a 20 s margin for
+  those two upstream builds. A build that starts just after the 09:30 open therefore still
+  counts as pre-open. Ceilings: scanners 1500 s in
+  the regular session and 6 h outside it, themes 1200 s / 6 h, signals 24 h; the pulse keeps its
+  120 s. Past
+  that the section ships empty and iOS hides it, so yesterday's movers never appear under today's
+  header.
+- **A boot warm holds the deploy gate.** On Railway the lifespan's first spawn is the one-shot
+  `_run_home_boot_warm`: the movers close map (`refresh_closes()`, §7.1) and `warm_all()` (every
+  shared section plus `PriceService.refresh_universe()`), in parallel. Until it finishes or
+  `HOME_BOOT_WARM_MAX_WAIT_SECONDS` (45 s) passes, `GET /health/pdf` — Railway's health check —
+  answers 503 `{"status": "warming"}` before doing anything else, and Railway keeps serving the
+  old deployment. The deadline is checked in the route, so a warm that dies or hangs holds a
+  deploy for 45 s at most. The gate always opens (finished, failed or out of time); a warm still
+  running at the deadline continues under `shield` and is cancelled with the lifespan at
+  shutdown. `tests/test_deploy_command_parity.py` keeps 3 × the wait within railway.toml's
+  `healthcheckTimeout` (300). At 0 the warm still runs, ungated.
+
+The pulse build is one `gather` of the batch quote, the five ETF sparklines and the crypto tile
+(the sparklines used to wait for the quote). In the regular session its FMP call count is
+unchanged; outside it the sparklines come from the memo above.
+
+**On iOS** the first Home frame is this account's last dashboard from the device (§7.1) when one
+is saved: its Market Pulse header reads "Updated <time>" with a muted dot, instead of the
+server's market status, until a live load lands. With no snapshot,
+`Views/Molecules/HomeDashboardSkeleton.swift` shimmers inside the scroll content; Home's
+full-screen `LoadingOverlay`, which blocked the header and the tab bar, is gone. A first load that
+fails transiently is retried at +2 s and +5 s (§6.4).
 
 ### 3.5 Progressive first-paint — the fast-core pattern (added 2026)
 
@@ -724,8 +802,8 @@ that matters: two errors with the same HTTP status can need opposite handling (s
 
 | Class | Example | Auto-retry? | Client action |
 |---|---|---|---|
-| Offline | no route to host | no | wait for `NetworkMonitor`; the session heals itself (§9.1) |
-| Timeout | slow upstream | no | show Retry — deliberately not auto-retried |
+| Offline | no route to host | no (Home's first load only: +2 s, +5 s — §6.4) | wait for `NetworkMonitor`; the session heals itself (§9.1) |
+| Timeout | slow upstream | no (Home's first load only: +2 s, +5 s — §6.4) | show Retry — deliberately not auto-retried by `APIClient` |
 | Server (5xx) | upstream 502 | **GET only**, ≤2×, fixed 1 s | see §6.4 — the method guard is a money guard |
 | Auth — no credential | `AUTH_REQUIRED` | no | prompt sign-in; **never** clear a stored token |
 | Auth — bad credential | `AUTH_TOKEN_INVALID` | refresh once | retry after single-flight refresh |
@@ -859,7 +937,24 @@ refresh rather than one per request.
 
 `AppError.isRetryable` exists but drives **UI affordances** — whether to show a Retry button — not an
 automatic loop. The two must not be conflated: `.timeout` is user-retryable and is deliberately not
-auto-retried.
+auto-retried by `APIClient`.
+
+**One exception, above `APIClient`: Home's first load (2026-10-01).** With no live dashboard on
+screen, a Home load that fails transiently is retried twice, at **+2 s and +5 s**
+(`HomeDashboardViewModel.firstLoadRetryDelays`), instead of waiting for the 60 s refresh tick.
+Transient means no connection, a timeout, a 5xx after `APIClient`'s own retries, `AUTH_UNAVAILABLE`,
+or a transport error `URLError` could not name; the classifier mirrors
+`TaskPollingManager.isTransientPollFailure`, except that a 429 is never fast-retried (the tick
+honours its Retry-After). Auth failures, refusals, other 4xx, decode errors and cancellation are
+never retried. Each retry is a separately scheduled task that calls `load()`, so nothing waiting on a
+load is held through the delay; it is cancelled when the account changes, when Home stops being the
+visible tab, and by a live success (which resets the budget). Home also reloads when
+`NetworkMonitor` reports the path restored, if it is the visible tab and no live dashboard is on
+screen. Its request uses a
+**15 s** timeout (`APIEndpoint` `.getHomeDashboard`, against 30 s elsewhere): every server section is
+bounded by a guard of at most 8 s, so a flow that is silent for 15 s is stalled, not slow.
+`tests/test_ios_home_instant_paint_guards.py` pins the bound, the classifier and that 15 s stays
+above the slowest server guard. There is still no `RetryPolicy` type.
 
 ---
 
@@ -883,9 +978,11 @@ auto-retried.
 │  │                                                                       │    │
 │  │  Persistence: Keychain (tokens) + UserDefaults (preferences)          │    │
 │  │      ├── NO Core Data, NO SwiftData, NO NSCache, no local database   │    │
-│  │      └── THREE on-disk caches, all re-creatable from the server:     │    │
+│  │      └── FOUR on-disk caches, all re-creatable from the server:      │    │
 │  │          URLCache.shared (128 MB, images), LearnAudioCache (400 MB   │    │
-│  │          narration, purged on sign-out), ReportPDFViewModel's PDFs   │    │
+│  │          narration, purged on sign-out), ReportPDFViewModel's PDFs,  │    │
+│  │          HomeDashboardSnapshotStore (the last Home dashboard, one    │    │
+│  │          account's, ≤ 96 h, deleted when the session ends)           │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -901,7 +998,9 @@ auto-retried.
 │  │      │   TTL in 22 of 31, an expiry column in 9; survives restarts   │    │
 │  │      └── ticker_news_cache, profit_power_cache, signals_cache, …    │    │
 │  │                                                                       │    │
-│  │  Pre-warmers in main.py lifespan warm popular tickers/scanners.     │    │
+│  │  Pre-warmers in main.py lifespan warm popular tickers; the Home      │    │
+│  │  warmer rebuilds each shared Home section before its TTL (§7.4).     │    │
+│  │  The movers close map is rebuilt, then swapped in — never dropped.   │    │
 │  │  No Redis — the in-process dict + Supabase tiers suffice today.     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -927,6 +1026,79 @@ fallback) from an in-process cache — 1 h, 60 s for a degraded answer, `_inflig
 concurrent first callers, and each list's last good copy for up to a day if its RPC fails.
 Its upstream IS Supabase (two indexed aggregate RPCs from migration 179), so a Supabase
 tier would cache Supabase in itself. The lists are impersonal — one answer for every caller.
+
+**Tier 1 with no Tier 2: the movers close map, built first, then swapped (2026-10-01).**
+`market_movers_service` keeps every symbol's last two settled closes from `market_close_snapshot`
+in one in-process map, behind Top Movers, Heavy Traffic and every sector strip. Reading it is a
+~74-page PostgREST sweep (1,000 rows a page). Read serially it took 11–14 s, past the scanners'
+8 s guard on every first request after a deploy, and the hourly ingest DROPPED the map, which
+opened a 20–40 s window of 8 s requests every hour. Now:
+
+- `app/utils/postgrest_paging.py::fetch_all_rows_concurrent` takes an exact count first, reads the
+  pages on 4 workers and assembles them in page order, with a sentinel page that catches rows
+  added during the read. A failed page, a short page in the middle or fewer rows than counted
+  raises `PagedReadIncomplete`; it never returns a partial map.
+- `refresh_closes()` is the only writer. It builds the whole new map, then swaps it in under
+  `_inflight["movers:closes"]`. It refuses (`CloseMapRefused`, ERROR, live map kept) an empty
+  map, or one under 90% of the live map's size — unless the live map is past 12 h, when the
+  smaller one is accepted with an ERROR, so a deliberate bulk delete cannot freeze the map.
+- Readers never drop it: a map under 70 min old (`_CLOSES_SOFT_TTL`, 4200 s: the hourly loop's
+  period plus a 10-min ingest budget, so the loop's own rebuild is normally the only sweep) is
+  served; 70 min–12 h old, it is served while one background rebuild runs; with no map, or one
+  past 12 h, the read waits for a rebuild, and if that fails an existing map is served with a
+  WARNING.
+- The hourly close-snapshot loop calls `refresh_closes(after_write=True)` after its ingest (a
+  build that started before the write is waited out, then a fresh one runs), and the ingest
+  (`price_service.refresh_close_snapshot`) no longer drops the map. Each build logs
+  `movers: close map refreshed in …`.
+
+Serving an older map is honest: `price_service`'s `_snapshot_is_current` and `_pick_denominator`
+turn a row from too old a session into "change unknown", never a multi-session move.
+
+**iOS: the Home snapshot, the one on-disk cache that holds an account's data (2026-10-01).**
+`Core/Repositories/HomeDashboardSnapshotStore.swift` keeps the last good `GET /home/dashboard`
+response of the signed-in account, so a cold launch paints it at once. (TestFlight 1.0 (9),
+roaming: the first Home frame waited for launch, DNS + TCP + TLS, the server's gather and the
+download.) It is one binary plist under Library/Caches/HomeDashboard, written atomically with
+`.completeFileProtectionUntilFirstUserAuthentication`; Caches is never backed up and the OS may
+evict it. The file holds the raw response bytes (≤ 512 KB) in an envelope of schema version,
+owner id and save time, because `HomeDashboardData` holds `Color`s and is not Codable.
+
+- **Owner-stamped.** `AppState.configure` primes the store before the restore mounts the tabs,
+  with the owner read from the stored token's `sub` (`WidgetJWT.subject`, which authenticates
+  nothing). No stored credential deletes the file; another owner, another schema version, an age
+  past 96 h or a save time more than 5 min in the future deletes it with a WARNING. A read that
+  fails (a launch before first unlock) keeps it. `applyProfile` binds the account; the
+  account-switch branch of `onAuthenticated` re-binds it right after the discard.
+- **Written only after a successful live load**, fenced by an epoch captured before the request
+  (any change of account voids it), by a bound owner, and by `HomeDashboardData.isWorthPersisting`
+  (all five equity pulse tiles plus at least one other non-empty section), so a degraded answer
+  never overwrites a good snapshot. The watchlist has no degraded flag: a failed or timed-out read
+  comes back as "Your Watchlist", not a group, no tiles — what a user with no tickers gets — and a
+  failed quote fetch drops every tile of the same list. So while the saved snapshot is still
+  displayable and its watchlist has tiles, an empty watchlist in either shape (the degraded
+  default, or the same heading and group-ness) is refused (`hasDegradedWatchlist`); a user who
+  really emptied it keeps the older, time-labelled snapshot until it ages out, when the refusal
+  lapses too. Every read, write and delete runs in order on one detached task chain, so a delete
+  always lands after a late write.
+- **Shown for at most 96 h** (`maxDisplayAge`, owner decision 2026-10-01). That stays below the
+  refresh token's 7 d minus the access token's 24 h, so a provably dead session's dashboard never
+  shows; `tests/test_ios_home_instant_paint_guards.py` pins it. The pulse header reads
+  "Updated <time>" until a live load replaces the snapshot, and the seed never counts as a load,
+  so the live request still goes out at once. A snapshot whose numbers describe an earlier US
+  session than a live answer would now shows its movers card as "Top Movers · Sep 25", dated by
+  that session, without "#1 today". The session is the backend's `_numbers_session`, copied into
+  `MarketHoursUtil.numbersSessionDay`: a trading day from the 09:30 ET open on is that day,
+  anything earlier and every weekend or holiday is the previous trading day, and both instants
+  are shifted back by `_SESSION_GRACE_SECONDS` as `_same_numbers_session` does. So a Monday 07:00
+  save (Friday's moves) is dated "Sep 25" once Monday opens, and a Sunday save is dated by
+  Friday. It is re-dated on foreground, on tab activation and after a failed load if a session
+  opens while it is on screen.
+- **Cleared** by `AppState.discardDataForEndedSession()` (`.claude/rules/auth.md` §7), by a change
+  of account and by Settings › Clear Cache.
+- **Not a gate.** It keeps the Pro signals exactly as the server sent them to this account (owner
+  decision 2026-10-01); the server's redaction remains the gate. A load refused for want of an
+  armed credential still blanks Home; it never reseeds from the snapshot.
 
 **What may go into Tier 2 — the rule the diagram cannot show.** Tier 2 holds only
 sections that **cannot contain a live price**. A live price belongs in Tier 1 or in no
@@ -1211,13 +1383,15 @@ GLOBAL figures for a curated list.
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
-Everything scheduled runs INSIDE the one web process: 25 loops started by
-`app/main.py::_spawn`, plus one Railway cron service (the marketing worker, §12.2). There is
+Everything scheduled runs INSIDE the one web process: 26 tasks started by
+`app/main.py::_spawn` — 24 loops and two one-shots (the whale profile pre-warm and the Home
+boot warm), plus the Telegram webhook registration when the review bot is configured — and one
+Railway cron service (the marketing worker, §12.2). There is
 no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
 whether any of it runs:
 
 - **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
-  a laptop), all 25 start; in development only the notification trio can run, and only
+  a laptop), all 26 start; in development only the notification trio can run, and only
   behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
   refunds, subscription expiry and every push silently stop.
 - **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
@@ -1227,9 +1401,11 @@ whether any of it runs:
 
 | Loop | Cadence | Gate (default) |
 |---|---|---|
-| close snapshot | hourly, all day | — |
+| Home boot warm (one-shot, the first spawn): the movers close map + `warm_all()`, holding the deploy gate (§3.4) | once at boot; `GET /health/pdf` answers 503 until it ends or `HOME_BOOT_WARM_MAX_WAIT_SECONDS` (45 s) passes | — (0 = no gate; the warm still runs) |
+| close snapshot, then the movers close-map rebuild and swap (§7.1) | hourly, all day | — |
 | social snapshot | one per UTC day, hourly retry | — |
-| news / report / scanner / index pre-warmers | 2 h / 1 h / 15 min in session / 30 min | `*_PREWARM_ENABLED` (on) |
+| Home dashboard warmer: pulse, screener universe, scanners, themes, signals, Trillion, each rebuilt before its TTL (§3.4). FMP cost: in the regular session ~6 small sparkline calls a minute plus the universe sweeps (~1 a minute); outside it a pulse rebuild costs ~0 FMP chart calls (a finished session's bars are memoized), and in a closed window the universe lives 15 min | a tick every `HOME_WARM_TICK_SECONDS` (10 s), all hours; due at 40 s / 45 s (840 s in a closed window: overnight, weekends, holidays) / 900 s / 480 s / 2400 s / 480 s; starts once the boot warm opens the gate | `SCANNER_PREWARM_ENABLED` (on; off = it idles) |
+| news / report / index pre-warmers | 2 h / 1 h / 30 min | `*_PREWARM_ENABLED` (on) |
 | quarterly chain: dossier → competitor → IP → moat → industry benchmarks | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC, +30 min each | per-phase claim |
 | TTM benchmarks | Sunday 06:00 UTC | claim |
 | volatility precompute | daily 08:00 UTC | — |
@@ -1334,6 +1510,20 @@ flaky launch left a signed-in user running as a guest — with a perfectly good 
 Keychain — for the entire app run. `AuthStatus.restoring` exists to represent that state honestly
 rather than collapsing it into `.unauthenticated`.
 
+**An expiring access token is refreshed before it is sent (2026-10-01).** The first statement of
+each `APIClient` transport (`request<T>`, the no-body `request`, `downloadData`, `openStream`) is
+`refreshArmedTokenIfExpired(for:)`. When the armed token's `exp` (read with `WidgetJWT.expiry`) is
+within 60 s, it awaits the SAME single-flight refresh the 401 interceptor uses, so every request
+of a cold launch shares one refresh; after joining a refresh already running, it judges whatever
+token is armed afterwards once. Auth endpoints are skipped, so `/auth/refresh` cannot recurse.
+Each token is judged once (a failed refresh, or a device clock running ahead, costs at most one
+pre-flight refresh per token), and an unreadable `exp` means "send it; the server decides". It
+is an optimisation only: it never ends a session, clears a token or throws. Whatever the
+refresh's outcome, the request goes out as it would have, and the 401 interceptor stays the only
+code that interprets a failed refresh. *Why:* in TestFlight 1.0 (9) a cold launch more than 24 h
+after the last refresh sent the dead token anyway — a 401, a refresh, then the request again —
+which added 1–1.3 s on roaming data.
+
 **Guest identity — RETIRED as an identity, KEPT as a rate-limit key (2026-09-07).** The app is
 account-only. FMP's signed Order Form grants End-User Display Rights — Exhibit A's
 *Access-Restricted External Display* — permitting their data only "through the Licensee's
@@ -1437,17 +1627,20 @@ Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 | Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | n/a | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). |
 | User profile | **In memory only** — `UserState.profile` | `public.users` (RLS) | Re-fetched from the backend each launch. Not persisted. |
 | Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
+| Last Home dashboard (Market Pulse, scanners, signals as served, themes, the watchlist strip — active group name, tickers and prices — and the Trillion group) | **On disk** since 2026-10-01: the raw `GET /home/dashboard` response under Library/Caches/HomeDashboard (`HomeDashboardSnapshotStore`), `.completeFileProtectionUntilFirstUserAuthentication`, never backed up | nothing new — built per request from the existing tables | The account's watchlist tickers and their prices now survive app termination. Owner-stamped with the stored token's `sub`, shown for at most 96 h, deleted at session end, on a change of account and by Settings › Clear Cache (§7.1). Pro signals are kept exactly as served; the server's redaction remains the gate. |
 | UI preferences | `UserDefaults` | `user_settings.preferences` (JSONB), remote-synced | Appearance, notification toggles, Learn progress. |
 | API keys | never present | environment variables | Never in code, never logged (`app/log_redaction.py`). |
 | Search picks (a tap on a search result) | `UserDefaults` `search.trending.counted.v1` — which tickers this device already sent this week (≤300 keys, cleared at session end) | `search_pick_daily` — an **anonymous** daily count per ticker; no user, device, IP or timestamp column (migration 179 — a precise timestamp on a count of 1 would match one access-log line, and its IP) | De-duplicated per account per ticker per 7 ET days on the device and again in server memory (HMAC digests under a per-process key, never persisted), keyed on the security CLASS (crypto vs the rest) because the SQL sums a symbol's stock/etf/fund rows. Chip names come from FMP's active list or the curated file, never from `watchlist_items.company_name` (client-writable). App Privacy: Search History, **not linked**. |
 | News-tone labels (the Updates chart) | Nothing persisted — the chart is fetched per view (5-min memory cache) | `news_sentiment_log` — Cay AI's bullish/bearish/neutral label per (feed scope, `md5(external_id)::uuid`) and the ET day the article was published (migration 180). No headline, URL, summary or publisher: migration 104 removed the last long-term copy of news text and this must not become a second one. Written once per article when it is enriched (first label wins), read through `news_sentiment_daily()`, swept after 120 days from the news pre-warmer loop. A per-ticker backfill (migration 181, `news_sentiment_backfill`) adds `source='backfill'` labels for the previous 90 days, once per ticker — never per user — and a nightly top-up keeps them complete (a window the model could not fully label is not recorded as covered; a failing ticker is retried once a day on its own `last_failed_at` clock, migration 182); the `model` column records which news model labelled each row | Not user data. Keeping derived labels beyond 24 h touches the open FMP data-handling items (`documents/legal/fmp-order-form-checklist.md`) — an owner decision recorded in OWNER_TASKS. |
 | Files (avatars, narration, PDFs, art) | `LearnAudioCache` on disk (narration, purged on sign-out); `URLCache` (images) | **Supabase Storage** — nine buckets: `user-avatars` private (short-lived signed URLs); `research-pdfs` private, readable only through the owner-checked `GET /research/reports/{id}/pdf` proxy, never a signed URL; the three narration buckets `journey-media`, `money-moves-media`, `book-media` private since migration 128 (signed by the Learn audio routes); `book-covers`, `journey-images`, `money-moves-images`, `home-theme-media` public | Bucket `public` flags are ROWS in `storage.buckets`, invisible in a `--schema-only` dump; their `storage.objects` policies are in the snapshot. |
 
-**No user DATA survives app termination except the Keychain and `UserDefaults`.** Three on-disk
-caches do (`URLCache`, `LearnAudioCache`, exported PDFs — §7.1), and all are re-creatable from the
-server; the narration cache is purged by `discardDataForEndedSession()` because two of the three
+**No user DATA survives app termination except the Keychain, `UserDefaults` and Home's last
+dashboard.** Four on-disk caches do (`URLCache`, `LearnAudioCache`, exported PDFs and the Home
+snapshot — §7.1), and all are re-creatable from the server. The narration cache is purged by
+`discardDataForEndedSession()` because two of the three
 narration families it holds (Books, Money Moves) are Pro/Max-gated — Journey narration is free but
-shares the store and goes with them. There is no Core Data, no SwiftData, and no local database — see §7.1 and
+shares the store and goes with them. The Home snapshot is deleted there too, because it holds one
+account's watchlist and whatever signals that account's plan unlocked. There is no Core Data, no SwiftData, and no local database — see §7.1 and
 [iOS_ARCHITECTURE_GUIDE.md](../../frontend/ios/iOS_ARCHITECTURE_GUIDE.md) § Data Persistence, which
 states the same thing independently.
 
@@ -3140,7 +3333,7 @@ backend/
 │   ├── database.py               # get_supabase(); raw SDK, no ORM
 │   ├── dependencies.py           # NOT app/api/v1/dependencies.py
 │   ├── log_redaction.py
-│   └── main.py                   # lifespan, middleware, 24 supervised background loops (§7.4)
+│   └── main.py                   # lifespan, middleware, 26 supervised background tasks (§7.4)
 ├── database/
 │   ├── migrations/               # NNN_*.sql, applied by hand
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase

@@ -211,6 +211,100 @@ async def test_pulse_falls_back_per_tile_when_the_batch_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pulse_sparklines_start_before_the_batch_quote_returns():
+    """The five ETF sparklines overlap the batch quote instead of queueing behind it.
+
+    The fake batch quote cannot return until an ETF sparkline has STARTED: it waits on an
+    Event that only `_fetch_sparkline` sets. The old serial build (quote first, then each
+    tile's sparkline inside `_fetch_pulse_item`) deadlocks into the `wait_for` timeout, so
+    reverting the overlap fails here. The crypto tile's own sparkline does not set the
+    Event: it runs alongside the quote either way and would prove nothing.
+    """
+    import app.services.home_dashboard_service as hd
+
+    etf_sparkline_started = asyncio.Event()
+    calls = {"bulk": 0, "single": 0, "spark": []}
+
+    class _FMP:
+        async def get_batch_quotes_bulk(self, symbols):
+            calls["bulk"] += 1
+            await etf_sparkline_started.wait()
+            return [_quote(s) for s in symbols]
+
+        async def get_stock_price_quote(self, symbol):
+            calls["single"] += 1
+            return _quote(symbol)
+
+    hd.HomeDashboardService._cache.clear()
+    svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
+    svc.fmp = _FMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
+    etf_symbols = {c["symbol"] for c in hd._PULSE_SYMBOLS}
+
+    async def _spark(symbol, extended_hours=False):
+        calls["spark"].append(symbol)
+        if symbol in etf_symbols:
+            etf_sparkline_started.set()
+        await asyncio.sleep(0)
+        return ([1.0, 2.0], 0.0, 1.0)
+
+    svc._fetch_sparkline = _spark
+
+    try:
+        tiles = await asyncio.wait_for(svc._build_pulse(), 1.0)
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "the batch quote waited for a sparkline that never started: the pulse build "
+            "fetches its sparklines only AFTER the quote again (serial)"
+        )
+
+    assert len(tiles) == hd._EXPECTED_PULSE_TILES
+    assert calls["bulk"] == 1
+    # The same calls as before, no more: one sparkline per ETF tile (fetched ONCE, in the
+    # build's gather) plus the crypto tile's own, and one single quote (crypto's).
+    assert sorted(calls["spark"]) == sorted(list(etf_symbols) + ["BTCUSD"])
+    assert calls["single"] == 1
+    assert all(t.spark == [1.0, 2.0] for t in tiles)
+    hd.HomeDashboardService._cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pulse_sparkline_costs_the_line_not_the_tile():
+    """A sparkline that raises (the real one never does; a patched one can) must leave its
+    tile on the strip with an empty series, and must not trigger a second fetch."""
+    import app.services.home_dashboard_service as hd
+
+    calls = {"spark": []}
+
+    class _FMP:
+        async def get_batch_quotes_bulk(self, symbols):
+            return [_quote(s) for s in symbols]
+
+        async def get_stock_price_quote(self, symbol):
+            return _quote(symbol)
+
+    hd.HomeDashboardService._cache.clear()
+    svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
+    svc.fmp = _FMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
+
+    async def _spark(symbol, extended_hours=False):
+        calls["spark"].append(symbol)
+        if symbol == "SPY":
+            raise RuntimeError("chart endpoint down")
+        return ([1.0, 2.0], 0.0, 1.0)
+
+    svc._fetch_sparkline = _spark
+
+    tiles = {t.symbol: t for t in await svc._build_pulse()}
+    assert len(tiles) == hd._EXPECTED_PULSE_TILES, "a failed sparkline dropped its tile"
+    assert tiles["SPY"].spark == [] and tiles["SPY"].price == 100.0
+    assert tiles["DIA"].spark == [1.0, 2.0]
+    assert calls["spark"].count("SPY") == 1, "the tile fetched its sparkline a second time"
+    hd.HomeDashboardService._cache.clear()
+
+
+@pytest.mark.asyncio
 async def test_portfolio_prices_are_one_request_and_drop_unpriceable_rows():
     """This one is a MONEY path — the prices become `market_value = shares x price`.
 

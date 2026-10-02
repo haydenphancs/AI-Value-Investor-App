@@ -60,6 +60,7 @@ from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import detect_asset_class, uses_coingecko_price
 from app.utils.market_hours import (
+    SESSION_CLOSED,
     SESSION_PREMARKET,
     previous_trading_day,
     register_market_closure,
@@ -75,6 +76,21 @@ logger = logging.getLogger(__name__)
 # freshness a user perceives on a price and is what `home_dashboard_service` already
 # assumed of batch-quote.
 _UNIVERSE_TTL = 60.0
+# ...except while no US session is trading. When both the entry's stamp AND the clock fall in
+# `session_phase() == SESSION_CLOSED` (20:00-04:00 ET, weekends, holidays, a half-day after
+# 13:00), equity and ETF prices cannot move, and the round-the-clock Home warmer would
+# otherwise re-download the whole ~7,000-row screener page — the app's one large FMP
+# response — about every 50 s for identical numbers (~1,700 sweeps a day; the FMP contract
+# is priced on bandwidth, not only on calls). So such an entry stays fresh for 15 min.
+# Honest, not merely cheap: the day change is computed at READ time (`_from_screener` and
+# `market_movers_service.get_universe` call `_pick_denominator` against the current close
+# map and clock); only the frozen price comes from the sweep. A stamp from another phase
+# follows the 60 s rule: an after-hours sweep is not stretched past 20:00, and a sweep from
+# the night before never holds back the first pre-market prices at 04:00. No session fits
+# inside 15 min, so "both CLOSED" always means "the same closed window". See
+# `_universe_in_closed_window`; the warmer's matching refresh-ahead is in
+# home_dashboard_service (`_UNIVERSE_CLOSED_REFRESH_AHEAD_MARGIN_SECONDS`).
+_UNIVERSE_CLOSED_TTL = 900.0
 # A failed/empty screener sweep is memoised this long so a blip is one upstream call per
 # window, not one per request — but never as a `{}` universe (see `_get_universe`).
 _UNIVERSE_DEGRADED_TTL = 15.0
@@ -189,6 +205,53 @@ def _cache_get(key: str, ttl: float) -> Optional[Any]:
 
 def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
+
+
+#: The screener universe's cache key. `home_dashboard_service._PRICE_UNIVERSE_KEY` mirrors
+#: it (pinned by tests/test_home_dashboard_warmer.py).
+_UNIVERSE_KEY = "price:universe"
+
+
+def _universe_in_closed_window(stamp: float, now: float) -> bool:
+    """True when a universe entry stamped at ``stamp`` and read at ``now`` (epoch s) both
+    fall in `session_phase() == SESSION_CLOSED` — the one closed window (see
+    `_UNIVERSE_CLOSED_TTL`). The ONE rule: `_get_universe`'s freshness and the Home warmer's
+    refresh-ahead (`home_dashboard_service`, the universe spec) both read it.
+
+    An unreadable stamp (`fromtimestamp` refuses it) answers False with a WARNING: nothing
+    writes one, so it is a bug, and the cautious answer is the short TTL — a re-sweep.
+    """
+    try:
+        return (
+            session_phase(datetime.fromtimestamp(stamp, tz=timezone.utc)) == SESSION_CLOSED
+            and session_phase(datetime.fromtimestamp(now, tz=timezone.utc)) == SESSION_CLOSED
+        )
+    except (OverflowError, OSError, ValueError, TypeError) as e:
+        logger.warning(
+            "price_service: universe stamp %r / clock %r unreadable (%s: %s) — "
+            "using the %.0fs TTL", stamp, now, type(e).__name__, e, _UNIVERSE_TTL,
+        )
+        return False
+
+
+def _universe_ttl_for(stamp: float, now: float) -> float:
+    """The TTL of a universe entry stamped at ``stamp``, read at ``now`` (both epoch s):
+    `_UNIVERSE_CLOSED_TTL` inside one closed window, else `_UNIVERSE_TTL`."""
+    return _UNIVERSE_CLOSED_TTL if _universe_in_closed_window(stamp, now) else _UNIVERSE_TTL
+
+
+def _universe_is_fresh(stamp: float, now: Optional[float] = None) -> bool:
+    """True while a universe entry stamped at ``stamp`` may be served (``now`` injectable).
+
+    Fresh when younger than `_UNIVERSE_TTL`, or younger than `_UNIVERSE_CLOSED_TTL` with
+    both ends in the same closed window. The short rule is checked first, so the session
+    calendar is consulted only for an entry past 60 s.
+    """
+    now = time.time() if now is None else float(now)
+    age = now - stamp
+    if age < _UNIVERSE_TTL:
+        return True
+    return age < _universe_ttl_for(stamp, now)
 
 
 async def _empty_quote_map() -> Dict[str, Dict[str, Any]]:
@@ -1009,11 +1072,32 @@ class PriceService:
         Tracking, the widget, the alert sweep — for a full minute. Failures are instead
         memoised for `_UNIVERSE_DEGRADED_TTL` so a blip does not become one screener call
         per request either.
+
+        Freshness is session-aware (`_universe_is_fresh`): 60 s, or 15 min inside a closed
+        window, where prices cannot move. A stale entry is dropped exactly as the plain
+        `_cache_get` dropped it, so nothing ever serves it.
         """
-        key = "price:universe"
-        hit = _cache_get(key, _UNIVERSE_TTL)
-        if hit is not None:
-            return hit
+        entry = _cache.get(_UNIVERSE_KEY)
+        if entry is not None:
+            if _universe_is_fresh(entry[0]):
+                return entry[1]
+            _cache.pop(_UNIVERSE_KEY, None)
+        return await self._lead_or_join_universe()
+
+    async def refresh_universe(self) -> Dict[str, Dict[str, Any]]:
+        """Rebuild the screener universe NOW, however fresh the cached one is.
+
+        For warmers (the Home boot warm and the refresh-ahead loop), so a request finds a
+        fresh universe instead of paying the ~1.5 s sweep inline. It skips ONLY the
+        freshness check: a build already in flight is joined, the degraded memo still
+        holds a recent failure off, and the writer guards are `_get_universe`'s own (the
+        same code) — an empty or failed sweep is never cached as good.
+        """
+        return await self._lead_or_join_universe()
+
+    async def _lead_or_join_universe(self) -> Dict[str, Dict[str, Any]]:
+        """The universe writer shared by `_get_universe` and `refresh_universe`."""
+        key = _UNIVERSE_KEY
         if _cache_get(_UNIVERSE_DEGRADED_KEY, _UNIVERSE_DEGRADED_TTL) is not None:
             raise FMPUnavailableException(
                 "screener universe degraded (memoised for %ds)" % int(_UNIVERSE_DEGRADED_TTL)
@@ -1027,6 +1111,13 @@ class PriceService:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         _inflight[key] = future
+        # Stamped when the sweep is REQUESTED, not when it lands: the rows' prices are as of
+        # roughly that moment, and FMP's read timeout is per chunk with no total bound. A
+        # start stamp keeps a slow sweep's duration inside its own TTL, so a sweep requested
+        # just before the 09:30 open can never be judged post-open by the Home grace
+        # (`home_dashboard_service._SESSION_GRACE_SECONDS`), and a sweep requested in
+        # after-hours keeps the 60 s rule even if it lands after 20:00.
+        started = time.time()
         try:
             rows = await self._fetch_universe_pages()
             universe = {}
@@ -1044,7 +1135,7 @@ class PriceService:
                     len(rows), int(_UNIVERSE_DEGRADED_TTL),
                 )
                 raise FMPUnavailableException("screener universe returned no rows")
-            _cache_set(key, universe)
+            _cache[key] = (started, universe)
             _cache.pop(_UNIVERSE_DEGRADED_KEY, None)
             if not future.done():
                 future.set_result(universe)
@@ -1295,25 +1386,9 @@ class PriceService:
             "%d unlicensed symbols skipped)",
             written, latest_date, prev_date, with_prev, skipped_blocked,
         )
-        # ⚠️ ALSO drop the movers close map. It lives in `market_movers_service`'s OWN
-        # module-level `_cache` under `movers:closes`, so clearing only this module's keys
-        # left it holding the pre-ingest snapshot. Its TTL (3600 s) equals the ingest loop's
-        # period, so whether the post-ingest warm in `main.py` saw the new rows came down to
-        # a few hundred milliseconds of drift — every scanner and every sector strip reads
-        # that map.
-        try:
-            from app.services.market_movers_service import (  # noqa: PLC0415
-                _cache as _movers_cache,
-            )
-
-            _movers_cache.pop("movers:closes", None)
-        except Exception as e:
-            logger.warning(
-                "price_service: could not invalidate the movers close map (%s: %s) — it "
-                "will serve the previous snapshot until its own TTL expires",
-                type(e).__name__, e,
-            )
-
+        # The movers close map (`market_movers_service`, `movers:closes`) is deliberately
+        # NOT dropped here: dropping it put an 11-14 s sweep in front of the next request.
+        # `main._run_close_snapshot_loop` rebuilds it and swaps it in right after this.
         for key in [k for k in _cache if k.startswith("price:close:")]:
             _cache.pop(key, None)
         return written

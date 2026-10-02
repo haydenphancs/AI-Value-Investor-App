@@ -122,6 +122,12 @@ struct DailyScanner: Identifiable {
     let losers: [ScannerEntry]
     let entries: [ScannerEntry]
 
+    /// nil for a live card. "Sep 25" — the session its numbers describe — when this card is
+    /// the on-device snapshot from an EARLIER US-market session
+    /// (`HomeDashboardViewModel.presentedSnapshot`): `ScannerCard` then drops its "#1 today",
+    /// because that ranking is not today's.
+    var asOfDayLabel: String? = nil
+
     init(
         kind: ScannerKind,
         title: String,
@@ -146,6 +152,26 @@ struct DailyScanner: Identifiable {
         self.gainers = gainers
         self.losers = losers
         self.entries = entries
+    }
+
+    /// This card under another title, dated `asOfDayLabel`. Every field is `let`, so this is
+    /// a copy; the rows and the stable `id` (the kind) are unchanged.
+    func relabelled(title: String, asOfDayLabel: String?) -> DailyScanner {
+        var copy = DailyScanner(
+            kind: kind,
+            title: title,
+            subtitle: subtitle,
+            iconSystemName: iconSystemName,
+            accent: accent,
+            badgeText: badgeText,
+            expandCTA: expandCTA,
+            infoNote: infoNote,
+            gainers: gainers,
+            losers: losers,
+            entries: entries
+        )
+        copy.asOfDayLabel = asOfDayLabel
+        return copy
     }
 }
 
@@ -274,7 +300,10 @@ struct HomeDashboardData {
     let marketStatusText: String   // "Markets Open"
     let marketIsOpen: Bool
     let pulse: [MarketPulseItem]
-    let scanners: [DailyScanner]
+    /// `var` for one reason: `HomeDashboardViewModel.presentedSnapshot` dates the movers card of
+    /// an earlier session's snapshot by copying the whole dashboard and replacing only this
+    /// field, so no other section can be dropped on the way. Every other field stays `let`.
+    var scanners: [DailyScanner]
     let signals: [ExclusiveSignal]
     let themes: [TrendingTheme]
     /// The user's OWN watchlist — the only user-scoped section on Home. Empty for an
@@ -293,6 +322,58 @@ struct HomeDashboardData {
     /// Defaulted so a constructor that predates the section still compiles; both repositories
     /// pass it explicitly (`HomeRepository.mapTrillionClub` / the mock).
     var trillionClub: TrillionClubGroup = .empty
+}
+
+// MARK: - Snapshot eligibility (HomeDashboardSnapshotStore)
+
+extension HomeDashboardData {
+    /// The entitled-ETF tiles the backend's pulse strip carries — `len(_PULSE_SYMBOLS)` in
+    /// `home_dashboard_service.py`, pinned equal by `test_ios_home_instant_paint_guards.py`.
+    nonisolated static let expectedEquityPulseTiles = 5
+
+    /// Pulse tiles that are NOT the crypto tile — the backend's `_equity_tile_count`. The
+    /// crypto tile comes from a separate upstream and cache, so its absence alone is not a
+    /// degraded strip.
+    var equityPulseTileCount: Int {
+        pulse.filter { $0.type != .crypto }.count
+    }
+
+    /// Whether this dashboard may REPLACE the on-device snapshot.
+    ///
+    /// The backend has no degraded flag — a section that timed out is simply served empty — so
+    /// completeness is judged here: the whole equity pulse strip, and at least one other
+    /// section. A degraded 200 must never overwrite a good snapshot (the same "refuse degraded
+    /// over good" rule as `WidgetSnapshotStore`), or the next cold launch paints the outage.
+    var isWorthPersisting: Bool {
+        equityPulseTileCount >= Self.expectedEquityPulseTiles
+            && !(scanners.isEmpty && signals.isEmpty && themes.isEmpty && trillionClub.isEmpty)
+    }
+
+    /// The watchlist heading when the user has no active group — the backend's
+    /// `_WATCHLIST_DEFAULT_TITLE`, pinned equal by `test_ios_home_instant_paint_guards.py`.
+    /// `HomeRepository` falls back to it for a missing or blank title.
+    nonisolated static let defaultWatchlistTitle = "Your Watchlist"
+
+    /// The shape the backend sends when the watchlist read DEGRADED (`_get_watchlist_guarded`
+    /// on a timeout or a read error answers `("Your Watchlist", False, [])`) — on the wire,
+    /// the same as a user with no tickers.
+    var hasDefaultEmptyWatchlist: Bool {
+        watchlist.isEmpty && !watchlistIsGroup && watchlistTitle == Self.defaultWatchlistTitle
+    }
+
+    /// This dashboard's watchlist came back with NO tiles where `saved`'s has some, in a shape
+    /// a failed read produces — so `HomeDashboardSnapshotStore.save` will not let it replace
+    /// `saved`. Two shapes, and the backend flags neither:
+    ///   • the degraded-read shape (`hasDefaultEmptyWatchlist`), whatever list was saved — a
+    ///     group user's read that timed out also answers it;
+    ///   • the SAME list (heading and group-ness) with every tile gone — `_build_watchlist`
+    ///     drops each tile it has no quote for, so a failed quote fetch empties a group.
+    /// A different list that is empty (the user switched to a new, empty group) is real.
+    func hasDegradedWatchlist(comparedTo saved: HomeDashboardData) -> Bool {
+        guard watchlist.isEmpty, !saved.watchlist.isEmpty else { return false }
+        if hasDefaultEmptyWatchlist { return true }
+        return watchlistTitle == saved.watchlistTitle && watchlistIsGroup == saved.watchlistIsGroup
+    }
 }
 
 // MARK: - Live wire models (DTOs)

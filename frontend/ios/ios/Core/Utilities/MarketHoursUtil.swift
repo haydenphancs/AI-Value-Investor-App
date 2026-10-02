@@ -13,8 +13,11 @@ enum MarketHoursUtil {
     /// NYSE/NASDAQ full closures, as `yyyy-MM-dd` in ET. Mirrors the backend's
     /// `US_MARKET_HOLIDAYS` in `app/utils/market_hours.py` — keep both in sync.
     /// Without these the 30s price-refresh timer polled all day on Thanksgiving
-    /// and Christmas against a tape that never moved.
-    private static let holidays: Set<String> = [
+    /// and Christmas against a tape that never moved. `nonisolated` so the Home snapshot's
+    /// session rule (`numbersSessionDay(at:)`) can read it off the main actor — an immutable
+    /// Sendable literal set, the same lever as `commoditySymbols`. Pinned equal to the backend
+    /// table by `tests/test_ios_home_instant_paint_guards.py`.
+    nonisolated private static let holidays: Set<String> = [
         // 2025
         "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26",
         "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25",
@@ -24,6 +27,9 @@ enum MarketHoursUtil {
         // 2027
         "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
         "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+        // 2028 — no New Year's Day closure (Jan 1 is a Saturday; NYSE does not close Dec 31).
+        "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19",
+        "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
     ]
 
     /// Half-days: the market shuts at 13:00 ET, with no after-hours session.
@@ -31,6 +37,8 @@ enum MarketHoursUtil {
         "2025-07-03", "2025-11-28", "2025-12-24",
         "2026-11-27", "2026-12-24",
         "2027-11-26",
+        // 2028 (NYSE's published calendar; Christmas Eve is a Sunday, so no half-day for it).
+        "2028-07-03", "2028-11-24",
     ]
 
     /// Whether `ymd` ("YYYY-MM-DD", ET) is a 13:00 early close. The set stays private;
@@ -39,11 +47,67 @@ enum MarketHoursUtil {
         earlyCloses.contains(ymd)
     }
 
-    private static let etCalendar: Calendar = {
+    /// `nonisolated` for the same reason as `holidays` (a `Calendar` is Sendable).
+    nonisolated private static let etCalendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
         return calendar
     }()
+
+    // MARK: - The session a dashboard's numbers describe
+
+    /// 09:30 ET, the regular-session open, as a minute of the day.
+    nonisolated static let regularOpenMinuteOfDay: Int = 9 * 60 + 30
+
+    /// How long after the open an answer may still carry PRE-OPEN numbers: the backend's
+    /// `home_dashboard_service._SESSION_GRACE_SECONDS` (two stacked 60 s caches, one warmer
+    /// tick and a build), pinned equal by `tests/test_ios_home_instant_paint_guards.py`. The
+    /// backend judges "same session" with both instants shifted back by it; so does Home.
+    nonisolated static let numbersSessionGraceSeconds: TimeInterval = 150
+
+    /// The US trading day whose day change a dashboard answered at `instant` describes, as the
+    /// America/New_York midnight that starts it — the Swift copy of the backend's
+    /// `home_dashboard_service._numbers_session`.
+    ///
+    /// A trading day at or after the 09:30 open is that day. Anything earlier (pre-market,
+    /// overnight) and every weekend or holiday is the PREVIOUS trading day: until the open the
+    /// screener still divides by the close before it, so a Monday 07:00 dashboard ranks
+    /// Friday's moves. Holidays are best effort — `holidays` above; an unscheduled closure the
+    /// backend learns at run time (`_OBSERVED_CLOSURES`) is unknown here.
+    nonisolated static func numbersSessionDay(at instant: Date) -> Date {
+        let calendar: Calendar = etCalendar
+        let parts: DateComponents = calendar.dateComponents([.hour, .minute], from: instant)
+        let minuteOfDay: Int = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        let day: Date = calendar.startOfDay(for: instant)
+        if minuteOfDay >= regularOpenMinuteOfDay && isTradingDay(day, calendar: calendar) {
+            return day
+        }
+        return previousTradingDay(before: day, calendar: calendar)
+    }
+
+    /// A weekday that is not a full closure. Half-days ARE trading days (backend `is_trading_day`).
+    nonisolated private static func isTradingDay(_ day: Date, calendar: Calendar) -> Bool {
+        let parts: DateComponents = calendar.dateComponents([.weekday, .year, .month, .day], from: day)
+        guard let weekday = parts.weekday, let year = parts.year,
+              let month = parts.month, let dayOfMonth = parts.day else { return false }
+        // Sunday = 1, Saturday = 7.
+        if weekday == 1 || weekday == 7 { return false }
+        let key: String = String(format: "%04d-%02d-%02d", year, month, dayOfMonth)
+        return !holidays.contains(key)
+    }
+
+    /// The most recent trading day strictly before `day` (an ET midnight). Bounded like the
+    /// backend's `previous_trading_day`: no real calendar closes ten days running, and a loop
+    /// that cannot end would hang the caller on a malformed table.
+    nonisolated private static func previousTradingDay(before day: Date, calendar: Calendar) -> Date {
+        var probe: Date = day
+        for _ in 0..<10 {
+            guard let earlier = calendar.date(byAdding: .day, value: -1, to: probe) else { break }
+            probe = earlier
+            if isTradingDay(probe, calendar: calendar) { break }
+        }
+        return probe
+    }
 
     /// Check if US markets are in an active trading session.
     ///

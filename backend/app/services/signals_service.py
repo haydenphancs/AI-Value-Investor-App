@@ -27,7 +27,9 @@ the display strings. See ``schemas/home_dashboard.py`` (SignalRowResponse etc.).
 Caching (CLAUDE.md invariant 4): a 45-min in-memory tier + an ``_inflight`` dedup
 future (collapses concurrent cold builds into ONE fetch) + a 24-hour Supabase
 ``signals_cache`` Tier-2 (survives restarts; the sources move daily/quarterly).
-This service rides inside ``get_dashboard()`` and its existing pre-warm loop.
+This service rides inside ``get_dashboard()``, and the Home warmer
+(``HomeDashboardService.refresh_due_sections`` / ``warm_all``) refreshes it with
+``get_signals(force=True)`` before the memory tier expires.
 
 Degradation (CLAUDE.md loud-failure rule): every branch degrades independently —
 one source failing → that card is ``None`` (iOS omits it), the others still
@@ -108,6 +110,15 @@ _SIGNALS_DEGRADED_TTL_SECONDS = 300      # a build where a branch RAISED: memory
                                          # rebuild instead of being pinned for 24h by Tier 2.
 _SIGNALS_TABLE = "signals_cache"
 _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dashboard
+# How old the in-memory copy may be and still stand in for a build that missed the guard.
+# It used to be ANY age, so a day of failing rebuilds kept serving the same cards. 24 h
+# matches the Tier-2 TTL: memory is refilled from a Tier-2 row of at most 24 h, so the
+# content a guard timeout can show is bounded at ~48 h, inside these cards' own cadence
+# (30-day congress window, quarterly 13F, a week of earnings) and each card's as-of date.
+# Past it the section is hidden. The Home warmer re-reads the tier every 40 min, so this
+# only bites when every refresh has failed for a day.
+_SIGNALS_STALE_SERVE_CEILING_SECONDS = 24 * 3600
+_SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS = 5   # a stamp further ahead is skew, never "fresh"
 
 _SIGNAL_ROWS = 10                        # drill-down leaders per card (iOS scrolls the
                                          # expanded list in a bounded box past ~6 rows)
@@ -815,14 +826,19 @@ class SignalsService:
 
     # ── Public API ────────────────────────────────────────────────────
 
-    async def get_signals(self) -> SignalsGroupResponse:
+    async def get_signals(self, *, force: bool = False) -> SignalsGroupResponse:
         """Signals, cache-aside (45-min in-mem → 24h Supabase) + in-flight dedup.
 
         Never re-raises: a build failure returns empty groups and is NOT cached, so
         the next request retries (keeps awaiters unpoisoned and the shielded
         background build — see ``get_signals_guarded`` — from leaking an exception).
+
+        ``force`` (the Home warmers) skips ONLY the in-memory freshness check. A build
+        already in flight is still joined, so a forced call never starts a second one,
+        and the Supabase tier is still read first: a fresh Tier-2 row is reloaded rather
+        than rebuilt (the sources move daily/quarterly, so that is the right answer).
         """
-        cached = self._cache.get(_SIGNALS_CACHE_KEY)
+        cached = None if force else self._cache.get(_SIGNALS_CACHE_KEY)
         ttl = (
             _SIGNALS_DEGRADED_TTL_SECONDS
             if _SIGNALS_CACHE_KEY in self._degraded_keys
@@ -859,11 +875,26 @@ class SignalsService:
             else:
                 try:
                     result, failed = await self._build()
+                    kept = (
+                        self._still_good_signals()
+                        if force and (failed or not _has_any_group(result)) else None
+                    )
                     # Cache ONLY a build that produced ≥1 group — never pin a transient
                     # total failure (all-None). PERSIST only a build in which no branch
                     # raised: Tier 2 is read before every rebuild, so a persisted partial
                     # build would hide the failed card for up to 24 h.
-                    if _has_any_group(result):
+                    if kept is not None:
+                        # A forced refresh runs AHEAD of the memory TTL, so the good cards
+                        # it would replace are still valid: keep them until they expire
+                        # rather than swap in a degraded (or empty) build early.
+                        logger.warning(
+                            "Signals refresh came back degraded (failed: %s) — keeping the "
+                            "good cards (%.0fs old) until they expire",
+                            ", ".join(sorted(failed)) or "every card empty",
+                            time.time() - kept[0],
+                        )
+                        result = kept[1]
+                    elif _has_any_group(result):
                         self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
                         if failed:
                             self._degraded_keys.add(_SIGNALS_CACHE_KEY)
@@ -879,7 +910,10 @@ class SignalsService:
                     logger.warning(
                         "Signals build failed: %s: %s", type(exc).__name__, exc
                     )
-                    result = SignalsGroupResponse()  # empty; not cached → retries
+                    kept = self._still_good_signals() if force else None
+                    # Empty and NOT cached → retries. A forced (early) refresh hands its
+                    # joiners the still-valid cards instead of an empty section.
+                    result = kept[1] if kept is not None else SignalsGroupResponse()
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -891,11 +925,24 @@ class SignalsService:
         finally:
             self._inflight.pop(_SIGNALS_CACHE_KEY, None)
 
+    def _still_good_signals(self) -> Optional[Tuple[float, SignalsGroupResponse]]:
+        """The in-memory entry when it is good (not degraded) AND inside its TTL, else None."""
+        current = self._cache.get(_SIGNALS_CACHE_KEY)
+        if (
+            current is not None
+            and _SIGNALS_CACHE_KEY not in self._degraded_keys
+            and 0 <= time.time() - current[0] < _SIGNALS_MEM_TTL_SECONDS
+        ):
+            return current
+        return None
+
     async def get_signals_guarded(self) -> SignalsGroupResponse:
         """Await signals up to a hard timeout. ``asyncio.shield`` ensures a timeout
         never CANCELS the shared build (it keeps running and caches for the next
         request) — we just ship the dashboard without signals this round, serving
-        the last cached value (any age) if we have one."""
+        the last cached value while it is under `_SIGNALS_STALE_SERVE_CEILING_SECONDS`.
+        The cards carry no price and no day change (counts, a surprise %, a dollar
+        total, each with its own as-of date), so no trading-session check applies."""
         try:
             return await asyncio.wait_for(
                 asyncio.shield(self.get_signals()),
@@ -904,11 +951,24 @@ class SignalsService:
         except Exception as exc:  # TimeoutError or anything unexpected
             cached = self._cache.get(_SIGNALS_CACHE_KEY)
             if cached is not None:
-                logger.info(
-                    "Signals build slow (%s); serving last cached (age=%.0fs)",
-                    type(exc).__name__, time.time() - cached[0],
+                age = time.time() - cached[0]
+                servable = (
+                    -_SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS
+                    < age
+                    < _SIGNALS_STALE_SERVE_CEILING_SECONDS
                 )
-                return cached[1]
+                if servable:
+                    logger.info(
+                        "Signals build slow (%s); serving last cached (age=%.0fs)",
+                        type(exc).__name__, age,
+                    )
+                    return cached[1]
+                logger.warning(
+                    "Signals build slow (%s: %s) and the cached copy is %.0fs old (ceiling "
+                    "%ds; a negative age is a clock-skewed stamp) — section hidden",
+                    type(exc).__name__, exc, age, _SIGNALS_STALE_SERVE_CEILING_SECONDS,
+                )
+                return SignalsGroupResponse()
             logger.warning(
                 "Signals not ready this build (no cache yet): %s: %s",
                 type(exc).__name__, exc,

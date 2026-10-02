@@ -335,6 +335,19 @@ final class AppState {
             WidgetRefreshService.shared.markCredentialReady()
             WidgetRefreshService.shared.refresh(identity: identityGeneration)
 
+            // Load the stored account's last Home dashboard BEFORE the restore runs.
+            //
+            // ⚠️ ORDER. `performRestore` publishes `.restoring`, and that publish is what mounts
+            // the tab tree — `HomeDashboardViewModel` seeds itself from the store in its init.
+            // Primed any later, the first frame is the skeleton and the snapshot is wasted.
+            // After the widget seed so those requests leave first. The owner is the stored
+            // token's `sub` claim, read and never trusted for anything else (auth.md §8); no
+            // credential means the file is deleted.
+            await HomeDashboardSnapshotStore.shared.prime(
+                ownerUserId: authService.getStoredToken().flatMap { WidgetJWT.subject(of: $0) },
+                apiClient: apiClient
+            )
+
             await restoreSession(trigger: "launch")
         }
     }
@@ -682,6 +695,10 @@ final class AppState {
         // discovery and bumps nothing; on a sign-in or an account switch it bumps and every
         // tab drops what it loaded for the previous identity.
         resolveIdentity(profile.id)
+        // And whose dashboard the on-device Home snapshot may hold. Before the caller publishes
+        // `.authenticated`, so the Home reload that status triggers can only reseed THIS
+        // account's snapshot. A different account drops the old one; the same one is a no-op.
+        HomeDashboardSnapshotStore.shared.bindOwner(profile.id)
         // Push the tier to the audio engines. They are services, not views, so they cannot
         // read `@Environment(AppState.self)` — and the gate has to live at the engines
         // because Journey narrates from `.onAppear` with no button to guard. One assignment
@@ -801,6 +818,11 @@ final class AppState {
         // view and `pushUnsynced()` writes them into the new account.
         if let userId, let previous = lastAuthenticatedUserId, previous != userId {
             discardDataForEndedSession()
+            // ⚠️ ORDER, the same trap as the widget gate below: the discard unbinds the Home
+            // snapshot store that `applyProfile` bound to THIS account a moment ago. Left
+            // unbound, every save is refused for the rest of the process. Synchronous, before
+            // any await, so a Home load started after this captures the post-rebind epoch.
+            HomeDashboardSnapshotStore.shared.bindOwner(userId)
         }
         lastAuthenticatedUserId = userId
 
@@ -1254,6 +1276,10 @@ final class AppState {
         // the stores above, same funnel. `entitlementGeneration` covers an in-session tier
         // change; this covers the session boundary.
         StockRepository.shared.clearForEndedSession()
+        // The on-device Home snapshot: the ended account's watchlist, group name and prices in
+        // Library/Caches, painted on the next cold launch. Unbinds and deletes; the store's
+        // epoch fence also refuses a dashboard load that was still in flight.
+        HomeDashboardSnapshotStore.shared.clearForEndedSession()
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access

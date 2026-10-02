@@ -16,8 +16,18 @@ import SwiftUI
 // MARK: - Protocol
 
 protocol HomeRepositoryProtocol {
-    /// Fetch everything the Home dashboard renders.
-    func fetchHomeDashboard() async throws -> HomeDashboardData
+    /// Fetch everything the Home dashboard renders — plus, from a live source, the exact
+    /// response bytes `HomeDashboardSnapshotStore` persists.
+    func fetchHomeDashboard() async throws -> HomeDashboardFetch
+}
+
+/// One fetch: the mapped dashboard, and the wire bytes it was decoded from.
+///
+/// `body == nil` means "not persistable" — the mock and the previews have no wire bytes, so
+/// nothing they return is ever written to the on-device snapshot.
+struct HomeDashboardFetch {
+    let data: HomeDashboardData
+    let body: Data?
 }
 
 // MARK: - Live implementation (backend-backed)
@@ -41,12 +51,27 @@ final class HomeRepository: HomeRepositoryProtocol {
         self.apiClient = apiClient
     }
 
-    func fetchHomeDashboard() async throws -> HomeDashboardData {
-        let dto = try await apiClient.request(
+    func fetchHomeDashboard() async throws -> HomeDashboardFetch {
+        // `requestReturningBody`, not `request`: the same gate, 401 refresh, GET-only 5xx retry
+        // and error contract, but it also hands back the bytes it decoded, which the
+        // ViewModel persists as the on-device snapshot after a successful load.
+        let (dto, body) = try await apiClient.requestReturningBody(
             endpoint: .getHomeDashboard,
             responseType: HomeDashboardResponseDTO.self
         )
-        return Self.map(dto)
+        return HomeDashboardFetch(data: Self.map(dto), body: body)
+    }
+
+    /// A persisted response body → the dashboard, through the SAME decode and mapping as a
+    /// live fetch. Used by `HomeDashboardSnapshotStore.prime` at launch.
+    ///
+    /// Decoded by `APIClient`'s own decoder (same configuration, same isolation as the live
+    /// path), so a file written by an older build reads exactly as that build's response
+    /// would today — and a body the current DTOs cannot read throws `APIError.decodingError`,
+    /// which the store answers by deleting the file.
+    static func dashboard(fromSnapshotBody body: Data, apiClient: APIClient = .shared) async throws -> HomeDashboardData {
+        let dto = try await apiClient.decodeBody(HomeDashboardResponseDTO.self, from: body)
+        return map(dto)
     }
 
     // MARK: - DTO → presentation mapping
@@ -101,7 +126,7 @@ final class HomeRepository: HomeRepositoryProtocol {
     /// floating over the cards, which reads as a layout bug rather than a missing name.
     private static func watchlistTitle(_ raw: String?) -> String {
         let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "Your Watchlist" : trimmed
+        return trimmed.isEmpty ? HomeDashboardData.defaultWatchlistTitle : trimmed
     }
 
     /// Watchlist tiles are labelled with the SYMBOL ("ORCL"), not the company name
@@ -519,7 +544,14 @@ final class HomeRepository: HomeRepositoryProtocol {
 /// needs to change.
 final class MockHomeRepository: HomeRepositoryProtocol {
 
-    func fetchHomeDashboard() async throws -> HomeDashboardData {
+    func fetchHomeDashboard() async throws -> HomeDashboardFetch {
+        // No body: the mock has no wire bytes, so nothing it returns is ever persisted.
+        HomeDashboardFetch(data: Self.sampleDashboard, body: nil)
+    }
+
+    /// The whole mock dashboard, synchronously — previews seed an in-memory
+    /// `HomeDashboardSnapshotStore` from it.
+    static var sampleDashboard: HomeDashboardData {
         HomeDashboardData(
             marketStatusText: "Markets Open",
             marketIsOpen: true,

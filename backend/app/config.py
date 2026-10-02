@@ -893,14 +893,53 @@ class Settings(BaseSettings):
     REPORT_PREWARM_TOP_N: int = 20
     REPORT_PREWARM_INTERVAL_SECONDS: int = 3600
 
-    # Home Daily Scanners pre-warm: keeps Movers + Volume (and, free of charge,
-    # Skeptical Money — built in the same get_scanners() pass) hot during the
-    # regular session. Interval is BELOW the 20-min scanner cache TTL so the cache
-    # is refreshed before it expires (no cold gap mid-session). ~135 FMP calls per
-    # build, builds ≥15 min apart, gated to market hours → ~18% of a Premium
-    # minute's budget. Raise the interval to 1800 on FMP Starter (300/min).
+    # Home dashboard warmer (`main._run_home_dashboard_warmer`). The name is historical: it
+    # used to warm only the Daily Scanners, by reading through their cache, during the
+    # regular session. It now keeps EVERY shared Home section hot around the clock — Market
+    # Pulse, the screener universe, scanners, themes, signals and the Trillion group — by
+    # rebuilding each one BEFORE its TTL runs out (`refresh_due_sections`), so a lone open
+    # after hours finds a warm cache too. Off = the loop idles (nothing is warmed; the boot
+    # warm below still runs once). FMP spend: the pulse rebuilds about once a minute at all
+    # hours. In the regular session (and the first 10 min after the close) each build makes
+    # five intraday-sparkline calls (~7-8 trading days of 5-min bars each), so about 6 small
+    # calls a minute plus the universe sweeps. Outside it a finished session's bars are
+    # final and memoized (`home_dashboard_service._spark_memo`), so a pulse rebuild costs ~0
+    # FMP chart calls; its prices come from the universe below. The screener universe is the
+    # one large response (~7,000 rows a sweep): about one sweep a minute 04:00-20:00 ET on
+    # trading days, but only one every ~14 min in a closed window — overnight, weekends,
+    # holidays — where prices cannot move (15-min `price_service._UNIVERSE_CLOSED_TTL`).
+    # So about 7-8 calls a minute in session (~1% of Premium's 750/min), about 1 a minute
+    # pre-market and after hours, and about 4 sweeps an hour in a closed window: ~1,180
+    # universe sweeps a trading day and ~100 a closed day (a fixed 50 s cadence would be
+    # ~1,700 every day). Turning it off means a lone open after hours pays the cold builds
+    # (1.4-2.7 s measured, up to the 8 s guard).
     SCANNER_PREWARM_ENABLED: bool = True
+    # The scanners' REFRESH-AHEAD age: the warmer rebuilds the scanner section once its
+    # entry is this old. Must stay below the 1200 s scanner TTL by more than one tick plus
+    # one build; `home_dashboard_service` clamps it into [60, 1080], and the warmer logs any
+    # section whose ordering an override breaks. A build reads the shared screener universe
+    # (warmed on its own), three rank-1 sparklines (memoized outside the regular session,
+    # like the pulse's) and 24 h-cached floats: a handful of FMP calls, not the ~135 the old
+    # per-symbol build made.
     SCANNER_PREWARM_INTERVAL_SECONDS: int = 900
+    # How long Railway's deploy gate (`/health/pdf`, healthcheckPath in railway.toml) waits
+    # for the Home first-paint warm (`main._run_home_boot_warm`: the movers close map plus
+    # every shared Home section) before promoting a new deployment. Until the warm finishes
+    # or this many seconds pass, `/health/pdf` answers 503 {"status": "warming"} and Railway
+    # keeps serving the OLD deployment — without it the first Home request after every deploy
+    # waited 8.1-8.5 s (17 of 17 in production). Cold pieces run in parallel: typically about
+    # 5 s, about 15 s on a bad day; 45 s is 3x headroom. The deadline is enforced IN THE
+    # ROUTE, so a hung warm can never hold a deploy longer, and 3 x this must stay within
+    # railway.toml's healthcheckTimeout (300) — pinned by tests/test_deploy_command_parity.py.
+    # 0 = no gate (the warm still runs).
+    HOME_BOOT_WARM_MAX_WAIT_SECONDS: int = 45
+    # The Home warmer's tick. Each tick only CHECKS ages and kicks background builds (it
+    # never awaits one), so it is cheap. Every section's refresh-ahead age + this tick + its
+    # worst-case build must stay below that section's TTL (pulse 40 + 10 + 6 < 60, the
+    # screener universe 45 + 10 + 3 < 60, or 840 + 10 + 3 < 900 inside a closed window).
+    # 12 s already breaks the universe and 14 s the pulse; the warmer logs any broken
+    # section at start-up (`warm_ordering_violations`). Values below 1 are treated as 1.
+    HOME_WARM_TICK_SECONDS: int = 10
 
     # Index detail pre-warm. Only THREE symbols are reachable (`_INDEX_PROFILES`), and
     # they are the ones Home Market Pulse links to, so this is a bounded ~3-call pass.

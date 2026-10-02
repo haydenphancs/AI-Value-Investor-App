@@ -69,7 +69,8 @@ def _call_sites():
                     continue
                 fn = node.func
                 name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-                if name != "fetch_all_rows":
+                # The parallel sibling pages by OFFSET too, so the same precondition holds.
+                if name not in ("fetch_all_rows", "fetch_all_rows_concurrent"):
                     continue
                 order_by = None
                 for kw in node.keywords:
@@ -103,6 +104,8 @@ def test_the_scan_finds_the_real_call_sites():
     files = {s[0] for s in sites}
     assert any("signals_service" in f for f in files)
     assert any("price_alert_service" in f for f in files)
+    # The concurrent sibling's call site (the movers close map) is scanned too.
+    assert ("market_close_snapshot", "symbol") in {(s[2], s[3]) for s in sites}
 
 
 def test_the_snapshot_parse_finds_real_primary_keys():

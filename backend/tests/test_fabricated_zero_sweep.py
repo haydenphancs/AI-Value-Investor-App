@@ -250,7 +250,7 @@ def test_the_close_sweep_orders_its_pages(monkeypatch):
         def __init__(self):
             self._ordered = False
 
-        def select(self, *_a):
+        def select(self, *_a, **_k):        # `count=` / `head=` for the exact count
             return self
 
         def order(self, col, **_k):
@@ -262,7 +262,7 @@ def test_the_close_sweep_orders_its_pages(monkeypatch):
             return self
 
         def execute(self):
-            return type("R", (), {"data": []})()
+            return type("R", (), {"data": [], "count": 0})()
 
     class _SB:
         def table(self, _name):

@@ -16,6 +16,7 @@ import logging
 import re
 import time
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -209,11 +210,33 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
 #: Background tasks that are SUPPOSED to finish. Everything else `_spawn` starts is a
 #: `while True` loop whose normal return is a bug worth a WARNING; these run once by
 #: design, and flagging them every boot is how a REAL loop death gets lost in the noise.
-_ONE_SHOT_TASKS = frozenset({"run_whale_profile_pre_warmer", "marketing_telegram_webhook"})
+_ONE_SHOT_TASKS = frozenset({
+    "run_whale_profile_pre_warmer", "marketing_telegram_webhook", "run_home_boot_warm",
+})
+
+
+@dataclass
+class _WarmGate:
+    """The Home first-paint warm's hold on Railway's deploy gate (`/health/pdf`).
+
+    `ready` is set once the boot warm finished, failed or ran out of time — ALWAYS, by
+    `_run_home_boot_warm`. `deadline` (`time.monotonic()`) is checked by the route itself,
+    so a warm task that dies or hangs still cannot hold a deploy past it.
+    """
+
+    ready: asyncio.Event
+    deadline: float
+
+
+#: Set by the lifespan (Railway only, and only when `HOME_BOOT_WARM_MAX_WAIT_SECONDS` > 0),
+#: reset at teardown. None = no gate: `/health/pdf` answers as it always did (tests, local
+#: dev, a disabled gate).
+_HOME_WARM_GATE: Optional[_WarmGate] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _HOME_WARM_GATE
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
 
@@ -356,6 +379,18 @@ async def lifespan(app: FastAPI):
                 "loops locally (PUSH_DRY_RUN=%s)", settings.PUSH_DRY_RUN,
             )
     else:
+        # Home first-paint warm, FIRST so it starts at t=0: the movers close map plus every
+        # shared Home section, built before the first user asks. While it runs (at most
+        # HOME_BOOT_WARM_MAX_WAIT_SECONDS) `/health/pdf` answers 503 "warming", so Railway
+        # keeps routing to the old deployment instead of handing the first Home request an
+        # 8 s cold build. The warm runs even with the gate off (0); it only stops gating.
+        boot_warm_max_wait = settings.HOME_BOOT_WARM_MAX_WAIT_SECONDS
+        _HOME_WARM_GATE = (
+            _WarmGate(ready=asyncio.Event(), deadline=time.monotonic() + boot_warm_max_wait)
+            if boot_warm_max_wait > 0 else None
+        )
+        _spawn(_run_home_boot_warm(), "run_home_boot_warm")
+
         # Keep the previous-close table current. This is the denominator for every batch
         # day-change % in the app now that FMP's `quote` / `batch-quote` are unlicensed —
         # without it, prices render but every change % is blank.
@@ -375,10 +410,11 @@ async def lifespan(app: FastAPI):
         # makes some Gemini-grounded calls for cold tickers).
         _spawn(_run_report_pre_warmer(), "run_report_pre_warmer")
 
-        # Start background scanner pre-warmer: keeps the Home Daily Scanners
-        # (Movers/Volume + Skeptical Money) hot during the regular session so the
-        # first Home load after each 20-min cache expiry isn't a cold build.
-        _spawn(_run_scanner_pre_warmer(), "run_scanner_pre_warmer")
+        # Home dashboard warmer: every shared Home section (pulse, the screener universe,
+        # scanners, themes, signals, Trillion) rebuilt AHEAD of its TTL, around the clock,
+        # so no Home request — not even a lone open after hours — pays a cold build. Starts
+        # once the boot warm above has opened the deploy gate. SCANNER_PREWARM_ENABLED.
+        _spawn(_run_home_dashboard_warmer(), "run_home_dashboard_warmer")
 
         # Start background index pre-warmer: three symbols, keeping the index detail
         # screens off the cold path after a redeploy. See the docstring for the numbers.
@@ -542,6 +578,20 @@ async def lifespan(app: FastAPI):
                     task.get_name(), type(result).__name__, result,
                 )
         logger.info("Stopped %d background tasks", len(pending))
+
+    # The Home warmer's builds are loose tasks (`refresh_due_sections` kicks them; they are
+    # not in `background_tasks`), so they are cancelled here — after the warmer loop above
+    # stopped kicking new ones and BEFORE `close_fmp_client()` below, which would otherwise
+    # fail every request joined to one of them with closed-client errors. Bounded.
+    try:
+        from app.services.home_dashboard_service import HomeDashboardService
+
+        await HomeDashboardService.shutdown_warm_tasks(timeout=2.0)
+    except Exception as e:  # best effort: a stray build dies with the process anyway
+        logger.warning(
+            "Home warm shutdown failed: %s: %s", type(e).__name__, e, exc_info=True,
+        )
+    _HOME_WARM_GATE = None
 
     # Marketing script generations are spawned per request (kick-and-poll), not by `_spawn`,
     # so they are not in `background_tasks`. Cancel them here: each hands its run back
@@ -814,20 +864,23 @@ async def _run_close_snapshot_loop():
         try:
             written = await price_source().refresh_close_snapshot()
 
-            # Warm the movers close map straight after the ingest. It is a 63-request /
-            # ~6.6 s Supabase sweep (PostgREST caps a response at 1,000 rows however wide
-            # a `range` you ask for) and it backs Home's Top Movers, Heavy Traffic and
-            # every sector strip. Warming here means the first request after a deploy is
-            # served from cache instead of paying the sweep on the hot path.
+            # Rebuild the movers close map straight after the ingest and swap it in. It is
+            # a ~74-page Supabase sweep (PostgREST caps a response at 1,000 rows however
+            # wide a `range` you ask for) behind Home's Top Movers, Heavy Traffic and every
+            # sector strip. The ingest no longer drops the live map, so readers keep the
+            # old one until this build replaces it; `after_write` makes sure the map comes
+            # from a build that started AFTER the rows above were written.
             try:
                 from app.services.market_movers_service import get_market_movers_service
 
-                await get_market_movers_service()._all_closes()
+                await get_market_movers_service().refresh_closes(after_write=True)
             except Exception as e:
-                # Best-effort: a cold cache is slower, never wrong. Logged rather than
-                # swallowed so a persistent failure is visible.
+                # Best-effort: the previous map stays in service (readers treat a row
+                # from too old a session as "change unknown", never a wrong number).
+                # Logged rather than swallowed so a persistent failure is visible.
                 logger.warning(
-                    "Movers close-map warm failed (%s: %s)", type(e).__name__, e,
+                    "Movers close-map refresh failed (%s: %s) — the previous map stays "
+                    "in service", type(e).__name__, e,
                 )
 
             if written == 0:
@@ -997,53 +1050,211 @@ async def _run_report_pre_warmer():
         await asyncio.sleep(settings.REPORT_PREWARM_INTERVAL_SECONDS)
 
 
-async def _run_scanner_pre_warmer():
-    """Background task: keep the Home Daily Scanners hot during the regular session.
+def _home_warm_gate_remaining(gate: Optional[_WarmGate]) -> Optional[float]:
+    """Seconds left before ``gate``'s deadline (never negative), or None with no gate."""
+    if gate is None:
+        return None
+    return max(0.0, gate.deadline - time.monotonic())
 
-    Movers + Volume are intraday metrics behind a 20-min cache; Skeptical Money is
-    built in the SAME ``get_scanners()`` pass. Without warming, the first Home load
-    after each cache expiry pays a cold build. This refreshes the shared scanner
-    cache every ``SCANNER_PREWARM_INTERVAL_SECONDS`` (set BELOW the 20-min TTL so it
-    never goes cold mid-session) ONLY while the regular US session is open, and
-    idles otherwise (0 FMP calls overnight/weekends).
 
-    ``get_scanners()`` serves its cache first (a no-op when a user already built it
-    recently, via the in-flight dedup) and degrades internally on an FMP 429, so
-    this loop needs no extra rate logic — the inter-build gap IS the backoff. Short
-    interest is 3-day cached over a bi-monthly source, so warming it here adds ~0
-    FINRA calls.
+def _format_warm_summary(summary: Any) -> str:
+    """`{piece: ok}` as one greppable line: ``close_map=ok, pulse=ok, scanners=NOT warm``."""
+    if not isinstance(summary, dict) or not summary:
+        return repr(summary)
+    return ", ".join(f"{name}={'ok' if ok else 'NOT warm'}" for name, ok in summary.items())
+
+
+async def _home_boot_warm_work() -> dict:
+    """The Home first-paint warm: the movers close map and every shared Home section.
+
+    Both run in parallel. `refresh_closes()` leads the close-map build, and the scanners
+    section inside `warm_all()` joins it through `_inflight["movers:closes"]`, so the
+    ~74-page sweep runs once. Returns ``{piece: ok}`` (``close_map`` plus `warm_all`'s
+    sections). A failed piece logs a WARNING and reads False; it never raises an
+    `Exception` past the imports. Cancellation propagates to both builds.
+    """
+    from app.services.home_dashboard_service import get_home_dashboard_service
+    from app.services.market_movers_service import CloseMapRefused, get_market_movers_service
+
+    closes, sections = await asyncio.gather(
+        get_market_movers_service().refresh_closes(),
+        get_home_dashboard_service().warm_all(),
+        return_exceptions=True,
+    )
+    summary: dict = {}
+    if isinstance(closes, BaseException):
+        # CloseMapRefused is expected on an empty table and already logged at ERROR by the
+        # check that refused it; anything else is unexpected, so it carries its stack.
+        logger.warning(
+            "Home boot warm: close map not rebuilt (%s: %s) — the scanners build it on demand",
+            type(closes).__name__, closes,
+            exc_info=None if isinstance(closes, CloseMapRefused) else closes,
+        )
+        summary["close_map"] = False
+    else:
+        summary["close_map"] = True
+    if isinstance(sections, BaseException):
+        # `warm_all` promises never to raise an Exception; a raise here is a defect.
+        logger.warning(
+            "Home boot warm: warm_all raised (%s: %s)",
+            type(sections).__name__, sections, exc_info=sections,
+        )
+        summary["sections"] = False
+    elif isinstance(sections, dict):
+        summary.update({str(name): bool(ok) for name, ok in sections.items()})
+    else:
+        logger.warning(
+            "Home boot warm: warm_all returned %s, not a {section: ok} dict",
+            type(sections).__name__,
+        )
+        summary["sections"] = False
+    return summary
+
+
+async def _run_home_boot_warm() -> None:
+    """One-shot at boot: warm Home, then open the deploy gate (`_HOME_WARM_GATE`).
+
+    Why: every Railway deploy empties the in-process caches, and the first Home request
+    after one waited 8.1-8.5 s (17 of 17 in production) — the scanners' close-map sweep
+    outlived their 8 s guard. Warming before Railway promotes the deployment moves that
+    wait off every user.
+
+    The gate opens — `ready` is set — ALWAYS: when the warm finishes, fails, or runs past
+    the gate's deadline. In that last case the warm keeps going under `shield`: a
+    timeout must not cancel shared builds that requests may already have joined (a
+    CancelledError would poison every joiner). The remainder is still awaited HERE, so
+    this task owns it: when the lifespan cancels this task at shutdown, the warm is
+    cancelled with it rather than outliving the teardown that closes the HTTP clients.
+    """
+    gate = _HOME_WARM_GATE
+    started = time.monotonic()
+    work = asyncio.ensure_future(_home_boot_warm_work())
+    try:
+        try:
+            summary = await asyncio.wait_for(
+                asyncio.shield(work), timeout=_home_warm_gate_remaining(gate)
+            )
+        except asyncio.TimeoutError:
+            if not work.done():
+                logger.warning(
+                    "Home boot warm: not finished after %.1fs — opening the deploy gate; "
+                    "the warm continues", time.monotonic() - started,
+                )
+            elif work.cancelled():
+                logger.warning(
+                    "Home boot warm: cancelled after %.1fs — opening the deploy gate",
+                    time.monotonic() - started,
+                )
+            else:
+                # The warm itself raised a TimeoutError — a failure, not the deadline.
+                logger.warning(
+                    "Home boot warm failed after %.1fs (%r) — opening the deploy gate",
+                    time.monotonic() - started, work.exception(),
+                )
+        except Exception as e:
+            logger.exception(
+                "Home boot warm failed after %.1fs (%s: %s) — opening the deploy gate",
+                time.monotonic() - started, type(e).__name__, e,
+            )
+        else:
+            log = logger.info if summary and all(summary.values()) else logger.warning
+            log(
+                "Home boot warm: ready in %.1fs: %s",
+                time.monotonic() - started, _format_warm_summary(summary),
+            )
+        finally:
+            if gate is not None:
+                gate.ready.set()
+
+        if not work.done():
+            try:
+                summary = await work
+            except Exception as e:
+                logger.warning(
+                    "Home boot warm: failed after the deploy gate opened (%s: %s)",
+                    type(e).__name__, e, exc_info=True,
+                )
+            else:
+                logger.info(
+                    "Home boot warm: finished %.1fs after boot, after the deploy gate "
+                    "opened: %s", time.monotonic() - started, _format_warm_summary(summary),
+                )
+    except asyncio.CancelledError:
+        # Shutdown (a redeploy can land inside the warm window). `work` runs under
+        # `shield` above, so cancelling THIS task does not reach it by itself.
+        work.cancel()
+        raise
+
+
+async def _wait_for_home_warm_gate() -> None:
+    """Return once the boot warm opened the deploy gate, or the gate's deadline passed."""
+    gate = _HOME_WARM_GATE
+    remaining = _home_warm_gate_remaining(gate)
+    if gate is None or gate.ready.is_set() or not remaining:
+        return
+    try:
+        await asyncio.wait_for(gate.ready.wait(), timeout=remaining)
+    except asyncio.TimeoutError:
+        logger.info("Home warmer: boot warm still running at its deadline — starting anyway")
+
+
+async def _run_home_dashboard_warmer():
+    """Background task: keep every shared Home section warm, around the clock.
+
+    Replaces the old scanner pre-warmer, which read THROUGH the cache (a no-op while the
+    entry was younger than its TTL, so the first request after each expiry still paid the
+    cold build) and ran only during the regular session — Market Pulse was never warmed,
+    themes went cold for a third of every warm interval, and a lone open after hours paid
+    1.4-2.7 s (up to the 8 s guard).
+
+    Every `HOME_WARM_TICK_SECONDS` it calls `refresh_due_sections()`, which is SYNC: it
+    only checks ages and starts one forced background build per section that is due
+    (pulse, the screener universe, scanners, themes, signals, Trillion — each at its own
+    refresh-ahead age, below its TTL), deduped through the section's `_inflight`. A slow
+    scanner sweep therefore never delays the pulse, and the tick never waits on a build.
+    No market-hours gate on purpose: the cost is about 7-8 FMP calls a minute (see
+    `SCANNER_PREWARM_ENABLED` in config.py).
+
+    Starts once the boot warm has opened the deploy gate, so the two never race for the
+    same cold builds. With `SCANNER_PREWARM_ENABLED` off it idles instead of returning —
+    a `_spawn`ed loop that returns is reported as a dead loop.
     """
     if not settings.SCANNER_PREWARM_ENABLED:
-        return
+        logger.info(
+            "Home warmer: SCANNER_PREWARM_ENABLED is off — idling; shared Home sections "
+            "are built on demand only"
+        )
+        while True:
+            await asyncio.sleep(3600)
 
-    # Stagger after the news (30s) and report (45s) pre-warmers so the startup
-    # bursts don't pile onto the shared 20-connection FMP pool at once.
-    await asyncio.sleep(120)
+    from app.services.home_dashboard_service import get_home_dashboard_service
 
-    from app.services.home_dashboard_service import (
-        _market_status,
-        get_home_dashboard_service,
-    )
-    from app.services.signals_service import get_signals_service
+    await _wait_for_home_warm_gate()
+
+    tick = max(1.0, float(settings.HOME_WARM_TICK_SECONDS))
+    try:
+        violations = get_home_dashboard_service().warm_ordering_violations(tick)
+        if violations:
+            logger.warning(
+                "Home warmer: these sections can expire before their rebuild lands — "
+                "check HOME_WARM_TICK_SECONDS / SCANNER_PREWARM_INTERVAL_SECONDS: %s",
+                "; ".join(violations),
+            )
+    except Exception as e:
+        logger.warning(
+            "Home warmer: could not check the warm ordering (%s: %s)",
+            type(e).__name__, e, exc_info=True,
+        )
+    logger.info("Home warmer: started (tick %.0fs, around the clock)", tick)
 
     while True:
         try:
-            _, is_open = _market_status()
-            if is_open:  # regular US session only (9:30–4 ET, DST-aware)
-                await get_home_dashboard_service().get_scanners()
-                # App-Exclusive Signals ride along (congress/whale/earnings/ceo). Cheap:
-                # whale is Supabase-only, congress is 2 FMP calls, earnings is 1 + a
-                # quote batch, CEO Buys ~3 pages of the insider feed + a quote batch —
-                # and get_signals() serves its own cache first (a no-op when warm).
-                await get_signals_service().get_signals()
-                # Emerging Frontiers themes ride along too — one batch-quote fan-out
-                # over the small ticker union; get_themes() serves its cache first.
-                await get_home_dashboard_service().get_themes()
-                logger.info("Scanner + signals + themes pre-warm: refreshed (regular session open)")
+            get_home_dashboard_service().refresh_due_sections()
         except Exception as e:
-            logger.error(f"Scanner pre-warmer failed: {e}", exc_info=True)
-
-        await asyncio.sleep(settings.SCANNER_PREWARM_INTERVAL_SECONDS)
+            logger.error(
+                "Home warmer tick failed (%s: %s)", type(e).__name__, e, exc_info=True,
+            )
+        await asyncio.sleep(tick)
 
 
 async def _run_index_pre_warmer():
@@ -2596,7 +2807,22 @@ async def health_pdf():
     so the first success is the answer for the rest of the process's life. A failure is
     never memoised. Moving the render to a thread would not close it — WeasyPrint is
     mostly pure Python and holds the GIL.
+
+    ALSO the Home first-paint gate. While the boot warm (`_run_home_boot_warm`) has not
+    finished and its deadline (`HOME_BOOT_WARM_MAX_WAIT_SECONDS`, 45 s) has not passed, this
+    answers 503 {"status": "warming"} — no data, no render, checked FIRST — so Railway keeps
+    serving the old deployment instead of promoting one whose first Home request would wait
+    on an 8 s cold build. The deadline is enforced HERE, not by the warm task, so a warm
+    that dies or hangs can hold a deploy for 45 s at most; railway.toml's
+    healthcheckTimeout (300) is far above that. No gate (tests, local dev, max wait 0)
+    answers exactly as before.
     """
+    gate = _HOME_WARM_GATE
+    if gate is not None and not gate.ready.is_set() and time.monotonic() < gate.deadline:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "warming"},
+        )
     global _PDF_HEALTH_OK
     if _PDF_HEALTH_OK is not None:
         return _PDF_HEALTH_OK

@@ -47,10 +47,16 @@ struct HomeDashboardView: View {
 
     /// `repository == nil` → the live `HomeRepository` (the app default).
     /// Pass `MockHomeRepository()` for offline previews / tests.
-    init(selectedTab: Binding<HomeTab>, repository: HomeRepositoryProtocol? = nil) {
+    /// `snapshotStore == nil` → `HomeDashboardSnapshotStore.shared`; previews pass
+    /// `.inMemory(seed:)` so they never touch the device's file.
+    init(
+        selectedTab: Binding<HomeTab>,
+        repository: HomeRepositoryProtocol? = nil,
+        snapshotStore: HomeDashboardSnapshotStore? = nil
+    ) {
         self._selectedTab = selectedTab
         self._viewModel = StateObject(
-            wrappedValue: HomeDashboardViewModel(repository: repository)
+            wrappedValue: HomeDashboardViewModel(repository: repository, snapshotStore: snapshotStore)
         )
     }
 
@@ -70,15 +76,12 @@ struct HomeDashboardView: View {
                 CustomTabBar(selectedTab: $selectedTab)
             }
 
-            // FIRST attempt only. `LoadingOverlay` is a full-screen dim that
-            // swallows every touch (the same tap-eater the detail views removed),
-            // and `isLoading && data == nil` stays true for every retry while the
-            // first load keeps failing — so without `!hasAttemptedLoad` the 60s
-            // auto-refresh re-raised it once a minute during an outage and locked
-            // the user out of the tab bar. Later failures surface via errorBanner.
-            if viewModel.isLoading && viewModel.data == nil && !viewModel.hasAttemptedLoad {
-                LoadingOverlay()
-            }
+            // NO full-screen overlay here, deliberately. A `LoadingOverlay` used to sit on top
+            // of this stack for the first load: a dim that swallowed every touch, the header
+            // and the tab bar included, for as long as `GET /home/dashboard` took — the
+            // TestFlight 1.0 (9) "it loads so slow" screenshot. The first load now renders
+            // `HomeDashboardSkeleton` INSIDE the scroll content (see `content`), and a saved
+            // snapshot usually means there is nothing to wait for at all.
         }
         // Home is opacity-mounted: it never leaves the view hierarchy, so a plain
         // `.task` fires ONCE per process and `onAppear`/`onDisappear` never fire
@@ -127,8 +130,26 @@ struct HomeDashboardView: View {
                 for: UIApplication.didBecomeActiveNotification
             )
         ) { _ in
+            // A snapshot that aged past its display window while the app was in the
+            // background comes down first, whichever tab is showing; one that is still shown
+            // but from a US-market session that has since been replaced (the 09:30 ET open)
+            // stops saying "Today's". `loadIfStale` repeats both for a plain tab switch.
+            viewModel.expireSnapshotIfStale()
+            viewModel.relabelSnapshotIfDayRolledOver()
             guard isActiveTab else { return }
             Task { await viewModel.loadIfStale() }
+        }
+        // The network came BACK (posted on the false → true edge only). With nothing live on
+        // screen — a blank page, the error banner, or the labelled snapshot — load now instead
+        // of waiting out the fast retries or the 60 s tick. Joins a load already in flight; a
+        // no-op once live data is showing, and while Home is not the visible tab.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NetworkMonitor.didRestoreNotification
+            )
+        ) { _ in
+            guard isActiveTab, !viewModel.hasLiveData else { return }
+            Task { await viewModel.load() }
         }
         // The active group changed on the Tracking tab. A FORCED reload, not
         // `loadIfStale()`: the staleness window is 300s and the auto-refresh tick is 60s,
@@ -317,9 +338,14 @@ struct HomeDashboardView: View {
                     // the whole section on an upstream blip removed correct
                     // information (and made the outage look like a layout bug).
                     // The section renders its own honest placeholder instead.
+                    //
+                    // The header comes from `pulseHeader(for:)`, never straight from `data`: while
+                    // the on-device snapshot is on screen it reads "Updated <time>" with a muted
+                    // dot, because the saved "Markets Open" described the moment of the save.
+                    let pulseStatus = viewModel.pulseHeader(for: data)
                     MarketPulseSection(
-                        statusText: data.marketStatusText,
-                        isOpen: data.marketIsOpen,
+                        statusText: pulseStatus.text,
+                        isOpen: pulseStatus.isOpen,
                         items: data.pulse,
                         onTap: openPulse
                     )
@@ -402,6 +428,13 @@ struct HomeDashboardView: View {
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.top, AppSpacing.md)
                         .frame(maxWidth: .infinity, alignment: .center)
+                } else if viewModel.showsFirstLoadSkeleton {
+                    // The first load, with no snapshot to show: placeholders IN the content, so
+                    // the header, the tab bar and pull-to-refresh all stay live. Inert (no
+                    // buttons, one VoiceOver label). A separate struct, so this plain VStack
+                    // gains no lazy container.
+                    HomeDashboardSkeleton()
+                        .padding(.top, AppSpacing.sm)
                 }
 
                 Spacer()
@@ -526,7 +559,49 @@ private struct TrillionClubTarget: Identifiable {
 }
 
 #Preview {
-    HomeDashboardView(selectedTab: .constant(.home), repository: MockHomeRepository())
-        .environment(AppState())
-        .environmentObject(AudioManager.shared)
+    HomeDashboardView(
+        selectedTab: .constant(.home),
+        repository: MockHomeRepository(),
+        snapshotStore: .inMemory()
+    )
+    .environment(AppState())
+    .environmentObject(AudioManager.shared)
+}
+
+/// A cold launch with no network: the saved snapshot paints, labelled "Updated <time>" with a
+/// muted dot, and the failed live load adds the offline banner above it.
+#Preview("Offline snapshot") {
+    HomeDashboardView(
+        selectedTab: .constant(.home),
+        repository: OfflinePreviewHomeRepository(),
+        snapshotStore: .inMemory(
+            seed: MockHomeRepository.sampleDashboard,
+            savedAt: Date().addingTimeInterval(-3 * 60 * 60)
+        )
+    )
+    .environment(AppState())
+    .environmentObject(AudioManager.shared)
+}
+
+/// The same, with a snapshot from an EARLIER US-market session: the movers card reads
+/// "Top Movers · <session day>" and drops its "#1 today". 72 h old is an earlier session
+/// except around a long holiday weekend (~2% of the year), where the card stays undated.
+#Preview("Offline snapshot · earlier day") {
+    HomeDashboardView(
+        selectedTab: .constant(.home),
+        repository: OfflinePreviewHomeRepository(),
+        snapshotStore: .inMemory(
+            seed: MockHomeRepository.sampleDashboard,
+            savedAt: Date().addingTimeInterval(-72 * 60 * 60)
+        )
+    )
+    .environment(AppState())
+    .environmentObject(AudioManager.shared)
+}
+
+/// Previews only: every fetch fails as a device with no connection would.
+private struct OfflinePreviewHomeRepository: HomeRepositoryProtocol {
+    func fetchHomeDashboard() async throws -> HomeDashboardFetch {
+        throw URLError(.notConnectedToInternet)
+    }
 }

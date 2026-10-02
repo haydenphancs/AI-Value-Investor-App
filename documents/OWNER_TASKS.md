@@ -21,15 +21,15 @@ production (Supabase, Storage or App Store Connect). Run its dry run first and r
 2. **The web service runs ONE uvicorn worker.** Most loops are safe only because of that.
    - A parity test (`backend/tests/test_deploy_command_parity.py`) fails if `--workers` is added.
 
-### 1A. Web-server loops (`backend/app/main.py`, 25 of them)
+### 1A. Web-server loops (`backend/app/main.py`, 26 of them)
 
 | # | Job | When | Turned on by (default) | What it does |
 |---|---|---|---|---|
-| 1 | Close snapshot | hourly, all day | always | Stores the last two official closes for every symbol. Every day-change % is computed against them. |
+| 1 | Close snapshot | hourly, all day | always | Stores the last two official closes for every symbol. Every day-change % is computed against them. Then rebuilds the movers close map (Top Movers, Heavy Traffic, sector strips) and swaps it in; the old map stays in service until the new one is built (log: `movers: close map refreshed in …`). |
 | 2 | Social snapshot | once per UTC day (hourly retry) | always | ApeWisdom mention counts → `social_mentions_history`. Feeds the 7-day social count. |
 | 3 | News pre-warm | every 2 h | always | News for the top 20 watchlist tickers. Also deletes old rows from 7 log/budget tables (incl. `news_sentiment_log` past 120 days). |
 | 4 | Report pre-warm | hourly | `REPORT_PREWARM_ENABLED` (on) | Keeps the top 20 tickers' report data warm. |
-| 5 | Scanner pre-warm | every 15 min, 9:30–16:00 ET | `SCANNER_PREWARM_ENABLED` (on) | Daily Scanners, Signals and Themes caches. |
+| 5 | Home warm (was "Scanner pre-warm") | a check every 10 s (`HOME_WARM_TICK_SECONDS`), around the clock; each section is rebuilt before its cache expires: Market Pulse every ~40 s, the screener universe ~45 s, Scanners ~15 min (`SCANNER_PREWARM_INTERVAL_SECONDS`, 900), Themes and Trillion ~8 min, Signals ~40 min | `SCANNER_PREWARM_ENABLED` (on; off = the loop idles and Home builds on demand) | Keeps every shared Home section warm, so no Home request — not even a lone open after hours — waits on a cold build. Costs about 7-8 FMP calls a minute in the regular session (~1% of the 750/min plan): ~6 small Market Pulse chart calls plus about one screener-universe sweep. Outside the regular session a finished session's chart bars are final and kept until the next open, so a Market Pulse rebuild costs ~0 FMP chart calls; what remains is the universe — about once a minute pre-market and after hours, and only every ~14 min overnight, at weekends and on holidays (its 15-min closed-window cache), when prices cannot move. The universe is the one large response (~7,000 rows): ~1,180 sweeps a trading day, ~100 a closed day. A failing section is retried after 45 s (Signals after 5 min). |
 | 6 | Index pre-warm | every 30 min | `INDEX_PREWARM_ENABLED` (on) | S&P 500 / Nasdaq / Dow detail pages. |
 | 7 | Quarterly industry chain | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC; the next phase starts every 30 min | always (per-phase claim) | Industry dossier → competitor intel → patents/FDA → moat benchmarks → sector & industry medians. A failed phase is retried up to 3× the same day. |
 | 8 | TTM benchmarks | Sunday 06:00 UTC | always (claim) | Refreshes trailing-12-month industry medians. Retried the same way. |
@@ -50,6 +50,7 @@ production (Supabase, Storage or App Store Connect). Run its dry run first and r
 | 23 | Scheduled pushes | hourly wake | same | Earnings after 16:00 ET · insider + whale/congress after 18:00 ET · profile match after 19:00 ET. Once per ET day each, retried hourly after a failure. |
 | 24 | Price alerts | every 60 s | same | All rules 04:00–20:00 ET; crypto-only rules otherwise. |
 | 25 | News-sentiment backfill | every ~3 min, or at once when a ticker is added; then a nightly top-up ~21:00 ET per ticker | **`SENTIMENT_BACKFILL_ENABLED` (OFF)** | Gives each watched ticker (never the Market tab) 90 days of News Tone history: FMP news → Cay AI sentiment labels (no text) → `news_sentiment_log`. Once per ticker, not per user. Labels with the live enrichment request itself (same prompt, model and temperature; bullets discarded). Capped by `SENTIMENT_BACKFILL_DAILY_CALLS` (3000 model calls/day ≈ $5 max on standard, about half on Flex); uses Gemini's 50%-off Flex tier (`SENTIMENT_BACKFILL_FLEX`). Needs migration 181. |
+| 26 | Home boot warm | once at boot, the first task started | always; `HOME_BOOT_WARM_MAX_WAIT_SECONDS` (45; 0 = no deploy hold, the warm still runs) | Builds the movers close map and every shared Home section before the first user asks. Until it finishes, or 45 s pass, the health check `/health/pdf` answers 503 `warming`, so Railway keeps serving the old deployment. Log: `Home boot warm: ready in …` (WARNING instead of INFO when a piece failed — the line names it). The Home warm (row 5) starts once it is done. |
 
 Started by a user action, not a clock: the report worker, the pre-warm when a ticker is opened,
 admin recomputes, and marketing script generation.
@@ -57,7 +58,7 @@ admin recomputes, and marketing script generation.
 ### 1B. Railway
 
 - **Web service** (`backend/railway.toml`):
-  - Builds from the Dockerfile; health check `/health/pdf`.
+  - Builds from the Dockerfile; health check `/health/pdf`. Right after boot it answers 503 `warming` for up to 45 s while the Home boot warm runs (row 26), so a deploy goes live up to 45 s later than before; the old deployment keeps serving, and keeps running its loops, until then. The health-check timeout (300 s) must stay at least 3 × `HOME_BOOT_WARM_MAX_WAIT_SECONDS`; a test checks both `railway.toml` files.
   - Restarts on failure at most 5 times. After that, every loop stays down until you redeploy.
 - **Marketing worker** (service `marketing-worker`, created 2026-09-30). Its settings live in the DASHBOARD — Railway lets no new service use a config file — and `backend/marketing/railway.toml` records them:
   - Root Directory `/backend/marketing` (Railway auto-detects that folder's `Dockerfile`; a custom Dockerfile path is ignored), Cron `15 * * * *` (UTC), Restart Policy Never, no health check, Watch Paths `/backend/marketing/**`, Memory 4 GB. Starts a day's run from 16:00 ET.
@@ -76,6 +77,7 @@ admin recomputes, and marketing script generation.
 
 - No background tasks. The only background mode is audio.
 - **Widget:** reloads every 20 min in session, 60 min in extended hours, and at the next 04:00 ET otherwise. It fetches for itself in market mode.
+- **On launch:** Home shows the last dashboard this account loaded on this phone (at most 96 h old, labelled "Updated <time>" in the Market Pulse header) while the live one loads; with none saved, a shimmer skeleton. The saved copy is deleted at sign-out, on an account switch and by Settings › Clear Cache. A first load that fails on a bad connection is retried after 2 s and 5 s.
 - **While the app is open:**
   - Home refreshes every 60 s.
   - A stock's quote every 15 s during the market day.
@@ -99,7 +101,7 @@ admin recomputes, and marketing script generation.
 
 - [x] **Railway variables** (verified 2026-09-25 against deploy 95ea9b25):
   - `ENVIRONMENT=production`; all 25 loops started.
-  - Deploys use root `/backend` and config `/backend/railway.toml`. ⚠️ **Before 2026-12-01** move these settings into the dashboard: Railway's notice says config-as-code (railway.toml) stops working then. The ones that matter: Dockerfile builder, health check `/health/pdf` (timeout 300), restart On Failure ×5.
+  - Deploys use root `/backend` and config `/backend/railway.toml`. ⚠️ **Before 2026-12-01** move these settings into the dashboard: Railway's notice says config-as-code (railway.toml) stops working then. The ones that matter: Dockerfile builder, health check `/health/pdf` (timeout 300 — never below 135, i.e. 3 × `HOME_BOOT_WARM_MAX_WAIT_SECONDS`, or the Home boot warm could fail a deploy; the test that checks this reads only the `railway.toml` files), restart On Failure ×5.
   - `SENTRY_DSN` is set and the SDK starts.
   - APNs keys are set, `APNS_ENV=production`, `PUSH_DRY_RUN` is unset.
 - [ ] **Sentry quota:** the DSN is fine, but Sentry received no backend events after 2026-09-04. Check the Sentry project's quota and rate-limit page.
@@ -213,6 +215,21 @@ admin recomputes, and marketing script generation.
   5. The iOS build (the "competes in" line, the order caption, the "How competitors are chosen" sheet) can ship before or after the backend. Every new field is optional, and a report without the order marker is captioned "Highest threat first".
   6. Reply to the tester (Claude's summary has a draft). Their report is a stored snapshot and keeps its order. A new AVGO report shows the new list.
   7. **Follow-up once 186 is applied:** `./scripts/dump_schema.sh` (one re-dump can cover the calendar-quarter item's step 6). Then ask Claude to add `competitor_details` to the `key=(…)` tuple of `public.competitor_intel_cache` in `backend/scripts/schema_curation.py`. It is left out until then because `test_curation_never_names_a_column_that_no_longer_exists` fails while the snapshot lacks the column. Then `./venv/bin/python scripts/generate_schema_doc.py`, then `--check`.
+- [ ] **Instant Home first paint (TestFlight 1.0 (9): "it loads so slow"; built 2026-10-01, not deployed or shipped yet).** No migration. The backend and the iOS build can ship in either order: the response did not change.
+  1. **Two new settings; the defaults are right, nothing to set:** `HOME_BOOT_WARM_MAX_WAIT_SECONDS` (45; how long a deploy may wait for the boot warm, row 26) and `HOME_WARM_TICK_SECONDS` (10; the Home warm's check interval, row 5). Keep the tick at 10: 12 already lets the screener universe expire before its rebuild lands, and the warm logs a WARNING naming any such section when it starts. `SCANNER_PREWARM_ENABLED` now switches the whole Home warm.
+  2. **After the deploy, in Railway's logs:**
+     - The deployment's health check answers 503 `warming`, then 200 within 45 s, and `Home boot warm: ready in …s: close_map=ok, pulse=ok, …` appears. A WARNING with `NOT warm` names the piece that failed. `Home boot warm: not finished after …` means the 45 s ran out; the warm keeps going, so look for `finished … after the deploy gate opened`.
+     - `Home warmer: started (tick 10s, around the clock)`, with no `can expire before their rebuild lands` WARNING.
+     - The first `GET /home/dashboard` after the deploy takes under 1 s, and there is no `Scanners not ready this build` or `Themes not ready this build` line.
+     - Every hour, `movers: close map refreshed in …` (a few seconds expected; the old serial read took 11–14 s). An ERROR `rebuilt close map is EMPTY` or `… (below 90%)` means the new map was refused and the old one kept: check `market_close_snapshot`.
+     - No new FMP rate-limit WARNINGs (the warm adds about 7-8 calls a minute).
+  3. **Over the next 7 days**, compare Home response times with the baseline (p50 1.43 s, p90 2.34 s, p99 6.15 s). Target: p50 under 0.5 s, p90 under 0.8 s, no 8 s responses.
+  4. **On the next TestFlight build:**
+     - Signed in, cold launch (on mobile data if you can, and once from the widget): Home shows the last dashboard at once with "Updated <time>" in the Market Pulse header, then turns live within 1–2 s. The header and the tab bar respond the whole time.
+     - Fresh install, or after Settings › Clear Cache: a shimmer skeleton, nothing blocked, no full-screen spinner.
+     - Airplane mode at launch: the saved dashboard shows, then "Reconnecting…".
+     - Sign out, switch accounts, and Settings › Clear Cache: each removes the saved dashboard. The next launch shows the skeleton, never the previous account's watchlist.
+     - Open the app more than 24 h after you last used it (an expired sign-in token): Home loads with no extra delay.
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
   - Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template
   - publish the Google OAuth consent screen
@@ -363,7 +380,8 @@ These were found in the 2026-09-25 sweep and deliberately not changed. The last 
 - A theme rotation that failed twice retries just after midnight ET.
 - During a database outage the Updates sweeper refreshes news 3× as often.
 - Price alerts write every rule every minute: fine now, slow near 5,000 rules.
-- A disabled pre-warmer logs one WARNING per boot.
+- A disabled pre-warmer logs one WARNING per boot (the Home warm logs one INFO line, `idling`).
+- Home warm (2026-10-01): the close map is re-read by a request only once it is 70 min old (the hourly loop's period plus a 10-min ingest budget), so normally the hourly rebuild is the only read; an ingest slower than 10 min costs one extra read (about 75 small Supabase reads, a few seconds). With `market_close_snapshot` empty (a fresh dev database), each cold read logs an ERROR and every day change reads as unknown.
 - A one-shot price alert that was capped or muted is not replayed later; it fires on its next crossing.
 - A daily `percent_move` alert counts +1 trigger every minute while the move holds (display only).
 - A subscription bought on a NEW Apple lineage, whose app verify is delayed past a newer notification on the old subscription, reads as stale. The webhook still grants it.

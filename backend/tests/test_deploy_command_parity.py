@@ -76,3 +76,32 @@ def test_the_repo_root_railway_toml_cannot_start_a_different_server():
     if hc:
         assert hc.group(1) == backend_hc.group(1), (hc.group(1), backend_hc.group(1))
     assert "--workers" not in toml
+
+
+def _healthcheck_timeout(toml_path: Path) -> int:
+    m = re.search(r'^healthcheckTimeout\s*=\s*(\d+)\s*$', toml_path.read_text(), re.M)
+    assert m, f"{toml_path}: no healthcheckTimeout — Railway's default would apply"
+    return int(m.group(1))
+
+
+def test_the_home_warm_gate_can_never_fail_a_deploy():
+    """`/health/pdf` also answers 503 "warming" while the Home boot warm runs, for at most
+    HOME_BOOT_WARM_MAX_WAIT_SECONDS (the route enforces that deadline itself). Railway fails
+    the deploy if the healthcheck has not passed within healthcheckTimeout, so the gate must
+    sit far inside it — 3x headroom covers the boot before the lifespan starts the clock and
+    the render after it. Checked against BOTH railway.toml files: either may be the one
+    applied (see the repo-root test above)."""
+    from app.config import settings
+
+    wait = settings.HOME_BOOT_WARM_MAX_WAIT_SECONDS
+    assert isinstance(wait, int) and wait >= 0, wait
+    files = [_BACKEND / "railway.toml"]
+    root = _BACKEND.parent / "railway.toml"
+    if root.exists():
+        files.append(root)
+    for toml_path in files:
+        timeout = _healthcheck_timeout(toml_path)
+        assert wait * 3 <= timeout, (
+            f"{toml_path}: HOME_BOOT_WARM_MAX_WAIT_SECONDS={wait} leaves too little of "
+            f"healthcheckTimeout={timeout} — a slow warm would FAIL the deploy"
+        )

@@ -1305,12 +1305,16 @@ class TrillionClubService:
             )
             return TrillionClubGroupResponse()
 
-    async def get_group(self) -> TrillionClubGroupResponse:
+    async def get_group(self, *, force: bool = False) -> TrillionClubGroupResponse:
         """The Home group: cache-aside (10 min) + shielded in-flight dedup. RAISES on a read
-        error (never cached); ``get_group_guarded`` is the caller that must not raise."""
+        error (never cached); ``get_group_guarded`` is the caller that must not raise.
+
+        ``force`` (the Home warmers) skips ONLY the freshness check: a build already in
+        flight is still joined through ``_dedup``, so a forced call never starts a second
+        one."""
         if not settings.TRILLION_CLUB_ENABLED:
             return TrillionClubGroupResponse()
-        cached = self._group_cache.get(_GROUP_KEY)
+        cached = None if force else self._group_cache.get(_GROUP_KEY)
         if cached is not None and self._is_fresh(cached[0]):
             return cached[1]
         return await self._dedup(_GROUP_KEY, self._build_group, self._group_cache)

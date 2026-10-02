@@ -969,6 +969,7 @@ Manages AI voice interaction for conversational features.
 | Auth tokens | iOS Keychain | Secure, persists across app launches |
 | App data | Server-only | No local database (CoreData/SQLite/Realm) |
 | In-memory cache | ViewModel/Repository | Cleared on navigation away |
+| Last Home dashboard | `Library/Caches/HomeDashboard/` — one binary plist written by `Core/Repositories/HomeDashboardSnapshotStore.swift` (raw `GET /home/dashboard` bytes, `.completeFileProtectionUntilFirstUserAuthentication`, never backed up) | Painted on a cold launch, labelled "Updated <time>", until the live load lands; from an earlier US session (the backend's `_numbers_session`: the 09:30 ET open; weekends and holidays count as the session before) its movers card reads "Top Movers · <session day>", never "Today's". One account's only (owner = the stored token's `sub`), at most 96 h old, written only after a successful, complete live load (and, while the saved one is displayable, never with an empty watchlist over its tiles — the server's degraded default, or the same list emptied by a failed quote fetch). Deleted by `AppState.discardDataForEndedSession()`, on an account switch and by Settings › Clear Cache. Not a database: re-creatable from the server (added 2026-10-01). |
 | UI preferences | UserDefaults | Theme, settings |
 
 ---

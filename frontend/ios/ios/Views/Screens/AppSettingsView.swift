@@ -792,7 +792,14 @@ struct AppSettingsView: View {
         URLCache.shared.removeAllCachedResponses()
         LearnAudioCache.shared.purgeAll()
         StockRepository.shared.clearCache()
+        // The on-device Home snapshot. Its delete is queued behind any pending snapshot write
+        // (off the main thread), so the size is counted again once it has landed.
+        let homeSnapshotPurge = HomeDashboardSnapshotStore.shared.purgeCache()
         calculateCacheSize()
+        Task {
+            await homeSnapshotPurge?.value
+            calculateCacheSize()
+        }
     }
 
     private func deleteAccount() {

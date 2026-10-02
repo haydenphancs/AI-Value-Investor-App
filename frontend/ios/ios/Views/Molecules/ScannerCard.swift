@@ -223,7 +223,11 @@ struct ScannerCard: View {
                     Text(head.primaryText)
                         .font(AppTypography.dataDisplay)
                         .foregroundColor(head.isPositive ? AppColors.bullish : AppColors.bearish)
-                    Text("\(head.secondaryText) · #1 today")
+                    // "today" only for a live card: a snapshot from an earlier US-market session
+                    // carries its date in the title instead (`DailyScanner.asOfDayLabel`).
+                    Text(scanner.asOfDayLabel == nil
+                         ? "\(head.secondaryText) · #1 today"
+                         : "\(head.secondaryText) · #1")
                         .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textMuted)
 

@@ -2,32 +2,49 @@
 Home Dashboard Service — aggregates the redesigned Caydex Home screen
 (`HomeDashboardView`) into a single response.
 
-Currently powers the top "Market Pulse" strip: the major US indices plus
-Bitcoin and key commodities, each with a live quote and a short daily-close
-sparkline. Built to grow top-to-bottom (scanners, signals, themes) behind the
-same `HomeDashboardResponse`.
+Six sections ride one `HomeDashboardResponse`: the "Market Pulse" strip (five ETF
+proxies plus a Bitcoin tile, each with a live quote and an intraday sparkline), the
+Daily Scanners, the App-Exclusive Signals (`signals_service`), the Emerging Frontiers
+themes, the caller's watchlist strip and the Trillion-Dollar Club group
+(`trillion_club_service`). Each one is built behind its own cache and timeout guard,
+so a slow or failed section costs that section only.
 
 Caching (CLAUDE.md invariant 4, lite):
-- The pulse is GLOBAL (not per-user) and fast-moving, so a 5-minute in-memory
-  tier is the right freshness ceiling — same tier `index_service` uses for live
-  market data. A Supabase tier would only serve stale prices here, so it is
-  intentionally omitted (~6 cheap FMP quote calls repopulate a cold cache).
+- Every section except the watchlist strip is GLOBAL (one class-level cache shared by
+  every caller). The pulse is fast-moving, so its in-memory tier lives 60 s
+  (`_CACHE_TTL_SECONDS`, 45 s when degraded). A Supabase tier would only serve stale
+  prices here, so it is intentionally omitted. Its regular-hours intraday sparklines (and
+  the scanners' rank-1 lines) are memoized per symbol outside the regular session, where a
+  finished session's bars cannot change (`_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS`).
 - An `_inflight` dedup future collapses concurrent cold-cache loads into ONE
-  FMP fan-out, preventing a thundering herd when many users open Home at once.
+  fan-out, preventing a thundering herd when many users open Home at once.
+- Nobody should pay a cold build on the request path. `warm_all` (the boot warm) and
+  `refresh_due_sections` (called every `HOME_WARM_TICK_SECONDS` by the Home warmer in
+  `main.py`, around the clock) rebuild each shared section, plus the screener universe
+  every equity quote reads, BEFORE its TTL runs out (the `_*_REFRESH_AHEAD_SECONDS`
+  constants). A forced rebuild skips only the freshness check and still leads or joins
+  the section's `_inflight` future, so there are never two builds of one section.
+- When a guard times out, a cached copy is served only while it is still honest: under
+  an age ceiling and from the same trading session (`_stale_serve_problem`), so
+  yesterday's movers never appear under today's header. Past that the section ships
+  empty and iOS hides it.
 
 Each symbol degrades gracefully: a failed quote/history drops that one tile
 rather than failing the whole strip (mirrors the legacy `home_service`).
 """
 
 import asyncio
+import functools
 import json
 import logging
 import math
 import time
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from app.config import Settings, settings
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.services.active_group_service import (
@@ -61,6 +78,7 @@ from app.utils.market_hours import (
     last_completed_close,
     previous_trading_day,
     session_phase,
+    session_trading_date,
 )
 from app.schemas.home_dashboard import (
     HomeDashboardResponse,
@@ -81,8 +99,11 @@ from app.schemas.themes_detail import (
     ThemePerformanceResponse,
     ThemePeriodReturnResponse,
 )
-from app.services.price_service import price_source
-from app.services.market_movers_service import get_market_movers_service
+from app.services.price_service import _UNIVERSE_TTL as _PRICE_UNIVERSE_TTL_SECONDS, price_source
+from app.services.market_movers_service import (
+    _UNIVERSE_TTL as _MOVERS_UNIVERSE_TTL_SECONDS,
+    get_market_movers_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +177,30 @@ def _equity_tile_count(tiles) -> int:
 
 
 _SPARKLINE_POINTS = 30          # downsampled intraday closes per mini-chart
+# ── Sparkline memo: a finished session's bars are final ──────────────
+# The Home warmer rebuilds the pulse every ~40-50 s around the clock, and each build fetches
+# five 5-min intraday series (`fetch_chart_data(..., "1D")`: 3 days plus a 7-day indicator
+# warm-up, ~7-8 trading days, ~80-95 KB each) of which only the latest regular session is
+# drawn. Outside 09:30-16:00 those regular-hours bars cannot change, so a series is memoized
+# per (symbol, extended_hours) — `HomeDashboardService._spark_memo` — and reused until the
+# next open. The rules (`_spark_memo_refusal` / `_spark_memo_problem`, both pure):
+# - regular-hours series only: a 24/7 (crypto) or extended series is never memoized;
+# - never in the regular session: there every build fetches, exactly as before;
+# - fetched at least `_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS` after that session's close
+#   (13:00 on a half-day), so a closing bar that lands late is never frozen out;
+# - its bars are the latest COMPLETED session's and reach the bell: 5-min bars are stamped at
+#   their START, so a complete session ends with the bar one interval before the close (15:55,
+#   or 12:55 on a half-day). `_SPARK_MEMO_COMPLETE_WITHIN_MINUTES` is that one interval, so a
+#   feed still missing its final bar is refetched rather than frozen until the next open;
+# - served only while that session is still the latest completed one, outside the regular
+#   session (pre-market reuses the previous session's bars; 09:30 fetches again);
+# - never a failure or an empty series.
+# Outside the session a pulse rebuild then costs no chart call at all.
+_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS = 600
+_SPARK_MEMO_COMPLETE_WITHIN_MINUTES = 5
+# Five pulse ETFs plus the scanners' rank-1 heads; entries of an older session are dropped on
+# every store, and this caps the rest.
+_SPARK_MEMO_MAX_ENTRIES = 64
 # 1 min — live market-data freshness ceiling. Was 300s, which meant the Market
 # Pulse prices moved once every five minutes under a header that says "Markets
 # Open" with a blinking green dot: the strip read as frozen, which is exactly the
@@ -270,6 +315,91 @@ _THEME_DETAIL_CACHE_TTL_SECONDS = 600
 _THEME_DETAIL_DEGRADED_TTL_SECONDS = 60      # built on a failed review read — retry soon
 _CARD_TREND_MAX_SESSIONS_OLD = 3             # older insights draw no trend on a card
 
+# ── Honest stale serving (the guards' timeout fallbacks) ──────────────
+# When a section's guard times out, the shielded build keeps running and the response
+# carries the last cached copy instead — but only while that copy is still honest. The
+# scanner and theme rows carry prices and the DAY's % move under a market header computed
+# fresh on every request, so the old "any age" rule could show yesterday's movers under
+# today's "Markets Open". Past these limits the section ships empty and iOS hides it.
+#
+# Scanners, in the regular session: 1500 s = the 1200 s TTL + 5 min, i.e. one missed warm
+# cycle plus a slow rebuild. An hour-old ranking under "Today's Top Movers" would mislead.
+# Outside the session the cards describe a session that has stopped moving, so 6 h; the
+# same-session check (`_same_numbers_session`) stops a copy from crossing the next open.
+_SCANNER_STALE_CEILING_IN_SESSION_SECONDS = 1500
+_SCANNER_STALE_CEILING_OFF_SESSION_SECONDS = 21_600
+# Themes, in session: 2 × the 600 s TTL — a card's % is an average over a basket and moves
+# more slowly than one mover. Outside the session 6 h, for the same reason as the scanners.
+_THEMES_STALE_CEILING_IN_SESSION_SECONDS = 1200
+_THEMES_STALE_CEILING_OFF_SESSION_SECONDS = 21_600
+# A build stamped just after the 09:30 open can still carry PRE-OPEN numbers, because the
+# scanners read the market through TWO stacked 60 s caches: the screener universe
+# (`price_service._UNIVERSE_TTL`) and the movers universe derived from it
+# (`market_movers_service._UNIVERSE_TTL`, `movers:universe`, which `force=` does not bypass).
+# Worst case: a sweep taken at 09:29:59 is served until 09:30:59, a movers universe derived
+# from it then is served until 09:31:59, and a scanner build that STARTS then reads it. A
+# scanner or theme build is stamped when it STARTS (`get_scanners` / `get_themes`), so how
+# long it runs no longer matters — its shorts leg has no overall timeout. The screener
+# universe is stamped when its sweep STARTS (`price_service._lead_or_join_universe`), so the
+# FMP sweep's duration sits inside its own 60 s. The movers universe is a CPU-only derivation
+# stamped when it ENDS; its rows can predate that stamp by the derivation, plus the sweep
+# when the derivation itself had to trigger one (`_SESSION_GRACE_UPSTREAM_BUILD_SECONDS` is
+# the margin). Residual, accepted: a derivation that triggers its own sweep slower than that
+# margin right at the open (the warmer normally keeps the screener universe fresh, so the
+# derivation finds one and sweeps nothing) can still date pre-open moves as today's until
+# the next 900 s scanner refresh. Session membership is
+# therefore judged with the stamp AND the clock shifted back by both TTLs + that margin + one
+# warmer tick (the DECLARED `HOME_WARM_TICK_SECONDS` default, so an env override cannot move
+# the grace): such a build is not passed off as today's, and the warmer rebuilds once, after
+# the grace, from post-open inputs. The cost: for ~2.5 min after the open the pre-open
+# cards stay in place (the warmer's session-change rebuild waits out the grace).
+_SESSION_GRACE_UPSTREAM_BUILD_SECONDS = 20
+_SESSION_GRACE_SECONDS = (
+    _PRICE_UNIVERSE_TTL_SECONDS
+    + _MOVERS_UNIVERSE_TTL_SECONDS
+    + Settings.model_fields["HOME_WARM_TICK_SECONDS"].default
+    + _SESSION_GRACE_UPSTREAM_BUILD_SECONDS
+)   # 60 + 60 + 10 + 20 = 150 s; pinned by tests/test_home_dashboard_warmer.py
+# A stamp further ahead of the clock than this is skew or a bad write, never "fresh".
+_FUTURE_STAMP_TOLERANCE_SECONDS = 5
+
+# ── Refresh-ahead warm (`refresh_due_sections` / `warm_all`) ──────────
+# A section is rebuilt once its entry is THIS old, so the Home warmer (one tick every
+# `HOME_WARM_TICK_SECONDS`, around the clock) lands a new entry before any request finds
+# the old one expired. The ordering each must keep — refresh-ahead + one tick + one
+# worst-case build < TTL — is `warm_ordering_violations()`, pinned by
+# tests/test_home_dashboard_warmer.py.
+_PULSE_REFRESH_AHEAD_SECONDS = 40          # TTL 60: lands by 40 + 10 + 6 (its guard) = 56
+_UNIVERSE_REFRESH_AHEAD_SECONDS = 45       # price_service._UNIVERSE_TTL 60; sweep ~1.5 s
+# Inside one closed window (no US session: 20:00-04:00 ET, weekends, holidays) the universe
+# stays fresh for `price_service._UNIVERSE_CLOSED_TTL` (900 s), so it is rebuilt this long
+# before THAT runs out: at 840 s, ~4 sweeps an hour instead of ~70 while prices cannot move
+# (`price_service._universe_in_closed_window` — the rule `_get_universe` applies). A stamp
+# from another phase falls back to the 45 s age, which also makes the night's last sweep
+# due at the first tick after 04:00 ET. The pulse keeps its 40 s cadence: its builds then
+# reuse that universe, and their five sparklines come from `_spark_memo` (a finished
+# session's bars are final), so they cost ~0 FMP calls (the CoinGecko tile has its own 600 s
+# cache).
+_UNIVERSE_CLOSED_REFRESH_AHEAD_MARGIN_SECONDS = 60
+_THEMES_REFRESH_AHEAD_SECONDS = 480        # TTL 600 (the old 900 s warm left it cold 1/3)
+_SIGNALS_REFRESH_AHEAD_SECONDS = 2400      # memory TTL 2700; usually just a Tier-2 re-read
+_TRILLION_REFRESH_AHEAD_SECONDS = 480      # TTL 600; Supabase reads only
+# Scanners refresh at `SCANNER_PREWARM_INTERVAL_SECONDS` (900), clamped so a misconfigured
+# value can neither outlive the TTL nor rebuild on every tick.
+_SCANNER_REFRESH_AHEAD_MARGIN_SECONDS = 120
+_SCANNER_REFRESH_AHEAD_FLOOR_SECONDS = 60
+# The universe has no guard of its own; its sweep measures ~1.5 s.
+_UNIVERSE_BUILD_BUDGET_SECONDS = 3
+# After a warm build fails, comes back degraded or writes nothing, that section is not
+# kicked again for this long (or for the section's own degraded TTL when longer — signals
+# hold 300 s, a rebuild being ~8 FMP calls). Without it a 10 s tick would retry an outage
+# six times a minute.
+_WARM_FAILURE_COOLDOWN_SECONDS = 45
+#: Every section the warmer keeps hot, in kick order.
+WARM_SECTIONS: Tuple[str, ...] = (
+    "pulse", "universe", "scanners", "themes", "signals", "trillion",
+)
+
 _SHORT_UNIVERSE_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "short_interest_universe.json"
 )
@@ -337,6 +467,98 @@ def _market_status(now: Optional[datetime] = None) -> Tuple[str, bool]:
         now = now.replace(tzinfo=_ET_ZONE)
     phase = session_phase(now)
     return _PHASE_TEXT.get(phase, ("Markets Closed", False))
+
+
+def _numbers_session(ts: float) -> date:
+    """The trading day whose day change a build stamped at ``ts`` (epoch s) describes.
+
+    `session_trading_date` names the session that is live or just was, and pre-market that
+    is TODAY — but the numbers are not today's. Until 09:30 the screener price still sits
+    on the previous close, so `price_service._pick_denominator` divides by the close before
+    it and the "day change" is the PREVIOUS session's move (`_no_session_since_close`).
+    Pre-market therefore maps to the previous trading day, and the value changes exactly
+    once per trading day, at the open (holidays and weekends keep the last session).
+    """
+    moment = datetime.fromtimestamp(ts, tz=timezone.utc)
+    if session_phase(moment) == SESSION_PREMARKET:
+        return previous_trading_day(moment.astimezone(_ET_ZONE).date())
+    return session_trading_date(moment)
+
+
+def _same_numbers_session(stamp: float, now: float) -> bool:
+    """Do the numbers stamped at ``stamp`` describe the session the clock describes now?
+
+    Both sides are shifted back by `_SESSION_GRACE_SECONDS` (see there): a build stamped in
+    the first seconds after the open may still carry pre-market numbers, and shifting the
+    clock too keeps a pre-open copy acceptable for that same short window instead of
+    blanking the section, and makes the warmer rebuild once after it.
+    """
+    grace = _SESSION_GRACE_SECONDS
+    return _numbers_session(stamp - grace) == _numbers_session(now - grace)
+
+
+def _stale_serve_problem(
+    stamp: float,
+    *,
+    in_session_ceiling: float,
+    off_session_ceiling: float,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """Why a cached copy stamped at ``stamp`` may NOT stand in for a timed-out build.
+
+    None means it may. Three refusals: a stamp in the future (skew or a bad write), an age
+    at or past the ceiling (``in_session_ceiling`` during the regular session, else
+    ``off_session_ceiling``), and numbers from a different trading session than the one
+    the response's market header describes. Pure; ``now`` is injectable (epoch seconds).
+    """
+    # NEVER raises: it runs inside the guards' `except` arms, and the dashboard gather has
+    # no `return_exceptions` — an exception here would fail the whole Home response.
+    try:
+        now = time.time() if now is None else float(now)
+        age = now - float(stamp)
+        if age < -_FUTURE_STAMP_TOLERANCE_SECONDS:
+            return f"stamped {-age:.0f}s in the future"
+        in_session = (
+            session_phase(datetime.fromtimestamp(now, tz=timezone.utc)) == SESSION_REGULAR
+        )
+        ceiling = in_session_ceiling if in_session else off_session_ceiling
+        if age >= ceiling:
+            where = "in the regular session" if in_session else "outside the regular session"
+            return f"{age:.0f}s old, at or past the {ceiling:.0f}s ceiling {where}"
+        if not _same_numbers_session(stamp, now):
+            return (
+                f"built for the {_numbers_session(stamp - _SESSION_GRACE_SECONDS)} session, "
+                f"now it is the {_numbers_session(now - _SESSION_GRACE_SECONDS)} session"
+            )
+    except Exception as exc:  # noqa: BLE001 — see above; an unreadable stamp is not servable
+        # `fromtimestamp` refuses an absurd stamp (OverflowError / OSError / ValueError);
+        # a non-numeric one is a TypeError. Either way: not servable, and say why.
+        return f"unreadable stamp {stamp!r}: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _scanner_is_degraded(result: ScannerGroupsResponse) -> bool:
+    """A scanner build that is not an answer: the universe pair is missing, or nothing came
+    back at all (see `get_scanners` — the movers card ranks the whole universe, so a
+    legitimately empty pair cannot happen)."""
+    return (
+        (result.movers is None and result.volume is None)
+        or not (result.movers or result.volume or result.shorts)
+    )
+
+
+def _warm_tick_seconds() -> float:
+    """The Home warmer's tick (`HOME_WARM_TICK_SECONDS`), floored at 1 s exactly as the loop
+    in `main._run_home_dashboard_warmer` floors it. Read at call time so an env override is
+    honoured."""
+    return max(1.0, float(settings.HOME_WARM_TICK_SECONDS))
+
+
+def _scanner_refresh_ahead_seconds() -> float:
+    """`SCANNER_PREWARM_INTERVAL_SECONDS`, clamped into [floor, TTL − margin]."""
+    configured = float(settings.SCANNER_PREWARM_INTERVAL_SECONDS)
+    ceiling = _SCANNER_CACHE_TTL_SECONDS - _SCANNER_REFRESH_AHEAD_MARGIN_SECONDS
+    return max(_SCANNER_REFRESH_AHEAD_FLOOR_SECONDS, min(configured, ceiling))
 
 
 def _finite_float(v: Any) -> Optional[float]:
@@ -434,6 +656,109 @@ def _intraday_sparkline(
     sampled = _downsample(closes, points)
     digits = sparkline_precision(sampled)
     return ([round(c, digits) for c in sampled], *span)
+
+
+# ── Sparkline memo (see `_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS`) ────────
+
+_SparkResult = Tuple[List[float], float, float]
+
+
+@dataclass(frozen=True)
+class _SparkMemo:
+    """One finished session's sparkline. Immutable: the series is a tuple, and every serve
+    hands out a fresh list, so no caller can edit what the next build reads."""
+
+    session_day: date           # the ET trading day the bars describe
+    fetched_at: float           # epoch s when the fetch was REQUESTED (not when it landed)
+    series: Tuple[float, ...]
+    span_from: float
+    span_to: float
+
+    def as_result(self) -> _SparkResult:
+        return (list(self.series), self.span_from, self.span_to)
+
+
+def _spark_last_bar(bars: Any) -> Optional[datetime]:
+    """The LAST dict bar's ET wall-clock stamp (naive), or None.
+
+    The same bar `_intraday_sparkline` reads its "latest day" from, so the memo's session
+    day is the day the series actually draws. FMP intraday stamps are naive ET
+    ("YYYY-MM-DD HH:MM:SS"); anything else (a daily bar, garbage) is None.
+    """
+    if not isinstance(bars, list):
+        return None
+    for bar in reversed(bars):
+        if isinstance(bar, dict):
+            try:
+                return datetime.strptime(str(bar.get("date", "")), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    return None
+
+
+def _spark_memo_refusal(
+    result: _SparkResult, last_bar: Optional[datetime], fetched_at: float
+) -> Optional[Tuple[str, bool]]:
+    """Why a regular-hours series fetched at ``fetched_at`` may NOT be memoized.
+
+    None means it may. Otherwise ``(reason, notable)``: ``notable`` is False for the
+    routine refusals (an empty series, the regular session, the minutes right after the
+    close) and True when the feed itself looks behind — bars from an older session, or a
+    series that stops short of the bell. Pure.
+    """
+    series = result[0]
+    if len(series) < 2:
+        return ("an empty series", False)
+    moment = datetime.fromtimestamp(fetched_at, tz=timezone.utc)
+    if session_phase(moment) == SESSION_REGULAR:
+        return ("fetched in the regular session", False)
+    close = last_completed_close(moment)
+    since_close = fetched_at - close.timestamp()
+    if since_close < _SPARK_MEMO_POST_CLOSE_DELAY_SECONDS:
+        return (
+            f"fetched {since_close:.0f}s after the close, under the "
+            f"{_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS}s settle delay",
+            False,
+        )
+    close_et = close.astimezone(_ET_ZONE)
+    if last_bar is None:
+        return ("its last bar carries no intraday time", True)
+    if last_bar.date() != close_et.date():
+        return (
+            f"its bars end on {last_bar.date()}, but the latest completed session is "
+            f"{close_et.date()}",
+            True,
+        )
+    close_minute = close_et.hour * 60 + close_et.minute
+    last_minute = last_bar.hour * 60 + last_bar.minute
+    if last_minute < close_minute - _SPARK_MEMO_COMPLETE_WITHIN_MINUTES:
+        return (
+            f"its last bar is {last_bar:%H:%M} ET, short of the {close_et:%H:%M} close",
+            True,
+        )
+    return None
+
+
+def _spark_memo_problem(memo: _SparkMemo, now: float) -> Optional[str]:
+    """Why ``memo`` may NOT be served at ``now`` (epoch s); None means it may. Pure.
+
+    Served only outside the regular session, while the session it describes is still the
+    latest completed one, and only when it was fetched past that close's settle delay (the
+    store already refuses anything else; checked again so a memo is never trusted on its
+    own say-so). A memo stamped ahead of the clock (the clock stepped back) is refused.
+    """
+    if now < memo.fetched_at - _FUTURE_STAMP_TOLERANCE_SECONDS:
+        return f"fetched {memo.fetched_at - now:.0f}s in the future"
+    moment = datetime.fromtimestamp(now, tz=timezone.utc)
+    if session_phase(moment) == SESSION_REGULAR:
+        return "the regular session is live"
+    close = last_completed_close(moment)
+    latest = close.astimezone(_ET_ZONE).date()
+    if memo.session_day != latest:
+        return f"it describes {memo.session_day}, the latest completed session is {latest}"
+    if memo.fetched_at < close.timestamp() + _SPARK_MEMO_POST_CLOSE_DELAY_SECONDS:
+        return "it was fetched inside the close's settle delay"
+    return None
 
 
 # ── Scanner pure helpers (unit-tested without network) ────────────────
@@ -746,6 +1071,52 @@ def _short_rows(
     return out
 
 
+# ── Refresh-ahead warm: one section's descriptor ──────────────────────
+
+# The screener universe's cache key in `price_service` (a literal there). The warmer reads
+# the entry's stamp to know when the universe is due; tests/test_home_dashboard_warmer.py
+# pins that `refresh_universe` writes exactly this key, so a rename cannot leave the
+# warmer believing the universe is always missing.
+_PRICE_UNIVERSE_KEY = "price:universe"
+
+
+@dataclass(frozen=True)
+class _WarmSpec:
+    """One section the Home warmer keeps hot.
+
+    Every callable is a cheap synchronous read of the section's own class-level state,
+    except ``build``, which returns the awaitable FORCED rebuild (it skips only the
+    freshness check, and leads or joins the section's `_inflight` future).
+    ``degraded`` is True when the current entry is not a good answer: a partial pulse, a
+    scanner build without its universe pair, a signals build with a failed card, or a
+    Trillion group invalidated by a job write.
+
+    The three ``closed_*`` fields are the screener universe's alone: when
+    ``closed_window(stamp, now)`` is True the entry lives ``closed_ttl_seconds`` and is
+    rebuilt at ``closed_refresh_ahead_seconds`` instead of the pair above. None = one pair.
+    """
+
+    name: str
+    ttl_seconds: float
+    refresh_ahead_seconds: float
+    build_budget_seconds: float
+    cooldown_seconds: float
+    session_bound: bool
+    enabled: Callable[[], bool]
+    stamp: Callable[[], Optional[float]]
+    degraded: Callable[[], bool]
+    busy: Callable[[], bool]
+    build: Callable[[], Awaitable[Any]]
+    closed_window: Optional[Callable[[float, float], bool]] = None
+    closed_ttl_seconds: Optional[float] = None
+    closed_refresh_ahead_seconds: Optional[float] = None
+
+
+def _entry_stamp(cache: Dict[str, Tuple[float, Any]], key: str) -> Optional[float]:
+    entry = cache.get(key)
+    return float(entry[0]) if entry is not None else None
+
+
 # ── Service ───────────────────────────────────────────────────────────
 
 
@@ -770,6 +1141,18 @@ class HomeDashboardService:
     # Per-theme drill-down cache, keyed by slug (lazy, on tap).
     _theme_detail_cache: Dict[str, Tuple[float, ThemeDetailResponse]] = {}
     _theme_detail_inflight: Dict[str, asyncio.Future] = {}
+    # Refresh-ahead warm (`refresh_due_sections`). At most ONE background build per
+    # section, held by a strong reference (a bare `create_task` can be garbage-collected
+    # mid-flight) and dropped by its own done-callback. `_warm_cooldown_until` is the
+    # epoch time before which a section that just failed, or came back degraded, is not
+    # kicked again.
+    _warm_tasks: Dict[str, asyncio.Task] = {}
+    _warm_cooldown_until: Dict[str, float] = {}
+    # Finished-session sparklines, keyed (SYMBOL, extended_hours) — see
+    # `_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS`. `_spark_memo_noted` keeps the last notable
+    # refusal logged per key, so a lagging feed logs once, not on every 40 s rebuild.
+    _spark_memo: Dict[Tuple[str, bool], _SparkMemo] = {}
+    _spark_memo_noted: Dict[Tuple[str, bool], str] = {}
 
     def __init__(self) -> None:
         self.fmp: FMPClient = get_fmp_client()
@@ -782,15 +1165,19 @@ class HomeDashboardService:
         """Aggregate the dashboard.
 
         Market status is computed FRESH each call (cheap datetime math, never
-        stale on an open↔closed transition). The Market Pulse list is cache-aside
-        (5 min) + in-flight dedup. The scanners come from their OWN 20-min cache
-        behind a timeout guard.
+        stale on an open↔closed transition). The six sections are gathered
+        concurrently, each from its OWN cache behind its own timeout guard: the
+        Market Pulse (60 s), scanners (20 min), signals (45 min in memory, 24 h in
+        Supabase), themes (10 min), Trillion Club (10 min) and the uncached,
+        per-user watchlist strip. The Home warmer (`refresh_due_sections`) rebuilds
+        the shared ones before they expire, so a request normally reads memory only.
 
-        Caching pulse and scanners under SEPARATE keys (rather than baking the
-        whole response into one 5-min entry) is deliberate: it means a slow/cold
-        scanner build that misses the 8s guard is never pinned as "empty" inside
-        a 5-minute dashboard cache — the scanners appear on the very next request
-        as soon as their own background build warms _scanner_cache.
+        Caching the sections under SEPARATE keys (rather than baking the whole
+        response into one entry) is deliberate: a slow/cold section that misses its
+        guard is never pinned as "empty" inside a dashboard-wide cache — it appears
+        on the very next request as soon as its own shielded build lands. While it
+        is missing, the guard serves its last copy only within that section's honest
+        limits (`_stale_serve_problem`), else the section ships empty.
 
         ``tier`` gates the App-Exclusive Signals tickers only (Pro/Max); omitting it
         defaults to Free, i.e. locked. Nothing else on this screen is tier-gated.
@@ -836,6 +1223,397 @@ class HomeDashboardService:
             watchlist_is_group=watchlist_is_group,
             trillion_club=trillion_club,
         )
+
+    # ── Refresh-ahead warm (boot warm + the Home warmer loop) ─────────
+
+    def _warm_spec(self, name: str) -> _WarmSpec:
+        """The descriptor for one of `WARM_SECTIONS`.
+
+        Built per call, with the sibling services imported function-locally: signals
+        imports FROM this module (a module-level import would be a cycle), and a defect in
+        the Trillion module must cost that one section — the same reason
+        `_get_trillion_club_guarded` imports it inside its own try.
+        """
+        if name == "pulse":
+            return _WarmSpec(
+                name=name,
+                ttl_seconds=_CACHE_TTL_SECONDS,
+                refresh_ahead_seconds=_PULSE_REFRESH_AHEAD_SECONDS,
+                build_budget_seconds=_PULSE_BUILD_TIMEOUT_SECONDS,
+                cooldown_seconds=max(_WARM_FAILURE_COOLDOWN_SECONDS, _CACHE_DEGRADED_TTL_SECONDS),
+                session_bound=False,
+                enabled=lambda: True,
+                stamp=lambda: _entry_stamp(self._cache, _CACHE_KEY),
+                degraded=lambda: (
+                    _CACHE_KEY in self._cache
+                    and _equity_tile_count(self._cache[_CACHE_KEY][1]) < len(_PULSE_SYMBOLS)
+                ),
+                busy=lambda: _CACHE_KEY in self._inflight,
+                build=lambda: self._get_pulse_cached(force=True),
+            )
+        if name == "universe":
+            from app.services import price_service as prices
+
+            return _WarmSpec(
+                name=name,
+                ttl_seconds=prices._UNIVERSE_TTL,
+                refresh_ahead_seconds=_UNIVERSE_REFRESH_AHEAD_SECONDS,
+                build_budget_seconds=_UNIVERSE_BUILD_BUDGET_SECONDS,
+                cooldown_seconds=max(_WARM_FAILURE_COOLDOWN_SECONDS, prices._UNIVERSE_DEGRADED_TTL),
+                session_bound=False,
+                enabled=lambda: True,
+                stamp=lambda: _entry_stamp(prices._cache, _PRICE_UNIVERSE_KEY),
+                # An empty or failed sweep is never cached (the entry is good or absent).
+                degraded=lambda: False,
+                busy=lambda: _PRICE_UNIVERSE_KEY in prices._inflight,
+                build=lambda: prices.get_price_service().refresh_universe(),
+                # Prices cannot move in a closed window: the rule `_get_universe` applies
+                # to the entry's freshness (see `_UNIVERSE_CLOSED_REFRESH_AHEAD_MARGIN_SECONDS`).
+                closed_window=lambda stamp, now: prices._universe_in_closed_window(stamp, now),
+                closed_ttl_seconds=prices._UNIVERSE_CLOSED_TTL,
+                closed_refresh_ahead_seconds=(
+                    prices._UNIVERSE_CLOSED_TTL - _UNIVERSE_CLOSED_REFRESH_AHEAD_MARGIN_SECONDS
+                ),
+            )
+        if name == "scanners":
+            return _WarmSpec(
+                name=name,
+                ttl_seconds=_SCANNER_CACHE_TTL_SECONDS,
+                refresh_ahead_seconds=_scanner_refresh_ahead_seconds(),
+                build_budget_seconds=_SCANNER_BUILD_TIMEOUT_SECONDS,
+                cooldown_seconds=max(_WARM_FAILURE_COOLDOWN_SECONDS, _SCANNER_DEGRADED_TTL_SECONDS),
+                session_bound=True,
+                enabled=lambda: True,
+                stamp=lambda: _entry_stamp(self._scanner_cache, _SCANNER_CACHE_KEY),
+                degraded=lambda: (
+                    _SCANNER_CACHE_KEY in self._scanner_cache
+                    and _scanner_is_degraded(self._scanner_cache[_SCANNER_CACHE_KEY][1])
+                ),
+                busy=lambda: _SCANNER_CACHE_KEY in self._scanner_inflight,
+                build=lambda: self.get_scanners(force=True),
+            )
+        if name == "themes":
+            return _WarmSpec(
+                name=name,
+                ttl_seconds=_THEMES_CACHE_TTL_SECONDS,
+                refresh_ahead_seconds=_THEMES_REFRESH_AHEAD_SECONDS,
+                build_budget_seconds=_THEMES_BUILD_TIMEOUT_SECONDS,
+                cooldown_seconds=_WARM_FAILURE_COOLDOWN_SECONDS,
+                session_bound=True,
+                enabled=lambda: True,
+                stamp=lambda: _entry_stamp(self._themes_cache, _THEMES_CACHE_KEY),
+                # A failed themes build is not cached at all, so a cached entry is good.
+                degraded=lambda: False,
+                busy=lambda: _THEMES_CACHE_KEY in self._themes_inflight,
+                build=lambda: self.get_themes(force=True),
+            )
+        if name == "signals":
+            from app.services import signals_service as sig
+
+            cls = sig.SignalsService
+            key = sig._SIGNALS_CACHE_KEY
+            return _WarmSpec(
+                name=name,
+                ttl_seconds=sig._SIGNALS_MEM_TTL_SECONDS,
+                refresh_ahead_seconds=_SIGNALS_REFRESH_AHEAD_SECONDS,
+                build_budget_seconds=sig._SIGNALS_BUILD_TIMEOUT_SECONDS,
+                # A signals rebuild is ~8 FMP calls; retry a failed card on the section's
+                # own degraded cadence, not every 45 s.
+                cooldown_seconds=max(_WARM_FAILURE_COOLDOWN_SECONDS, sig._SIGNALS_DEGRADED_TTL_SECONDS),
+                session_bound=False,
+                enabled=lambda: True,
+                stamp=lambda: _entry_stamp(cls._cache, key),
+                degraded=lambda: key in cls._degraded_keys,
+                busy=lambda: key in cls._inflight,
+                build=lambda: sig.get_signals_service().get_signals(force=True),
+            )
+        if name == "trillion":
+            from app.services import trillion_club_service as tcs
+
+            cls = tcs.TrillionClubService
+            key = tcs._GROUP_KEY
+
+            def _invalidated() -> bool:
+                stamp = _entry_stamp(cls._group_cache, key)
+                return stamp is not None and stamp <= cls._invalidated_at
+
+            return _WarmSpec(
+                name=name,
+                ttl_seconds=tcs._CACHE_TTL_SECONDS,
+                refresh_ahead_seconds=_TRILLION_REFRESH_AHEAD_SECONDS,
+                build_budget_seconds=tcs._GROUP_TIMEOUT_SECONDS,
+                cooldown_seconds=_WARM_FAILURE_COOLDOWN_SECONDS,
+                session_bound=False,
+                # Off → `get_group` reads nothing and caches nothing; warming it would
+                # only "fail" every cooldown.
+                enabled=lambda: bool(settings.TRILLION_CLUB_ENABLED),
+                stamp=lambda: _entry_stamp(cls._group_cache, key),
+                degraded=_invalidated,
+                busy=lambda: key in cls._inflight,
+                build=lambda: tcs.get_trillion_club_service().get_group(force=True),
+            )
+        raise KeyError(f"unknown Home warm section {name!r}")
+
+    def warm_ordering_violations(self, tick_seconds: Optional[float] = None) -> List[str]:
+        """Sections whose refresh-ahead + one tick + one worst-case build is NOT under the TTL.
+
+        Empty is the invariant: then the warmer always lands a new entry before a request
+        could find the old one expired. The Home warmer logs any violation at start-up (an
+        env override of `HOME_WARM_TICK_SECONDS` or `SCANNER_PREWARM_INTERVAL_SECONDS` can
+        break it); the tests pin it for the defaults.
+        """
+        tick = _warm_tick_seconds() if tick_seconds is None else float(tick_seconds)
+        out: List[str] = []
+        for name in WARM_SECTIONS:
+            spec = self._warm_spec(name)
+            pairs = [(name, spec.refresh_ahead_seconds, spec.ttl_seconds)]
+            if spec.closed_ttl_seconds is not None and spec.closed_refresh_ahead_seconds is not None:
+                # The universe's closed-window pair must keep the same ordering.
+                pairs.append((
+                    f"{name} (closed window)",
+                    spec.closed_refresh_ahead_seconds, spec.closed_ttl_seconds,
+                ))
+            for label, ahead, ttl in pairs:
+                total = ahead + tick + spec.build_budget_seconds
+                if not total < ttl:
+                    out.append(
+                        f"{label}: refresh-ahead {ahead:.0f}s + tick {tick:.0f}s "
+                        f"+ build {spec.build_budget_seconds:.0f}s = {total:.0f}s >= TTL "
+                        f"{ttl:.0f}s"
+                    )
+        return out
+
+    @classmethod
+    def _warm_due_reason(cls, spec: _WarmSpec, now: float) -> Optional[str]:
+        """Why ``spec`` should be rebuilt now, or None. Never awaits; pure dict reads."""
+        if now < cls._warm_cooldown_until.get(spec.name, 0.0):
+            return None
+        stamp = spec.stamp()
+        if stamp is None:
+            return "missing"
+        if spec.degraded():
+            return "degraded"
+        age = now - stamp
+        if age < -_FUTURE_STAMP_TOLERANCE_SECONDS:
+            return f"stamped {-age:.0f}s in the future"
+        refresh_ahead = spec.refresh_ahead_seconds
+        if (
+            age >= refresh_ahead
+            and spec.closed_window is not None
+            and spec.closed_refresh_ahead_seconds is not None
+            and spec.closed_window(stamp, now)
+        ):
+            # The universe inside one closed window lives longer (prices cannot move), so it
+            # is due later. Any other phase pair — e.g. a stamp from the night read at
+            # 04:00 ET — keeps the short age, so a phase change makes it due at once.
+            refresh_ahead = spec.closed_refresh_ahead_seconds
+        if age >= refresh_ahead:
+            return f"{age:.0f}s old"
+        if spec.session_bound and not _same_numbers_session(stamp, now):
+            return "a new trading session"
+        return None
+
+    def refresh_due_sections(self, now: Optional[float] = None) -> List[str]:
+        """Start ONE forced background rebuild for every section that is due; never awaits.
+
+        Called by the Home warmer every `HOME_WARM_TICK_SECONDS`, around the clock. A
+        section is due when its entry is missing, degraded, at least its refresh-ahead age
+        old (the `_*_REFRESH_AHEAD_SECONDS` constants; the screener universe's is 840 s
+        inside one closed window, where its TTL is 900 s), stamped in the future, or — for
+        scanners and themes, whose rows carry the DAY's move — built for an earlier
+        trading session. A section that just failed is skipped until its cooldown ends.
+
+        Never two builds of one section: a section is skipped while its `_inflight` holds
+        the key (a request is building it) or while this method's previous task for it is
+        still running, and the forced build itself leads or joins that `_inflight` future.
+        Because nothing here awaits a build, a slow scanner sweep never delays the pulse.
+
+        ``now`` (epoch seconds) is injectable for tests. Returns the sections kicked.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "Home warm: refresh_due_sections called without a running event loop — "
+                "nothing kicked"
+            )
+            return []
+        now_ts = time.time() if now is None else float(now)
+        kicked: List[str] = []
+        notable: List[str] = []
+        for name in WARM_SECTIONS:
+            try:
+                spec = self._warm_spec(name)
+                if not spec.enabled():
+                    continue
+                reason = self._warm_due_reason(spec, now_ts)
+                if reason is None or spec.busy():
+                    continue
+                running = self._warm_tasks.get(name)
+                if running is not None and not running.done():
+                    if running.get_loop() is loop:
+                        continue
+                    # Bound to a loop that is gone (a test's per-test loop, or a reloaded
+                    # app): it can never finish here, so it must not block the section.
+                    HomeDashboardService._warm_tasks.pop(name, None)
+                task = loop.create_task(self._warm_one(spec, reason), name=f"home-warm:{name}")
+                HomeDashboardService._warm_tasks[name] = task
+                task.add_done_callback(
+                    functools.partial(HomeDashboardService._on_warm_task_done, name)
+                )
+                kicked.append(name)
+                if not reason.endswith("s old"):
+                    notable.append(f"{name} ({reason})")
+            except Exception as exc:  # noqa: BLE001 — one section never stops the others
+                HomeDashboardService._warm_cooldown_until[name] = (
+                    time.time() + _WARM_FAILURE_COOLDOWN_SECONDS
+                )
+                logger.warning(
+                    "Home warm: could not check or kick the %s section: %s: %s — skipped "
+                    "for %ds",
+                    name, type(exc).__name__, exc, _WARM_FAILURE_COOLDOWN_SECONDS,
+                    exc_info=True,
+                )
+        if notable:
+            # Routine age refreshes (pulse ~1/min) stay at DEBUG; a missing, degraded or
+            # session-crossing section is worth a line.
+            logger.info("Home warm: rebuilding %s", ", ".join(notable))
+        elif kicked:
+            logger.debug("Home warm: rebuilding %s", ", ".join(kicked))
+        return kicked
+
+    async def _warm_one(self, spec: _WarmSpec, reason: str) -> bool:
+        """Run one forced build and judge it. True only when it left a NEW, good entry.
+
+        A build that raised, wrote nothing (an empty pulse, a failed themes read), left the
+        old entry in place, or wrote a degraded one puts the section in cooldown and logs a
+        WARNING; a success clears the cooldown. Never raises an `Exception`.
+        """
+        started = time.monotonic()
+        try:
+            before = spec.stamp()
+            await spec.build()
+        except Exception as exc:  # noqa: BLE001 — judged and logged here, never re-raised
+            self._note_warm_failure(spec, f"{type(exc).__name__}: {exc}", exc_info=True)
+            return False
+        after = spec.stamp()
+        if after is None:
+            problem = "nothing was cached"
+        elif after == before:
+            problem = "the cached entry was not replaced"
+        elif spec.degraded():
+            problem = "the new entry is degraded"
+        else:
+            problem = None
+        if problem is not None:
+            self._note_warm_failure(spec, problem)
+            return False
+        if HomeDashboardService._warm_cooldown_until.pop(spec.name, None) is not None:
+            logger.info("Home warm: %s recovered (%s)", spec.name, reason)
+        logger.debug(
+            "Home warm: %s rebuilt in %.2fs (%s)", spec.name, time.monotonic() - started, reason
+        )
+        return True
+
+    @staticmethod
+    def _note_warm_failure(spec: _WarmSpec, problem: str, *, exc_info: bool = False) -> None:
+        HomeDashboardService._warm_cooldown_until[spec.name] = time.time() + spec.cooldown_seconds
+        logger.warning(
+            "Home warm: %s rebuild failed: %s — not retried for %.0fs",
+            spec.name, problem, spec.cooldown_seconds,
+            exc_info=exc_info,
+        )
+
+    @staticmethod
+    def _on_warm_task_done(name: str, task: asyncio.Task) -> None:
+        """Drop the strong reference, and retrieve anything `_warm_one` could not catch."""
+        if HomeDashboardService._warm_tasks.get(name) is task:
+            HomeDashboardService._warm_tasks.pop(name, None)
+        if task.cancelled():
+            logger.info("Home warm: %s rebuild cancelled", name)
+            return
+        exc = task.exception()
+        if exc is not None:
+            HomeDashboardService._warm_cooldown_until[name] = (
+                time.time() + _WARM_FAILURE_COOLDOWN_SECONDS
+            )
+            logger.warning(
+                "Home warm: %s rebuild task died: %s: %s — not retried for %ds",
+                name, type(exc).__name__, exc, _WARM_FAILURE_COOLDOWN_SECONDS,
+                exc_info=exc,
+            )
+
+    async def warm_all(self) -> Dict[str, bool]:
+        """Force-rebuild every shared Home section, and the screener universe, concurrently.
+
+        The boot warm: pulse, scanners, themes, signals (its Supabase tier first), the
+        Trillion group and `PriceService.refresh_universe()`. Each forced build leads or
+        joins its section's `_inflight` future, so a request or warmer tick racing this
+        never doubles a build. Returns ``{section: ok}`` — ok means the section now holds
+        a NEW, good entry; a disabled section (the Trillion flag off) is left out.
+
+        Never raises an `Exception`: each failed section logs one WARNING with its type and
+        message (`_warm_one`). Cancellation propagates, and cancels the builds this call
+        leads — the caller (the lifespan's boot warm) relies on that at shutdown.
+        """
+        started = time.monotonic()
+        specs: List[_WarmSpec] = []
+        outcome: Dict[str, bool] = {}
+        for name in WARM_SECTIONS:
+            try:
+                spec = self._warm_spec(name)
+                if spec.enabled():
+                    specs.append(spec)
+            except Exception as exc:  # noqa: BLE001 — that section fails, the rest warm
+                outcome[name] = False
+                logger.warning(
+                    "Home warm-all: %s section unavailable: %s: %s",
+                    name, type(exc).__name__, exc, exc_info=True,
+                )
+        results = await asyncio.gather(
+            *(self._warm_one(spec, "boot warm") for spec in specs), return_exceptions=True
+        )
+        for spec, res in zip(specs, results):
+            if isinstance(res, BaseException):
+                # `_warm_one` catches every Exception, so this is a child's own
+                # cancellation (or worse) — still one section, never the whole warm.
+                logger.warning(
+                    "Home warm-all: %s did not finish: %s: %s",
+                    spec.name, type(res).__name__, res,
+                )
+                outcome[spec.name] = False
+            else:
+                outcome[spec.name] = bool(res)
+        ordered = {name: outcome[name] for name in WARM_SECTIONS if name in outcome}
+        failed = [name for name, ok in ordered.items() if not ok]
+        log = logger.warning if failed else logger.info
+        log(
+            "Home warm-all: %d/%d sections warm in %.1fs%s",
+            len(ordered) - len(failed), len(ordered), time.monotonic() - started,
+            f" (not warm: {', '.join(failed)})" if failed else "",
+        )
+        return ordered
+
+    @classmethod
+    async def shutdown_warm_tasks(cls, timeout: float = 2.0) -> None:
+        """Cancel every in-flight warm build and wait (bounded) for it to unwind.
+
+        For the lifespan teardown, BEFORE the shared HTTP clients close: a warm build is a
+        loose task, not one of `main.background_tasks`, and one still running would
+        otherwise fail every request joined to it with closed-client errors.
+        """
+        loop = asyncio.get_running_loop()
+        tasks = [t for t in cls._warm_tasks.values() if not t.done() and t.get_loop() is loop]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=timeout)
+            if pending:
+                logger.warning(
+                    "Home warm: %d warm build(s) still unwinding after %.1fs at shutdown",
+                    len(pending), timeout,
+                )
+        cls._warm_tasks.clear()
 
     # ── Trillion-Dollar Club Bets ─────────────────────────────────────
 
@@ -1039,18 +1817,21 @@ class HomeDashboardService:
 
     # ── Market Pulse (cache-aside) ────────────────────────────────────
 
-    async def _get_pulse_cached(self) -> List[MarketPulseItemResponse]:
+    async def _get_pulse_cached(self, *, force: bool = False) -> List[MarketPulseItemResponse]:
         """The Market Pulse list, cache-aside + in-flight dedup.
 
         TTL depends on COMPLETENESS, not on "didn't raise": a full strip is good
-        for 5 minutes, a degraded one for 45 seconds. `_build_pulse` catches every
-        per-tile failure and returns whatever survived, so it cannot raise — the
-        old unconditional write meant a transient FMP blip pinned a partial or
-        empty strip for the whole 5-minute window, in a CLASS-level cache shared
+        for `_CACHE_TTL_SECONDS` (60 s), a degraded one for 45 seconds. `_build_pulse`
+        catches every per-tile failure and returns whatever survived, so it cannot
+        raise — the old unconditional write meant a transient FMP blip pinned a
+        partial or empty strip for the whole window, in a CLASS-level cache shared
         by every user. Every sibling builder in this file (get_scanners,
         get_themes, _cached_float) already refuses to pin a degraded result.
+
+        ``force`` (the warmers) skips ONLY the freshness check: a build already in
+        flight is still joined, so a forced call never starts a second one.
         """
-        cached = self._cache.get(_CACHE_KEY)
+        cached = None if force else self._cache.get(_CACHE_KEY)
         if cached is not None:
             age = time.time() - cached[0]
             ttl = (
@@ -1072,7 +1853,26 @@ class HomeDashboardService:
         self._inflight[_CACHE_KEY] = fut
         try:
             pulse = await self._build_pulse()
-            if pulse:
+            current = self._cache.get(_CACHE_KEY)
+            if (
+                force
+                and _equity_tile_count(pulse) < len(_PULSE_SYMBOLS)
+                and current is not None
+                and _equity_tile_count(current[1]) == len(_PULSE_SYMBOLS)
+                and 0 <= time.time() - current[0] < _CACHE_TTL_SECONDS
+            ):
+                # A forced refresh runs AHEAD of the TTL, so the complete strip it would
+                # replace is still valid. Swapping in a partial one early — or handing
+                # joiners an empty one — would make the warmer worse than no warmer; keep
+                # the complete strip until it expires (the warmer backs off, and the next
+                # build decides).
+                logger.warning(
+                    "Market pulse refresh came back degraded (%d/%d entitled tiles) — "
+                    "keeping the complete strip (%.0fs old) until it expires",
+                    _equity_tile_count(pulse), len(_PULSE_SYMBOLS), time.time() - current[0],
+                )
+                pulse = current[1]
+            elif pulse:
                 # An empty build is never cached at all (nothing to serve, and the
                 # next request should retry immediately); a partial one is cached
                 # so it can still be served as "last known good", but at the short
@@ -1149,15 +1949,17 @@ class HomeDashboardService:
         )
         return cached[1]
 
-    async def _build_pulse(self) -> List[MarketPulseItemResponse]:
-        # ONE `batch-quote` request for every tile, instead of one `/quote` per tile.
-        # `/stable/batch-quote` takes a comma-separated list and returns the identical
-        # field set (verified live across SPY / ONEQ / DIA / BRK-B), and ETF proxy
-        # symbols ride along for free — so this is the same data in 1 call, not 6.
-        #
-        # Best-effort: on failure every tile falls back to its own `/quote`, which is
-        # exactly the previous behaviour, so a batch outage degrades rather than blanks
-        # the strip.
+    async def _pulse_quote_map(self) -> Dict[str, Dict[str, Any]]:
+        """ONE batch quote for every ETF tile, keyed by upper-cased symbol. NEVER raises.
+
+        One `batch-quote`-shaped request instead of one `/quote` per tile: it takes a
+        comma-separated list and returns the identical field set (verified live across
+        SPY / ONEQ / DIA / BRK-B), so this is the same data in 1 call, not 6.
+
+        Best-effort: on failure it returns ``{}`` and every tile falls back to its own
+        `/quote` (`_fetch_pulse_item`), so a batch outage degrades rather than blanks the
+        strip.
+        """
         quote_map: Dict[str, Dict[str, Any]] = {}
         try:
             rows = await price_source(self).get_quotes_list(
@@ -1171,17 +1973,60 @@ class HomeDashboardService:
                 "Pulse batch quote failed (%s: %s) — falling back to per-tile quotes",
                 type(e).__name__, e,
             )
+        return quote_map
 
-        # The crypto tile rides the SAME gather as the ETF tiles. Awaiting it afterwards
-        # would add its full latency to every cold build (measured: it doubled the build
-        # time under a slow upstream, which matters because `_get_pulse_guarded` ships an
-        # empty strip once the build passes `_PULSE_BUILD_TIMEOUT_SECONDS`).
-        *results, crypto_res = await asyncio.gather(
+    async def _build_pulse(self) -> List[MarketPulseItemResponse]:
+        # ONE gather for every independent upstream read: the batch quote, the five
+        # intraday sparklines and the crypto tile. The sparklines used to start only
+        # after the batch quote returned (inside `_fetch_pulse_item`), which put the
+        # whole quote leg (~0.2-0.4 s, a screener sweep when the universe is cold) in
+        # front of every cold build. Same calls, same count — they just overlap now.
+        #
+        # The crypto tile rides the SAME gather. Awaiting it afterwards would add its
+        # full latency to every cold build (measured: it doubled the build time under a
+        # slow upstream, which matters because `_get_pulse_guarded` ships an empty strip
+        # once the build passes `_PULSE_BUILD_TIMEOUT_SECONDS`).
+        n = len(_PULSE_SYMBOLS)
+        gathered = await asyncio.gather(
+            self._pulse_quote_map(),
             *[
-                self._fetch_pulse_item(cfg, quote_map.get(cfg["symbol"].upper()))
+                self._fetch_sparkline(
+                    cfg["symbol"], extended_hours=trades_extended_hours(cfg.get("type", ""))
+                )
                 for cfg in _PULSE_SYMBOLS
             ],
             self._get_crypto_pulse_tile(),
+            return_exceptions=True,
+        )
+        quote_res, spark_results, crypto_res = gathered[0], gathered[1:1 + n], gathered[1 + n]
+        if isinstance(quote_res, BaseException):
+            # `_pulse_quote_map` never raises; this is a cancelled child (or a patched one).
+            logger.warning(
+                "Pulse batch quote did not finish (%s: %s) — falling back to per-tile quotes",
+                type(quote_res).__name__, quote_res,
+            )
+            quote_map: Dict[str, Dict[str, Any]] = {}
+        else:
+            quote_map = quote_res or {}
+
+        sparks: List[Tuple[List[float], float, float]] = []
+        for cfg, spark in zip(_PULSE_SYMBOLS, spark_results):
+            if isinstance(spark, BaseException):
+                # `_fetch_sparkline` never raises either. A failed series must cost the
+                # line only — the tile still renders, exactly like a sparkline failure
+                # inside `_fetch_pulse_item` — and must not trigger a second fetch.
+                logger.warning(
+                    "Pulse sparkline %s did not finish: %s: %s — tile served without it",
+                    cfg["symbol"], type(spark).__name__, spark,
+                )
+                spark = ([], *FULL_SPAN)
+            sparks.append(spark)
+
+        results = await asyncio.gather(
+            *[
+                self._fetch_pulse_item(cfg, quote_map.get(cfg["symbol"].upper()), spark=spark)
+                for cfg, spark in zip(_PULSE_SYMBOLS, sparks)
+            ],
             return_exceptions=True,
         )
         pulse: List[MarketPulseItemResponse] = []
@@ -1245,15 +2090,18 @@ class HomeDashboardService:
 
     # ── Daily Scanners ────────────────────────────────────────────────
 
-    async def get_scanners(self) -> ScannerGroupsResponse:
+    async def get_scanners(self, *, force: bool = False) -> ScannerGroupsResponse:
         """Build the three scanner cards, cache-aside (20-min) + in-flight dedup.
 
         Never re-raises: a build failure returns empty groups (and is NOT cached,
         so the next request retries). This keeps awaiters from being poisoned and
         keeps the shielded background build (see ``_get_scanners_guarded``) from
         leaving an unretrieved exception.
+
+        ``force`` (the warmers) skips ONLY the freshness check: a build already in
+        flight is still joined, so a forced call never starts a second one.
         """
-        cached = self._scanner_cache.get(_SCANNER_CACHE_KEY)
+        cached = None if force else self._scanner_cache.get(_SCANNER_CACHE_KEY)
         if cached is not None and (time.time() - cached[0]) < _SCANNER_CACHE_TTL_SECONDS:
             logger.debug("Scanners served from in-memory cache")
             return cached[1]
@@ -1268,6 +2116,13 @@ class HomeDashboardService:
         self._scanner_inflight[_SCANNER_CACHE_KEY] = fut
         try:
             try:
+                # The entry is stamped with the build's START, not its end: movers and volume
+                # read the market universe at the start, while the shorts leg (no overall
+                # timeout) can run on for minutes. An end stamp let a slow build that read
+                # pre-open numbers pass for today's session (`_same_numbers_session`, the
+                # warmer's session check and `_stale_serve_problem` all read this stamp),
+                # and the age it gives is the age of the numbers inside.
+                started = time.time()
                 result = await self._build_scanner_groups()
                 # A degraded build is not an answer, and the cards are NOT independent:
                 # movers and volume both come from one `get_scanner_inputs()` universe
@@ -1279,22 +2134,40 @@ class HomeDashboardService:
                 # (The movers card ranks the whole universe, so a legitimately empty pair
                 # cannot happen.) Cached only briefly so the herd is still guarded while the
                 # next request retries.
-                degraded = (
-                    (result.movers is None and result.volume is None)
-                    or not (result.movers or result.volume or result.shorts)
-                )
-                stamp = time.time()
-                if degraded:
-                    stamp -= (_SCANNER_CACHE_TTL_SECONDS - _SCANNER_DEGRADED_TTL_SECONDS)
+                degraded = _scanner_is_degraded(result)
+                kept = self._still_good_scanners() if (force and degraded) else None
+                if kept is not None:
+                    # A forced refresh runs AHEAD of the TTL, so the good cards it would
+                    # replace are still valid: keep them until they expire rather than
+                    # swap in a degraded build early (the warmer backs off and retries).
                     logger.warning(
-                        "Scanners built empty (movers/volume/shorts all unavailable) — "
-                        "held for %ds, not the full %ds",
-                        _SCANNER_DEGRADED_TTL_SECONDS, _SCANNER_CACHE_TTL_SECONDS,
+                        "Scanner refresh came back degraded — keeping the good cards "
+                        "(%.0fs old) until they expire",
+                        time.time() - kept[0],
                     )
-                self._scanner_cache[_SCANNER_CACHE_KEY] = (stamp, result)
+                    result = kept[1]
+                else:
+                    stamp = started
+                    if degraded:
+                        # Held `_SCANNER_DEGRADED_TTL_SECONDS` from when it LANDS (a degraded
+                        # entry is a herd guard, not an answer), and never later than its start.
+                        stamp = min(
+                            started,
+                            time.time()
+                            - (_SCANNER_CACHE_TTL_SECONDS - _SCANNER_DEGRADED_TTL_SECONDS),
+                        )
+                        logger.warning(
+                            "Scanners built empty (movers/volume/shorts all unavailable) — "
+                            "held for %ds, not the full %ds",
+                            _SCANNER_DEGRADED_TTL_SECONDS, _SCANNER_CACHE_TTL_SECONDS,
+                        )
+                    self._scanner_cache[_SCANNER_CACHE_KEY] = (stamp, result)
             except Exception as exc:  # noqa: BLE001 — scanners must never fail the dashboard
                 logger.warning("Scanner build failed: %s: %s", type(exc).__name__, exc)
-                result = ScannerGroupsResponse()  # empty; not cached → retries
+                kept = self._still_good_scanners() if force else None
+                # Empty and NOT cached → retries. A forced (early) refresh hands its
+                # joiners the still-valid cards instead of an empty section.
+                result = kept[1] if kept is not None else ScannerGroupsResponse()
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1306,6 +2179,17 @@ class HomeDashboardService:
             raise
         finally:
             self._scanner_inflight.pop(_SCANNER_CACHE_KEY, None)
+
+    def _still_good_scanners(self) -> Optional[Tuple[float, ScannerGroupsResponse]]:
+        """The cached scanner entry when it is good AND still inside its TTL, else None."""
+        current = self._scanner_cache.get(_SCANNER_CACHE_KEY)
+        if (
+            current is not None
+            and not _scanner_is_degraded(current[1])
+            and 0 <= time.time() - current[0] < _SCANNER_CACHE_TTL_SECONDS
+        ):
+            return current
+        return None
 
     async def _get_scanners_guarded(self) -> ScannerGroupsResponse:
         """Await scanners up to a hard timeout. ``asyncio.shield`` ensures a
@@ -1319,16 +2203,30 @@ class HomeDashboardService:
             )
         except Exception as exc:  # TimeoutError or anything unexpected
             # The shielded build keeps running and will refresh _scanner_cache.
-            # Meanwhile serve the LAST cached scanners (any age) — slightly stale
-            # cards beat a blank section — falling back to empty only if nothing
-            # has ever been built.
+            # Meanwhile serve the last cached scanners — slightly stale cards beat a
+            # blank section — but only while they are honest: under the age ceiling and
+            # from the session the header describes. The rows carry prices and the
+            # DAY's move, and "any age" (the old rule) put yesterday's movers under
+            # today's "Markets Open".
             cached = self._scanner_cache.get(_SCANNER_CACHE_KEY)
             if cached is not None:
-                logger.info(
-                    "Scanners build slow (%s); serving last cached (age=%.0fs)",
-                    type(exc).__name__, time.time() - cached[0],
+                problem = _stale_serve_problem(
+                    cached[0],
+                    in_session_ceiling=_SCANNER_STALE_CEILING_IN_SESSION_SECONDS,
+                    off_session_ceiling=_SCANNER_STALE_CEILING_OFF_SESSION_SECONDS,
                 )
-                return cached[1]
+                if problem is None:
+                    logger.info(
+                        "Scanners build slow (%s); serving last cached (age=%.0fs)",
+                        type(exc).__name__, time.time() - cached[0],
+                    )
+                    return cached[1]
+                logger.warning(
+                    "Scanners build slow (%s: %s) and the cached copy is not servable (%s) "
+                    "— shipping the section empty",
+                    type(exc).__name__, exc, problem,
+                )
+                return ScannerGroupsResponse()
             logger.warning(
                 "Scanners not ready this build (no cache yet): %s: %s",
                 type(exc).__name__, exc,
@@ -1554,14 +2452,17 @@ class HomeDashboardService:
 
     # ── Emerging Frontiers themes (server-driven, cache-aside + guard) ─
 
-    async def get_themes(self) -> ThemesGroupResponse:
+    async def get_themes(self, *, force: bool = False) -> ThemesGroupResponse:
         """Build the Emerging Frontiers cards, cache-aside (10-min) + in-flight dedup.
 
         Never re-raises: a build failure returns an empty group (NOT cached, so
         the next request retries). Mirrors ``get_scanners`` — keeps awaiters
         unpoisoned and the shielded background build (see ``_get_themes_guarded``)
-        from leaving an unretrieved exception."""
-        cached = self._themes_cache.get(_THEMES_CACHE_KEY)
+        from leaving an unretrieved exception.
+
+        ``force`` (the warmers) skips ONLY the freshness check: a build already in
+        flight is still joined, so a forced call never starts a second one."""
+        cached = None if force else self._themes_cache.get(_THEMES_CACHE_KEY)
         if cached is not None and (time.time() - cached[0]) < _THEMES_CACHE_TTL_SECONDS:
             logger.debug("Themes served from in-memory cache")
             return cached[1]
@@ -1576,13 +2477,18 @@ class HomeDashboardService:
         self._themes_inflight[_THEMES_CACHE_KEY] = fut
         try:
             try:
+                # Stamped with the build's START (as `get_scanners` is): the card % comes
+                # from a universe read made after it, and the review/insight reads that end
+                # the build can be slow, so an end stamp could pass pre-open numbers off as
+                # today's session.
+                started = time.time()
                 result = await self._build_themes()
                 # Cache ANY successful build — including a genuine "no active themes"
                 # empty (mirrors get_scanners). _read_theme_rows now RAISES on a
                 # Supabase error, so an empty here means the read succeeded with zero
                 # active rows — safe to cache, and it stops re-reading Supabase every
                 # request. Only a BUILD EXCEPTION (below) skips caching so it retries.
-                self._themes_cache[_THEMES_CACHE_KEY] = (time.time(), result)
+                self._themes_cache[_THEMES_CACHE_KEY] = (started, result)
             except Exception as exc:  # noqa: BLE001 — themes must never fail the dashboard
                 logger.warning("Themes build failed: %s: %s", type(exc).__name__, exc)
                 result = ThemesGroupResponse()  # empty; NOT cached → retries next request
@@ -1601,7 +2507,8 @@ class HomeDashboardService:
         """Await themes up to a hard timeout. ``asyncio.shield`` ensures a timeout
         never CANCELS the shared build (it keeps running + caches for the next
         request) — we just stop waiting and ship the dashboard without themes this
-        round, serving the last cached list (any age) if we have one."""
+        round, serving the last cached list if it is still honest (under the age
+        ceiling and from the current trading session — the card % is the DAY's move)."""
         try:
             return await asyncio.wait_for(
                 asyncio.shield(self.get_themes()),
@@ -1610,11 +2517,23 @@ class HomeDashboardService:
         except Exception as exc:  # TimeoutError or anything unexpected
             cached = self._themes_cache.get(_THEMES_CACHE_KEY)
             if cached is not None:
-                logger.info(
-                    "Themes build slow (%s); serving last cached (age=%.0fs)",
-                    type(exc).__name__, time.time() - cached[0],
+                problem = _stale_serve_problem(
+                    cached[0],
+                    in_session_ceiling=_THEMES_STALE_CEILING_IN_SESSION_SECONDS,
+                    off_session_ceiling=_THEMES_STALE_CEILING_OFF_SESSION_SECONDS,
                 )
-                return cached[1]
+                if problem is None:
+                    logger.info(
+                        "Themes build slow (%s); serving last cached (age=%.0fs)",
+                        type(exc).__name__, time.time() - cached[0],
+                    )
+                    return cached[1]
+                logger.warning(
+                    "Themes build slow (%s: %s) and the cached copy is not servable (%s) "
+                    "— shipping the section empty",
+                    type(exc).__name__, exc, problem,
+                )
+                return ThemesGroupResponse()
             logger.warning(
                 "Themes not ready this build (no cache yet): %s: %s",
                 type(exc).__name__, exc,
@@ -1941,34 +2860,47 @@ class HomeDashboardService:
         return fl_f
 
     async def _fetch_pulse_item(
-        self, cfg: Dict[str, str], quote: Optional[Dict[str, Any]] = None
+        self,
+        cfg: Dict[str, str],
+        quote: Optional[Dict[str, Any]] = None,
+        *,
+        spark: Optional[Tuple[List[float], float, float]] = None,
     ) -> Optional[MarketPulseItemResponse]:
-        """Build one tile from a pre-fetched quote + a daily-close sparkline.
+        """Build one tile from a pre-fetched quote + an intraday sparkline.
 
         `quote` comes from the single `batch-quote` request in `_build_pulse`. When it
         is None (batch failed, or this symbol was missing from the response) the tile
         falls back to its own `/quote` — the pre-batch behaviour, kept so one bad batch
         degrades a tile rather than the strip.
 
+        `spark` is the `_fetch_sparkline` result `_build_pulse` already fetched alongside
+        the batch quote; given, this tile does not fetch its own. The crypto tile
+        (`_get_crypto_pulse_tile`) passes neither and fetches both here.
+
         A missing quote/price drops the tile (returns None). Sparkline failure is
         non-fatal — the tile still renders with an empty series.
         """
         symbol = cfg["symbol"]
-        # Bitcoin trades 24/7 and the FMP commodity codes (GCUSD/CLUSD) are
-        # continuously-quoted futures, so their intraday series must NOT be clipped
-        # to the US equity session — that is what their own detail charts do
-        # (crypto_service / commodity_service both pass extended_hours=True).
-        # _PULSE_SYMBOLS already carries the class per tile.
-        spark_task = self._fetch_sparkline(
-            symbol, extended_hours=trades_extended_hours(cfg.get("type", ""))
-        )
-        if quote is None:
-            quote, spark_result = await asyncio.gather(
-                price_source(self).get_quote(symbol), spark_task
-            )
+        if spark is not None:
+            spark_result = spark
+            if quote is None:
+                quote = await price_source(self).get_quote(symbol)
         else:
-            spark_result = await spark_task
-        spark, spark_from, spark_to = spark_result
+            # Bitcoin trades 24/7 and the FMP commodity codes (GCUSD/CLUSD) are
+            # continuously-quoted futures, so their intraday series must NOT be clipped
+            # to the US equity session — that is what their own detail charts do
+            # (crypto_service / commodity_service both pass extended_hours=True).
+            # _PULSE_SYMBOLS already carries the class per tile.
+            spark_task = self._fetch_sparkline(
+                symbol, extended_hours=trades_extended_hours(cfg.get("type", ""))
+            )
+            if quote is None:
+                quote, spark_result = await asyncio.gather(
+                    price_source(self).get_quote(symbol), spark_task
+                )
+            else:
+                spark_result = await spark_task
+        spark_series, spark_from, spark_to = spark_result
 
         if not quote:
             logger.warning("No quote for pulse symbol %s — dropping tile", symbol)
@@ -2034,7 +2966,7 @@ class HomeDashboardService:
             change_percent=round(change_f, 2) + 0.0,
             change_known=change_known,
             previous_close=previous_close,
-            spark=spark,
+            spark=spark_series,
             spark_from=spark_from,
             spark_to=spark_to,
         )
@@ -2058,7 +2990,16 @@ class HomeDashboardService:
 
         Returns [] on failure — never a synthetic series. The span degrades to full
         width, i.e. the behaviour the tile had before spans existed.
+
+        Outside the regular session a finished session's regular-hours series is served
+        from `_spark_memo` instead of downloaded again (`_SPARK_MEMO_POST_CLOSE_DELAY_SECONDS`
+        has the rules). In the regular session, and for every 24/7 series, this fetches
+        exactly as before.
         """
+        requested_at = time.time()
+        memoized = self._spark_memo_get(symbol, extended_hours, requested_at)
+        if memoized is not None:
+            return memoized
         try:
             bars = await fetch_chart_data(
                 self.fmp, symbol, "1D", extended_hours=extended_hours
@@ -2066,13 +3007,117 @@ class HomeDashboardService:
             # Same flag on both halves: the span describes the window the bars were
             # FETCHED in, so passing one and not the other would position a
             # regular-hours series against a 24h axis (or vice versa).
-            return _intraday_sparkline(bars, extended_hours=extended_hours)
+            result = _intraday_sparkline(bars, extended_hours=extended_hours)
         except Exception as exc:
             logger.warning(
                 "Sparkline (1D intraday) for %s failed: %s: %s",
                 symbol, type(exc).__name__, exc,
             )
             return ([], *FULL_SPAN)
+        self._spark_memo_put(symbol, extended_hours, bars, result, requested_at)
+        return result
+
+    @classmethod
+    def _spark_memo_get(
+        cls, symbol: str, extended_hours: bool, now: float
+    ) -> Optional[_SparkResult]:
+        """The memoized series for ``symbol`` when it may be served at ``now``, else None.
+
+        Never raises (`_fetch_sparkline` promises not to): an unexpected error is a miss,
+        logged, and the caller fetches as it always did.
+        """
+        if extended_hours:
+            return None
+        try:
+            key = (str(symbol).upper(), False)
+            memo = cls._spark_memo.get(key)
+            if memo is None:
+                return None
+            problem = _spark_memo_problem(memo, now)
+            if problem is not None:
+                logger.debug("Sparkline memo for %s not served: %s", key[0], problem)
+                return None
+            logger.debug(
+                "Sparkline %s served from the memo (%s session, fetched %.0fs ago)",
+                key[0], memo.session_day, now - memo.fetched_at,
+            )
+            return memo.as_result()
+        except Exception as exc:  # noqa: BLE001 — a memo defect costs one fetch, never the tile
+            logger.warning(
+                "Sparkline memo read for %s failed: %s: %s — fetching instead",
+                symbol, type(exc).__name__, exc, exc_info=True,
+            )
+            return None
+
+    @classmethod
+    def _spark_memo_put(
+        cls,
+        symbol: str,
+        extended_hours: bool,
+        bars: Any,
+        result: _SparkResult,
+        requested_at: float,
+    ) -> None:
+        """Memoize a freshly fetched series when `_spark_memo_refusal` allows it. Never raises.
+
+        A store never replaces a memo fetched LATER (two concurrent builds can land out of
+        order), and drops every entry of an older session; past `_SPARK_MEMO_MAX_ENTRIES`
+        the oldest fetches go.
+        """
+        if extended_hours:
+            return
+        try:
+            key = (str(symbol).upper(), False)
+            last_bar = _spark_last_bar(bars)
+            refusal = _spark_memo_refusal(result, last_bar, requested_at)
+            if refusal is not None:
+                reason, notable = refusal
+                if notable and cls._spark_memo_noted.get(key) != reason:
+                    if len(cls._spark_memo_noted) >= _SPARK_MEMO_MAX_ENTRIES:
+                        cls._spark_memo_noted.clear()   # bounded; at worst a line repeats
+                    cls._spark_memo_noted[key] = reason
+                    logger.info(
+                        "Sparkline %s not memoized: %s — fetched again on the next build",
+                        key[0], reason,
+                    )
+                else:
+                    logger.debug("Sparkline %s not memoized: %s", key[0], reason)
+                return
+            if last_bar is None:  # unreachable: `_spark_memo_refusal` refuses a missing bar
+                return
+            current = cls._spark_memo.get(key)
+            if current is not None and current.fetched_at >= requested_at:
+                logger.debug(
+                    "Sparkline %s: a later fetch is already memoized — keeping it", key[0]
+                )
+                return
+            memo = _SparkMemo(
+                session_day=last_bar.date(),
+                fetched_at=float(requested_at),
+                series=tuple(float(v) for v in result[0]),
+                span_from=float(result[1]),
+                span_to=float(result[2]),
+            )
+            cls._spark_memo[key] = memo
+            cls._spark_memo_noted.pop(key, None)
+            for other, entry in list(cls._spark_memo.items()):
+                if entry.session_day < memo.session_day:
+                    cls._spark_memo.pop(other, None)
+            if len(cls._spark_memo) > _SPARK_MEMO_MAX_ENTRIES:
+                by_age = sorted(cls._spark_memo.items(), key=lambda kv: kv[1].fetched_at)
+                for other, _entry in by_age[: len(by_age) - _SPARK_MEMO_MAX_ENTRIES]:
+                    cls._spark_memo.pop(other, None)
+            if current is None or current.session_day != memo.session_day:
+                logger.info(
+                    "Sparkline %s memoized for the %s session (%d points) — no chart call "
+                    "for it until the next open",
+                    key[0], memo.session_day, len(memo.series),
+                )
+        except Exception as exc:  # noqa: BLE001 — a failed store costs a later fetch only
+            logger.warning(
+                "Sparkline memo store for %s failed: %s: %s — it will be fetched again",
+                symbol, type(exc).__name__, exc, exc_info=True,
+            )
 
 
 # ── Singleton ─────────────────────────────────────────────────────────

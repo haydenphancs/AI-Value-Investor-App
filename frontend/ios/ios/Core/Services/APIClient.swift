@@ -14,6 +14,7 @@
 //
 
 import Foundation
+import OSLog
 
 // MARK: - API Client
 
@@ -166,6 +167,84 @@ actor APIClient {
         return endpoint.authPolicy.isUsableWithoutCredential
     }
 
+    // MARK: - Proactive token refresh (pre-flight)
+
+    /// How close to its `exp` an armed access token may be before a request refreshes it FIRST.
+    /// Above any send latency, and tiny against the 24 h access token
+    /// (`ACCESS_TOKEN_EXPIRE_MINUTES`; a backend↔iOS test pins the ratio).
+    nonisolated private static let proactiveRefreshSkew: TimeInterval = 60
+
+    /// The last token the pre-flight JUDGED. Each token is judged once: a refresh that failed, or
+    /// a device clock set ahead (a token minted seconds ago that already "looks" expired), costs
+    /// at most one pre-flight refresh per token — never one per request.
+    private var preflightExemptToken: String?
+
+    /// `exp` of the last token whose claims were parsed, so a burst of requests on one token
+    /// decodes its payload once. nil `exp` = unreadable.
+    private var expiryMemo: (token: String, exp: Date?)?
+
+    nonisolated private static let preflightLog = Logger(subsystem: "com.phan.caydex", category: "auth-preflight")
+
+    /// Refresh the armed access token BEFORE sending when it is expired or within
+    /// `proactiveRefreshSkew` of expiring — instead of sending it anyway, eating a 401 and a
+    /// second round trip (TestFlight 1.0 (9): +1-1.3 s on a roaming cold launch more than 24 h
+    /// after the last refresh).
+    ///
+    /// An OPTIMISATION ONLY, so it can never make anything worse:
+    ///   • it rides the EXISTING single-flight, so every launch request shares one refresh with
+    ///     each other and with the 401 interceptor;
+    ///   • it never ends a session, clears a token or throws. Whatever the outcome, the request
+    ///     goes out exactly as it would have, and the 401 interceptor stays the ONLY code that
+    ///     interprets a failed refresh (auth.md §3/§5);
+    ///   • `isAuthEndpoint` is skipped, so `/auth/refresh` cannot recurse into itself;
+    ///   • an unreadable `exp` means "the server decides" (unlike `WidgetJWT`'s
+    ///     unknown = expired), so a token it cannot parse never causes a refresh.
+    ///
+    /// `self.refreshTokenSingleFlight()` is the fifth call site of the single-flight, the only
+    /// one outside the four 401 interceptors (`test_ios_transient_refresh_keeps_session.py` T1
+    /// counts those); `test_ios_home_instant_paint_guards.py` pins the full caller set.
+    private func refreshArmedTokenIfExpired(for endpoint: APIEndpoint) async {
+        guard !endpoint.isAuthEndpoint, tokenRefresher != nil else { return }
+        if let inFlight = refreshInFlight {
+            // A refresh is already running — another request's pre-flight or a 401. Wait for it
+            // instead of sending the token it is replacing, then judge whatever token is armed
+            // AFTER it, once (below). Returning here instead would send a token re-armed
+            // meanwhile (session restore) unjudged.
+            _ = await inFlight.value
+        }
+        guard let token = authToken, token != preflightExemptToken else { return }
+
+        let claimedExpiry: Date?
+        if let memo = expiryMemo, memo.token == token {
+            claimedExpiry = memo.exp
+        } else {
+            claimedExpiry = WidgetJWT.expiry(of: token)
+            expiryMemo = (token, claimedExpiry)
+        }
+        guard let exp = claimedExpiry else {
+            preflightExemptToken = token
+            Self.preflightLog.warning("auth-preflight: the armed access token has no readable exp — sending it as is, the server decides")
+            return
+        }
+        let secondsLeft = exp.timeIntervalSinceNow
+        guard secondsLeft <= Self.proactiveRefreshSkew else { return }
+
+        // Judged BEFORE the await: a request arriving while this refresh runs joins it above,
+        // and never starts a second one for the same token.
+        preflightExemptToken = token
+        let path = endpoint.path
+        Self.preflightLog.info("auth-preflight: access token expires in \(secondsLeft, format: .fixed(precision: 0), privacy: .public)s — refreshing before \(path, privacy: .public)")
+        let outcome = await self.refreshTokenSingleFlight()
+        switch outcome {
+        case .refreshed(let fresh):
+            preflightExemptToken = fresh
+        case .transientFailure, .credentialRejected:
+            // Nothing. The request goes out with the token it has; if that 401s, the interceptor
+            // refreshes again and decides what the failure means.
+            Self.preflightLog.info("auth-preflight: refresh before \(path, privacy: .public) did not complete — sending as is, the 401 path decides")
+        }
+    }
+
     // MARK: - Request Methods
 
     /// Make a request and decode the response
@@ -175,6 +254,7 @@ actor APIClient {
         retryCount: Int = 2,
         allowAuthRetry: Bool = true
     ) async throws -> T {
+        await refreshArmedTokenIfExpired(for: endpoint)
         let request = try buildRequest(for: endpoint)
 
         logRequest(request, endpoint: endpoint)
@@ -263,6 +343,7 @@ actor APIClient {
 
     /// Make a request without expecting a response body
     func request(endpoint: APIEndpoint, allowAuthRetry: Bool = true) async throws {
+        await refreshArmedTokenIfExpired(for: endpoint)
         let request = try buildRequest(for: endpoint)
 
         logRequest(request, endpoint: endpoint)
@@ -324,6 +405,7 @@ actor APIClient {
     /// `request` — on a non-2xx status `validateResponse` still decodes the
     /// backend's APIError body (e.g. REPORT_NOT_READY) into an `APIError`.
     func downloadData(endpoint: APIEndpoint, retryCount: Int = 1, allowAuthRetry: Bool = true) async throws -> Data {
+        await refreshArmedTokenIfExpired(for: endpoint)
         let request = try buildRequest(for: endpoint)
         logRequest(request, endpoint: endpoint)
 
@@ -377,6 +459,58 @@ actor APIClient {
             throw error
         } catch {
             throw APIError.networkError(error)
+        }
+    }
+
+    /// `request<T>` that ALSO hands back the exact response bytes it decoded.
+    ///
+    /// For the one caller that keeps a response verbatim: Home's on-device snapshot
+    /// (`HomeDashboardSnapshotStore`). It stores the raw body because `HomeDashboardData` holds
+    /// `Color`s and is not Codable — re-mapping the bytes through the same decode-safe DTOs is
+    /// what lets a newer build read an older file, or reject it cleanly.
+    ///
+    /// Built on `downloadData`, so it shares that transport's `buildRequest` gate (an unarmed
+    /// call on a `.signInRequired` route is refused before any I/O, typed), the 401 →
+    /// single-flight refresh → retry-once interceptor, the GET-only 5xx retry and the
+    /// structured-error contract. DEBUG builds also get `request<T>`'s localhost/Railway
+    /// failover on a connection failure (`downloadData` has none of its own).
+    func requestReturningBody<T: Decodable>(
+        endpoint: APIEndpoint,
+        responseType: T.Type,
+        retryCount: Int = 2
+    ) async throws -> (value: T, body: Data) {
+        let body: Data
+        do {
+            body = try await downloadData(endpoint: endpoint, retryCount: retryCount)
+        } catch {
+            // Connection failed — the same DEBUG failover as `request<T>`, so Home is not the
+            // one screen that shows a network error while localhost is down. `downloadData`
+            // wraps the transport failure as `.networkError`; never on a cancellation, and
+            // only a GET (the helper's own guard). Release rethrows exactly as before.
+            #if DEBUG
+            if let apiError = error as? APIError,
+               case .networkError(let underlying) = apiError,
+               !Self.isCancellation(underlying),
+               let failoverResult: (value: T, body: Data) = try? await attemptFailoverReturningBody(
+                   endpoint: endpoint, responseType: responseType, originalError: underlying
+               ) {
+                return failoverResult
+            }
+            #endif
+            throw error
+        }
+        let value = try decodeBody(responseType, from: body)
+        return (value, body)
+    }
+
+    /// Decode bytes with THIS client's decoder — the configuration and isolation every live
+    /// response is decoded with. Any failure surfaces as `APIError.decodingError`, exactly as a
+    /// malformed live body does in `request<T>`.
+    func decodeBody<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIError.decodingError(error)
         }
     }
 
@@ -436,6 +570,7 @@ actor APIClient {
     /// every other request in the app silently recovered — the same session working everywhere
     /// except the one screen the user was typing into.
     private func openStream(endpoint: APIEndpoint, allowAuthRetry: Bool = true) async throws -> URLSession.AsyncBytes {
+        await refreshArmedTokenIfExpired(for: endpoint)
         do {
             return try await openStreamOnce(endpoint: endpoint)
         } catch let error as APIError {
@@ -642,6 +777,46 @@ actor APIClient {
         try validateResponse(httpResponse, data: data)
 
         await env.resolve()
+    }
+
+    /// `attemptFailover` for `requestReturningBody`: the same probe, GET-only guard and
+    /// resolve-on-success, but it hands back the response bytes alongside the decoded value.
+    private func attemptFailoverReturningBody<T: Decodable>(
+        endpoint: APIEndpoint,
+        responseType: T.Type,
+        originalError: Error
+    ) async throws -> (value: T, body: Data) {
+        // GET only — the same money rule as `attemptFailover` (a failover is a RE-SEND).
+        guard endpoint.method.isSafeToRetryAfterServerError else { throw originalError }
+
+        let env = ServerEnvironmentManager.shared
+        guard !env.isManualOverride else { throw originalError }
+
+        let failoverURL: URL
+        if env.isLocal {
+            failoverURL = env.railwayURL
+            print("⚡ [APIClient] Localhost unreachable — failing over to Railway")
+        } else {
+            guard await env.isLocalhostAvailable() else { throw originalError }
+            failoverURL = env.localURL
+            print("⚡ [APIClient] Railway unreachable — failing over to localhost")
+        }
+
+        let request = try buildRequest(for: endpoint, baseURL: failoverURL)
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.unknown(message: "Invalid response type")
+        }
+
+        logResponse(httpResponse, data: data)
+        try validateResponse(httpResponse, data: data)
+
+        let value = try decodeBody(responseType, from: data)
+
+        // Failover succeeded — update the resolved URL so future requests use it directly.
+        await env.resolve()
+        return (value, data)
     }
     #endif
 

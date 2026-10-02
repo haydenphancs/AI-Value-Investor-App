@@ -40,23 +40,66 @@ import time
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
+from postgrest import CountMethod
+
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.utils.market_hours import session_trading_date
+from app.utils.postgrest_paging import fetch_all_rows_concurrent
 from app.services.price_service import PriceService, _finite, price_source
 
 logger = logging.getLogger(__name__)
 
-# Closes move once per session. An hour keeps a redeploy from re-paying the 63-request
-# sweep on every request while never serving a stale session.
-_CLOSES_TTL = 3600.0
-# The derived universe rides the screener's own 60 s freshness.
+# ── the close map (`movers:closes`) ─────────────────────────────────────────────────
+# Closes move once per session, and the map is a ~74-page Supabase sweep (~3 s with
+# `_CLOSE_PAGE_WORKERS` pages in flight, 11-14 s serially), so a READ never rebuilds a map
+# it already has unless that map is very old:
+#
+#   * younger than `_CLOSES_SOFT_TTL`  → served as is;
+#   * older, but younger than `_CLOSES_MAX_AGE` → served as is AND one background rebuild
+#     starts (deduped);
+#   * older than `_CLOSES_MAX_AGE`, or no map at all → the read awaits a rebuild, and if
+#     that fails it still gets the old map (WARNING), if there is one.
+#
+# Serving an old map is honest, not merely fast: every reader decides per ROW whether its
+# `trade_date` can still be the day-change denominator (`PriceService._snapshot_is_current`
+# / `_pick_denominator`), so a row from a session that is too old reads "change unknown",
+# never a multi-session move labelled as today's.
+_CLOSES_KEY = "movers:closes"
+# The soft TTL sits ABOVE the hourly ingest's cycle, so that loop's own rebuild is normally
+# the only sweep. `main._run_close_snapshot_loop` ingests, rebuilds (`refresh_closes(
+# after_write=True)`), then sleeps `_CLOSE_INGEST_PERIOD_SECONDS`; the next map therefore
+# lands one period PLUS one ingest after the last (two ~12 MB batch-eod fetches of ~10 s
+# each, then the upsert: typically 10-40 s). At a soft TTL equal to the period (the old
+# 3600 s), a read inside that ingest window kicked a second sweep, often over a half-written
+# upsert, and `after_write` then ran a third: ~48 sweeps a day instead of 24. The 10-min
+# budget is ~15x a normal ingest. A STALLED cycle (FMP sending nothing: up to ~15 min, see
+# `fmp._ENDPOINT_TIMEOUTS`) costs one extra sweep, and a harmless one: the ingest writes
+# only after both fetches return, so that sweep reads an unchanged table.
+# Pinned against the loop's literal sleep by tests/test_market_movers_close_map_swap.py.
+_CLOSE_INGEST_PERIOD_SECONDS = 3600.0
+_CLOSE_INGEST_BUDGET_SECONDS = 600.0
+_CLOSES_SOFT_TTL = _CLOSE_INGEST_PERIOD_SECONDS + _CLOSE_INGEST_BUDGET_SECONDS   # 4200 s
+_CLOSES_MAX_AGE = 43200.0
+# Rows are only ever UPSERTED into `market_close_snapshot` (nothing in app/ deletes them),
+# so a rebuilt map much smaller than the live one is a bad read, not a smaller market —
+# refused, and the live map kept. Accepted anyway once the live map is past
+# `_CLOSES_MAX_AGE`: a deliberate bulk delete must not freeze the map until a restart.
+_CLOSES_MIN_KEEP_SHARE = 0.9
+# Pages in flight for the sweep. The PostgREST httpx pool is 20 connections
+# (`database.py`); four leaves the rest for request-path reads.
+_CLOSE_PAGE_WORKERS = 4
+# The derived universe rides the screener's own 60 s freshness. It stays 60 s inside a
+# closed window too, where `price_service` keeps the screener sweep for 15 min: rebuilding
+# it is CPU only (no FMP call), and it picks up a swapped close map within a minute.
+# `home_dashboard_service._SESSION_GRACE_SECONDS` counts this layer.
 _UNIVERSE_TTL = 60.0
 # A universe built while the close map was DOWN (every day change unknown) is memoised
 # under its own key for this long — a herd guard, not an answer. Without it every
 # request during a Supabase outage re-ran the paged full-table read to its timeout;
 # with the normal TTL the outage was frozen as "no day changes" for a minute past its
-# end. `get_universe` has no `_inflight` of its own (only `_all_closes` does).
+# end. `get_universe` has no `_inflight` of its own (only the close map's
+# `refresh_closes` does).
 _DEGRADED_UNIVERSE_TTL = 15.0
 
 # An "average move" computed from two members is noise presented as a statistic. Sectors
@@ -66,6 +109,32 @@ _MIN_GROUP_MEMBERS = 5
 
 _cache: Dict[str, Tuple[float, Any]] = {}
 _inflight: Dict[str, asyncio.Future] = {}
+
+# The background close-map rebuild a read starts. `asyncio.create_task` keeps only a WEAK
+# reference, so `_background_tasks` holds the strong one until the done callback drops it;
+# `_closes_refresh_task` is the dedup — at most one such task alive at a time.
+_background_tasks: set = set()
+_closes_refresh_task: Optional[asyncio.Task] = None
+# `time.monotonic()` at which the current close-map leader started reading — how
+# `refresh_closes(after_write=True)` tells a build that can contain freshly written rows
+# from one that began before them.
+_closes_build_started: float = 0.0
+
+
+class CloseMapRefused(RuntimeError):
+    """A rebuilt close map failed its sanity check and was NOT swapped in."""
+
+
+def _on_close_refresh_done(task: asyncio.Task) -> None:
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "movers: background close-map refresh failed (%s: %s) — the previous map "
+            "stays in service", type(exc).__name__, exc,
+        )
 
 
 def _cache_get(key: str, ttl: float) -> Optional[Any]:
@@ -93,22 +162,117 @@ class MarketMoversService:
 
         Loaded whole rather than per-symbol because the ranking needs a change % for the
         ENTIRE universe, and PostgREST caps a response at 1,000 rows regardless of the
-        `range` asked for (verified: `.range(0, 49999)` still returns 1,000). So it is 63
-        requests / ~6.6 s either way — worth doing once an hour behind a shared future,
-        never per request.
-        """
-        key = "movers:closes"
-        hit = _cache_get(key, _CLOSES_TTL)
-        if hit is not None:
-            return hit
-        if key in _inflight:
-            return await asyncio.shield(_inflight[key])
+        `range` asked for (verified: `.range(0, 49999)` still returns 1,000). So it is ~74
+        requests either way — worth doing in the background, never per request.
 
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        Reads `_cache` DIRECTLY: `_cache_get` POPS an expired entry, and dropping the live
+        map is exactly what used to put an 11-14 s sweep in front of a request (after
+        every deploy, and once an hour when the ingest invalidated it). The ages that
+        decide serve / serve-and-refresh / await are at `_CLOSES_SOFT_TTL` above.
+        """
+        hit = _cache.get(_CLOSES_KEY)
+        if hit is not None:
+            ts, closes = hit
+            age = time.time() - ts
+            if age < _CLOSES_MAX_AGE:
+                if age >= _CLOSES_SOFT_TTL or age < 0:
+                    # Negative = the wall clock stepped back past the stamp; rebuild so
+                    # the stamp is re-taken rather than trusting it for a day.
+                    self._kick_close_map_refresh()
+                return closes
+
+        # No map, or one too old to serve without trying. The rebuild runs as an OWNED
+        # task joined under `shield`, so a reader that gives up (Home's 8 s guard) does
+        # not cancel the sweep everyone else — and the next request — is waiting for.
+        try:
+            return await asyncio.shield(self._kick_close_map_refresh())
+        except Exception as e:
+            old = _cache.get(_CLOSES_KEY)
+            if old is None:
+                raise
+            logger.warning(
+                "movers: close-map rebuild failed (%s: %s) — serving the previous map, "
+                "%.0f s old (rows whose session is too old read as unknown change)",
+                type(e).__name__, e, time.time() - old[0],
+            )
+            return old[1]
+
+    def _kick_close_map_refresh(self) -> "asyncio.Future[Dict[str, Dict[str, Any]]]":
+        """Start ONE background `refresh_closes()`, or return the build already running.
+
+        Never awaits. Deduped twice: on the shared `_inflight` future (a build led
+        elsewhere — the hourly loop, the boot warm) and on the task this method started
+        last (which has not necessarily reached `_inflight` yet).
+        """
+        global _closes_refresh_task
+        loop = asyncio.get_running_loop()
+        shared = _inflight.get(_CLOSES_KEY)
+        if shared is not None and shared.get_loop() is loop:
+            return shared
+        running = _closes_refresh_task
+        # Same loop only: a task left pending by a loop that has since closed never
+        # finishes, and adopting it would park this reader forever.
+        if running is not None and not running.done() and running.get_loop() is loop:
+            return running
+        task = loop.create_task(self.refresh_closes(), name="movers:closes:refresh")
+        _closes_refresh_task = task
+        _background_tasks.add(task)
+        task.add_done_callback(_on_close_refresh_done)
+        return task
+
+    async def refresh_closes(self, *, after_write: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Rebuild the close map and swap it in. The ONLY writer of `movers:closes`.
+
+        The new map is built completely BEFORE it replaces the old one, so readers are
+        never left without a map while the sweep runs. A rebuilt map is refused
+        (`CloseMapRefused`, ERROR, the live map kept) when it is empty, or smaller than
+        `_CLOSES_MIN_KEEP_SHARE` of the live map while that map is still servable.
+
+        Concurrent callers share one build through `_inflight[movers:closes]`.
+        `after_write=True` is for a caller that has just WRITTEN rows (the hourly ingest
+        loop): a build that started before this call cannot contain them, so it is waited
+        out and a new one led — or a newer one joined.
+        """
+        global _closes_build_started
+        key = _CLOSES_KEY
+        loop = asyncio.get_running_loop()
+        called_at = time.monotonic()
+        while True:
+            shared = _inflight.get(key)
+            if shared is None:
+                break
+            if shared.get_loop() is not loop:
+                # Its leader's loop is gone (it never ran `finally`); nothing else will
+                # ever settle or clear it.
+                _inflight.pop(key, None)
+                continue
+            if not after_write or _closes_build_started >= called_at:
+                return await asyncio.shield(shared)
+            try:
+                await asyncio.shield(shared)
+            except Exception as e:                  # noqa: BLE001 — superseded below
+                logger.info(
+                    "movers: a close-map build that predates the ingest ended in %s: %s "
+                    "— leading a fresh one", type(e).__name__, e,
+                )
+            # The leader's `finally` popped the key before this frame resumed, so the loop
+            # now leads — or joins a NEWER build. Defensive: an entry that is still this
+            # same, settled future has no leader left to clear it; drop it rather than spin.
+            if _inflight.get(key) is shared and shared.done():
+                _inflight.pop(key, None)
+
+        future: asyncio.Future = loop.create_future()
         _inflight[key] = future
+        _closes_build_started = time.monotonic()
+        started = _closes_build_started
         try:
             closes = await asyncio.to_thread(self._select_all_closes)
+            self._check_close_map(closes)
             _cache_set(key, closes)
+            logger.info(
+                "movers: close map refreshed in %.1fs (%d rows)",
+                time.monotonic() - started, len(closes),
+            )
             if not future.done():
                 future.set_result(closes)
             return closes
@@ -126,32 +290,68 @@ class MarketMoversService:
             _inflight.pop(key, None)
 
     @staticmethod
+    def _check_close_map(closes: Dict[str, Dict[str, Any]]) -> None:
+        """Refuse a rebuilt map that cannot be right. Raises `CloseMapRefused` (ERROR)."""
+        if not closes:
+            logger.error(
+                "movers: rebuilt close map is EMPTY — refused (%s); market_close_snapshot "
+                "has no rows or the read lost them",
+                "the live map stays in service" if _CLOSES_KEY in _cache
+                else "no map in memory, day changes read as unknown",
+            )
+            raise CloseMapRefused("rebuilt close map is empty")
+        live = _cache.get(_CLOSES_KEY)
+        if live is None:
+            return
+        live_ts, live_map = live
+        live_age = time.time() - live_ts
+        floor = len(live_map) * _CLOSES_MIN_KEEP_SHARE
+        if len(closes) >= floor:
+            return
+        if live_age >= _CLOSES_MAX_AGE:
+            logger.error(
+                "movers: rebuilt close map has %d rows against %d live — accepted anyway "
+                "because the live map is %.0f s old (past the %.0f s max age); if rows "
+                "were not deliberately deleted, market_close_snapshot lost data",
+                len(closes), len(live_map), live_age, _CLOSES_MAX_AGE,
+            )
+            return
+        logger.error(
+            "movers: rebuilt close map has %d rows against %d live (below %.0f%%) — "
+            "refused as a bad read; keeping the live map (%.0f s old)",
+            len(closes), len(live_map), _CLOSES_MIN_KEEP_SHARE * 100, live_age,
+        )
+        raise CloseMapRefused(
+            f"rebuilt close map shrank from {len(live_map)} to {len(closes)} rows"
+        )
+
+    @staticmethod
     def _select_all_closes() -> Dict[str, Dict[str, Any]]:
+        """The whole `market_close_snapshot`, keyed by symbol — complete or raising.
+
+        `fetch_all_rows_concurrent` reads `_CLOSE_PAGE_WORKERS` pages at a time against an
+        exact count and raises `PagedReadIncomplete` rather than return a map with a hole
+        in it. ORDER BY symbol (the primary key) is what makes `.range()` pages stable:
+        without it Postgres may return rows in a different physical order between
+        statements, and the hourly upsert rewrites every tuple.
+        """
         supabase = get_supabase()
+        rows = fetch_all_rows_concurrent(
+            lambda: supabase.table("market_close_snapshot").select(
+                "symbol,close,previous_close,trade_date"
+            ),
+            count_query=lambda: supabase.table("market_close_snapshot").select(
+                "symbol", count=CountMethod.exact, head=True
+            ),
+            order_by="symbol",
+            what="market_close_snapshot",
+            workers=_CLOSE_PAGE_WORKERS,
+        )
         out: Dict[str, Dict[str, Any]] = {}
-        start = 0
-        PAGE = 1000
-        while True:
-            rows = (
-                supabase.table("market_close_snapshot")
-                .select("symbol,close,previous_close,trade_date")
-                # ORDER BY is what makes `.range()` pages stable: without it Postgres may
-                # return rows in a different physical order between statements, and the
-                # hourly upsert rewrites every tuple while this sweep is in flight — so a
-                # page could skip or repeat symbols and the gap would be cached for 1h.
-                .order("symbol")
-                .range(start, start + PAGE - 1)
-                .execute()
-            ).data or []
-            if not rows:
-                break
-            for r in rows:
-                sym = (r.get("symbol") or "").upper()
-                if sym:
-                    out[sym] = r
-            if len(rows) < PAGE:
-                break
-            start += PAGE
+        for r in rows:
+            sym = str(r.get("symbol") or "").strip().upper() if isinstance(r, dict) else ""
+            if sym:
+                out[sym] = r
         return out
 
     # ── the derived universe ──────────────────────────────────────────────────────

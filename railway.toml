@@ -5,7 +5,9 @@
 # were ever the one applied, its `startCommand` would replace the Dockerfile CMD. It is
 # therefore kept IDENTICAL in effect: same command (single worker, bounded graceful
 # shutdown — without it one live SSE stream kept the old instance alive until SIGKILL and
-# the durable job claims stayed parked) and the same health check.
+# the durable job claims stayed parked) and the same health check — which also waits, at
+# most HOME_BOOT_WARM_MAX_WAIT_SECONDS (45 s), for the Home first-paint warm, answering 503
+# "warming" until then (see backend/railway.toml).
 # Pinned by backend/tests/test_deploy_command_parity.py. Owner check: Railway → service →
 # Settings → Config-as-code path should read `/backend/railway.toml`.
 [deploy]

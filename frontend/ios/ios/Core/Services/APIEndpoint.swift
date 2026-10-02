@@ -1411,6 +1411,13 @@ enum APIEndpoint: Sendable {
             return 60 // 1 minute — first call may warm ApeWisdom cache
         case .getWhaleProfile:
             return 60 // 1 minute for whale profile (may fetch from FMP)
+        case .getHomeDashboard:
+            // The first screen of every launch. The server bounds each of its six sections
+            // (≤ 8 s guards in home_dashboard_service / signals / trillion) plus the users-row
+            // read, so a flow silent for 15 s is stalled, not slow: fail it and let the
+            // first-load retry (+2 s, +5 s) or the 60 s tick re-send, rather than wait out 30 s.
+            // A backend↔iOS test keeps this above the slowest server guard.
+            return 15
         default:
             return 30 // 30 seconds default
         }

@@ -5,6 +5,11 @@ dockerfilePath = "Dockerfile"
 [deploy]
 # /health/pdf 503s when WeasyPrint can't load -> a broken native stack FAILS the deploy
 # instead of silently shipping. Railway runs this once before promoting the new deployment.
+# It ALSO waits for the Home first-paint warm (app/main.py `_run_home_boot_warm`): until that
+# finishes, or HOME_BOOT_WARM_MAX_WAIT_SECONDS (45 s) pass, it answers 503 "warming" and
+# Railway keeps serving the old deployment, so the first Home request after a deploy is warm.
+# The deadline is enforced in the route; 3 x that wait must stay within healthcheckTimeout
+# (pinned by backend/tests/test_deploy_command_parity.py).
 healthcheckPath = "/health/pdf"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"

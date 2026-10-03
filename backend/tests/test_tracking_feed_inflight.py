@@ -438,6 +438,34 @@ async def test_a_failed_insider_fetch_is_not_cached_as_no_activity(mode):
 
 
 @pytest.mark.asyncio
+async def test_a_rate_limited_insider_fetch_through_the_REAL_client_is_not_cached(monkeypatch):
+    """The test above fakes `get_insider_trading` returning `EmptyAfterFailure` — a value the
+    real client never produced: it swallowed a 429 into a bare `[]`, which this pass then
+    cached for 10 minutes as "no insider activity" (audit 2026-10-03). Drive the REAL
+    `FMPClient.get_insider_trading` with only the HTTP layer patched."""
+    from datetime import datetime, timedelta
+    from app.integrations.fmp import FMPClient, FMPRateLimitException
+
+    calls = []
+
+    async def make_request(self, endpoint, params=None, **kw):
+        calls.append(endpoint)
+        if len(calls) == 1:
+            raise FMPRateLimitException("429 Too Many Requests")
+        day = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        return [{"transactionDate": day, "transactionType": "P-Purchase",
+                 "securitiesTransacted": 10_000, "price": 50.0, "reportingName": "Jane Doe",
+                 "typeOfOwner": "CEO", "securityName": "Common Stock"}]
+
+    monkeypatch.setattr(FMPClient, "_make_request", make_request)
+    svc = _svc(object.__new__(FMPClient))
+    assert await svc._get_insider_transaction_alerts(["AAPL"]) == []
+    assert "AAPL" not in ts._insider_cache, "a 429 must not be cached as no activity"
+    second = await svc._get_insider_transaction_alerts(["AAPL"])
+    assert len(calls) == 2 and [a.title for a in second] == ["Insider Bought"]
+
+
+@pytest.mark.asyncio
 async def test_a_measured_empty_insider_answer_is_still_cached():
     """Control: the genuine 'no notable Form 4 in the window' stays the cached common case."""
     fmp = _InsiderFMP({"AAPL": []})

@@ -32,7 +32,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.services._insider_common import classify_for_alerts, normalize_insider_name
+from app.services._insider_common import (
+    classify_for_alerts,
+    is_equity_line,
+    normalize_insider_name,
+)
 from app.services._whale_common import (
     format_amount_range,
     format_amount_short,
@@ -138,6 +142,10 @@ def notable_insider_trade(
         if not informative:
             # Option exercises, tax withholding, composite S+OE sales — mechanical
             # events that carry no sentiment. Same filter the Holders tab applies.
+            continue
+        if not is_equity_line(tx.get("securityName"), strict=False):
+            # A purchase of preferred shares, notes or warrants is not "bought the
+            # stock". Lenient: an unlabeled or unusual equity label still notifies.
             continue
         shares = finite(tx.get("securitiesTransacted"))
         price = finite(tx.get("price"))

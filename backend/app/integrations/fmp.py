@@ -2158,86 +2158,51 @@ class FMPClient:
         self,
         ticker: str,
         limit: int = 100,
-        since_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get insider trading history for a stock ticker (stable API path).
+        """The most recent ``limit`` insider (Form 4) rows for a ticker — ONE page, newest
+        first. For the watchlist alerts and the insider roster, which want the latest N.
 
-        FMP returns rows newest-first. A single page (``limit`` rows, default
-        100) can stop short of a caller's 365-day window for actively-traded
-        names, silently truncating "last 12 months" totals. When ``since_date``
-        (ISO ``YYYY-MM-DD``) is supplied, page back until the oldest row on a
-        page predates it, so the window is fully covered. Without it, the
-        original single-page behavior is preserved (used by callers that just
-        want the most-recent N, e.g. ``get_insider_roster``).
-
-        The 365-day decision stays in the service layer — this method only
-        pages until rows predate the supplied date bound.
+        A 12-month window is NOT this method: use the fail-closed
+        ``get_insider_trades_since(since, symbol=ticker)``. The window pager that lived here
+        swallowed every failure into ``[]`` (an outage read, and was cached, as "no insider
+        traded"), stopped on ``transactionDate`` although the feed is ordered by
+        ``filingDate``, and kept page-shift repeats; it was removed on 2026-10-03.
         """
-        if since_date is None:
-            try:
-                data = await self._make_request(
-                    "insider-trading/search",
-                    params={"symbol": ticker.upper(), "limit": limit, "page": 0},
-                )
-                return data if isinstance(data, list) else []
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (403, 404):
-                    logger.warning(
-                        f"Insider trading search unavailable for {ticker}"
-                    )
-                    return []
-                raise
-            except Exception as e:
-                logger.warning(f"Insider trading search failed for {ticker}: {e}")
-                return []
-
-        # Paginated path: cover the full window back to `since_date`.
-        PAGE_SIZE = 100
-        MAX_PAGES = 15  # safety cap (~1,500 rows) for hyper-active tickers
-        all_trades: List[Dict[str, Any]] = []
-        for page in range(MAX_PAGES):
-            try:
-                rows = await self._make_request(
-                    "insider-trading/search",
-                    params={
-                        "symbol": ticker.upper(),
-                        "limit": PAGE_SIZE,
-                        "page": page,
-                    },
-                )
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (403, 404):
-                    logger.warning(
-                        f"Insider trading search unavailable for {ticker}"
-                    )
-                else:
-                    logger.warning(
-                        f"Insider trading page {page} failed for {ticker}: {e}"
-                    )
-                break  # return whatever pages already succeeded
-            except Exception as e:
+        # A failure is an `EmptyAfterFailure`, never a bare `[]`: tracking caches "no
+        # insider activity" for a measured empty answer and checks `fetch_failed` to tell
+        # an outage apart (a bare [] on a 429 cached the outage as "nothing traded").
+        # 403/404 stays a plain [] — the endpoint is simply not on the plan.
+        try:
+            data = await self._make_request(
+                "insider-trading/search",
+                params={"symbol": ticker.upper(), "limit": limit, "page": 0},
+            )
+            if isinstance(data, list):
+                return data
+            logger.warning(
+                "Insider trading search for %s returned %s, expected list — marked as a "
+                "failed fetch", ticker, type(data).__name__,
+            )
+            return EmptyAfterFailure(
+                f"insider-trading/search returned {type(data).__name__}, expected list"
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 404):
                 logger.warning(
-                    f"Insider trading page {page} failed for {ticker}: {e}"
+                    f"Insider trading search unavailable for {ticker}"
                 )
-                break
-
-            if not isinstance(rows, list) or not rows:
-                break
-            all_trades.extend(rows)
-
-            # ISO dates sort lexicographically; the last row is the oldest on
-            # the page. Once it predates the cutoff, the window is covered.
-            oldest = (
-                rows[-1].get("transactionDate")
-                or rows[-1].get("filingDate")
-                or ""
-            )[:10]
-            if oldest and oldest < since_date:
-                break
-            if len(rows) < PAGE_SIZE:
-                break  # short page → no more data upstream
-
-        return all_trades
+                return []
+            logger.warning(
+                "Insider trading search failed for %s: %s: %s",
+                ticker, type(e).__name__, redact_secrets(e),
+            )
+            return EmptyAfterFailure(f"{type(e).__name__}: {e}")
+        except Exception as e:
+            logger.warning(
+                "Insider trading search failed for %s: %s: %s",
+                ticker, type(e).__name__, redact_secrets(e),
+            )
+            return EmptyAfterFailure(f"{type(e).__name__}: {e}")
 
     async def get_beneficial_ownership(
         self, ticker: str
@@ -2304,16 +2269,24 @@ class FMPClient:
         """
         try:
             trades = await self.get_insider_trading(ticker, limit=100)
-            # Deduplicate insiders by name
+            if getattr(trades, "fetch_failed", False):
+                return trades  # keep the failure marker; an empty roster is not "no insiders"
+            # Deduplicate insiders by (name, issuer CIK). `companyCik` rides along so the
+            # service can drop "insiders" of OTHER issuers: the per-symbol feed carries the
+            # filings a company made as a 10% owner elsewhere (BRK-B lists Berkshire itself).
             seen = {}
             for tx in trades:
-                name = tx.get("reportingName", "").strip()
-                if not name or name in seen:
+                if not isinstance(tx, dict):
                     continue
-                seen[name] = {
+                name = str(tx.get("reportingName") or "").strip()
+                key = (name, str(tx.get("companyCik") or ""))
+                if not name or key in seen:
+                    continue
+                seen[key] = {
                     "owner": name,
                     "title": tx.get("typeOfOwner", "Officer"),
                     "numberOfShares": tx.get("securitiesOwned", 0),
+                    "companyCik": tx.get("companyCik"),
                 }
             return list(seen.values())
         except Exception as e:

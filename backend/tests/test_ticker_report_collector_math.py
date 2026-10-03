@@ -521,17 +521,28 @@ def test_insider_filter_keeps_informative_pure_sale():
     assert vital["sell_count"] == 1
 
 
-def test_insider_filter_drops_non_common_stock():
-    """RSU rows are excluded by the securityName guard — matches
-    HoldersService Smart Money pipeline."""
+@pytest.mark.parametrize("security_name,counted", [
+    # Labels that NAME the stock but are not it. The old guard (a "common stock" substring
+    # test) KEPT every one of these, and its test fed only "RSU"/"Stock Option", which never
+    # contained the substring — so it could not fail (testing.md §3).
+    ("Warrants to purchase Common Stock", False),
+    ("Common Stock Purchase Warrant", False),
+    ("Stock Option (right to buy Common Stock)", False),
+    ("Common Stock (RSU)", False),
+    ("RSU", False), ("Stock Option", False),
+    # Anti-vacuity: the issuer's stock under every live label is counted — including the
+    # "Ordinary Shares" the old guard dropped (NYAX read Buys 0 beside a Home CEO buy).
+    ("Common Stock", True), ("Ordinary Shares", True), ("Common Shares", True),
+    ("Class C Capital Stock", True), ("", True),
+])
+def test_insider_filter_counts_only_the_issuers_stock(security_name, counted):
     trades = [
-        _trade(transaction_type="P-Purchase", security_name="RSU"),
-        _trade(transaction_type="S-Sale", security_name="Stock Option"),
+        _trade(transaction_type="P-Purchase", security_name=security_name),
+        _trade(transaction_type="S-Sale", security_name=security_name),
     ]
     insider, _ = _build_insider_sections(trades)
     counts = {t["type"]: t["count"] for t in insider["transactions"]}
-    assert counts["Buys"] == 0
-    assert counts["Sells"] == 0
+    assert counts == ({"Buys": 1, "Sells": 1} if counted else {"Buys": 0, "Sells": 0})
 
 
 def test_insider_filter_mixed_set():

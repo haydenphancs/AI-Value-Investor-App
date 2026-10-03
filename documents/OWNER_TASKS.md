@@ -243,6 +243,13 @@ admin recomputes, and marketing script generation.
   - re-shoot `02-ai-research-personas.png`
   - revoke the old sandbox APNs key `7YPQRK276L`
 
+- [ ] **Insider buys missing on Report + Holders (NYAX, 2026-10-03).** No migration. **The backend half was committed and pushed by Claude on 2026-10-03 at your request (Railway deploys `main` on push). The iOS half is NOT committed: it waits for an Xcode build (⌘B); then commit it together with `backend/tests/test_ios_report_insider_gate.py`.** Cause: the report and the Holders tab kept a Form 4 row only if its security name contained "common stock", so every "Ordinary Shares" filer (NYAX, STX, TSM, WIX, GRAB…, ~13–15% of open-market insider trades) read Buys 0 / Neutral while the Home CEO Buys card listed the CEO's buys. The same fix drops other companies' rows from a ticker's feed (BRK-B read "Net Buying $212.9M"), counts each Form 4/A amendment once, and turns a failed insider fetch into "couldn't be loaded" instead of a cached "no insider activity".
+  1. `CACHE_SCHEMA_FLOOR` was moved to 2026-10-03 13:30 UTC with this commit. The Google Search grounding retirement (another session, still uncommitted) has its own provenance stamp, so it needs no further floor move.
+  2. **One-time rebuild burst** on first view of each ticker: holders payload v2 (about 14 FMP calls per ticker), ownership snapshot v3, Home signals `signals_v5`, and every report collection (floor).
+  3. **Regenerate the NYAX report.** Saved reports are snapshots and keep Buys 0 (your decision). Expect Buys 16 / about $9.0M vs Sells 55 / about $3.8M, "Net Buying".
+  4. The next day, search Railway logs for `[holders-insider-foreign-cik]` / `[report-insider-foreign-cik]` (rows from other issuers dropped; expect BRK-A/B and similar holding companies) and `[report-insider-unavailable]` (an insider fetch failed; the report says so and is not cached). Many `unavailable` lines would mean FMP's insider feed is failing.
+  5. Ship the iOS build after the backend: older apps decode the new optional `unavailable` fields fine (a failed fetch shows the caption "Insider data couldn't be loaded"), but only the new build shows the Holders "couldn't be loaded" states and the fixed report chart.
+
 ### 2.2 Recurring
 
 | Cadence | Task | How |

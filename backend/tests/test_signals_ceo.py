@@ -105,6 +105,16 @@ def _syms(group):
     ("officer: EVP & Chief Executive Officer - Europe", False),
     ("officer: President & CEO Elect", False), ("officer: Former Chief Executive Officer", False),
     ("officer: Retired CEO", False), ("officer: CEO Emeritus", False),
+    # 2026-10-03: a segment CEO whose title ENDS in a region, with no punctuation for the
+    # comma/dash/"of" rules — NYAX's North America head files as "CEO NAYX North America".
+    ("officer: CEO NAYX North America", False), ("officer: CEO Europe", False),
+    ("officer: CEO EMEA", False), ("officer: Chief Executive Officer Asia Pacific", False),
+    # ...while the issuer CEO keeps matching, including company names holding a place name.
+    ("officer: CEO, Co Founder & Chairman", True),
+    ("director, officer: CEO, Co Founder & Chairman", True),
+    ("officer: Chairman & CEO, Marriott International", True),
+    ("officer: Chief Executive Officer and Director USA Compression", True),
+    ("officer: CEO and Founder", True),
 ])
 def test_ceo_title_variants(title, ok):
     assert is_ceo_role(title) is ok
@@ -134,6 +144,27 @@ def test_ceo_role_label(title, label):
     ("Series A Preferred Stock", False), ("Warrants to purchase Common Stock", False),
     ("Convertible Senior Notes", False), ("Stock Option (right to buy Common Stock)", False),
     ("Rights", False), ("Restricted Stock Units", False), ("", False), (None, False), (3, False),
+    # 2026-10-03, tuned on 11,000 live Form 4 rows: equity lines the rule used to miss...
+    ("Class C Capital Stock", True), ("Capital Stock", True), ("Class A Ordinary Stock", True),
+    ("Ordinary shares", True), ("Class A ordinary shares", True),
+    ("Ordinary Shares, par value NIS 1.00 per share", True),
+    ("Shares of Beneficial Interest", True), ("Units of Beneficial Interest", True),
+    ("Common Shares of Beneficial Interest", True), ("Subordinate Voting Shares", True),
+    ("Class A Limited Voting Shares", True), ("Class A Common  Stock", True),
+    ("Common Units (representing limited partnership interests)", True),
+    ("Common Stock and associated Preferred Stock Purchase Rights", True),
+    # ...and lines that name the stock but are not it.
+    ("Common Stock Purchase Warrant", False), ("Common Stock Warrants (right to buy)", False),
+    ("Warrants to Purchase Series B Common Stock (Right to Buy)", False),
+    ("Option to Purchase Common Stock", False), ("Common Stock (Right to Buy)", False),
+    ("BellRing Brands, Inc. Common Stock Equivalents", False),
+    ("Phantom Common Stock Units", False), ("Common Stock Units", False),
+    ("Class C Google Stock Units", False), ("Common Stock (RSU)", False), ("RSUs (Class A)", False),
+    ("Series A Preference Shares", False), ("Equity Swap", False),
+    # ADS stay out of the share-counting surfaces (owner decision 2026-10-03): one ADS is
+    # several ordinary shares, so the share chart would mix units.
+    ("American Depositary Shares", False), ("Ordinary Shares represented by ADS", False),
+    ("ADSs", False), ("American Depositary Receipts", False),
 ])
 def test_common_stock_only(name, ok):
     assert is_common_stock(name) is ok
@@ -659,7 +690,7 @@ async def test_congress_and_whale_failures_now_raise_so_the_build_knows(monkeypa
 
 
 def test_the_cache_key_was_bumped_for_the_new_card():
-    assert ssvc._SIGNALS_CACHE_KEY == "signals_v4"
+    assert ssvc._SIGNALS_CACHE_KEY == "signals_v5"
     assert ssvc._SIGNAL_STEPS == ("congress", "whale", "earnings", "ceo")
     assert set(ssvc._SIGNAL_STEPS) == set(SignalsGroupResponse.model_fields)
 

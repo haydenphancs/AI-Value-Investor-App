@@ -723,6 +723,8 @@ def build_context(
             "share_count_known": _share_count_change_known(cap),
             "recent": recent_tx,
             "ownership_note": insider.get("ownership_note") or "",
+            # The insider fetch FAILED for this report: say so, never a measured "no flow".
+            "unavailable": insider.get("unavailable") is True,
         },
         "management": {
             "top_holders": [

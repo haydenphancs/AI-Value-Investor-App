@@ -129,6 +129,10 @@ class SmartMoneyDataSchema(BaseModel):
     daily_prices: List[DailyPricePointSchema] = []
     flow_data: List[SmartMoneyFlowDataPointSchema] = []
     summary: SmartMoneyFlowSummarySchema = SmartMoneyFlowSummarySchema()
+    # True when this tab's source fetch FAILED for this build (only the Insider tab sets
+    # it, 2026-10-03): the zero bars are a placeholder, not "no activity". Optional, so
+    # older builds and cached rows decode it as absent.
+    unavailable: Optional[bool] = None
 
 
 # ── Recent Activities ────────────────────────────────────────────
@@ -178,6 +182,9 @@ class InsiderActivitiesDataSchema(BaseModel):
     """Insider activities with summary."""
     summary: InsiderActivitySummarySchema = InsiderActivitySummarySchema()
     activities: List[InsiderActivitySchema] = []
+    # True when the insider fetch FAILED for this build: an empty list is then not "no
+    # insider transactions" (iOS says the trades couldn't be loaded). Optional.
+    unavailable: Optional[bool] = None
 
 
 class CongressActivitySummarySchema(BaseModel):

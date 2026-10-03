@@ -120,7 +120,10 @@ def test_internal_callers_stay_ungated():
         tree = ast.parse(inspect.getsource(mod))
         attrs = [n.func.attr for n in ast.walk(tree)
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
-        assert "get_holders" in attrs, f"{mod.__name__} no longer calls get_holders"
+        # `get_holders_with_status` is the same ungated read plus the build's degraded
+        # status (callers that freeze the result must not pin a degraded build).
+        assert {"get_holders", "get_holders_with_status"} & set(attrs), \
+            f"{mod.__name__} no longer calls get_holders"
         assert "get_holders_for_tier" not in attrs, f"{mod.__name__} would fold a None tier to Free"
 
 

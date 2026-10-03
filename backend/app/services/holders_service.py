@@ -16,14 +16,27 @@ import math
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
-from app.integrations.fmp import get_fmp_client
+from app.integrations.fmp import (
+    FMPNotEntitledException,
+    FMPPartialPageException,
+    get_fmp_client,
+)
 from app.services._insider_common import (
     classify_insider_transaction,
+    INSIDER_MAX_PAGES,
+    INSIDER_PAGE_SIZE,
+    _normalize_cik,
+    clean_role_title,
+    insider_row_date,
+    insider_window_cutoff,
+    is_equity_line,
+    issuer_roster,
     normalize_insider_name,
+    prepare_insider_rows,
 )
 from app.services.corporate_actions_service import (
     effective_window_for_quarter,
@@ -106,6 +119,22 @@ def _cache_set(key: str, value: Any) -> None:
     while len(_cache) > _CACHE_MAX_ENTRIES:
         oldest = min(_cache, key=lambda k: _cache[k][0])
         _cache.pop(oldest, None)
+
+
+class _HoldersEntry(NamedTuple):
+    """A built response plus the CRITICAL sources that failed for it. The 5-minute tier and
+    the in-flight future carry the pair, so a caller that freezes the response further down
+    (the report's collection cache, the ownership snapshot's 24h row) can tell a degraded
+    build from a complete one — `get_holders` used to drop the status, and a build holders
+    itself refused to persist was pinned downstream anyway."""
+
+    result: Any
+    degraded: Tuple[str, ...]
+
+
+def _as_entry(value: Any) -> _HoldersEntry:
+    """A cached value as an entry; a bare response (no status recorded) reads as complete."""
+    return value if isinstance(value, _HoldersEntry) else _HoldersEntry(value, ())
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -195,6 +224,61 @@ def _safe_int(value: Any, default: int = 0) -> int:
 # Backward-compat alias — callers use the private name; shared impl lives in _insider_common.
 _classify_insider_transaction = classify_insider_transaction
 
+# Per-symbol insider window fetch — shared with the report collector (`_insider_common`).
+_INSIDER_PAGE_SIZE = INSIDER_PAGE_SIZE
+_INSIDER_MAX_PAGES = INSIDER_MAX_PAGES
+
+
+def _settle_insider_window(ticker: str, value: Any, degraded: List[str]) -> List[Dict[str, Any]]:
+    """Land the fail-closed insider window fetch (`get_insider_trades_since`).
+
+    * rows → as-is;
+    * page cap hit (`FMPPartialPageException` with no LOST page) → the rows that arrived:
+      a contiguous newest span of a company that files more than the cap per year. That is
+      the company's state, not an outage, so it is served AND persisted (marking it degraded
+      would rebuild a heavy filer from FMP on every 5-minute miss, forever) — logged;
+    * a lost page or any other failure → what arrived (or nothing), marked degraded so the
+      build is served best-effort for 5 minutes and never pinned in the 24h tier. This used
+      to be a plain `[]` swallowed in the client and persisted as "no insider activity".
+    """
+    if isinstance(value, FMPNotEntitledException):
+        # Outside the licence: permanent, like the 403/404 the client already answers with
+        # [] — marking it degraded would rebuild this ticker from FMP on every 5-min miss.
+        logger.warning(
+            "Insider trading not entitled for %s (%s) — served as no rows", ticker, value
+        )
+        return []
+    if isinstance(value, FMPPartialPageException):
+        rows = [r for r in (value.partial or []) if isinstance(r, dict)]
+        if value.pages_failed == 0:
+            logger.warning(
+                "[holders-insider-cap] %s: insider window walk hit its %d-page cap with %d rows "
+                "— serving the newest span (%s)", ticker, _INSIDER_MAX_PAGES, len(rows), value,
+            )
+            return rows
+        logger.warning(
+            "Insider trading fetch INCOMPLETE for %s (%d row(s) arrived): %s — serving them, "
+            "not persisting", ticker, len(rows), value,
+        )
+        degraded.append("Insider trading")
+        return rows
+    if isinstance(value, Exception):
+        logger.warning(
+            "Insider trading fetch failed for %s: %s: %s", ticker, type(value).__name__, value
+        )
+        degraded.append("Insider trading")
+        return []
+    if not isinstance(value, list):
+        logger.warning(
+            "Insider trading fetch for %s returned %s, expected list", ticker, type(value).__name__
+        )
+        degraded.append("Insider trading")
+        return []
+    return value
+
+
+_issuer_roster = issuer_roster
+
 
 _SUPABASE_CACHE_TTL_HOURS = 24
 
@@ -205,7 +289,10 @@ _SUPABASE_CACHE_TTL_HOURS = 24
 #:
 #: 1 → pre-versioning rows have no key and never match (the intent). Introduced with
 #:     the institutional-percent plausibility gate (TestFlight E5, 2026-09-17).
-_HOLDERS_PAYLOAD_VERSION = 1
+#: 2 → insider rows rebuilt (2026-10-03): "Ordinary Shares" / "Common Shares" lines counted
+#:     (NYAX read Buys 0 beside a Home CEO Buys card), warrants dropped, other issuers'
+#:     rows filtered by CIK (BRK-B), Form 4/A amendments counted once, cleaned titles.
+_HOLDERS_PAYLOAD_VERSION = 2
 _VERSION_KEY = "payload_version"
 
 #: Below this insider block, `institutions + insiders > 100` is physically impossible
@@ -361,6 +448,18 @@ class HoldersService:
         return redact_congress(resp, required_tier_for_congress_holders(tier) or TIER_PRO)
 
     async def get_holders(self, ticker: str) -> HoldersResponse:
+        result, _ = await self.get_holders_with_status(ticker)
+        return result
+
+    async def get_holders_with_status(
+        self, ticker: str
+    ) -> Tuple[HoldersResponse, List[str]]:
+        """The holders payload and the critical sources that failed building it (``[]`` for
+        a complete build, including every Supabase hit — only complete builds are persisted).
+
+        For callers that FREEZE the result beyond holders' own 5-minute tier: a non-empty
+        list means "serve it, never pin it".
+        """
         ticker = _validate_ticker(ticker)
         cache_key = f"holders:{ticker}"
 
@@ -368,7 +467,8 @@ class HoldersService:
         cached = _cache_get(cache_key)
         if cached is not None:
             logger.info(f"Holders in-memory cache HIT for {ticker}")
-            return cached
+            entry = _as_entry(cached)
+            return entry.result, list(entry.degraded)
 
         # In-flight dedup
         if cache_key in _inflight:
@@ -379,7 +479,8 @@ class HoldersService:
             # perfectly, while every other joiner gets a CancelledError. Verified: an
             # unshielded joiner cancellation makes the leader's set_result raise; a shielded
             # one leaves it untouched. Matches profit_power_service.py.
-            return await asyncio.shield(_inflight[cache_key])
+            entry = _as_entry(await asyncio.shield(_inflight[cache_key]))
+            return entry.result, list(entry.degraded)
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -390,17 +491,19 @@ class HoldersService:
             db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
             if db_cached is not None:
                 logger.info(f"Holders Supabase cache HIT for {ticker}")
-                _cache_set(cache_key, db_cached)
+                entry = _HoldersEntry(db_cached, ())
+                _cache_set(cache_key, entry)
                 if not future.done():
-                    future.set_result(db_cached)
-                return db_cached
+                    future.set_result(entry)
+                return db_cached, []
 
             # Cache miss — build from FMP
             logger.info(f"Holders cache MISS for {ticker} — fetching from FMP")
             result, degraded = await self._build_holders(ticker)
-            _cache_set(cache_key, result)
+            entry = _HoldersEntry(result, tuple(degraded))
+            _cache_set(cache_key, entry)
             if not future.done():
-                future.set_result(result)
+                future.set_result(entry)
 
             # Upsert to Supabase in background (non-blocking) — but ONLY when the
             # build was complete. A degraded build (an FMP call failed and
@@ -425,7 +528,7 @@ class HoldersService:
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
 
-            return result
+            return result, list(degraded)
         except Exception as e:
             fail_shared_future(future, e)
             raise
@@ -592,7 +695,13 @@ class HoldersService:
             self.fmp.get_institutional_holder(ticker, limit=20),
             self.fmp.get_institutional_ownership_summary(ticker),
             self.fmp.get_institutional_ownership_for_quarter(ticker, data_year, data_quarter),
-            self.fmp.get_insider_trading(ticker, since_date=insider_since),
+            # FAIL-CLOSED window fetch: a failure raises (typed) instead of reading as
+            # "no insider traded", a lost later page raises FMPPartialPageException, the
+            # walk stops on filingDate (the feed's order) and drops page-shift repeats.
+            self.fmp.get_insider_trades_since(
+                insider_since, symbol=ticker,
+                page_size=_INSIDER_PAGE_SIZE, max_pages=_INSIDER_MAX_PAGES,
+            ),
             self.fmp.get_insider_roster(ticker),
             self.fmp.get_historical_prices(ticker, from_date=from_date),
             self.fmp.get_senate_latest(limit=1000),
@@ -642,7 +751,7 @@ class HoldersService:
             inst_ownership_summary, "Inst ownership summary", {}, critical=True
         )
         inst_quarter_aggregate = _unwrap(inst_quarter_aggregate, "Inst quarter aggregate", None)
-        insider_trading = _unwrap(insider_trading, "Insider trading", [], critical=True)
+        insider_trading = _settle_insider_window(ticker, insider_trading, degraded)
         insider_roster = _unwrap(insider_roster, "Insider roster", [])
         # `critical=True`: without it a build that got NO price data at all was pinned in
         # the 24h holders_cache. Every dollar figure on the tab is derived from these
@@ -679,6 +788,34 @@ class HoldersService:
         house_from_latest = [h for h in house_latest if h.get("symbol", "").upper() == ticker]
         senate_for_ticker = self._dedup_congress_trades(senate_disclosure, senate_from_latest)
         house_for_ticker = self._dedup_congress_trades(house_disclosure, house_from_latest)
+
+        # Insider rows: this issuer only, its stock only, each amended trade once — ONE pass
+        # here so the chart, the summary card and the list (and the report, which copies
+        # the chart and list) describe the same rows. See `_insider_common.prepare_insider_rows`.
+        issuer_cik = await self._issuer_cik(
+            ticker, inst_ownership_summary, inst_quarter_aggregate, degraded
+        )
+        insider_trading, foreign = prepare_insider_rows(insider_trading, issuer_cik)
+        # The list is "Last 12 Months" too, like the chart and the summary card: a 1000-row
+        # page reaches back years, and the old 100-row pager's ~99-row overshoot became up to
+        # thousands of out-of-window rows under that label. Supersession has already run.
+        insider_cutoff = insider_window_cutoff()
+        insider_trading = [r for r in insider_trading if insider_row_date(r) >= insider_cutoff]
+        if foreign:
+            logger.warning(
+                "[holders-insider-foreign-cik] %s: dropped %d insider row(s) filed under other "
+                "issuers' CIKs %s (issuer CIK %s) — the company's own 10%%-owner filings "
+                "elsewhere, or a CIK change", ticker, sum(foreign.values()),
+                sorted(foreign), issuer_cik,
+            )
+        if getattr(insider_roster, "fetch_failed", False):
+            # A failed roster is not "no insiders": keep the build out of the 24h tier.
+            logger.warning(
+                "Insider roster fetch failed for %s (%s) — build not persisted",
+                ticker, getattr(insider_roster, "reason", ""),
+            )
+            degraded.append("Insider roster")
+        insider_roster = _issuer_roster(insider_roster, issuer_cik)
 
         # Build each section. The prior settled quarter's summary is fetched ONLY when
         # the current aggregate fails the plausibility gate (zero steady-state cost) —
@@ -788,6 +925,16 @@ class HoldersService:
                 f"holders_cache."
             )
 
+        if "Insider trading" in degraded:
+            # Say so on the wire: an empty insider list / zero bars from a FAILED fetch must
+            # not read as "no insider transactions" (served 5 min, never persisted).
+            insider_sm = insider_sm.model_copy(update={"unavailable": True})
+            recent = recent.model_copy(update={
+                "insider_activities": recent.insider_activities.model_copy(
+                    update={"unavailable": True}
+                ),
+            })
+
         return HoldersResponse(
             symbol=ticker,
             shareholder_breakdown=breakdown,
@@ -796,6 +943,45 @@ class HoldersService:
             congress_data=congress_sm,
             recent_activities=recent,
         ), degraded
+
+    async def _issuer_cik(
+        self,
+        ticker: str,
+        inst_summary: Any,
+        inst_quarter_aggregate: Any,
+        degraded: List[str],
+    ) -> Optional[str]:
+        """The issuer's SEC CIK, used to drop other issuers' rows from the insider feed.
+
+        Read from the institutional positions summary already fetched for this build (it
+        carries the issuer's `cik`), so the common path costs no call. Only when neither
+        summary has one is the profile fetched. A profile call that RAISES marks the build
+        degraded: without the CIK filter a BRK-B-style feed would be pinned for 24h with
+        another company's purchases counted as insider buys. A profile with no CIK is not a
+        failure — the rows are then kept unfiltered.
+        """
+        for source in (inst_summary, inst_quarter_aggregate):
+            if not isinstance(source, dict) or source.get("cik") in (None, ""):
+                continue
+            cik = _normalize_cik(source.get("cik"))
+            if cik:
+                return cik
+            # A present but unusable value ("0000000000", "N/A") must not silently switch
+            # the filter off: fall through to the profile.
+            logger.warning(
+                "Issuer CIK %r from the positions summary for %s is not a CIK — asking the "
+                "profile", source.get("cik"), ticker,
+            )
+        try:
+            profile = await self.fmp.get_company_profile(ticker)
+        except Exception as e:
+            logger.warning(
+                "Issuer CIK lookup failed for %s: %s: %s — insider rows unfiltered, build "
+                "not persisted", ticker, type(e).__name__, e,
+            )
+            degraded.append("Issuer CIK")
+            return None
+        return _normalize_cik(profile.get("cik")) if isinstance(profile, dict) else None
 
     # ── Shareholder Breakdown ─────────────────────────────────────
 
@@ -980,7 +1166,7 @@ class HoldersService:
                 "name": normalize_insider_name(r.get("owner")),
                 # `.get(k, default)` does NOT fall back on a present-but-null
                 # value, and TopInsiderSchema.title is a required str.
-                "title": (r.get("title") or r.get("typeOfOwner") or "Officer"),
+                "title": clean_role_title(r.get("title") or r.get("typeOfOwner")),
                 "valueInMillions": value_millions,
                 "shares": shares,
                 "percentOwnership": ownership_pct,
@@ -1064,9 +1250,7 @@ class HoldersService:
         # summary card's volumes/buyer counts describe the same span as the bars
         # beside them (was 12 calendar months, which dropped the partial 13th
         # month and could disagree with the chart at the boundary).
-        insider_cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=365)
-        ).strftime("%Y-%m-%d")
+        insider_cutoff = insider_window_cutoff()
         acts_in_window = [a for a in all_insider_acts if a.date >= insider_cutoff]
         insider_summary = self._build_insider_activity_summary(acts_in_window)
 
@@ -1396,9 +1580,10 @@ class HoldersService:
 
         result = []
         for tx in trades:
-            # Only show equity trades (common stock), not RSUs/options/warrants
-            security_name = (tx.get("securityName") or "").lower()
-            if security_name and "common stock" not in security_name:
+            # Only show the issuer's stock (common / ordinary shares), not RSUs, options or
+            # warrants. The shared rule: a "common stock" substring test here dropped every
+            # "Ordinary Shares" filer (NYAX) and kept "Common Stock Purchase Warrant" rows.
+            if not isinstance(tx, dict) or not is_equity_line(tx.get("securityName")):
                 continue
 
             # Normalize FMP's messy 'LAST FIRST' / comma name shapes to ONE
@@ -1452,12 +1637,16 @@ class HoldersService:
             # kept by this summary card (and land under a different month bar).
             # Transaction date is also the economically correct bucketing
             # ("did insiders sell into strength or weakness?").
-            date_str = (tx.get("transactionDate") or tx.get("filingDate") or "")[:10]
+            date_str = insider_row_date(tx)
             if not date_str:
                 date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-            # Lookup title
-            title = title_map.get(reporting_name.lower(), "Officer")
+            # Title: the roster's (the insider's newest filing), else this row's own
+            # `typeOfOwner` — an insider outside the newest-100 roster used to read
+            # "Officer" — with FMP's "officer:" tag stripped ("officer: CFO" → "CFO").
+            title = clean_role_title(
+                title_map.get(reporting_name.lower()) or tx.get("typeOfOwner")
+            )
 
             result.append(InsiderActivitySchema(
                 name=reporting_name,
@@ -1814,7 +2003,7 @@ class HoldersService:
         # and the list can't describe different time spans. 365 days touches up
         # to 13 calendar months, so generate 13 buckets; the oldest is partial
         # and a day-level cutoff (below) keeps only its post-cutoff trades.
-        cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+        cutoff_str = insider_window_cutoff()
         month_keys = self._generate_month_keys(13)
         monthly_flows: Dict[str, Dict[str, float]] = {
             m: {"buy": 0.0, "sell": 0.0} for m in month_keys
@@ -1836,28 +2025,25 @@ class HoldersService:
                 skipped_count += 1
                 continue
 
-            # Only count equity trades (common stock).
+            # Only count the issuer's stock (the shared rule — see _build_insider_activities).
             # Skip RSU vestings, stock options, warrants, phantom stock, etc.
-            security_name = (tx.get("securityName") or "").lower()
-            if security_name and "common stock" not in security_name:
+            if not is_equity_line(tx.get("securityName")):
                 skipped_count += 1
                 continue
 
             # Use transactionDate or filingDate
-            date_str = (tx.get("transactionDate") or tx.get("filingDate") or "")[:10]
+            date_str = insider_row_date(tx)
             if not date_str:
                 continue
 
-            # Day-level window so the chart's totals equal the report table's
-            # (which filters on the same 365-day cutoff). A trade in the partial
-            # oldest month but dated before the cutoff is excluded.
+            # Day-level window, the SAME date-string cutoff as the report table, the
+            # summary card and the report's list. A trade in the partial oldest month but
+            # dated before the cutoff is excluded.
             try:
-                tx_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
-                )
+                datetime.strptime(date_str, "%Y-%m-%d")
             except (ValueError, TypeError):
                 continue
-            if tx_dt < cutoff:
+            if date_str < cutoff_str:
                 continue
 
             m_key = f"{date_str[5:7]}/{date_str[:4]}"
@@ -1926,7 +2112,6 @@ class HoldersService:
         # would sit each bar under the wrong date — misreading "did insiders sell
         # into strength or weakness?". Monthly price_data is already windowed via
         # _build_price_data(month_keys), so it's left as-is.
-        cutoff_str = cutoff.strftime("%Y-%m-%d")
         windowed_daily = [
             dp for dp in (daily_prices or []) if dp.date >= cutoff_str
         ]

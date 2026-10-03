@@ -1326,7 +1326,14 @@ def _key_management_insight_prompt(
     has_buy = (buys.get("count") or 0) > 0
     has_sell = (sells.get("count") or 0) > 0
 
-    if has_buy and has_sell:
+    if insider.get("unavailable"):
+        # The insider fetch FAILED for this report: the zero counts are a placeholder.
+        flow_state = (
+            "UNAVAILABLE — the insider trading data could not be loaded for this report. "
+            "Do NOT describe insider buying, selling, or the absence of either; cover "
+            "ownership and capital allocation only"
+        )
+    elif has_buy and has_sell:
         flow_state = "BOTH buys and sells in window — lead with the buy (higher signal)"
     elif has_buy:
         flow_state = "BUYS only — high-conviction signal, lead with it"
@@ -1896,7 +1903,9 @@ def build_narrative_jobs(
     iv = (
         shell.get("_scoring_inputs") or shell.get("key_vitals") or {}
     ).get("insider")
-    if isinstance(iv, dict):
+    # Not when the insider fetch FAILED: the headline would be written from placeholder
+    # zeros ("No insider moves"); `assemble_report` already set the "couldn't be loaded" text.
+    if isinstance(iv, dict) and not (shell.get("insider_data") or {}).get("unavailable"):
         jobs.append(NarrativeJob(
             label="insider_key_insight",
             prompt=_insider_key_insight_prompt(persona, evidence, shell),
@@ -2358,6 +2367,13 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
     """Insider & Management."""
     out: List[str] = []
     idata = report.get("insider_data") or {}
+    if idata.get("unavailable"):
+        # A FAILED fetch, not a quiet year: no counts, and nothing to infer from them.
+        out.append(
+            "INSIDER: unavailable (the insider trading data could not be loaded) — make no "
+            "claim about insider buying, selling or their absence."
+        )
+        idata = {k: v for k, v in idata.items() if k == "capital_allocation"}
     sent = idata.get("sentiment")
     tx_strs = [
         f"{t.get('type', '?')} {t.get('count', '?')} ({t.get('value', '?')})"

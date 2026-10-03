@@ -203,7 +203,20 @@ TABLE_NAME = "ticker_report_cache"
 #     just before the deploy, per the 2026-07-04 paragraph; if the deploy commit lands
 #     later, move it to the commit time. Deploy after the 18:00 ET close so the
 #     invalidated day's reports regenerate on the next close cycle anyway.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 2, 1, 15, 0, tzinfo=timezone.utc)
+# 2026-10-03 (13:30 UTC): bumped for the insider-row fix (NYAX). Cached collections carry
+#     the COMPUTED `insider_data_partial` / `insider_vital_partial` and the embedded
+#     `holders_response` built under the old rules: every "Ordinary Shares" filer read
+#     "Buys 0 / Neutral" (a "common stock" substring filter), Form 4/A amendments were
+#     counted twice, other issuers' rows were counted (BRK-B "Net Buying $212.9M"), and a
+#     failed insider fetch was stored as "no insider activity". A fixed collector never
+#     recomputes a cached collection, so without this the report kept the zeros until the
+#     next close. Ships with `_HOLDERS_PAYLOAD_VERSION` 2 and the ownership snapshot's
+#     `_schema_v` 3 — bumping only this floor would rebuild the report from the stale 24h
+#     holders row (a fixed table beside a zero chart). This ONE bump supersedes every
+#     instant above. Set to a PAST instant just before the commit; deployed on a Saturday,
+#     inside the Fri 18:00 → Mon 18:00 ET close cycle, so it only re-bills the weekend's
+#     cached reports.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 3, 13, 30, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

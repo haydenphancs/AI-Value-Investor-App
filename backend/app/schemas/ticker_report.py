@@ -230,6 +230,10 @@ class InsiderDataResponse(BaseModel):
     # None when holders data is unavailable → iOS hides these blocks.
     insider_flow: Optional[SmartMoneyDataSchema] = None
     recent_transactions: Optional[InsiderActivitiesDataSchema] = None
+    # True when the insider fetch FAILED for this report: the zero `transactions` are then
+    # a placeholder, not "no insider trades" (iOS: "couldn't be loaded"). Absent/None on a
+    # measured section. Optional on both sides, so older builds and stored reports decode.
+    unavailable: Optional[bool] = None
 
 
 class KeyManagerResponse(BaseModel):

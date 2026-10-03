@@ -383,3 +383,21 @@ def test_a_malformed_estimate_degrades_to_the_nil_state_in_both_places(dcf_on, e
 def test_section_09_keeps_the_institutional_flow_chart(dcf_on):
     sec = _section_09(render_html(build_context(_estimate_report())))
     assert "Institutional (13F) Net Flow" in sec and "<svg" in sec
+
+
+def test_an_unavailable_insider_section_says_so_in_the_pdf():
+    """A FAILED insider fetch (`insider_data.unavailable`, 2026-10-03) prints its own line,
+    never "Buys 0 / Sells 0" or the measured-sounding "No insider-flow data"."""
+    report = _sample()
+    report["insider_data"] = {
+        "sentiment": "neutral", "timeframe": "Insider data couldn't be loaded",
+        "transactions": [], "unavailable": True,
+    }
+    ctx = build_context(report, 196.0)
+    assert ctx["insider"]["unavailable"] is True
+    html = render_html(ctx)
+    assert "Insider trading data couldn&#39;t be loaded" in html or \
+        "Insider trading data couldn't be loaded" in html
+    assert "No insider-flow data." not in html
+    measured = build_context(_sample(), 196.0)
+    assert measured["insider"]["unavailable"] is False

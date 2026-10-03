@@ -79,6 +79,7 @@ from app.services._whale_common import (
 from app.services._insider_common import (
     ceo_role_label,
     classify_insider_transaction,
+    insider_reporter_key,
     is_ceo_role,
     is_common_stock,
     normalize_insider_name,
@@ -101,10 +102,14 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────
 _SIGNALS_MEM_TTL_SECONDS = 2700          # 45 min in-memory freshness ceiling
 _SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 survives restart; sources daily/quarterly
-_SIGNALS_CACHE_KEY = "signals_v4"        # bump to invalidate stale rows on a semantics change —
+_SIGNALS_CACHE_KEY = "signals_v5"        # bump to invalidate stale rows on a semantics change —
                                          # v4 (2026-09-23) added the `ceo` card: a v3 row validates
                                          # (the field is optional) but would hide CEO Buys for up to
                                          # its 24h TTL after a deploy. The old row is simply ignored.
+                                         # v5 (2026-10-03): `is_common_stock` now counts "Class C
+                                         # Capital Stock" / beneficial-interest / "Ordinary Stock"
+                                         # lines and drops ADS-linked and unit-award lines, and
+                                         # `is_ceo_role` rejects region-tailed segment CEOs.
 _SIGNALS_DEGRADED_TTL_SECONDS = 300      # a build where a branch RAISED: memory only, 5 min, never
                                          # persisted — so the failed card comes back on the next
                                          # rebuild instead of being pinned for 24h by Tier 2.
@@ -507,20 +512,9 @@ class _CeoBuy(NamedTuple):
     form_type: str         # "4" or "4/A"
 
 
-def _ceo_reporter_key(row: Dict[str, Any]) -> str:
-    """Stable per-person identity: the SEC reporting CIK, else the normalised name.
-    ``""`` when neither identifies anyone (``normalize_insider_name`` answers "Insider")."""
-    cik = row.get("reportingCik")
-    if cik is not None and not isinstance(cik, bool):
-        text = str(cik).strip()
-        if text and text.lower() not in {"none", "null", "0"}:
-            return f"cik:{text}"
-    name = row.get("reportingName")
-    if isinstance(name, str) and name.strip():
-        normalized = normalize_insider_name(name).lower()
-        if normalized and normalized != "insider":
-            return f"name:{normalized}"
-    return ""
+# Per-person identity, shared with the report/Holders amendment rule
+# (`_insider_common.supersede_form4_amendments`) so both group a reporter the same way.
+_ceo_reporter_key = insider_reporter_key
 
 
 def _extract_ceo_buys(

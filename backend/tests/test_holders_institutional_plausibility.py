@@ -161,7 +161,8 @@ class _FMP:
     async def get_institutional_ownership_summary(self, t): return self.summary
     async def get_institutional_ownership_for_quarter(self, t, y, q, strict=False):
         self.prior_calls.append((y, q)); return self.prior
-    async def get_insider_trading(self, t, since_date=None): return []
+    async def get_insider_trades_since(self, since, *, symbol=None, page_size=1000, max_pages=5, transaction_type=None): return []
+    async def get_company_profile(self, t): return {"cik": "0000320193"}
     async def get_insider_roster(self, t): return []
     async def get_historical_prices(self, t, from_date=None, to_date=None): return []
     async def get_senate_latest(self, limit=1000): return []

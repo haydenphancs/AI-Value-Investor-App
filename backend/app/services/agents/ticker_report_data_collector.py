@@ -88,10 +88,19 @@ from app.schemas.growth import GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services._insider_common import (
+    INSIDER_MAX_PAGES,
+    INSIDER_PAGE_SIZE,
     classify_insider_transaction,
+    clean_role_title,
     ensure_insider_label,
+    insider_row_date,
+    insider_window_cutoff,
+    is_ceo_role,
+    is_equity_line,
     is_informative,
+    issuer_roster,
     normalize_insider_name,
+    prepare_insider_rows,
 )
 from app.services.sector_aggregates_service import (
     SectorAggregates,
@@ -351,6 +360,11 @@ class CollectedTickerData:
     news: List[Dict[str, Any]] = field(default_factory=list)
     insider_trades: List[Dict[str, Any]] = field(default_factory=list)
     insider_roster: List[Dict[str, Any]] = field(default_factory=list)
+    # True when the insider window fetch FAILED or lost a page (`_settle_insider_rows`): the
+    # report then states "unavailable" instead of computing "Buys 0 / Neutral" from nothing.
+    # A failed fetch also lands on `degraded_sections`, which blocks the ticker_data_cache
+    # write, so a stored collection never carries True.
+    insider_unavailable: bool = False
     # SC 13D/G filings — used to upgrade Form 4 share counts for
     # 10%+ owners whose direct holdings understate true beneficial ownership.
     beneficial_owners: List[Dict[str, Any]] = field(default_factory=list)
@@ -516,10 +530,28 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
       quiet week;
     * anything else failed → its default, with a warning;
     * a snapshot card (`_SNAPSHOT_STATUS_ATTRS`) arrives as `(snapshot, degraded)` and is
-      landed by `_settle_snapshot_result`, which refuses a degraded build.
+      landed by `_settle_snapshot_result`, which refuses a degraded build;
+    * `insider_trades` (the fail-closed window fetch) → `_settle_insider_rows`;
+    * `holders_response` arrives as `(holders, degraded)` → `_settle_holders_result`.
     """
     if attr in _SNAPSHOT_STATUS_ATTRS:
         _settle_snapshot_result(out, attr, result, ticker)
+        return
+    if attr == "insider_trades":
+        _settle_insider_rows(out, result, ticker)
+        return
+    if attr == "holders_response":
+        _settle_holders_result(out, result, ticker)
+        return
+    if attr == "insider_roster" and getattr(result, "fetch_failed", False):
+        # The roster feeds Key Management: a failed fetch is not "no officers", so the
+        # collection (and the report built from it) must not be shared-cached.
+        logger.warning(
+            "[report-degraded-section] %s: insider roster fetch failed (%s) — Key Management "
+            "may lack officers; not cached", ticker, getattr(result, "reason", ""),
+        )
+        out.insider_roster = []
+        out.degraded_sections.append("insider_roster:fetch_failed")
         return
     if isinstance(result, Exception):
         logger.warning(
@@ -535,6 +567,111 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
         setattr(out, attr, default)
         return
     setattr(out, attr, result if result is not None else default)
+
+
+# Holders sources whose failure changes what the REPORT shows from `holders_response`: the
+# insider flow chart + recent-transactions list (insider rows, the issuer filter), the
+# chart's price line, and the congressional trades the Hidden Market Signals module copies
+# (a lost congress page truncates that set). A build degraded on one of them is used for
+# this delivery but keeps the collection and the report out of every shared cache.
+_HOLDERS_REPORT_CRITICAL = frozenset({
+    "Insider trading", "Issuer CIK", "Historical prices",
+    "Senate latest", "House latest", "Senate disclosure", "House disclosure",
+})
+
+
+def _settle_insider_rows(out: Any, result: Any, ticker: str) -> None:
+    """Land the insider window fetch (`FMPClient.get_insider_trades_since`, fail-closed).
+
+    * rows → stored;
+    * the page cap hit with NO lost page (`FMPPartialPageException.pages_failed == 0`) → the
+      contiguous newest rows: a company filing more than the cap per year. Company state,
+      not an outage — kept cacheable (marking it degraded would regenerate that ticker's
+      report on every open), logged;
+    * anything else (a raise, a lost page, a non-list) → NO rows, ``insider_unavailable``
+      and a ``degraded_sections`` entry. A partial window is not frozen either: the
+      exception's own contract forbids caching it, and an under-counted window would feed
+      the insider vital and every persona score. This used to be a swallowed failure
+      returning ``[]``, which the report rendered — and cached — as "Buys 0 / Neutral".
+    """
+    from app.integrations.fmp import FMPNotEntitledException, FMPPartialPageException
+
+    if isinstance(result, FMPNotEntitledException):
+        # Outside the licence: a permanent state (the client answers 403/404 with [] the
+        # same way), not an outage — never a reason to regenerate every report.
+        logger.warning(
+            "[report-insider-not-entitled] %s: insider window not entitled (%s) — no rows",
+            ticker, result,
+        )
+        out.insider_trades = []
+        return
+    if isinstance(result, FMPPartialPageException) and result.pages_failed == 0:
+        rows = [r for r in (result.partial or []) if isinstance(r, dict)]
+        logger.warning(
+            "[report-insider-cap] %s: insider window walk hit its %d-page cap with %d rows "
+            "— using the newest span (%s)", ticker, INSIDER_MAX_PAGES, len(rows), result,
+        )
+        out.insider_trades = rows
+        return
+    if isinstance(result, list):
+        out.insider_trades = result
+        return
+    reason = type(result).__name__ if isinstance(result, BaseException) else "malformed"
+    logger.warning(
+        "[report-insider-unavailable] %s: insider window fetch failed (%s: %s) — the "
+        "report's insider section is marked unavailable and the collection is not cached",
+        ticker, reason, result if isinstance(result, BaseException) else type(result).__name__,
+    )
+    out.insider_trades = []
+    out.insider_unavailable = True
+    out.degraded_sections.append(f"insider_trades:{reason}")
+
+
+def _settle_holders_result(out: Any, result: Any, ticker: str) -> None:
+    """Land `HoldersService.get_holders_with_status` → ``(holders, degraded)``.
+
+    The report copies its insider chart and recent-transactions list (and the price line)
+    from this object. Holders refuses to PERSIST a degraded build, but `get_holders` used to
+    hand it over with no status, so the collector froze it into ticker_data_cache and the
+    shared report caches anyway. A build degraded on a source the report shows
+    (`_HOLDERS_REPORT_CRITICAL`) is still used, but recorded on ``degraded_sections``.
+    A raise leaves ``holders_response`` None and is recorded too (fail closed).
+    """
+    if isinstance(result, BaseException):
+        from app.integrations.fmp import FMPNotEntitledException
+
+        logger.warning(
+            "Collector: holders_response failed for %s: %s: %s",
+            ticker, type(result).__name__, result,
+        )
+        out.holders_response = None
+        # An invalid symbol (holders' ticker grammar is stricter than the report door's) or
+        # an unlicensed path repeats on every rebuild: recording it would keep the ticker out
+        # of every cache for good, so each open became a new 20-credit generation — the
+        # round-3 P3/P4 lesson `_SNAPSHOT_COMPANY_STATE_REASONS` records. Transient failures
+        # still block.
+        if not isinstance(result, (ValueError, FMPNotEntitledException)):
+            out.degraded_sections.append(f"holders_response:{type(result).__name__}")
+        return
+    if isinstance(result, tuple) and len(result) == 2:
+        holders, raw = result
+        reasons = [str(r) for r in raw if r] if isinstance(raw, (list, tuple)) else ["status_malformed"]
+    else:
+        holders, reasons = result, ["status_unknown"]
+    out.holders_response = holders
+    blocking = [r for r in reasons if r in _HOLDERS_REPORT_CRITICAL or r.startswith("status_")]
+    if blocking:
+        logger.warning(
+            "[report-degraded-section] %s: holders_response was built from a DEGRADED "
+            "upstream (%s) — used for this report, kept out of every shared cache",
+            ticker, ", ".join(blocking),
+        )
+        out.degraded_sections.append(f"holders_response:{'+'.join(blocking)}")
+    elif reasons:
+        logger.info(
+            "Collector: holders_response for %s degraded on sources outside "
+            "_HOLDERS_REPORT_CRITICAL (%s) — not blocking the cache", ticker, ", ".join(reasons),
+        )
 
 
 async def _caydex_dcf(ticker: str):
@@ -1315,7 +1452,16 @@ class TickerReportDataCollector:
             ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 10), []),
             ("historical", self.fmp.get_historical_prices(ticker, from_date=hist_from), {}),
             ("news", self.fmp.get_stock_news(ticker, 20), []),
-            ("insider_trades", self.fmp.get_insider_trading(ticker, since_date=insider_since), []),
+            # FAIL-CLOSED window fetch (typed raise / FMPPartialPageException), landed by
+            # `_settle_insider_rows`: an outage is "unavailable", never "Buys 0".
+            (
+                "insider_trades",
+                self.fmp.get_insider_trades_since(
+                    insider_since, symbol=ticker,
+                    page_size=INSIDER_PAGE_SIZE, max_pages=INSIDER_MAX_PAGES,
+                ),
+                [],
+            ),
             ("insider_roster", self.fmp.get_insider_roster(ticker), []),
             ("beneficial_owners", self.fmp.get_beneficial_ownership(ticker), []),
             (
@@ -1325,7 +1471,13 @@ class TickerReportDataCollector:
             ),
             ("earnings_dates", self.fmp.get_historical_earnings_dates(ticker), []),
             ("analyst_analysis", analyst_service.get_analysis(ticker), None),
-            ("holders_response", holders_service.get_holders(ticker), None),
+            # WITH its build status: a degraded holders build must not be frozen into the
+            # collection (`_settle_holders_result`).
+            (
+                "holders_response",
+                _await_with_status(lambda: holders_service.get_holders_with_status(ticker)),
+                None,
+            ),
             # Capital Allocation (buybacks + dividends) — same service the
             # Financials tab's "Signal of Confidence" uses (own 2-tier cache).
             (
@@ -2430,8 +2582,20 @@ class TickerReportDataCollector:
         }
 
         # ── Insider transactions, sentiment, and vital ────────────────
+        # One pass over the fetched rows, the SAME as HoldersService (whose chart + list this
+        # report copies): the issuer's own rows (the per-symbol feed carries the company's
+        # 10%-owner filings at OTHER issuers — BRK-B), its stock only, each amended trade once.
+        issuer_cik = (profile or {}).get("cik")
+        insider_rows, foreign = prepare_insider_rows(out.insider_trades, issuer_cik)
+        if foreign:
+            logger.warning(
+                "[report-insider-foreign-cik] %s: dropped %d insider row(s) filed under other "
+                "issuers' CIKs %s (issuer CIK %s) — the company's own 10%%-owner filings "
+                "elsewhere, or a CIK change", out.ticker, sum(foreign.values()),
+                sorted(foreign), issuer_cik,
+            )
         insider_data, insider_vital_partial = _build_insider_sections(
-            out.insider_trades
+            insider_rows, unavailable=bool(getattr(out, "insider_unavailable", False)),
         )
         out.insider_data_partial = insider_data
         out.insider_vital_partial = insider_vital_partial
@@ -2443,7 +2607,7 @@ class TickerReportDataCollector:
             or 0
         )
         out.key_management_partial = _build_key_management(
-            out.insider_roster,
+            issuer_roster(out.insider_roster, issuer_cik),
             profile,
             current_price,
             beneficial_owners=out.beneficial_owners,
@@ -2596,10 +2760,19 @@ class TickerReportDataCollector:
         # ._build_insider_smart_money), matching the bars, so it ships as-is.
         # Recent transactions are capped (iOS shows 3 + "Show more"). Left None
         # when there's no data → iOS hides the blocks.
-        hr = out.holders_response
+        # Not when the report's own insider fetch failed: a chart from a separate holders
+        # fetch beside an "unavailable" table would contradict it. And never an all-zero
+        # chart: holders always emits 13 month buckets, so attaching any non-empty series
+        # drew a fabricated ±1M axis of zero bars and kept iOS's empty state unreachable.
+        # Gate on the volumes, not `has_activity` (the schema defaults it to True).
+        insider_unavailable = bool(insider_data.get("unavailable"))
+        hr = None if insider_unavailable else out.holders_response
         if hr is not None:
             sm = hr.insider_data
-            if sm.flow_data:
+            if any(
+                (p.buy_volume or 0) > 0 or (p.sell_volume or 0) > 0
+                for p in (sm.flow_data or [])
+            ):
                 insider_data["insider_flow"] = sm.model_dump()
             recent = hr.recent_activities.insider_activities
             # Informative trades only (open-market P/S) — drops RSU vesting,
@@ -2609,9 +2782,7 @@ class TickerReportDataCollector:
             # first: iOS shows 3 collapsed + "Show N more", so an older-but-
             # counted buy is always reachable instead of being hidden behind a
             # wall of more-recent sells.
-            insider_cutoff = (
-                datetime.now(timezone.utc) - timedelta(days=365)
-            ).strftime("%Y-%m-%d")
+            insider_cutoff = insider_window_cutoff()
             informative = [
                 a for a in recent.activities
                 if a.transaction_type in ("Informative Buy", "Informative Sell")
@@ -2626,9 +2797,14 @@ class TickerReportDataCollector:
         # ── Insider vital: AI provides only key_insight ──────────────
         insider_vital = dict(out.insider_vital_partial)
         insider_vital["key_insight"] = (
-            insider_ai.get("key_insight")
-            or insider_vital.get("key_insight")
-            or "Insider activity reflected above."
+            # Never the model's words about data it did not have.
+            "Insider trading data couldn't be loaded for this report."
+            if insider_unavailable
+            else (
+                insider_ai.get("key_insight")
+                or insider_vital.get("key_insight")
+                or "Insider activity reflected above."
+            )
         )
 
         # ── Key management: AI provides ownership_insight ────────────
@@ -6047,6 +6223,8 @@ def _build_revenue_forecast_partial(
 
 def _build_insider_sections(
     insider_trades: List[Dict[str, Any]],
+    *,
+    unavailable: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Aggregate the last 12 months of real insider trades.
 
@@ -6055,37 +6233,65 @@ def _build_insider_sections(
     buys from junior officers. When no trades are available, returns
     honest zeros + neutral status.
 
+    ``unavailable`` (the insider fetch failed — `_settle_insider_rows`) is NOT "no trades":
+    the section carries ``unavailable: True`` (iOS says the data couldn't be loaded instead
+    of "no insider buys or sells") and the vital is UNMEASURED (score None, renormalised out
+    of every persona's overall score) rather than a neutral 5 computed from nothing.
+
     Returns (insider_data_partial, insider_vital_partial). The partial
     insider_data only lacks `ownership_note`, and the partial vital
     only lacks `key_insight` — both filled in `assemble_report`.
     """
+    if unavailable:
+        # NO transaction rows (not zero rows): every reader that ignores `unavailable` —
+        # the PDF, report-chat grounding, an app build older than the flag — would print or
+        # narrate "Buys 0 / Sells 0" as measured. The timeframe carries the message, because
+        # it is the caption every shipped iOS build already prints.
+        return (
+            {
+                "sentiment": "neutral",
+                "timeframe": "Insider data couldn't be loaded",
+                "transactions": [],
+                "ownership_note": None,
+                "unavailable": True,
+            },
+            {
+                "score": {"value": None, "status": "neutral"},
+                "sentiment": "neutral",
+                "net_activity": "Unavailable",
+                "buy_count": 0,
+                "sell_count": 0,
+                "key_insight": None,
+            },
+        )
+
     # 12-month window so the aggregate matches the 12-mo flow chart + the
     # recent-transactions list shown alongside it (was 90 days, which disagreed
-    # with the chart's timeline).
-    cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+    # with the chart's timeline). The shared date-string cutoff: every insider surface
+    # compares the same string, so a trade on the cutoff day is in or out everywhere.
+    cutoff = insider_window_cutoff()
 
     def _is_in_window(t: Dict[str, Any]) -> bool:
-        date_str = (t.get("transactionDate") or t.get("filingDate") or "")[:10]
+        date_str = insider_row_date(t)
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            )
+            datetime.strptime(date_str, "%Y-%m-%d")
         except (ValueError, TypeError):
             return False
-        return dt >= cutoff
+        return date_str >= cutoff
 
-    recent = [t for t in insider_trades if _is_in_window(t)]
+    recent = [t for t in insider_trades if isinstance(t, dict) and _is_in_window(t)]
 
-    # Match HoldersService Smart Money classification: keep only common-stock
-    # rows + only Informative trades (open-market P-Purchase / pure S-Sale).
+    # Match HoldersService Smart Money classification: keep only the issuer's stock
+    # (`is_equity_line` — common AND ordinary shares; a "common stock" substring test here
+    # dropped every "Ordinary Shares" filer, e.g. NYAX's CEO buys, and kept warrants)
+    # + only Informative trades (open-market P-Purchase / pure S-Sale).
     # Drops RSU vesting, option exercises, tax withholding, gifts — i.e.
     # compensation mechanics that don't carry sentiment signal. Without
     # this, the report's buy/sell counts disagree with the Holders tab.
     buys: List[Dict[str, Any]] = []
     sells: List[Dict[str, Any]] = []
     for t in recent:
-        sec = (t.get("securityName") or "").lower()
-        if sec and "common stock" not in sec:
+        if not is_equity_line(t.get("securityName")):
             continue
         classification = classify_insider_transaction(
             t.get("transactionType") or ""
@@ -6172,32 +6378,25 @@ def _build_insider_sections(
     return insider_data_partial, insider_vital_partial
 
 
-_OFFICER_PREFIX_RE = re.compile(r"\s*officer:\s*", flags=re.IGNORECASE)
+# Shared with the Holders activity list (`_insider_common.clean_role_title`).
+_clean_role_title = clean_role_title
 
 
-def _clean_role_title(title: Optional[str]) -> str:
-    """Strip the FMP `officer:` tag from a roster title so it reads
-    cleanly in the UI ("officer: Chief Executive Officer" →
-    "Chief Executive Officer"). Other tags (`director,`,
-    `10 percent owner,`) are preserved.
-    """
-    if not title:
-        return "Officer"
-    cleaned = _OFFICER_PREFIX_RE.sub(" ", title)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip().strip(",").strip()
-    return cleaned or "Officer"
-
-
-def _role_rank(cleaned_title: str, raw_type: str) -> int:
+def _role_rank(cleaned_title: str, raw_type: str, *, ceo: bool = False) -> int:
     """Numeric priority for ordering the Officers sub-section
     (lower = higher in the list). Pulls CEO/CFO/COO/President to the
     top regardless of share count, then other C-level, then other
     officers, then directors-only.
+
+    ``ceo`` is `_insider_common.is_ceo_role` on the raw FMP title — the SAME CEO rule as the
+    Home CEO Buys card. Without it only a title of exactly "CEO" or one containing "chief
+    executive" ranked first: NYAX's "CEO, Co Founder & Chairman" matched "chair" (5) and was
+    listed below its CFO, COO and President.
     """
     title_l = (cleaned_title or "").lower()
     type_l = (raw_type or "").lower()
 
-    if "chief executive" in title_l or title_l == "ceo":
+    if ceo or "chief executive" in title_l or title_l == "ceo":
         return 1
     if "chief financial" in title_l or title_l == "cfo":
         return 2
@@ -6403,7 +6602,9 @@ def _build_key_management(
                 if cik and cik in seen_top_ciks:
                     continue
                 row["_rank"] = _role_rank(
-                    cleaned_title, r.get("typeOfOwner") or ""
+                    cleaned_title, r.get("typeOfOwner") or "",
+                    # Roster rows carry FMP's raw `typeOfOwner` as `title`.
+                    ceo=is_ceo_role(r.get("title") or r.get("typeOfOwner")),
                 )
                 row["_shares"] = shares
                 officers.append(row)
@@ -9565,15 +9766,22 @@ def build_financial_context(out: CollectedTickerData) -> str:
 
     if out.insider_data_partial:
         i = out.insider_data_partial
-        txns = i.get("transactions", [])
-        tx_strs = [
-            f"{t['type']} {t['count']} ({t['shares']} sh, {t['value']})"
-            for t in txns
-        ]
-        parts.append(
-            f"\nInsider Activity (12mo): {i.get('sentiment', 'neutral')} "
-            f"— " + ", ".join(tx_strs)
-        )
+        if i.get("unavailable"):
+            # The fetch failed: zeros here would be narrated as "no insider buying".
+            parts.append(
+                "\nInsider Activity (12mo): UNAVAILABLE (the insider data could not be "
+                "loaded) — do not describe insider buying, selling or its absence."
+            )
+        else:
+            txns = i.get("transactions", [])
+            tx_strs = [
+                f"{t['type']} {t['count']} ({t['shares']} sh, {t['value']})"
+                for t in txns
+            ]
+            parts.append(
+                f"\nInsider Activity (12mo): {i.get('sentiment', 'neutral')} "
+                f"— " + ", ".join(tx_strs)
+            )
 
     if out.revenue_engine_partial.get("segments"):
         # Pre-formatted dollars. The engine's values are MILLIONS, and this header used to

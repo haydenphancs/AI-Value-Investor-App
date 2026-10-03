@@ -928,6 +928,63 @@ def test_assemble_report_forwards_insider_flow_and_transactions():
     assert bare["insider_data"].get("recent_transactions") is None
 
 
+def test_an_all_zero_insider_flow_is_not_shipped():
+    """holders always emits 13 month buckets, so attaching any non-empty series shipped a
+    chart of zero bars on a fabricated ±1M axis, and kept iOS's "no insider transactions"
+    empty state unreachable (NYAX, 2026-10-03). Gated on the VOLUMES: `has_activity`
+    defaults to True on the schema, so a row built without the flag would read as active."""
+    from app.schemas.holders import (
+        HoldersResponse, SmartMoneyDataSchema, SmartMoneyFlowDataPointSchema,
+    )
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.holders_response = HoldersResponse(
+        symbol="AAPL",
+        insider_data=SmartMoneyDataSchema(
+            tab="Insider",
+            flow_data=[SmartMoneyFlowDataPointSchema(month=f"{m:02d}/2026", buy_volume=0.0,
+                                                     sell_volume=0.0) for m in range(1, 13)],
+        ),
+    )
+    report = coll.assemble_report(out, stage_a_fallback())
+    assert report["insider_data"].get("insider_flow") is None
+    TickerReportResponse.model_validate(report)
+
+
+def test_an_unavailable_insider_section_round_trips_and_ships_no_chart():
+    """A FAILED insider fetch reaches iOS as `unavailable: true` (Optional on both sides),
+    never as a measured "Buys 0 / Neutral"; no chart or list from a separate holders fetch
+    sits beside it, and the key insight is not the model's words about missing data."""
+    from app.schemas.holders import (
+        HoldersResponse, SmartMoneyDataSchema, SmartMoneyFlowDataPointSchema,
+    )
+    from app.services.agents.ticker_report_data_collector import _build_insider_sections
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.insider_data_partial, out.insider_vital_partial = _build_insider_sections([], unavailable=True)
+    out.holders_response = HoldersResponse(
+        symbol="AAPL",
+        insider_data=SmartMoneyDataSchema(
+            tab="Insider",
+            flow_data=[SmartMoneyFlowDataPointSchema(month="01/2026", buy_volume=0.5, sell_volume=0.0)],
+        ),
+    )
+    ai = stage_a_fallback()
+    ai["insider_analysis"] = {"key_insight": "Insiders were not buying.", "ownership_note": None}
+    report = coll.assemble_report(out, ai)
+    insider = report["insider_data"]
+    assert insider["unavailable"] is True
+    assert insider.get("insider_flow") is None and insider.get("recent_transactions") is None
+    validated = TickerReportResponse.model_validate(report)
+    assert validated.insider_data.unavailable is True
+    measured = TickerReportResponse.model_validate(
+        coll.assemble_report(_make_collected_data(), stage_a_fallback())
+    )
+    assert measured.insider_data.unavailable is None
+
+
 def test_build_insider_smart_money_windows_daily_prices():
     """The Holders Insider chart overlays a price line on buy/sell bars that span
     the trailing 365 days. The raw daily series spans ~2 years (sized for the

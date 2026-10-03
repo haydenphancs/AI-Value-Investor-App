@@ -45,7 +45,10 @@ _CACHE_TTL = 300  # 5 minutes
 #: 2 → the Institutional Ownership metric honours the Holders tab's plausibility gate
 #:     (`institutions_unknown` → "—", and the rating no longer scores an unknown as
 #:     "<10%"). Rows written before this can still carry AAPL's laundered "100.0%".
-_SNAPSHOT_PAYLOAD_VERSION = 2
+#: 3 → the insider flow it summarises was rebuilt (2026-10-03): "Ordinary Shares" filers
+#:     (NYAX) read "Neutral" with no insider trades, other issuers' rows counted (BRK-B),
+#:     Form 4/A amendments double-counted.
+_SNAPSHOT_PAYLOAD_VERSION = 3
 _VERSION_KEY = "_schema_v"
 
 
@@ -191,11 +194,21 @@ class OwnershipSnapshotService:
 
         try:
             logger.info(f"Ownership snapshot cache MISS for {ticker} — computing")
-            result = await self._compute(ticker)
+            result, holders_degraded = await self._compute_with_status(ticker)
 
-            asyncio.get_running_loop().run_in_executor(
-                None, self._upsert_supabase_cache, ticker, result,
-            )
+            # Only a COMPLETE holders build may be pinned for 24h. A degraded one (an FMP
+            # source failed — e.g. the insider fetch, whose failure used to read as "no
+            # insider activity") is served from the 5-minute tier only, so the next read
+            # recomputes from a fresh build, the same rule holders applies to itself.
+            if holders_degraded:
+                logger.warning(
+                    "Ownership snapshot NOT persisted for %s — holders build degraded (%s)",
+                    ticker, ", ".join(holders_degraded),
+                )
+            else:
+                asyncio.get_running_loop().run_in_executor(
+                    None, self._upsert_supabase_cache, ticker, result,
+                )
 
             _cache_set(cache_key, result)
             if not future.done():
@@ -277,11 +290,23 @@ class OwnershipSnapshotService:
 
     # ── Core computation ──────────────────────────────────────────
 
+    async def _compute_with_status(
+        self, ticker: str
+    ) -> Tuple[SnapshotItemResponse, List[str]]:
+        """The snapshot plus the holders build's degraded sources (``[]`` = complete)."""
+        from app.services.holders_service import get_holders_service
+
+        holders, degraded = await get_holders_service().get_holders_with_status(ticker)
+        return self._compute_from_holders(holders), degraded
+
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
         """Reuse HoldersService (Holders tab) to get exact same data the user sees."""
         from app.services.holders_service import get_holders_service
 
         holders = await get_holders_service().get_holders(ticker)
+        return self._compute_from_holders(holders)
+
+    def _compute_from_holders(self, holders: Any) -> SnapshotItemResponse:
 
         # Extract shareholder breakdown. An UNKNOWN institutional figure (implausible
         # 13F aggregate, no plausible fallback) arrives as 0.0 + `institutions_unknown`;
@@ -300,6 +325,9 @@ class OwnershipSnapshotService:
 
         insider_flow = insider_summary.total_net_flow
         insider_positive = insider_summary.is_positive
+        # The insider fetch FAILED for this holders build: its zeros are a placeholder.
+        # Show "—" and score the factor as no-signal, never "Neutral" as a measurement.
+        insider_unavailable = getattr(holders.insider_data, "unavailable", None) is True
         # The insider VERDICT is dollar-denominated when the Holders service supplies it
         # (it does for the Insider tab), so that this card, the Holders badge and
         # TickerReportView cannot state opposite conclusions for one ticker. `is_positive`
@@ -323,7 +351,8 @@ class OwnershipSnapshotService:
             SnapshotMetricResponse(
                 name="Insider Activity (12M)",
                 value=(
-                    _fmt_usd_flow(insider_usd, insider_positive)
+                    "—" if insider_unavailable
+                    else _fmt_usd_flow(insider_usd, insider_positive)
                     if insider_usd is not None
                     else _fmt_share_flow(insider_flow, insider_positive)
                 ),
@@ -345,9 +374,9 @@ class OwnershipSnapshotService:
         # Weighted rating across 4 factors
         rating = self._compute_rating(
             insider_pct, inst_pct,
-            insider_flow, insider_positive,
+            0.0 if insider_unavailable else insider_flow, insider_positive,
             inst_flow, inst_positive,
-            insider_usd_millions=insider_usd,
+            insider_usd_millions=0.0 if insider_unavailable else insider_usd,
         )
 
         return SnapshotItemResponse(

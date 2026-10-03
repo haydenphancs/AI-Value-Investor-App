@@ -38,7 +38,11 @@ from app.schemas.tracking import (
     AnalystRatingItemResponse,
     InsiderTransactionItemResponse,
 )
-from app.services._insider_common import classify_for_alerts
+from app.services._insider_common import (
+    classify_for_alerts,
+    is_equity_line,
+    supersede_form4_amendments,
+)
 from app.services._analyst_common import (
     analyst_section_available,
     classify_for_alerts as classify_analyst_for_alerts,
@@ -1524,9 +1528,19 @@ class TrackingService:
                 return None, True
 
             # Aggregate by (insider_name, transaction_date, action) because
-            # Form 4 filings often split one decision across many small rows.
+            # Form 4 filings often split one decision across many small rows. A Form 4/A
+            # repeats its original's lines under the SAME trade date, so it is collapsed
+            # first — summed into one bucket, a restated $1.3M sale read as $2.5M.
             buckets: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-            for tx in trades:
+            # Only the stock itself: a P-Purchase of preferred shares, notes or warrants is
+            # not "Insider bought". Lenient (`strict=False`): an unlabeled or unusual equity
+            # label still alerts. Filtered BEFORE supersession (`prepare_insider_rows`'
+            # order), so a warrant-only 4/A can never be read as a correction of a stock line.
+            equity = [
+                t for t in trades
+                if isinstance(t, dict) and is_equity_line(t.get("securityName"), strict=False)
+            ]
+            for tx in supersede_form4_amendments(equity):
                 date_str = tx.get("transactionDate") or tx.get("filingDate") or ""
                 dt = _parse_date(date_str)
                 if dt is None or dt < cutoff:

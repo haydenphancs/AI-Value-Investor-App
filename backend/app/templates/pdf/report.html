@@ -387,7 +387,8 @@
   <table class="two-col">
     <td class="col-l">
       <div class="sub-h">Insider Buy / Sell Flow</div>
-      {% if charts.insider_flow %}<div class="chart-wrap">{{ charts.insider_flow | safe }}</div>
+      {% if insider.unavailable %}<div class="no-data">Insider trading data couldn't be loaded for this report.</div>
+      {% elif charts.insider_flow %}<div class="chart-wrap">{{ charts.insider_flow | safe }}</div>
       <div class="chart-legend"><span class="sw" style="background:#16A34A"></span>Buys<span class="sw" style="background:#DC2626"></span>Sells</div>{% else %}<div class="no-data">No insider-flow data.</div>{% endif %}
       {% if insider.transactions %}
       <table class="kv"><thead><tr><th>Type</th><th class="r">Trades</th><th class="r">Shares</th><th class="r">Value</th></tr></thead><tbody>

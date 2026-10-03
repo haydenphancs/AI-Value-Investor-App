@@ -72,9 +72,18 @@ def _ticker_tool(name: str, description: str) -> types.FunctionDeclaration:
 _MARKET_TOOL = "get_market_snapshot"
 
 # The two per-ticker tools that closed the "why did it move" hole. Both are free at the
-# point of call; `explain_price_move` escalates to a metered web search only for a material
-# move it cannot otherwise explain (see `chat_market_tools`).
+# point of call (`explain_price_move`'s metered grounded-search tier was retired 2026-10-02;
+# see `chat_market_tools`).
 _NEWS_TOOLS = frozenset({"get_ticker_news", "explain_price_move"})
+
+# Report chat's live web search (`chat_web_search_service`). The ONE name both files share:
+# defined HERE and imported by the service, never the reverse — this module must not pull the
+# budget / database code in at import (`tests/test_chat_tool_boundary.py`). It is in NO asset
+# class's table below: `tools_for_asset_type(..., web_search=True)` adds it only on a turn the
+# service's gate opened (REPORT session, TICKER_REPORT screen, the switch, a key, a signed-in
+# caller and an explicit ask), so the declaration, the handler map and the prompt's capability
+# block all follow that one decision.
+WEB_SEARCH_TOOL = "web_search"
 
 _STOCK_TOOLSET = frozenset({
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
@@ -104,8 +113,12 @@ _TOOLS_BY_ASSET_TYPE: Dict[str, frozenset] = {
 }
 
 
-def tools_for_asset_type(asset_type: Optional[str]) -> frozenset:
+def tools_for_asset_type(asset_type: Optional[str], *, web_search: bool = False) -> frozenset:
     """Tool NAMES the given asset class may call.
+
+    `web_search=True` adds report chat's `web_search` tool on top — passed ONLY by a turn whose
+    `chat_web_search_service.WebSearchTurn` exists. Defaults to False, so every existing caller
+    (the chip scope, the tool-less builds) is unchanged.
 
     An unknown / missing asset type falls back to the full equity set — the conservative
     direction, since that is exactly what every caller did before this table existed.
@@ -128,6 +141,8 @@ def tools_for_asset_type(asset_type: Optional[str]) -> frozenset:
     allowed = _TOOLS_BY_ASSET_TYPE.get((asset_type or "").strip().upper(), _STOCK_TOOLSET)
     if not analyst_section_available():
         allowed = allowed - {"get_analyst_analysis"}
+    if web_search:
+        allowed = allowed | {WEB_SEARCH_TOOL}
     return allowed
 
 
@@ -190,6 +205,16 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "performance, and macro indicators. For INDEX / broad-market questions, NOT "
         "individual stocks."
     ),
+    WEB_SEARCH_TOOL: (
+        "Search the public web — ONLY for what the user explicitly asked, in this message, to "
+        "search for, look up, verify, fact-check or get the latest on. Call it at most once. "
+        "`query`: a short search — the company name or ticker, the topic and, if needed, a "
+        "year or quarter; never a figure, price or percentage, and nothing about the user. "
+        "Optional `recency`: day, week, month or year. Returns third-party pages with their "
+        "publisher and date — not Caydex data and not the report's view. For a company's "
+        "recent headlines prefer the news-headlines tool when you have it; never use this for "
+        "prices, quotes, price changes or other market data."
+    ),
 }
 
 TOOL_CAPABILITIES: Dict[str, str] = {
@@ -217,6 +242,11 @@ TOOL_CAPABILITIES: Dict[str, str] = {
         "get_market_overview for the index's valuation (P/E, forward P/E, earnings yield), "
         "sector performance and macro indicators"
     ),
+    WEB_SEARCH_TOOL: (
+        "web_search for third-party web pages on what the user explicitly asked you to look "
+        "up, verify or get the latest on in this message — once per question, and never for "
+        "prices, quotes or market data"
+    ),
 }
 
 # What a ticker tool answers when the model's argument is not a symbol. Fixed text —
@@ -226,6 +256,10 @@ _INVALID_TICKER = {"error": "invalid or missing ticker"}
 # Tools that take no arguments / a symbol rather than a ticker.
 _NO_ARG_TOOLS = frozenset({_MARKET_TOOL})
 _SYMBOL_ARG_TOOLS = frozenset({"get_market_overview"})
+# The ONE tool with a free-form argument. The query is model output: the service sanitizes it
+# (no figure, no URL, no email, ≤ 16 words) before anything leaves the server, and validates
+# `recency` itself — no `enum` in the schema, which a strict declaration validator can 400 on.
+_QUERY_ARG_TOOLS = frozenset({WEB_SEARCH_TOOL})
 
 
 def _declaration(name: str) -> types.FunctionDeclaration:
@@ -234,6 +268,27 @@ def _declaration(name: str) -> types.FunctionDeclaration:
         return types.FunctionDeclaration(
             name=name, description=description,
             parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+        )
+    if name in _QUERY_ARG_TOOLS:
+        return types.FunctionDeclaration(
+            name=name, description=description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "query": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "A short web search: the company name or ticker, the topic and, if "
+                            "needed, a year or quarter. Never a figure, price or percentage."
+                        ),
+                    ),
+                    "recency": types.Schema(
+                        type=types.Type.STRING,
+                        description="Optional: how recent the pages must be — day, week, month or year.",
+                    ),
+                },
+                required=["query"],
+            ),
         )
     if name in _SYMBOL_ARG_TOOLS:
         return types.FunctionDeclaration(
@@ -257,12 +312,16 @@ def _declaration(name: str) -> types.FunctionDeclaration:
 _TOOL_ORDER = (
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
     "get_ticker_news", "explain_price_move", _MARKET_TOOL, "get_market_overview",
+    WEB_SEARCH_TOOL,
 )
 
 
-def build_chat_tool_declarations(asset_type: Optional[str] = None) -> List[types.Tool]:
-    """The tools the agentic chat may call, filtered to those meaningful for `asset_type`."""
-    allowed = tools_for_asset_type(asset_type)
+def build_chat_tool_declarations(
+    asset_type: Optional[str] = None, *, web_search: bool = False,
+) -> List[types.Tool]:
+    """The tools the agentic chat may call, filtered to those meaningful for `asset_type`
+    (plus `web_search` only when the turn's gate opened — see `tools_for_asset_type`)."""
+    allowed = tools_for_asset_type(asset_type, web_search=web_search)
     decls = [_declaration(name) for name in _TOOL_ORDER if name in allowed]
     # An empty `function_declarations` list is not a valid Tool — return no tools at all.
     return [types.Tool(function_declarations=decls)] if decls else []
@@ -456,14 +515,23 @@ def build_chat_tool_handlers(
     screen_symbol: Optional[str] = None,
     screen_asset_type: Optional[str] = None,
     user_id: Optional[str] = None,
+    web_turn: Any = None,
 ) -> Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]:
     """Map each tool name → async handler delegating to the ChatService fetch methods.
 
+    `web_turn` is the turn's `chat_web_search_service.WebSearchTurn`, or None. Only when it
+    exists does the map gain the `web_search` handler — every round, specialist and the
+    stream→non-stream fallback that shares this turn shares its ONE search. `web_search` is the
+    only tool that spends a paid search: `explain_price_move`'s grounded third tier was retired
+    on 2026-10-02, so the `web_escalation=False` its handler still passes on a web turn is an
+    accepted no-op (kept so a paid tier added there later stays off on a turn that already
+    carries the user's search).
+
     `screen_symbol` is the session's `stock_id` and `screen_asset_type` the class the screen
     resolved it as (STOCK / ETF / CRYPTO / …). Together they let a handler trust the screen
-    over the ticker's spelling — see `_resolve` below. `user_id` reaches the one PAID tool
-    (`explain_price_move`) so its web-search spend is metered per account as well as
-    globally; every other handler is free and ignores it.
+    over the ticker's spelling — see `_resolve` below. `user_id` is forwarded to
+    `explain_price_move`, which accepts and ignores it today; the `web_search` handler meters
+    its spend through `web_turn.user_id` instead.
     """
     screen = (screen_symbol or "").strip().upper()
     # Every NON-crypto screen earns the exemption — STOCK, and also ETF / INDEX / COMMODITY,
@@ -584,6 +652,13 @@ def build_chat_tool_handlers(
         sym, on_equity = _resolve(args)
         if sym is None:
             return _invalid(args)
+        if web_turn is not None:
+            # This turn already carries the user's own web search. The price-move ladder is free
+            # today (its paid tier was retired), so `web_escalation=False` is a no-op — kept so a
+            # paid tier added there later can never buy a SECOND search on a web turn.
+            kw: Dict[str, Any] = {"is_crypto": False} if on_equity else {}
+            return await svc._fetch_price_move_data(
+                sym, user_id=user_id, web_escalation=False, **kw)
         if on_equity:
             return await svc._fetch_price_move_data(sym, is_crypto=False, user_id=user_id)
         return await svc._fetch_price_move_data(sym, user_id=user_id)
@@ -591,7 +666,7 @@ def build_chat_tool_handlers(
     async def _snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
         return await svc._fetch_market_snapshot_data()
 
-    return {
+    handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {
         "get_stock_chart_data": _stock,
         "get_analyst_analysis": _analyst,
         "get_sentiment_analysis": _sentiment,
@@ -600,6 +675,17 @@ def build_chat_tool_handlers(
         "explain_price_move": _why,
         _MARKET_TOOL: _snapshot,
     }
+    if web_turn is not None:
+        async def _web(args: Dict[str, Any]) -> Dict[str, Any]:
+            # Lazy import: this module is loaded by the declaration path and must not pull the
+            # budget service and its datastore client in at import.
+            from app.services.chat_web_search_service import run_web_search
+
+            a = args if isinstance(args, dict) else {}
+            return await run_web_search(web_turn, a.get("query"), a.get("recency"))
+
+        handlers[WEB_SEARCH_TOOL] = _web
+    return handlers
 
 
 # Tool results with these widget_types render as inline widgets; others only inform the answer.

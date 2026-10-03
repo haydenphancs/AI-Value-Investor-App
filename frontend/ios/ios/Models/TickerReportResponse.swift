@@ -376,9 +376,12 @@ struct InsiderDataDTO: Codable {
     // payloads and tickers with no insider data.
     let insiderFlow: SmartMoneyDataDTO?
     let recentTransactions: InsiderActivitiesDataDTO?
+    // true when the backend's insider fetch FAILED for this report: the zero counts are a
+    // placeholder, not "no insider trades". Optional → older/stored reports decode as nil.
+    let unavailable: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case sentiment, timeframe, transactions
+        case sentiment, timeframe, transactions, unavailable
         case ownershipNote = "ownership_note"
         case capitalAllocation = "capital_allocation"
         case insiderFlow = "insider_flow"
@@ -770,22 +773,11 @@ struct CriticalFactorDTO: Codable {
 extension TickerReportAPIResponse {
     /// Convert the Codable API response into the rich view-model type.
     func toTickerReportData() -> TickerReportData {
-        // Agent
-        let agentPersona: ReportAgentPersona = {
-            switch agent.lowercased() {
-            case "buffett": return .buffett
-            case "wood": return .wood
-            case "lynch": return .lynch
-            case "ackman": return .ackman
-            case "burry": return .burry
-            // Legacy: cached/history reports tagged the Ackman persona "dalio"
-            // before the badge was renamed. Every such report was an Ackman
-            // analysis (there was never a real Dalio persona), so map it to
-            // .ackman rather than a default.
-            case "dalio": return .ackman
-            default: return .buffett
-            }
-        }()
+        // Agent — through the ONE tag table, `ReportAgentPersona(agentTag:)` (which also maps
+        // the legacy "dalio" tag). `.buffett` is this screen's DISPLAY default for an unknown
+        // tag, decided here and nowhere else; the report chat reads `agent.personaKey` from the
+        // result, so its mode always names the method the badge shows.
+        let agentPersona = ReportAgentPersona(agentTag: agent) ?? .buffett
 
         // Quality Rating — labeled through the report's persona lens
         // ("Strong Growth Profile" for Wood, "Strong Value Profile" for Buffett).
@@ -951,7 +943,8 @@ extension TickerReportAPIResponse {
                 )
             },
             insiderFlow: insiderData.insiderFlow?.toDisplayModel(),
-            recentTransactions: insiderData.recentTransactions?.toDisplayModel().activities ?? []
+            recentTransactions: insiderData.recentTransactions?.toDisplayModel().activities ?? [],
+            isUnavailable: insiderData.unavailable == true
         )
 
         // Key Management — split into top holders (10%+ owners) and

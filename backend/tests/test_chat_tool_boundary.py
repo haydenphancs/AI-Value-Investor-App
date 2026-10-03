@@ -107,3 +107,48 @@ def test_research_tool_handler_set_is_exactly_the_readonly_allowlist():
         "fetch_extended_financials",
         "research_complete",
     }
+
+
+# ── report chat's web_search: the ONE free-form parameter, and only when granted ──
+#
+# The query is model output. What keeps it safe is not the schema but the service: it is
+# sanitized (no figure, URL, email; ≤ 16 words) before anything leaves the server, the handler
+# reaches only `chat_web_search_service.run_web_search` (lazy import — this module still holds no
+# DB primitive, pinned above), and the tool is declared only on a turn the gate opened.
+
+_WEB_TOOL_PARAMS = {"query", "recency"}
+
+
+def test_web_search_is_the_only_free_form_tool_and_only_when_granted():
+    seen_web = False
+    for asset_type in ("STOCK", "NORMAL", "ETF", "CRYPTO", "INDEX", "COMMODITY"):
+        for tool in chat_tools.build_chat_tool_declarations(asset_type, web_search=True):
+            for fd in tool.function_declarations or []:
+                props = set((fd.parameters.properties or {}).keys()) if fd.parameters else set()
+                if fd.name == chat_tools.WEB_SEARCH_TOOL:
+                    seen_web = True
+                    assert props == _WEB_TOOL_PARAMS
+                    assert list(fd.parameters.required or []) == ["query"]
+                    assert all(fd.parameters.properties[p].enum is None for p in props)
+                else:
+                    assert props <= _ALLOWED_TOOL_PARAMS, (fd.name, props)
+    assert seen_web, "anti-vacuity: the granted declaration set must contain web_search"
+
+
+def test_handler_set_with_a_web_turn_adds_exactly_web_search():
+    base = set(chat_tools.build_chat_tool_handlers(MagicMock()))
+    with_web = set(chat_tools.build_chat_tool_handlers(MagicMock(), web_turn=object()))
+    assert with_web == base | {chat_tools.WEB_SEARCH_TOOL}
+    assert chat_tools.WEB_SEARCH_TOOL not in base
+
+
+def test_the_web_handler_reaches_only_the_service_entry_point():
+    """By AST: the only import in the handler map's web branch is
+    `chat_web_search_service.run_web_search`, imported lazily inside the handler."""
+    import ast
+    tree = ast.parse(inspect.getsource(chat_tools))
+    lazy = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+            and n.module == "app.services.chat_web_search_service"]
+    assert len(lazy) == 1 and [a.name for a in lazy[0].names] == ["run_web_search"]
+    top = {n.module for n in tree.body if isinstance(n, ast.ImportFrom)}
+    assert "app.services.chat_web_search_service" not in top, "must stay a LAZY import"

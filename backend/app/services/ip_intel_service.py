@@ -269,7 +269,7 @@ class IPIntelService:
         self, top_n: int = _BATCH_TOP_N,
     ) -> Dict[str, Any]:
         """Quarterly batch entry. Reads the top-N most-watchlisted
-        tickers and refreshes each. Mirrors competitor_intel_service.
+        tickers and refreshes each.
         """
         run_id = str(uuid.uuid4())
         started = time.time()

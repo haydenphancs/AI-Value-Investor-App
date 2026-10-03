@@ -19,27 +19,22 @@ Every capability below already existed and was wired to some OTHER surface — t
 sweeper, the Home Screen widget, the research agent. Nothing here is a new data source; it
 is the missing wiring.
 
-THE ESCALATION LADDER — the whole cost story
+THE ANSWER LADDER — free, licensed data only
 --------------------------------------------
-`explain_price_move` answers in three tiers and stops at the first that finds a
-company-specific cause:
+`explain_price_move` answers in two tiers, then a deterministic bottom line:
 
   1. `widget_movers_service.attribute_ticker_move` — the deterministic detector set
      (earnings / analyst / company news / group move / gap), arithmetic and string matching
      over data already paid for. Free, and it cannot hallucinate.
   2. The ticker's 6h-cached news corpus. Free — FMP's "Market News" package IS on the Order
      Form, unlike the quote and market-performance families.
-  3. `price_catalyst_service.get_catalyst` — a grounded Google Search. **This is the only
-     paid step in the file**, at roughly $0.035 a call, and it is gated three ways: the move
-     must be volatility-relative material, tiers 1-2 must have found nothing
-     company-specific, and a durable daily budget must admit it.
 
-⚠️ **The window label MUST stay `"today"`.** It is a cache-identity component
-(`_ctx_key`, migration 095) and the Updates sweeper already writes `"today"` rows, so
-matching it means chat SHARES that 24h cache and a watchlist name usually costs nothing.
-It is also a correctness guard: `daily_move_attribution`'s own header records a measured
-case where the cached window was "Last 15 Days" (+42.7%) and printing it under a red daily
-move produced "a correct answer to a different question". Any other label re-opens that.
+There used to be a third, paid tier: a grounded Google Search through
+`price_catalyst_service`, shared through a 24 h cross-user cache. Retired 2026-10-02 — the
+Gemini "Grounding with Google Search" terms forbid caching a grounded answer, sharing it
+beyond the user who asked, and showing it without its Search Suggestions
+(`tests/test_no_google_search_grounding.py`). Report chat's live web search is a separate,
+licensed path (`chat_web_search_service`).
 """
 
 from __future__ import annotations
@@ -47,51 +42,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import uuid
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from app.config import settings
 from app.services.chat_budget_service import (
     ChatBudgetUnavailable,
     get_chat_budget_service,
 )
-from app.services.updates_materiality import (
-    BAND_EXTREME,
-    TIER_EXTREME,
-    TIER_UNUSUAL,
-)
 
 logger = logging.getLogger(__name__)
-
-# The move tiers that earn a paid search, byte-identical to the Updates sweeper's
-# `_CATALYST_TIERS`. Shared deliberately: two surfaces with two thresholds is how one
-# starts explaining moves the other calls ordinary, for the same ticker on the same day.
-# `BAND_EXTREME` is the fixed-band fallback a thin-history or newly-listed name lands on
-# when σ is unavailable — precisely the population most prone to violent moves.
-_CATALYST_TIERS = frozenset({TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME})
-
-# Attribution kinds that already name a company-specific cause. Reaching any of these
-# means tier 3 has nothing to add and must not run.
-_COMPANY_SPECIFIC_KINDS = frozenset({"earnings", "analyst", "company_news"})
-
-# Bucket key for the GLOBAL daily ceiling on chat-initiated web searches.
-#
-# Reuses `chat_usage_budget` + the `claim_chat_turn` RPC rather than adding a table:
-# that column is a bare uuid with no FK and the RPC takes an arbitrary limit, which is
-# exactly how `_ip_budget_bucket` already shares it. So this is durable and atomic across
-# Railway instances — unlike the sweeper's in-process `_CATALYST_DAILY_CAP`, whose own
-# comment concedes a 2x blast radius across two instances — and needs no migration.
-_WEB_SEARCH_BUCKET = str(
-    uuid.uuid5(uuid.NAMESPACE_URL, "caydex:chat:web-search-budget")
-)
-
-
-def _user_web_search_bucket(user_id: str) -> str:
-    """The per-account sub-bucket beneath the global one (`CHAT_WEB_SEARCH_USER_DAILY_CAP`).
-    Derived, never the raw account id: the column is shared with the per-install chat
-    bucket keyed on the SAME uuid, and a raw id would count web searches as chat turns."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"caydex:chat:web-search-budget:{user_id}"))
 
 # Headlines handed to the model per call. Small on purpose: a tool result is truncated at
 # 8000 chars by `stream_agentic`, and the grounding is re-sent on EVERY turn (chat is not
@@ -148,8 +107,14 @@ def _trim(value: Any, cap: int) -> Optional[str]:
     return text if len(text) <= cap else text[: cap - 1].rstrip() + "…"
 
 
-async def _claim_bucket(bucket: str, limit: int, what: str) -> bool:
-    """One atomic claim on `bucket`; False on the cap OR on any failure (fails closed)."""
+async def _claim_bucket_status(bucket: str, limit: int, what: str) -> str:
+    """One atomic claim on `bucket`: "ok", "capped" (the daily cap) or "unavailable" (the
+    budget store failed — the caller must fail CLOSED on it).
+
+    The three-way answer exists for report chat's web search (`chat_web_search_service`),
+    which tells the model "the daily limit is reached" on a cap but settles a budget OUTAGE
+    as an upstream failure. (It lives here because `explain_price_move`'s retired grounded
+    tier was its first caller; the budget table and RPC are shared.)"""
     try:
         count = await asyncio.to_thread(
             get_chat_budget_service().try_claim_turn, bucket, limit
@@ -159,17 +124,17 @@ async def _claim_bucket(bucket: str, limit: int, what: str) -> bool:
             "chat web-search %s budget unavailable — failing CLOSED, the turn keeps its "
             "deterministic answer: %s", what, e,
         )
-        return False
+        return "unavailable"
     except Exception as e:  # noqa: BLE001 — a budget read must never break a turn
         logger.warning(
             "chat web-search %s budget raised unexpectedly (%s: %s) — failing closed",
             what, type(e).__name__, e,
         )
-        return False
+        return "unavailable"
     if count == -1:
         logger.info("chat web-search %s daily cap reached (limit=%s)", what, limit)
-        return False
-    return True
+        return "capped"
+    return "ok"
 
 
 async def _refund_bucket(bucket: str, what: str) -> None:
@@ -178,49 +143,6 @@ async def _refund_bucket(bucket: str, what: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("chat web-search %s unit release failed (%s: %s)",
                        what, type(e).__name__, e)
-
-
-async def _claim_web_search(user_id: Optional[str] = None) -> bool:
-    """Admit one chat-initiated grounded search, or refuse.
-
-    FAILS CLOSED, which is the opposite of `_claim_chat_turn_or_error` and deliberate.
-    That one fails open because a DB blip must never wall a user out of chat; this one
-    guards SPEND, and refusing only drops the turn back to the free tiers — a slightly
-    thinner answer, never an error. Failing open here would uncap the one paid path.
-
-    Two buckets, claimed in a fixed order: the caller's PER-ACCOUNT sub-bucket first
-    (`CHAT_WEB_SEARCH_USER_DAILY_CAP`), then the GLOBAL one. The global ceiling alone let
-    one account drain the day's units for everyone (S01-4). A global refusal hands the
-    per-account unit straight back, so the two counts move together — and
-    `_release_web_search` refunds both for the same reason.
-    """
-    if not getattr(settings, "CHAT_WEB_SEARCH_ENABLED", True):
-        return False
-    if user_id:
-        user_limit = getattr(settings, "CHAT_WEB_SEARCH_USER_DAILY_CAP", 10)
-        if not await _claim_bucket(_user_web_search_bucket(user_id), user_limit, "per-account"):
-            return False
-    limit = getattr(settings, "CHAT_WEB_SEARCH_DAILY_CAP", 200)
-    if not await _claim_bucket(_WEB_SEARCH_BUCKET, limit, "global"):
-        if user_id:
-            await _refund_bucket(_user_web_search_bucket(user_id), "per-account")
-        return False
-    return True
-
-
-async def _release_web_search(user_id: Optional[str] = None) -> None:
-    """Give back a claimed unit when the grounded call produced nothing.
-
-    The claim is taken BEFORE the search (correctly — it is the spend gate). Released ONLY
-    when the search provably did not run (the call raised before reaching Gemini, or the
-    tool runner cancelled it); an empty-but-billed result keeps its unit. Best-effort: a
-    failure here only costs one unit of a 200-unit ceiling. BOTH buckets: a unit that was
-    claimed on the account's sub-bucket and not given back would leave that account walled
-    off by searches that never ran.
-    """
-    await _refund_bucket(_WEB_SEARCH_BUCKET, "global")
-    if user_id:
-        await _refund_bucket(_user_web_search_bucket(user_id), "per-account")
 
 
 # ── Tool 1: the ticker's recent news ──────────────────────────────────────────
@@ -534,8 +456,8 @@ def _hot_tickers(scanner_inputs: Any, session_dates: Optional[Counter] = None) -
 def _card_digest(card: Dict[str, Any]) -> Dict[str, Any]:
     """The Updates screen's AI market card, compacted for a tool result.
 
-    This is the "integrate with AI Insights" half: the same headline, bullets and cited
-    catalyst the user already sees on Updates, so chat and that screen tell one story.
+    This is the "integrate with AI Insights" half: the same headline and bullets the
+    user already sees on Updates, so chat and that screen tell one story.
     """
     digest: Dict[str, Any] = {}
     if card.get("headline"):
@@ -544,12 +466,6 @@ def _card_digest(card: Dict[str, Any]) -> Dict[str, Any]:
     bullets = [b for b in bullets if b]
     if bullets:
         digest["points"] = bullets
-    pm = card.get("price_move") or {}
-    if pm.get("reason"):
-        digest["why_the_market_moved"] = {
-            "tag": pm.get("catalyst_tag"),
-            "reason": _trim(pm["reason"], _SUMMARY_CAP),
-        }
     digest["as_of"] = card.get("generated_at")
     return digest
 
@@ -558,13 +474,13 @@ def _card_digest(card: Dict[str, Any]) -> Dict[str, Any]:
 
 async def explain_price_move(
     ticker: str, is_crypto: bool = False, user_id: Optional[str] = None,
+    web_escalation: bool = True,
 ) -> Dict[str, Any]:
-    """Today's move for one symbol, explained — the escalation ladder.
+    """Today's move for one symbol, explained — the answer ladder (module docstring).
 
-    Tier 1 and 2 are free and always run. Tier 3 is the only paid step and is gated on
-    all three of: a volatility-relative MATERIAL move, tiers 1-2 having found no
-    company-specific cause, and the durable daily budget admitting it — the global one
-    and, when `user_id` is known, the caller's own sub-bucket.
+    Both tiers are free and always run. `user_id` and `web_escalation` are accepted and
+    unused: they gated the retired grounded third tier, and callers (`chat_tools._why`,
+    `chat_service._fetch_price_move_data`) still pass them.
     """
     sym = (ticker or "").upper().strip()
     if not sym:
@@ -646,11 +562,6 @@ async def explain_price_move(
     else:
         out["news_available"] = False
 
-    # ── Tier 3: the paid grounded search ─────────────────────────────────────
-    catalyst = await _maybe_web_catalyst(sym, exp, a.kind.value, user_id=user_id)
-    if catalyst is not None:
-        out["web_research"] = catalyst
-
     # ── The answer of last resort, so there is never a dead end ──────────────
     #
     # Requested directly after a follow-up chip Cay AI had PROPOSED came back "I don't have
@@ -660,7 +571,7 @@ async def explain_price_move(
     # news". Both of those ARE answers; "I don't know" is not.
     #
     # Only emitted when nothing upstream found a cause, so it can never talk over a real one.
-    if a.kind.value == "none" and not out.get("web_research"):
+    if a.kind.value == "none":
         out["no_single_catalyst"] = True
         out["bottom_line"] = _bottom_line(exp, news)
     return out
@@ -756,186 +667,3 @@ def _unusualness_note(tier: Optional[str], z: Optional[float]) -> Optional[str]:
     # The fallback path has no σ row, so the lowercase band labels above deliberately say
     # "judged on price alone" — claiming a σ multiple we never computed would be a lie.
     return note
-
-
-async def _maybe_web_catalyst(
-    sym: str, exp: Any, cause_kind: str, user_id: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """The one paid path in this file, behind three independent gates.
-
-    Order matters and is a cost decision, not a style one: the CACHE is consulted before
-    the budget, so a row the Updates sweeper already paid for is served without consuming
-    a unit. Reversing those two would let one popular ticker exhaust the daily cap while
-    costing nothing.
-
-    The same rule covers a search that is still IN FLIGHT. `get_catalyst` answers a
-    `cache_only` probe with None BEFORE it reaches its `_inflight` join, so a probe miss
-    used to claim a unit and then JOIN the leader's future — one Google search, two or
-    three units debited: a second user in the same ~60 s window, a chat turn while the
-    sweeper's `NVDA|today|…` was running, or the model re-issuing `explain_price_move`
-    in the next round after the 75 s tool ceiling answered `timed_out` (the shielded
-    handler keeps running). On a market-wide selloff that walled the 200/day cap off
-    with a fraction of its searches bought. A joiner now joins WITHOUT claiming, and a
-    claim that turns out to be a joiner's (a leader appeared while the claim's DB round
-    trip yielded) is given back before anything is awaited.
-    """
-    if cause_kind in _COMPANY_SPECIFIC_KINDS:
-        # Tiers 1-2 already named a company-specific cause. Paying to second-guess a
-        # dated fact with a web search is how a good deterministic answer gets talked
-        # over by a vaguer one.
-        return None
-    if exp.tier not in _CATALYST_TIERS:
-        # An ordinary day for this ticker. There is usually no catalyst to find, and
-        # searching for one invites the model to manufacture significance.
-        return None
-    if (getattr(exp, "session_word", None) or "today") != "today":
-        # Pre-market the numbers are the PRIOR session's. A paid "today" search for
-        # Friday's move would cache under `X|today|…` and answer Monday's question with
-        # Friday's cause; the deterministic tiers already carry the right session word.
-        logger.info("chat tool: grounded catalyst for %s skipped — move is %s, not today",
-                    sym, exp.session_word)
-        return None
-    change = exp.change_percent
-    if change is None or change == 0:
-        # Guard against paying to explain a phantom +0.0% — a live defect in the Updates
-        # sweeper before `_maybe_price_move` gained the same check.
-        return None
-
-    from app.services import price_catalyst_service as _pcs
-    from app.services.price_catalyst_service import get_price_catalyst_service
-
-    svc = get_price_catalyst_service()
-    # The service's own dedup identity (ticker|today|ET date|direction) and its in-flight
-    # table. Reached into deliberately: the spend gate lives HERE, and it has to see the
-    # leader/joiner decision the service makes, or it meters joiners as leaders.
-    ctx_key = _pcs._ctx_key(sym, "today", change)
-    try:
-        # ⚠️ `"today"` — see this module's header. It is both the cache key shared with
-        # the Updates sweeper and the guard against answering a daily question with a
-        # multi-day window's narrative.
-        cached = await svc.get_catalyst(sym, change, "today", cache_only=True,
-                                        company_name=getattr(exp, "company_name", None))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("chat tool: catalyst cache read failed for %s (%s: %s)",
-                       sym, type(e).__name__, e)
-        cached = None
-    if cached is not None:
-        return _catalyst_digest(cached, paid=False)
-
-    # Don't CLAIM a unit the search provably cannot spend. `get_catalyst` answers None for
-    # "not attempted" and "attempted but unusable" alike, so the release below can only
-    # distinguish a raise; the two no-attempt cases we CAN see up front are the kill switch
-    # and an open quota breaker (every grounded attempt then fails fast before any HTTP).
-    # Claiming for those walled the day off at 200 units with nothing bought.
-    if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
-        return None
-    from app.integrations.gemini import _quota_circuit
-    if _quota_circuit.tripped:
-        logger.info("chat tool: grounded catalyst for %s skipped — Gemini quota breaker open", sym)
-        return None
-
-    # Someone else (the sweeper, a report collector, another chat turn) is already paying
-    # for this exact search: join their future for free, exactly as `get_catalyst` would.
-    if ctx_key in _pcs._inflight:
-        return await _join_inflight_catalyst(sym, ctx_key, _pcs._inflight[ctx_key])
-
-    if not await _claim_web_search(user_id):
-        return None
-
-    # Re-checked AFTER the claim: `_claim_web_search` is a DB round trip that yields, and
-    # a leader can appear during it. This is the last await before the leader election,
-    # and the election below is SYNCHRONOUS (see `force_refresh`), so from here a missing
-    # entry means we ARE the leader — no unit can be spent on a join.
-    leader = _pcs._inflight.get(ctx_key)
-    if leader is not None:
-        await _release_web_search(user_id)
-        return await _join_inflight_catalyst(sym, ctx_key, leader)
-
-    try:
-        # The listed name rides along so the web search targets the security, not the
-        # coin that shares its ticker (LTC Properties vs Litecoin) — see `_prompt_subject`.
-        #
-        # `force_refresh=True` is NOT "ignore the cache" here — the cache was probed a few
-        # milliseconds ago and missed. It skips the service's own re-read of the two tiers,
-        # which is an `await` that sat between the in-flight check above and the
-        # `_inflight[ctx_key] = future` write: in that gap a second caller could become the
-        # leader and this claimed call would silently join it. Skipping the re-read makes
-        # the path from here to the leader write synchronous, so the claim and the search
-        # are the same event.
-        fresh = await svc.get_catalyst(sym, change, "today", force_refresh=True,
-                                       company_name=getattr(exp, "company_name", None))
-    except asyncio.CancelledError:
-        # The tool runner's timeout no longer cancels a handler (it is shielded, and the
-        # search keeps running and is billed); a cancellation that does reach here came from
-        # the turn itself being torn down mid-search. Whether Google billed the search is
-        # unknowable from here; the unit is refunded in a detached task (awaiting inside a
-        # cancelled task would itself be cancelled), which errs on the side of not walling
-        # the day off over a teardown.
-        asyncio.get_running_loop().create_task(_release_web_search(user_id))
-        raise
-    except Exception as e:  # noqa: BLE001
-        # A raise means the search did not run: `CatalystNotAttempted` (the quota breaker's
-        # fail-fast, a 429 the ladder gave up on, the kill switch) or the cache / DB layer
-        # around the call. `get_catalyst` returns None only for "searched, nothing usable".
-        # Before `CatalystNotAttempted` existed, every refusal came back as None and the
-        # unit was kept — this branch was unreachable.
-        logger.warning("chat tool: grounded catalyst not run for %s (%s: %s) — unit released",
-                       sym, type(e).__name__, e)
-        await _release_web_search(user_id)
-        return None
-    if not fresh:
-        # NOT released: a None here includes "the grounded call ran and answered, but the
-        # output was unusable" (no JSON fence, truncated JSON) — Google billed that search.
-        # A spend gate refunds only what provably was not spent.
-        return None
-    return _catalyst_digest(fresh, paid=True)
-
-
-async def _join_inflight_catalyst(
-    sym: str, ctx_key: str, future: "asyncio.Future"
-) -> Optional[Dict[str, Any]]:
-    """Await a leader's in-flight catalyst WITHOUT claiming a unit — the leader's caller
-    metered it. Mirrors the joiner branch of `get_catalyst`: shielded so this turn's
-    cancellation cannot cancel a future other callers are waiting on; a refused search
-    (`CatalystNotAttempted`) or the leader's failure degrades to None, never raises.
-    Never falls through to a search of its own — a joiner that became a leader would be
-    an UNMETERED search.
-    """
-    logger.info("chat tool: grounded catalyst for %s already in flight (%s) — joining, no unit",
-                sym, ctx_key)
-    try:
-        joined = await asyncio.shield(future)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # noqa: BLE001 — CatalystNotAttempted or the leader's own error
-        logger.info("chat tool: joined catalyst for %s settled without a result (%s: %s)",
-                    sym, type(e).__name__, e)
-        return None
-    if not joined:
-        return None
-    return _catalyst_digest(joined, paid=False)
-
-
-def _catalyst_digest(catalyst: Dict[str, Any], *, paid: bool) -> Optional[Dict[str, Any]]:
-    """Shape a catalyst for the model, keeping its citations.
-
-    `get_catalyst` degrades to `{tag: None, reason: <broad-market line>, sources: []}` when
-    the search found nothing citable — a real answer, not a failure, and one worth passing
-    through so the model can say "no single company-specific catalyst" with authority
-    instead of guessing.
-    """
-    reason = _trim(catalyst.get("reason"), _SUMMARY_CAP)
-    if not reason:
-        return None
-    digest: Dict[str, Any] = {"reason": reason, "from_web_search": True, "freshly_searched": paid}
-    if catalyst.get("tag"):
-        digest["catalyst"] = catalyst["tag"]
-    sources = []
-    for s in (catalyst.get("sources") or [])[:5]:
-        publisher = str((s or {}).get("publisher") or "").strip()
-        title = _trim((s or {}).get("title"), _HEADLINE_CAP)
-        if publisher or title:
-            sources.append({"publisher": publisher or None, "title": title})
-    if sources:
-        digest["sources"] = sources
-    return digest

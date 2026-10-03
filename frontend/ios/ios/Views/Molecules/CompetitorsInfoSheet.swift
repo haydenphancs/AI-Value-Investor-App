@@ -15,6 +15,11 @@
 //  and the customer/partner exclusion is claimed only for the list that applied it.
 //  The scoring paragraph follows it too: only a most-direct list scores on directness.
 //
+//  Web research for rivals was retired on 2026-10-02: every new report is threat-ordered,
+//  built from the industry peer list, and scores each rival with a neutral moat factor.
+//  Stored reports keep the research list and the moat scaling they were built with, so
+//  the copy covers both and never says the moat scaling always applies.
+//
 
 import SwiftUI
 
@@ -84,7 +89,7 @@ struct CompetitorsInfoSheet: View {
         case .mostDirect:
             return "Cay researches the company's latest annual report, its recent earnings calls and the past year of public coverage to find the companies that sell competing products. Companies that are mainly customers, suppliers or partners are left out."
         case .highestThreat:
-            return "The list comes from Cay's research into company filings and public coverage or, when that is not available, from public companies in the same industry."
+            return "The list comes from public companies in the same industry. Some earlier reports used Cay's research into company filings and public coverage instead."
         }
     }
 
@@ -139,9 +144,9 @@ struct CompetitorsInfoSheet: View {
     private var scoringText: String {
         switch order {
         case .mostDirect:
-            return "When return-on-capital figures exist for both companies, the score blends how directly the rival competes with how its return on invested capital compares with this company's, then scales the result by the strength of the rival's own moat. Otherwise it compares the rival's operating margin, return on equity and revenue growth with its sector's median."
+            return "When return-on-capital figures exist for both companies, the score blends how directly the rival competes with how its return on invested capital compares with this company's and, on reports where the rival's own moat score was available, scales the result by it. Otherwise it compares the rival's operating margin, return on equity and revenue growth with its sector's median."
         case .highestThreat:
-            return "When return-on-capital figures exist for both companies, the score blends the rival's position in the list it came from (Cay's research or the industry peer list) with how its return on invested capital compares with this company's, then scales the result by the strength of the rival's own moat. Otherwise it compares the rival's operating margin, return on equity and revenue growth with its sector's median."
+            return "When return-on-capital figures exist for both companies, the score blends the rival's position in the list it came from (Cay's research or the industry peer list) with how its return on invested capital compares with this company's and, on reports where the rival's own moat score was available, scales the result by it. Otherwise it compares the rival's operating margin, return on equity and revenue growth with its sector's median."
         }
     }
 

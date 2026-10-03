@@ -24,7 +24,12 @@ struct AIDataConsentView: View {
 
     private let whatWeSend: [Row] = [
         Row(text: "The message you type, and the recent messages in that conversation."),
-        Row(text: "Market data for whatever you're looking at, so the answer is relevant.")
+        Row(text: "Market data for whatever you're looking at, so the answer is relevant."),
+        // Report chat's web search (2026-10-02): a query DERIVED from what the user typed goes to
+        // a second third-party service, so the consent gate says so (App Review 5.1.2(i)). Never
+        // name the vendor here (CLAUDE.md invariant #7); the Privacy Policy §4 names it.
+        Row(text: "When you ask Cay AI to search the web in a report chat, a short search query "
+                + "(such as the company, its ticker and the topic) goes to a web search provider.")
     ]
 
     private let whatWeDont: [Row] = [

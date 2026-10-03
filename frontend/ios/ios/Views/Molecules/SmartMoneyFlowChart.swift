@@ -37,15 +37,15 @@ struct SmartMoneyFlowChart: View {
     /// Vertical gap inserted between the price chart and the volume chart so the
     /// price axis's bottom label (e.g. "$150") and the volume axis's top label
     /// (e.g. "200K") don't crowd at the otherwise zero-spacing boundary.
-    /// Defaults to 0 → the Ticker Report's insider chart (and any other caller)
-    /// renders EXACTLY as before; only the Smart Money tab opts into a gap.
+    /// Defaults to 0 for any other caller. The Smart Money tab AND the Ticker
+    /// Report's insider chart opt in (the report's zero gap printed "1M$40").
     let priceVolumeGap: CGFloat
     /// When true, the volume y-axis uses an EXPLICIT symmetric 5-label scale
     /// (±top, ±top/2, 0) with the top label parked at a fixed 80% of the domain,
     /// so every tab (insider / institutions / congress) shows the SAME clean
     /// headroom above the top label regardless of magnitude (±40K vs ±200K vs
-    /// ±100M). Defaults false → the auto-axis (and the Ticker Report) are
-    /// unchanged. Only the Smart Money tab opts in.
+    /// ±100M). Defaults false → the auto-axis. The Smart Money tab and the Ticker
+    /// Report's insider chart (the same insider series) opt in.
     let uniformVolumeAxis: Bool
     /// When true, the volume bars/axis are DOLLAR-denominated (the Congress tab:
     /// STOCK Act discloses dollar ranges, not shares) and the y-axis magnitudes
@@ -89,7 +89,7 @@ struct SmartMoneyFlowChart: View {
     /// Fixed width for the y-axis label column so the price axis ("$150") and the
     /// volume axis ("200K" / "-100M") share ONE straight left edge regardless of
     /// label width. Only applied when `uniformVolumeAxis` is on (the Smart Money
-    /// tab); the report keeps its natural per-axis widths.
+    /// tab and the report's insider chart).
     private let yAxisLabelWidth: CGFloat = 40
 
     /// Wider bars for quarterly (8 bars) vs monthly (12 bars)
@@ -207,8 +207,8 @@ struct SmartMoneyFlowChart: View {
                             .font(AppTypography.caption)
                             .foregroundStyle(AppColors.textMuted)
                             // Same fixed-width left-aligned column as the volume
-                            // axis so "$150" lines up under "200K". nil width on
-                            // the report path → unchanged there.
+                            // axis so "$150" lines up under "200K". nil width when
+                            // `uniformVolumeAxis` is off (natural label widths).
                             .frame(width: uniformVolumeAxis ? yAxisLabelWidth : nil, alignment: .leading)
                     }
                 }
@@ -266,8 +266,8 @@ struct SmartMoneyFlowChart: View {
                             .font(AppTypography.caption)
                             .foregroundStyle(AppColors.textMuted)
                             // Same fixed-width left-aligned column as the volume
-                            // axis so "$150" lines up under "200K". nil width on
-                            // the report path → unchanged there.
+                            // axis so "$150" lines up under "200K". nil width when
+                            // `uniformVolumeAxis` is off (natural label widths).
                             .frame(width: uniformVolumeAxis ? yAxisLabelWidth : nil, alignment: .leading)
                     }
                 }
@@ -580,8 +580,10 @@ struct SmartMoneyFlowChart: View {
         // axisMax — then the tallest (most important) bar, capped at axisMax by
         // displayVolume, overflows the plotted domain and renders clamped flush
         // against the ceiling with no clip label (isClipped compares to axisMax,
-        // not the domain). max(..., axisMax) guarantees the top bar fits.
-        uniformVolumeAxis ? max(volumeTopLabel / 0.80, axisMax) : yScaleMax
+        // not the domain). max(..., yScaleMax) guarantees the top bar fits AND, when a bar
+        // is clipped, keeps the outlier-label headroom the auto-axis has (axisMax × 1.30):
+        // with plain axisMax that label could spill onto the month axis.
+        uniformVolumeAxis ? max(volumeTopLabel / 0.80, yScaleMax) : yScaleMax
     }
 
     /// Nice, round top label (with a clean half) ≈ the outlier-capped bar max.

@@ -13,6 +13,9 @@ struct ChatMessagesList: View {
     var streamingMessageId: UUID? = nil
     /// Tapping a follow-up suggestion under the LATEST answer sends it as a new message.
     var onFollowUpTap: ((String) -> Void)? = nil
+    /// Tapping a web source pill on ANY answer opens its article — the screen presents it, never
+    /// a row (a row can be torn down by the lazy stack while it is presenting).
+    var onOpenSource: ((URL) -> Void)? = nil
 
     /// Changes on a new message AND as the streaming message grows, so the view
     /// stays pinned to the newest content while tokens arrive (the in-place update
@@ -27,7 +30,10 @@ struct ChatMessagesList: View {
         // and only `thinking.reasoning` grows, so keying on text length alone left the view un-pinned
         // (no auto-scroll) until the first answer token arrived.
         let lastReasonCount = last?.thinking?.reasoning?.count ?? 0
-        return messages.count &* 1_000_003 &+ lastTextCount &+ lastReasonCount
+        // And the pills: a web search re-sends the source list mid-stream, and the first pill
+        // row adds height to the expanded card.
+        let lastSourceCount = last?.sources?.count ?? 0
+        return messages.count &* 1_000_003 &+ lastTextCount &+ lastReasonCount &+ lastSourceCount
     }
 
     var body: some View {
@@ -39,7 +45,8 @@ struct ChatMessagesList: View {
                             message: message,
                             isStreaming: message.id == streamingMessageId,
                             isLast: message.id == messages.last?.id,
-                            onFollowUpTap: onFollowUpTap
+                            onFollowUpTap: onFollowUpTap,
+                            onOpenSource: onOpenSource
                         )
                         .id(message.id)
                     }
@@ -66,6 +73,7 @@ struct ChatMessageRow: View {
     /// The last message in the list — only it shows follow-up suggestion chips.
     var isLast: Bool = false
     var onFollowUpTap: ((String) -> Void)? = nil
+    var onOpenSource: ((URL) -> Void)? = nil
 
     var body: some View {
         switch message.role {
@@ -96,7 +104,8 @@ struct ChatMessageRow: View {
             showFollowUps: isLast,
             onFollowUpTap: onFollowUpTap,
             credit: message.credit,
-            truncated: message.truncated
+            truncated: message.truncated,
+            onOpenSource: onOpenSource
         )
     }
 }

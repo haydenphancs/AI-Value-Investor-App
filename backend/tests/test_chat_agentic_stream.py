@@ -408,7 +408,9 @@ async def test_a_cut_on_the_final_round_after_tools_is_marked_too():
     events = [ev async for ev in _client(chat).stream_agentic(
         "prompt", tools=[_TOOL], tool_handlers={"get_x": handler}, max_rounds=1)]
     kinds = [k for k, _ in events]
-    assert kinds == ["tool", "answer", "finish"], events
+    # `tool_start` announces the handler BEFORE it runs (report chat's "Searching the web…"
+    # status rides on it); the cut marker is still the LAST event.
+    assert kinds == ["tool_start", "tool", "answer", "finish"], events
 
 
 def test_declarations_default_to_the_full_equity_set(monkeypatch):

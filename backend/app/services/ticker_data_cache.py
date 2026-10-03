@@ -122,6 +122,23 @@ _DATACLASS_FIELDS: Dict[str, Any] = {
 # instances, which are created per ResearchAgent run).
 _INFLIGHT: Dict[str, "asyncio.Future"] = {}
 
+# The provenance stamp's key in `collected_data` — the name of the
+# `CollectedTickerData.grounding_free` field, which `_serialize` writes as a plain JSON
+# boolean. Migration 189 deletes every row where it is not exactly JSON `true`;
+# tests/test_grounding_free_stamp.py pins the literal to the field and to that SQL.
+GROUNDING_FREE_FIELD = "grounding_free"
+
+
+def collection_is_grounding_free(raw: Any) -> bool:
+    """Whether a RAW `collected_data` payload carries the post-retirement stamp.
+
+    True only when the key holds exactly the JSON boolean true — written only by
+    `_collect_fresh` in code with no Google Search grounding. A pre-retirement row (no key),
+    False, "true", 1 or a non-dict payload → False, which every reader treats as a MISS.
+    Pure, so the gate is testable without a database.
+    """
+    return isinstance(raw, dict) and raw.get(GROUNDING_FREE_FIELD) is True
+
 
 # ── Serialization (fail-safe) ───────────────────────────────────────
 
@@ -290,6 +307,18 @@ async def get_cached_collection(ticker: str) -> Optional[Any]:
     if data is None:
         return None
 
+    # On the RAW payload, BEFORE `_deserialize`: a pre-retirement row has no stamp, and
+    # deserializing it would only drop its removed grounded fields while keeping what was
+    # baked from them (`price_action_partial`'s grounded catalyst). Fresh by the clock is
+    # not enough — that code wrote these rows after CACHE_SCHEMA_FLOOR (see the field).
+    if not collection_is_grounding_free(data):
+        logger.warning(
+            "ticker_data_cache row for %s is a pre-retirement collection (no %s stamp — "
+            "possibly Google Search grounded) — treating as a miss; the fresh collection "
+            "overwrites it", ticker, GROUNDING_FREE_FIELD,
+        )
+        return None
+
     # Deserialize off the event loop too — it touches Pydantic validation which
     # can be non-trivial for big payloads.
     from app.services.agents.ticker_report_data_collector import CollectedTickerData
@@ -333,6 +362,15 @@ async def is_cached_collection_fresh(ticker: str) -> bool:
 
     Degrades to False on any error, exactly like a cache MISS, so a probe failure can only
     cost a redundant collection — never a wrong answer.
+
+    ⚠️ It does NOT see the provenance stamp (`collection_is_grounding_free`), by design — that
+    lives in the payload. So a PRE-RETIREMENT row (written by the grounded code, after
+    CACHE_SCHEMA_FLOOR) probes FRESH here while `get_cached_collection` reads it as a miss:
+    the pre-warmer skips that ticker for the rest of the close cycle. Nothing grounded is
+    ever served — the first real read misses, re-collects and overwrites the row with a
+    stamped one — and migration 189 deletes every unstamped row outright. The window is one
+    close cycle after the deploy; every row the current code writes is stamped
+    (`_serialize_readable` refuses an unstamped one), so the mismatch cannot recur.
     """
     ticker = ticker.upper().strip()
 
@@ -374,6 +412,16 @@ def _serialize_readable(ticker: str, out: Any) -> Optional[Dict[str, Any]]:
     """
     payload = _serialize(out)
     if payload is None:
+        return None
+    # The reader's first check is the provenance stamp, so an unstamped payload is a row
+    # that would never read back. Only `_collect_fresh` stamps a collection; reaching this
+    # means some other producer was cached — a bug, so ERROR.
+    if not collection_is_grounding_free(payload):
+        logger.error(
+            "ticker_data_cache write SKIPPED for %s — the collection has no %s stamp, so "
+            "every read would miss it; only TickerReportDataCollector._collect_fresh may "
+            "produce a cached collection", ticker, GROUNDING_FREE_FIELD,
+        )
         return None
     if _deserialize(payload, {f.name for f in dataclasses.fields(out)}) is None:
         logger.error(

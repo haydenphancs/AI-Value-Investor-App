@@ -313,6 +313,9 @@ struct SmartMoneyData: Identifiable {
     let dailyPrices: [DailyPricePoint]    // Daily prices for detailed chart
     let flowData: [SmartMoneyFlowDataPoint]
     let summary: SmartMoneyFlowSummary
+    /// The tab's source fetch FAILED for this build (the Insider tab): its zero bars are a
+    /// placeholder, so the tab says "couldn't be loaded", never "no activity".
+    var isUnavailable: Bool = false
 }
 
 // MARK: - Combined Holders Data
@@ -1008,7 +1011,17 @@ struct InsiderActivitySummary {
     }
 
     var isNetPositive: Bool {
-        netInformativeFlowInMillions >= 0
+        netDirection > 0
+    }
+
+    /// Sign of the net flow AS PRINTED (whole shares): +1, -1, or 0 for exactly flat.
+    /// Flat used to be `>= 0` — "+ 0 shares" in bullish green on a ticker with no
+    /// informative trades at all (the tri-state SmartMoneyFlowSummary already uses).
+    private var netDirection: Int {
+        let shares = (netInformativeFlowInMillions * 1_000_000).rounded()
+        if shares > 0 { return 1 }
+        if shares < 0 { return -1 }
+        return 0
     }
 
     // Insider informative buys/sells are in millions of SHARES. Format the raw
@@ -1026,12 +1039,16 @@ struct InsiderActivitySummary {
     var formattedSells: String { formatShares(informativeSellsInMillions) }
 
     var formattedNetFlow: String {
-        let sign = netInformativeFlowInMillions >= 0 ? "+ " : "- "
+        let sign = netDirection > 0 ? "+ " : (netDirection < 0 ? "- " : "")
         return sign + formatShares(abs(netInformativeFlowInMillions))
     }
 
     var netFlowColor: Color {
-        isNetPositive ? AppColors.bullish : AppColors.bearish
+        switch netDirection {
+        case 1: return AppColors.bullish
+        case -1: return AppColors.bearish
+        default: return AppColors.textSecondary
+        }
     }
 
     var buyersLabel: String {
@@ -1048,6 +1065,8 @@ struct InsiderActivitySummary {
 struct InsiderActivitiesData {
     let summary: InsiderActivitySummary
     let activities: [InsiderActivity]
+    /// The insider fetch FAILED for this build: an empty list is not "no insider trades".
+    var isUnavailable: Bool = false
 
     func filteredActivities(by filter: InsiderActivityFilterOption) -> [InsiderActivity] {
         switch filter {

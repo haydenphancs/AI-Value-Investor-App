@@ -63,7 +63,6 @@ _INFLIGHT_MODULES = [
     # invisible twice over: the enumeration check below only looked for
     # `create_future()`, and `_source` silently skipped nested paths.
     "agents/ticker_report_data_collector.py",
-    "geopolitical_macro_service.py",
     "commodity_service.py",
     # Added 2026-08-21 with the commodity cache pass: N concurrent viewers of the same
     # cold ticker each ran their own 600-day fetch AND their own pandas indicator pass.
@@ -85,11 +84,6 @@ _INFLIGHT_MODULES = [
     # account (or a DELETE-driven invalidation storm) collapse to one build — and a joiner
     # that gives up must not cancel it for the leader's own client.
     "tracking_service.py",
-    # Added 2026-09-17 with F04-5: a JOINER only. It never creates the shared future — it
-    # awaits `price_catalyst_service._inflight[ctx_key]` under `shield` so a chat turn does
-    # not claim a second web-search unit for a search someone else already paid for. Its
-    # `create_task(` is the detached unit refund, not a shared awaitable.
-    "chat_market_tools.py",
     # Added 2026-09-10 with the rotating chat starters. TWO shared futures, not one: the
     # editorial POOL (hourly) and the composed RESPONSE (15 min). The response build is the
     # one that matters — it is fronted by a 2.5 s `wait_for`, so without the shield the
@@ -110,17 +104,14 @@ _INFLIGHT_MODULES = [
     # The 2026-08-07 audit named only the six above. The anti-vacuity check at the bottom of
     # this file found sixteen more already using the same shared-future dedup, which is the
     # whole reason that check exists.
-    "competitor_intel_service.py",
     "growth_snapshot_service.py",
     "health_check_service.py",
     "health_snapshot_service.py",
     "home_dashboard_service.py",
     "ip_intel_service.py",
     "journey_content_service.py",
-    "moat_scoring_service.py",
     "money_moves_content_service.py",
     "ownership_snapshot_service.py",
-    "price_catalyst_service.py",
     "profitability_snapshot_service.py",
     "revenue_breakdown_service.py",
     "signal_of_confidence_service.py",
@@ -162,6 +153,12 @@ _INFLIGHT_MODULES = [
     # report cancelled mid-collect must not cancel it for the rest
     # (`test_industry_dossier_self_heal.py` proves leader- and joiner-cancel at runtime).
     "industry_dossier_service.py",
+    # Added 2026-10-02 with report chat's live web search. Future-based leader per (user,
+    # query, recency): two turns of ONE account asking the same thing join one Brave call and
+    # one budget unit; a cancelled leader settles the future (and refunds in a detached task),
+    # and joiners attach through `asyncio.shield`. Its per-turn guard is a Task joined the same
+    # shielded way. Never shared across users (Brave allows transient storage only).
+    "chat_web_search_service.py",
 ]
 
 

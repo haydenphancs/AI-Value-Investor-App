@@ -51,7 +51,7 @@ class _FakeSB:
         return _Query(name)
 
 
-def _install_supabase(monkeypatch, dossier_rows, audit_rows=None, audit_error=None):
+def _install_supabase(monkeypatch, dossier_rows):
     import app.database
 
     monkeypatch.setattr(app.database, "get_supabase", lambda: _FakeSB())
@@ -59,10 +59,7 @@ def _install_supabase(monkeypatch, dossier_rows, audit_rows=None, audit_error=No
     async def fake_sb_exec(query):
         if query.table == "industry_dossier":
             return SimpleNamespace(data=dossier_rows)
-        if query.table == "industry_override_audit":
-            if audit_error is not None:
-                raise audit_error
-            return SimpleNamespace(data=audit_rows or [])
+        # The grounded-override audit is retired (2026-10-02): the route must not read it.
         raise AssertionError(f"unexpected table {query.table!r}")
 
     monkeypatch.setattr(admin, "sb_exec", fake_sb_exec)
@@ -221,12 +218,7 @@ def test_a_row_missing_its_industry_name_does_not_break_sorting():
 async def test_audit_route_adds_the_counts_and_keeps_the_grain_summary(monkeypatch):
     rows = [_row("A", 0), _row("B", 0), _row("C", 120.5, grain="sector"),
             _row("D", 800.0, grain="industry", scope="global")]
-    audit_rows = [
-        {"run_id": "r2", "computed_at": "2026-10-01", "status": "applied"},
-        {"run_id": "r2", "computed_at": "2026-10-01", "status": "rejected_sanity"},
-        {"run_id": "r1", "computed_at": "2026-07-05", "status": "applied"},
-    ]
-    _install_supabase(monkeypatch, rows, audit_rows)
+    _install_supabase(monkeypatch, rows)
 
     out = await admin.list_industry_dossier(x_admin_token=None, user=_ADMIN)
 
@@ -237,25 +229,21 @@ async def test_audit_route_adds_the_counts_and_keeps_the_grain_summary(monkeypat
     assert out["tam_placeholder_industries"] == ["A", "B"]
     assert out["tam_placeholder_by_grain"] == {"all_industry": 2}
     assert out["global_scope_count"] == 1
-    assert out["global_scope_industries"] == ["D"]
-    assert out["last_override_run"]["run_id"] == "r2"
-    assert out["last_override_run"]["status_counts"] == {"applied": 1, "rejected_sanity": 1}
+    assert out["global_scope_industries"] == ["D"]   # the operator's check that 188 ran
+    assert "last_override_run" not in out
     assert out["rows"] == rows
 
 
 @pytest.mark.asyncio
-async def test_audit_route_survives_malformed_rows_and_a_failed_override_read(monkeypatch, caplog):
+async def test_audit_route_survives_malformed_rows(monkeypatch):
     rows = [_row("A", "garbage"), "not-a-dict", None, _row("B", float("nan")), _row("C", 10.0)]
-    _install_supabase(monkeypatch, rows, audit_error=RuntimeError("audit table down"))
+    _install_supabase(monkeypatch, rows)
 
-    with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        out = await admin.list_industry_dossier(x_admin_token=None, user=_ADMIN)
+    out = await admin.list_industry_dossier(x_admin_token=None, user=_ADMIN)
 
     assert out["total"] == 3  # the two non-dict rows are dropped, not a 500
     assert out["tam_placeholder_count"] == 2
     assert out["tam_placeholder_industries"] == ["A", "B"]
-    assert out["last_override_run"] is None
-    assert any("RuntimeError" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio

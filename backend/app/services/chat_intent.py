@@ -30,6 +30,11 @@ never REMOVE a non-English note, and ``InlineDisclaimerNotice`` is on screen for
 whole conversation. Non-English trade turns degrade to the old fallback, never to
 nothing. Adding a language is an additive table, not a redesign.
 
+A SECOND, independent gate lives here too: ``is_web_search_intent`` — did the user
+explicitly ask to search the web, look something up, or verify / double-check something?
+It decides whether report chat offers its paid ``web_search`` tool on this turn (see the
+section at the bottom of this file).
+
 Pure, no I/O, never raises.
 """
 
@@ -183,3 +188,156 @@ def is_trade_intent(text: Optional[str]) -> bool:
     if _STANDALONE_RE.search(masked):
         return True
     return bool(_FRAME_RE.search(masked) and _VERB_RE.search(masked))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WEB-SEARCH INTENT — "did the user explicitly ask to search / look up / verify?"
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The gate for report chat's `web_search` tool (`chat_web_search_service.open_web_search_turn`).
+# OWNER DECISION (2026-10-02): explicit request ONLY — no chip, never model-decided. So this is
+# tuned for PRECISION, the opposite of `is_trade_intent`: a false positive declares a paid tool,
+# collapses a multi-lens answer to one lens and adds the web rule to the prompt; a false negative
+# answers from the report as every turn did before. The model still decides whether to CALL the
+# tool, and only a call costs money.
+#
+# ⚠️ The product is called a "research REPORT", so bare "research" NEVER triggers ("summarize this
+# research report", "what does the research say"). Nor does "Google Search" the product (Alphabet's
+# segment), "search the report", or a negated ask ("don't search the web, just use the report").
+#
+# ENGLISH ONLY, like the trade gate. Known false negatives, by design: implicit asks ("what
+# happened since the report?", "has anything changed?"), a bare "news?", and a follow-up turn of
+# a web turn ("and the other one?").
+#
+# Every quantifier is bounded and the input is capped, so a hostile 4,000-char message scans in
+# linear time (pinned by `tests/test_chat_web_search_intent.py`).
+
+_WEB_SCAN_MAX = 4000
+# iOS smart punctuation sends the typographic apostrophe; every pattern below is written with the
+# ASCII one ("don't", "today's"), so it is folded first.
+_WEB_APOSTROPHES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u2032": "'"})
+
+# The request verbs whose NEGATION cancels the ask. Shared by the negation mask below.
+_WEB_VERBS = (
+    r"(?:search|look|google|check|browse|verify|confirm|double[\s-]?check|fact[\s-]?check|"
+    r"cross[\s-]?check)"
+)
+
+# 1. Negated asks are masked FIRST, to the end of the clause: "Don't search the web, just use the
+#    report" / "No need to check the news" / "Without checking online, what's the thesis?". The
+#    verb must follow the negation within three plain words — "I don't trust this number, can you
+#    verify it?" is NOT masked (the comma stops the word run), and stays an ask.
+_WEB_NEG_RE = re.compile(
+    r"\b(?:don't|dont|do\s+not|never|no\s+need\s+to|without|instead\s+of|rather\s+than)\s+"
+    r"(?:\w+\s+){0,3}?" + _WEB_VERBS + r"\w*\b[^.?!;\n]{0,80}",
+    re.IGNORECASE,
+)
+
+# 2. An explicit "do a (web) search" — checked BEFORE the noun masks, which would otherwise eat
+#    "a search" ("Can you do a search on their CFO?").
+_WEB_STRONG_RE = re.compile(
+    r"\b(?:do|run|perform|try)\s+(?:a|an|some|one)\s+(?:quick\s+)?"
+    r"(?:google\s+|web\s+|internet\s+|online\s+)?search(?:es)?\b",
+    re.IGNORECASE,
+)
+
+# 3. Traps — finance prose uses "search" / "look up" / "research" as ordinary words.
+_WEB_MASK_RE = re.compile("|".join((
+    # the product's own name
+    r"\bresearch\s+reports?\b", r"\b(?:this|the|your|my|our|caydex|cay)\s+research\b",
+    # "search" as a noun: a CEO search, Alphabet's search business, paid search
+    r"\b(?:the|a|an|its|their|his|her|our|ceo|cfo|executive|job|talent|leadership|ongoing|paid|"
+    r"organic)\s+search\b",
+    r"\bsearch\s+(?:engines?|business(?:es)?|segment|revenues?|ads?|advertising|"
+    r"market(?:\s+share)?|share|traffic|volumes?|queries|results?\s+pages?|(?:&|and)\s+other|"
+    r"giant|monopoly|deal|default|box)\b",
+    r"\bgoogle\s+search\b",
+    # searching INSIDE the report or the screen, not the web
+    r"\b(?:search|look|check|find|scan)\w*\s+(?:\w+\s+){0,3}?(?:in|through|within|inside|across)\s+"
+    r"(?:the|this|your|my)\s+(?:report|analysis|section|chart|data|document|page)\b",
+    r"\bsearch\w*\s+(?:the|this|your|my)\s+(?:report|analysis|section|document|page)\b",
+    r"\blook\w*\s+(?:\w+\s+){0,2}?up\b[^.?!\n]{0,60}?\b(?:in|from)\s+(?:the|this|your|my)\s+report\b",
+    # "investors look up to Buffett"
+    r"\blook(?:s|ed|ing)?\s+up\s+to\b",
+)), re.IGNORECASE)
+
+# The request frames that turn a verify / confirm verb into an ask ("can you verify…"). Bare
+# "verify" is NOT an ask on its own: "How does Visa verify transactions?" (review 2026-10-02 #6).
+_WEB_REQUEST_FRAME = (
+    r"(?:please|pls|plz|can\s+you|could\s+you|would\s+you|will\s+you|you\s+to|go|help\s+me|"
+    r"let's|lets|i\s+(?:want|need|would\s+like|'d\s+like)\s+(?:you\s+)?to)"
+)
+_WEB_CHECK_VERBS = r"(?:verify|confirm|double[\s-]?check|fact[\s-]?check|cross[\s-]?check)"
+# The start of a sentence, optionally with a softener — the imperative position.
+# Every quantifier after the sentence mark is BOUNDED: `[.?!;:]\s*\W*` backtracked once per
+# punctuation character, so a 4,000-char run of "." (a valid message) cost ~1.1 s of event-loop
+# time per call (review 2026-10-02 HIGH). `^\W*` stays unbounded — `^` (no MULTILINE) is tried
+# at offset 0 only, so it is linear.
+_WEB_IMPERATIVE_START = (
+    r"(?:^\W*|[.?!;:]\s{0,6}\W{0,4})(?:please\s+|pls\s+|now\s+|also\s+|ok(?:ay)?\s*,?\s+)?"
+)
+
+# 4. The asks themselves.
+_WEB_INTENT_RE = re.compile("|".join((
+    # search the web / online / the news
+    r"\bsearch\w*\s+(?:(?:on|in|through|across)\s+)?(?:the\s+)?(?:web|internet|net|online|news)\b",
+    r"\b(?:web|internet|online)\s+search\w*\b",
+    _WEB_IMPERATIVE_START + r"search\b",
+    r"\b(?:please|pls|plz|can\s+you|could\s+you|would\s+you|will\s+you|you\s+to|go)\s+"
+    r"(?:please\s+)?search\b",
+    r"\bsearch\s+(?:for|up)\b",
+    r"\bbrows(?:e|ing)\s+(?:the\s+)?(?:web|internet|net|online|news)\b",
+    r"\b(?:can|could|would)\s+you\s+browse\b",
+    # look it up / look online
+    r"\blook\s+(?:(?:it|this|that|them|these|those|him|her)\s+)?up\b",
+    r"\blook(?:ing)?\s+(?:(?:it|this|that)\s+)?(?:online|on\s+the\s+(?:web|internet|net))\b",
+    r"\bcheck\w*\s+(?:(?:it|this|that)\s+)?(?:online|the\s+(?:web|internet|net|news|headlines)|"
+    r"(?:the\s+)?(?:latest|recent)\s+(?:news|headlines))\b",
+    r"\b(?:search|look|check|find|research|verify|confirm|dig|read)\w*\b[^.?!\n]{0,60}?"
+    r"\b(?:online|on\s+the\s+(?:web|internet|net))(?=\s*(?:[.?!\n]|$))",
+    r"\bresearch\w*\s+(?:(?:it|this|that|them)\s+)?(?:online|on\s+the\s+(?:web|internet|net))\b",
+    r"\b(?:saying|say|said|written|posted|out\s+there)\b[^.?!\n]{0,30}?"
+    r"\b(?:online|on\s+the\s+(?:web|internet))\b",
+    # google it
+    r"\bgoogle\s+(?:it|that|this|them)\b",
+    r"\b(?:please|pls|can\s+you|could\s+you|would\s+you|you\s+should|just)\s+google\b",
+    # the latest / any news
+    r"\b(?:latest|recent|newest|current|fresh|breaking|today's)\s+(?:news|headlines|updates?|"
+    r"developments?|announcements?|coverage)\b",
+    r"\bany\s+(?:new\s+|recent\s+|fresh\s+|other\s+|more\s+|good\s+|bad\s+)?"
+    r"(?:news|updates?|developments?|headlines)\b",
+    r"\bwhat(?:'s|\s+is|\s+are)\s+the\s+(?:latest|news)"
+    r"(?:\s*\??\s*$|\s+(?:on|with|about|for|regarding|today)\b)",
+    r"\bthe\s+latest\s+(?:on|with|about|for|regarding)\b",
+    r"\bin\s+the\s+news\b",
+    # verify / double-check / confirm — only in a request frame or the imperative position
+    _WEB_IMPERATIVE_START + _WEB_CHECK_VERBS + r"\b",
+    r"\b" + _WEB_REQUEST_FRAME + r"\s+(?:please\s+)?(?:also\s+)?" + _WEB_CHECK_VERBS + r"\b",
+    r"\bverify\s+(?:this|that|these|those|it|whether|if)\b",
+    r"\bconfirm\s+(?:whether|if)\b",
+    r"\b(?:can|could)\s+(?:this|that|it|these|those)\s+be\s+(?:verified|confirmed|double[\s-]?checked)\b",
+    r"\b(?:double|fact|cross)[\s-]?check\w*\b",
+    r"\bcross[\s-]?referenc\w*\b", r"\bsanity[\s-]?check\w*\b",
+    # is this still true?
+    r"\b(?:is|are)\s+(?:this|that|it|these|those|they|the\s+\w+(?:\s+\w+)?)\s+still\s+"
+    r"(?:true|accurate|current|valid|correct|right|the\s+case|up[\s-]to[\s-]date|in\s+place|happening)\b",
+    r"\bstill\s+(?:true|accurate|valid|current|up[\s-]to[\s-]date)\s*\?",
+)), re.IGNORECASE)
+
+
+def is_web_search_intent(text: Optional[str]) -> bool:
+    """True when the user explicitly asked to search the web, look something up, get the latest
+    news, or verify / double-check something. Pure, English-only, never raises.
+
+    NEVER fires on bare "research" (the product is a "research report"), on "Google Search" the
+    product, on searching inside the report, or on a negated ask."""
+    try:
+        if not isinstance(text, str) or not text.strip():
+            return False
+        t = text[:_WEB_SCAN_MAX].translate(_WEB_APOSTROPHES)
+        t = _WEB_NEG_RE.sub(" ", t)
+        if _WEB_STRONG_RE.search(t):
+            return True
+        return bool(_WEB_INTENT_RE.search(_WEB_MASK_RE.sub(" ", t)))
+    except Exception:  # noqa: BLE001 — a gate must never break a turn
+        return False

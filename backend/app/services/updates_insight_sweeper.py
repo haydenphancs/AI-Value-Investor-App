@@ -91,7 +91,6 @@ from app.services.news_insight_service import (
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.volatility_cache_service import get_volatility_cache_service
 from app.config import settings
-from app.services.price_catalyst_service import get_price_catalyst_service
 from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
@@ -146,19 +145,12 @@ _GLOBAL_DAILY_CAP = 1500
 # ``processing_started_at`` in research_reconciliation_service.
 _CLAIM_STALE_SECONDS = 120
 
-# Max grounded "why did it move" web searches per ET day, across ALL scopes, so a
-# broad-volatility day cannot fan out unbounded (paid) searches. The cap bounds
-# DISTINCT big movers per day: a scope already explained today does not re-consume
-# a unit (it just re-reads its 24h-cached catalyst), so a churning or repeatedly-
-# failing single ticker cannot exhaust the budget and starve genuinely-new movers.
-# In-process v1 (bounded blast radius 2×cap across two Railway instances); a durable
-# cross-instance RPC is a documented follow-up.
-_CATALYST_DAILY_CAP = 30
-
-# The move tiers that earn a grounded "why it moved" catalyst. Includes the fixed-
-# band BAND_EXTREME so a thin-history / newly-listed name (σ unavailable → fallback
-# band) — precisely the population most prone to violent moves — is not silently
-# denied a catalyst that an established ticker with the same move would get.
+# The move tiers that earn a price-move ALERT (and an always-regenerate card). Includes
+# the fixed-band BAND_EXTREME so a thin-history / newly-listed name (σ unavailable →
+# fallback band) — precisely the population most prone to violent moves — is not
+# silently treated as ordinary. (These tiers also gated the grounded "why it moved"
+# web search, retired 2026-10-02 with Google Search grounding; the name is kept
+# because `chat_market_tools._CATALYST_TIERS` mirrors it.)
 _CATALYST_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
 
 # Skip reasons after which the card is "as current as policy allows": the sweeper
@@ -193,7 +185,7 @@ _ENRICH_WINDOW_CAP = 25          # per scope; == news get_cached_bulk(scopes, 25
 # In-process ET-day ceiling on enrichment BATCH CALLS (defense-in-depth vs a runaway
 # news day). Self-limiting already bounds this — a fully-enriched scope makes zero
 # calls — so this only bites on a broad, sustained influx. In-process v1 (2× across
-# two Railway instances); a durable RPC is a follow-up, same as _CATALYST_DAILY_CAP.
+# two Railway instances); a durable RPC is a follow-up.
 _ENRICH_DAILY_CAP = 1200
 
 _STATE_TABLE = "updates_insight_state"
@@ -206,11 +198,6 @@ class InsightSweeper:
         self.news = get_news_cache_service()
         self.insights = get_news_insight_service()
         self.vol = get_volatility_cache_service()
-        # In-process ET-day cap on grounded catalyst web searches. `_catalyst_scopes`
-        # dedups so the cap counts DISTINCT movers, not attempts.
-        self._catalyst_day = None
-        self._catalyst_count = 0
-        self._catalyst_scopes: set = set()
         # In-process ET-day cap on proactive enrichment batch calls.
         self._enrich_day = None
         self._enrich_count = 0
@@ -518,12 +505,10 @@ class InsightSweeper:
         card: Dict[str, Any],
         now: datetime,
         quote: Optional[Dict[str, Any]] = None,
-        price_move: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Push a fresh insight to the people watching this ticker.
 
-        Gated on the SAME materiality tiers that trigger the grounded "why it moved"
-        catalyst (`_CATALYST_TIERS`). That is deliberate: a routine 0.4% drift already
+        Gated on the Unusual/Extreme materiality tiers (`_CATALYST_TIERS`). That is deliberate: a routine 0.4% drift already
         regenerates a card, and notifying on those would train users to ignore the app
         within a week. Only Unusual/Extreme earns an interruption.
 
@@ -542,10 +527,6 @@ class InsightSweeper:
         # would interrupt someone about a move that isn't happening — and the dedup
         # key is per DAY, so it would land as a genuinely new alert.
         #
-        # `_maybe_price_move` guards the paid catalyst the same way (see its
-        # "STALE σ-tier" comment). Notifying is a louder action than fetching an
-        # explanation, so it gets at least the same gate.
-        #
         # Session-aware (`session_change_percent`): a change stamped with a PRIOR
         # session is None. Without this the 04:00 ET pre-market pass read yesterday's
         # whole-session move off a row whose price was still yesterday's close, and —
@@ -563,7 +544,7 @@ class InsightSweeper:
                 trading_date_et,
             )
 
-            # THE BODY MUST EXPLAIN THE MOVE THAT TRIGGERED THE ALERT.
+            # THE BODY MUST NEVER CONTRADICT THE MOVE THAT TRIGGERED THE ALERT.
             #
             # This used to send `card["headline"]` — a Gemini one-line synthesis of the
             # ticker's whole 24-48h news corpus — which has no connection to why the
@@ -577,28 +558,12 @@ class InsightSweeper:
             #     "Hydrogen Stocks Face Selloff" on a day the trigger recorded PLUG
             #     **up 4.16%**. A bearish sector claim attached to a bullish move.
             #
-            # `price_move["reason"]` is the grounded, web-searched, CITED answer to
-            # exactly the question the alert raises, and it was already being computed
-            # in this same sweep — then dropped on the floor at the call site.
-            #
-            # ONLY a cited catalyst is a body. `price_catalyst_service` returns
-            # `catalyst_tag=None` when the web search found no company-specific driver
-            # (or found one it could not cite), and its `reason` is then the model's
-            # own prose about having found nothing — which shipped as an alert:
-            # "Current web sources for September 14, 2026, do not indicate a -10.4%
-            # move for Teradyne…" under the title "TER -13.3%". A body that denies the
-            # move the title announces is worse than no body. The prose still lands on
-            # the Updates card's "why it moved" row, where it is framed as a search
-            # result rather than as the alert itself.
-            #
-            # Otherwise the body is DETERMINISTIC and always true: the size and
-            # direction of the move (the fact the alert is about), plus either "no
-            # catalyst found" when the search ran, or a pointer to the ticker when no
-            # search was available this cycle (day cap / kill switch / quota breaker).
-            # The card headline is deliberately NOT a fallback any more — it is a
-            # synthesis of the news corpus, not of the move, and both production
-            # failures above came from attaching it to a price alert.
-            body = self._alert_body(scope, cp, price_move)
+            # It then carried the grounded web-search catalyst, which was retired on
+            # 2026-10-02 with Google Search grounding (its terms forbid caching a grounded
+            # answer and sending it to anyone but the user who asked). The body is now
+            # DETERMINISTIC and always true: the size and direction of the move plus a
+            # pointer to the ticker, where the news card holds the coverage.
+            body = self._alert_body(scope, cp)
 
             await get_push_dispatch_service().notify_watchers(
                 ticker=scope,
@@ -608,9 +573,8 @@ class InsightSweeper:
                 # duplicate. They were not: the dedup key is `move:{TICKER}:{ET-date}`,
                 # so those were two separate >=2-sigma sessions. What made them look
                 # identical is that the title was the bare ticker on both, while the
-                # bodies were two Gemini paraphrases of the same earnings story —
-                # `price_catalyst_service` caches for 24h, so day two re-runs the
-                # grounded search and writes fresh prose about the same news.
+                # bodies were two paraphrases of the same earnings story (the grounded
+                # catalyst of the time, since retired).
                 #
                 # The percentage is the one field that always differs between two
                 # distinct moves, and it is the fact the alert is actually about. It
@@ -619,7 +583,7 @@ class InsightSweeper:
                 title=f"{scope} {cp:+.1f}%",
                 # NOT truncated here. This same string becomes `notification_events.body`,
                 # which the Activity detail screen shows in full — a slice at the sender made
-                # every stored catalyst exactly 180 characters, ending mid-word. The lock-screen
+                # every stored body exactly 180 characters, ending mid-word. The lock-screen
                 # bound is applied at the APNs boundary instead (`truncate_for_banner`).
                 body=body,
                 dedup_key=f"move:{scope}:{trading_date_et()}",
@@ -643,23 +607,12 @@ class InsightSweeper:
             )
 
     @staticmethod
-    def _alert_body(scope: str, cp: float, price_move: Optional[Dict[str, Any]]) -> str:
-        """The `ticker_move` alert text for a move of `cp` percent.
-
-        Three cases, none of which can contradict the title:
-          * a CITED catalyst (`catalyst_tag` set, non-empty reason) → its reason;
-          * the search ran and found no company-specific driver (`price_move` present,
-            no tag) → a neutral sentence that says so;
-          * no search this cycle (`price_move` None) → the move plus a pointer.
-        Pure, so the policy is testable without a dispatcher.
+    def _alert_body(scope: str, cp: float) -> str:
+        """The `ticker_move` alert text for a move of `cp` percent: the move plus a
+        pointer to the ticker. Never a cause — nothing deterministic knows one, and the
+        news card is where the coverage lives. Pure, so testable without a dispatcher.
         """
         move = f"{'Up' if cp > 0 else 'Down'} {abs(cp):.1f}% in today's session"
-        if isinstance(price_move, dict):
-            tag = str(price_move.get("catalyst_tag") or "").strip()
-            reason = str(price_move.get("reason") or "").strip()
-            if tag and reason:
-                return reason
-            return f"{move} — no single company-specific catalyst found in current sources."
         return f"{move}. Open {scope} for the latest coverage."
 
     def _release_claim(self, scope: str, now: datetime, reason: str) -> None:
@@ -682,47 +635,6 @@ class InsightSweeper:
                 "Could not release insight claim for %s: %s: %s",
                 scope, type(e).__name__, e,
             )
-
-    def _claim_catalyst_budget(self, now: datetime, scope: str) -> bool:
-        """Take one unit of today's grounded-catalyst budget for ``scope``
-        (in-process ET-day counter).
-
-        Bounds DISTINCT movers, not attempts: a scope already explained today
-        does not re-consume a unit — its catalyst is 24h-cached, so a churning or
-        repeatedly-failing single ticker cannot drain the budget and starve
-        genuinely-new movers. Returns False once ``_CATALYST_DAILY_CAP`` distinct
-        scopes have been admitted today (and the scope is not already among them).
-        """
-        day = now.astimezone(ET).date()
-        if self._catalyst_day != day:
-            self._catalyst_day = day
-            self._catalyst_count = 0
-            self._catalyst_scopes = set()
-        if scope in self._catalyst_scopes:
-            return True  # already counted today → re-read the cached catalyst, no new unit
-        if self._catalyst_count >= _CATALYST_DAILY_CAP:
-            return False
-        self._catalyst_count += 1
-        self._catalyst_scopes.add(scope)
-        return True
-
-    def _release_catalyst_budget(self, now: datetime, scope: str) -> None:
-        """Hand back the unit `_claim_catalyst_budget` took for ``scope`` THIS call, when
-        the search provably did not run (`CatalystNotAttempted`: the quota breaker's
-        fail-fast, a 429 the ladder gave up on, the kill switch).
-
-        Without this, an open-breaker day burned the 30 distinct-mover budget on searches
-        that never left the process, and the movers of the afternoon — when the quota was
-        back — got no catalyst (F04-8). Only a unit from TODAY's ledger is returned (a day
-        rollover between claim and release must not decrement a fresh day), and only for a
-        scope still in the set (a scope counted earlier by a search that RAN keeps its
-        unit: that one was billed).
-        """
-        day = now.astimezone(ET).date()
-        if self._catalyst_day != day or scope not in self._catalyst_scopes:
-            return
-        self._catalyst_scopes.discard(scope)
-        self._catalyst_count = max(0, self._catalyst_count - 1)
 
     def _claim_enrich_budget(self, now: datetime) -> bool:
         """Take one unit of today's proactive-enrichment BATCH-CALL budget
@@ -786,105 +698,6 @@ class InsightSweeper:
         counts = await asyncio.gather(*[_one(s) for s in admitted])
         return sum(counts), deferred
 
-    async def _maybe_price_move(
-        self,
-        scope: str,
-        decision: Decision,
-        now: datetime,
-        quote: Optional[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Grounded "why did it move" for a per-ticker Unusual/Extreme session
-        move, folded onto the card as a separate ``price_move`` block.
-
-        Gated to non-market scopes at tier Unusual/Extreme (incl. fixed-band
-        extreme); kill-switched; capped per ET day; the reason itself is 24h-cached
-        + inflight-deduped by ``price_catalyst_service``. Returns None on any
-        miss/failure — it must NEVER fabricate a driver, block, or fail the news
-        card.
-        """
-        if scope == MARKET_SCOPE:
-            return None
-        if decision.price_band not in _CATALYST_TIERS:
-            return None
-        # The move must be measurable and non-trivial IN THE CURRENT QUOTE. When
-        # the quote is unusable the gate carries a STALE σ-tier (last_price_band),
-        # and the old `finite(...) or 0.0` would then fetch a paid catalyst for a
-        # phantom "+0.0% move" and store a self-contradictory {tier:Unusual,
-        # change_percent:0.0} card. A move that rounds to 0.00% is not worth
-        # explaining.
-        #
-        # Session-aware: a change stamped with a PRIOR session (pre-market, before the
-        # first print) is None here too, so no paid "today" search runs for yesterday's
-        # move — that search would cache yesterday's cause under today's key and serve
-        # it for a genuine same-direction move later in the day.
-        cp = session_change_percent(quote, now)
-        if cp is None or round(cp, 2) == 0.0:
-            return None
-        if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
-            return None
-        # Don't CLAIM a distinct-mover unit the search provably cannot spend: with the
-        # Gemini quota breaker open every grounded attempt fails fast before any HTTP
-        # (mirrors `chat_market_tools._maybe_web_catalyst`).
-        from app.integrations.gemini import _quota_circuit
-        if _quota_circuit.tripped:
-            logger.info("Price-move catalyst for %s skipped — Gemini quota breaker open", scope)
-            return None
-        # Whether the claim below takes a NEW unit (vs re-admitting a scope counted
-        # earlier today); decided before the claim, on the day it will be counted in.
-        fresh_unit = (
-            self._catalyst_day != now.astimezone(ET).date()
-            or scope not in self._catalyst_scopes
-        )
-        if not self._claim_catalyst_budget(now, scope):
-            logger.info(
-                "Price-move catalyst day cap (%d distinct movers) reached — skipping %s",
-                _CATALYST_DAILY_CAP, scope,
-            )
-            return None
-
-        from app.services.price_catalyst_service import CatalystNotAttempted
-        try:
-            grounded = await get_price_catalyst_service().get_catalyst(
-                scope, cp, "today",
-                # `price_service._shape` carries the listed name; it keeps the
-                # grounded search on the security rather than a same-ticker coin.
-                company_name=(quote or {}).get("name"),
-            )
-        except CatalystNotAttempted as e:
-            # Nothing ran and nothing was billed: the unit goes back so a later mover
-            # can use it. A None return below is the opposite case (the search RAN and
-            # answered unusably — Google billed it) and keeps its unit.
-            if fresh_unit:
-                self._release_catalyst_budget(now, scope)
-            logger.info(
-                "Price-move catalyst for %s not attempted (%s) — day-cap unit released",
-                scope, e,
-            )
-            return None
-        except Exception as e:
-            logger.warning(
-                "Price-move catalyst failed for %s (%s: %s)",
-                scope, type(e).__name__, e,
-            )
-            return None
-        if grounded is None:
-            return None
-        # Normalise the fixed-band 'extreme' to the tier vocabulary so the stored
-        # `tier` is always one of the documented Notable/Unusual/Extreme labels.
-        tier = TIER_EXTREME if decision.price_band == BAND_EXTREME else decision.price_band
-        return {
-            "tier": tier,
-            "change_pct": cp,
-            "catalyst_tag": grounded.get("tag"),   # None ⇒ "no clear catalyst"
-            "reason": grounded.get("reason") or "",
-            # The OUTSIDE web sources the grounded search consulted
-            # (``[{title, uri, publisher}]``). Carried alongside the block so the
-            # caller can MERGE them into the card's `sources` list; stripped by
-            # `_sanitize_price_move` (whitelist) so it never lands in the stored
-            # `price_move` column.
-            "web_sources": grounded.get("sources") or [],
-        }
-
     def _consume_global_budget(self, now: datetime) -> bool:
         """Atomically take one unit of today's global generation budget.
 
@@ -939,7 +752,7 @@ class InsightSweeper:
         coins in the universe. No MARKET scope, no equities, no index leg (so
         ``market_change`` is None and the equity-only MWCB guard is inert), no
         earnings lookup. Everything else — closed cooldown and TTLs, CoinGecko
-        quotes, crypto-routed news refresh, claims, budgets, catalysts — is the
+        quotes, crypto-routed news refresh, claims, budgets — is the
         ordinary machinery reading ``is_market_active() == False``.
         """
         now = datetime.now(timezone.utc)
@@ -966,8 +779,8 @@ class InsightSweeper:
                 if not sym:
                     continue
                 # A change stamped with a PRIOR session is not a current move. Blanked
-                # HERE, once, so the materiality gate, the card prompt's price line, the
-                # catalyst gate and the alert gate all agree: pre-market, before a
+                # HERE, once, so the materiality gate, the card prompt's price line and
+                # the alert gate all agree: pre-market, before a
                 # ticker's first print, the screener still carries yesterday's close and
                 # the row's change is yesterday's whole session. Read as "today" it
                 # re-tripped the gate at 04:03 ET and minted a second `ticker_move`
@@ -1185,24 +998,10 @@ class InsightSweeper:
                 card = None
                 error = None
                 try:
-                    # Explain-the-move: for a per-ticker Unusual/Extreme move, fetch
-                    # the grounded "why" (web search) and fold it into the card.
-                    # Gated + day-capped + kill-switched + 24h-cached; None on any
-                    # failure, and never blocks or fails the news card. Called
-                    # INSIDE the try so a shutdown-cancel during the (seconds-long)
-                    # catalyst search still reaches the finally that releases the
-                    # claim — outside it, the claim parked for the full stale window
-                    # after every deploy.
-                    price_move = await self._maybe_price_move(
-                        scope, decision, now, quotes_by_symbol.get(scope),
-                    )
-                    # When the move is STILL big but the catalyst was merely
-                    # unavailable this cycle (budget spent / transient error /
-                    # kill-switch), PRESERVE any existing "why it moved" block
-                    # rather than wiping a still-valid, still-24h-cached explanation
-                    # to NULL. Clear it only when the move is no longer big.
-                    move_still_big = decision.price_band in _CATALYST_TIERS
-                    preserve_price_move = price_move is None and move_still_big
+                    # No "why it moved" block any more: it came from a grounded Google
+                    # search, retired 2026-10-02 for the Grounding terms. `_store`
+                    # writes NULL over any block a card still carries, so the next
+                    # regeneration clears it.
                     card = await self.insights.generate_and_store(
                         scope=scope,
                         corpus=corpora.get(scope, []),
@@ -1214,11 +1013,6 @@ class InsightSweeper:
                             else quotes_by_symbol.get(scope)
                         ),
                         market_active=market_active,
-                        price_move=price_move,
-                        preserve_price_move=preserve_price_move,
-                        # Merge the catalyst's outside web sources into the card's
-                        # `sources` list (None when no big-move catalyst ran).
-                        catalyst_sources=(price_move or {}).get("web_sources"),
                         # The prompt's clock is the moment of generation, not the
                         # sweep start (a sweep can run for minutes).
                         now=datetime.now(timezone.utc),
@@ -1261,8 +1055,8 @@ class InsightSweeper:
                     )
                 # A fresh card for a WATCHED ticker that moved materially is the one
                 # thing in this app worth interrupting someone for. Everything the
-                # alert needs was just computed — the tier, the move, the grounded
-                # "why" — so notifying costs one reverse lookup, not another pipeline.
+                # alert needs was just computed — the tier and the move — so notifying
+                # costs one reverse lookup, not another pipeline.
                 #
                 # Deliberately NOT awaited into the sweep's critical path failure
                 # modes: `_notify_watchers` never raises, and a push problem must not
@@ -1271,9 +1065,6 @@ class InsightSweeper:
                     await self._notify_watchers(
                         scope, decision, card, now,
                         quote=quotes_by_symbol.get(scope),
-                        # The grounded "why it moved", computed above. Without this the
-                        # notification explains the move with unrelated news.
-                        price_move=price_move,
                     )
 
                 return card is not None

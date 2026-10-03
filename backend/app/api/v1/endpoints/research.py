@@ -1032,15 +1032,21 @@ def _in_display_order(personas: List[dict]) -> List[dict]:
 # Returned when the agent_personas Supabase query fails so the iOS app keeps working
 # instead of falling back to its own offline defaults. Field names are
 # snake_case to match the iOS BackendPersona CodingKeys.
+#
+# The copy (name / tagline / description) must equal migration 187's rows and the iOS
+# `AnalysisPersona` fallbacks (ResearchModels.swift), and must make no suitability claim
+# ("Ideal for conservative investors", "Safe") and echo no investor's catchphrase.
+# tests/test_persona_display_parity.py pins all three.
 _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-warren_buffett",
         "key": "warren_buffett",
         "name": "The Quality Compounder",
-        "tagline": "Safe, Long-term Value",
+        "tagline": "Durable, Long-term Value",
         "description": (
-            "Focuses on fundamental value, strong moats, consistent earnings, "
-            "and long-term competitive advantages. Ideal for conservative investors."
+            "Focuses on fundamental value, durable moats, consistent earnings, "
+            "and long-term competitive advantages, and asks for a margin of "
+            "safety on price."
         ),
         "icon_name": "building.columns.fill",
         "accent_color": "3B82F6",
@@ -1052,8 +1058,8 @@ _FALLBACK_PERSONAS: List[dict] = [
         "name": "The Growth Hunter",
         "tagline": "Growth at a Reasonable Price",
         "description": (
-            "Looks for growth at a reasonable price (GARP), with focus on "
-            "companies you understand and can spot in everyday life."
+            "Looks for growth at a reasonable price (GARP), weighing earnings "
+            "growth against valuation, with a focus on understandable businesses."
         ),
         "icon_name": "chart.line.uptrend.xyaxis",
         "accent_color": "06B6D4",
@@ -1108,7 +1114,10 @@ _FALLBACK_PERSONAS: List[dict] = [
 async def get_personas(
     supabase: Client = Depends(get_supabase),
 ):
-    """Get all active investor personas (no auth required).
+    """Get all active investor personas (signed-in callers only).
+
+    Not public: this router carries `Depends(get_current_user_id)` (the account-only wall,
+    auth.md §1a), so a signed-out call answers 401 AUTH_REQUIRED before reaching here.
 
     Resilient to DB failures: if the Supabase query throws (missing
     column, RLS deny, network blip), the endpoint logs the underlying

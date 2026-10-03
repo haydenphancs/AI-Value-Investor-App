@@ -219,41 +219,6 @@ struct NewsArticle: Identifiable, Hashable {
     }
 }
 
-// MARK: - Insight Price Move ("Why it moved")
-/// Grounded price-move explanation shown on the insight card for a big move.
-/// Distinct from the news bullets: this is the web-search-grounded, cited reason.
-struct InsightPriceMove {
-    let tier: String            // "Notable" | "Unusual" | "Extreme"
-    let changePercent: Double?
-    let catalystTag: String?    // nil ⇒ "no clear catalyst" (broad/sector move)
-    let reason: String
-
-    /// Signed, one-decimal change, or nil when unavailable (non-finite guarded).
-    var formattedChange: String? {
-        guard let c = changePercent, c.isFinite else { return nil }
-        let sign = c >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", c))%"
-    }
-
-    var isPositive: Bool { (changePercent ?? 0) >= 0 }
-
-    /// "<Catalyst Tag> — <reason>", or just the reason when there is no clear
-    /// company catalyst (a broad-market / sector move).
-    ///
-    /// The backend builds the SAME string in
-    /// `news_insight_service.catalyst_display_line`, because the roll-up prompt
-    /// quotes it back to the model and tells it this line is already on screen so
-    /// the bullets must not restate it. If the two ever drift, that instruction
-    /// starts describing a sentence the reader never sees and the de-duplication
-    /// silently stops working. `test_ios_insights_card_merge.py` pins them together.
-    var displayLine: String {
-        if let tag = catalystTag, !tag.isEmpty {
-            return "\(tag) — \(reason)"
-        }
-        return reason
-    }
-}
-
 // MARK: - Insight Source
 /// One source story the Insights summary was built from. These are the LITERAL
 /// corpus inputs (headline + publisher url), so they're safe to attribute.
@@ -303,8 +268,6 @@ struct NewsInsightSummary: Identifiable {
     let sentiment: MarketSentiment
     let updatedAt: Date
     let summaryType: String
-    /// Grounded "why it moved" block; nil unless a big move triggered the card.
-    var priceMove: InsightPriceMove? = nil
     /// The source stories this summary was built from; empty when unavailable
     /// (older cards) — the UI hides the tap affordance then.
     var sources: [InsightSource] = []
@@ -536,6 +499,9 @@ struct UpdatesTabsResponse: Codable, Sendable {
     }
 }
 
+/// The retired "why it moved" block. Decoded only so a payload that still carries one keeps
+/// decoding; never rendered. The backend serves `price_move: null` since the grounded
+/// catalyst behind it was retired (2026-10-02).
 struct PriceMoveDTO: Codable, Sendable {
     let tier: String
     let changePercent: Double?
@@ -570,6 +536,7 @@ struct AIInsightCardDTO: Codable, Sendable {
     let refreshing: Bool?
     let aiGenerated: Bool?
     let triggerReason: String?
+    /// Always null from the backend now; Optional so any payload decodes. Not mapped.
     let priceMove: PriceMoveDTO?
     let sources: [InsightSourceDTO]?
 
@@ -748,14 +715,6 @@ extension NewsInsightSummary {
         self.isStale = dto.isStale ?? false
         self.isRefreshing = dto.refreshing ?? false
         self.articleCount = dto.articleCount ?? 0
-        if let pm = dto.priceMove {
-            self.priceMove = InsightPriceMove(
-                tier: pm.tier,
-                changePercent: pm.changePercent,
-                catalystTag: pm.catalystTag,
-                reason: pm.reason
-            )
-        }
         self.sources = (dto.sources ?? []).compactMap { s in
             let title = s.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { return nil }

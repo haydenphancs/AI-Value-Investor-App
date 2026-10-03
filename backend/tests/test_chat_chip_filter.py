@@ -274,3 +274,67 @@ def test_replay_of_stored_chips_is_filtered_and_an_all_refused_row_shows_none():
     assert legacy.suggestions is None
     kept = _row_to_message({**base, "rich_content": {"suggestions": ["Continue your answer"]}})
     assert kept.suggestions == ["Continue your answer"]
+
+
+# ── report chat: no paid web search one tap away (owner decision 2026-10-02) ──
+
+_WEB_CHIPS = ["Any recent news on AVGO?", "What's the latest news?", "Can you verify the margin?",
+              "Search the web for the DOJ case", "Is this still true?"]
+_PLAIN_CHIPS = ["What drives the moat?", "How does it compare to peers?", "Summarize this research report"]
+
+
+@pytest.mark.parametrize("chip", _WEB_CHIPS)
+def test_a_web_search_chip_is_dropped_only_in_a_report_chat(chip):
+    assert is_answerable_chip(chip) is True, "outside a report chat it is an ordinary chip"
+    assert is_answerable_chip(chip, drop_web_search=True) is False
+
+
+@pytest.mark.parametrize("chip", _PLAIN_CHIPS)
+def test_ordinary_chips_survive_the_report_chat_filter(chip):
+    assert is_answerable_chip(chip, drop_web_search=True) is True
+
+
+def test_the_report_filter_drops_before_the_cap():
+    raw = ["Any recent news on AVGO?", "What drives the moat?", "What's the latest news?",
+           "How does it compare to peers?"]
+    assert filter_answerable_chips(raw, drop_web_search=True) == \
+        ["What drives the moat?", "How does it compare to peers?"]
+    assert filter_answerable_chips(raw) == ["Any recent news on AVGO?", "What drives the moat?"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_type,context_type,dropped", [
+    ("REPORT", "TICKER_REPORT", True), ("REPORT", None, True), (None, "TICKER_REPORT", True),
+    ("NORMAL", "STOCK", False), (None, None, False),
+])
+async def test_generate_followup_suggestions_drops_web_chips_in_a_report_chat(
+        session_type, context_type, dropped):
+    from app.services.chat_service import ChatService
+
+    svc = ChatService.__new__(ChatService)
+
+    class _Gem:
+        async def generate_json(self, prompt, system_instruction=None, model_name=None):
+            return {"text": json.dumps({"suggestions": [
+                "Any recent news on AVGO?", "What drives the moat?", "How does it compare to peers?",
+            ]})}
+
+    svc.gemini = _Gem()
+    out = await svc.generate_followup_suggestions(
+        "what is the moat?", "The moat is…", context_type=context_type, reference_id="AVGO",
+        session_type=session_type,
+    )
+    if dropped:
+        assert out == ["What drives the moat?", "How does it compare to peers?"]
+    else:
+        assert out == ["Any recent news on AVGO?", "What drives the moat?"]
+
+
+def test_the_stream_door_passes_the_session_type_to_the_chip_generator():
+    """Source-scan (comment-free, bounded to the generator call)."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/api/v1/endpoints/chat.py").read_text()
+    src = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    m = re.search(r"generate_followup_suggestions\((.*?)\)\)", src, re.S)
+    assert m and re.search(r"\bsession_type=session_type\b", m.group(1)), m and m.group(1)

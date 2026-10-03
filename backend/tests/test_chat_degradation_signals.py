@@ -345,8 +345,9 @@ async def test_a_resolver_that_appends_keeps_the_replayed_label(monkeypatch):
     client = "GCUSD · $2,410 · +0.4%"
     monkeypatch.setattr(res, "get_chat_context_resolver", lambda: SimpleNamespace(
         resolve=AsyncMock(return_value=client + "\n\nGold: a monetary metal…")))
-    ctx, server_grounded, replayed, cache_safe = await svc._resolve_grounding(
+    ctx, server_grounded, replayed, cache_safe, persona = await svc._resolve_grounding(
         "COMMODITY", "GCUSD", client, None, True)
+    assert persona is None, "only a TICKER_REPORT resolve can vouch for a report persona"
     assert server_grounded is True and replayed is True
     # …and an APPENDED block still carries the caller's own text, so a deep-dive brief
     # built on it must never enter the shared 24 h cache: `cache_safe` is the write bar,
@@ -355,8 +356,45 @@ async def test_a_resolver_that_appends_keeps_the_replayed_label(monkeypatch):
     # A resolver that REBUILT the block (ETF/CRYPTO/INDEX) is live — and cache-safe.
     monkeypatch.setattr(res, "get_chat_context_resolver", lambda: SimpleNamespace(
         resolve=AsyncMock(return_value="SPY · live block")))
-    ctx, server_grounded, replayed, cache_safe = await svc._resolve_grounding("ETF", "SPY", client, None, True)
+    ctx, server_grounded, replayed, cache_safe, persona = await svc._resolve_grounding(
+        "ETF", "SPY", client, None, True)
+    assert persona is None
     assert server_grounded is True and replayed is False and cache_safe is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_grounding_hands_the_resolver_meta_out_without_changing_its_tuple(monkeypatch):
+    """`meta_out` (2026-10-02) carries the resolver's meta — the report persona and the report's
+    as-of date the web-results caveat names — beside an UNCHANGED 5-tuple."""
+    import app.services.chat_context_resolver as res
+    svc = _svc()
+
+    class _Res:
+        async def resolve(self, context_type, reference_id, client_context=None, user_id=None,
+                          meta=None):
+            meta["report_persona_key"] = "peter_lynch"
+            meta["report_as_of"] = "2026-09-22"
+            return "SERVER REPORT BLOCK"
+
+    monkeypatch.setattr(res, "get_chat_context_resolver", lambda: _Res())
+    out: dict = {}
+    result = await svc._resolve_grounding("TICKER_REPORT", "ORCL|lynch", None, "u1", False,
+                                          meta_out=out)
+    assert len(result) == 5 and result[4] == "peter_lynch" and result[1] is True
+    assert out == {"report_persona_key": "peter_lynch", "report_as_of": "2026-09-22"}
+    # Without `meta_out` (every existing caller) it behaves exactly as before.
+    assert await svc._resolve_grounding("TICKER_REPORT", "ORCL|lynch", None, "u1", False) == result
+
+
+@pytest.mark.asyncio
+async def test_resolve_grounding_meta_out_stays_empty_when_the_resolver_wrote_nothing(monkeypatch):
+    import app.services.chat_context_resolver as res
+    svc = _svc()
+    monkeypatch.setattr(res, "get_chat_context_resolver", lambda: SimpleNamespace(
+        resolve=AsyncMock(return_value="client ctx")))
+    out: dict = {"untouched": 1}
+    await svc._resolve_grounding("TICKER_REPORT", "ORCL|lynch", "client ctx", None, True, meta_out=out)
+    assert out == {"untouched": 1}
 
 
 # ── E1: the non-stream door reads the finish reason (2026-09-19) ─────────────

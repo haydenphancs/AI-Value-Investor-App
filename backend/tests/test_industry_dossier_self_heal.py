@@ -340,9 +340,6 @@ async def test_end_to_end_census_down_falls_back_to_bea_naics_335_not_all_manufa
 @pytest.mark.parametrize("row", [
     _row(current_tam_b=195.0, future_tam_b=270.9, cagr_5y_pct=6.8, source_grain="industry",
          source_label="US Census AIES (NAICS 335)", tam_scope="us"),
-    _row(industry="Semiconductors", sector="Technology", current_tam_b=702.44,
-         future_tam_b=950.0, cagr_5y_pct=6.34, source_grain="industry",
-         source_label="SIA / WSTS global semiconductor sales", tam_scope="global"),
 ])
 async def test_real_rows_are_returned_untouched_with_no_live_call(monkeypatch, row):
     fake = _FakeSB([row])
@@ -352,6 +349,53 @@ async def test_real_rows_are_returned_untouched_with_no_live_call(monkeypatch, r
     assert d == IndustryDossier.from_db_row(row)
     assert tiers.calls == []
     assert fake.writes == []
+
+
+# ── A grounded GLOBAL row is never served (Google Search grounding retired 2026-10-02) ──
+
+_GROUNDED_GLOBAL = _row(
+    industry="Semiconductors", sector="Technology", current_tam_b=702.44, future_tam_b=950.0,
+    cagr_5y_pct=6.34, lifecycle_phase="secular_growth", source_grain="industry",
+    source_label="SIA / WSTS global semiconductor sales", tam_scope="global",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_grounded_global_row_reads_as_a_placeholder_keeping_its_concentration(monkeypatch):
+    fake = _FakeSB([dict(_GROUNDED_GLOBAL)])
+    monkeypatch.setattr(ids, "get_supabase", lambda: fake)
+    d = await IndustryDossierService().get_dossier("Semiconductors")
+    assert (d.current_tam, d.future_tam, d.cagr_5y_pct) == (0.0, 0.0, None)
+    assert d.tam_scope == "us" and d.lifecycle_phase == "mature"   # nothing grounded survives
+    assert "SIA" not in d.source_label and "WSTS" not in d.source_label
+    assert (d.hhi, d.concentration_label, d.constituent_count) == (1834.5, "oligopoly", 56)
+
+
+@pytest.mark.asyncio
+async def test_a_grounded_global_row_is_served_as_a_live_census_figure(monkeypatch):
+    fake = _FakeSB([dict(_GROUNDED_GLOBAL)])
+    monkeypatch.setattr(ids, "get_supabase", lambda: fake)
+
+    async def compute(self, industry, sector, tickers, caps_by_ticker):
+        return _live(industry=industry, sector=sector, current_tam=116.2,
+                     source_label="US Census AIES (NAICS 3344)")
+    _stub_compute(monkeypatch, compute)
+    d = await IndustryDossierService().get_or_compute_dossier("Semiconductors", "Technology")
+    assert d.current_tam == 116.2 and d.tam_scope == "us"
+    assert d.source_label == "US Census AIES (NAICS 3344)"
+    assert d.concentration_label == "oligopoly"          # the stored, ungrounded side is kept
+    assert fake.writes == []                              # never persisted on the read path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["us", None, "", "GLOBAL"])
+async def test_only_the_exact_global_scope_is_withdrawn(monkeypatch, scope):
+    """`tam_scope` has a CHECK constraint ('us' | 'global'); anything else read back is
+    not a grounded row and is served as before."""
+    fake = _FakeSB([dict(_GROUNDED_GLOBAL, tam_scope=scope)])
+    monkeypatch.setattr(ids, "get_supabase", lambda: fake)
+    d = await IndustryDossierService().get_dossier("Semiconductors")
+    assert d.current_tam == 702.44
 
 
 @pytest.mark.asyncio
@@ -627,30 +671,19 @@ def test_grain_allow_list_and_new_mapping_are_consistent():
     assert its.INDUSTRY_TO_CENSUS[PLUG_INDUSTRY] == "335"
     assert its.INDUSTRY_TO_FRED_SERIES[PLUG_INDUSTRY] == "USELCEQAPMANNGSP"
     label = its._fred_source_label("USELCEQAPMANNGSP")
-    # Phase B's floor skip and `_backfill_global_scope` recognise a US source by
-    # these exact markers.
+    # Migration 188's purge recognises a Phase A (US) source by these exact markers.
     assert label.startswith("BEA ") and "via FRED" in label
     assert its.fred_mapping_grain("Computer Hardware") == "sector"
     assert its.fred_mapping_grain(PLUG_INDUSTRY) == "industry"
 
 
-# ── recompute_all: global rows and real TAMs are never replaced ─────────
-
-
-class _RecordingPhaseB:
-    def __init__(self) -> None:
-        self.calls: List[Dict[str, Any]] = []
-
-    async def refresh_all_overrides(self, **kwargs):
-        self.calls.append(kwargs)
-        return {"status": "stubbed"}
+# ── recompute_all: real TAMs are never zeroed; grounded global rows are replaced ──
 
 
 @pytest.mark.asyncio
-async def test_recompute_all_keeps_global_rows_and_never_zeroes_a_real_tam(monkeypatch):
+async def test_recompute_all_replaces_global_rows_and_never_zeroes_a_real_tam(monkeypatch):
     import app.integrations.census as census_mod
     import app.integrations.fred as fred_mod
-    import app.services.industry_override_service as ovr_mod
 
     existing = [
         _row(industry="Semiconductors", sector="Technology", current_tam_b=702.44,
@@ -674,23 +707,22 @@ async def test_recompute_all_keeps_global_rows_and_never_zeroes_a_real_tam(monke
         if industry == "Restaurants":            # a transient miss this run
             return _live(industry=industry, sector=sector, current_tam=0.0, future_tam=0.0,
                          source_label=PLACEHOLDER_LABEL, source_grain="all_industry")
-        if industry == "Semiconductors":         # a US figure Phase A must NOT write
+        if industry == "Semiconductors":         # Phase A's US figure replaces the grounded one
             return _live(industry=industry, sector=sector, current_tam=116.2,
                          source_label="US Census AIES (NAICS 3344)")
         return _live(industry=industry, sector=sector)
     _stub_compute(monkeypatch, compute)
 
-    phase_b = _RecordingPhaseB()
-    monkeypatch.setattr(ovr_mod, "get_industry_override_service", lambda: phase_b)
-
     result = await IndustryDossierService().recompute_all()
 
     upserted = [row for op, batch, _f in fake.writes if op == "upsert" for row in batch]
     by_industry = {r["industry"]: r for r in upserted}
-    assert "Semiconductors" not in by_industry          # global research row kept
+    assert by_industry["Semiconductors"]["current_tam_b"] == 116.2   # grounded row replaced
+    assert by_industry["Semiconductors"]["tam_scope"] == "us"
     assert "Restaurants" not in by_industry             # real TAM never zeroed
     assert by_industry[PLUG_INDUSTRY]["current_tam_b"] == 195.0   # zero → real is written
-    assert result["rows_upserted"] == 1
+    assert result["rows_upserted"] == 2
+    assert "phase_b_summary" not in result
     assert not any(math.isnan(r["current_tam_b"]) for r in upserted)
 
 
@@ -763,7 +795,7 @@ async def test_reset_during_the_supabase_read_caches_neither_placeholder_nor_hea
     _stub_compute(monkeypatch, compute)
     task = asyncio.create_task(IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials"))
     await _until(sb.in_read.is_set)
-    IndustryDossierService.reset_cache()       # Phase B wrote a global row meanwhile
+    IndustryDossierService.reset_cache()       # a recompute wrote a row meanwhile
     sb.read_gate.set()
     d = await asyncio.wait_for(task, 2)
     assert d.current_tam == 195.0              # this request still gets a figure
@@ -902,7 +934,6 @@ def test_collector_settles_the_dossier_and_tags_only_transient_holes(result, tag
 async def _run_recompute(monkeypatch, existing, universe, compute_by_industry):
     import app.integrations.census as census_mod
     import app.integrations.fred as fred_mod
-    import app.services.industry_override_service as ovr_mod
 
     fake = _FakeSB(existing)
     monkeypatch.setattr(ids, "get_supabase", lambda: fake)
@@ -916,12 +947,10 @@ async def _run_recompute(monkeypatch, existing, universe, compute_by_industry):
             raise out
         return out
     _stub_compute(monkeypatch, compute)
-    phase_b = _RecordingPhaseB()
-    monkeypatch.setattr(ovr_mod, "get_industry_override_service", lambda: phase_b)
     result = await IndustryDossierService().recompute_all()
     upserted = {r["industry"]: r for op, batch, _f in fake.writes if op == "upsert" for r in batch}
     updates = [(payload, f) for op, payload, f in fake.writes if op == "update"]
-    return result, upserted, updates, phase_b
+    return result, upserted, updates
 
 
 def _u(industry, sector="Technology"):
@@ -929,52 +958,43 @@ def _u(industry, sector="Technology"):
 
 
 @pytest.mark.asyncio
-async def test_recompute_refreshes_concentration_of_a_global_row_but_not_its_tam(monkeypatch, caplog):
+@pytest.mark.parametrize("computed, expect_tam", [
+    # A real Census figure replaces it, concentration and all, in ONE upsert.
+    (_live(industry="Semiconductors", sector="Technology", current_tam=116.2,
+           source_label="US Census AIES (NAICS 3344)", hhi=2400.0, constituent_count=42,
+           concentration_label="oligopoly"), 116.2),
+    # THE TRAP: Phase A resolving only a placeholder must STILL replace it. The zero-guard
+    # protects a REAL figure; a grounded one is not real, and keeping it is the storage
+    # the Grounding terms forbid.
+    (_live(industry="Semiconductors", sector="Technology", current_tam=0.0, future_tam=0.0,
+           source_label=PLACEHOLDER_LABEL, source_grain="all_industry"), 0.0),
+    # ...and so must a broader (sector-grain) fallback: the grain guard protects only a
+    # real industry-grain figure.
+    (_live(industry="Semiconductors", sector="Technology", current_tam=3000.0,
+           source_grain="sector", source_label="BEA Manufacturing GDP — broader than Semiconductors"),
+     3000.0),
+])
+async def test_recompute_replaces_a_grounded_global_row_whatever_phase_a_resolves(
+    monkeypatch, computed, expect_tam,
+):
     existing = [_row(industry="Semiconductors", sector="Technology", current_tam_b=702.44,
                      source_label="SIA / WSTS", tam_scope="global", source_grain="industry")]
-    computed = _live(industry="Semiconductors", sector="Technology", current_tam=116.2,
-                     source_label="US Census AIES (NAICS 3344)", hhi=2400.0,
-                     top1_share_pct=48.0, top2_share_pct=61.0,
-                     concentration_label="oligopoly", constituent_count=42)
-    with caplog.at_level(logging.WARNING, logger=LOGGER):
-        _r, upserted, updates, phase_b = await _run_recompute(
-            monkeypatch, existing, [_u("Semiconductors")], {"Semiconductors": computed},
-        )
-    assert "Semiconductors" not in upserted                     # TAM untouched
-    assert len(updates) == 1
-    payload, filters = updates[0]
-    assert filters == {"industry": "Semiconductors"}
-    assert payload["hhi"] == 2400.0 and payload["constituent_count"] == 42
-    assert not ({"current_tam_b", "future_tam_b", "cagr_5y_pct", "tam_scope", "source_label"} & set(payload))
-    assert "GLOBAL research row" in caplog.text and "Semiconductors" in caplog.text
-    # Phase B's floor gets THIS run's Phase-A figure, not the row's own global value.
-    assert phase_b.calls[0]["phase_a_baseline"]["Semiconductors"] == {
-        "tam": 116.2, "source_label": "US Census AIES (NAICS 3344)",
-    }
-
-
-@pytest.mark.asyncio
-async def test_recompute_does_not_blank_a_global_rows_concentration_with_no_constituents(monkeypatch):
-    existing = [_row(industry="Semiconductors", sector="Technology", current_tam_b=702.44,
-                     source_label="SIA / WSTS", tam_scope="global", source_grain="industry")]
-    computed = _live(industry="Semiconductors", sector="Technology", constituent_count=None,
-                     concentration_label="fragmented")
-    _r, upserted, updates, _pb = await _run_recompute(
+    _r, upserted, updates = await _run_recompute(
         monkeypatch, existing, [_u("Semiconductors")], {"Semiconductors": computed},
     )
-    assert updates == [] and "Semiconductors" not in upserted
+    assert upserted["Semiconductors"]["current_tam_b"] == expect_tam
+    assert upserted["Semiconductors"]["tam_scope"] == "us"
+    assert updates == []                     # no concentration-only side write any more
 
 
 @pytest.mark.asyncio
-async def test_recompute_protects_only_real_curated_global_rows(monkeypatch):
+async def test_recompute_protects_no_global_row(monkeypatch):
     existing = [
-        # zero global row → nothing to protect → Phase A writes it
         _row(industry="Semiconductors", sector="Technology", current_tam_b=0.0, tam_scope="global"),
-        # 'global' but NOT curated → back to Phase A
         _row(industry="Uncurated Global Thing", sector="Technology", current_tam_b=500.0,
              tam_scope="global", source_label="Some research", source_grain="industry"),
     ]
-    _r, upserted, _upd, _pb = await _run_recompute(
+    _r, upserted, _upd = await _run_recompute(
         monkeypatch, existing,
         [_u("Semiconductors"), _u("Uncurated Global Thing")],
         {"Semiconductors": _live(industry="Semiconductors", sector="Technology"),
@@ -990,7 +1010,7 @@ async def test_recompute_keeps_an_industry_level_row_when_the_run_fell_back_to_a
     broader = _live(current_tam=2930.1, future_tam=3980.7, source_grain="sector",
                     source_label="BEA Manufacturing GDP — broader than Electrical Equipment & Parts")
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        _r, upserted, _upd, _pb = await _run_recompute(
+        _r, upserted, _upd = await _run_recompute(
             monkeypatch, existing, [_u(PLUG_INDUSTRY, "Industrials")], {PLUG_INDUSTRY: broader},
         )
     assert upserted == {}
@@ -1005,7 +1025,7 @@ async def test_recompute_writes_a_grain_change_for_an_industry_not_mapped_to_ind
                      source_grain="industry", source_label="BEA Construction GDP (via FRED)")]
     now_sector = _live(industry="Construction", sector="Industrials", current_tam=1340.0,
                        source_grain="sector", source_label="BEA Construction GDP (via FRED)")
-    _r, upserted, _upd, _pb = await _run_recompute(
+    _r, upserted, _upd = await _run_recompute(
         monkeypatch, existing, [_u("Construction", "Industrials")], {"Construction": now_sector},
     )
     assert upserted["Construction"]["source_grain"] == "sector"
@@ -1017,7 +1037,7 @@ async def test_recompute_keeps_the_stored_row_when_census_is_unavailable(monkeyp
 
     existing = [_row(current_tam_b=195.0, source_grain="industry")]
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        _r, upserted, _upd, _pb = await _run_recompute(
+        _r, upserted, _upd = await _run_recompute(
             monkeypatch, existing, [_u(PLUG_INDUSTRY, "Industrials")],
             {PLUG_INDUSTRY: CensusUnavailableException("Census HTTP 503")},
         )

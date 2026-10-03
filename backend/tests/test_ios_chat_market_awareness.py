@@ -145,6 +145,7 @@ _LABELLED_TOOLS = (
     "get_ticker_news",
     "get_market_snapshot",
     "explain_price_move",
+    "web_search",
 )
 
 
@@ -157,16 +158,51 @@ def test_every_chat_tool_has_a_human_thinking_label(tool):
     assert f'case "{tool}"' in body, f"{tool} falls through to the raw-identifier default"
 
 
-def test_the_web_search_step_is_not_called_searching_the_web():
-    """A product decision, made explicitly: "Searching the web…" reads as a generic chatbot.
+def test_every_declared_backend_tool_has_an_ios_label():
+    """DERIVED from the backend's own registry, so a tool added there without an iOS label
+    fails here — the hand-kept tuple above only pins the ones someone remembered.
+    `TOOL_DESCRIPTIONS` includes the gated `web_search` (declared only on a turn whose web
+    gate opened), imported by its constant rather than retyped."""
+    from app.services.agents.chat_tools import TOOL_DESCRIPTIONS, WEB_SEARCH_TOOL
 
-    It would also be wrong most of the time — `explain_price_move` answers from deterministic
-    attribution and cached news first, and escalates to a paid search only for a large move it
-    cannot otherwise explain.
-    """
     body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
-    assert "Digging deeper" in body
-    assert "Searching the web" not in body
+    assert WEB_SEARCH_TOOL in TOOL_DESCRIPTIONS
+    missing = sorted(t for t in TOOL_DESCRIPTIONS if f'case "{t}"' not in body)
+    assert not missing, f"these backend tools render as a raw identifier on iOS: {missing}"
+
+
+def _case_line(body: str, tool: str) -> str:
+    lines = [l for l in body.splitlines() if f'case "{tool}":' in l]
+    assert len(lines) == 1, f"expected exactly one `case \"{tool}\":` line, found {lines}"
+    return lines[0]
+
+
+def test_explain_price_move_still_reads_digging_deeper():
+    """`explain_price_move` answers only from deterministic attribution and the ticker's cached
+    news — its paid web-search tier was retired on 2026-10-02 — so it must never claim a web
+    search. (Superseded the old `test_the_web_search_step_is_not_called_searching_the_web`.)"""
+    body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
+    line = _case_line(body, "explain_price_move")
+    assert 'return "Digging deeper"' in line
+    assert "web" not in line.lower(), f"explain_price_move's label mentions the web: {line!r}"
+
+
+def test_only_the_explicit_web_search_tool_says_searching_the_web():
+    """DECISION CHANGED, deliberately (owner, 2026-10-02). This file used to pin that NO label
+    said "Searching the web" — a product call made when the only web search was
+    `explain_price_move`'s escalation, which rarely ran. Report chat now has a real,
+    explicit-request-only `web_search` tool, and the owner asked for a visible "Searching the
+    web…" status while it runs. So the phrase is now allowed in exactly ONE place: the
+    `web_search` case. Never on `explain_price_move` (above), never in `default:` (which would
+    put it on every unknown tool)."""
+    body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
+    line = _case_line(body, "web_search")
+    assert 'return "Searching the web"' in line
+    assert body.count("Searching the web") == 1, (
+        "the web-search wording must belong to the web_search case alone"
+    )
+    default = body[body.index("default:"):]
+    assert "Searching the web" not in default
 
 
 def test_the_label_scan_is_not_vacuous():

@@ -27,11 +27,13 @@ struct ReportInsiderActivityTable: View {
     /// Per-month informative buy/sell transaction counts, keyed to match the
     /// insider flow bars' "MM/YYYY" months. Derived from `recentTransactions`
     /// (the SAME full, 365-day, informative-only set the bars aggregate, per the
-    /// report collector), so the popup counts line up with the columns. UTC
-    /// bucketing matches the backend's date-string month key.
+    /// report collector), so the popup counts line up with the columns.
+    /// Bucketed in the zone the dates were PARSED in: `HoldersISODateFormatter` reads
+    /// "yyyy-MM-dd" at local midnight, so a UTC calendar put a trade dated the 1st into
+    /// the previous month on any device east of UTC (its bar sat in the right month).
     private var monthlyInsiderCounts: [String: (buy: Int, sell: Int)] {
         var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "UTC") ?? .current
+        cal.timeZone = .current
         var counts: [String: (buy: Int, sell: Int)] = [:]
         for tx in insiderData.recentTransactions {
             let c = cal.dateComponents([.year, .month], from: tx.date)
@@ -48,10 +50,18 @@ struct ReportInsiderActivityTable: View {
     /// counts, a flow chart, or recent transactions. When false, the section
     /// shows an explicit empty state instead of an all-zero "Buys 0 / Sells 0"
     /// table (which reads as an error rather than "no activity").
+    /// The flow counts only when a bar HAS activity: the backend always sends 13
+    /// month buckets, so `!flowData.isEmpty` was always true and this empty state
+    /// was unreachable — the section drew a "Neutral" pill, a zero table and a ±1M
+    /// axis of dashes instead (mirrors SmartMoneySection's `hasActivity` gate).
     private var hasInsiderActivity: Bool {
         insiderData.transactions.contains { $0.count > 0 }
             || !insiderData.recentTransactions.isEmpty
-            || (insiderData.insiderFlow.map { !$0.flowData.isEmpty } ?? false)
+            || flowHasActivity
+    }
+
+    private var flowHasActivity: Bool {
+        insiderData.insiderFlow?.flowData.contains { $0.hasActivity } ?? false
     }
 
     var body: some View {
@@ -65,7 +75,7 @@ struct ReportInsiderActivityTable: View {
 
                 Spacer()
 
-                if hasInsiderActivity {
+                if hasInsiderActivity && !insiderData.isUnavailable {
                     ReportSentimentBadge(
                         text: insiderData.sentiment.rawValue,
                         textColor: insiderData.sentiment.color,
@@ -74,18 +84,30 @@ struct ReportInsiderActivityTable: View {
                 }
             }
 
-            // Timeframe
-            Text(insiderData.timeframe)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+            // Timeframe — not when unavailable: the backend then puts its message in this
+            // field for app builds older than the flag, and the line below says it already.
+            if !insiderData.isUnavailable {
+                Text(insiderData.timeframe)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
 
-            if hasInsiderActivity {
+            if insiderData.isUnavailable {
+                // The backend's insider fetch FAILED for this report: its zeros are a
+                // placeholder, so never say "no insider transactions" here.
+                Text("Insider data couldn't be loaded for this report.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, AppSpacing.xs)
+            } else if hasInsiderActivity {
                 insiderContent
             } else {
                 // Empty state — the "Insider Activity" title + timeframe stay
                 // visible so an absent table reads as "no data", not an error
-                // (mirrors the Congressional Trades empty state).
-                Text("No insider transactions in the last 12 months.")
+                // (mirrors the Congressional Trades empty state). "Open-market":
+                // award, option and tax rows exist but are not counted here.
+                Text("No open-market insider buys or sells in the last 12 months.")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -160,7 +182,7 @@ struct ReportInsiderActivityTable: View {
             // (like the Holders tab) so you can read whether insiders sold into
             // strength or weakness; the backend windows the daily price to the
             // bars' 365-day span so the line and bars share one timeline.
-            if let flow = insiderData.insiderFlow, !flow.flowData.isEmpty {
+            if let flow = insiderData.insiderFlow, flowHasActivity {
                 SmartMoneyFlowChart(
                     priceData: flow.priceData,
                     dailyPrices: flow.dailyPrices,
@@ -168,7 +190,14 @@ struct ReportInsiderActivityTable: View {
                     showPriceChart: true,
                     showVolumeYAxis: true,
                     monthlyCounts: monthlyInsiderCounts,
-                    selectedMonth: $selectedInsiderPeriod
+                    selectedMonth: $selectedInsiderPeriod,
+                    // The Holders tab's exact layout for the same series: a gap below the
+                    // price axis and ONE fixed-width label column for both axes. With the
+                    // defaults (gap 0, natural widths) the volume axis's top label ran into
+                    // the price axis's bottom one ("1M$40"), and the two plots had different
+                    // widths, so the price line sat off its month's bar on every render.
+                    priceVolumeGap: AppSpacing.sm,
+                    uniformVolumeAxis: true
                 )
                 SmartMoneyFlowLegend(buyLabel: "Bought", sellLabel: "Sold")
             }

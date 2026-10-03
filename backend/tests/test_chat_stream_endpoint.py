@@ -1267,6 +1267,54 @@ def test_the_history_oracle_answers_409_on_a_transient_failure_and_reads_the_new
     assert [m["content"] for m in msgs] == ["q", "newest"], "rows must come back oldest→newest"
 
 
+@pytest.mark.parametrize("session_type,context_type,expected", [
+    ("REPORT", "TICKER_REPORT", ["What drives the moat?"]),
+    ("REPORT", None, ["What drives the moat?"]),
+    ("NORMAL", "TICKER_REPORT", ["What drives the moat?"]),
+    ("NORMAL", "STOCK", ["Any recent news on AVGO?", "What drives the moat?"]),
+    (None, None, ["Any recent news on AVGO?", "What drives the moat?"]),
+])
+def test_history_replay_drops_stored_web_search_chips_in_a_report_chat(
+        harness, session_type, context_type, expected):
+    """Review 2026-10-02 LOW: a chip stored before the web-search drop existed must not reopen a
+    paid search one tap away when a report chat is reopened."""
+    client, db, quota, _ = harness
+
+    class _History(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == "chat_messages":
+                q.order = lambda col, desc=False: q
+                q.limit = lambda n: q
+                q.execute = lambda: _Result([
+                    {"id": "m2", "session_id": _SESSION, "role": "assistant", "content": "The moat…",
+                     "created_at": "2026-10-02T00:00:02+00:00", "citations": None, "tokens_used": None,
+                     "rich_content": {"suggestions": ["Any recent news on AVGO?",
+                                                      "What drives the moat?"]}},
+                    {"id": "m1", "session_id": _SESSION, "role": "user", "content": "What is the moat?",
+                     "created_at": "2026-10-02T00:00:01+00:00", "rich_content": None,
+                     "citations": None, "tokens_used": None},
+                ])
+            return q
+
+    hdb = _History({**db.session_row, "id": _SESSION, "session_type": session_type,
+                    "context_type": context_type, "created_at": "2026-10-02T00:00:00+00:00",
+                    "updated_at": "2026-10-02T00:00:00+00:00", "title": None, "is_saved": False,
+                    "message_count": 2})
+    app.dependency_overrides[get_supabase] = lambda: hdb
+    r = client.get(f"/api/v1/chat/sessions/{_SESSION}")
+    assert r.status_code == 200, r.text
+    assert r.json()["messages"][-1]["suggestions"] == expected
+
+
+@pytest.mark.parametrize("row", [None, "REPORT", 7, {}, {"session_type": 3, "context_type": ["x"]},
+                                 {"session_type": " report "}, {"context_type": "ticker_report"}])
+def test_the_report_chat_test_for_history_chips_never_raises(row):
+    expected = isinstance(row, dict) and (row.get("session_type") == " report "
+                                          or row.get("context_type") == "ticker_report")
+    assert chat_mod._drops_web_search_chips(row) is expected
+
+
 def test_a_degraded_deep_dive_is_never_written_to_the_cache(harness, monkeypatch):
     """A tool-less / unmerged brief is refunded — caching it would replay it for 24 h as a
     zero-cost hit ("cached failure ≡ real answer")."""
@@ -2333,3 +2381,463 @@ def test_the_non_stream_door_returns_and_persists_the_same_verdict(harness, verd
         assert "context_grounded" not in rich
     else:
         assert rich["context_grounded"] is verdict
+
+
+# ── report chat's web search through the stream door (2026-10-02) ─────────────
+
+
+def _web_turn():
+    from app.services.chat_web_search_service import WebSearchTurn
+    return WebSearchTurn(user_id=_USER["id"])
+
+
+def _synthesize_router(monkeypatch):
+    import app.services.agents.chat_router as router
+    monkeypatch.setattr(router, "route_question",
+                        _async_value({"specialists": ["valuation", "moat"], "mode": "synthesize",
+                                      "labels": ["Valuation", "Moat"], "degraded": False}))
+
+
+def test_a_web_turn_is_answered_in_single_mode_with_the_tool(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _synthesize_router(monkeypatch)
+    turn = _web_turn()
+    _FakeChatService.prep_overrides = {"web_turn": turn, "web_search_granted": True,
+                                       "asset_type": "STOCK"}
+    r = _post(client, message="Can you verify the DOJ case?")
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    routing = [d for e, d in frames if e == "routing"]
+    assert routing == [{"specialists": ["valuation"], "labels": ["Valuation"], "mode": "single"}], \
+        "the routing frame must never promise lenses a web turn will not run"
+    sent = _FakeChatService.instances[-1].gemini.stream_calls
+    assert len(sent) == 1, "single mode: one agentic stream, not a synthesis"
+    declared = {fd.name for t in sent[0]["tools"] for fd in (t.function_declarations or [])}
+    assert "web_search" in declared and "web_search" in sent[0]["tool_handlers"]
+
+
+def test_an_ordinary_turn_keeps_its_synthesis_and_has_no_tool(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _synthesize_router(monkeypatch)
+    called = []
+    monkeypatch.setattr(_FakeChatService, "stream_synthesis",
+                        lambda self, prep, msg, route, tools, handlers, signals=None:
+                        (called.append((route, handlers)) or _events(("answer", "merged answer."))()))
+    r = _post(client, message="What is the moat?")
+    assert r.status_code == 200, r.text
+    routing = [d for e, d in _parse_sse(r.text) if e == "routing"]
+    assert routing and routing[0]["mode"] == "synthesize"
+    route, handlers = called[0]
+    assert route["mode"] == "synthesize" and "web_search" not in handlers
+
+
+def test_a_tool_start_event_sends_no_frame(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("tool_start", {"name": "get_ticker_news"}),
+                               ("tool", {"name": "get_ticker_news", "args": {"ticker": "AAPL"},
+                                         "result": {"articles": []}}),
+                               ("answer", "Nothing new today.")]
+    r = _post(client)
+    frames = _parse_sse(r.text)
+    names = [f[0] for f in frames]
+    assert "tool_start" not in names and names.count("tool_step") == 1
+    assert frames[-1][1]["message"]["content"].startswith("Nothing new today.")
+
+
+def test_the_fallback_is_handed_the_streams_web_turn(harness):
+    client, db, quota, _ = harness
+    turn = _web_turn()
+    _FakeChatService.prep_overrides = {"web_turn": turn, "web_search_granted": True}
+    _FakeChatService.fallback_result = {"content": "Fallback answer. " * 3, "tokens_used": 30,
+                                        "web_search_used": True, "web_sources": []}
+
+    async def _boom(*a, **k):
+        yield ("answer", "partial…")
+        raise RuntimeError("stream died")
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: _boom()
+    try:
+        r = _post(client, message="Can you verify the DOJ case?")
+    finally:
+        _FakeGemini.stream_agentic = orig
+    assert r.status_code == 200, r.text
+    svc = _FakeChatService.instances[-1]
+    assert svc.fallback_calls == 1 and svc.fallback_kwargs["web_turn"] is turn
+
+
+def _delivered_web_result():
+    return {"web_search": True, "status": "ok", "result_count": 1,
+            "results": [{"title": "DOJ case advances", "publisher": "Reuters",
+                         "published": "2026-09-30", "snippet": "The case advanced."}]}
+
+
+def test_a_cut_web_answer_is_not_auto_continued(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"web_turn": _web_turn(), "web_search_granted": True,
+                                       "system_instruction_no_tools": "SYS-NO-TOOLS"}
+    _FakeChatService.events = [("tool", {"name": "web_search", "args": {"query": "DOJ case"},
+                                         "result": _delivered_web_result()}),
+                               ("answer", "Reuters, Sep 30, 2026: the case advanced and the"),
+                               ("finish", "MAX_TOKENS")]
+    _FakeGemini.continue_events = [("answer", " judge set a date.")]
+    r = _post(client, message="Can you verify the DOJ case?")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.continue_calls == [], "a continuation never saw the web results"
+    assert quota.settled == ["chat_degraded_truncated"]
+
+
+@pytest.mark.parametrize("tool_events", [
+    [],  # the gate opened but the model never searched
+    [("tool", {"name": "web_search", "args": {"query": "DOJ case"},  # capped: nothing delivered
+               "result": {"web_search": True, "status": "daily_limit", "result_count": 0,
+                          "results": [], "error": "Daily web search limit reached."}})],
+    [("tool", {"name": "web_search", "args": {"query": "DOJ case"},  # empty answer from the web
+               "result": {"web_search": True, "status": "ok", "result_count": 0, "results": []}})],
+])
+def test_a_cut_web_intent_answer_without_web_results_is_continued(harness, tool_events):
+    """Review 2026-10-02 MED: gating the continuation on the GATE (not on delivered results)
+    made every cut web-intent answer settle free as truncated, no search required."""
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"web_turn": _web_turn(), "web_search_granted": True,
+                                       "system_instruction_no_tools": "SYS-NO-TOOLS"}
+    _FakeChatService.events = [*tool_events,
+                               ("answer", "From the report, the moat rests on switching costs and the"),
+                               ("finish", "MAX_TOKENS")]
+    _FakeGemini.continue_events = [("answer", " installed base.")]
+    r = _post(client, message="Can you verify the moat claim?")
+    assert r.status_code == 200, r.text
+    assert len(_FakeGemini.continue_calls) == 1, "nothing from the web to misattribute — continue"
+    assert "chat_degraded_truncated" not in quota.settled
+
+
+# ── report chat's web search: frames, caveat, pills and persistence (2026-10-02) ──
+#
+# The iOS wire contract: `tool_start {name: "web_search"}` (forwarded for web_search ONLY),
+# `tool_step.skipped: true` when no search the user can be told about ran, a FULL `sources`
+# frame re-sent when web pills arrive (base first, ≤5 web, one per host), `done` carrying the
+# live list; the stored row keeps no web pill while CHAT_WEB_SOURCES_PERSIST is False,
+# `thinking.source_count` counts what is stored, and `thinking.web_searched` marks a turn
+# whose web results reached the answer. The caveat is code-authored and appended last.
+
+from app.services.chat_security import WEB_CAVEAT_LEAD as _CAVEAT_LEAD
+
+_BASE_PILL = {"label": "Cay research report", "detail": "AAPL"}
+_WEB_PILL = {"kind": "web", "label": "Web", "detail": "Reuters", "title": "DOJ case advances",
+             "url": "https://www.reuters.com/legal/apple-doj/", "published_at": "2026-09-30"}
+_WEB_PILL_2 = {"kind": "web", "label": "Web", "detail": "AP News", "title": "Apple responds",
+               "url": "https://apnews.com/article/apple", "published_at": None}
+_DATED_CAVEAT = _CAVEAT_LEAD + " Your report reflects data as of Sep 22, 2026."
+
+
+def _turn_with_pills(pills):
+    """A real `WebSearchTurn` whose search FINISHED with these pills (status ok)."""
+    import asyncio as _asyncio
+    from app.services.chat_web_search_service import WebSearchOutcome, WebSearchTurn
+    turn = WebSearchTurn(user_id=_USER["id"])
+    loop = _asyncio.new_event_loop()
+    try:
+        fut = loop.create_future()
+        fut.set_result(WebSearchOutcome(status="ok", query="Apple DOJ case",
+                                        results=[{"n": 1}], pills=[dict(p) for p in pills]))
+    finally:
+        loop.close()
+    turn._task = fut
+    return turn
+
+
+def _web_prep(turn, **extra):
+    _FakeChatService.prep_overrides = {
+        "web_turn": turn, "web_search_granted": True, "asset_type": "STOCK",
+        "sources": [dict(_BASE_PILL)], "report_as_of": "Sep 22, 2026", **extra,
+    }
+
+
+def _web_tool_events(result=None, *, memo_replay=False):
+    res = result if result is not None else _delivered_web_result()
+    evs = [("tool_start", {"name": "web_search"}),
+           ("tool", {"name": "web_search", "args": {"query": "Apple DOJ case"}, "result": res})]
+    if memo_replay:
+        evs.append(("tool", {"name": "web_search", "args": {"query": "Apple DOJ case"},
+                             "result": res, "memoized": True}))
+    return evs
+
+
+def _assistant_row(db):
+    return [m for m in db.inserted_messages if m.get("role") == "assistant"][-1]
+
+
+def test_a_delivered_web_search_streams_the_whole_contract(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _web_prep(_turn_with_pills([_WEB_PILL, _WEB_PILL_2]))
+    _FakeChatService.events = [*_web_tool_events(),
+                               ("answer", "Reuters, Sep 30, 2026: the DOJ case advanced.")]
+    r = _post(client, message="Can you verify the DOJ case?")
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    names = [e for e, _ in frames]
+
+    # tool_start → tool_step → the FULL sources list, in that order.
+    assert [d for e, d in frames if e == "tool_start"] == [{"name": "web_search"}]
+    step = [d for e, d in frames if e == "tool_step"][0]
+    assert step["name"] == "web_search" and "skipped" not in step and step["error"] is None
+    sources_frames = [d["sources"] for e, d in frames if e == "sources"]
+    assert sources_frames[0] == [_BASE_PILL]
+    assert sources_frames[-1] == [_BASE_PILL, _WEB_PILL, _WEB_PILL_2], "base first, then web"
+    assert names.index("tool_start") < names.index("tool_step") < len(names) - 1 - names[::-1].index("sources")
+    assert names.index("tool_start") < names.index("token")
+
+    # The caveat: appended last, with the report date, as ONE live token and in `done`.
+    tokens = [d["delta"] for e, d in frames if e == "token"]
+    assert tokens[-1] == "\n\n" + _DATED_CAVEAT
+    done = frames[-1][1]["message"]
+    assert done["content"] == "Reuters, Sep 30, 2026: the DOJ case advanced.\n\n" + _DATED_CAVEAT
+    assert done["sources"] == [_BASE_PILL, _WEB_PILL, _WEB_PILL_2], "done carries the LIVE list"
+    assert done["thinking"]["web_searched"] is True
+
+    # Stored: no web pill (persistence off), source_count counts what is stored, the flag kept.
+    row = _assistant_row(db)
+    assert row["content"] == done["content"]
+    assert row["rich_content"]["sources"] == [_BASE_PILL]
+    assert row["rich_content"]["thinking"]["source_count"] == 1
+    assert row["rich_content"]["thinking"]["web_searched"] is True
+    assert done["thinking"]["source_count"] == 1
+    assert done["rich_content"]["sources"] == [_BASE_PILL], "the raw echo is the stored copy"
+    assert quota.refunds == [] and quota.settled == []
+
+
+def test_with_persistence_on_the_row_keeps_the_web_pills(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", True)
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.events = [*_web_tool_events(), ("answer", "Reuters: the case advanced.")]
+    r = _post(client, message="Can you verify the DOJ case?")
+    frames = _parse_sse(r.text)
+    row = _assistant_row(db)
+    assert row["rich_content"]["sources"] == [_BASE_PILL, _WEB_PILL]
+    assert row["rich_content"]["thinking"]["source_count"] == 2
+    assert frames[-1][1]["message"]["sources"] == [_BASE_PILL, _WEB_PILL]
+
+
+@pytest.mark.parametrize("result,skipped", [
+    ({"web_search": True, "status": "daily_limit", "result_count": 0, "results": []}, True),
+    ({"web_search": True, "status": "disabled", "result_count": 0, "results": []}, True),
+    ({"web_search": True, "status": "unavailable", "result_count": 0, "results": [],
+      "error": "web search unavailable", "upstream": True}, True),
+    ({"error": "invalid or missing web query", "note": "…"}, True),
+    ({"error": "TimeoutError: tool timed out", "upstream": True}, True),
+    ({"web_search": True, "status": "no_results", "result_count": 0, "results": []}, False),
+])
+def test_a_search_that_delivered_nothing_earns_no_pill_no_caveat_and_no_badge(
+    harness, monkeypatch, result, skipped,
+):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", True)
+    # Even a turn object holding pills must not leak them when the TOOL RESULT delivered nothing.
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.events = [*_web_tool_events(result),
+                               ("answer", "The daily web-search limit was reached; from the report: …")]
+    r = _post(client, message="Can you verify the DOJ case?")
+    frames = _parse_sse(r.text)
+    step = [d for e, d in frames if e == "tool_step"][0]
+    assert step.get("skipped", False) is skipped
+    assert [d["sources"] for e, d in frames if e == "sources"] == [[_BASE_PILL]], "no re-send"
+    done = frames[-1][1]["message"]
+    assert _CAVEAT_LEAD not in done["content"]
+    assert done["sources"] == [_BASE_PILL]
+    assert "web_searched" not in done["thinking"]
+    assert "web_searched" not in _assistant_row(db)["rich_content"]["thinking"]
+
+
+def test_a_memoized_replay_sends_no_second_sources_frame(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.events = [*_web_tool_events(memo_replay=True), ("answer", "Reuters: …")]
+    frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    assert len([1 for e, _ in frames if e == "sources"]) == 2, "the base frame + ONE web re-send"
+    assert [e for e, _ in frames].count("tool_step") == 2
+    assert frames[-1][1]["message"]["content"].count(_CAVEAT_LEAD) == 1
+
+
+def test_web_pills_are_deduped_by_host_and_publisher_and_unsafe_ones_dropped(harness, monkeypatch):
+    """The turn hands over ≤5 pills (`source_pills()` caps them); the merge still folds a
+    `www.` twin and a second host the outlet map names alike (a shipped build keys a pill on
+    `label|detail`), and drops an unsafe URL. The cap itself: test_chat_web_sources.py."""
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    site = dict(_WEB_PILL, url="https://site0.example.com/a", detail="site0.example.com")
+    pills = [_WEB_PILL,
+             dict(_WEB_PILL, url="https://reuters.com/other"),           # www-folded twin
+             dict(_WEB_PILL, url="https://uk.reuters.com/x"),            # same publisher name
+             dict(_WEB_PILL, url="javascript:alert(1)", detail="Evil"),  # unsafe
+             site]
+    _web_prep(_turn_with_pills(pills))
+    _FakeChatService.events = [*_web_tool_events(), ("answer", "Reuters: …")]
+    frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    live = frames[-1][1]["message"]["sources"]
+    assert live == [_BASE_PILL, _WEB_PILL, site]
+
+
+def test_a_non_web_turn_strips_a_model_written_caveat(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("answer", "Margins held up.\n\n"),
+                               ("answer", _DATED_CAVEAT)]
+    frames = _parse_sse(_post(client).text)
+    done = frames[-1][1]["message"]
+    assert done["content"] == "Margins held up."
+    assert "web_searched" not in done["thinking"]
+
+
+def test_a_non_web_tool_start_still_sends_no_frame_and_a_web_one_does(harness):
+    client, db, quota, _ = harness
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.events = [("tool_start", {"name": "get_ticker_news"}),
+                               ("tool", {"name": "get_ticker_news", "args": {"ticker": "AAPL"},
+                                         "result": {"articles": []}}),
+                               *_web_tool_events(), ("answer", "Reuters: …")]
+    frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    assert [d for e, d in frames if e == "tool_start"] == [{"name": "web_search"}]
+    news_step = [d for e, d in frames if e == "tool_step" and d["name"] == "get_ticker_news"][0]
+    assert "skipped" not in news_step, "skipped is a web_search-only key"
+
+
+def _die_after(*evs):
+    async def _boom(*a, **k):
+        for e in evs:
+            yield e
+        raise RuntimeError("stream died")
+    return _boom
+
+
+def test_a_fallback_that_did_not_use_the_web_drops_the_streams_web_pills(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", True)
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.fallback_result = {"content": "From the report: the moat holds. " * 2,
+                                        "tokens_used": 30, "web_search_used": False,
+                                        "web_sources": [], "report_as_of": "Sep 22, 2026"}
+    boom = _die_after(*_web_tool_events(), ("answer", "Reuters: partial…"))
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: boom()
+    try:
+        frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    finally:
+        _FakeGemini.stream_agentic = orig
+    done = frames[-1][1]["message"]
+    assert _CAVEAT_LEAD not in done["content"]
+    assert done["sources"] == [_BASE_PILL]
+    assert _assistant_row(db)["rich_content"]["sources"] == [_BASE_PILL]
+    assert "web_searched" not in done["thinking"]
+
+
+def test_a_fallback_that_used_the_web_carries_its_own_pills_caveat_and_date(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.fallback_result = {"content": "AP News, Oct 1, 2026: Apple responded.",
+                                        "tokens_used": 30, "web_search_used": True,
+                                        "web_sources": [dict(_WEB_PILL_2)],
+                                        "report_as_of": "Sep 23, 2026"}
+    boom = _die_after(("answer", "partial…"))
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: boom()
+    try:
+        frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    finally:
+        _FakeGemini.stream_agentic = orig
+    names = [e for e, _ in frames]
+    assert "reset" in names and names.index("reset") < len(names) - 1 - names[::-1].index("sources")
+    assert [d["sources"] for e, d in frames if e == "sources"][-1] == [_BASE_PILL, _WEB_PILL_2]
+    done = frames[-1][1]["message"]
+    assert done["content"].endswith(_CAVEAT_LEAD + " Your report reflects data as of Sep 23, 2026.")
+    assert done["sources"] == [_BASE_PILL, _WEB_PILL_2]
+    assert done["thinking"]["web_searched"] is True
+    assert _assistant_row(db)["rich_content"]["sources"] == [_BASE_PILL]
+
+
+def test_a_fallback_after_a_prep_failure_adopts_its_own_base_pills(harness, monkeypatch):
+    """Review 2026-10-02 #13: prep raised, so the stream had no pills at all — the fallback
+    re-resolved, and the pills it earned are the ones the answer was grounded on."""
+    client, db, quota, _ = harness
+
+    async def _prep_boom(self, **kw):
+        raise RuntimeError("prep exploded")
+    monkeypatch.setattr(_FakeChatService, "prepare_stream_generation", _prep_boom)
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30,
+                                        "sources": [dict(_BASE_PILL)]}
+    frames = _parse_sse(_post(client).text)
+    done = frames[-1][1]["message"]
+    assert done["sources"] == [_BASE_PILL]
+    assert _assistant_row(db)["rich_content"]["thinking"]["source_count"] == 1
+
+
+def test_the_send_door_appends_the_caveat_and_shows_but_does_not_store_the_pills(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _FakeChatService.fallback_result = {
+        "content": f"Reuters, Sep 30, 2026: the case advanced.\n\n{_CAVEAT_LEAD}",  # model's copy
+        "tokens_used": 30, "sources": [dict(_BASE_PILL)],
+        "web_search_used": True, "web_sources": [dict(_WEB_PILL)],
+        "report_as_of": "Sep 22, 2026",
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages",
+                    json={"message": "Can you verify the DOJ case?"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["content"] == "Reuters, Sep 30, 2026: the case advanced.\n\n" + _DATED_CAVEAT
+    assert body["content"].count(_CAVEAT_LEAD) == 1
+    assert body["sources"] == [_BASE_PILL, _WEB_PILL]
+    row = _assistant_row(db)
+    assert row["content"] == body["content"]
+    assert row["rich_content"]["sources"] == [_BASE_PILL]
+    assert row["rich_content"]["thinking"] == {**row["rich_content"]["thinking"],
+                                               "source_count": 1, "web_searched": True}
+
+
+def test_the_send_door_without_web_results_is_unchanged(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _FakeChatService.fallback_result = {
+        "content": "Margins held up.", "tokens_used": 30, "sources": [dict(_BASE_PILL)],
+        "web_search_used": False, "web_sources": [dict(_WEB_PILL)],   # pills without use: ignored
+    }
+    body = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"}).json()
+    assert body["content"] == "Margins held up." and body["sources"] == [_BASE_PILL]
+    assert "web_searched" not in _assistant_row(db)["rich_content"]["thinking"]
+
+
+def test_a_stored_unsafe_web_pill_is_dropped_on_read_everywhere():
+    row = {"id": "m1", "session_id": _SESSION, "role": "assistant", "content": "x",
+           "created_at": "2026-10-02T00:00:00Z",
+           "rich_content": {"sources": [_BASE_PILL, _WEB_PILL,
+                                        dict(_WEB_PILL, url="javascript:alert(1)"),
+                                        dict(_WEB_PILL, url="http://reuters.com/plain"),
+                                        dict(_WEB_PILL, url="https://user@reuters.com/x")],
+                            "thinking": {"source_count": 2}}}
+    msg = chat_mod._row_to_message(row)
+    assert msg.sources == [_BASE_PILL, _WEB_PILL]
+    assert msg.rich_content["sources"] == [_BASE_PILL, _WEB_PILL], "the raw echo too"
+    # A row with nothing to drop is passed through untouched (same object).
+    clean = {**row, "rich_content": {"sources": [_BASE_PILL, _WEB_PILL]}}
+    assert chat_mod._row_to_message(clean).rich_content is clean["rich_content"]
+
+
+def test_a_replayed_web_search_call_sends_no_second_tool_start(harness, monkeypatch):
+    """The turn runs ONE search; a later call with other words replays it (its handler still
+    runs, so `stream_agentic` announces it again) — the client sees one "Searching the web…"."""
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    replay = dict(_delivered_web_result(), repeat_note="Only one web search runs per question.")
+    _FakeChatService.events = [
+        *_web_tool_events(),
+        ("tool_start", {"name": "web_search"}),
+        ("tool", {"name": "web_search", "args": {"query": "Apple antitrust"}, "result": replay}),
+        ("answer", "Reuters: …"),
+    ]
+    frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    assert [e for e, _ in frames].count("tool_start") == 1
+    steps = [d for e, d in frames if e == "tool_step"]
+    assert len(steps) == 2 and not any(d.get("skipped") for d in steps)
+    assert frames[-1][1]["message"]["content"].count(_CAVEAT_LEAD) == 1

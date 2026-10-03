@@ -451,12 +451,7 @@ async def test_pass_two_records_a_failed_sector_history_and_skips_the_cache(
 ):
     """`_fetch_dependent` end to end (every other leg stubbed): a failed sector-history
     read keeps the collection out of ticker_data_cache; a clean one does not."""
-    import app.services.competitor_intel_service as cis
     import app.services.ip_intel_service as ips
-
-    class _NoPeers:
-        async def get_competitors(self, ticker, profile):
-            return []
 
     class _NoIp:
         async def get_ip_intel(self, ticker, profile):
@@ -465,7 +460,6 @@ async def test_pass_two_records_a_failed_sector_history_and_skips_the_cache(
     async def _no_aggregates(_sector):
         return None
 
-    monkeypatch.setattr(cis, "get_competitor_intel_service", lambda: _NoPeers())
     monkeypatch.setattr(ips, "get_ip_intel_service", lambda: _NoIp())
     monkeypatch.setattr(C, "get_sector_aggregates", _no_aggregates)
 
@@ -474,13 +468,9 @@ async def test_pass_two_records_a_failed_sector_history_and_skips_the_cache(
     async def _history(industry, sector):
         return BenchmarkLookupFailed(history) if failed else dict(history)
 
-    async def _noop(out):
-        return None
-
     coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
     coll.fmp = None
     monkeypatch.setattr(coll, "_fetch_sector_benchmark_history", _history)
-    monkeypatch.setattr(coll, "_precompute_moat_grounded", _noop)
 
     out = _out(ticker="R3SECT", profile={"sector": "Technology"})
     await coll._fetch_dependent(out)

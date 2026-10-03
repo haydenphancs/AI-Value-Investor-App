@@ -196,7 +196,7 @@ async def _build_ticker_universe(fmp: FMPClient, top_n: int) -> List[str]:
     top_set = set(top)
 
     # Watchlist union — only real stocks (must be in the screener pool), ordered
-    # by user-occurrence (mirror competitor_intel_service._load_top_watchlist_tickers).
+    # by user-occurrence (mirrors ip_intel_service's top-watchlist read).
     wl_counts: Dict[str, int] = {}
     try:
         sb = get_supabase()

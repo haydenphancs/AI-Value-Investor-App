@@ -179,6 +179,9 @@ def test_price_line_names_the_latest_regular_session(svc):
     assert "in the current session" not in prompt
 
 
-def test_the_points_count_follows_max_points(svc):
-    three = svc._build_prompt("ORCL", [{"headline": "A"}], "x", None, None, now=NOW, max_points=3)
-    assert '"points": 1 to 3 points.' in three
+def test_the_points_count_is_the_schemas_max(svc):
+    from app.services.news_insight_service import _INSIGHT_SCHEMA, MAX_POINTS
+
+    prompt = svc._build_prompt("ORCL", [{"headline": "A"}], "x", None, None, now=NOW)
+    assert f'"points": 1 to {MAX_POINTS} points.' in prompt
+    assert _INSIGHT_SCHEMA["properties"]["points"]["maxItems"] == MAX_POINTS == 4

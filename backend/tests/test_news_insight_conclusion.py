@@ -26,12 +26,9 @@ import app.services.news_insight_service as nis
 from app.services.earnings_window_service import EarningsStatus
 from app.services.news_insight_service import (
     MAX_POINTS,
-    MAX_POINTS_WITH_CATALYST,
     NewsInsightService,
     _CONCLUSION_SCHEMA,
     _INSIGHT_SCHEMA,
-    _INSIGHT_SCHEMA_BY_MAX,
-    _max_points_for,
 )
 
 NOW = datetime(2026, 9, 10, 21, 0, tzinfo=timezone.utc)   # Thu 17:00 ET
@@ -86,23 +83,22 @@ class _Svc(NewsInsightService):
         return True
 
 
-async def _run(svc, scope="ETHUSD", articles=ETH_ARTICLES, **kw):
+async def _run(svc, scope="ETHUSD", articles=ETH_ARTICLES, quote=None, **kw):
     return await svc.generate_and_store(
         scope=scope, corpus=articles, inputset_id="iid", price_band=None,
-        trigger_reason="t", quote=None, market_active=True, now=NOW, **kw,
+        trigger_reason="t", quote=quote, market_active=True, now=NOW, **kw,
     )
 
 
 # ── schema ───────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("n", [MAX_POINTS_WITH_CATALYST, MAX_POINTS])
-def test_schema_ordering_matches_properties(n):
-    schema = _INSIGHT_SCHEMA_BY_MAX[n]
+def test_schema_ordering_matches_properties():
+    schema = _INSIGHT_SCHEMA
     assert schema["propertyOrdering"] == list(schema["properties"])
     assert set(schema["required"]) <= set(schema["properties"])
     assert "additionalProperties" not in schema
     assert schema["properties"]["points"]["minItems"] == 1
-    assert schema["properties"]["points"]["maxItems"] == n
+    assert schema["properties"]["points"]["maxItems"] == MAX_POINTS == 4
 
 
 def test_sentiment_is_committed_before_the_conclusion():
@@ -114,17 +110,6 @@ def test_sentiment_is_committed_before_the_conclusion():
 def test_the_repair_schema_is_the_conclusion_alone():
     assert _CONCLUSION_SCHEMA["required"] == ["conclusion"]
     assert list(_CONCLUSION_SCHEMA["properties"]) == ["conclusion"]
-
-
-@pytest.mark.parametrize("move,preserve,expected", [
-    (None, False, 4),
-    ({"tier": "Extreme", "reason": "Beat estimates."}, False, 3),
-    ({"tier": "Extreme", "reason": ""}, False, 4),        # unusable → no catalyst shown
-    ("not a dict", False, 4),
-    (None, True, 3),                                      # an OLD catalyst stays on screen
-])
-def test_max_points_leave_the_conclusion_visible(move, preserve, expected):
-    assert _max_points_for(move, preserve) == expected
 
 
 def test_the_insight_model_setting_is_declared():
@@ -146,7 +131,7 @@ async def test_a_clean_card_is_one_call_with_the_card_settings():
     call = gem.calls[0]
     assert call["temperature"] == 0.3
     assert call["usage_tag"] == "insight_card"
-    assert call["response_schema"] is _INSIGHT_SCHEMA_BY_MAX[MAX_POINTS]
+    assert call["response_schema"] is _INSIGHT_SCHEMA
     assert call["system_instruction"] is nis._SYSTEM_INSTRUCTION
 
 
@@ -278,28 +263,29 @@ async def test_a_six_point_answer_keeps_four_and_the_conclusion():
 
 
 @pytest.mark.asyncio
-async def test_with_a_catalyst_the_card_has_three_points_and_the_schema_says_so():
-    move = {"tier": "Extreme", "change_percent": -5.2, "catalyst_tag": "Guidance",
-            "reason": "Shares fell after guidance disappointed."}
-    points = [f"Point number {i} about Oracle." for i in range(5)]
-    conclusion = "The guidance reset leaves the backlog story to prove itself."
-    gem = _Gemini(_card(conclusion, points=points, headline="Oracle slides on guidance"))
-    svc = _Svc(gem)
-    card = await _run(svc, scope="ORCL", articles=ETH_ARTICLES, price_move=move)
-    assert card["bullets"] == [*points[:3], conclusion]
-    assert gem.calls[0]["response_schema"] is _INSIGHT_SCHEMA_BY_MAX[MAX_POINTS_WITH_CATALYST]
-
-
-@pytest.mark.asyncio
-async def test_the_catalysts_move_is_an_allowed_figure():
-    move = {"tier": "Extreme", "change_percent": -5.2, "catalyst_tag": "Guidance",
-            "reason": "Shares fell after guidance disappointed."}
+async def test_the_quotes_move_is_an_allowed_figure():
+    """The session move from the quote is a trusted figure (the only one left since the
+    grounded catalyst's `change_percent` was retired), so citing it is not a fabrication."""
     conclusion = "The 5% drop shows how much the guidance reset matters."
     gem = _Gemini(_card(conclusion, points=["Guidance disappointed."], headline="Oracle slides"))
     svc = _Svc(gem)
-    card = await _run(svc, scope="ORCL", price_move=move)
+    card = await _run(svc, scope="ORCL", quote={"changePercentage": -5.2})
     assert card["bullets"][-1] == conclusion
     assert len(gem.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_without_the_quote_the_same_figure_is_a_fabrication():
+    """The twin of the test above: nothing else carries "5%", so it is rejected."""
+    conclusion = "The 5% drop shows how much the guidance reset matters."
+    gem = _Gemini(
+        _card(conclusion, points=["Guidance disappointed."], headline="Oracle slides"),
+        json.dumps({"conclusion": conclusion}),
+    )
+    svc = _Svc(gem)
+    assert await _run(svc, scope="ORCL") is None
+    assert svc.stored == []
+    assert svc.pop_failure_reason("ORCL").startswith("conclusion_guard: figure")
 
 
 # ── a report called "upcoming" after it happened ───────────────────────────────
@@ -330,7 +316,7 @@ async def test_a_stale_upcoming_claim_triggers_one_full_card_retry():
     card = await _run(svc, scope="ORCL", articles=ORCL_ARTICLES, earnings=REPORTED)
     assert card["headline"] == "Oracle's Q1 shows the backlog converting"
     assert len(gem.calls) == 2
-    assert gem.calls[1]["response_schema"] is _INSIGHT_SCHEMA_BY_MAX[MAX_POINTS]
+    assert gem.calls[1]["response_schema"] is _INSIGHT_SCHEMA
     assert "REPAIR" in gem.calls[1]["prompt"] and "HAPPENED" in gem.calls[1]["prompt"]
 
 

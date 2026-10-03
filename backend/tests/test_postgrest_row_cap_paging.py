@@ -111,7 +111,6 @@ def test_the_backstop_is_generous_enough_for_every_caller():
 _SITES = [
     "app/services/price_alert_service.py",
     "app/services/signals_service.py",
-    "app/services/competitor_intel_service.py",
     "app/services/ip_intel_service.py",
     "scripts/hydrate_hedge_fund_flow.py",
 ]

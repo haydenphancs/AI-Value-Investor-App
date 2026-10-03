@@ -106,7 +106,15 @@ logger = logging.getLogger(__name__)
 # ticker's EARNINGS status (ORCL the same evening read "set to report" after the
 # release), dropped "why an everyday investor should care" (which the model echoed
 # as "Investors should care because…"), and bans people-framed openers.
-PROMPT_VERSION = 6
+# v7: no prompt-text change of its own — an owner-approved (2026-10-03) ONE-TIME
+# regeneration for the Google Search grounding retirement. Since v4 the roll-up prompt was
+# handed the "why it moved" catalyst, which came from the retired grounded search
+# (price_catalyst_service), so a card's headline and bullets can restate grounded research
+# even after migrations 188/189 cleared its `price_move` block — and the pre-retirement
+# code kept writing such cards after 188 was applied. The bump changes every fingerprint,
+# so each card is rewritten once (bounded by the usual per-cycle + global caps) from
+# licensed inputs only.
+PROMPT_VERSION = 7
 
 
 # ── Thresholds ────────────────────────────────────────────────────────

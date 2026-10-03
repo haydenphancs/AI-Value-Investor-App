@@ -24,7 +24,8 @@ python-multipart==0.0.18
 
 # Google Gemini — unified SDK. 1.75.0 is the newest google-genai that keeps pydantic at 2.9+
 # (so pydantic stays 2.10.4) while giving real thinking tokens (ThinkingConfig.include_thoughts /
-# part.thought), native async streaming, and the google_search tool. Requires httpx>=0.28.1.
+# part.thought) and native async streaming. Requires httpx>=0.28.1. (Its google_search
+# grounding tool is NOT used — retired 2026-10-02 for its terms.)
 google-genai==1.75.0
 
 # HTTP client (for FMP API). 0.28.1 required by google-genai; supabase 2.16 allows it (<0.29).

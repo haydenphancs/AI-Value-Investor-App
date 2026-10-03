@@ -77,11 +77,11 @@ async def test_call_with_timeout_raises_the_typed_error(monkeypatch):
     _reset(monkeypatch)
     monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", 0.02)
 
-    err = await _timed_out("generate_grounded_research")
+    err = await _timed_out("generate_json")
 
     assert isinstance(err, GeminiTimeoutError)
     assert str(err), "a bare TimeoutError's empty str() is what caused the Sentry issue"
-    assert "generate_grounded_research" in str(err)
+    assert "generate_json" in str(err)
 
 
 @pytest.mark.asyncio

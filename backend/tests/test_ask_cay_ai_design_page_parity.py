@@ -127,7 +127,7 @@ def test_every_setting_or_error_code_the_page_names_exists():
 # ignored by iOS (the chips land on `done`). There is NO `widget` frame: the internal
 # ("widget", payload) generator event is collected into the terminal `done` message.
 _FRAMES_BOTH_SIDES = ["meta", "sources", "routing", "reasoning", "token", "tool_step",
-                      "reset", "credits", "done", "error"]
+                      "tool_start", "reset", "credits", "done", "error"]
 _FRAMES_SERVER_ONLY = ["suggestions"]
 
 
@@ -170,9 +170,13 @@ def test_the_page_states_the_real_specialist_cap_and_tool_count():
     block = _data_block()
     assert f"≤{settings.CHAT_MAX_SPECIALISTS} of 7 lenses" in block
     assert f"(≤{settings.CHAT_MAX_SPECIALISTS})" in block
-    assert len(TOOL_DESCRIPTIONS) == 7, "the page's per-class tool table lists 7 tools"
-    for tool in ("explain_price_move", "get_market_overview"):
+    assert len(TOOL_DESCRIPTIONS) == 8, (
+        "the page's tool table lists 7 per-class tools plus the gated 8th, web_search"
+    )
+    for tool in ("explain_price_move", "get_market_overview", "web_search"):
         assert tool in block or tool.replace("get_", "") in block
+    # The gated tool is described as gated, not as one more per-class tool.
+    assert "web_search=True" in block and "open_web_search_turn" in block
 
 
 def test_the_page_no_longer_carries_the_known_rot():
@@ -185,3 +189,19 @@ def test_the_page_no_longer_carries_the_known_rot():
     # F13-7: the stage-6 compensation for an unconfirmed pre-charge is a refund reason the
     # page used to document nowhere.
     assert "chat_precharge_unconfirmed" in block
+
+
+def test_the_page_describes_the_web_search_wire_contract():
+    """Report chat's web search (2026-10-02) added a frame and changed two: `tool_start` (web_search
+    only), `tool_step.skipped`, a second FULL `sources` frame, live-only pills and the caveat. The
+    page must say each, and each must exist in the code it describes."""
+    block = _data_block()
+    for claim in ("<code>tool_start {name}</code>", "<code>skipped: true</code>",
+                  "FULL <code>sources</code> frame", "<code>CHAT_WEB_SOURCES_PERSIST</code>",
+                  "<code>finalize_answer_notes</code>", "<code>thinking.web_searched: true</code>"):
+        assert claim in block, f"the page no longer says {claim!r}"
+    src = _endpoint_src()
+    assert re.search(r'_sse\(\s*"tool_start"', src)
+    assert '_step["skipped"] = True' in src
+    # The stale claim about a cached paid catalyst on web turns is gone (that tier was retired).
+    assert "serves only an already-cached catalyst" not in block

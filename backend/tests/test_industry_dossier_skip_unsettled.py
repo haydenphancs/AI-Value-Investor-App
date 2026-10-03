@@ -24,7 +24,6 @@ import pytest
 import app.integrations.census as census_mod
 import app.integrations.fred as fred_mod
 import app.services.industry_dossier_service as ids
-import app.services.industry_override_service as ovr_mod
 import app.services.notification_jobs as nj
 from app import main as m
 from app.services.industry_dossier_service import (
@@ -62,26 +61,15 @@ class _RecordingSB:
         return _Query(self, name)
 
 
-class _PhaseB:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def refresh_all_overrides(self, **_kwargs):  # recompute_all passes phase_a_baseline=
-        self.calls += 1
-        return {"status": "stubbed"}
-
-
 def _install(monkeypatch, *, universe, fred: bool, census: bool):
     """Wire every seam `recompute_all` touches; return the recorders."""
     sb = _RecordingSB()
-    phase_b = _PhaseB()
     computed: List[str] = []
 
     monkeypatch.setattr(ids, "_load_universe", lambda: list(universe))
     monkeypatch.setattr(ids, "get_supabase", lambda: sb)
     monkeypatch.setattr(fred_mod, "get_fred_client", lambda: SimpleNamespace(is_configured=fred))
     monkeypatch.setattr(census_mod, "get_census_client", lambda: SimpleNamespace(is_configured=census))
-    monkeypatch.setattr(ovr_mod, "get_industry_override_service", lambda: phase_b)
 
     async def _compute(self, industry, sector, tickers, caps_by_ticker):
         computed.append(industry)
@@ -92,7 +80,7 @@ def _install(monkeypatch, *, universe, fred: bool, census: bool):
         )
 
     monkeypatch.setattr(IndustryDossierService, "_compute_one", _compute)
-    return sb, phase_b, computed
+    return sb, computed
 
 
 def _skip_errors(caplog) -> List[logging.LogRecord]:
@@ -108,7 +96,7 @@ def _skip_errors(caplog) -> List[logging.LogRecord]:
 
 @pytest.mark.asyncio
 async def test_an_empty_universe_raises_logs_and_writes_nothing(monkeypatch, caplog):
-    sb, phase_b, computed = _install(monkeypatch, universe=[], fred=True, census=True)
+    sb, computed = _install(monkeypatch, universe=[], fred=True, census=True)
 
     with caplog.at_level(logging.ERROR, logger=ids.__name__):
         with pytest.raises(IndustryDossierRecomputeSkipped) as info:
@@ -119,12 +107,11 @@ async def test_an_empty_universe_raises_logs_and_writes_nothing(monkeypatch, cap
     assert len(_skip_errors(caplog)) == 1
     assert sb.tables == [] and sb.writes == []      # no pre-read, no upsert
     assert computed == []
-    assert phase_b.calls == 0                        # no paid Gemini pass on a run that never started
 
 
 @pytest.mark.asyncio
 async def test_no_upstream_credentials_raises_logs_and_writes_nothing(monkeypatch, caplog):
-    sb, phase_b, computed = _install(monkeypatch, universe=_UNIVERSE, fred=False, census=False)
+    sb, computed = _install(monkeypatch, universe=_UNIVERSE, fred=False, census=False)
 
     with caplog.at_level(logging.ERROR, logger=ids.__name__):
         with pytest.raises(IndustryDossierRecomputeSkipped) as info:
@@ -135,14 +122,13 @@ async def test_no_upstream_credentials_raises_logs_and_writes_nothing(monkeypatc
     assert len(_skip_errors(caplog)) == 1
     assert sb.tables == [] and sb.writes == []
     assert computed == []                            # the zero-placeholder sweep never ran
-    assert phase_b.calls == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fred,census", [(True, False), (False, True)])
 async def test_one_configured_upstream_is_enough_to_run(monkeypatch, caplog, fred, census):
     """The boundary: the credential gate is AND-of-missing, not OR — one key still runs."""
-    sb, phase_b, computed = _install(monkeypatch, universe=_UNIVERSE, fred=fred, census=census)
+    sb, computed = _install(monkeypatch, universe=_UNIVERSE, fred=fred, census=census)
 
     with caplog.at_level(logging.ERROR, logger=ids.__name__):
         result = await IndustryDossierService().recompute_all()
@@ -151,7 +137,6 @@ async def test_one_configured_upstream_is_enough_to_run(monkeypatch, caplog, fre
     assert result["rows_upserted"] == 1
     assert computed == ["Restaurants"]
     assert [t for t, _ in sb.writes] == ["industry_dossier"]
-    assert phase_b.calls == 1
     assert _skip_errors(caplog) == []
 
 

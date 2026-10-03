@@ -101,16 +101,15 @@ async def test_a_slow_handler_times_out_with_an_explicit_marker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_long_running_market_tools_are_not_cut_at_the_default_ceiling(monkeypatch):
-    """`explain_price_move` may escalate to a grounded web search (a model chain with
-    retries) and `get_market_snapshot` sweeps several services. Cancelling those at the 8 s
-    default wasted the paid search AND stranded its claimed daily unit — so they carry their
-    own ceilings, and the default setting must not reach them."""
+    """The market tools sweep several cached services and may fetch the news feed on a
+    miss, so they carry their own ceilings and the 8 s default must not reach them.
+    (`explain_price_move` had >= 60 s while it could escalate to a grounded Google search;
+    that tier was retired 2026-10-02, and its ceiling came down to the snapshot's.)"""
     from app.integrations.gemini import _TOOL_TIMEOUTS
 
     monkeypatch.setattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 0.01)
-    assert _TOOL_TIMEOUTS["explain_price_move"] >= 60.0
+    assert _TOOL_TIMEOUTS["explain_price_move"] >= 30.0
     assert _TOOL_TIMEOUTS["get_market_snapshot"] >= 30.0
-    assert _TOOL_TIMEOUTS["explain_price_move"] > _TOOL_TIMEOUTS["get_market_snapshot"]
 
     async def slower_than_default(args):
         await asyncio.sleep(0.05)      # past the 0.01 s default, far under its own ceiling
@@ -387,3 +386,133 @@ def _instant_sleep():
     async def _s(secs):
         return None
     return _s
+
+
+# ── report chat's web_search (2026-10-02) ─────────────────────────────────────
+
+
+def test_web_search_has_a_brave_sized_ceiling():
+    """Two budget-claim RPCs + Brave's hard bound (timeout + 2 s) must fit under the ceiling, or
+    a search that will be billed is reported `timed_out`; and the ceiling stays far under the
+    turn budget. The literal key must equal the registry's tool name."""
+    from app.config import Settings
+    from app.integrations.gemini import _TOOL_TIMEOUTS
+    from app.services.agents.chat_tools import WEB_SEARCH_TOOL
+
+    assert WEB_SEARCH_TOOL in _TOOL_TIMEOUTS
+    brave_default = Settings.model_fields["BRAVE_SEARCH_TIMEOUT_SECONDS"].default
+    assert brave_default + 4 <= _TOOL_TIMEOUTS[WEB_SEARCH_TOOL] <= 15
+    assert WEB_SEARCH_TOOL in gem._REDACTED_ARG_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_web_search_args_never_reach_the_timeout_log(monkeypatch, caplog):
+    monkeypatch.setitem(gem._TOOL_TIMEOUTS, "web_search", 0.01)
+
+    async def slow(args):
+        await asyncio.sleep(1)
+        return {}
+
+    with caplog.at_level("WARNING", logger=gem.__name__):
+        out = await _run_tool_handler("web_search", slow, {"query": "SECRETQUERY about my portfolio"})
+    assert out["error"] == "timed_out"
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "timed out" in text and "SECRETQUERY" not in text and "<30 chars>" in text
+
+
+@pytest.mark.asyncio
+async def test_web_search_args_never_reach_the_invocation_log(caplog):
+    gem._quota_circuit.reset()
+    first = _Resp([_Part(fc=_FC("web_search", {"query": "SECRETQUERY lawsuit", "recency": "week"})),
+                   _Part(fc=_FC("get_ticker_news", {"ticker": "AAPL"}))])
+    follow = _Resp([_Part(text="Answer.")])
+    client, _ = _client([first, follow])
+
+    async def ok(args):
+        return {"ok": True}
+
+    with caplog.at_level("INFO", logger=gem.__name__):
+        await client.generate_with_tools(prompt="p", tools=[],
+                                         tool_handlers={"web_search": ok, "get_ticker_news": ok})
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SECRETQUERY" not in text and "'web_search'" in text
+    assert "AAPL" in text, "other tools keep their args in the log (anti-vacuity)"
+
+
+@pytest.mark.parametrize("args,expected", [
+    ({"query": "abc", "recency": "week"}, {"query": "<3 chars>", "recency": "<4 chars>"}),
+    ("raw string", {"redacted": "str"}),
+    (None, {"redacted": "NoneType"}),
+])
+def test_loggable_args_shape(args, expected):
+    assert gem._loggable_tool_args("web_search", args) == expected
+    assert gem._loggable_tool_args("get_ticker_news", {"ticker": "AAPL"}) == {"ticker": "AAPL"}
+
+
+# ── stream_agentic: the `tool_start` event ────────────────────────────────────
+
+
+class _StreamChunk:
+    def __init__(self, *parts):
+        self.candidates = [_Cand(list(parts))]
+        self.usage_metadata = None
+
+
+def _stream_client(rounds):
+    sent: list = []
+
+    class _Chat:
+        async def send_message_stream(self, message):
+            sent.append(message)
+            chunks = rounds.pop(0)
+
+            async def _gen():
+                for c in chunks:
+                    yield c
+            return _gen()
+
+    class _Chats:
+        def create(self, **kw):
+            return _Chat()
+
+    class _Aio:
+        chats = _Chats()
+
+    class _C:
+        aio = _Aio()
+
+    client = GeminiClient.__new__(GeminiClient)
+    client.model_name = "gemini-2.5-flash"
+    client._temperature = 0.7
+    client._max_tokens = 8192
+    client._client = _C()
+    return client, sent
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_announces_a_tool_before_its_handler_runs():
+    gem._quota_circuit.reset()
+    order: list = []
+    fc = _FC("web_search", {"query": "Apple DOJ"})
+    client, _ = _stream_client([
+        [_StreamChunk(_Part(fc=fc), _Part(fc=_FC("ghost", {})))],     # a real tool + an unknown one
+        [_StreamChunk(_Part(fc=fc))],                                    # the SAME call again → memo
+        [_StreamChunk(_Part(text="Done."))],
+    ])
+
+    async def handler(args):
+        order.append("handler")
+        return {"web_search": True, "status": "ok"}
+
+    events = []
+    async for kind, payload in client.stream_agentic("p", tools=[], tool_handlers={"web_search": handler},
+                                                     max_rounds=4):
+        events.append((kind, payload))
+        if kind == "tool_start":
+            order.append("tool_start")
+    kinds = [k for k, _ in events]
+    # Announced once, BEFORE the one real run; never for the unknown tool or the memoized replay.
+    assert order == ["tool_start", "handler"]
+    assert kinds.count("tool_start") == 1 and kinds.count("tool") == 3
+    assert events[kinds.index("tool_start")][1] == {"name": "web_search"}
+    assert kinds.index("tool_start") < kinds.index("tool")

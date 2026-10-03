@@ -398,9 +398,9 @@ class CompetitorResponse(BaseModel):
     competitive_score: float
     market_share_percent: float
     threat_level: str  # "low" | "moderate" | "high"
-    # Short "competes in" label (≤ 48 chars, cleaned by competitor_intel_service) for a
-    # research-sourced peer; None when unknown and on every report stored before
-    # 2026-10-01. Declared so the direct door's re-dump keeps it (undeclared keys drop).
+    # Short "competes in" label (≤ 48 chars) for a research-sourced peer. Present only on
+    # reports stored 2026-10-01..02: its source (grounded competitor research) was retired
+    # with Google Search grounding on 2026-10-02, so a new report never sets it. Declared so the direct door's re-dump keeps it (undeclared keys drop).
     segment: Optional[str] = None
     # How `competitive_score` was computed: "relative" (0.6 × directness rank + 0.4 ×
     # ROIC vs the focal, × moat 0.7–1.3; 5 = neutral midpoint) or "absolute" (op margin /
@@ -434,8 +434,9 @@ class MacroRiskFactorResponse(BaseModel):
     description: str
     trend: str  # "improving" | "stable" | "worsening"
     severity: str  # "low" | "elevated" | "high" | "severe" | "critical"
-    # Web-search citations — only present on WEB-GROUNDED geopolitical factors
-    # (geopolitical_macro_service). Carried in the payload for the future PDF;
+    # Web-search citations — present only on the web-grounded geopolitical factors of
+    # reports built before that overlay was retired (2026-10-02, Google Search grounding
+    # terms). No new report sets it; kept Optional so a stored report still validates.
     # iOS doesn't declare this key, so Swift Codable silently ignores it.
     sources: Optional[List[SourceCitationResponse]] = None
 

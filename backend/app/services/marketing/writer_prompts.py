@@ -32,7 +32,9 @@ from app.services.marketing.post_copy import CAPTION_FIELDS, COMPUTED_BUDGET_FIE
 from app.services.marketing.selection import Template
 
 #: Bump when the prompt or schema changes meaningfully; persisted with every accepted package.
-PROMPT_VERSION = "2026-09-26.8"
+#: 2026-10-02.1: the shared IDENTITY_RULE (persona_config) that leads the writer's system
+#: instruction now discloses a third-party AI provider without naming it.
+PROMPT_VERSION = "2026-10-02.1"
 
 # ── editorial limits ──
 # ENFORCED ceilings (writer_service) sit above what the prompt ASKS for (`_ASK_*`): a model

@@ -13,7 +13,7 @@ lifting (found 2026-09-12):
 
   * `price_alert_service`   `.limit(MAX_RULES=5000)`  — alert rules past row 1,000 never fire
   * `signals_service`       `.limit(10000)`           — "N funds adding" under-counts
-  * `competitor_intel_service` / `ip_intel_service` / `hydrate_hedge_fund_flow`
+  * `ip_intel_service` / `hydrate_hedge_fund_flow` (and the retired `competitor_intel_service`)
                             `.limit(50_000)`          — the "top watchlisted tickers"
                                                         universe computed from an
                                                         arbitrary unordered sample

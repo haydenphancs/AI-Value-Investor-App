@@ -92,6 +92,62 @@ enum ChatContextType: String {
     }
 }
 
+// MARK: - Report Chat Agent Mode
+
+/// The analysis-style MODE a report chat runs in: "Cay AI · Growth Hunter Agent".
+///
+/// Cay AI is always the speaker; "<Style> Agent" names the method it applies in this chat, never
+/// a separate assistant and never a real investor. Derived ONLY from the chat's context type and
+/// `reference_id` — the bytes the backend reads on every turn, restored when a chat is reopened
+/// from history — so the label the app shows and the method the server applies come from the
+/// same place. `AIChatScreen.reportAgentMode` is its single construction site; the grounding
+/// chip is its only surface ("Cay AI · Growth Hunter Agent · MSFT report").
+///
+/// There is deliberately NO greeting card (owner, 2026-10-02: the chip says enough). The server's
+/// mode voice never greets or announces itself either, so nothing introduces the mode but the chip.
+///
+/// Known limitation: this reads the REFERENCE only, while the server's voice prefers the persona
+/// of the report it actually grounds on (`report_voice_prompt.resolve_voice_key`). The two agree
+/// for every reference this build sends (the report screen sends the on-screen report's own
+/// persona). A history reference from an older build can still diverge: a wrong default segment
+/// (`|warren_buffett` on a Growth report) labels the wrong style, and an empty or unknown segment
+/// shows no mode while the server speaks the grounded report's voice.
+struct ReportChatAgentMode {
+    let persona: AnalysisPersona
+    /// The report's ticker from the reference's first segment, kept only when it is a plausible
+    /// symbol (the backend's pattern); "" otherwise, and the chip then names no ticker.
+    let ticker: String
+
+    /// nil unless this is a report chat whose reference names a known persona (the closed,
+    /// hard-coded `allCases`). Unknown or missing persona → nil: the chip keeps its plain
+    /// "Grounded on" label.
+    init?(contextType: ChatContextType?, referenceId: String?) {
+        guard contextType == .tickerReport,
+              let persona = AnalysisPersona.forChatReference(referenceId)
+        else { return nil }
+        self.persona = persona
+        self.ticker = Self.validatedTicker(in: referenceId)
+    }
+
+    /// "Growth Hunter" — the hard-coded persona's name without "The ".
+    var styleName: String { persona.compactName }
+
+    /// "Growth Hunter Agent". NOT `AnalysisPersona.agentLabel` ("GARP Agent"), which is the
+    /// report-progress label built from `shortName`.
+    var chatModeLabel: String { "\(styleName) Agent" }
+
+    /// The reference's first segment (split KEEPING empty parts, like the backend), trimmed and
+    /// upper-cased, when it matches the backend's symbol pattern; "" otherwise.
+    private static func validatedTicker(in referenceId: String?) -> String {
+        guard let first = referenceId?
+            .split(separator: "|", omittingEmptySubsequences: false).first
+        else { return "" }
+        let symbol = first.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let pattern = #"^\^?[A-Z0-9][A-Z0-9.\-]{0,14}$"#
+        return symbol.range(of: pattern, options: .regularExpression) != nil ? symbol : ""
+    }
+}
+
 // MARK: - Rich Content Type
 enum RichContentType {
     case text(String)
@@ -106,33 +162,207 @@ enum RichContentType {
 
 // MARK: - Thinking / Sources (futuristic chat)
 
-/// One grounded-context "source" pill for the thinking card (a screen context or a filing
-/// section). Codable — the JSON keys (`label`/`detail`) match the backend `_build_sources`
-/// output directly, so no CodingKeys are needed.
+/// One "source" pill for the thinking card. Two kinds share the wire shape:
+///
+/// * a GROUNDING pill (a screen context or a filing section) — `label`/`detail` only, exactly
+///   what the backend's `_build_sources` writes and what every shipped build decodes;
+/// * a WEB pill (report chat's live web search, 2026-10-02) — `kind: "web"`, `label: "Web"`,
+///   `detail` = the publisher (derived server-side from the article's URL host, never from the
+///   page's own metadata), plus `title`, `url` (https) and `published_at` ("YYYY-MM-DD" or null).
+///   Older builds read it as a plain "Web · <publisher>" pill, which is why `label` stays "Web".
+///
+/// Web pills are LIVE: by default the server does not store them, so a reopened chat shows the
+/// grounding pills and the card's "Web search" badge, not the links.
 struct ChatSource: Codable, Identifiable, Sendable, Hashable {
-    var id: String { label + "|" + (detail ?? "") }
+    /// Grounding pills keep `label|detail` — the id every stored row already has, so reopening an
+    /// old chat causes no ForEach churn. A web pill keys on its URL: the server sends one pill per
+    /// host, but an older server could send two from the same publisher, and those must not share
+    /// an id in a `ForEach`.
+    var id: String {
+        if isWeb, let link = url?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
+            return "web|" + link
+        }
+        return label + "|" + (detail ?? "")
+    }
     let label: String
     let detail: String?
+    /// "web" for a web pill; nil for a grounding pill (every legacy row).
+    let kind: String?
+    /// The article's title (web pills only). Read out by VoiceOver, never drawn on the pill.
+    let title: String?
+    /// The article's address (web pills only). Untrusted: only `webURL` may turn it into a link.
+    let url: String?
+    /// The article's calendar date, "YYYY-MM-DD" (web pills only); nil when unknown.
+    let publishedAt: String?
 
-    init(label: String, detail: String?) {
+    /// The longest address a pill may open. Longer is not an article link.
+    static let maxURLLength = 2048
+    /// The most pills one answer can show. The server sends at most 6 grounding + 5 web pills;
+    /// the cap only stops a malformed row from drawing an unbounded horizontal row.
+    static let maxPills = 16
+
+    init(label: String, detail: String?, kind: String? = nil, title: String? = nil,
+         url: String? = nil, publishedAt: String? = nil) {
         self.label = label
         self.detail = detail
+        self.kind = kind
+        self.title = title
+        self.url = url
+        self.publishedAt = publishedAt
     }
 
-    private enum CodingKeys: String, CodingKey { case label, detail }
+    private enum CodingKeys: String, CodingKey {
+        case label, detail, kind, title, url
+        case publishedAt = "published_at"
+    }
 
     /// Total (never-throwing) decode. `sources` is an OPTIONAL field on `ChatMessageDTO`, but
     /// `decodeIfPresent` only swallows an absent/null ARRAY — a present array whose element is a
     /// malformed object (missing the non-optional `label`) still rethrows, and array decoding is
     /// all-or-nothing, so ONE bad pill would collapse the entire `[ChatMessageDTO]` history decode
     /// (blank conversation). A missing label degrades to "" (dropped at render), never a crash —
-    /// mirrors the `ChatWidgetData.unknown` hardening.
+    /// mirrors the `ChatWidgetData.unknown` hardening. Every web field is optional the same way:
+    /// a wrong type degrades that one field to nil (a web pill without a usable link renders as a
+    /// plain label), never the pill and never the history.
     init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
-            self.label = ""; self.detail = nil; return
+            self.label = ""; self.detail = nil
+            self.kind = nil; self.title = nil; self.url = nil; self.publishedAt = nil
+            return
         }
         self.label = (try? c.decode(String.self, forKey: .label)) ?? ""
         self.detail = try? c.decode(String.self, forKey: .detail)
+        self.kind = try? c.decode(String.self, forKey: .kind)
+        self.title = try? c.decode(String.self, forKey: .title)
+        self.url = try? c.decode(String.self, forKey: .url)
+        self.publishedAt = try? c.decode(String.self, forKey: .publishedAt)
+    }
+
+    /// True for a web search result pill.
+    var isWeb: Bool {
+        kind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "web"
+    }
+
+    /// The ONLY way a pill becomes tappable. An https address with a real public host and no
+    /// user info, or nil. The server builds pills from https URLs only; this is the second layer,
+    /// because the address is a third party's and the in-app browser must never be handed
+    /// `javascript:`, a custom scheme (`caydex://` is this app's own sign-in scheme) or
+    /// `https://reuters.com@evil.example` (user info that disguises the real host).
+    /// `URLComponents`, not `URL.host` / `URL.user` (deprecated since iOS 16).
+    var webURL: URL? {
+        guard isWeb,
+              let raw = url?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty, raw.count <= Self.maxURLLength,
+              let parts = URLComponents(string: raw),
+              parts.scheme?.lowercased() == "https",
+              let host = parts.host, Self.isPublicHostName(host),
+              parts.user == nil, parts.password == nil, parts.port == nil,
+              let resolved = parts.url
+        else { return nil }
+        return resolved
+    }
+
+    /// The link's host without "www.", lowercased ("reuters.com"); nil without a usable link.
+    var webHost: String? {
+        guard let link = webURL,
+              let host = URLComponents(url: link, resolvingAgainstBaseURL: false)?.host?.lowercased()
+        else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    /// Who published the article: the server's publisher name, else the link's host. nil when
+    /// neither exists — such a pill attributes nothing and is dropped by `sanitized(_:)`.
+    /// Capped, because the pills sit in a horizontal scroll where `lineLimit` never truncates.
+    var webPublisherName: String? {
+        guard isWeb else { return nil }
+        if let named = Self.oneLine(detail, cap: 48) { return named }
+        return webHost.map { String($0.prefix(48)) }
+    }
+
+    /// "Oct 1, 2026" from `published_at`, or nil when it is absent or not a calendar date.
+    var publishedDisplay: String? { ChatSourceDate.display(publishedAt) }
+
+    /// What VoiceOver reads for a web pill: kind, publisher, date, host (when the publisher name
+    /// is not simply the host) and the title — so the destination is never only implied.
+    var webAccessibilityLabel: String {
+        var parts = ["Web source"]
+        if let name = webPublisherName { parts.append(name) }
+        if let date = publishedDisplay { parts.append(date) }
+        if let host = webHost, host != webPublisherName?.lowercased() { parts.append(host) }
+        var spoken = parts.joined(separator: ", ")
+        if let heading = Self.oneLine(title, cap: 160) { spoken += ". " + heading }
+        return spoken
+    }
+
+    /// The pills an answer may show, in the server's order. Drops an empty-label pill (only a
+    /// malformed row produces one, via the total decode above), a web pill that names no
+    /// publisher, and a repeated id (first wins), and stops at `maxPills`. Every entry path —
+    /// history, the non-stream reply, `done`, and the live `sources` frame — goes through here.
+    static func sanitized(_ raw: [ChatSource]?) -> [ChatSource]? {
+        guard let raw else { return nil }
+        var seen = Set<String>()
+        var kept: [ChatSource] = []
+        for source in raw {
+            if kept.count >= maxPills { break }
+            if source.label.isEmpty { continue }
+            if source.isWeb && source.webPublisherName == nil { continue }
+            guard seen.insert(source.id).inserted else { continue }
+            kept.append(source)
+        }
+        return kept
+    }
+
+    /// A dotted public DNS name: never an IP literal, `localhost`, a `.local` / `.localhost` /
+    /// `.internal` name or an IPv6 literal. Mirrors the server's pill check.
+    private static func isPublicHostName(_ host: String) -> Bool {
+        let name = host.lowercased()
+        guard name.contains("."), !name.contains(":"),
+              !name.hasPrefix("."), !name.hasSuffix("."),
+              !name.hasSuffix(".local"), !name.hasSuffix(".localhost"), !name.hasSuffix(".internal"),
+              let topLevel = name.split(separator: ".").last,
+              topLevel.contains(where: { $0.isLetter })
+        else { return false }
+        return true
+    }
+
+    /// Whitespace runs (newlines included) folded to one space, trimmed, capped; nil when empty.
+    private static func oneLine(_ text: String?, cap: Int) -> String? {
+        guard let text else { return nil }
+        let folded = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return folded.isEmpty ? nil : String(folded.prefix(cap))
+    }
+}
+
+/// `published_at` is a calendar DATE, so it is parsed and shown in UTC with the POSIX locale and
+/// the Gregorian calendar: in the device zone a date-only value lands a day early west of UTC,
+/// and a Buddhist- or Japanese-calendar phone would print another year.
+private enum ChatSourceDate {
+    static let parser: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        f.isLenient = false
+        return f
+    }()
+
+    static let shown: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+
+    /// "2026-10-01" → "Oct 1, 2026". Anything else (a relative age, a timestamp, garbage) → nil.
+    static func display(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              value.count == 10,
+              let date = parser.date(from: value)
+        else { return nil }
+        return shown.string(from: date)
     }
 }
 
@@ -146,20 +376,49 @@ struct ChatThinking: Codable, Sendable {
     /// The model's streamed reasoning preamble — replaces the old canned "stages". nil/empty for
     /// legacy rows (which still carry `stages`). (Backend always sends `stages`, now as `[]`.)
     let reasoning: String?
+    /// Where this turn's web search stands — the card's "Searching the web…" header and its
+    /// "Web search" badge. nil: no web search on this turn (every legacy row).
+    let webSearchState: WebSearchState?
+
+    /// Report chat's live web search, as the card shows it.
+    enum WebSearchState: Sendable, Equatable {
+        /// The server announced the search (`tool_start`) and its step has not landed yet.
+        case searching
+        /// The search step finished. On a stored row: the server's `web_searched: true`, a flag
+        /// it keeps on a turn whose answer used web results (never the results themselves).
+        case done
+        /// The search did not run on this turn (the day's limit, or unavailable). Live only.
+        case skipped
+    }
 
     enum CodingKeys: String, CodingKey {
         case stages, reasoning
         case sourceCount = "source_count"
         case elapsedMs = "elapsed_ms"
+        case webSearched = "web_searched"
     }
 
     // Defaulted init so callers can construct without every field (a `let` optional is otherwise
-    // required by the synthesized memberwise init). `encode(to:)` stays synthesized.
-    init(stages: [String] = [], sourceCount: Int? = nil, elapsedMs: Int? = nil, reasoning: String? = nil) {
+    // required by the synthesized memberwise init).
+    init(stages: [String] = [], sourceCount: Int? = nil, elapsedMs: Int? = nil, reasoning: String? = nil,
+         webSearchState: WebSearchState? = nil) {
         self.stages = stages
         self.sourceCount = sourceCount
         self.elapsedMs = elapsedMs
         self.reasoning = reasoning
+        self.webSearchState = webSearchState
+    }
+
+    /// Written by hand only because `webSearchState` has no wire key of its own: the wire carries
+    /// `web_searched: true` for `.done` and nothing for any other state (the live-only states never
+    /// leave the device). The other four fields encode exactly as the synthesized version did.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(stages, forKey: .stages)
+        try c.encodeIfPresent(sourceCount, forKey: .sourceCount)
+        try c.encodeIfPresent(elapsedMs, forKey: .elapsedMs)
+        try c.encodeIfPresent(reasoning, forKey: .reasoning)
+        if webSearchState == .done { try c.encode(true, forKey: .webSearched) }
     }
 
     /// Total (never-throwing) decode. `thinking` is OPTIONAL on `ChatMessageDTO`, but `decodeIfPresent`
@@ -172,12 +431,15 @@ struct ChatThinking: Codable, Sendable {
     init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
             self.stages = []; self.sourceCount = nil; self.elapsedMs = nil; self.reasoning = nil
+            self.webSearchState = nil
             return
         }
         self.stages = (try? c.decode([String].self, forKey: .stages)) ?? []
         self.sourceCount = try? c.decode(Int.self, forKey: .sourceCount)
         self.elapsedMs = try? c.decode(Int.self, forKey: .elapsedMs)
         self.reasoning = try? c.decode(String.self, forKey: .reasoning)
+        // Only a real `true` is a web-searched turn: absent, false, null or a wrong type is not.
+        self.webSearchState = (try? c.decode(Bool.self, forKey: .webSearched)) == true ? WebSearchState.done : nil
     }
 
     /// True while the answer is still being produced (drives the animated header).
@@ -196,9 +458,13 @@ struct ChatThinking: Codable, Sendable {
     /// there is reasoning / stages / grounded sources to show. Sources are gated on `sourceCount`
     /// (the card owns the source pills) so a finished message whose model skipped the reasoning
     /// preamble — or that came via the non-streaming fallback (reasoning "", stages []) — still
-    /// surfaces its grounding attribution instead of silently dropping the pills.
+    /// surfaces its grounding attribution instead of silently dropping the pills. A web-searched
+    /// turn always shows the card too: its "Web search" badge is the answer's only marker that
+    /// third-party pages were read, and the server's stored `source_count` does not count the
+    /// live web pills.
     var shouldDisplay: Bool {
         isActive || reasoningText != nil || !stages.isEmpty || (sourceCount ?? 0) > 0
+            || webSearchState == .done
     }
 }
 
@@ -921,10 +1187,10 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
 
         let timestamp = BackendISO8601.date(from: createdAt) ?? Date()
 
-        // Drop any empty-label source pill (only possible from a malformed row via the total
-        // ChatSource decode above) so it renders as nothing rather than a blank chip.
+        // The one source sanitizer (empty labels, unattributed web pills, repeated ids) — the
+        // live `sources` frame goes through the same function.
         return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp,
-                               thinking: thinking, sources: sources?.filter { !$0.label.isEmpty },
+                               thinking: thinking, sources: ChatSource.sanitized(sources),
                                suggestions: suggestions, credit: credit,
                                truncated: msgRole == .assistant && (truncated ?? false),
                                serverId: id.isEmpty ? nil : id)

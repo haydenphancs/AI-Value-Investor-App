@@ -103,25 +103,49 @@ private func humanTarget(of url: URL) -> String {
 
 // MARK: - View modifier
 
+/// How the in-app browser is presented.
+enum InAppBrowserStyle {
+    /// Full screen — the default, and what every screen used before the chat needed a sheet.
+    case cover
+    /// A sheet — for a host that is ITSELF a full-screen cover and must stay mounted underneath
+    /// (the Cay AI chat). A nested cover takes the host off screen, so closing the browser
+    /// re-runs the host's `onAppear` (the chat reloads its history, the audio overlay re-pins,
+    /// an expanded thinking card collapses under the user); a sheet leaves the host on screen.
+    case sheet
+}
+
 private struct InAppBrowserModifier: ViewModifier {
     @Binding var link: BrowserLink?
+    let style: InAppBrowserStyle
 
+    // `item:` rather than `isPresented:` in both styles — the URL and the presentation are one
+    // piece of state, so they cannot disagree (present with a stale URL, or hold a URL after
+    // dismissal). Item-based presentation is also the form that still works when the host is
+    // itself inside a cover (see `.aiChatCover` in AIChatScreen.swift).
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            // `item:` rather than `isPresented:` — the URL and the presentation
-            // are one piece of state, so they cannot disagree (present with a
-            // stale URL, or hold a URL after dismissal).
-            .fullScreenCover(item: $link) { target in
-                SafariView(url: target.url)
-                    .ignoresSafeArea()
-            }
+        switch style {
+        case .cover:
+            content
+                .fullScreenCover(item: $link) { target in
+                    SafariView(url: target.url)
+                        .ignoresSafeArea()
+                }
+        case .sheet:
+            content
+                .sheet(item: $link) { target in
+                    SafariView(url: target.url)
+                        .ignoresSafeArea()
+                }
+        }
     }
 }
 
 extension View {
     /// Present external links in an in-app browser. Set `link` (normally via
-    /// `openExternal(_:into:)`) to open; the cover clears it on dismiss.
-    func inAppBrowser(link: Binding<BrowserLink?>) -> some View {
-        modifier(InAppBrowserModifier(link: link))
+    /// `openExternal(_:into:)`) to open; the presentation clears it on dismiss.
+    /// `style` defaults to a full-screen cover; pass `.sheet` from a host that is itself a cover.
+    func inAppBrowser(link: Binding<BrowserLink?>, style: InAppBrowserStyle = .cover) -> some View {
+        modifier(InAppBrowserModifier(link: link, style: style))
     }
 }

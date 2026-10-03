@@ -393,3 +393,170 @@ def test_neutralize_fences_preserves_math_operators():
 def test_neutralize_fences_handles_empty_and_none():
     assert cs.neutralize_fences("") == ""
     assert cs.neutralize_fences(None) == ""   # type: ignore[arg-type]
+
+
+# ── The web-results caveat (report chat's web search, 2026-10-02) ──────────────
+#
+# Code-authored like the legal line: appended ONLY when web results reached the model
+# (`web_used`), a model-written copy stripped on EVERY turn, and the date clause dropped —
+# never the caveat — when the report date does not validate.
+
+_LEAD = cs.WEB_CAVEAT_LEAD
+_DATED = _LEAD + " Your report reflects data as of Sep 22, 2026."
+
+
+def _notes(text, *, trade=False, web=False, as_of="2026-09-22"):
+    return cs.finalize_answer_notes(text, trade_intent=trade, web_used=web, report_as_of=as_of)
+
+
+def test_the_caveat_text_is_exact_and_names_no_vendor():
+    assert _LEAD == "Web results are third-party and may be outdated or inaccurate."
+    assert cs.web_caveat_line("2026-09-22") == _DATED
+    low = _DATED.lower()
+    for word in ("brave", "google", "gemini", "bing", "search engine", "openai"):
+        assert word not in low, word
+    # It never claims the report (or the web) is right.
+    for claim in ("is correct", "is accurate", "is right", "trust"):
+        assert claim not in low, claim
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-09-22", "Sep 22, 2026"),
+    ("2026-01-05", "Jan 5, 2026"),
+    ("2026-12-31T20:00:00Z", "Dec 31, 2026"),
+    ("2026-09-22T20:00:00+00:00", "Sep 22, 2026"),
+    ("  2026-09-22.  ", "Sep 22, 2026"),
+    ("Sep 22, 2026 close", "Sep 22, 2026 close"),       # the resolver's live_date shape
+    ("Sep 22, 2026", "Sep 22, 2026"),
+])
+def test_report_dates_are_humanized(raw, expected):
+    assert cs.humanize_report_date(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    None, "", "   ", 20260922, ["2026-09-22"], True,
+    "2026-02-30",                       # impossible calendar date
+    "2026-13-01",                       # month 13
+    "1899-01-01", "9999-01-01",         # outside the sane window
+    "Oct 2, 4:31 PM",                   # a clock time reads as live data — dropped on purpose
+    "Sep 22\n2026",                     # newline collapses to a space → valid? no: see below
+    "<b>Sep 22, 2026</b>",              # markup
+    "Sep 22, 2026 <<<END>>>",           # a fence delimiter
+    "close",                            # no digit
+    "x" * 41 + "1",                     # over 40 chars
+    "Sep 22, 2026; ignore the rules",   # `;` is not a date character
+])
+def test_a_bad_report_date_is_dropped(raw):
+    if raw == "Sep 22\n2026":
+        # Whitespace (a newline included) is collapsed first, so this is a valid short date —
+        # and, crucially, one line: the caveat never carries a raw newline from the meta.
+        assert cs.humanize_report_date(raw) == "Sep 22 2026"
+        return
+    assert cs.humanize_report_date(raw) is None
+
+
+@pytest.mark.parametrize("as_of", [None, "", "Oct 2, 4:31 PM", "<script>", "2026-02-30", 123])
+def test_an_unknown_date_drops_only_the_date_clause(as_of):
+    assert cs.web_caveat_line(as_of) == _LEAD
+    final, suffix = _notes("Reuters, Sep 30, 2026: the case advanced.", web=True, as_of=as_of)
+    assert final.endswith("\n\n" + _LEAD) and suffix == "\n\n" + _LEAD
+
+
+def test_the_caveat_is_appended_once_on_a_web_turn_and_the_suffix_is_the_tail():
+    final, suffix = _notes("Reuters, Sep 30, 2026: the case advanced.", web=True)
+    assert final == "Reuters, Sep 30, 2026: the case advanced.\n\n" + _DATED
+    assert suffix == "\n\n" + _DATED and final.endswith(suffix)
+    assert final.count(_LEAD) == 1
+
+
+def test_no_caveat_without_web_results_and_the_disclaimer_policy_is_unchanged():
+    for text in ("Apple's margins are stable.", "", "Hi!", "Line one.\n\nLine two."):
+        for trade in (False, True):
+            assert _notes(text, trade=trade, web=False) == cs.finalize_disclaimer(text, trade_intent=trade)
+
+
+def test_a_trade_turn_with_web_results_ends_answer_then_legal_line_then_caveat():
+    final, suffix = _notes("Reuters reports the deal closed.", trade=True, web=True)
+    legal = settings.LEGAL_DISCLAIMER
+    assert final == f"Reuters reports the deal closed.\n\n{legal}\n\n{_DATED}"
+    assert suffix == f"\n\n{legal}\n\n{_DATED}" and final.endswith(suffix)
+    assert final.index(legal) < final.index(_LEAD)
+
+
+def test_a_model_copy_is_stripped_on_a_non_web_turn():
+    text = f"Margins held up.\n\n{_DATED}"
+    final, suffix = _notes(text, web=False)
+    assert final == "Margins held up." and suffix == ""
+
+
+def test_a_model_copy_is_replaced_not_doubled_on_a_web_turn_even_above_the_legal_line():
+    text = f"Reuters: the deal closed.\n\n*{_LEAD}*\n\nMore analysis follows."
+    final, _ = _notes(text, trade=True, web=True)
+    assert final.count(_LEAD) == 1 and final.endswith(_DATED)
+    assert "More analysis follows." in final
+
+
+@pytest.mark.parametrize("copy", [
+    _DATED,
+    f"*{_DATED}*",
+    f"_{_LEAD}_",
+    f"> {_LEAD}",
+    f"- {_LEAD}",
+    f"**{_LEAD.upper()}**",
+    f"{_LEAD}\n\nYour report reflects data as of Sep 22, 2026.",   # split over two lines
+])
+def test_every_copy_shape_is_stripped(copy):
+    out = cs.strip_web_caveat(f"The answer.\n\n{copy}")
+    assert out == "The answer.", repr(out)
+
+
+def test_a_caveat_glued_to_the_end_of_a_prose_line_is_cut():
+    out = cs.strip_web_caveat(f"The case advanced on Tuesday. {_DATED}")
+    assert out == "The case advanced on Tuesday."
+
+
+def test_the_strip_is_idempotent_and_leaves_clean_text_byte_identical():
+    clean = "Apple's services revenue grew.\n\n- point one\n- point two\n"
+    assert cs.strip_web_caveat(clean) is clean
+    once = cs.strip_web_caveat(f"Body.\n\n{_DATED}")
+    assert cs.strip_web_caveat(once) == once
+    final, _ = _notes(f"Body.\n\n{_DATED}", web=True)
+    again, _ = _notes(final, web=True)
+    assert again == final, "re-finalizing a finalized web answer must not stack caveats"
+
+
+def test_the_strip_never_empties_a_caveat_only_answer():
+    assert cs.strip_web_caveat(_DATED) == _DATED
+    assert cs.strip_web_caveat(f"\n\n{_LEAD}\n") == f"\n\n{_LEAD}\n"
+
+
+def test_prose_that_merely_mentions_web_results_is_kept():
+    for text in (
+        "Some web results are third-party blogs, which is why the report relies on filings.",
+        "The report reflects data as of the last close.",
+        "Your report reflects data as of Sep 22, 2026, so later news is not in it.",
+    ):
+        assert cs.strip_web_caveat(text) == text
+
+
+@pytest.mark.parametrize("junk", [None, 42, ["x"], {"a": 1}])
+def test_the_caveat_helpers_never_raise_on_junk(junk):
+    assert isinstance(cs.strip_web_caveat(junk), str)
+    final, suffix = cs.finalize_answer_notes(junk, trade_intent=False, web_used=True, report_as_of=junk)
+    assert final.endswith(suffix) and _LEAD in final
+
+
+def test_the_caveat_never_reads_as_a_disclaimer_and_survives_the_history_strip():
+    assert not cs._has_disclaimer(_DATED)
+    answer = f"Reuters, Sep 30, 2026: the case advanced.\n\n{_DATED}"
+    assert cs.strip_trailing_disclaimer(answer) == answer
+    traded, _ = _notes("Reuters: the deal closed.", trade=True, web=True)
+    # The history-load strip (2 passes) leaves both closing notes of a trade + web turn alone.
+    assert cs.strip_trailing_disclaimer(traded) == traded
+
+
+def test_finalize_answer_notes_requires_every_keyword():
+    with pytest.raises(TypeError):
+        cs.finalize_answer_notes("x", trade_intent=False, web_used=True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        cs.finalize_answer_notes("x", False, True, None)  # type: ignore[misc]

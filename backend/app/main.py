@@ -31,6 +31,7 @@ from app.integrations.openfda import close_openfda_client
 from app.integrations.telegram import close_telegram_client
 from app.integrations.x_api import close_x_client
 from app.integrations.bluesky import close_bluesky_client
+from app.integrations.brave_search import close_brave_search_client
 from app.integrations.upload_post import close_upload_post_client
 from app.integrations.uspto import close_uspto_client
 from app.log_redaction import scrub_sentry_event, scrub_sentry_transaction, SecretRedactingFilter
@@ -406,8 +407,8 @@ async def lifespan(app: FastAPI):
         # Start background report pre-warmer: warms the persona-neutral
         # ticker_data_cache for top tickers so the first report after each close
         # (and any same-session burst) skips re-collecting it. Runs the full
-        # persona-neutral collection (FMP fan-out + grounded precompute, which
-        # makes some Gemini-grounded calls for cold tickers).
+        # persona-neutral collection (the FMP fan-out; no Gemini call since
+        # Google Search grounding was retired, 2026-10-02).
         _spawn(_run_report_pre_warmer(), "run_report_pre_warmer")
 
         # Home dashboard warmer: every shared Home section (pulse, the screener universe,
@@ -620,6 +621,7 @@ async def lifespan(app: FastAPI):
     await close_telegram_client()
     await close_x_client()
     await close_bluesky_client()
+    await close_brave_search_client()
     await close_upload_post_client()
     await close_health_client()
     logger.info("Shutting down")
@@ -1008,9 +1010,9 @@ async def _run_report_pre_warmer():
     warming the top tickers here means the first report request (and any
     same-session multi-user burst on a trending name) hits a warm collection
     and skips re-collecting it. This runs the full persona-NEUTRAL collection —
-    the ~20-call FMP fan-out PLUS the persona-neutral grounded precompute (which
-    for a cold ticker makes some Gemini-grounded calls) — but skips the
-    per-persona Stage-A/Stage-B work, credits, and research_reports rows.
+    the ~20-call FMP fan-out (its Gemini-grounded precompute was retired with Google
+    Search grounding, 2026-10-02) — but skips the per-persona Stage-A/Stage-B work,
+    credits, and research_reports rows.
 
     Idempotent: `collect()` checks freshness first, so a still-fresh ticker is a
     one-DB-read no-op — real FMP work only happens right after a new close.
@@ -1427,7 +1429,6 @@ _CHAIN_PHASE_STALE_SECONDS = 3 * 3600
 
 JOB_TTM_BENCHMARK_WEEKLY = "ttm_benchmark_weekly"
 JOB_INDUSTRY_DOSSIER_QUARTERLY = "industry_dossier_quarterly"
-JOB_COMPETITOR_INTEL_QUARTERLY = "competitor_intel_quarterly"
 JOB_IP_INTEL_QUARTERLY = "ip_intel_quarterly"
 JOB_INDUSTRY_MOAT_QUARTERLY = "industry_moat_benchmark_quarterly"
 JOB_INDUSTRY_BENCHMARK_QUARTERLY = "industry_benchmark_quarterly"
@@ -1507,8 +1508,8 @@ async def _run_claimed_phase(job: str, label: str, body) -> bool:
     `body` is an async callable returning a summary. The claim is day-keyed and shared
     across instances, so a phase that already completed today (before a restart, or on
     the other instance of a deploy overlap) is skipped rather than re-run — the fiscal
-    dossier recompute and the two Gemini-grounded `refresh_top_tickers` batches have no
-    freshness gate of their own, so the claim is what makes a catch-up pass idempotent.
+    dossier recompute and the IP-intel `refresh_top_tickers` batch have no freshness
+    gate of their own, so the claim is what makes a catch-up pass idempotent.
     A phase that raises releases the claim with success=False; one cancelled by a
     redeploy does the same, in the manager's `finally`.
 
@@ -1784,15 +1785,12 @@ async def _run_industry_dossier_job():
     """Background task: recompute the industry_dossier table quarterly
     on the first Sunday of January / April / July / October at 02:00 UTC.
 
-    The recompute itself is two-phase:
-      Phase A — Census/FRED 4-tier chain (industry_dossier_service)
-      Phase B — AI-driven research overrides for the curated
-                globally-traded industries (industry_override_service)
-
-    Phase B fires automatically right after Phase A from inside
-    `recompute_all()` — no separate task. Pure asyncio.sleep loop with
-    per-iteration try/except so a single failed quarter doesn't break
-    the loop.
+    The recompute is the Census/FRED tier chain (industry_dossier_service). Its
+    former Phase B — Gemini grounded-research TAM overrides for curated global
+    industries — and the competitor-intel phase below were retired 2026-10-02 with
+    Google Search grounding (its terms forbid caching grounded output and serving
+    it to every user). Pure asyncio.sleep loop with per-iteration try/except so a
+    single failed quarter doesn't break the loop.
     """
     from datetime import datetime, timezone
 
@@ -1804,8 +1802,7 @@ async def _run_industry_dossier_job():
     # waits until it's clear before hitting FMP again — never overlapping
     # in the rate-limit window.
     #
-    #   base + 0   min → industry_dossier  (Phase A + Phase B)
-    #   base + 30  min → competitor_intel.refresh_top_tickers
+    #   base + 0   min → industry_dossier
     #   base + 60  min → ip_intel.refresh_top_tickers
     #   base + 90  min → industry_moat_benchmark.recompute_all  (longest)
     #   base + 120 min → industry_benchmark.recompute_all (sector + industry medians)
@@ -1854,22 +1851,9 @@ async def _run_industry_dossier_job():
             return await get_industry_dossier_service().recompute_all()
         settled &= await _run_claimed_phase(JOB_INDUSTRY_DOSSIER_QUARTERLY, "Industry dossier job", _dossier)
 
-        # ── Phase 2 chained: competitor intel @ base + 30 min ──
-        # Waits until the staggered start time so its Gemini-grounded
-        # research batch doesn't overlap any FMP burst tail from the
-        # dossier job. Own try/except so a batch failure can't break
-        # the loop.
+        # (The competitor-intel phase that ran at base + 30 min was retired with
+        # Google Search grounding, 2026-10-02.)
         from datetime import timedelta as _td
-        await _wait_until(next_run + _td(minutes=30))
-
-        async def _competitor():
-            from app.services.competitor_intel_service import (
-                get_competitor_intel_service,
-            )
-            return await get_competitor_intel_service().refresh_top_tickers()
-        settled &= await _run_claimed_phase(
-            JOB_COMPETITOR_INTEL_QUARTERLY, "Competitor intel quarterly batch", _competitor,
-        )
 
         # ── Phase 3C chained: ip_intel (USPTO + FDA) @ base + 60 min ──
         # USPTO patents and FDA approvals change very slowly. Run an

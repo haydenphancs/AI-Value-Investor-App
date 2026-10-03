@@ -65,10 +65,11 @@ _STR_CAP = 400              # any single string field is trimmed to this in the 
 _MIN_CUT_CHARS = 40
 
 # ── Competitor lead (TICKER_REPORT) ──
-# Duplicated on purpose — importing the collector or the intel service here would pull
-# the whole report pipeline (and its FMP client) into every chat turn. Pinned equal to
-# `competitor_intel_service.SEGMENT_MAX_CHARS` and the collector's `_THREAT_HIGH_THRESHOLD`
-# / `_THREAT_LOW_THRESHOLD` by tests/test_chat_context_resolver.py.
+# Duplicated on purpose — importing the collector here would pull the whole report
+# pipeline (and its FMP client) into every chat turn. Pinned equal to the collector's
+# `_THREAT_HIGH_THRESHOLD` / `_THREAT_LOW_THRESHOLD` by tests/test_chat_context_resolver.py.
+# The segment cap is the one the collector wrote "competes in" segments under (48) until
+# the grounded research list was retired (2026-10-02); only stored reports carry one now.
 _COMPETITOR_SEGMENT_CAP = 48
 _COMPETITOR_NAME_CAP = 80
 _COMPETITOR_LEAD_MAX_ROWS = 7
@@ -143,15 +144,11 @@ _NO_DEEP_DROP: frozenset = frozenset()
 # dropped when it does not fit; a LIST value is cut only between elements.
 _LINE_TEXT, _LINE_NUM, _LINE_LIST = "text", "num", "list"
 
-# agent_tag → full persona key, so a reference_id built from EITHER form
-# ("AAPL|buffett" or "AAPL|warren_buffett") resolves to the same cache row.
-_AGENT_TAG_TO_KEY = {
-    "buffett": "warren_buffett",
-    "wood": "cathie_wood",
-    "lynch": "peter_lynch",
-    "ackman": "bill_ackman",
-    "burry": "michael_burry",
-}
+# A reference_id built from EITHER form ("AAPL|buffett" or "AAPL|warren_buffett") resolves to
+# the same cache row through the SHARED `persona_config.AGENT_TAG_TO_KEY` (imported where it is
+# used: `app.services.agents` imports the research agent). This module kept a private copy of
+# that map until 2026-10-02. The shared map holds CURRENT tags only: a legacy `dalio` reference
+# must miss the cache rather than ground an old chat on today's Activist report.
 _DEFAULT_PERSONA = "warren_buffett"
 
 # TICKER_REPORT dump order (fair mode — every present section gets a share). The moat sits
@@ -830,7 +827,15 @@ class ChatContextResolver:
         reference_id: Optional[str],
         client_context: Optional[str] = None,
         user_id: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
+        """`meta` (optional out-param): facts about WHAT was grounded, beside the block itself.
+        Two keys, both TICKER_REPORT only: `report_persona_key` — the persona of the row the block
+        was built from (its stored `agent` tag), which decides the report chat's mode voice — and
+        `report_as_of` — the report's own as-of date (`_report_date`), which the web-results
+        caveat names. Written
+        only when the handler finished inside the ceiling: a timed-out or failed resolve leaves
+        it untouched, so a late-finishing shielded task can never change a turn already built."""
         if not context_type:
             return client_context
         ctype = context_type.strip().upper()
@@ -853,9 +858,10 @@ class ChatContextResolver:
         # the caller's own frozen report row), so it is the only handler that takes an
         # identity. Special-cased here rather than widening all eight signatures with a
         # parameter seven of them would ignore.
+        handler_meta: Dict[str, Any] = {}
         if ctype == "TICKER_REPORT":
             coro = self._resolve_ticker_report(
-                reference_id, client_context, user_id=user_id,
+                reference_id, client_context, user_id=user_id, meta=handler_meta,
             )
         else:
             coro = handler(self, reference_id, client_context)
@@ -883,6 +889,9 @@ class ChatContextResolver:
                 _log_ref(context_type, 64), _log_ref(reference_id, 128), type(e).__name__, e,
             )
             return None if ctype in _CONTROL_CONTEXT else client_context
+        # Copied only HERE, after the handler returned inside the ceiling (see the docstring).
+        if meta is not None and handler_meta:
+            meta.update(handler_meta)
         if ctype in _CONTROL_CONTEXT:
             return block
         return block or client_context
@@ -921,8 +930,15 @@ class ChatContextResolver:
         reference_id: Optional[str],
         client_context: Optional[str],
         user_id: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Ground the chat in the report the user is ACTUALLY LOOKING AT.
+
+        `meta` (see `resolve`) receives `report_persona_key`: the persona of the row the block
+        is built from, read from its stored `agent` tag — the report chat's mode voice follows
+        the report actually grounded, not the reference segment (an installed build opening a
+        report from a notification sends `warren_buffett` whatever the report is). Set only
+        when a report resolved and its tag is a known persona (legacy `dalio` included).
 
         `reference_id` is `"TICKER|persona"` or `"TICKER|persona|<report_id>"`.
 
@@ -946,10 +962,15 @@ class ChatContextResolver:
         """
         if not reference_id:
             return None
+        from app.services.agents.persona_config import AGENT_TAG_TO_KEY, persona_key_from_tag
+
         parts = [p.strip() for p in reference_id.split("|")]
         ticker = (parts[0] if parts else "").upper()
-        persona = (parts[1].lower() if len(parts) > 1 else "")
-        persona = _AGENT_TAG_TO_KEY.get(persona, persona) or _DEFAULT_PERSONA
+        segment = parts[1] if len(parts) > 1 else ""
+        persona = segment.lower()
+        # CURRENT tags only (no legacy `dalio`): this key looks up TODAY's shared cache row.
+        # An unknown string passes through and simply misses, never grounding on another persona.
+        persona = AGENT_TAG_TO_KEY.get(persona, persona) or _DEFAULT_PERSONA
         report_id = parts[2] if len(parts) > 2 and parts[2] else None
         if not ticker:
             return None
@@ -980,6 +1001,33 @@ class ChatContextResolver:
             )
             return None
 
+        # The grounded report's OWN persona (its stored tag; legacy tags are a method, fine
+        # for a voice). Logged when it disagrees with the reference — the visible trace of an
+        # old build's notification route, where the voice now follows the report.
+        stored_agent = report.get("agent")
+        grounded_persona = persona_key_from_tag(stored_agent, include_legacy=True)
+        ref_persona = persona_key_from_tag(segment, include_legacy=True)
+        if grounded_persona is None:
+            logger.warning(
+                "chat_context: report for %r (report_id=%r) carries no known persona tag "
+                "agent=%r — report chat voice falls back to the reference segment (ref=%r)",
+                _log_ref(ticker, 32), _log_ref(report_id, 64), _log_ref(stored_agent, 32),
+                _log_ref(reference_id, 128),
+            )
+        else:
+            if meta is not None:
+                meta["report_persona_key"] = grounded_persona
+            # A reference that names no known persona (empty → the default lookup) claims
+            # nothing, so it cannot disagree.
+            if ref_persona is not None and ref_persona != grounded_persona:
+                logger.warning(
+                    "chat_context: report persona mismatch for %r (report_id=%r) — the "
+                    "grounded report is %s, the reference says %s (ref=%r); the chat voice "
+                    "follows the grounded report",
+                    _log_ref(ticker, 32), _log_ref(report_id, 64), grounded_persona, ref_persona,
+                    _log_ref(reference_id, 128),
+                )
+
         # LEAD — guarantee the highest-value, most-asked facts survive the cap.
         lead: List[str] = [
             f"The user is viewing the in-depth Cay research report for "
@@ -989,6 +1037,11 @@ class ChatContextResolver:
         dated = _report_date(report)
         if dated:
             lead.append(f"Report dated {dated}.")
+            # The same as-of date for the code-authored web-results caveat ("Your report reflects
+            # data as of …", `chat_security.finalize_answer_notes`). Copied to the caller's meta
+            # only when this handler finished inside the ceiling (see `resolve`).
+            if meta is not None:
+                meta["report_as_of"] = dated
         score = _finite_float(report.get("quality_score"))
         # 0-100 scale (iOS renders /100). A /10 label told Gemini "72/10", poisoning grounding.
         # A bool / NaN / ±inf is not a score ("nan/100" would reach the model).
@@ -1114,7 +1167,6 @@ class ChatContextResolver:
 
         from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
         from app.services.news_insight_service import (
-            catalyst_display_line,
             get_news_insight_service,
             select_recent_corpus,
         )
@@ -1202,19 +1254,6 @@ class ChatContextResolver:
             )
             for bullet in card.get("bullets") or []:
                 lines.append("• " + _cap(str(bullet), _UPDATES_BULLET_CAP))
-            move = card.get("price_move")
-            why = catalyst_display_line(move) if isinstance(move, dict) else ""
-            if why:
-                bits: List[str] = []
-                change = move.get("change_percent")
-                if isinstance(change, (int, float)) and math.isfinite(change):
-                    bits.append(f"{change:+.1f}%")
-                if written:
-                    bits.append(f"as of the card, {written.split(',')[0]}")
-                lines.append(
-                    "Why it moved" + (f" ({'; '.join(bits)})" if bits else "") + ": "
-                    + _cap(why, _MAX_REPORT_MODULE)
-                )
         elif headline_lines:
             lines.append(
                 "There is no Cay AI summary for this feed yet: the card on screen is the plain "

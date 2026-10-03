@@ -1070,15 +1070,26 @@ class ChatViewModel: ObservableObject {
                             : "Consulting \(labels.joined(separator: ", "))"
                     )
 
+                case "tool_start":
+                    // A tool is about to run. The server forwards this for report chat's web
+                    // search only — the one tool slow enough, and visible enough, to need a live
+                    // status — and the card then reads "Searching the web…" until its step lands.
+                    guard let start = Self.decodeToolFrame(event.data),
+                          start.name == "web_search"
+                    else { continue }
+                    setWebSearchState(id: ensureBubble(), state: .searching)
+
                 case "tool_step":
                     // A real tool call completing — genuine progress, not a synthesized label.
-                    struct ToolStep: Decodable { let name: String? }
-                    guard
-                        let data = event.data.data(using: .utf8),
-                        let step = try? JSONDecoder().decode(ToolStep.self, from: data),
-                        let name = step.name, !name.isEmpty
-                    else { continue }
-                    appendThinkingStage(id: ensureBubble(), stage: Self.thinkingLabel(forTool: name))
+                    guard let step = Self.decodeToolFrame(event.data) else { continue }
+                    if step.name == "web_search" {
+                        let settled: ChatThinking.WebSearchState = step.skipped ? .skipped : .done
+                        setWebSearchState(id: ensureBubble(), state: settled)
+                    }
+                    // A skipped step never ran (the day's web-search limit, or unavailable on
+                    // this turn), so it claims no progress on the card.
+                    if step.skipped { continue }
+                    appendThinkingStage(id: ensureBubble(), stage: Self.thinkingLabel(forTool: step.name))
 
                 case "grounding":
                     // The server's verdict on whether this screen's grounding reached the
@@ -1104,6 +1115,13 @@ class ChatViewModel: ObservableObject {
                 case "token":
                     guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
                     let id = ensureBubble()
+                    // The answer cannot resume until the search's round has ended, so a token
+                    // while the card still says "Searching the web…" means that step's frame was
+                    // lost. Drop the status rather than show it over a streaming answer; `done`
+                    // carries the server's own verdict for the badge.
+                    if webSearchState(id: id) == .searching {
+                        setWebSearchState(id: id, state: nil)
+                    }
                     if streamingMessageId == nil {
                         // First token: show the caret + start metering the reveal. Thoughts precede
                         // the answer, so reasoning is complete now — let its reveal drain + stop.
@@ -1126,6 +1144,9 @@ class ChatViewModel: ObservableObject {
                         // whole fallback generation (seconds) it stayed on screen above an empty
                         // bubble. `done` replaces thinking wholesale, so this only closes the gap.
                         setMessageReasoning(id: id, text: "")
+                        // Same for the web-search status: the fallback emits no tool frames, so a
+                        // "Searching the web…" left here would sit over the whole regeneration.
+                        setWebSearchState(id: id, state: nil)
                     }
 
                 case "done":
@@ -1451,11 +1472,12 @@ class ChatViewModel: ObservableObject {
     /// Human-readable label for a backend tool name. Falls back to a de-snake-cased form so a
     /// newly added tool still reads sensibly instead of showing a raw identifier.
     static func thinkingLabel(forTool name: String) -> String {
-        // Exactly the seven tools `chat_tools.TOOL_DESCRIPTIONS` declares — the backend has
-        // never emitted any other name. Six phantom cases (get_stock_quote, get_quote,
-        // get_company_profile, get_financials, get_income_statement, get_ticker_report,
-        // search_news) used to sit here; they matched nothing and read as capabilities the
-        // product does not have. A genuinely new tool falls to `default:` and still renders.
+        // Exactly the tools `chat_tools.TOOL_DESCRIPTIONS` declares (a Python source-scan test
+        // derives the list from it) — the backend has never emitted any other name. Six phantom
+        // cases (get_stock_quote, get_quote, get_company_profile, get_financials,
+        // get_income_statement, get_ticker_report, search_news) used to sit here; they matched
+        // nothing and read as capabilities the product does not have. A genuinely new tool falls
+        // to `default:` and still renders.
         switch name {
         case "get_stock_chart_data":              return "Checking the latest price"
         case "get_sentiment_analysis":            return "Reading the market mood"
@@ -1463,11 +1485,15 @@ class ChatViewModel: ObservableObject {
         case "get_market_overview":               return "Sizing up the market"
         case "get_ticker_news":                   return "Scanning recent news"
         case "get_market_snapshot":               return "Checking today's market"
-        // Deliberately NOT "Searching the web". That phrasing reads as a generic chatbot,
-        // and it would also be wrong most of the time: this tool answers from deterministic
-        // attribution and cached news first and escalates to a web search only for a large
-        // move it cannot otherwise explain. "Digging deeper" is true on every path.
+        // Not the web-search wording: this tool answers only from deterministic attribution
+        // and the ticker's cached news (its web-search tier for large unexplained moves was
+        // retired on 2026-10-02), so "Digging deeper" is true on every path. The web-search
+        // label belongs to the one tool that does search the web, below.
         case "explain_price_move":                return "Digging deeper"
+        // Report chat's live web search (owner decision, 2026-10-02). The server declares this
+        // tool only on a turn that asked for a web search and passed its gate, and a skipped
+        // step never reaches this label, so the words are true wherever they render.
+        case "web_search":                        return "Searching the web"
         default:
             let words = name.replacingOccurrences(of: "_", with: " ")
             return words.prefix(1).uppercased() + words.dropFirst()
@@ -1485,11 +1511,12 @@ class ChatViewModel: ObservableObject {
         // stage list until the next reasoning delta arrived.
         messages[idx].thinking = ChatThinking(
             stages: stages, sourceCount: messages[idx].sources?.count ?? t?.sourceCount,
-            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning
+            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning, webSearchState: t?.webSearchState
         )
     }
 
-    /// Attach the grounded source pills to the (active) assistant bubble.
+    /// Attach the source pills to the (active) assistant bubble. The server re-sends the FULL
+    /// list when a web search adds pills, so this replaces rather than appends.
     private func applyLiveSources(id: UUID, sources: [ChatSource]) {
         guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[idx].sources = sources
@@ -1497,7 +1524,24 @@ class ChatViewModel: ObservableObject {
         // Same rule as `appendThinkingStage`: one channel's frame must not clobber another's.
         messages[idx].thinking = ChatThinking(
             stages: t?.stages ?? [], sourceCount: sources.count,
-            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning
+            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning, webSearchState: t?.webSearchState
+        )
+    }
+
+    /// The live bubble's web-search state, or nil.
+    private func webSearchState(id: UUID) -> ChatThinking.WebSearchState? {
+        messages.first(where: { $0.id == id })?.thinking?.webSearchState
+    }
+
+    /// Patch ONLY the web-search state of the (active) assistant bubble — the same
+    /// one-channel-never-clobbers-another rule as `appendThinkingStage`.
+    private func setWebSearchState(id: UUID, state: ChatThinking.WebSearchState?) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        let t = messages[idx].thinking
+        guard t?.webSearchState != state else { return }
+        messages[idx].thinking = ChatThinking(
+            stages: t?.stages ?? [], sourceCount: t?.sourceCount,
+            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning, webSearchState: state
         )
     }
 
@@ -1512,7 +1556,8 @@ class ChatViewModel: ObservableObject {
         guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
         let t = messages[idx].thinking
         messages[idx].thinking = ChatThinking(
-            stages: t?.stages ?? [], sourceCount: t?.sourceCount, elapsedMs: t?.elapsedMs, reasoning: text
+            stages: t?.stages ?? [], sourceCount: t?.sourceCount, elapsedMs: t?.elapsedMs, reasoning: text,
+            webSearchState: t?.webSearchState
         )
     }
 
@@ -1659,10 +1704,33 @@ class ChatViewModel: ObservableObject {
         return (try? JSONDecoder().decode(Stage.self, from: data))?.stage
     }
 
+    /// The `sources` frame's pills through the SAME sanitizer as history and `done`
+    /// (`ChatSource.sanitized`), so a live pill can never be one a reload would drop.
     private static func decodeSources(_ json: String) -> [ChatSource]? {
         struct Payload: Decodable { let sources: [ChatSource] }
         guard let data = json.data(using: .utf8) else { return nil }
-        return (try? JSONDecoder().decode(Payload.self, from: data))?.sources
+        return ChatSource.sanitized((try? JSONDecoder().decode(Payload.self, from: data))?.sources)
+    }
+
+    /// `tool_start` / `tool_step` → the tool's name and whether the step was skipped (did not
+    /// run). Total: a missing or blank name is nil (the frame is ignored), and a missing,
+    /// null or wrong-typed `skipped` is false — a malformed flag must not drop the whole step.
+    private static func decodeToolFrame(_ json: String) -> (name: String, skipped: Bool)? {
+        struct Payload: Decodable {
+            let name: String?
+            let skipped: Bool?
+            enum CodingKeys: String, CodingKey { case name, skipped }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                name = try? c.decode(String.self, forKey: .name)
+                skipped = try? c.decode(Bool.self, forKey: .skipped)
+            }
+        }
+        guard let data = json.data(using: .utf8),
+              let frame = try? JSONDecoder().decode(Payload.self, from: data),
+              let name = frame.name, !name.isEmpty
+        else { return nil }
+        return (name: name, skipped: frame.skipped == true)
     }
 
     /// `{"context_grounded": Bool}` from the `grounding` frame. A malformed frame is nil —

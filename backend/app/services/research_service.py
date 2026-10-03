@@ -30,8 +30,10 @@ from app.services.agents.ticker_report_data_collector import report_degraded_sec
 from app.services.agents.persona_config import get_persona_config
 from app.services.agents.persona_scoring import compute_quality_score
 from app.services.report_degradation import (
+    GROUNDING_FREE_KEY,
     DegradedReportError,
     report_degraded_reason,
+    report_is_grounding_free,
 )
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
@@ -896,6 +898,20 @@ class ResearchService:
 
                 if result.data and result.data[0].get("ticker_report_data"):
                     blob = result.data[0]["ticker_report_data"]
+                    # Never copy ANOTHER user's pre-retirement report to this one: without
+                    # the provenance stamp it was written by the grounded code (possibly
+                    # from Google Search grounded research, which may be shown only to the
+                    # user who asked), and that code completed reports AFTER
+                    # CACHE_SCHEMA_FLOOR, so the cutoff above cannot catch it. A miss →
+                    # this caller's run regenerates. Their own copy of it stays theirs.
+                    if not report_is_grounding_free(blob):
+                        logger.warning(
+                            "Shared cache row for %s/%s is a pre-retirement report (no %s "
+                            "stamp — possibly Google Search grounded) — treating as a miss "
+                            "rather than copying it to another user",
+                            ticker, persona_key, GROUNDING_FREE_KEY,
+                        )
+                        return None
                     # Never re-sell a degraded shell. Nothing writes one any more (the
                     # generate path raises before the completion write), but rows written
                     # BEFORE that fix are still sitting in the table inside the close

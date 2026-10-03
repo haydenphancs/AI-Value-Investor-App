@@ -8,6 +8,10 @@ These tests assert both user-facing surfaces derive from the one exported consta
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from app.services.agents.persona_config import (
     ADVICE_BOUNDARY,
     IDENTITY_RULE,
@@ -21,6 +25,79 @@ def test_identity_rule_is_exported_and_aliased():
     assert IDENTITY_RULE is _IDENTITY_RULE            # private back-compat alias == public
     assert "Cay AI" in IDENTITY_RULE
     assert "never say Google, Gemini, OpenAI" in IDENTITY_RULE
+
+
+# ── Provider disclosure + the "are you an AI?" literal (2026-10-02) ──────────
+#
+# The rule now says a third-party AI provider is involved — the Privacy Policy's own words —
+# without naming it, and answers "are you an AI?" with an EXACT literal. The literal is
+# load-bearing: the natural reply "Yes, I'm an AI" is redacted by `enforce_answer` and flagged
+# `identity_leak` by `scan_answer`, so a model told only "say yes" would have its honest answer
+# mangled into "Yes, Cay AI". The two tests below pin both halves.
+
+_AI_ANSWER_RE = re.compile(r'say exactly: "([^"]+)"')
+
+
+def _ai_answer_literal() -> str:
+    m = _AI_ANSWER_RE.search(IDENTITY_RULE)
+    assert m, "IDENTITY_RULE no longer quotes an exact answer to 'are you an AI?'"
+    return m.group(1)
+
+
+def test_identity_rule_discloses_a_third_party_provider_without_naming_it():
+    assert IDENTITY_RULE.startswith("CRITICAL IDENTITY RULE: You are Cay AI")
+    assert IDENTITY_RULE.endswith("\n\n")
+    for phrase in (
+        "third-party AI provider", "Privacy Policy",
+        "do not name the provider or the model",
+        "Never deny being an AI", "never claim that Caydex built the underlying model",
+        "If asked who made you, say you are Cay AI by Caydex",
+    ):
+        assert phrase in IDENTITY_RULE, phrase
+    # Disclosing a provider must never become naming it: the only provider names in the rule
+    # are inside the "never say …" list.
+    named = IDENTITY_RULE.split("(e.g. never say", 1)
+    assert len(named) == 2
+    outside_list = named[0] + named[1].split(")", 1)[1]
+    for vendor in ("Google", "Gemini", "OpenAI", "GPT"):
+        assert vendor not in outside_list, vendor
+
+
+def test_old_reveal_mention_hint_wording_is_gone():
+    assert "NEVER reveal, mention, or hint" not in IDENTITY_RULE
+
+
+def test_the_exact_ai_answer_survives_both_guardrails():
+    from app.services.agents.chat_guardrails import enforce_answer, scan_answer
+
+    literal = _ai_answer_literal()
+    assert literal == "Yes — I'm Cay AI, an AI system by Caydex."
+    redacted, tags = enforce_answer(literal)
+    assert redacted == literal and not tags, (redacted, tags)
+    assert scan_answer(literal) == []
+
+
+@pytest.mark.parametrize("natural", [
+    "Yes, I'm an AI.",
+    "Yes, I am an AI — Cay AI by Caydex.",
+    "I'm an AI built by Caydex.",
+])
+def test_the_natural_ai_answer_is_flagged_so_the_literal_is_load_bearing(natural: str):
+    """If this ever stops firing, the exact literal is no longer needed — and if the literal
+    test above ever fails, the rule is steering the model INTO a redaction."""
+    from app.services.agents.chat_guardrails import enforce_answer, scan_answer
+
+    redacted, tags = enforce_answer(natural)
+    assert "identity_redacted" in tags and redacted != natural
+    assert "identity_leak" in scan_answer(natural)
+
+
+def test_privacy_policy_still_says_third_party_ai_provider():
+    """The rule cites the Privacy Policy; it must say the same thing the rule does."""
+    from pathlib import Path
+
+    policy = (Path(__file__).resolve().parents[1] / "app/templates/legal/privacy.html").read_text()
+    assert "third-party AI provider" in policy
 
 
 def test_chat_system_instruction_uses_the_shared_constant():

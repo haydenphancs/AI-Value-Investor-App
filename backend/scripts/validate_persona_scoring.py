@@ -13,10 +13,9 @@ FMP/FRED (no Gemini). `assemble_report(out, {})` (empty AI dict) then builds the
 real 10-vital `_scoring_inputs` deterministically. We re-run `compute_quality_score`
 for all 4 personas on that one inputs dict. So we validate exactly what ships.
 
-Three Gemini touchpoints inside `_collect_fresh` are monkeypatched to no-ops for the
-DETERMINISTIC run (competitor intel, geopolitical precompute, moat grounded fallback).
-For the `--spotcheck` names we leave the moat fallback ON (real Gemini) and diff the
-Buffett/Ackman scores to size how much moat-grounding matters.
+`_collect_fresh` makes no Gemini call: its three grounded touchpoints (competitor
+intel, the geopolitical overlay, the moat grounded fallback) were retired with Google
+Search grounding on 2026-10-02, and with them this script's `--spotcheck` diff.
 
 Important framing: the score is a quality-FIT (0-100), the same base re-weighted +
 a bounded +/-10 style nudge. High-quality names score high for EVERYONE; the test is
@@ -25,8 +24,7 @@ exists -> this is face-validity + factor correlation + (weak) 13F membership.
 
 Usage:
     cd backend && ./venv/bin/python -m scripts.validate_persona_scoring \
-        --universe data/persona_validation_universe.json --concurrency 4 \
-        --spotcheck NVDA,TSLA,KO,AAPL,GOOGL,BN,COST,HOOD,CMG,F
+        --universe data/persona_validation_universe.json --concurrency 4
 
     # smoke test (2 names, no spend beyond FMP):
     ./venv/bin/python -m scripts.validate_persona_scoring --tickers NVDA,KO
@@ -62,23 +60,6 @@ VITALS = ["valuation", "moat", "financial_health", "profitability", "revenue",
           "insider", "macro", "forecast", "wall_street", "capital_allocation"]
 
 
-# ── Gemini neutralization ─────────────────────────────────────────────
-
-async def _noop_async(*a, **k):
-    return None
-
-
-def _patch_competitor_intel_off() -> None:
-    """Module-level: competitor intel (lazy-imported inside _collect_fresh) -> []."""
-    import app.services.competitor_intel_service as cis
-
-    class _StubIntel:
-        async def get_competitors(self, *a, **k):
-            return []
-
-    cis.get_competitor_intel_service = lambda: _StubIntel()
-
-
 def _force_fresh_snapshots() -> None:
     """Force the 4 Fundamentals snapshot services to RECOMPUTE — skip the 24h Supabase
     `snapshot_cache` (and clear the in-memory tier) — so the validation reflects the
@@ -93,17 +74,6 @@ def _force_fresh_snapshots() -> None:
         cls._check_supabase_cache = lambda self, ticker: None   # type: ignore[assignment]
         if hasattr(mod, "_cache"):
             mod._cache.clear()
-
-
-def _make_collector(*, moat_gemini: bool) -> TickerReportDataCollector:
-    """Fresh collector with the 3 Gemini touchpoints neutralized. When
-    moat_gemini=True we leave the moat grounded fallback ON (real Gemini) so the
-    spot-check can isolate moat's effect."""
-    c = TickerReportDataCollector()
-    c._precompute_geopolitical = _noop_async          # type: ignore[assignment]
-    if not moat_gemini:
-        c._precompute_moat_grounded = _noop_async      # type: ignore[assignment]
-    return c
 
 
 # ── Per-ticker scoring ────────────────────────────────────────────────
@@ -288,7 +258,6 @@ def _load_universe(path: Path) -> List[Dict[str, Any]]:
 
 
 async def main(args: argparse.Namespace) -> None:
-    _patch_competitor_intel_off()
     if not args.use_cache:
         _force_fresh_snapshots()
         print("(snapshot caches force-missed — scoring reflects current code)")
@@ -300,36 +269,13 @@ async def main(args: argparse.Namespace) -> None:
         entries = _load_universe(Path(args.universe))
     labels = {e["ticker"]: e for e in entries}
     tickers = [e["ticker"] for e in entries]
-    spot = [t.strip().upper() for t in (args.spotcheck or "").split(",") if t.strip()]
 
     print(f"Scoring {len(tickers)} tickers (deterministic, no Gemini), concurrency={args.concurrency}")
-    det = _make_collector(moat_gemini=False)
+    det = TickerReportDataCollector()
     sem = asyncio.Semaphore(args.concurrency)
     rows = await asyncio.gather(*[_bounded(sem, det, t, "det") for t in tickers])
 
-    spot_rows: List[Dict[str, Any]] = []
-    if spot:
-        print(f"\nSpot-check {len(spot)} names WITH Gemini moat grounding (sequential)")
-        sc = _make_collector(moat_gemini=True)
-        for t in spot:
-            spot_rows.append(await _bounded(asyncio.Semaphore(1), sc, t, "gem"))
-
     _analyze(rows, labels)
-
-    if spot_rows:
-        print("\n[5] MOAT SPOT-CHECK (Gemini moat vs deterministic — Buffett/Ackman delta)")
-        det_by = {r["symbol"]: r for r in rows if "error" not in r}
-        for sr in spot_rows:
-            if "error" in sr:
-                continue
-            dr = det_by.get(sr["symbol"])
-            if not dr:
-                continue
-            db, da = dr["scores"]["buffett"], dr["scores"]["ackman"]
-            gb, ga = sr["scores"]["buffett"], sr["scores"]["ackman"]
-            print(f"  {sr['symbol']:<6} buffett {db:>5}->{gb:<5} (Δ{round(gb - db, 1):>+5})   "
-                  f"ackman {da:>5}->{ga:<5} (Δ{round(ga - da, 1):>+5})   "
-                  f"moat {'Y' if sr['moat_measured'] else '-'}")
 
     # Persist raw output.
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -337,7 +283,7 @@ async def main(args: argparse.Namespace) -> None:
     out_json = _OUT_DIR / f"validate_persona_scoring_{stamp}.json"
     out_csv = _OUT_DIR / f"validate_persona_scoring_{stamp}.csv"
     out_json.write_text(json.dumps(
-        {"deterministic": rows, "spotcheck": spot_rows, "labels": labels}, indent=2, default=str))
+        {"deterministic": rows, "labels": labels}, indent=2, default=str))
 
     with out_csv.open("w", newline="") as f:
         w = csv.writer(f)
@@ -367,7 +313,6 @@ def _parse() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Validate persona scoring against real data.")
     ap.add_argument("--universe", default=str(_UNIVERSE))
     ap.add_argument("--tickers", default=None, help="CSV override; skips the universe file")
-    ap.add_argument("--spotcheck", default=None, help="CSV of names to re-run WITH Gemini moat")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--use-cache", action="store_true",
                     help="allow the 24h snapshot cache (default: force-fresh so results reflect current code)")

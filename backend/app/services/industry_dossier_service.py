@@ -165,9 +165,10 @@ class IndustryDossier:
     concentration_label: Optional[str] = None
     constituent_count: Optional[int] = None
     source_grain: str = "industry"
-    # Scope of the TAM figure: 'us' (Census/FRED US-domestic, the Phase A
-    # default) or 'global' (Gemini grounded research via industry_override_
-    # service, Phase B). Lets the report explicitly label US vs Global.
+    # Scope of the TAM figure: 'us' (Census/FRED US-domestic) — the only scope
+    # written now. 'global' marked a Gemini grounded-research override (the old
+    # Phase B, retired 2026-10-02 with Google Search grounding); such a row is
+    # never served (`_withdraw_grounded_tam`) and migration 188 clears it.
     tam_scope: str = "us"
 
     def to_db_row(self) -> Dict[str, Any]:
@@ -318,6 +319,27 @@ def _fred_is_configured() -> bool:
         return False
 
 
+GROUNDED_TAM_SCOPE = "global"
+
+
+def _withdraw_grounded_tam(d: "IndustryDossier") -> "IndustryDossier":
+    """A row whose TAM came from Gemini grounded research (`tam_scope='global'`, the
+    retired Phase B) with that TAM withdrawn: a zero placeholder, so the read path's
+    self-heal serves a live Census/FRED figure in its place. The Grounding with Google
+    Search terms forbid storing a grounded result and showing it to every user, so not
+    even its lifecycle (derived from the grounded CAGR) survives. The CONCENTRATION side
+    (universe market caps) was never grounded and is kept. Any other row is unchanged.
+    """
+    if d.tam_scope != GROUNDED_TAM_SCOPE:
+        return d
+    return dataclasses.replace(
+        d,
+        current_tam=0.0, future_tam=0.0, current_year="", future_year="",
+        cagr_5y_pct=None, lifecycle_phase="mature", source_grain="all_industry",
+        source_label="Research figure withdrawn — pending recompute", tam_scope="us",
+    )
+
+
 def _merge_live_tam(stored: "IndustryDossier", live: "IndustryDossier") -> "IndustryDossier":
     """Lay a live-computed TAM over a stored placeholder row.
 
@@ -383,8 +405,8 @@ class IndustryDossierService:
 
     @classmethod
     def reset_cache(cls) -> None:
-        # Called from recompute_all and from industry_override_service (some of
-        # it inside asyncio.to_thread) — plain dict/int ops only. `_live_inflight`
+        # Called from recompute_all (and admin routes, some inside
+        # asyncio.to_thread) — plain dict/int ops only. `_live_inflight`
         # is deliberately NOT cleared: dropping a live future would strand the
         # callers awaiting it.
         cls._cache.clear()
@@ -448,7 +470,7 @@ class IndustryDossierService:
         if not rows:
             return None, True
 
-        dossier = IndustryDossier.from_db_row(rows[0])
+        dossier = _withdraw_grounded_tam(IndustryDossier.from_db_row(rows[0]))
         # A recompute/override that reset the cache while this read was in its
         # worker thread may have written a newer row than the one we hold.
         if type(self)._generation == generation:
@@ -471,8 +493,8 @@ class IndustryDossierService:
     ) -> tuple[Optional[IndustryDossier], bool]:
         """Read path with an on-the-fly fallback. Returns (dossier, transient).
 
-        - A stored row with a real TAM (US Census/FRED or a Phase-B global
-          override) is returned untouched — no live call.
+        - A stored row with a real Census/FRED TAM is returned untouched — no live
+          call. A grounded global row reads as a placeholder (`_withdraw_grounded_tam`).
         - A stored ZERO PLACEHOLDER, or no row at all, triggers a live compute
           (the same 4-tier chain the quarterly job uses), bounded by
           `_LIVE_COMPUTE_TIMEOUT_SECONDS` and shared per (industry, sector).
@@ -482,9 +504,9 @@ class IndustryDossierService:
           guards, and a third writer on the request path would race them.
         - A failed / timed-out / unusable live compute leaves the placeholder
           (TAM 0 → the report shows "—") and is not retried for 5 min.
-        - A Supabase READ failure returns None with no live compute: a live US
-          figure computed then could replace a global research row for this
-          request and get baked into the close-aligned report caches.
+        - A Supabase READ failure returns None with no live compute: we cannot
+          tell what the stored row holds, and a guess would be baked into the
+          close-aligned report caches.
 
         `transient` is True when the answer is a momentary hole rather than the
         industry's real state — a Supabase read failure, a live compute that
@@ -676,8 +698,7 @@ class IndustryDossierService:
         # That is not hypothetical: it already happened in production. A live query on
         # 2026-08-07 found 138 of 158 rows zeroed with exactly that source label, because
         # FRED_API_KEY and CENSUS_API_KEY are set in `backend/.env` but were never set on
-        # Railway. Phase B only restores the ~21 curated industries, so the rest stay at zero
-        # until someone notices the Moat TAM row has silently vanished app-wide.
+        # Railway. Every industry stays at zero until someone notices the Moat TAM row has silently vanished app-wide.
         #
         # A quarterly job that destroys data when a credential is missing is worse than one
         # that does not run: skipping leaves the last good snapshot in place, which is stale
@@ -724,13 +745,6 @@ class IndustryDossierService:
                     industry, sector, exc, exc_info=True,
                 )
 
-        # Phase B's floor baseline: what Phase A computed THIS run, per industry —
-        # including the global rows it does not write (see the guard below).
-        phase_a_baseline: Dict[str, Dict[str, Any]] = {
-            d.industry: {"tam": d.current_tam, "source_label": d.source_label}
-            for d in dossiers
-        }
-
         # 3. Upsert in chunks. Supabase's batch upsert supports several
         # hundred rows per call; 100 is a safe ceiling.
         rows_upserted = 0
@@ -756,30 +770,14 @@ class IndustryDossierService:
                         .select("industry, current_tam_b, tam_scope, source_grain")
                     ))
                 )
+                # A GROUNDED global row (`tam_scope='global'`, the retired Phase B) is
+                # not a real figure to protect: it must be REPLACED by this run, even by
+                # a placeholder (Grounding with Google Search terms; migration 188).
+                # Counting it here would let the zero-guard below keep it for a quarter.
                 has_real_tam = {
                     r["industry"] for r in (existing.data or [])
                     if (r.get("current_tam_b") or 0) > 0
-                }
-                # Phase-B GLOBAL rows (Gemini grounded research for the CURATED
-                # industries) are not Phase A's to replace. Before 2026-10-01
-                # Phase A overwrote them with its US Census/FRED figure every run
-                # and relied on Phase B to put the global number back — so a Phase
-                # B that failed or was switched off (quota, kill switch) left
-                # Semiconductors reading all-US-manufacturing GDP until the next
-                # quarter. Phase B refreshes these rows itself; its floor is fed the
-                # FRESH Phase-A figure computed here (`phase_a_baseline`), never the
-                # row's own previous global value — that would let a global TAM only
-                # ever go up. Limited to the curated list so a de-curated industry
-                # returns to Phase A.
-                from app.services.industry_override_service import (  # noqa: PLC0415
-                    CURATED_OVERRIDE_INDUSTRIES,
-                )
-                curated = {ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES}
-                global_rows = {
-                    r["industry"] for r in (existing.data or [])
-                    if (r.get("current_tam_b") or 0) > 0
-                    and r.get("tam_scope") == "global"
-                    and r["industry"] in curated
+                    and r.get("tam_scope") != GROUNDED_TAM_SCOPE
                 }
                 # Rows that already hold an INDUSTRY-grain real figure. A run that
                 # resolves one of them to a broader source for an industry that is
@@ -790,6 +788,7 @@ class IndustryDossierService:
                     r["industry"] for r in (existing.data or [])
                     if (r.get("current_tam_b") or 0) > 0
                     and r.get("source_grain") == "industry"
+                    and r.get("tam_scope") != GROUNDED_TAM_SCOPE
                 }
             except Exception as exc:
                 # Fail SAFE: if we cannot tell which rows are good, do not risk clobbering
@@ -799,13 +798,12 @@ class IndustryDossierService:
                     "risking an overwrite of good rows", exc, exc_info=True,
                 )
                 has_real_tam = None
-                global_rows = set()
                 industry_grain_rows = set()
 
             if has_real_tam is None:
                 rows = []
             else:
-                kept, skipped, kept_global, kept_grain = [], [], [], []
+                kept, skipped, kept_grain = [], [], []
                 for row in rows:
                     ind = row["industry"]
                     would_zero = (row.get("current_tam_b") or 0) <= 0
@@ -814,9 +812,7 @@ class IndustryDossierService:
                         and ind in industry_grain_rows
                         and expects_industry_grain(ind)
                     )
-                    if ind in global_rows:
-                        kept_global.append(row)
-                    elif would_zero and ind in has_real_tam:
+                    if would_zero and ind in has_real_tam:
                         skipped.append(ind)
                     elif downgrades:
                         kept_grain.append(ind)
@@ -828,13 +824,6 @@ class IndustryDossierService:
                         "industr%s because this run fell back to a broader source (%s)",
                         len(kept_grain), "y" if len(kept_grain) == 1 else "ies",
                         ", ".join(sorted(kept_grain)),
-                    )
-                if kept_global:
-                    logger.warning(
-                        "industry_dossier: Phase A left the TAM of %d GLOBAL research row%s "
-                        "untouched (Phase B refreshes them): %s",
-                        len(kept_global), "" if len(kept_global) == 1 else "s",
-                        ", ".join(sorted(r["industry"] for r in kept_global)),
                     )
                 if skipped:
                     logger.warning(
@@ -857,69 +846,18 @@ class IndustryDossierService:
                 except Exception as exc:
                     logger.error("industry_dossier upsert failed: %s", exc, exc_info=True)
 
-            # A global row keeps its TAM, but its CONCENTRATION side (HHI, shares,
-            # label, constituent count — from the universe's market caps, not from
-            # FRED/Census) is Phase A's and still refreshes every run; Phase B
-            # never writes those columns. A per-row UPDATE with only these keys —
-            # never a mixed upsert, where PostgREST would null the TAM columns this
-            # batch leaves out. Skipped when the run measured no constituents, so an
-            # empty caps entry cannot erase a measured label.
-            for row in (kept_global if has_real_tam is not None else []):
-                if not row.get("constituent_count"):
-                    continue
-                concentration = {
-                    k: row.get(k) for k in (
-                        "sector", "hhi", "top1_share_pct", "top2_share_pct",
-                        "concentration_label", "constituent_count",
-                    )
-                }
-                try:
-                    (await sb_exec(
-                        sb.table("industry_dossier").update(concentration)
-                        .eq("industry", row["industry"])
-                    ))
-                except Exception as exc:
-                    logger.warning(
-                        "industry_dossier: concentration refresh failed for global row %r: "
-                        "%s: %s", row["industry"], type(exc).__name__, exc,
-                    )
-
         # 4. Reset the in-memory tier so the freshly-upserted rows are
         # read on the next request.
         self.reset_cache()
-
-        phase_a_elapsed = time.time() - started
-
-        # Phase B — AI-driven research overrides for the curated
-        # globally-traded industries (semis, biotech, pharma, etc.).
-        # Lazy import so test paths that don't exercise overrides
-        # (persona scoring etc.) don't pull in the Gemini integration.
-        phase_b_summary: Optional[Dict[str, Any]] = None
-        try:
-            from app.services.industry_override_service import (
-                get_industry_override_service,
-            )
-            phase_b_summary = await get_industry_override_service().refresh_all_overrides(
-                phase_a_baseline=phase_a_baseline,
-            )
-        except Exception as exc:
-            logger.error(
-                "industry_dossier: Phase B (overrides) failed: %s — Phase A values stay",
-                exc, exc_info=True,
-            )
 
         elapsed = time.time() - started
         result = {
             "status": "ok",
             "universe_size": len(universe),
             "rows_upserted": rows_upserted,
-            "phase_a_elapsed_seconds": round(phase_a_elapsed, 1),
-            "phase_b_summary": phase_b_summary,
             "elapsed_seconds": round(elapsed, 1),
         }
-        logger.info("industry_dossier recompute (Phase A + B): %s", {
-            k: v for k, v in result.items() if k != "phase_b_summary"
-        })
+        logger.info("industry_dossier recompute: %s", result)
         return result
 
     async def _compute_one(

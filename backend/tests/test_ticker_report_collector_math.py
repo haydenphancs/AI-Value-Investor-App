@@ -13,6 +13,7 @@ isolation.
 from __future__ import annotations
 
 import asyncio
+import math
 
 import pytest
 
@@ -3434,9 +3435,8 @@ def test_guidance_overlay_maintained_status_clears_attribution():
 async def test_collect_deepcopies_shared_base_across_personas(monkeypatch):
     """Concurrent same-ticker callers share ONE persona-neutral base via the
     ticker-keyed _INFLIGHT dedup. collect() must hand each persona its OWN deep
-    copy so an in-place mutation in one persona's assemble_report (e.g. the
-    grounded moat-pillar `source` / `peer_score` writes) can never bleed into a
-    concurrent persona's report — guards the shallow-`dataclasses.replace`
+    copy so an in-place mutation in one persona's assemble_report can never bleed
+    into a concurrent persona's report — guards the shallow-`dataclasses.replace`
     aliasing footgun.
     """
     from app.services.agents.ticker_report_data_collector import (
@@ -3452,7 +3452,7 @@ async def test_collect_deepcopies_shared_base_across_personas(monkeypatch):
         persona_key="warren_buffett",
         profile={"symbol": "AAPL"},
         computed={"roe": 0.5},
-        moat_grounded_pillars={"Brand": {"score": 7.0}},
+        peer_ratios={"MRVL": {"returnOnCapitalEmployed": 0.1}},
         meta={"symbol": "AAPL"},
     )
 
@@ -3475,16 +3475,16 @@ async def test_collect_deepcopies_shared_base_across_personas(monkeypatch):
 
     # Each persona owns its object graph — no aliasing to the base or each other.
     assert a is not shared_base and b is not shared_base
-    assert a.moat_grounded_pillars is not shared_base.moat_grounded_pillars
-    assert a.moat_grounded_pillars is not b.moat_grounded_pillars
-    assert a.moat_grounded_pillars["Brand"] is not b.moat_grounded_pillars["Brand"]
+    assert a.peer_ratios is not shared_base.peer_ratios
+    assert a.peer_ratios is not b.peer_ratios
+    assert a.peer_ratios["MRVL"] is not b.peer_ratios["MRVL"]
     assert a.computed is not b.computed
 
-    # Concrete proof: the exact in-place write assemble_report does on a grounded
-    # pillar must NOT leak to the shared base or the other persona.
-    a.moat_grounded_pillars["Brand"]["source"] = "grounded"
-    assert "source" not in shared_base.moat_grounded_pillars["Brand"]
-    assert "source" not in b.moat_grounded_pillars["Brand"]
+    # Concrete proof: an in-place write on a nested dict must NOT leak to the shared
+    # base or the other persona.
+    a.peer_ratios["MRVL"]["source"] = "mutated"
+    assert "source" not in shared_base.peer_ratios["MRVL"]
+    assert "source" not in b.peer_ratios["MRVL"]
 
 
 # ── Price-action event index: trading days, not calendar days ────────────────
@@ -3718,32 +3718,28 @@ def test_the_gather_loop_lands_every_result_through_the_settle_arm():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Competitor selection by research rank (TestFlight #57, AVGO, 2026-10-01)
+# Competitor selection (FMP `/stock-peers` + industry universe)
 #
-# The research ("intel") list is ordered most direct first. `_build_competitors` used to
-# keep the top 5 by THAT DAY'S market cap, so AVGO's #2 rival (QCOM) never appeared, its
-# #7 suggestion (GOOGL, a customer) always did, and MRVL / IBM swapped the last slot on
-# 2-3% price moves (which is why two AVGO reports a week apart differed).
+# One path since 2026-10-02: drop peers below max(focal × 5%, $5B), keep the 5 largest,
+# score, drop the unscorable, display highest threat score first. The research ("intel")
+# list that was selected and displayed by directness rank (TestFlight #57, AVGO) came from
+# Google Search grounding and was retired with it.
 # ═══════════════════════════════════════════════════════════════════════════
 
 from app.services.agents.ticker_report_data_collector import (  # noqa: E402
     _COMPETITOR_MAX_N,
-    _clean_competitor_segment,
-    _clean_peer_details,
-    _fetch_intel_peer_details,
-    _intel_list_is_ranked,
     _resolve_focal_roic_ttm,
 )
 
-# Grounded-research order for AVGO (2026-08-26 audit row): most direct first.
+# FMP list order for AVGO's peers — a scoring input (directness), not a display order.
 _AVGO_RANKS = {"MRVL": 1, "QCOM": 2, "INTC": 3, "NVDA": 4, "MSFT": 5, "IBM": 6, "GOOGL": 7}
 _AVGO_NAMES = {
     "MRVL": "Marvell Technology, Inc.", "QCOM": "QUALCOMM Incorporated",
     "INTC": "Intel Corp.", "NVDA": "NVIDIA Corporation", "MSFT": "Microsoft Corporation",
     "IBM": "International Business Machines Corporation", "GOOGL": "Alphabet Inc.",
 }
-# Caps shaped like the two production reports: the old path picked GOOGL every time
-# and IBM (09-17) vs MRVL (09-23) on a ~2% move; QCOM never made the market-cap top 5.
+# Caps shaped like two production reports a week apart: IBM (09-17) vs MRVL (09-23) take
+# the fifth slot on a ~2% move; QCOM never makes the market-cap top 5.
 _CAPS_0917 = {"NVDA": 4.3e12, "MSFT": 3.7e12, "GOOGL": 3.0e12, "INTC": 1.2e11,
               "IBM": 1.01e11, "MRVL": 0.99e11, "QCOM": 0.97e11}
 _CAPS_0923 = {**_CAPS_0917, "IBM": 0.99e11, "MRVL": 1.02e11}
@@ -3751,14 +3747,10 @@ _CAPS_0923 = {**_CAPS_0917, "IBM": 0.99e11, "MRVL": 1.02e11}
 _AVGO_FOCAL_ROIC = 0.20
 _AVGO_PEER_ROIC = {"MRVL": 0.13, "QCOM": 0.25, "INTC": -0.02, "NVDA": 0.80,
                    "MSFT": 0.30, "IBM": 0.10, "GOOGL": 0.30}
-_AVGO_SEGMENTS = {
-    "MRVL": {"segment": "Custom AI accelerators & data-center networking"},
-    "QCOM": {"segment": "Wireless RF front-end chips"},
-}
 
 
-def _avgo_build(caps, *, peer_source="intel", ranks=None, ratios=None, details=None,
-                moats=None, focal_profile=None, focal_roic_ttm=_AVGO_FOCAL_ROIC):
+def _avgo_build(caps, *, ranks=None, ratios=None, moats=None, focal_profile=None,
+                focal_roic_ttm=_AVGO_FOCAL_ROIC):
     ranks = dict(_AVGO_RANKS if ranks is None else ranks)
     profiles = [
         {"symbol": sym, "companyName": _AVGO_NAMES.get(sym, sym), "mktCap": caps[sym]}
@@ -3773,91 +3765,75 @@ def _avgo_build(caps, *, peer_source="intel", ranks=None, ratios=None, details=N
         peer_profiles=profiles, peer_ratios=ratios,
         peer_moats={"NVDA": 8.5} if moats is None else moats,
         peer_ranks=ranks, n_total_peers=len(ranks),
-        peer_source=peer_source,
-        peer_details=_AVGO_SEGMENTS if details is None else details,
         focal_roic_ttm=focal_roic_ttm,
     )
 
 
-def test_old_market_cap_selection_is_what_dropped_qcom_and_kept_googl():
-    """The heuristic path still selects by market cap (unchanged) — this pins the bug's
-    mechanism so the intel test below is a real contrast, not a tautology."""
-    old_0917 = [c["ticker"] for c in _avgo_build(_CAPS_0917, peer_source="heuristic")]
-    old_0923 = [c["ticker"] for c in _avgo_build(_CAPS_0923, peer_source="heuristic")]
-    assert "QCOM" not in old_0917 and "QCOM" not in old_0923
-    assert "GOOGL" in old_0917 and "GOOGL" in old_0923
-    assert ("IBM" in old_0917) and ("MRVL" not in old_0917)
-    assert ("MRVL" in old_0923) and ("IBM" not in old_0923)
+def test_selection_is_the_five_largest_above_the_floor():
+    """Market cap picks the rows, so a ~2% move can swap the fifth one (IBM ↔ MRVL)."""
+    rows_0917 = {c["ticker"] for c in _avgo_build(_CAPS_0917)}
+    rows_0923 = {c["ticker"] for c in _avgo_build(_CAPS_0923)}
+    assert rows_0917 == {"NVDA", "MSFT", "GOOGL", "INTC", "IBM"}
+    assert rows_0923 == {"NVDA", "MSFT", "GOOGL", "INTC", "MRVL"}
+    assert len(rows_0917) == len(rows_0923) == _COMPETITOR_MAX_N
 
 
 @pytest.mark.parametrize("caps", [_CAPS_0917, _CAPS_0923], ids=["09-17", "09-23"])
-def test_intel_path_keeps_the_five_most_direct_in_rank_order(caps):
+def test_rows_display_highest_threat_first_and_never_carry_a_segment(caps):
+    """The list order is not a most-direct-first ranking, so the strongest threat leads;
+    a "competes in" segment came only from the retired research list."""
     rows = _avgo_build(caps)
-    assert [c["ticker"] for c in rows] == ["MRVL", "QCOM", "INTC", "NVDA", "MSFT"]
-    assert "GOOGL" not in {c["ticker"] for c in rows}      # rank 7, a customer
-    assert "IBM" not in {c["ticker"] for c in rows}        # rank 6
-    by = {c["ticker"]: c for c in rows}
-    assert by["MRVL"]["segment"] == "Custom AI accelerators & data-center networking"
-    assert by["QCOM"]["segment"] == "Wireless RF front-end chips"
-    assert "segment" not in by["NVDA"]                      # unknown → key omitted
+    scores = [c["competitive_score"] for c in rows]
+    assert scores == sorted(scores, reverse=True)
+    assert rows[0]["ticker"] == "NVDA"
+    assert all("segment" not in c for c in rows)
     assert all(c["score_basis"] == "relative" for c in rows)
 
 
-def test_intel_list_is_identical_across_the_two_price_days():
-    """The rows (and their scores) no longer move with a 2-3% price change."""
-    assert _avgo_build(_CAPS_0917) == _avgo_build(_CAPS_0923)
-
-
-def test_avgo_shaped_scoring_keeps_nvda_the_biggest_threat_but_not_first():
+def test_avgo_shaped_scoring():
     """Rank 1 at −7pp ROIC (neutral moat) vs rank 4 at +60pp with moat 8.5:
     MRVL = (0.6×10 + 0.4×2.667)×1.0 = 7.07 → 7.1 High;
-    NVDA = (0.6×5.714 + 0.4×10)×1.21 = 8.99 → 9.0 High (the score the tester saw).
-    Scores are unchanged by the selection fix; only the ORDER is directness now."""
-    rows = _avgo_build(_CAPS_0917)
-    by = {c["ticker"]: c for c in rows}
+    NVDA = (0.6×5.714 + 0.4×10)×1.21 = 8.99 → 9.0 High."""
+    by = {c["ticker"]: c for c in _avgo_build(_CAPS_0923)}
     assert by["MRVL"]["competitive_score"] == pytest.approx(7.1)
     assert by["NVDA"]["competitive_score"] == pytest.approx(9.0)
     assert by["MRVL"]["threat_level"] == by["NVDA"]["threat_level"] == "high"
-    assert rows[0]["ticker"] == "MRVL"
-    assert max(rows, key=lambda c: c["competitive_score"])["ticker"] == "NVDA"
 
 
-def test_an_unscorable_rank_two_peer_is_replaced_by_rank_six():
-    """Score all, drop the unscorable, THEN keep 5 — a dropped QCOM is backfilled by IBM
-    instead of leaving four rows."""
+def test_an_unscorable_peer_is_dropped_not_backfilled():
+    """The cap is applied BEFORE the unscorable drop: fewer confident rows, never a
+    sixth-largest peer pulled in and never a fabricated score."""
     ratios = {s: {"returnOnCapitalEmployed": r} for s, r in _AVGO_PEER_ROIC.items()}
-    ratios["QCOM"] = {}                                   # no ROIC, no margins at all
+    ratios["NVDA"] = {}                                   # no ROIC, no margins at all
     rows = _avgo_build(_CAPS_0917, ratios=ratios)
-    assert [c["ticker"] for c in rows] == ["MRVL", "INTC", "NVDA", "MSFT", "IBM"]
-    assert len(rows) == _COMPETITOR_MAX_N
+    assert [c["ticker"] for c in rows if c["ticker"] == "NVDA"] == []
+    assert {c["ticker"] for c in rows} == {"MSFT", "GOOGL", "INTC", "IBM"}
+    assert all(math.isfinite(c["competitive_score"]) for c in rows)
 
 
-def test_a_small_cap_focal_keeps_its_small_intel_peers_but_the_heuristic_floor_drops_them():
+def test_a_small_cap_focals_sub_floor_peers_are_dropped():
+    """The $5B absolute floor applies whatever the focal's size."""
     peers = {"AAA": 1.2e9, "BBB": 1.8e9}
     ranks = {"AAA": 1, "BBB": 2}
     ratios = {"AAA": {"returnOnCapitalEmployed": 0.10}, "BBB": {"returnOnCapitalEmployed": 0.12}}
-    focal = {"mktCap": 3.0e9}
-    intel = _avgo_build(peers, ranks=ranks, ratios=ratios, details={}, moats={},
-                        focal_profile=focal, focal_roic_ttm=0.10)
-    assert [c["ticker"] for c in intel] == ["AAA", "BBB"]
-    heuristic = _avgo_build(peers, peer_source="heuristic", ranks=ranks, ratios=ratios,
-                            details={}, moats={}, focal_profile=focal, focal_roic_ttm=0.10)
-    assert heuristic == []                                # $5B floor (unchanged)
+    rows = _avgo_build(peers, ranks=ranks, ratios=ratios, moats={},
+                       focal_profile={"mktCap": 3.0e9}, focal_roic_ttm=0.10)
+    assert rows == []
 
 
-@pytest.mark.parametrize("bad_cap", [0, None, -5e9, float("nan"), "n/a", True])
-def test_an_intel_peer_with_no_live_market_cap_is_dropped(bad_cap):
-    caps = {"AAA": 2e9, "BBB": bad_cap}
+@pytest.mark.parametrize("bad_cap", [0, None, -5e9, float("nan"), float("inf"), "n/a", True])
+def test_a_peer_with_no_usable_market_cap_is_dropped(bad_cap):
+    caps = {"AAA": 6e9, "BBB": bad_cap}
     ranks = {"AAA": 1, "BBB": 2}
     ratios = {"AAA": {"returnOnCapitalEmployed": 0.1}, "BBB": {"returnOnCapitalEmployed": 0.1}}
-    rows = _avgo_build(caps, ranks=ranks, ratios=ratios, details={}, moats={},
-                       focal_roic_ttm=0.1)
+    rows = _avgo_build(caps, ranks=ranks, ratios=ratios, moats={},
+                       focal_profile={"mktCap": 3.0e9}, focal_roic_ttm=0.1)
     assert [c["ticker"] for c in rows] == ["AAA"]
 
 
-def test_intel_path_tolerates_malformed_profiles_and_duplicates():
+def test_selection_tolerates_malformed_profiles_and_duplicates():
     profiles = [
-        "not-a-dict", None, {"symbol": None, "mktCap": 1e9}, {"symbol": "avgo", "mktCap": 1e9},
+        "not-a-dict", None, {"symbol": None, "mktCap": 1e11}, {"symbol": "avgo", "mktCap": 1e11},
         {"symbol": " mrvl ", "companyName": "Marvell", "mktCap": 1e11},
         {"symbol": "MRVL", "companyName": "Marvell (dup)", "mktCap": 1e11},
         {"symbol": "QCOM", "companyName": 42, "mktCap": 1e11},
@@ -3866,28 +3842,15 @@ def test_intel_path_tolerates_malformed_profiles_and_duplicates():
         my_ticker="AVGO", my_profile={"mktCap": 1.6e12}, my_ratios=[], my_revenue_growth=None,
         peer_profiles=profiles,
         peer_ratios={"MRVL": {"returnOnCapitalEmployed": 0.1}, "QCOM": "garbage"},
-        peer_ranks={"MRVL": 1, "QCOM": 2}, n_total_peers=2, peer_source="intel",
+        peer_ranks={"MRVL": 1, "QCOM": 2}, n_total_peers=2,
         focal_roic_ttm=0.1,
     )
     # QCOM's ratios row is not a dict → nothing to score → dropped; MRVL once, focal never.
     assert [(c["ticker"], c["name"]) for c in rows] == [("MRVL", "Marvell")]
 
 
-def test_an_unranked_intel_peer_sorts_after_every_ranked_one():
-    caps = {"ZZZ": 5e10, "AAA": 5e10, "BBB": 5e10}
-    rows = _build_competitors(
-        my_ticker="FOC", my_profile={"mktCap": 1e11}, my_ratios=[], my_revenue_growth=None,
-        peer_profiles=[{"symbol": s, "mktCap": c} for s, c in caps.items()],
-        peer_ratios={s: {"returnOnCapitalEmployed": 0.1} for s in caps},
-        peer_ranks={"AAA": 1, "BBB": 2}, n_total_peers=3, peer_source="intel",
-        focal_roic_ttm=0.1,
-    )
-    assert [c["ticker"] for c in rows] == ["AAA", "BBB", "ZZZ"]
-
-
-def test_heuristic_path_is_unchanged_floor_market_cap_cap_and_score_order():
-    """Even with ranks and details passed, the heuristic path keeps today's selection
-    (floor, then the 5 largest) and display (highest score first)."""
+def test_selection_floor_market_cap_cap_and_score_order():
+    """Floor, then the 5 largest, displayed highest score first — whatever the ranks say."""
     caps = {f"P{i}": (10 - i) * 5e10 for i in range(7)}      # P0 largest … P6 smallest
     caps["TINY"] = 1e8                                        # below the $5B floor
     roic = {f"P{i}": 0.05 + 0.03 * i for i in range(7)}       # smaller cap → higher ROIC
@@ -3896,13 +3859,30 @@ def test_heuristic_path_is_unchanged_floor_market_cap_cap_and_score_order():
         peer_profiles=[{"symbol": s, "mktCap": c} for s, c in caps.items()],
         peer_ratios={s: {"returnOnCapitalEmployed": r} for s, r in roic.items()},
         peer_ranks={s: i + 1 for i, s in enumerate(caps)}, n_total_peers=len(caps),
-        peer_details={"P0": {"segment": "Cloud"}},
         focal_roic_ttm=0.10,
     )
     assert {c["ticker"] for c in rows} == {"P0", "P1", "P2", "P3", "P4"}
     scores = [c["competitive_score"] for c in rows]
     assert scores == sorted(scores, reverse=True)
     assert all(c["score_basis"] == "relative" for c in rows)
+
+
+def test_the_research_peer_path_is_gone():
+    """The grounded research list ("intel" / "intel_stale", its rank-order display and its
+    "competes in" segments) was retired 2026-10-02. Pinned so it cannot come back as a
+    dormant branch: a caller passing the old arguments fails loudly."""
+    import inspect
+
+    from app.services.agents import ticker_report_data_collector as C
+
+    params = set(inspect.signature(C._build_competitors).parameters)
+    assert not params & {"peer_source", "peer_details"}
+    for name in ("_INTEL_PEER_SOURCES", "_clean_competitor_segment",
+                 "_COMPETITOR_SEGMENT_MAX_CHARS"):
+        assert not hasattr(C, name), name
+    with pytest.raises(TypeError):
+        _build_competitors(my_ticker="X", my_profile={}, my_ratios=[], my_revenue_growth=None,
+                           peer_profiles=[], peer_source="intel")
 
 
 def test_legacy_peer_ratio_key_still_scores_on_the_relative_path():
@@ -3912,7 +3892,7 @@ def test_legacy_peer_ratio_key_still_scores_on_the_relative_path():
         my_ticker="FOC", my_profile={}, my_ratios=[], my_revenue_growth=None,
         peer_profiles=[{"symbol": "PEER", "mktCap": 1e11}],
         peer_ratios={"PEER": {"returnOnCapitalEmployed": 0.15}},
-        focal_roic_ttm=0.15, peer_source="intel", peer_ranks={"PEER": 1}, n_total_peers=1,
+        focal_roic_ttm=0.15, peer_ranks={"PEER": 1}, n_total_peers=1,
     )
     assert rows[0]["score_basis"] == "relative"
     # rank 1 of 1 → directness 10, equal ROIC → financial 5 → 8.0
@@ -3984,55 +3964,7 @@ def test_resolve_focal_roic_ttm_chain():
         assert _resolve_focal_roic_ttm(empty, None) is None
 
 
-def test_clean_competitor_segment():
-    assert _clean_competitor_segment("  Custom   AI\taccelerators\n") == "Custom AI accelerators"
-    assert _clean_competitor_segment("Data\x00center\x1b[31m chips") == "Data center [31m chips"
-    long = "word " * 400                                   # ~2 KB
-    out = _clean_competitor_segment(long)
-    assert out and len(out) <= 48 and not out.endswith(" ")
-    assert _clean_competitor_segment("x" * 60) == "x" * 48  # no space → hard cut
-    for bad in (None, 5, ["a"], {"a": 1}, "", "   ", "\x00\x01"):
-        assert _clean_competitor_segment(bad) is None
-
-
-def test_clean_peer_details_keeps_only_known_peers_and_usable_segments():
-    raw = {
-        "mrvl": {"segment": "Networking"}, "QCOM": {"segment": ""}, "NVDA": "GPUs",
-        5: {"segment": "x"}, "GOOGL": {"segment": "Search"}, "INTC": {"segment": None},
-    }
-    assert _clean_peer_details(raw, ["MRVL", "QCOM", "NVDA", "INTC"]) == {
-        "MRVL": {"segment": "Networking"},
-    }
-    assert _clean_peer_details(None, ["MRVL"]) == {}
-    assert _clean_peer_details(["MRVL"], ["MRVL"]) == {}
-
-
-def test_fetch_intel_peer_details_never_raises():
-    class _NoMethod:
-        pass
-
-    class _Raises:
-        async def get_competitor_details(self, ticker):
-            raise RuntimeError("db down")
-
-    class _Async:
-        async def get_competitor_details(self, ticker):
-            assert ticker == "AVGO"
-            return {"MRVL": {"segment": "Networking"}, "XXX": {"segment": "Other"}}
-
-    class _Sync:
-        def get_competitor_details(self, ticker):
-            return {"MRVL": {"segment": "Networking"}}
-
-    run = lambda svc: asyncio.run(_fetch_intel_peer_details(svc, "AVGO", ["MRVL"]))
-    assert run(_NoMethod()) == {}
-    assert run(None) == {}
-    assert run(_Raises()) == {}
-    assert run(_Async()) == {"MRVL": {"segment": "Networking"}}
-    assert run(_Sync()) == {"MRVL": {"segment": "Networking"}}
-
-
-# ── `_fetch_dependent` end to end: peer source, details, the focal TTM call ──
+# ── `_fetch_dependent` end to end: the peers and the focal TTM call ──
 
 
 class _PeerFmp:
@@ -4064,8 +3996,7 @@ class _PeerFmp:
         return [{"revenueGrowth": 0.1}]
 
 
-def _stub_pass_two(monkeypatch, intel):
-    import app.services.competitor_intel_service as cis
+def _stub_pass_two(monkeypatch):
     import app.services.ip_intel_service as ips
     from app.services.agents import ticker_report_data_collector as C
 
@@ -4073,37 +4004,26 @@ def _stub_pass_two(monkeypatch, intel):
         async def get_ip_intel(self, ticker, profile):
             return None
 
-    async def _noop(out):
-        return None
-
     async def _no_history(industry, sector):
         return {}
 
-    monkeypatch.setattr(cis, "get_competitor_intel_service", lambda: intel)
     monkeypatch.setattr(ips, "get_ip_intel_service", lambda: _NoIp())
     coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
-    monkeypatch.setattr(coll, "_precompute_moat_grounded", _noop)
     monkeypatch.setattr(coll, "_fetch_sector_benchmark_history", _no_history)
     return coll, C
 
 
-def test_pass_two_marks_an_intel_list_and_fetches_the_focal_ttm_once(monkeypatch):
-    class _Intel:
-        async def get_competitors(self, ticker, profile):
-            return ["mrvl", "MRVL", 7, "", None, " QCOM "]
-
-        async def get_competitor_details(self, ticker):
-            return {"MRVL": {"segment": "Networking"}, "QCOM": {"segment": 3}}
-
-    coll, C = _stub_pass_two(monkeypatch, _Intel())
+def test_pass_two_scores_the_fmp_peers_and_fetches_the_focal_ttm_once(monkeypatch):
+    """The grounded research list is retired (2026-10-02): pass 2 scores FMP's peers in
+    list order and still reads the focal's TTM ROIC exactly once."""
+    coll, C = _stub_pass_two(monkeypatch)
     coll.fmp = _PeerFmp(km_ttm=[{"returnOnInvestedCapitalTTM": 0.42}])
     out = C.CollectedTickerData(ticker="AVGO", persona_key="warren_buffett", profile={})
+    out.peer_tickers = ["MRVL", "QCOM"]
     out.ratios_ttm = [{"returnOnCapitalEmployedTTM": 0.11}]
     asyncio.run(coll._fetch_dependent(out))
 
-    assert out.peer_source == "intel"
-    assert out.peer_ranks == {"MRVL": 1, "QCOM": 2}          # deduped, junk dropped
-    assert out.peer_details == {"MRVL": {"segment": "Networking"}}
+    assert out.peer_ranks == {"MRVL": 1, "QCOM": 2}
     assert out.focal_roic_ttm == 0.42
     km_calls = [c for c in coll.fmp.calls if c[0] == "km_ttm"]
     assert km_calls.count(("km_ttm", "AVGO")) == 1
@@ -4112,149 +4032,34 @@ def test_pass_two_marks_an_intel_list_and_fetches_the_focal_ttm_once(monkeypatch
 
 
 def test_pass_two_focal_ttm_failure_falls_back_to_ratios_ttm(monkeypatch):
-    class _Intel:
-        async def get_competitors(self, ticker, profile):
-            return ["MRVL"]                                  # no details method at all
-
-    coll, C = _stub_pass_two(monkeypatch, _Intel())
+    coll, C = _stub_pass_two(monkeypatch)
     coll.fmp = _PeerFmp(km_raises=True)
     out = C.CollectedTickerData(ticker="AVGO", persona_key="warren_buffett", profile={})
+    out.peer_tickers = ["MRVL"]
     out.ratios_ttm = [{"returnOnCapitalEmployedTTM": 0.11}]
     asyncio.run(coll._fetch_dependent(out))
-    assert out.peer_source == "intel" and out.peer_details == {}
+    assert out.peer_ranks == {"MRVL": 1}
     assert out.focal_roic_ttm == 0.11
 
 
-def test_pass_two_without_peers_stays_heuristic_and_skips_the_focal_call(monkeypatch):
-    class _Intel:
-        async def get_competitors(self, ticker, profile):
-            return []
-
-    coll, C = _stub_pass_two(monkeypatch, _Intel())
+def test_pass_two_without_peers_skips_the_focal_call(monkeypatch):
+    coll, C = _stub_pass_two(monkeypatch)
     coll.fmp = _PeerFmp()
     out = C.CollectedTickerData(ticker="AVGO", persona_key="warren_buffett", profile={})
     asyncio.run(coll._fetch_dependent(out))
-    assert out.peer_source == "heuristic" and out.peer_ranks == {}
+    assert out.peer_ranks == {}
     assert out.focal_roic_ttm is None
     assert coll.fmp.calls == []
 
 
-@pytest.mark.parametrize("answer", ["raise", "MRVL", {"MRVL": 1}, [None, "", 3]])
-def test_pass_two_intel_failure_falls_back_to_heuristic(monkeypatch, answer):
-    """A raise, a bare string (would iterate into letters), a dict or an all-junk list
-    is "no research list" — the heuristic path runs and the marker stays "heuristic"."""
-    class _Intel:
-        async def get_competitors(self, ticker, profile):
-            if answer == "raise":
-                raise RuntimeError("quota")
-            return answer
+def test_the_collected_data_carries_no_grounded_fields():
+    """Pinned so a grounded field cannot come back by accident: the ones the retired
+    Google Search grounding filled (2026-10-02), including the research peer list's
+    source marker and per-peer "competes in" details."""
+    import dataclasses
+    from app.services.agents.ticker_report_data_collector import CollectedTickerData
 
-    coll, C = _stub_pass_two(monkeypatch, _Intel())
-    coll.fmp = _PeerFmp()
-    out = C.CollectedTickerData(ticker="AVGO", persona_key="warren_buffett", profile={})
-    out.peer_tickers = ["MRVL"]
-    asyncio.run(coll._fetch_dependent(out))
-    assert out.peer_source == "heuristic" and out.peer_details == {}
-    assert out.peer_ranks == {"MRVL": 1}
+    names = {f.name for f in dataclasses.fields(CollectedTickerData)}
+    assert not names & {"price_catalyst_grounded", "geopolitical_factors", "moat_grounded_pillars",
+                        "peer_source", "peer_details"}
 
-
-def test_the_real_intel_service_exposes_the_details_method_the_collector_looks_up():
-    """The collector reaches it through `getattr(..., None)` (so test stubs without it
-    still work) — which also means a rename would silently drop every segment. Pin it."""
-    import inspect
-    from app.services.competitor_intel_service import CompetitorIntelService
-
-    fn = getattr(CompetitorIntelService, "get_competitor_details", None)
-    assert fn is not None and inspect.iscoroutinefunction(fn)
-    assert list(inspect.signature(fn).parameters) == ["self", "ticker"]
-
-
-# ── A STALE research list (older prompt, served after a failed re-extraction) ──
-#
-# Selected by research rank like a current list, but its order was never requested
-# as most-direct-first, so it must DISPLAY highest threat first and the report must
-# never be marked competitor_order="direct".
-
-
-@pytest.mark.parametrize("caps", [_CAPS_0917, _CAPS_0923], ids=["09-17", "09-23"])
-def test_a_stale_intel_list_selects_by_rank_but_displays_by_threat(caps):
-    current = _avgo_build(caps, peer_source="intel")
-    stale = _avgo_build(caps, peer_source="intel_stale")
-    # Same membership (rank selection, no size floor) — only the display order differs.
-    assert {c["ticker"] for c in stale} == {c["ticker"] for c in current}
-    scores = [c["competitive_score"] for c in stale]
-    assert scores == sorted(scores, reverse=True)
-    assert stale[0]["ticker"] == "NVDA"
-    assert current[0]["ticker"] == "MRVL"
-
-
-def test_intel_list_is_ranked_helper_trusts_only_an_explicit_true():
-    class _NoMethod:
-        pass
-
-    class _Ranked:
-        async def is_ranked_list(self, ticker):
-            return True
-
-    class _Unranked:
-        async def is_ranked_list(self, ticker):
-            return False
-
-    class _Truthy:
-        def is_ranked_list(self, ticker):
-            return "yes"           # not the bool True → not trusted
-
-    class _Raises:
-        async def is_ranked_list(self, ticker):
-            raise RuntimeError("db down")
-
-    run = lambda svc: asyncio.run(_intel_list_is_ranked(svc, "AVGO"))
-    assert run(_NoMethod()) is True          # stubs without the method keep working
-    assert run(_Ranked()) is True
-    assert run(_Unranked()) is False
-    assert run(_Truthy()) is False
-    assert run(_Raises()) is False
-
-
-def test_pass_two_marks_a_stale_research_list_intel_stale(monkeypatch):
-    class _Intel:
-        async def get_competitors(self, ticker, profile):
-            return ["NVDA", "MRVL"]
-
-        async def get_competitor_details(self, ticker):
-            return {}
-
-        async def is_ranked_list(self, ticker):
-            return False
-
-    coll, C = _stub_pass_two(monkeypatch, _Intel())
-    coll.fmp = _PeerFmp(km_ttm=[{"returnOnInvestedCapitalTTM": 0.2}])
-    out = C.CollectedTickerData(ticker="AVGO", persona_key="warren_buffett", profile={})
-    asyncio.run(coll._fetch_dependent(out))
-    assert out.peer_source == "intel_stale"
-    assert out.peer_ranks == {"NVDA": 1, "MRVL": 2}
-
-
-def test_the_real_intel_service_exposes_the_ranked_check_the_collector_looks_up():
-    import inspect
-    from app.services.competitor_intel_service import CompetitorIntelService
-
-    fn = getattr(CompetitorIntelService, "is_ranked_list", None)
-    assert fn is not None and inspect.iscoroutinefunction(fn)
-    assert list(inspect.signature(fn).parameters) == ["self", "ticker"]
-
-
-def test_collector_segment_cap_mirrors_the_intel_service_cap():
-    """Review collector/F4: `_COMPETITOR_SEGMENT_MAX_CHARS` is a hand-copied mirror of
-    `competitor_intel_service.SEGMENT_MAX_CHARS` (the collector re-checks the label so a
-    bad cache row cannot widen a row). If the service cap moved alone, the collector would
-    silently re-cut every longer label at a word boundary, with no ellipsis, and the report,
-    PDF and iOS would show a shorter label than the one the service cleaned."""
-    from app.services import competitor_intel_service as cis
-    from app.services.agents import ticker_report_data_collector as trdc
-
-    assert trdc._COMPETITOR_SEGMENT_MAX_CHARS == cis.SEGMENT_MAX_CHARS
-    # A label exactly at the service cap passes the collector untouched.
-    at_cap = ("Custom AI accelerators and networking silicon " + "x" * 48)[: cis.SEGMENT_MAX_CHARS]
-    assert len(at_cap) == cis.SEGMENT_MAX_CHARS
-    assert trdc._clean_competitor_segment(at_cap) == at_cap

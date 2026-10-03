@@ -290,3 +290,235 @@ def test_the_prompt_forbids_links_and_the_ios_renderer_strips_them():
     assert "Self.stripLinks(&parsed)" in body
     fn = body[body.index("static func stripLinks("):]
     assert re.search(r"for run in text\.runs where run\.link != nil \{\s*text\[run\.range\]\.link = nil", fn), fn
+
+
+# ── Persona drift (monitor-only, 2026-10-02) ──────────────────────────────────
+#
+# The report chat answers in a method MODE ("Cay AI · Growth Hunter Agent"). Two drifts are
+# monitored: speaking AS a real investor, and claiming holdings or trades of its own. Both
+# tables matter equally — `theme_insights_service.find_banned_language` turns every
+# `scan_answer` tag into a rejected theme summary, so a false positive costs real output.
+
+_IMPERSONATION_HITS = [
+    "I'm Warren Buffett, and here is how I see Apple.",
+    "I am Peter Lynch.",
+    "As Cathie Wood, I see a huge opportunity here.",
+    "Michael Burry here — the balance sheet worries me.",
+    "Michael Burry here",
+    "Peter Lynch here.",
+    "Speaking as Bill Ackman, the catalyst is obvious.",
+    "My name is Peter Lynch and this is a fast grower.",
+    "I’m Buffett, and I like moats.",              # curly apostrophe
+    "As Buffett, I'd wait for a better price.",
+    "I'm Mr. Buffett.",
+    "I am Charlie Munger.",
+    "Writing as Lynch: this is a stalwart.",
+    "As Ray Dalio, my view is cautious.",
+    # The comma/whitespace joint after the name, every spelling (fix pass 2026-10-02).
+    "As Buffett,I'd wait.",
+    "As Buffett , I'd wait.",
+    "As   Buffett    I think so.",
+]
+
+_IMPERSONATION_CLEAN = [
+    "GARP was popularized by Peter Lynch's books.",
+    "As Peter Lynch described, the story matters.",
+    "No — I'm not Peter Lynch; I'm Cay AI, an AI by Caydex.",
+    "Berkshire Hathaway, led by Warren Buffett, owns Apple shares.",
+    "Merrill Lynch here…",
+    "Wood here is a commodity input.",
+    "Peter Lynch here argues that a simple story is evidence.",   # a Book chat's natural prose
+    "The method described by Peter Lynch here.",
+    "Peter Lynch speaking at a conference in 1990 said much the same.",
+    "Investors such as Peter Lynch, I believe, popularized the PEG ratio.",
+    "I'm Cay AI by Caydex, working as the Growth Hunter Agent in this chat — an AI applying "
+    "the growth-at-a-reasonable-price method this report used.",
+    "No — I'm Cay AI, an AI by Caydex. Growth Hunter is a Caydex analysis style, not a real "
+    "investor, and Caydex is not affiliated with or endorsed by any investor.",
+    "Lynch Industries reported higher sales.",
+    # A possessive or compound is third-person; a comma after "here" is Book-chat prose.
+    "I am Peter Lynch's biggest fan.",
+    "I'm Lynch-like in my approach.",
+    "I’m Buffett’s student only in the sense that I read his letters.",   # curly
+    "Peter Lynch here, in One Up On Wall Street, argues that stories matter.",
+]
+
+_HOLDINGS_HITS = [
+    "I own shares of Apple.",
+    "In my portfolio, this is a core position.",
+    "I bought more last week.",
+    "I've sold half of it.",
+    "My holdings include AAPL and MSFT.",
+    "I trimmed my stake in Apple.",
+    "I also own Microsoft.",
+    "I personally own it.",
+    "I recently bought shares.",
+    "I hold Apple through the cycle.",
+    "I have held it for years.",
+    "When I bought it, it was cheap.",
+    "My track record with growers is strong.",
+    "I’ve owned it since 2010.",
+    "I own it.",
+    # A skip word in an EARLIER sentence never excuses the next one.
+    "The question is what to do. I bought more.",
+    "What should we do? I sold it.",
+    "Should I? I own it.",
+    "If the margin holds; I hold it anyway.",
+    # "hold on to" / "held onto" are holdings, not the "hold off" idiom.
+    "I hold on to my shares.",
+    "I held onto Apple.",
+]
+
+_HOLDINGS_CLEAN = [
+    "Insiders own 0.1% of the shares.",
+    "Some funds bought shares last quarter.",
+    "If you own the stock, watch the margins.",
+    "Berkshire owns 5% of the company.",
+    "If I own the stock, what changes?",
+    "What if I sold now?",
+    "Phase I sold out within a week.",
+    "Should I hold?",
+    "Do I own enough of it?",
+    "As Cay AI, I hold no positions and own nothing.",
+    "I don't own any shares.",
+    "I have no portfolio of my own.",
+    "Shares held their gains into the close.",
+    "Whether I sold or not is irrelevant to the thesis.",
+    "I never owned it.",
+    # Worked examples and hypotheticals.
+    "Suppose I bought 100 shares at $10, then the price doubled.",
+    "Imagine I own a lemonade stand.",
+    "Let's say I sold half at the top.",
+    "Assume I bought at the peak.",
+    "Hypothetically, I sold everything.",
+    # Numbered names, not a pronoun.
+    "Vision Fund I sold its stake in 2021.",
+    "Model I sold well.",
+    "Act I held the audience.",
+    # Idioms.
+    "I hold off on a verdict until the filing.",
+    "I still hold the view that margins matter.",
+]
+
+
+@pytest.mark.parametrize("answer", _IMPERSONATION_HITS)
+def test_first_person_impersonation_is_flagged(answer):
+    assert "persona_impersonation" in scan_answer(answer), answer
+
+
+@pytest.mark.parametrize("answer", _IMPERSONATION_CLEAN)
+def test_third_person_mentions_are_not_flagged(answer):
+    assert "persona_impersonation" not in scan_answer(answer), answer
+
+
+@pytest.mark.parametrize("answer", _HOLDINGS_HITS)
+def test_first_person_holdings_are_flagged(answer):
+    assert "first_person_holdings" in scan_answer(answer), answer
+
+
+@pytest.mark.parametrize("answer", _HOLDINGS_CLEAN)
+def test_ordinary_holdings_language_is_not_flagged(answer):
+    assert "first_person_holdings" not in scan_answer(answer), answer
+
+
+@pytest.mark.parametrize("answer", _IMPERSONATION_HITS + _HOLDINGS_HITS)
+def test_persona_tags_are_monitor_only(answer):
+    """Never redacted: rewriting a first-person sentence mid-answer would corrupt it."""
+    redacted, tags = enforce_answer(answer)
+    assert redacted == answer
+    assert not {"persona_impersonation", "first_person_holdings"} & set(tags)
+
+
+def test_the_persona_tags_add_nothing_to_an_existing_tag():
+    """The new patterns run on their own folded copy; an answer the old tags flagged is
+    flagged exactly as before, with the persona tags only ever appended."""
+    assert scan_answer("I'm an AI") == ["identity_leak"]
+    assert scan_answer("You should buy it.") == ["advice_directive"]
+    assert scan_answer("You should buy it. I own it.") == ["advice_directive", "first_person_holdings"]
+
+
+def test_a_long_whitespace_run_after_a_name_stays_linear():
+    """`\\s*,?\\s+` let a whitespace run split many ways (2 s at 20k spaces, quadratic);
+    scan_answer runs synchronously on the event loop, so the joint must match one way only."""
+    import time
+
+    for text in ("as buffett" + " " * 50_000 + "x",
+                 "as buffett" + " " * 25_000 + "," + " " * 25_000 + "x",
+                 "peter lynch" + " " * 50_000 + "here" + " " * 50_000 + "x",
+                 "i am" + " " * 50_000 + "x"):
+        started = time.perf_counter()
+        scan_answer(text)
+        assert time.perf_counter() - started < 1.0, text[:16]
+
+
+def test_scan_answer_still_never_raises_on_garbage():
+    for value in (None, "", "   ", "I" * 100_000, "i " * 50_000, "’" * 10_000):
+        assert isinstance(scan_answer(value), list)
+
+
+# ── The endpoint wires the persona monitor on BOTH output channels (source scan, AST) ──
+#
+# The reasoning channel is shown in the thinking card and persisted; with a report chat's mode
+# voice it is the likeliest place for "Peter Lynch would…" to surface, and it used to be
+# enforced but never scanned. AST, so comments (which name every token) cannot satisfy it.
+
+def _chat_endpoint_tree():
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "endpoints" / "chat.py")
+    return ast.parse(src.read_text(encoding="utf-8"))
+
+
+def _calls(tree, name):
+    import ast
+
+    return [n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name]
+
+
+def test_the_streamed_reasoning_is_scanned_not_only_enforced():
+    import ast
+
+    scanned = [c for c in _calls(_chat_endpoint_tree(), "scan_answer")
+               if c.args and isinstance(c.args[0], ast.Name) and c.args[0].id == "reasoning_text"]
+    assert scanned, "chat.py no longer runs scan_answer over the streamed reasoning"
+
+
+def test_every_guardrail_log_line_carries_the_persona():
+    import ast
+
+    lines = []
+    for node in ast.walk(_chat_endpoint_tree()):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "warning" and node.args):
+            fmt = node.args[0]
+            parts = [fmt] if isinstance(fmt, ast.Constant) else (
+                [v for v in ast.walk(fmt) if isinstance(v, ast.Constant)])
+            text = "".join(str(p.value) for p in parts if isinstance(p.value, str))
+            if text.startswith("Chat guardrail ("):
+                lines.append(text)
+    assert len(lines) == 3, lines        # send, stream, stream reasoning
+    for text in lines:
+        assert "persona=%s" in text, text
+
+
+# ── Report chat's web search (2026-10-02): the code-authored caveat is not a guardrail event ──
+#
+# The caveat is appended AFTER enforcement, but a model-written copy of it (or an attributed
+# web answer) passes through `enforce_answer` / `scan_answer` first. Neither may redact it or
+# raise a monitor flag — a false flag on every web turn would bury the real ones in the log.
+
+def test_the_web_caveat_and_an_attributed_web_answer_pass_the_guardrails_untouched():
+    from app.services.chat_security import web_caveat_line
+
+    for text in (
+        web_caveat_line("2026-09-22"),
+        web_caveat_line(None),
+        "Reuters, Sep 30, 2026: the DOJ case against Apple advanced. The report, dated Sep 22, "
+        "2026, rates the legal risk as moderate; the web figure and the report figure differ.",
+        "A web search found nothing usable for this question, so this answer is from the report.",
+    ):
+        cleaned, enforced = enforce_answer(text)
+        assert cleaned == text and enforced == [], (text, enforced)
+        assert scan_answer(text) == [], text

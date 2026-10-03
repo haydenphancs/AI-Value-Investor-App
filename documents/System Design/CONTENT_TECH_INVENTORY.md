@@ -173,9 +173,10 @@ shares_short, history). The prose synthesis is `hidden_market_signals_insight` (
 
 - `services/earnings_service.py` — surprise computation, fiscal-quarter labeling, `beat_summary`,
   earnings timeline.
-- `services/geopolitical_macro_service.py` — web-search-grounded (Gemini) scan of real current
-  macro/geopolitical shocks; emits risk factors with severity tiers → `macro_data`
-  (`overall_threat_level`, `headline`, `intelligence_brief`) + persisted citations.
+- Macro risk factors (`macro_data`: `overall_threat_level`, `headline`, `intelligence_brief`) are
+  built in the report collector from FRED + FMP market indicators only. The web-search-grounded
+  geopolitical scan that used to add current events was retired on 2026-10-02 with Google Search
+  grounding (SYSTEM_DESIGN_GUIDELINES §2).
 
 ---
 
@@ -424,11 +425,15 @@ throttled, cloning is a few cents of GPU per long piece, and alignment is fully 
 persona system prompt (and enforced in `services/chat_service.py`). The agent is **"Cay AI, the
 intelligent agent powering the Caydex app"** and must **never reveal or hint at the underlying
 model/provider** (never say Google, Gemini, OpenAI, GPT, "LLM," "language model," etc.). If asked
-who made it: "Cay AI by Caydex."
+who made it: "Cay AI by Caydex." Since 2026-10-02 it also **discloses, without naming it**, that
+Caydex uses a third-party AI provider (the Privacy Policy's wording — Apple 5.1.2(i)), never denies
+being an AI, and answers "are you an AI?" with exactly "Yes — I'm Cay AI, an AI system by Caydex."
+In a report chat Cay AI works as a "<Style> Agent" mode (`agents/report_voice_prompt.py`) — still
+Cay AI speaking, never a separate entity or a real investor.
 
-The backend runs Gemini (`research_agent.py` imports `google.generativeai`; `_MODEL_CHAIN` in
-`geopolitical_macro_service.py` references `gemini-2.5-*`), but **this must never surface** in any
-produced or quoted content.
+The backend runs Gemini (`research_agent.py` imports `google.generativeai`; `config.py`'s
+`GEMINI_MODEL` names `gemini-2.5-*`), but **this must never surface** in any produced or quoted
+content.
 
 Additional compliance note baked into the personas: the report avoids explicit buy/sell calls;
 `fair_value` is presented as one objective DCF figure, not advice.
@@ -445,7 +450,7 @@ card_verdict,fmp_tools,narrative_prompts,ticker_report_data_collector}.py` ·
 ticker_data_cache,pdf_report_service,pdf_charts}.py` · `backend/app/templates/pdf/`
 
 **Data / signals:** `backend/data/whale_registry.json` · `backend/app/services/{whale_service,
-_whale_common,signals_service,holders_service,earnings_service,geopolitical_macro_service}.py` ·
+_whale_common,signals_service,holders_service,earnings_service}.py` ·
 `backend/app/api/v1/endpoints/whales.py`
 
 **TTS (Gemini/Achird):** `backend/scripts/{generate_money_moves_audio,generate_journey_audio,

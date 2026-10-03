@@ -478,47 +478,22 @@ async def test_the_card_headline_is_never_the_alert_body(monkeypatch):
 
 # ── the alert body never contradicts its title (TestFlight, 2026-09-15) ─────────
 #
-# The grounded search returns `catalyst_tag=None` when it found no company-specific
-# driver, and its `reason` is then the model's own prose about finding nothing. That
-# prose shipped as the body of "TER -13.3%": "Current web sources for September 14,
-# 2026, do not indicate a -10.4% move for Teradyne…" — an alert whose body denies the
-# move its title announces. Only a CITED catalyst is a body; everything else is a
-# deterministic sentence built from the move itself.
+# The body used to quote the grounded "why it moved" catalyst — and when the search found
+# no company-specific driver, its own prose shipped as the body of "TER -13.3%": "Current
+# web sources for September 14, 2026, do not indicate a -10.4% move for Teradyne…". The
+# catalyst was retired on 2026-10-02 with Google Search grounding, so the body is now
+# always the deterministic sentence built from the move itself.
 
-def _body(cp, price_move, scope="TER"):
+def _body(cp, scope="TER"):
     from app.services.updates_insight_sweeper import InsightSweeper
 
-    return InsightSweeper._alert_body(scope, cp, price_move)
+    return InsightSweeper._alert_body(scope, cp)
 
 
-def test_a_cited_catalyst_is_the_body():
-    assert _body(-13.3, {"catalyst_tag": "Guidance Cut", "reason": "Teradyne cut its Q4 outlook."}) \
-        == "Teradyne cut its Q4 outlook."
-
-
-@pytest.mark.parametrize("tag", [None, "", "   "])
-def test_a_no_catalyst_answer_is_never_the_body(tag):
-    prose = "Current web sources for September 14, 2026, do not indicate a -10.4% move for Teradyne (TER) today."
-    body = _body(-13.3, {"catalyst_tag": tag, "reason": prose})
-    assert body == "Down 13.3% in today's session — no single company-specific catalyst found in current sources."
-    assert "do not indicate" not in body and "-10.4" not in body
-
-
-def test_a_tag_without_a_reason_degrades_to_the_neutral_sentence():
-    """A cited tag with an empty reason has nothing to quote; never an empty body."""
-    assert _body(4.2, {"catalyst_tag": "Analyst Upgrade", "reason": "  "}) \
-        == "Up 4.2% in today's session — no single company-specific catalyst found in current sources."
-
-
-def test_no_search_this_cycle_points_at_the_ticker():
-    assert _body(7.65, None, scope="INTC") == "Up 7.7% in today's session. Open INTC for the latest coverage."
-    assert _body(-0.06, None, scope="INTC") == "Down 0.1% in today's session. Open INTC for the latest coverage."
-
-
-@pytest.mark.parametrize("junk", ["string", 42, ["x"], {"reason": None, "catalyst_tag": None}])
-def test_a_malformed_price_move_never_raises(junk):
-    body = _body(-2.5, junk)
-    assert body.startswith("Down 2.5% in today's session")
+def test_the_body_is_the_move_plus_a_pointer():
+    assert _body(7.65, scope="INTC") == "Up 7.7% in today's session. Open INTC for the latest coverage."
+    assert _body(-0.06, scope="INTC") == "Down 0.1% in today's session. Open INTC for the latest coverage."
+    assert _body(-13.3) == "Down 13.3% in today's session. Open TER for the latest coverage."
 
 
 # ── a move belongs to its SESSION, not to the calendar day it was read on ────────
@@ -551,7 +526,6 @@ async def test_a_prior_session_move_is_not_re_alerted_pre_market(monkeypatch):
     await _sweeper()._notify_watchers(
         "TER", _Decision(TIER_EXTREME), {"headline": "h"}, _TUESDAY_0403_ET,
         quote={"changePercentage": -13.3, "changeSession": "2026-09-14", "price": 371.47},
-        price_move={"catalyst_tag": None, "reason": "no clear catalyst"},
     )
     assert calls == [], "re-alerted Monday's move at 04:03 Tuesday"
 
@@ -573,11 +547,10 @@ async def test_a_current_session_move_still_alerts(monkeypatch):
     await _sweeper()._notify_watchers(
         "TER", _Decision(TIER_EXTREME), {"headline": "h"}, _TUESDAY_0935_ET,
         quote={"changePercentage": -6.1, "changeSession": "2026-09-15", "price": 348.8},
-        price_move={"catalyst_tag": None, "reason": "no clear catalyst"},
     )
     assert len(calls) == 1
     assert calls[0]["title"] == "TER -6.1%"
-    assert calls[0]["body"] == "Down 6.1% in today's session — no single company-specific catalyst found in current sources."
+    assert calls[0]["body"] == "Down 6.1% in today's session. Open TER for the latest coverage."
 
 
 @pytest.mark.asyncio

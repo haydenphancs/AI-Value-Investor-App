@@ -56,7 +56,6 @@ _DETAIL = _IOS / "Views/Screens/InsightsDetailView.swift"
 _NEWS_ATOM = _IOS / "Views/Atoms/NewsCardBulletPoint.swift"
 _NEWS_LIST = _IOS / "Views/Molecules/TickerNewsExpandedContent.swift"
 _NEWS_DETAIL_VM = _IOS / "ViewModels/NewsDetailViewModel.swift"
-_CATALYST = _IOS / "Views/Molecules/InsightCatalystBullet.swift"
 
 _INSIGHT_PROMPT = _ROOT / "backend/app/services/news_insight_service.py"
 _ARTICLE_PROMPT = _ROOT / "backend/app/services/news_cache_service.py"
@@ -259,8 +258,8 @@ def test_only_ai_cards_mark_and_strip_a_conclusion(path, header):
 def test_the_conclusion_marker_is_the_turn_down_arrow():
     block = _decl_block(_GLYPH.read_text(), "private var marker")
     assert 'Image(systemName: "arrow.turn.down.right")' in block
-    # Reserved elsewhere: sparkle = AI provenance, bolt = "Why it moved",
-    # lightbulb = the Wiser tab.
+    # Reserved elsewhere: sparkle = AI provenance, lightbulb = the Wiser tab; bolt was the
+    # retired "Why it moved" label and stays off the marker.
     for taken in ("sparkles", "bolt.fill", "lightbulb"):
         assert taken not in block, f"the conclusion marker collides with {taken!r}"
 
@@ -283,11 +282,11 @@ def test_the_glyph_centres_itself_on_the_neighbouring_text():
 
 
 @pytest.mark.parametrize(
-    "path", [_CARD, _DETAIL, _NEWS_ATOM, _CATALYST],
-    ids=["insights-card", "insights-detail", "news-atom", "catalyst"],
+    "path", [_CARD, _DETAIL, _NEWS_ATOM],
+    ids=["insights-card", "insights-detail", "news-atom"],
 )
 def test_no_surface_still_draws_its_own_bullet_dot(path):
-    """One atom, or the four drift — which is how the skeleton/row pair diverged before."""
+    """One atom, or the three drift — which is how the skeleton/row pair diverged before."""
     src = _strip_comments(path.read_text())
     assert "SummaryBulletGlyph(" in src, f"{path.name} does not use the shared glyph"
     assert ".frame(width: 5, height: 5)" not in src, (
@@ -317,5 +316,5 @@ def test_the_scanners_are_not_vacuous():
     assert "A()" in block and "B()" not in block, "_decl_block leaked past the declaration"
 
     for path in (_FORMAT, _GLYPH, _CARD, _DETAIL, _NEWS_ATOM, _NEWS_LIST,
-                 _NEWS_DETAIL_VM, _CATALYST, _INSIGHT_PROMPT, _ARTICLE_PROMPT):
+                 _NEWS_DETAIL_VM, _INSIGHT_PROMPT, _ARTICLE_PROMPT):
         assert path.exists(), f"{path} moved — every scan above would silently pass"

@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from app.services.dcf_report_gate import report_dcf_source_matches
+from app.services.report_degradation import GROUNDING_FREE_KEY, report_is_grounding_free
 from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,18 @@ TABLE_NAME = "ticker_report_cache"
 #     just before the deploy, per the 2026-07-04 paragraph; if the deploy commit lands
 #     later, move it to the commit time. Deploy after the 18:00 ET close so the
 #     invalidated day's reports regenerate on the next close cycle anyway.
+# 2026-10-03 (01:30 UTC): bumped for the Google Search grounding retirement (owner
+#     decision 2026-10-02). Cached collections carry grounded output — the price-move
+#     catalyst in `price_action_partial`, `geopolitical_factors`, the research-ranked
+#     `peer_source = "intel"` list with its `peer_details` segments, and
+#     `moat_grounded_pillars` — and cached reports carry what was built from them. The
+#     Grounding terms forbid serving that to anyone but the user who asked, and a
+#     removed dataclass field only DROPS on read (`_deserialize`) — the baked
+#     `price_action_partial` / report JSON would still be served for the rest of the
+#     close cycle, and `_lookup_shared_cache` would copy it to new users. This ONE bump
+#     supersedes the 01:15 instant above. Same rule: a PAST instant, moved to the
+#     commit time if the deploy lands later; deploy after the 18:00 ET close (owner
+#     agreed) so the regeneration costs nothing extra.
 # 2026-10-03 (13:30 UTC): bumped for the insider-row fix (NYAX). Cached collections carry
 #     the COMPUTED `insider_data_partial` / `insider_vital_partial` and the embedded
 #     `holders_response` built under the old rules: every "Ordinary Shares" filer read
@@ -448,6 +461,17 @@ async def get_cached_report(
             data = entry.get("ticker_report_data")
             if not isinstance(data, dict):
                 return None
+            # Provenance stamp (report_degradation.GROUNDING_FREE_KEY): a row without it was
+            # written by the pre-retirement code, possibly from Google Search grounded
+            # research, and that code wrote rows AFTER CACHE_SCHEMA_FLOOR — so the clock
+            # above cannot catch it. Served free to every user, so a miss (regenerate).
+            if not report_is_grounding_free(data):
+                logger.warning(
+                    "ticker_report_cache row for %s/%s is a pre-retirement report (no %s "
+                    "stamp — possibly Google Search grounded) — treated as a miss",
+                    ticker, persona, GROUNDING_FREE_KEY,
+                )
+                return None
             # Defence in depth: neither door writes a report that lost a Financials section
             # to a degraded upstream build (it is delivered to its buyer, never shared), but
             # if one ever lands here it must read as a miss. The key literal mirrors
@@ -491,8 +515,25 @@ async def upsert_cached_report(
 
     Fire-and-forget: failures are logged but never raised. Callers can
     `await` this for sequencing but it should never block the response.
+
+    REFUSES (ERROR, no write) a report without the provenance stamp
+    (report_degradation.GROUNDING_FREE_KEY): `get_cached_report` would read it as a miss,
+    so writing it buys nothing and only hides the bug. Every report `assemble_report`
+    builds from a `_collect_fresh` collection carries it; an unstamped one here means a
+    collection from some other producer reached a shared cache.
     """
     ticker, persona = _normalize_key(ticker, persona)
+
+    if not report_is_grounding_free(ticker_report_data):
+        logger.error(
+            "ticker_report_cache write REFUSED for %s/%s — the report has no %s stamp "
+            "(value %r), so every read would miss it. Its collection was not built by "
+            "TickerReportDataCollector._collect_fresh.",
+            ticker, persona, GROUNDING_FREE_KEY,
+            ticker_report_data.get(GROUNDING_FREE_KEY)
+            if isinstance(ticker_report_data, dict) else type(ticker_report_data).__name__,
+        )
+        return
 
     def _upsert() -> None:
         try:

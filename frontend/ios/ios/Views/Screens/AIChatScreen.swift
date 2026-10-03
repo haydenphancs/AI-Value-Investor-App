@@ -73,6 +73,10 @@ struct AIChatScreen: View {
     /// The history row being renamed (drives the rename alert) + its editable text.
     @State private var renamingItem: ChatHistoryItem?
     @State private var renameText: String = ""
+    /// The web source the user tapped, shown in the in-app browser SHEET. `@State`, not
+    /// ViewModel state: the caller's ViewModel outlives this cover, so a link left on it would
+    /// re-present the article the next time the chat opens.
+    @State private var browserLink: BrowserLink?
 
     var body: some View {
         GeometryReader { geometry in
@@ -159,6 +163,12 @@ struct AIChatScreen: View {
             // ET date — so six call sites still cost one request per day.
             Task { await ChatStartersStore.shared.prefetch() }
         }
+        // Web source pills open here, as a SHEET. This screen is itself a full-screen cover: a
+        // nested cover would take it off screen, and closing the browser would re-run the
+        // `onAppear` above (a history reload) and collapse the thinking card the user opened.
+        // Item-based, the form that presents reliably inside a cover (see `.aiChatCover`).
+        // While it is up, the root's error/paywall presentation waits behind it.
+        .inAppBrowser(link: $browserLink, style: .sheet)
     }
 
     // MARK: - Top Bar
@@ -226,11 +236,16 @@ struct AIChatScreen: View {
             // The claim follows the SERVER's verdict (`contextGrounded`), not the context type
             // alone: a report chat whose report could not be found runs ungrounded, and the chip
             // then says so instead of "Grounded on Research Report".
+            //
+            // A report chat with a known analysis style reads "Cay AI · Growth Hunter Agent ·
+            // AAPL report" instead; its ticker is the mode's VALIDATED symbol, never the raw
+            // reference segment.
             if let ctx = viewModel.currentContextType, ctx != .none {
                 GroundedContextChip(
                     contextType: ctx,
-                    referenceLabel: groundingReferenceLabel,
-                    groundingArrived: viewModel.contextGrounded
+                    referenceLabel: reportAgentMode?.ticker ?? groundingReferenceLabel,
+                    groundingArrived: viewModel.contextGrounded,
+                    agentModeLabel: reportAgentMode?.chatModeLabel
                 )
                 .padding(.top, AppSpacing.sm)
                 .padding(.bottom, AppSpacing.xs)
@@ -319,7 +334,8 @@ struct AIChatScreen: View {
             ChatMessagesList(
                 messages: viewModel.messages,
                 streamingMessageId: viewModel.streamingMessageId,
-                onFollowUpTap: handleFollowUpTap
+                onFollowUpTap: handleFollowUpTap,
+                onOpenSource: openWebSource
             )
 
             // Brief "thinking" dots only in the tiny window BEFORE the assistant bubble appears
@@ -331,13 +347,43 @@ struct AIChatScreen: View {
         }
     }
 
+    /// Open a web source pill's article in the in-app browser — and ONLY there. The address is a
+    /// third party's: it never goes to `openInSystem`, which would hand a custom scheme to the
+    /// system (`caydex://` is this app's own sign-in scheme). `ChatSource.webURL` already admits
+    /// https only, so the refusal below is unreachable today; it reports rather than failing
+    /// silently, because the tap was the user's (auth.md §6).
+    private func openWebSource(_ url: URL) {
+        guard SafariView.canOpen(url) else {
+            AppActions.shared.reportMutationFailure(
+                AppError.noAppToOpenURL(what: "links like that"),
+                action: "open that source"
+            )
+            return
+        }
+        browserLink = BrowserLink(url)
+    }
+
+    /// The report chat's analysis-style mode, or nil (any other chat, or a report reference
+    /// naming no known style). The ONE source for the chip's mode label, built from the same two
+    /// values the backend reads on every turn — so it is right after a history reopen too, and
+    /// gone the moment the context is cleared. (No greeting card: the chip is the only surface.)
+    private var reportAgentMode: ReportChatAgentMode? {
+        ReportChatAgentMode(
+            contextType: viewModel.currentContextType,
+            referenceId: viewModel.currentReferenceId
+        )
+    }
+
     /// A user-friendly reference for the grounding chip (a ticker for asset/report
     /// contexts; hidden for slug/order-based contexts, which aren't readable).
     private var groundingReferenceLabel: String? {
         guard let ref = viewModel.currentReferenceId, !ref.isEmpty else { return nil }
         switch viewModel.currentContextType {
         case .tickerReport, .stock, .etf, .crypto, .index, .commodity:
-            return ref.split(separator: "|").first.map(String.init)?.uppercased()
+            // First segment KEEPING empty parts (like the backend's split): "|peter_lynch"
+            // has no ticker, and must not show "PETER_LYNCH" in the ticker's place.
+            return ref.split(separator: "|", omittingEmptySubsequences: false)
+                .first.map(String.init)?.uppercased()
         case .updatesScope:
             // The market feed's reserved key is not something to show a person, and the
             // "|ETF" class hint is not part of the name.

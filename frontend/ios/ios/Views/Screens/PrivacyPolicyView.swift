@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
     var body: some View {
         LegalDocumentView(
             title: "Privacy Policy",
-            lastUpdated: "September 26, 2026",
+            lastUpdated: "October 2, 2026",
             // The summary is deliberately FIRST and in the intro rather than as a numbered
             // section: "we don't sell your data" is the single thing users most want to know,
             // and burying it in §5 (where it lived) meant almost nobody ever read it. The
@@ -31,7 +31,7 @@ struct PrivacyPolicyView: View {
 
                 •  We never connect to your brokerage. We hold no money or securities and cannot place trades. Any holdings in Portfolio Insights are figures you typed in yourself.
 
-                •  Your identity is not sent to the AI. When you use Cay AI, your name, email, account identifier, watchlist, portfolio and holdings are not transmitted with your message.
+                •  Your identity is not sent to the AI or to our web search provider. When you use Cay AI, your name, email, account identifier, watchlist, portfolio and holdings are not transmitted with your message or with a web search.
 
                 •  You can delete everything, from inside the app: Profile \u{2192} Settings \u{2192} Delete Account.
 
@@ -70,6 +70,7 @@ struct PrivacyPolicyView: View {
             paragraphs: [
                 "Cay AI chat sends what you type to a third-party AI provider for processing. We ask for your explicit permission before this happens for the first time, and chat does not work until you give it. You can withdraw that permission at any time in Settings \u{2192} General \u{2022} AI Chat Data Permission; chat then stops working until you allow it again, and the rest of the App is unaffected.",
                 "What is sent for chat: your message, the recent messages in that conversation, and market data for whatever you are viewing so the answer is relevant. What is NOT sent: your name, email, account identifier, watchlist, portfolio, or holdings.",
+                "Web search in report chat: only when you are chatting about a research report and ask Cay AI to search the web, look something up, or double-check something (for example, \u{201C}check the latest news\u{201D}), a short search query that Cay AI writes from your question \u{2014} such as the company, its ticker, and the topic \u{2014} is sent to our web search provider. Your name, email, account identifier, watchlist, portfolio, and holdings are never sent with it. The answer is saved with that conversation like any other chat message, along with a note that it used a web search. The list of web sources it used (each source\u{2019}s title, publisher, date, and link) is shown with the answer but is not kept, and we keep no other copy of the search results, apart from a temporary in-memory copy for a few minutes so the same question is not searched twice. Web sources are third-party content that we do not control or verify, and their links open the publisher\u{2019}s own page.",
                 "Generated research reports are produced from public market data. They contain no content you have typed and no information about you.",
                 "Our AI provider processes this data on our behalf to return a response, and is instructed not to use it for their own purposes. Do not submit sensitive personal information you would not want processed this way. AI output is generated automatically and may be inaccurate."
             ]
@@ -77,7 +78,7 @@ struct PrivacyPolicyView: View {
         LegalSection(
             heading: "Service Providers",
             paragraphs: [
-                "We rely on the following providers to run the App: Supabase (database, authentication, and file storage); Railway (application hosting); Google (the AI processing described above); Sentry (error and crash monitoring); and Apple (in-app purchases and push notification delivery).",
+                "We rely on the following providers to run the App: Supabase (database, authentication, and file storage); Railway (application hosting); Google (the AI processing described above); Brave Software (web search, only when you ask Cay AI to search the web in a report chat, as described above); Sentry (error and crash monitoring); and Apple (in-app purchases and push notification delivery).",
                 "Market and financial data flows the other way \u{2014} we request it from data providers using a ticker symbol, and we do not send them anything about you. Those providers are listed in the App under Profile \u{2192} Data Sources.",
                 "These providers may process your information only as needed to perform services for us and are bound by confidentiality and data-protection obligations. Our servers and these providers are located in the United States."
             ]

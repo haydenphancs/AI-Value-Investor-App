@@ -2935,13 +2935,16 @@ struct SmartMoneyDataDTO: Codable {
     let dailyPrices: [DailyPricePointDTO]?
     let flowData: [SmartMoneyFlowDataPointDTO]
     let summary: SmartMoneyFlowSummaryDTO
+    // true when the backend's fetch for this tab FAILED (Insider, 2026-10-03). Optional:
+    // older backends and cached rows omit it.
+    let unavailable: Bool?
 
     enum CodingKeys: String, CodingKey {
         case tab
         case priceData = "price_data"
         case dailyPrices = "daily_prices"
         case flowData = "flow_data"
-        case summary
+        case summary, unavailable
     }
 
     func toDisplayModel() -> SmartMoneyData {
@@ -2963,7 +2966,8 @@ struct SmartMoneyDataDTO: Codable {
             priceData: priceData.map { $0.toDisplayModel() },
             dailyPrices: (dailyPrices ?? []).map { $0.toDisplayModel() },
             flowData: flowData.map { $0.toDisplayModel() },
-            summary: summary.toDisplayModel(unit: flowUnit)
+            summary: summary.toDisplayModel(unit: flowUnit),
+            isUnavailable: unavailable == true
         )
     }
 }
@@ -3140,11 +3144,14 @@ struct InstitutionalActivityDTO: Codable {
 struct InsiderActivitiesDataDTO: Codable {
     let summary: InsiderActivitySummaryDTO
     let activities: [InsiderActivityDTO]
+    // true when the backend's insider fetch FAILED (2026-10-03). Optional for older payloads.
+    let unavailable: Bool?
 
     func toDisplayModel() -> InsiderActivitiesData {
         return InsiderActivitiesData(
             summary: summary.toDisplayModel(),
-            activities: activities.map { $0.toDisplayModel() }
+            activities: activities.map { $0.toDisplayModel() },
+            isUnavailable: unavailable == true
         )
     }
 }

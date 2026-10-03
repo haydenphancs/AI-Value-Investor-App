@@ -9,9 +9,9 @@ whole answer set is exhaustively testable without a fixture or a network.
 WHY THIS EXISTS
 ---------------
 The widget asks one question — "which stock moved most today, and why" — and the
-existing machinery answers a different one. `price_catalyst_service` is a Gemini
-web-search over an arbitrary *window label*, and in practice the report pipeline's
-multi-day windows dominate it. Measured 2026-08-14, the only cached ACHR row read:
+existing machinery answered a different one. `price_catalyst_service` (retired
+2026-10-02 with Google Search grounding) was a Gemini web-search over an arbitrary
+*window label*, and in practice the report pipeline's multi-day windows dominated it. Measured 2026-08-14, the only cached ACHR row read:
 
     tag "Boeing Acquisition & Partnership" · window "Last 15 Days" · +42.7%
     "Archer Aviation's stock surged following the announcement…"

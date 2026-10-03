@@ -13,7 +13,6 @@ import logging
 import asyncio
 import hashlib
 import json
-import re
 import time
 from functools import wraps
 
@@ -860,15 +859,33 @@ def _response_finish(response: Any) -> Optional[str]:
 
 
 # Per-tool ceilings, in seconds. The default (`CHAT_TOOL_TIMEOUT_SECONDS`) fits a quote or a
-# cached read; the two market tools can legitimately run long — `explain_price_move` may
-# escalate to a grounded web search (a model chain with retries, ~90 s per request at the
-# ceiling), and `get_market_snapshot` sweeps several cached services. Cancelling those at
-# 8 s would waste the paid search AND strand its claimed daily unit.
+# cached read; the market tools sweep several cached services and may fetch the news feed on
+# a miss. (`explain_price_move` had 75 s while it could escalate to a grounded Google search —
+# retired 2026-10-02 for the Grounding terms; it is now detectors + the FMP news corpus.)
 _TOOL_TIMEOUTS: Dict[str, float] = {
-    "explain_price_move": 75.0,
+    "explain_price_move": 30.0,
     "get_market_snapshot": 30.0,
     "get_market_overview": 20.0,
+    # Report chat's web search (`chat_web_search_service`): two budget-claim RPCs off the loop
+    # plus Brave's hard bound (BRAVE_SEARCH_TIMEOUT_SECONDS + 2 s), with slack. The handler is
+    # shielded, and a model re-issue after a `timed_out` joins the same per-turn search, so
+    # nothing is paid twice. (The literal name, not an import: this integration must not
+    # import the services layer; `test_gemini_tool_result_guards` pins it equal.)
+    "web_search": 12.0,
 }
+
+# Tools whose arguments are derived from the USER's own words: their args never reach a log
+# line verbatim (a web query is a paraphrase of a user's question). Logged as a shape instead.
+_REDACTED_ARG_TOOLS = frozenset({"web_search"})
+
+
+def _loggable_tool_args(name: str, args: Any) -> Any:
+    """`args` for a log line — the argument SHAPE only for a tool in `_REDACTED_ARG_TOOLS`."""
+    if name not in _REDACTED_ARG_TOOLS:
+        return args
+    if not isinstance(args, dict):
+        return {"redacted": type(args).__name__}
+    return {k: f"<{len(str(v))} chars>" for k, v in args.items()}
 
 
 async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[str, Any]) -> Any:
@@ -898,7 +915,8 @@ async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[s
         # one chat turn's 8 s ceiling failed the index screen and the widget batch.
         return await asyncio.wait_for(asyncio.shield(handler(args)), timeout=timeout)
     except asyncio.TimeoutError:
-        logger.warning("Gemini tool %s timed out after %.1fs (args=%s)", name, timeout, args)
+        logger.warning("Gemini tool %s timed out after %.1fs (args=%s)", name, timeout,
+                       _loggable_tool_args(name, args))
         # `upstream`: OUR side failed to answer, so the turn's refund gate counts it. A
         # handler that returns `{"error": …}` for the model's own bad argument does not.
         return {"error": "timed_out", "tool": name, "timeout_seconds": timeout, "upstream": True}
@@ -1402,97 +1420,6 @@ class GeminiClient:
             raise
 
     @async_retry(max_attempts=2, delay=2.0)
-    async def generate_grounded_research(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-        model_name: Optional[str] = None,
-        temperature: float = 0.3,
-        max_output_tokens: int = 8192,
-    ) -> Dict[str, Any]:
-        """
-        Generate text with **Google Search grounding** enabled (first-class Tool
-        in the unified SDK — no more raw REST). The response's grounding metadata
-        carries the actual web URLs Gemini consulted (more trustworthy than
-        asking the model to self-report sources).
-
-        Returns dict with: text, tokens_used, grounding_sources (list of
-        {title, uri, publisher} deduped by uri), search_queries, finish_reason, model.
-        """
-        model = model_name or self.model_name
-        try:
-            response = await _call_with_timeout(
-                self._client.aio.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction or None,
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                        tools=[types.Tool(google_search=types.GoogleSearch())],
-                    ),
-                ),
-                what="generate_grounded_research",
-            )
-        except Exception as exc:
-            if not is_transient_gemini_error(exc):
-                logger.error("Gemini grounded research failed: %s", exc, exc_info=True)
-            raise
-
-        # The only $35/1k-prompt path in the product, and the one that logged nothing.
-        _log_gemini_usage(_response_usage(response), call_site="generate_grounded_research", model=model)
-        candidates = getattr(response, "candidates", None) or []
-        if not candidates:
-            return {"text": "", "tokens_used": None, "grounding_sources": [], "search_queries": []}
-        cand = candidates[0]
-        text = _response_text(response)
-
-        # Extract grounding sources — deduped by uri.
-        sources: List[Dict[str, str]] = []
-        seen_uris: set = set()
-        grounding = getattr(cand, "grounding_metadata", None)
-        for chunk in (getattr(grounding, "grounding_chunks", None) or []) if grounding else []:
-            web = getattr(chunk, "web", None)
-            uri = (getattr(web, "uri", "") or "") if web else ""
-            title = (getattr(web, "title", "") or "") if web else ""
-            if uri and uri not in seen_uris:
-                seen_uris.add(uri)
-                # Grounded search returns Vertex AI Search redirect URIs, so the
-                # URL host is always "vertexaisearch" — useless as a publisher.
-                # The real publisher domain comes through in `title` as a bare
-                # host like "infosys.com". Prefer that; fall back to the URI host.
-                publisher = ""
-                title_clean = title.strip().lower()
-                if re.match(r"^[\w.-]+\.[a-z]{2,}$", title_clean):
-                    publisher = title_clean.replace("www.", "").split(".")[0]
-                else:
-                    try:
-                        from urllib.parse import urlparse
-                        host = urlparse(uri).hostname or ""
-                        if host and "vertexaisearch" not in host:
-                            publisher = host.replace("www.", "").split(".")[0]
-                    except Exception:
-                        pass
-                sources.append({"title": title[:200], "uri": uri, "publisher": publisher})
-
-        search_queries = list(getattr(grounding, "web_search_queries", None) or []) if grounding else []
-        finish_reason = _response_finish(response)
-        if finish_reason and finish_reason != "STOP":
-            logger.warning(
-                "Gemini grounded research finished with reason=%s — response may be truncated",
-                finish_reason,
-            )
-
-        return {
-            "text": text,
-            "tokens_used": _response_tokens(response),
-            "grounding_sources": sources,
-            "search_queries": search_queries,
-            "finish_reason": finish_reason,
-            "model": model,
-        }
-
-    @async_retry(max_attempts=2, delay=2.0)
     async def _generate_content_retried(self, *, model: str, contents: Any, config: Any, what: str):
         """ONE model call under the retry policy.
 
@@ -1565,7 +1492,8 @@ class GeminiClient:
                     args = dict(fc.args) if fc.args else {}
                     handler = tool_handlers.get(fc.name)
                     if handler is not None:
-                        logger.info(f"Gemini invoked tool '{fc.name}' with args: {args}")
+                        logger.info("Gemini invoked tool '%s' with args: %s", fc.name,
+                                    _loggable_tool_args(fc.name, args))
                     handler_result = await _run_tool_handler(fc.name, handler, args)
                     if isinstance(handler_result, dict) and handler_result.get("error"):
                         tool_errors.append({"name": fc.name, "error": handler_result["error"],
@@ -1649,11 +1577,10 @@ class GeminiClient:
             }
 
         except Exception as e:
-            # Was an UNCONDITIONAL ERROR — the only one of the five handlers in this
-            # file that never consulted the classifier, so a plain 429 / "high
-            # demand" / per-call timeout paged Sentry as if it were a code bug.
-            # Mirrors generate_text / generate_json / generate_embedding /
-            # generate_grounded_research now. Tool handlers run inside
+            # Was an UNCONDITIONAL ERROR — the only handler in this file that never
+            # consulted the classifier, so a plain 429 / "high demand" / per-call
+            # timeout paged Sentry as if it were a code bug. Mirrors generate_text /
+            # generate_json / generate_embedding now. Tool handlers run inside
             # `_run_tool_handler`, which converts their failures to an error RESULT —
             # so nothing an FMP tool raises can reach this classifier any more.
             if not is_transient_gemini_error(e):
@@ -1712,6 +1639,9 @@ class GeminiClient:
         Yields tagged events:
           * ("thought", str) — a reasoning summary chunk (→ the thinking card)
           * ("answer", str)  — an answer text chunk (→ the message bubble)
+          * ("tool_start", {"name"}) — immediately BEFORE a (non-replayed) handler runs, so
+            the caller can show live progress ("Searching the web…") during a slow tool. A
+            caller that does not care must simply ignore the kind.
           * ("tool", {"name","args","result"}) — AFTER a tool ran (→ tool_step + widget extraction)
           * ("finish", str)  — LAST, only when the answer was CUT (MAX_TOKENS / SAFETY /
             RECITATION) after real answer text streamed; the caller must not settle
@@ -1805,7 +1735,10 @@ class GeminiClient:
                         yield "tool", {"name": fc.name, "args": args, "result": result,
                                        "memoized": True}
                     else:
-                        result = await _run_tool_handler(fc.name, tool_handlers.get(fc.name), args)
+                        handler = tool_handlers.get(fc.name)
+                        if handler is not None:
+                            yield "tool_start", {"name": fc.name}
+                        result = await _run_tool_handler(fc.name, handler, args)
                         if not (isinstance(result, dict) and result.get("error")):
                             memo[memo_key] = result
                         yield "tool", {"name": fc.name, "args": args, "result": result}

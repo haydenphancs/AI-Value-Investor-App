@@ -367,6 +367,30 @@ def test_info_sheet_follows_the_marker():
     assert "customers" not in _switch_arm(source, "highestThreat")
 
 
+def test_info_sheet_matches_reports_built_after_web_research_was_retired():
+    """Web research for rivals was retired 2026-10-02: a new report is threat-ordered,
+    built from the industry peer list, and scores every rival with a neutral (1.0) moat
+    factor (`peer_moats = {}` in the collector). Stored reports kept their moat scaling and
+    research list, so the sheet may describe both only as conditional or past."""
+    src = _code(_INFO_SHEET)
+    scoring = _decl_body(src, r"private var scoringText:\s*String\s*\{")
+    for case in ("mostDirect", "highestThreat"):
+        arm = _switch_arm(scoring, case)
+        assert "on reports where the rival's own moat score was available" in arm, (
+            f"the .{case} scoring sentence must make the moat scaling conditional"
+        )
+        assert "then scales the result" not in arm, (
+            f"the .{case} scoring sentence says every score is scaled by the rival's moat"
+        )
+    threat = _switch_arm(_decl_body(src, r"private var sourceText:\s*String\s*\{"),
+                         "highestThreat")
+    assert "same industry" in threat and "research" in threat, "anti-vacuity: wrong arm"
+    assert threat.index("same industry") < threat.index("research"), (
+        "a threat-ordered report must lead with the industry peer list — every new report "
+        "comes from it — and mention Cay's research only as what earlier reports used"
+    )
+
+
 def test_info_sheet_explains_the_threat_bands_and_the_midpoint():
     src = _code(_INFO_SHEET)
     assert "5 is a neutral midpoint" in src

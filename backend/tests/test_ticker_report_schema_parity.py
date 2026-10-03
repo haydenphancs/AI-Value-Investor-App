@@ -92,12 +92,6 @@ from app.services.agents.ticker_report_data_collector import (
 # asserting the DEGRADED path. Stubbing it makes them assert the intended one, deterministically.
 
 
-def _no_supabase():
-    raise AssertionError(
-        "a test reached get_supabase() — stub the service, do not query production"
-    )
-
-
 class _StubBenchmarkLookup:
     """Deterministic stand-in for SectorBenchmarkLookup. No network."""
 
@@ -137,15 +131,15 @@ def _no_live_benchmark_lookup(monkeypatch):
     monkeypatch.setattr(
         lookup_mod, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup()
     )
-    # `moat_scoring_service` binds BOTH names at MODULE level (its lines 42/44), so it
-    # captured them at import time and patching the source module above does not reach
-    # it. Measured: that alone left 54 of the original 204 live calls in place, via
-    # `assemble_report` → `score_moat_dimensions`. Two bindings of one function need two
-    # patches — there is no single choke point.
+    # `moat_scoring_service` binds the lookup at MODULE level, so it captured it at import
+    # time and patching the source module above does not reach it. Measured: that alone
+    # left 54 of the original 204 live calls in place, via `assemble_report` →
+    # `score_moat_dimensions`. Two bindings of one function need two patches — there is
+    # no single choke point. (It also bound `get_supabase`, for the grounded
+    # `moat_intel_cache` tier retired 2026-10-02; that binding is gone with it.)
     monkeypatch.setattr(
         moat_mod, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup()
     )
-    monkeypatch.setattr(moat_mod, "get_supabase", _no_supabase)
     # …and a THIRD binding shape: `MoatScoringService.__init__` captures
     # `self._lookup = get_sector_benchmark_lookup()` at CONSTRUCTION, and the service is
     # a module-level singleton. Once any earlier test has built it, it holds the real
@@ -292,9 +286,13 @@ def test_assemble_report_top_level_keys_match_swift_codable():
     # it (the persona-rating input), but it's stripped from the iOS response
     # (patch_legacy_price_action / schema model_dump) and is NOT in the Swift
     # contract — so it's allowed as an extra key here, just not required.
-    extra = set(report.keys()) - expected - {"_scoring_inputs"}
+    # `_grounding_free` is the INTERNAL provenance stamp (report_degradation.GROUNDING_FREE_KEY)
+    # the cross-user cache readers require: set on EVERY assembled report, dropped by the
+    # schema's model_dump, and never decoded by Swift (synthesized Decodable ignores it).
+    extra = set(report.keys()) - expected - {"_scoring_inputs", "_grounding_free"}
     assert not missing, f"missing top-level keys: {missing}"
     assert not extra, f"unexpected top-level keys (would fail iOS decoder): {extra}"
+    assert "_grounding_free" in report, "assemble_report must stamp every report"
 
 
 def test_growth_chart_frozen_into_report_and_validates():
@@ -1988,12 +1986,17 @@ def test_capital_allocation_block_flags_an_unmeasured_share_change_and_still_val
 # re-dump the direct door does (undeclared keys are dropped there). The fixture above has
 # no peers, so these tests populate them — otherwise `competitors` is [] and every field
 # assertion is vacuous.
+#
+# Since 2026-10-02 a new report is always "threat" / "industry_peers" with no segment: the
+# directness-ranked research list ("direct" / "research", per-row "competes in" segment)
+# came from Google Search grounding, retired that day. Reports stored before then still
+# carry it and must keep validating.
 # ═══════════════════════════════════════════════════════════════════════════
 
 _PEER_SYMS = ["MRVL", "QCOM", "INTC", "NVDA", "MSFT", "IBM", "GOOGL"]
 
 
-def _with_peers(out: CollectedTickerData, *, source: str) -> CollectedTickerData:
+def _with_peers(out: CollectedTickerData) -> CollectedTickerData:
     out.peer_profiles = [
         {"symbol": s, "companyName": f"{s} Corp", "mktCap": 2e11 + i * 1e11,
          "sector": "Technology"}
@@ -2003,38 +2006,24 @@ def _with_peers(out: CollectedTickerData, *, source: str) -> CollectedTickerData
         s: {"returnOnCapitalEmployed": 0.10 + 0.05 * i} for i, s in enumerate(_PEER_SYMS)
     }
     out.peer_ranks = {s: i + 1 for i, s in enumerate(_PEER_SYMS)}
-    out.peer_source = source
-    out.peer_details = (
-        {"MRVL": {"segment": "Custom AI accelerators & networking"}}
-        if source == "intel" else {}
-    )
     out.focal_roic_ttm = 0.20
     return out
 
 
-@pytest.fixture
-def _no_peer_moat_read(monkeypatch):
-    """`assemble_report` imports this function-scoped from the source module."""
-    import app.services.moat_scoring_service as moat_mod
-
-    monkeypatch.setattr(moat_mod, "get_aggregate_moat_for_tickers", lambda tickers: {})
-
-
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
-def test_research_competitors_carry_the_direct_marker_for_every_persona(
-    persona_key, _no_peer_moat_read,
-):
+def test_new_reports_carry_the_threat_marker_for_every_persona(persona_key):
     coll = TickerReportDataCollector()
-    out = _with_peers(_make_collected_data(persona=persona_key), source="intel")
+    out = _with_peers(_make_collected_data(persona=persona_key))
     report = coll.assemble_report(out, stage_a_fallback())
     model = TickerReportResponse.model_validate(report)  # must not raise
 
     mc = model.moat_competition
-    assert mc.competitor_order == "direct" and mc.competitor_source == "research"
-    tickers = [c.ticker for c in mc.competitors]
-    assert tickers == ["MRVL", "QCOM", "INTC", "NVDA", "MSFT"]      # rank order, top 5
-    assert mc.competitors[0].segment == "Custom AI accelerators & networking"
-    assert all(c.segment is None for c in mc.competitors[1:])
+    assert mc.competitor_order == "threat" and mc.competitor_source == "industry_peers"
+    scores = [c.competitive_score for c in mc.competitors]
+    assert len(scores) == 5 and scores == sorted(scores, reverse=True)
+    # The 5 largest above the floor (market cap rises down `_PEER_SYMS`).
+    assert {c.ticker for c in mc.competitors} == {"INTC", "NVDA", "MSFT", "IBM", "GOOGL"}
+    assert all(c.segment is None for c in mc.competitors)
     assert {c.score_basis for c in mc.competitors} == {"relative"}
 
     # The keys iOS decodes travel in the JSON the endpoint serializes.
@@ -2044,46 +2033,37 @@ def test_research_competitors_carry_the_direct_marker_for_every_persona(
     json.dumps(dumped)
 
 
-def test_industry_peer_competitors_carry_the_threat_marker(_no_peer_moat_read):
+@pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
+def test_a_stored_direct_report_with_segments_still_validates(persona_key):
+    """A report stored before the retirement: the research list, most direct first, with a
+    "competes in" segment on some rows. Nothing produces one now, but `research_reports`
+    and the report caches serve them as stored, so the schema must keep every field."""
     coll = TickerReportDataCollector()
-    out = _with_peers(_make_collected_data(), source="heuristic")
+    out = _with_peers(_make_collected_data(persona=persona_key))
     report = coll.assemble_report(out, stage_a_fallback())
-    mc = TickerReportResponse.model_validate(report).moat_competition
-    assert mc.competitor_order == "threat" and mc.competitor_source == "industry_peers"
-    scores = [c.competitive_score for c in mc.competitors]
-    assert len(scores) == 5 and scores == sorted(scores, reverse=True)
-    assert all(c.segment is None for c in mc.competitors)
+    mc = report["moat_competition"]
+    mc["competitor_order"] = "direct"
+    mc["competitor_source"] = "research"
+    mc["competitors"][0]["segment"] = "Custom AI accelerators & networking"
+    stored = json.loads(json.dumps(report))       # the JSONB round trip
+
+    model = TickerReportResponse.model_validate(stored)  # must not raise
+    mcm = model.moat_competition
+    assert mcm.competitor_order == "direct" and mcm.competitor_source == "research"
+    assert mcm.competitors[0].segment == "Custom AI accelerators & networking"
+    assert all(c.segment is None for c in mcm.competitors[1:])
+    dumped = model.model_dump()
+    assert dumped["moat_competition"]["competitor_order"] == "direct"
+    assert dumped["moat_competition"]["competitors"][0]["segment"] == (
+        "Custom AI accelerators & networking"
+    )
+    json.dumps(dumped)
 
 
-def test_an_unknown_peer_source_is_never_marked_direct(_no_peer_moat_read):
-    """A cached collection from before the field existed deserializes to the default; a
-    garbage value must fall the same way — "direct" is earned only by "intel"."""
-    coll = TickerReportDataCollector()
-    out = _with_peers(_make_collected_data(), source="intel")
-    out.peer_source = "INTEL "
-    mc = coll.assemble_report(out, stage_a_fallback())["moat_competition"]
-    assert mc["competitor_order"] == "threat"
-
-
-def test_a_stale_research_list_is_research_sourced_but_threat_ordered(_no_peer_moat_read):
-    """An older prompt's list served after a failed re-extraction: selected by research
-    rank (so `research`), but displayed highest threat first and never marked "direct"."""
-    coll = TickerReportDataCollector()
-    out = _with_peers(_make_collected_data(), source="intel_stale")
-    mc = TickerReportResponse.model_validate(
-        coll.assemble_report(out, stage_a_fallback())
-    ).moat_competition
-    assert mc.competitor_order == "threat" and mc.competitor_source == "research"
-    scores = [c.competitive_score for c in mc.competitors]
-    assert len(scores) == 5 and scores == sorted(scores, reverse=True)
-    # Rank selection: the two lowest-ranked (IBM 6, GOOGL 7) are not picked.
-    assert {c.ticker for c in mc.competitors} == {"MRVL", "QCOM", "INTC", "NVDA", "MSFT"}
-
-
-def test_reports_without_the_competitor_fields_still_validate(_no_peer_moat_read):
+def test_reports_without_the_competitor_fields_still_validate():
     """A report stored before 2026-10-01 has no marker and no per-row segment/basis."""
     coll = TickerReportDataCollector()
-    out = _with_peers(_make_collected_data(), source="intel")
+    out = _with_peers(_make_collected_data())
     report = coll.assemble_report(out, stage_a_fallback())
     mc = report["moat_competition"]
     mc.pop("competitor_order")
@@ -2098,9 +2078,9 @@ def test_reports_without_the_competitor_fields_still_validate(_no_peer_moat_read
     assert model.moat_competition.competitors[0].score_basis is None
 
 
-def test_stage_b_jobs_build_on_a_report_with_competitors(_no_peer_moat_read):
+def test_stage_b_jobs_build_on_a_report_with_competitors():
     coll = TickerReportDataCollector()
-    out = _with_peers(_make_collected_data(), source="intel")
+    out = _with_peers(_make_collected_data())
     report = coll.assemble_report(out, stage_a_fallback())
     jobs = build_narrative_jobs(
         get_persona_config("warren_buffett"), build_financial_context(out), report,
@@ -2108,5 +2088,6 @@ def test_stage_b_jobs_build_on_a_report_with_competitors(_no_peer_moat_read):
     moat_prompts = [j.prompt for j in jobs if "KEY COMPETITORS" in j.prompt]
     assert len(moat_prompts) == 2
     for prompt in moat_prompts:
-        assert "KEY COMPETITORS (most direct first)" in prompt
-        assert "Biggest threat: " in prompt and "Closest rival: MRVL Corp" in prompt
+        assert "KEY COMPETITORS (highest threat score first)" in prompt
+        assert "Biggest threat: " in prompt
+        assert "Closest rival" not in prompt and "most direct first" not in prompt

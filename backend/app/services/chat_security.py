@@ -27,6 +27,11 @@ What lives here:
                             the answer, and a volunteered one is stripped otherwise.
                             A note on every answer, including "Hi", is how you train
                             people to stop reading notes.
+  - ``finalize_answer_notes`` (+ ``web_caveat_line`` / ``strip_web_caveat`` /
+                            ``humanize_report_date``) — the disclaimer policy above PLUS
+                            report chat's code-authored web-results caveat: appended only
+                            on a turn whose web results actually reached the model, and a
+                            model-written copy stripped on EVERY turn.
 
 None of these raise on bad input (None / non-str / empty) — they degrade to a safe value.
 """
@@ -390,3 +395,160 @@ def ensure_disclaimer(text: Optional[str], *, trade_intent: bool) -> str:
     every one of them beats a default that silently keeps the old always-on behaviour.
     """
     return finalize_disclaimer(text, trade_intent=trade_intent)[0]
+
+
+# ── The web-results caveat (report chat's web search, 2026-10-02) ───────────────
+#
+# A report chat may answer with third-party web results (`chat_web_search_service`), which can
+# be stale, wrong, or disagree with the report the user is reading. The caveat that says so is
+# CODE-AUTHORED, like the legal line above, for the same reason: a prompt can ask the model to
+# write a note, but only code can GUARANTEE it on the turns that need it and keep it off the
+# turns that do not. The rules:
+#
+#   * appended ONLY when web results actually reached the model on this turn (the caller's
+#     `web_used`: a capped, failed, empty or never-run search never earns it);
+#   * a model-written copy is stripped on EVERY turn (the prompt tells the model not to write
+#     one; a copy echoed from history must never survive, in any position), so a web turn
+#     carries exactly one, at the end;
+#   * it carries none of `_DISCLAIMER_MARKERS` / `_STRIP_MARKERS`, so it never makes the legal
+#     line look already present and the history-load strip leaves it alone;
+#   * it never names the search engine (IDENTITY_RULE's spirit: a vendor name is not ours to
+#     put in an answer).
+#
+# The report date comes from the resolver (`meta["report_as_of"]`, the report's own close date)
+# and is humanized here; anything that does not validate drops the date clause, never the
+# caveat.
+
+WEB_CAVEAT_LEAD = "Web results are third-party and may be outdated or inaccurate."
+_WEB_CAVEAT_DATE_TEMPLATE = " Your report reflects data as of {date}."
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+# `2026-09-22`, optionally with an ISO time tail (`T20:00:00Z`, `T20:00:00+00:00`).
+_ISO_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+\-]\d{2}:?\d{2})?)?$")
+# A short human date the resolver passed through ("Sep 22, 2026 close"). No `:` (a clock time
+# reads as live data — "Live Data as of Oct 2, 4:31 PM" is dropped on purpose), no markup, no
+# newline, at least one digit.
+_HUMAN_DATE_RE = re.compile(r"^[A-Za-z0-9 ,/\-]{4,40}$")
+_WEB_CAVEAT_PREFIX = "web results are third-party"
+_WEB_CAVEAT_MAX_LINE = 300
+_WEB_CAVEAT_LIST_MARK_RE = re.compile(r"^\s*(?:[-*+•]\s+|\d+[.)]\s+|#{1,6}\s+|>\s*)+")
+_WEB_CAVEAT_DATE_LINE_RE = re.compile(r"^your report reflects data as of [^\n]{1,60}$", re.IGNORECASE)
+# The model glued the caveat onto the end of a prose line instead of giving it its own.
+_WEB_CAVEAT_TAIL_RE = re.compile(r"(?<=[.!?])[ \t]+[*_]*web results are third-party\b[^\n]{0,280}$",
+                                 re.IGNORECASE)
+
+
+def humanize_report_date(value: object) -> Optional[str]:
+    """The report's as-of date for the caveat, or None.
+
+    ``"2026-09-22"`` (the report's `price_close_date`) → ``"Sep 22, 2026"``; a short human date
+    the resolver passed through (``"Sep 22, 2026 close"``) is kept as written once it
+    validates. Anything else — a clock time, markup, a newline, more than 40 characters, no
+    digit, an impossible calendar date, a non-string — is None. Pure, never raises."""
+    if not isinstance(value, str):
+        return None
+    try:
+        t = _WS_RE.sub(" ", normalize_text(value)).strip()
+        t = t.rstrip(".").strip()
+        if not t:
+            return None
+        m = _ISO_DAY_RE.match(t)
+        if m:
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            import datetime as _dt
+            _dt.date(year, month, day)          # ValueError on 2026-02-30 / month 13
+            if not 1990 <= year <= 2200:
+                return None
+            return f"{_MONTHS[month - 1]} {day}, {year}"
+        if not _HUMAN_DATE_RE.fullmatch(t) or not any(c.isdigit() for c in t):
+            return None
+        return t
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
+def web_caveat_line(report_as_of: object = None) -> str:
+    """The caveat sentence(s): the lead, plus "Your report reflects data as of <date>." when
+    the report date validates (`humanize_report_date`)."""
+    date = humanize_report_date(report_as_of)
+    return WEB_CAVEAT_LEAD + (_WEB_CAVEAT_DATE_TEMPLATE.format(date=date) if date else "")
+
+
+def _caveat_body(line: str) -> str:
+    """A line's text without list / heading / quote markers and edge decoration."""
+    s = _WEB_CAVEAT_LIST_MARK_RE.sub("", line)
+    return _EDGE_DECOR_RE.sub("", s).strip()
+
+
+def _is_web_caveat_line(line: str) -> bool:
+    s = _caveat_body(line)
+    return bool(s) and len(s) <= _WEB_CAVEAT_MAX_LINE and s.lower().startswith(_WEB_CAVEAT_PREFIX)
+
+
+def strip_web_caveat(text: Optional[str]) -> str:
+    """Remove every model-written copy of the web caveat, wherever it sits.
+
+    A line whose text (markers and decoration aside) starts with "Web results are third-party"
+    and is at most 300 chars goes; so does a "Your report reflects data as of …" line that
+    directly follows one (the caveat split over two lines), and the caveat glued onto the end
+    of a prose line. Returns the input UNCHANGED (same object) when nothing matched, so a turn
+    with no caveat is byte-identical to the disclaimer policy alone. Never empties the answer:
+    a reply that is nothing but the caveat is returned as it was. Idempotent; never raises."""
+    if not text or not isinstance(text, str):
+        return text if isinstance(text, str) else ""
+    if _WEB_CAVEAT_PREFIX not in text.lower():
+        return text
+    lines = text.split("\n")
+    kept: List[str] = []
+    changed = False
+    after_caveat = False
+    for line in lines:
+        if _is_web_caveat_line(line):
+            changed = True
+            after_caveat = True
+            continue
+        if after_caveat:
+            body = _caveat_body(line)
+            if not body:
+                kept.append(line)
+                continue
+            if _WEB_CAVEAT_DATE_LINE_RE.match(body):
+                changed = True
+                after_caveat = False
+                continue
+        after_caveat = False
+        cut = _WEB_CAVEAT_TAIL_RE.sub("", line)
+        if cut != line:
+            changed = True
+            line = cut.rstrip()
+        kept.append(line)
+    if not changed:
+        return text
+    out = _BLANK_RUN_RE.sub("\n\n", "\n".join(kept))
+    out = _drop_trailing_rule(out)
+    if not out.strip():
+        return text
+    return out
+
+
+def finalize_answer_notes(
+    text: Optional[str], *, trade_intent: bool, web_used: bool, report_as_of: object,
+) -> Tuple[str, str]:
+    """Every code-authored closing note, in one place. Returns ``(final_text, live_suffix)``.
+
+    1. a model-written web caveat is stripped (every turn — see `strip_web_caveat`);
+    2. the intent-gated disclaimer policy runs (`finalize_disclaimer`, unchanged);
+    3. on a turn whose web results reached the model (`web_used`), the caveat is appended LAST
+       — answer, then the legal line (trade turns only), then the caveat.
+
+    ``live_suffix`` is everything appended (the stream path emits it as one more live token),
+    so ``final_text`` always ends with it. All three keywords are REQUIRED: both chat doors
+    must decide, and a default would let one silently keep the old behaviour. On a turn with
+    ``web_used=False`` and no caveat copy in the text, the result is exactly
+    ``finalize_disclaimer``'s."""
+    base = strip_web_caveat(text)
+    final, suffix = finalize_disclaimer(base, trade_intent=trade_intent)
+    if not web_used:
+        return final, suffix
+    note = "\n\n" + web_caveat_line(report_as_of)
+    return final + note, suffix + note

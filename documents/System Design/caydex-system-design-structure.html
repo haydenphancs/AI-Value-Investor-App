@@ -396,7 +396,7 @@ const FEATURES = [
     screen:"(grounds Signal of Confidence + report critical-factors)", latency:"cheap (6h cache)",
     what:"The macro engine grounds the AI's risk view — inflation, rates, the yield curve — from FRED. It isn't a standalone screen; it feeds the report's critical-factors and the Signal-of-Confidence card.",
     steps:[
-      [{k:"service",t:"macro threat engine · geopolitical_macro_service",s:"composite/tier cutoffs · breadth guards"}],
+      [{k:"service",t:"macro threat engine · FRED + FMP factors (report collector)",s:"composite/tier cutoffs · breadth guards"}],
       [{k:"ext",t:"FRED get_observations",s:"CPI · Fed Funds · 10Y · unemployment (free, 120 rpm)"}],
       [{k:"cache",t:"6h dict + Supabase caches",s:"~4 fetches/day per series"}],
       [{k:"store",t:"macro factors → AI grounding",s:"report critical-factors + Signal of Confidence"}],

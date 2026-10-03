@@ -713,3 +713,98 @@ def test_the_longest_legitimate_reference_fits():
     ref = "GOOGL|warren_buffett|" + "0123456789abcdef" * 2 + "-0123"
     assert len(ref) < 256
     assert SendChatMessageRequest(message="hi", reference_id=ref).reference_id == ref
+
+
+# ── Report chat's web source pills on the wire (2026-10-02) ────────────────────
+#
+# A web pill is one more element of `sources` (`ChatSourcePill`, kind "web"): base pills first,
+# then ≤5 web pills. The response field stays `List[Any]` (a legacy row can never fail it), no
+# NEW top-level message key exists, `thinking.web_searched` rides inside `thinking`, and a
+# stored web pill whose URL is unsafe never reaches the iOS decoder.
+
+from pathlib import Path as _Path
+import re as _re
+
+from app.schemas.chat import ChatSourcePill
+
+_WEB_PILL = {"kind": "web", "label": "Web", "detail": "Reuters", "title": "DOJ case advances",
+             "url": "https://www.reuters.com/legal/a", "published_at": "2026-09-30"}
+_IOS_MODELS = (_Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios" / "Models"
+               / "ChatConversationModels.swift")
+
+
+def _web_row(sources, thinking=None):
+    return {"id": "m", "session_id": "s", "role": "assistant", "content": "answer",
+            "created_at": "2026-10-02T00:00:00.000000+00:00",
+            "rich_content": {"sources": sources,
+                             "thinking": thinking or {"stages": [], "source_count": len(sources),
+                                                      "elapsed_ms": 1, "web_searched": True}}}
+
+
+def test_a_stored_web_pill_round_trips_with_its_extra_keys_and_no_new_message_key():
+    base = {"label": "Cay research report", "detail": "AAPL"}
+    dumped = _row_to_message(_web_row([base, _WEB_PILL])).model_dump()
+    _assert_keys_subset(_MESSAGE_ALL_KEYS, dumped, "web message")
+    _assert_required_non_null(dumped, _MESSAGE_REQUIRED, "web message")
+    assert set(dumped) == set(ChatMessageResponse.model_fields), "no new top-level message key"
+    assert dumped["sources"] == [base, _WEB_PILL]
+    assert dumped["thinking"]["web_searched"] is True
+
+
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "http://www.reuters.com/a", "data:,x",
+                                 "https://user@reuters.com/a", "https://10.0.0.1/a", None, 7])
+def test_an_unsafe_stored_web_pill_never_reaches_the_decoder(url):
+    base = {"label": "Cay research report", "detail": "AAPL"}
+    dumped = _row_to_message(_web_row([base, {**_WEB_PILL, "url": url}])).model_dump()
+    assert dumped["sources"] == [base]
+    assert dumped["rich_content"]["sources"] == [base]
+
+
+def test_every_pill_shape_the_backend_writes_validates_against_the_contract():
+    for pill in ({"label": "Cay research report", "detail": "AAPL"},
+                 {"kind": "screen", "label": "Stock detail", "detail": "AAPL"}, _WEB_PILL,
+                 {**_WEB_PILL, "title": None, "published_at": None}):
+        ChatSourcePill.model_validate(pill)
+    with pytest.raises(ValidationError):
+        ChatSourcePill.model_validate({"detail": "no label"})
+
+
+def _swift_struct_body(src: str, name: str) -> str:
+    """The brace-bounded body of `struct <name>`, string- and comment-aware enough for a model
+    file: line comments and block comments are removed first."""
+    src = _re.sub(r"/\*.*?\*/", "", src, flags=_re.S)
+    src = "\n".join(_re.sub(r"(?<!:)//.*$", "", line) for line in src.splitlines())
+    m = _re.search(rf"\bstruct\s+{name}\b[^{{]*\{{", src)
+    assert m, f"struct {name} not found"
+    depth, i = 1, m.end()
+    while depth and i < len(src):
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        i += 1
+    return src[m.end(): i - 1]
+
+
+def _coding_key_wire_names(body: str) -> set:
+    m = _re.search(r"enum\s+CodingKeys\s*:\s*String\s*,\s*CodingKey\s*\{(.*?)\}", body, flags=_re.S)
+    assert m, "no CodingKeys enum"
+    names = set()
+    for case in _re.findall(r"\bcase\s+([^\n]+)", m.group(1)):
+        for part in case.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            raw = _re.search(r'=\s*"([^"]+)"', part)
+            names.add(raw.group(1) if raw else part.split("=")[0].strip())
+    return names
+
+
+def test_the_pill_contract_matches_the_ios_chat_source_coding_keys():
+    """`ChatSourcePill` (the backend contract) and `ChatSource` (the iOS decoder) name the same
+    wire keys — a renamed key on either side is a pill that silently never becomes tappable."""
+    body = _swift_struct_body(_IOS_MODELS.read_text(encoding="utf-8"), "ChatSource")
+    assert _coding_key_wire_names(body) == set(ChatSourcePill.model_fields)
+
+
+def test_the_web_searched_flag_is_a_key_the_ios_thinking_decoder_reads():
+    body = _swift_struct_body(_IOS_MODELS.read_text(encoding="utf-8"), "ChatThinking")
+    assert {"stages", "reasoning", "source_count", "elapsed_ms", "web_searched"} <= \
+        _coding_key_wire_names(body)

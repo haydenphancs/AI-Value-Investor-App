@@ -3,7 +3,9 @@
 TWO layers, deliberately different in aggression:
 
 1. ``scan_answer`` — MONITORING only. Detects likely advice-boundary drift (a personal
-   buy/sell/hold DIRECTIVE) and identity drift (the model naming its provider). The
+   buy/sell/hold DIRECTIVE), identity drift (the model naming its provider), suitability
+   claims, and persona drift (speaking AS a real investor, or claiming holdings or trades
+   of its own — the report chat's mode voice must never do either). The
    endpoint LOGS these WITHOUT altering the answer, because a false positive silently
    dropping a good answer is worse than a logged flag a human can review. This is the
    safety net that makes drift observable.
@@ -68,6 +70,100 @@ _SUITABILITY_PATTERNS = (
 )
 
 
+# ── Persona drift (monitor-only, 2026-10-02) ──────────────────────────────────
+# A report chat now answers in the report's MODE ("Cay AI · Growth Hunter Agent"), a method
+# voice that is name-free and third-person by construction (agents/report_voice_prompt.py).
+# The two ways it can drift are the two claims that are not true of the product: speaking AS a
+# real investor (right of publicity / false endorsement — migration 103's rule) and claiming
+# holdings or trades of its own (FTC §5 / SEC AI-washing: an AI with no portfolio saying "I own
+# shares"). MONITOR ONLY, never redacted: rewriting a first-person sentence mid-answer would
+# corrupt it, and the voice's own trailer is the primary control.
+#
+# Shapes, each pinned by a false-positive AND a false-negative table in
+# tests/test_chat_guardrails.py:
+#   * a name is only ever matched in a FIRST-PERSON frame ("I'm …", "my name is …", "speaking
+#     as …", "As …, I"), never on a bare mention — "GARP was popularized by Peter Lynch's books"
+#     and "Berkshire, led by Warren Buffett, owns Apple" are ordinary third-person prose — and
+#     never as a possessive or compound ("I am Peter Lynch's biggest fan", "I'm Lynch-like");
+#   * "<full name> here" only when a dash, end punctuation other than a comma, or the end
+#     follows ("Michael Burry here —"), so the Book chats' "Peter Lynch here argues…" and
+#     "Peter Lynch here, in One Up On Wall Street, argues…" stay clean, and never after
+#     "by"/"of"/"from" ("…the method described by Peter Lynch here.");
+#   * no bare "wood" (an ordinary noun) and no bare "speaking";
+#   * holdings allow one adverb ("I also own", "I personally own") and cover hold/held (not the
+#     idioms "hold off", "hold the view"), and skip a hypothetical, a question or a worked
+#     example ("if I sold", "should I hold", "Suppose I bought…") and a numbered name ("Phase I
+#     sold out", "Vision Fund I sold") — but only when that word sits in the SAME clause.
+
+# Full names, then the distinctive single names. The investors behind the five report methods
+# plus the two retired ones (graham/munger rows were deactivated by migration 187) and the
+# pre-rename Activist (dalio). No bare "wood"; no bare "graham" (a common first name).
+_INVESTOR_FULL_NAMES = (
+    r"warren\s+buffett", r"charlie\s+munger", r"benjamin\s+graham", r"peter\s+lynch",
+    r"cathie\s+wood", r"bill\s+ackman", r"michael\s+burry", r"ray\s+dalio",
+)
+_INVESTOR_SINGLE_NAMES = ("buffett", "munger", "lynch", "cathie", "ackman", "burry", "dalio")
+_INVESTOR_FULL = "(?:" + "|".join(_INVESTOR_FULL_NAMES) + ")"
+_INVESTOR_ANY = "(?:" + "|".join(_INVESTOR_FULL_NAMES + _INVESTOR_SINGLE_NAMES) + ")"
+_IMPERSONATION_RE = re.compile(
+    # "I am Peter Lynch's biggest fan" / "I'm Lynch-like" are third-person: never a name
+    # followed by a possessive or a hyphenated compound.
+    r"\bi(?:'m|\s+am)\s+(?:mr\.?\s+|ms\.?\s+|mrs\.?\s+)?" + _INVESTOR_ANY + r"\b(?!'s|-)"
+    r"|\bmy\s+name\s+is\s+" + _INVESTOR_ANY + r"\b"
+    r"|\b(?:speaking|writing|answering|talking)\s+as\s+" + _INVESTOR_ANY + r"\b"
+    # `(?:\s*,\s*|\s+)`, not `\s*,?\s+`: a whitespace run has ONE way to match, so a long
+    # run after the name cannot backtrack quadratically (scan_answer runs on the event loop).
+    r"|(?<!\bsuch\s)\bas\s+" + _INVESTOR_ANY + r"(?:\s*,\s*|\s+)(?:i|i'd|i'm|i've|i'll|my)\b"
+    # No comma in the follow set: "Peter Lynch here, in One Up On Wall Street, argues" is a
+    # Book chat's ordinary prose.
+    r"|(?<!\bby\s)(?<!\bof\s)(?<!\bfrom\s)\b" + _INVESTOR_FULL
+    + r"\s+here(?=\s*(?:[-\u2013\u2014.:;!?\u2026]|$))"
+)
+# "I hold off on a verdict" / "I still hold the view that\u2026" are idioms, not a holding.
+_HOLD_IDIOM_GUARD = (
+    r"(?!\s+(?:off|back)\b)"
+    r"(?!\s+(?:the|that|this|a|an|my|our)\s+(?:view|views|opinion|belief|line)\b)"
+)
+_HOLDINGS_RE = re.compile(
+    r"\bmy\s+(?:own\s+)?(?:portfolio|holdings|fund|track\s+record)\b"
+    r"|\bmy\s+(?:position|stake|shares)\s+in\b"
+    r"|\bi(?:'ve|\s+have)?(?:\s+(?:also|personally|recently|just|already|still))?"
+    r"\s+(?:own|owned|bought|sold|(?:hold|held)\b" + _HOLD_IDIOM_GUARD + r")"
+    # "I hold no positions" / "I own none" is the model COMPLYING, not a claim.
+    r"\b(?!\s+(?:no|none|nothing|zero)\b)"
+)
+# The word right before a first-person verb that makes it hypothetical, a question, a worked
+# example or a numbered name rather than a claim ("if I sold", "should I hold", "Suppose I
+# bought 100 shares", "Phase I sold out", "Vision Fund I sold its stake").
+_HOLDINGS_SKIP_BEFORE = frozenset({
+    "if", "whether", "unless", "should", "do", "does", "did", "can", "could", "would",
+    "will", "shall", "may", "might", "must",
+    "suppose", "imagine", "say", "assume", "pretend", "hypothetically",
+    "phase", "class", "tier", "series", "part", "stage", "grade", "level", "chapter",
+    "section", "title", "schedule", "war",
+    "fund", "model", "act", "volume", "book", "gen", "unit", "article", "type",
+})
+# The previous word counts only inside the same clause: a sentence end or a semicolon between
+# it and "I" ("\u2026what to do. I bought more.") means the verb is a fresh claim.
+_PREV_WORD_RE = re.compile(r"([a-z]+)[^\w.!?;]*$")
+
+
+def _persona_text(text: str) -> str:
+    """Lower-cased text with curly apostrophes straightened — for the persona patterns ONLY,
+    so every pre-existing tag stays byte-identical in what it matches."""
+    return text.replace("\u2019", "'").replace("\u2018", "'")
+
+
+def _has_first_person_holdings(text: str) -> bool:
+    for m in _HOLDINGS_RE.finditer(text):
+        if m.group(0).startswith("my"):
+            return True
+        prev = _PREV_WORD_RE.search(text[max(0, m.start() - 24):m.start()])
+        if prev is None or prev.group(1) not in _HOLDINGS_SKIP_BEFORE:
+            return True
+    return False
+
+
 def _boundary_regex(patterns) -> "re.Pattern":
     """Match any phrase as a whole token, not a substring. `(?<!\\w)…(?!\\w)` stops the short/fragile
     tokens from firing on innocent supersets — the reported class was `as an ai` matching inside
@@ -92,6 +188,11 @@ def scan_answer(answer: str) -> List[str]:
         issues.append("identity_leak")
     if _SUITABILITY_RE.search(text):
         issues.append("suitability_claim")
+    persona_text = _persona_text(text)
+    if _IMPERSONATION_RE.search(persona_text):
+        issues.append("persona_impersonation")
+    if _has_first_person_holdings(persona_text):
+        issues.append("first_person_holdings")
     return issues
 
 

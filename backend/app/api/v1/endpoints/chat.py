@@ -32,8 +32,9 @@ from app.services.chat_security import (
     sanitize_context,
     sanitize_symbol,
     scan_input,
-    finalize_disclaimer,
+    finalize_answer_notes,
     strip_trailing_disclaimer,
+    strip_web_caveat,
     neutralize_fences,
 )
 from app.core.security import trusted_client_ip
@@ -44,6 +45,15 @@ import time as _time
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 from app.services.chat_intent import is_trade_intent
 from app.services.chat_chip_filter import filter_answerable_chips
+from app.services.chat_web_search_service import (
+    MAX_WEB_PILLS,
+    STATUS_NO_RESULTS,
+    WEB_SEARCH_TOOL,
+    # The builder's own URL policy, reused (never copied) to check a STORED web pill on read.
+    _safe_https_url,
+    single_lens_route,
+    web_results_delivered,
+)
 from app.schemas.chat_starters import ChatStartersResponse
 from app.services.chat_starters_service import get_chat_starters_service
 from app.schemas.chat import (
@@ -1206,13 +1216,162 @@ def _object_citations(raw: Any) -> Optional[list]:
     return kept or None
 
 
-def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessageResponse:
+# ── Report chat's web source pills (2026-10-02) ──────────────────────────────
+#
+# The pills are BUILT by `chat_web_search_service` (`WebSearchTurn.source_pills()`: https only, one
+# per host, the publisher named from the URL's own host, at most `MAX_WEB_PILLS`) — code-authored,
+# never model text. These helpers only PLACE them: after the turn's base (grounding) pills, safe
+# URLs only, one per host (`www.` folded) AND per publisher name, capped — and, while
+# `CHAT_WEB_SOURCES_PERSIST` is False, kept out of what is stored (Brave's terms allow transient
+# storage only). They live here, not in a module of their own, so the web-search service keeps its
+# pinned importers (`tests/test_brave_search_boundary.py`).
+#
+# Wire shape of one web pill (one more element of the existing `sources` list, so a shipped build
+# that decodes only `{label, detail}` shows a plain "Web · Reuters" pill):
+#   {"kind": "web", "label": "Web", "detail": <publisher>, "title": <≤120 chars> | null,
+#    "url": "https://…", "published_at": "YYYY-MM-DD" | null}
+# One pill per PUBLISHER as well as per host: shipped iOS builds key a pill on `label|detail`, so
+# two "Reuters" pills (www.reuters.com and reuters.com) would collide in a `ForEach`.
+
+_WEB_PILL_KIND = "web"
+
+
+def _is_web_pill(pill: Any) -> bool:
+    """A dict whose `kind` is "web" (trimmed, case-insensitive). Never raises."""
+    if not isinstance(pill, dict):
+        return False
+    kind = pill.get("kind")
+    return isinstance(kind, str) and kind.strip().lower() == _WEB_PILL_KIND
+
+
+def _web_pill_host(pill: Any) -> Optional[str]:
+    """The host of a SAFE web pill (the dedup key), else None: not a web pill, a non-string or
+    blank label/detail, a non-string title/date, or a URL that fails the builder's policy."""
+    if not _is_web_pill(pill):
+        return None
+    label, detail = pill.get("label"), pill.get("detail")
+    if not isinstance(label, str) or not label.strip():
+        return None
+    if not isinstance(detail, str) or not detail.strip():
+        return None
+    title, published = pill.get("title"), pill.get("published_at")
+    if title is not None and not isinstance(title, str):
+        return None
+    if published is not None and not isinstance(published, str):
+        return None
+    safe = _safe_https_url(pill.get("url"))
+    return safe[1] if safe else None
+
+
+def _strip_web_pills(sources: Any) -> list:
+    """`sources` without its web pills (a new list; [] for None / a non-list)."""
+    if not isinstance(sources, list):
+        return []
+    return [p for p in sources if not _is_web_pill(p)]
+
+
+def _merge_web_pills(base: Any, pills: Any) -> list:
+    """Base (non-web) pills first, in order and untouched; then web pills — those already in
+    `base`, then `pills` — each only if SAFE, first-seen per host (`www.` folded) AND per
+    publisher name, at most `MAX_WEB_PILLS`. Idempotent, returns a new list, never mutates its
+    inputs; a non-list argument counts as empty."""
+    base_list = base if isinstance(base, list) else []
+    new_list = pills if isinstance(pills, list) else []
+    out: list = [p for p in base_list if not _is_web_pill(p)]
+    seen_hosts: set = set()
+    seen_names: set = set()
+    added = 0
+    for pill in [p for p in base_list if _is_web_pill(p)] + list(new_list):
+        if added >= MAX_WEB_PILLS:
+            break
+        host = _web_pill_host(pill)
+        if host is None:
+            continue
+        host_key = host[4:] if host.startswith("www.") else host
+        name_key = pill["detail"].strip().casefold()
+        if host_key in seen_hosts or name_key in seen_names:
+            continue
+        seen_hosts.add(host_key)
+        seen_names.add(name_key)
+        out.append(dict(pill))
+        added += 1
+    return out
+
+
+def _turn_sources(base: Any, web_pills: Any, *, persist: bool):
+    """``(live, stored)`` for one turn: ``live`` is what the client is shown (the re-sent
+    `sources` frame, `done`, the send door's response); ``stored`` is what goes into
+    `rich_content.sources` — the same list while `persist`, else the live list without its web
+    pills. Each is None when empty (the shape both doors always persisted)."""
+    live = _merge_web_pills(base, web_pills)
+    stored = live if persist else _strip_web_pills(live)
+    return (live or None), (stored or None)
+
+
+def _sanitize_stored_sources(sources: Any):
+    """``(sources_without_unsafe_web_pills, dropped)`` for a stored row's `sources`. Only web
+    pills are checked — a grounding pill, or anything this code never wrote, passes unchanged
+    (the schema is `List[Any]` and old builds decode totally). A non-list is returned as is."""
+    if not isinstance(sources, list):
+        return sources, 0
+    kept: list = []
+    dropped = 0
+    for pill in sources:
+        if _is_web_pill(pill) and _web_pill_host(pill) is None:
+            dropped += 1
+            continue
+        kept.append(pill)
+    return kept, dropped
+
+
+def _overlay_live_sources(message: dict, live: Optional[list]) -> dict:
+    """A message dict whose top-level `sources` is the turn's LIVE list, for `done` while the
+    stored copy omits the web pills. The `rich_content` echo and `thinking` stay as persisted."""
+    out = dict(message)
+    out["sources"] = list(live) if live else None
+    return out
+
+
+def _web_step_skipped(result: Any) -> bool:
+    """`tool_step.skipped` for a `web_search` step: True when no search the user can be told about
+    ran — the fixed not-run outcomes (`daily_limit`, `disabled`, `unavailable`), the invalid-query
+    refusal and a handler failure (a timeout's bare `{error}`). False when results were
+    delivered, and for `no_results`: that search DID run, found nothing usable, and the answer
+    says so. Never raises."""
+    if web_results_delivered(result):
+        return False
+    if isinstance(result, dict) and result.get("web_search") is True \
+            and result.get("status") == STATUS_NO_RESULTS and not result.get("error"):
+        return False
+    return True
+
+
+def _drops_web_search_chips(session_row: Any) -> bool:
+    """A report chat — the same test `ChatService` applies when it writes the chips: there a
+    chip that reads as a web-search ask is never offered (search is an EXPLICIT ask only)."""
+    if not isinstance(session_row, dict):
+        return False
+    st = session_row.get("session_type")
+    ct = session_row.get("context_type")
+    return (
+        (isinstance(st, str) and st.strip().upper() == "REPORT")
+        or (isinstance(ct, str) and ct.strip().upper() == "TICKER_REPORT")
+    )
+
+
+def _row_to_message(
+    row: dict, *, strip_disclaimer: bool = False, drop_web_search_chips: bool = False,
+) -> ChatMessageResponse:
     """Map a Supabase chat_messages row to the response schema.
 
     `strip_disclaimer` is OPT-IN, and only `get_chat_history` opts in. A blanket strip
     here would be wrong: this same function also serves the fresh non-streaming response
     and the `done` frame, whose content already went through `finalize_disclaimer` in
     THIS request — stripping again would delete a disclaimer that was required.
+
+    `drop_web_search_chips` (history replay of a report chat): a chip stored before the
+    web-search drop existed ("Any recent news on AVGO?") must not reopen a paid search one tap
+    away. The fresh response and the `done` frame were filtered at generation already.
     """
     rc = row.get("rich_content") if isinstance(row.get("rich_content"), dict) else None
     # `widgets` (list) is the Phase-2 multi-widget field; `widget` (single) stays for back-compat
@@ -1224,12 +1383,27 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
     # Futuristic-chat fields live in rich_content (no schema migration). Absent → None,
     # so legacy rows and old iOS builds decode unchanged.
     sources = rc.get("sources") if rc else None
+    # A stored web pill whose URL fails the builder's policy (https only, a DNS host, no
+    # userinfo / port) is dropped on READ — SFSafariViewController raises on anything else, and
+    # a stored row is data from the past. Grounding pills pass unchanged. The raw `rich_content`
+    # echo is corrected too, so no copy of the unsafe pill reaches the client.
+    raw_rich = row.get("rich_content")
+    sources, dropped_pills = _sanitize_stored_sources(sources)
+    if dropped_pills:
+        logger.warning(
+            "chat history: dropped %d unsafe web source pill(s) from message=%s",
+            dropped_pills, row.get("id"),
+        )
+        if isinstance(raw_rich, dict):
+            raw_rich = {**raw_rich, "sources": sources}
     # Chips stored BEFORE the answerable-scope filter existed can still propose a question
     # the chat declines; filtering on read keeps history honest without rewriting rows
     # (the raw `rich_content` echo is untouched — iOS reads `suggestions`). Idempotent on
     # the `done` frame, which was filtered at generation. The Continue chip passes.
     stored_chips = rc.get("suggestions") if rc else None
-    suggestions = (filter_answerable_chips(stored_chips) or None) if stored_chips else None
+    suggestions = (
+        filter_answerable_chips(stored_chips, drop_web_search=drop_web_search_chips) or None
+    ) if stored_chips else None
     thinking = rc.get("thinking") if rc else None
     # Present only on a turn that was free or refunded, so a history reload re-shows the
     # chip. Absent on every legacy row and every normally-charged turn → None → no chip.
@@ -1258,7 +1432,7 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
         content=content,
         widget=stored_widget,
         widgets=stored_widgets,
-        rich_content=row.get("rich_content"),
+        rich_content=raw_rich,
         # Objects only. The schema is `List[Any]` (a scalar would pass), and iOS decodes
         # each element as `ChatCitationDTO` — array decoding is all-or-nothing, so one
         # non-object element in one message used to blank the whole history. The DTO is
@@ -1571,9 +1745,13 @@ async def send_chat_message(
             )
         advice_flags = scan_answer(clean_answer)
         if enforced or advice_flags:
+            # `persona` = the report chat's mode voice the answer was written in (None outside
+            # a REPORT session) — what a `persona_impersonation` / `first_person_holdings` flag
+            # has to be read against.
             sec_logger.warning(
-                "Chat guardrail (send) session=%s enforced=%r flags=%r: %r",
-                session_id, enforced, advice_flags, clean_answer[:200],
+                "Chat guardrail (send) session=%s persona=%s enforced=%r flags=%r: %r",
+                session_id, ai_result.get("report_voice_key"), enforced, advice_flags,
+                clean_answer[:200],
             )
         # Disclaimer, gated on trade-action intent. The user's question is the primary
         # signal; `advice_directive` is OR'd in so a volunteered "you should buy it"
@@ -1582,7 +1760,13 @@ async def send_chat_message(
         # that it fires on the model COMPLYING ("depends on circumstances I can't see"),
         # so using it would re-attach the line almost everywhere and undo the gate.
         trade_intent = is_trade_intent(msg) or ("advice_directive" in advice_flags)
-        ai_result["content"], _ = finalize_disclaimer(clean_answer, trade_intent=trade_intent)
+        # …plus report chat's code-authored web-results caveat, appended only when web results
+        # reached THIS answer (`web_search_used`), and a model-written copy stripped on every turn.
+        web_used = bool(ai_result.get("web_search_used"))
+        ai_result["content"], _ = finalize_answer_notes(
+            clean_answer, trade_intent=trade_intent, web_used=web_used,
+            report_as_of=ai_result.get("report_as_of"),
+        )
 
         # Build the widget payload (if Gemini triggered the stock tool)
         widget_payload = ai_result.get("widget")
@@ -1622,13 +1806,21 @@ async def send_chat_message(
         }
         # Same shape the stream door persists (`_rich_content_for_turn`): a thinking card
         # with no streamed reasoning, the source pills, and the widget under both keys.
-        sources = ai_result.get("sources") or None
+        # The turn's web pills join the base pills on the LIVE response only, while
+        # `CHAT_WEB_SOURCES_PERSIST` is False; `source_count` counts what is stored, and
+        # `web_searched` (a flag, no result content) is stored either way.
+        live_sources, sources = _turn_sources(
+            ai_result.get("sources"), ai_result.get("web_sources") if web_used else [],
+            persist=bool(settings.CHAT_WEB_SOURCES_PERSIST),
+        )
         thinking_payload = {
             "stages": [],
             "reasoning": "",
             "source_count": len(sources) if sources else 0,
             "elapsed_ms": int((_time.monotonic() - started) * 1000),
         }
+        if web_used:
+            thinking_payload["web_searched"] = True
         # A cut answer (the model hit its ceiling after real text) is marked and gets the
         # single "Continue" chip — persisted with the row so history replays the same
         # state, and the identical shape the stream door writes for the same verdict.
@@ -1719,7 +1911,11 @@ async def send_chat_message(
         # Best-effort daily token accounting for spend observability.
         _record_chat_tokens(user, x_guest_id, ai_result.get("tokens_used"))
 
-        return _row_to_message(assistant_row)
+        response = _row_to_message(assistant_row)
+        if live_sources != sources:
+            # The stored row omits the web pills; the client is shown them on this response.
+            response = response.model_copy(update={"sources": live_sources})
+        return response
 
     except Exception as e:
         # Classified like the stream door, so the code the SERVER knows reaches the user:
@@ -1918,9 +2114,27 @@ async def stream_chat_message(
         # set from prep, REPLACED by the fallback's own (it re-resolves), persisted on the
         # row. Bound here because prep can raise before it is ever assigned.
         context_grounded: Optional[bool] = None
+        # The report chat's mode voice (a PERSONA_KEYS key, or None), for the guardrail log
+        # lines only. Set from prep, REPLACED by the fallback's own (it re-resolves); bound
+        # here because prep can raise before it is ever assigned.
+        report_voice_key: Optional[str] = None
         route: dict = {
             "specialists": ["general"], "mode": "single", "labels": ["General"], "degraded": True,
         }
+        # Report chat's web search (`chat_web_search_service`): the turn's `WebSearchTurn` from
+        # prep (None = no web search this turn), handed to the handlers AND to the fallback so
+        # the turn runs ONE search; and whether web results actually reached this answer.
+        # Bound before the try: the fallback and the persist block read them when prep raised.
+        web_turn = None
+        web_search_used = False
+        # The grounded report's humanized as-of date, which the web-results caveat names (prep's,
+        # REPLACED by the fallback's own when it has one), and the list the last `sources` frame
+        # carried — a frame is re-sent only when the live list changed (iOS REPLACES its pills).
+        report_as_of: Optional[str] = None
+        sent_sources: Optional[list] = None
+        # A later `web_search` call on the same turn REPLAYS the one search (no second "Searching
+        # the web…" flash): only the turn's first start is forwarded.
+        web_start_sent = False
 
         try:
             # Multi-agent (Phase 3): a cheap router picks the specialist lens(es). Run it in PARALLEL
@@ -1983,11 +2197,21 @@ async def stream_chat_message(
                 prep, warmed = await asyncio.gather(prep_coro, _warm_if_ungrounded())
                 route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
 
+            # A web turn is answered in SINGLE mode, decided BEFORE the `routing` frame below
+            # promises any lenses: the synthesis merge is a tool-less pass over 1,200-char
+            # summaries that would strip the publisher/date attributions, and two specialists
+            # would each reach for the search.
+            web_turn = prep.get("web_turn")
+            if web_turn is not None:
+                route = single_lens_route(route)
+            report_as_of = prep.get("report_as_of")
+
             # The chip's verdict as soon as it is known, so "Grounded on Research Report"
             # is corrected while the answer streams rather than after it. Only for a type
             # that HAS a verdict (old builds ignore an unknown frame); `done` carries the
             # final, persisted one — the fallback may re-resolve differently.
             context_grounded = prep.get("context_grounded")
+            report_voice_key = prep.get("report_voice_key")
             if isinstance(context_grounded, bool):
                 yield _sse("grounding", {"context_grounded": context_grounded})
             # Capture sources up-front so they survive even if streaming later fails and we
@@ -1995,6 +2219,7 @@ async def stream_chat_message(
             sources = prep.get("sources")
             if sources:
                 yield _sse("sources", {"sources": sources})
+                sent_sources = sources
             # Surface the routing decision (a real specialist / a synthesis) for the thinking card.
             if route["specialists"] != ["general"]:
                 yield _sse("routing", {
@@ -2012,16 +2237,17 @@ async def stream_chat_message(
             asset_type = prep.get("asset_type") or "NORMAL"
             # Filtered to the tools that MEAN something for this asset class — not just
             # "equity three, plus the index one for INDEX". See `chat_tools._TOOLS_BY_ASSET_TYPE`.
-            tools = build_chat_tool_declarations(asset_type)
+            # `web_search` joins both ONLY on a turn whose gate opened (`web_turn`).
+            tools = build_chat_tool_declarations(asset_type, web_search=web_turn is not None)
             # The HANDLER map is filtered too: the declarations decide what the model is
             # offered, but a handler left in the map for an undeclared tool would still
             # run if the model named it from memory (a second door around the class table).
-            allowed = tools_for_asset_type(asset_type)
+            allowed = tools_for_asset_type(asset_type, web_search=web_turn is not None)
             handlers = {
                 name: fn
                 for name, fn in build_chat_tool_handlers(
                     chat_service, screen_symbol=stock_id, screen_asset_type=asset_type,
-                    user_id=user["id"],
+                    user_id=user["id"], web_turn=web_turn,
                 ).items()
                 if name in allowed
             }
@@ -2140,6 +2366,21 @@ async def stream_chat_message(
                     # buffers its specialists or a long tool (a grounded web search) runs.
                     yield ": keepalive\n\n"
                     continue
+                if kind == "tool_start":
+                    # `stream_agentic` announces a tool BEFORE its handler runs. Forwarded as a
+                    # `tool_start {name}` frame for `web_search` ONLY — the live "Searching the
+                    # web…" status, the one tool slow enough to need it — and consumed silently
+                    # for every other tool (a shipped build ignores an unknown frame either way).
+                    # It does NOT mark the stream as started (no answer or reasoning text is on
+                    # screen): a fallback after it sends no `reset`, and the fallback's `done`
+                    # (which replaces the thinking card wholesale) settles the searching state.
+                    if (
+                        isinstance(payload, dict) and payload.get("name") == WEB_SEARCH_TOOL
+                        and not web_start_sent
+                    ):
+                        web_start_sent = True
+                        yield _sse("tool_start", {"name": WEB_SEARCH_TOOL})
+                    continue
                 streamed_any = True
                 if kind == "thought":
                     reasoning_parts.append(payload)
@@ -2164,10 +2405,31 @@ async def stream_chat_message(
                     # turn free, at 15/min, with the balance never moving.
                     if _err and isinstance(_res, dict) and _res.get("upstream"):
                         tool_calls_failed += 1
-                    yield _sse("tool_step", {
+                    _is_web = payload.get("name") == WEB_SEARCH_TOOL
+                    _web_delivered = payload.get("name") == WEB_SEARCH_TOOL and web_results_delivered(_res)
+                    if _web_delivered:
+                        # Web results reached the model on this turn (a capped, empty or failed
+                        # search never counts) — the caveat and the source pills key off it.
+                        web_search_used = True
+                    _step = {
                         "name": payload.get("name"), "args": payload.get("args"),
                         "error": str(_err)[:200] if _err else None,
-                    })
+                    }
+                    if _is_web and _web_step_skipped(_res):
+                        # Capped / switched off / unavailable / refused: no search the user can
+                        # be told about, so the client claims no "Searching the web" progress.
+                        _step["skipped"] = True
+                    yield _sse("tool_step", _step)
+                    if _web_delivered and web_turn is not None:
+                        # The turn's web pills (built by the service from the URLs the model
+                        # never saw) join the base pills, and the FULL list is re-sent — iOS
+                        # replaces its pills with each `sources` frame. A memoized replay merges
+                        # to the same list and sends nothing.
+                        merged = _merge_web_pills(sources, web_turn.source_pills())
+                        if merged != (sources or []):
+                            sources = merged
+                            yield _sse("sources", {"sources": sources})
+                            sent_sources = sources
                     w = widget_from_tool_result(_res)
                     if w is not None and widget_key(w) not in seen_widgets:
                         seen_widgets.add(widget_key(w))
@@ -2210,6 +2472,13 @@ async def stream_chat_message(
                 and getattr(settings, "CHAT_AUTO_CONTINUE_ENABLED", True)
                 and not prep.get("deep_dive_cached")
                 and not replayed_warm
+                # A continuation runs on the tool-less instruction with only the prompt — it
+                # never saw the web results and could invent attributions. A cut answer BUILT ON
+                # web results stays truncated (and is settled as such) instead. Gated on the
+                # results actually reaching the model, not on the gate opening: a web-intent
+                # turn that never searched (or was capped / failed) has nothing to misattribute,
+                # and skipping its continuation made every cut web-intent answer free.
+                and not web_search_used
             ):
                 cont_signals: dict = {}
                 try:
@@ -2293,6 +2562,9 @@ async def stream_chat_message(
                 # A DEGRADED brief (no specialists, unmerged, every tool failed) is refunded
                 # below — caching it would replay it for 24 h as a zero-cost "hit".
                 and not stream_signals.get("degraded")
+                # Never one built on a user's web results: third-party text must not enter a
+                # cache served to every user (Brave allows transient storage only).
+                and not web_search_used
             ):
                 await asyncio.to_thread(
                     chat_service._upsert_deep_dive_cache,
@@ -2324,6 +2596,8 @@ async def stream_chat_message(
                     user_id=user["id"],
                     # Same once-per-session card rule as the stream it replaces.
                     attach_base_widget=first_turn,
+                    # The SAME turn's web search: its outcome is replayed, never bought twice.
+                    web_turn=web_turn,
                 ))
                 # The fallback is one awaited call with tools inside it — nothing reaches
                 # the client until it returns, so heartbeat it the same way as the pump —
@@ -2378,9 +2652,22 @@ async def stream_chat_message(
                 # and the answer being persisted was grounded on THAT resolve, not prep's.
                 if "context_grounded" in ai_result:
                     context_grounded = ai_result.get("context_grounded")
+                report_voice_key = ai_result.get("report_voice_key")
+                # …and whether web results reached THIS answer (the fallback's own verdict),
+                # with its pills (the aborted stream's web pills are dropped unless the fallback
+                # used the results too) and its own report date.
+                web_search_used = bool(ai_result.get("web_search_used"))
+                report_as_of = ai_result.get("report_as_of") or report_as_of
+                fb_base = _strip_web_pills(sources) if sources else _strip_web_pills(ai_result.get("sources"))
+                sources = _merge_web_pills(
+                    fb_base, ai_result.get("web_sources") if web_search_used else [],
+                ) or None
                 if streamed_any:
                     # Discard any partial tokens before the full answer replaces them.
                     yield _sse("reset", {})
+                if sources and sources != sent_sources:
+                    yield _sse("sources", {"sources": sources})
+                    sent_sources = sources
             except Exception as e2:
                 # A transient Gemini condition (quota or "high demand" overload) is
                 # a retry-later, not a code bug — WARNING, not an ERROR Sentry page.
@@ -2416,8 +2703,8 @@ async def stream_chat_message(
         advice_flags = scan_answer(content)
         if enforced or advice_flags:
             sec_logger.warning(
-                "Chat guardrail (stream) session=%s enforced=%r flags=%r: %r",
-                session_id, enforced, advice_flags, content[:200],
+                "Chat guardrail (stream) session=%s persona=%s enforced=%r flags=%r: %r",
+                session_id, report_voice_key, enforced, advice_flags, content[:200],
             )
 
         # REASONING IS A SECOND OUTPUT CHANNEL and was never enforced. It is rendered in
@@ -2433,10 +2720,17 @@ async def stream_chat_message(
         # site sees the whole finalized string.
         if reasoning_text:
             reasoning_text, reasoning_enforced = enforce_answer(reasoning_text)
-            if reasoning_enforced:
+            # Monitored like the answer (2026-10-02): with a report chat's mode voice, the
+            # scratchpad is the likeliest place for "Peter Lynch would…" or "I'd buy" to
+            # surface, and it is shown in the thinking card and persisted. Logged only — the
+            # disclaimer gate below keys on the ANSWER's flags, never on these.
+            reasoning_flags = scan_answer(reasoning_text)
+            if reasoning_enforced or reasoning_flags:
                 sec_logger.warning(
-                    "Chat guardrail (stream reasoning) session=%s enforced=%r: %r",
-                    session_id, reasoning_enforced, reasoning_text[:200],
+                    "Chat guardrail (stream reasoning) session=%s persona=%s enforced=%r "
+                    "flags=%r: %r",
+                    session_id, report_voice_key, reasoning_enforced, reasoning_flags,
+                    reasoning_text[:200],
                 )
 
         # Disclaimer policy in code, gated on trade-action intent — same two signals and
@@ -2445,17 +2739,33 @@ async def stream_chat_message(
         # The suffix is streamed live only on the pure-streamed path; a fallback answer
         # arrives whole via `done`, so there is no live token to chase there.
         trade_intent = is_trade_intent(user_message) or ("advice_directive" in advice_flags)
-        content, _suffix = finalize_disclaimer(content, trade_intent=trade_intent)
+        # …plus report chat's code-authored web-results caveat: appended LAST and only when web
+        # results reached THIS answer (`web_search_used`, the fallback's own verdict after a
+        # fallback); a model-written copy is stripped on every turn. One live token carries the
+        # whole suffix (legal line + caveat) so the visible reveal matches the stored content.
+        content, _suffix = finalize_answer_notes(
+            content, trade_intent=trade_intent, web_used=web_search_used,
+            report_as_of=report_as_of,
+        )
         if _suffix and streamed_any and not used_fallback:
             yield _sse("token", {"delta": _suffix})
 
+        # The live pill list (base + the turn's web pills) vs. the stored one: while
+        # `CHAT_WEB_SOURCES_PERSIST` is False the row keeps no web pill and `done` overlays the
+        # live list. `source_count` counts what is STORED; `web_searched` (a flag, no result
+        # content) is stored on every turn whose web results were delivered — the badge on reopen.
+        live_sources, stored_sources = _turn_sources(
+            sources, [], persist=bool(settings.CHAT_WEB_SOURCES_PERSIST),
+        )
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         thinking_payload = {
             "stages": [],                    # canned steps replaced by the streamed reasoning below
             "reasoning": reasoning_text,
-            "source_count": len(sources) if sources else 0,
+            "source_count": len(stored_sources) if stored_sources else 0,
             "elapsed_ms": elapsed_ms,
         }
+        if web_search_used:
+            thinking_payload["web_searched"] = True
         # The answer the user is reading is INCOMPLETE: the model cut it and no
         # continuation finished it (`finish_reason` is cleared by a clean continuation
         # and re-set by the fallback's own verdict). Derived from the reason, not from
@@ -2476,7 +2786,7 @@ async def stream_chat_message(
             # suggestions) in one JSONB column — no schema migration. Suggestions are added AFTER
             # this durable write (below), so they can never block or drop it.
             rich_content: dict = _rich_content_for_turn(
-                thinking_payload, widgets, sources,
+                thinking_payload, widgets, stored_sources,
                 truncated=truncated, finish_reason=stream_signals.get("finish_reason"),
                 context_grounded=context_grounded,
             )
@@ -2628,9 +2938,13 @@ async def stream_chat_message(
                 # its budget gets a short grace, not another budget.
                 _sugg_task = asyncio.ensure_future(chat_service.generate_followup_suggestions(
                     user_message=user_message,
-                    answer=content,
+                    # Without the code-authored web caveat: chips are follow-ups to the ANSWER,
+                    # not to our closing note.
+                    answer=strip_web_caveat(content),
                     context_type=ctx_type,
                     reference_id=ref_id,
+                    # A REPORT chat drops chips that would open the paid web search.
+                    session_type=session_type,
                 ))
                 _sugg_deadline = max(
                     _time.monotonic() + 5.0,
@@ -2701,7 +3015,12 @@ async def stream_chat_message(
         # BALANCE is what stops its local copy going stale — chat is the one metered
         # surface that never refreshed it.
         yield _sse("credits", quota.cost_frame())
-        yield _sse("done", {"message": _row_to_message(assistant_row).model_dump()})
+        done_message = _row_to_message(assistant_row).model_dump()
+        if live_sources != stored_sources:
+            # The stored row omits the web pills (`CHAT_WEB_SOURCES_PERSIST`); iOS takes the
+            # turn's pills from `done`, so it carries the live list.
+            done_message = _overlay_live_sources(done_message, live_sources)
+        yield _sse("done", {"message": done_message})
 
     async def _metered_stream():
         # Wrap event_gen so a client disconnect (CancelledError/GeneratorExit) — which the
@@ -2799,6 +3118,7 @@ async def get_chat_history(
     # user row" is exact rather than a guess.
     replayed: List[ChatMessageResponse] = []
     last_question = ""
+    drop_web_chips = _drops_web_search_chips(session.data)
     for row in rows:
         if row.get("role") == "user":
             last_question = row.get("content") or ""
@@ -2808,7 +3128,8 @@ async def get_chat_history(
         # `scan_answer` is re-run because the tag was never persisted; a handful of
         # compiled regexes is what keeps replay symmetric with the live decision.
         keep = is_trade_intent(last_question) or ("advice_directive" in scan_answer(stored))
-        replayed.append(_row_to_message(row, strip_disclaimer=not keep))
+        replayed.append(_row_to_message(row, strip_disclaimer=not keep,
+                                        drop_web_search_chips=drop_web_chips))
 
     return ChatHistoryResponse(
         session=_row_to_session(session.data),

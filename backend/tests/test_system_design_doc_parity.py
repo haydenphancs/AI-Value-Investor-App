@@ -424,6 +424,9 @@ _CURATED_TABLES = {
     # AI-intel caches, the soft/hard-expiry one; §9.1: the never-FK'd unlinked tables.
     "short_interest_cache", "crypto_coin_id_cache", "competitor_intel_cache",
     "moat_intel_cache", "ip_intel_cache", "ai_insight_cache",
+    # 2026-10-02: §3.3 names the retired grounded caches as EMPTY (migration 188), so a later
+    # DROP must update that sentence too.
+    "geopolitical_macro_cache",
     "user_learn_progress", "push_send_log",
     # 2026-09-27: 173-181 applied and re-dumped. The document already named these tables;
     # now that the snapshot holds them they are curated, so a DROP fails here.
@@ -473,7 +476,7 @@ def test_every_real_table_the_doc_mentions_is_curated() -> None:
 # that — every one of their file counts had drifted 20-70% before this pass.
 EXPECTED = {
     "middleware_registered": 5,   # CORS, GZip, _security_headers, cap_json_body, add_process_time  (§8.3, §10)
-    "integrations": 16,           # app/integrations/*.py excluding __init__     (§2)
+    "integrations": 17,           # app/integrations/*.py excluding __init__     (§2)
 }
 
 

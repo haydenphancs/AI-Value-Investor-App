@@ -212,7 +212,6 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     from app.services.news_insight_service import (
         MAX_CORPUS_ARTICLES,
         NewsInsightService,
-        _max_points_for,
         select_recent_corpus,
     )
 
@@ -250,8 +249,8 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     for i in range(args.samples):
         before = len(counting.tags)
         card, reason = await svc._generate_card(
-            scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", None, None, None,
-            now=as_of, earnings=status, max_points=_max_points_for(None, False),
+            scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", None, None,
+            now=as_of, earnings=status,
         )
         tags = counting.tags[before:]
         if i == 0 and args.show_prompt and counting.prompts:

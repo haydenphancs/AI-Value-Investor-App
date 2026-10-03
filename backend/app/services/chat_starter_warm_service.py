@@ -3,7 +3,9 @@
 WHY. The chips are the questions people are most likely to tap, and — unlike anything a user
 types — they are known BEFORE they are asked. So a background pass answers each of the day's
 global chips once and stores it; tapping one then replays a stored answer instead of paying a
-full Gemini turn and, for a big mover, a grounded web search. The chips also happen to be the
+full Gemini turn and its market-data tool calls. (A big mover used to add a Google Search
+grounded web search too; that was retired on 2026-10-02 for its terms, and migration 189
+empties this table of the answers stored while it existed.) The chips also happen to be the
 questions that benefit most from the expensive path, which is exactly what makes pre-warming
 worth doing rather than merely clever.
 
@@ -133,10 +135,14 @@ def question_hash(question: str) -> str:
     apostrophe, a non-breaking space or capitalisation still hits its own warmed row. The
     same normalisation must be applied on the write and the read — hence one function, used
     by both.
+
+    Versioned (`v2`, 2026-10-03): an answer warmed before Google Search grounding was retired
+    may rest on the grounded "why it moved" tier, which may not be shown to other users. The
+    prefix makes every older row unreachable at once, whatever time migration 189 deletes them.
     """
     text = unicodedata.normalize("NFKC", question or "").casefold()
     text = " ".join(text.split())
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(("v2\x00" + text).encode("utf-8")).hexdigest()
 
 
 # ── Read path (the endpoint's half) ──────────────────────────────────────────
@@ -421,22 +427,39 @@ def _refusal_key(day: str, question: str) -> str:
 
 
 def _warmed_hashes(day: str) -> Dict[str, Any]:
-    """`{question_hash: created_at}` for every row stored today.
+    """`{question_hash: created_at}` for every row stored today under the CURRENT key.
 
     The stamp is what rule 2 ages a tape-bound row by. A row whose stamp cannot be read
     maps to None and keeps the once-a-day behaviour (`_row_age_seconds`).
+
+    A row whose key is not `question_hash(row.question)` is left out: it was written under the
+    pre-2026-10-03 unversioned key (see `question_hash`), so `lookup` can never serve it, and
+    counting it against `CHAT_STARTER_WARM_DAILY_CAP` would let unreadable rows stop today's
+    chips being warmed until migration 189 deletes them or the ET day ends.
     """
     result = (
         get_supabase()
         .table(_TABLE)
-        .select("question_hash, created_at")
+        .select("question, question_hash, created_at")
         .eq("answer_date", day)
         .execute()
     )
-    return {
-        r["question_hash"]: r.get("created_at")
-        for r in (result.data or []) if r.get("question_hash")
-    }
+    out: Dict[str, Any] = {}
+    orphaned = 0
+    for r in (result.data or []):
+        h = r.get("question_hash")
+        if not h:
+            continue
+        if not isinstance(r.get("question"), str) or question_hash(r["question"]) != h:
+            orphaned += 1
+            continue
+        out[h] = r.get("created_at")
+    if orphaned:
+        logger.info(
+            "chat starters: %d row(s) for %s carry an outdated key — unreadable, not counted "
+            "against the daily warm cap (migration 189 deletes them)", orphaned, day,
+        )
+    return out
 
 
 async def _warm_one(question: str, day: str) -> bool:

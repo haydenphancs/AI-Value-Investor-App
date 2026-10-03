@@ -46,7 +46,7 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 | Identifiers → **User ID** | Yes | App Functionality | Account UUID |
 | Identifiers → **Device ID** | Yes | App Functionality | Random per-install UUID in the Keychain, sent as `X-Guest-Id` (`GuestIdentity.swift`). Rate limiting + pre-sign-in learning progress |
 | Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_items.shares`, `market_value`) |
-| User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback |
+| User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback. Since 2026-10-02, ONLY when the user asks Cay AI to search the web in a report chat, a short query the AI writes from that message (company, ticker, topic; no identity) goes to Brave Search, a service provider (Privacy Policy §3/§4) |
 | User Content → **Photos or Videos** | Yes | App Functionality | Optional screenshot the user attaches to a Help Us Improve bug report, emailed to support@. Out-of-process `PhotosPicker`, one image at a time, visible in the composer before it sends |
 | Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities, and the optional learning preferences (experience level, explanation style, answer length, topics of interest) in `user_investor_profile` |
 | Purchases → **Purchase History** | Yes | App Functionality | StoreKit 2 subscriptions + the four consumable credit packs. Every verified transaction is written to `credit_purchases` with a **NOT NULL `user_id`** alongside `transaction_id` / `product_id` / `price_cents`; subscriptions also set `users.tier`. Linked, therefore — see the note below |
@@ -90,7 +90,16 @@ Notes on the non-obvious ones:
   counts. Declared anyway, because a tap on a result now leaves the device and is kept (as a
   count) beyond the request — Apple's test for "collected". `PrivacyInfo.xcprivacy` carries
   the same entry; `tests/test_ios_search_trending_guards.py` fails the build if the two drift.
-- **Browsing History** — no `WKWebView` and no URL history collection.
+- **Browsing History** — no `WKWebView` and no URL history collection. Report chat's web
+  source pills (2026-10-02) open in `SFSafariViewController`, which runs out of process: the app
+  never sees the pages visited, and no tap on a pill is recorded or sent anywhere.
+
+- **Report chat's web search adds NO data type** (2026-10-02). The query is derived from a chat
+  message — already declared as Other User Content (linked, App Functionality) — and Brave
+  Search processes it as our service provider, not for its own purposes or for tracking. No
+  `PrivacyInfo.xcprivacy` change. The search results and the source list are not kept with the
+  account while `CHAT_WEB_SOURCES_PERSIST` is off (the default); only the answer text and a
+  `web_searched` flag are stored with the conversation, like any chat turn.
 
 ---
 
@@ -148,6 +157,16 @@ or email.
 - **Any new SDK** → check whether it ships its own privacy manifest and whether it adds a
   data type. Update `Package.resolved`, the manifest, `AcknowledgementsView`, and this file.
 - **`tracesSampleRate` raised above 0** → add Performance Data (see §3).
+- **The web search provider changes, or `CHAT_WEB_SOURCES_PERSIST` is turned on** → Privacy
+  Policy §3 (the "shown with the answer but is not kept" sentence) and §4 (the provider) in all
+  three copies (served HTML, `documents/legal/privacy.html`, `PrivacyPolicyView.swift`), the
+  consent row in `AIDataConsentView.swift`, and this file. `tests/test_legal_pages.py`
+  fails the build if the "not kept" sentence survives a persistence default flip.
+- **Review notes, §7 below** — "no unrestricted web access" is still true (web search runs only
+  on an explicit ask in a report chat, and a source link opens one publisher page in
+  `SFSafariViewController`, as the Updates screen already did), and the 18+ rating is
+  unaffected. If that sentence is ever reworded, edit `backend/scripts/asc_review_resubmit.py`,
+  not this copy.
 
 ---
 

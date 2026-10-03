@@ -10,14 +10,12 @@ narrow sources added for them:
     the figures are recorded in `fixtures/industry_tam/verified_sources_2026_10_01.json`,
     so a new mapping without a recorded verification fails here;
   * every FRED series in `FRED_SERIES_MATCHES_INDUSTRY` was verified live and carries
-    the "BEA … (via FRED)" markers Phase B's floor-skip and scope backfill key off;
+    the "BEA … (via FRED)" markers migration 188's purge of grounded rows keys off;
   * the TAM/CAGR math on those recorded figures, and the grain `_compute_one` gives
     each newly mapped industry (Census answering, and Census unconfigured);
   * an allow-listed BEA backup never flips the card's lifecycle label against the
     Census figure it stands in for;
-  * the deliberately UNMAPPED industries stay unmapped, each with its reason;
-  * Phase B's "global ≥ US Census" floor for the two curated global industries that
-    now carry a Census figure.
+  * the deliberately UNMAPPED industries stay unmapped, each with its reason.
 
 Hermetic: the Census and FRED clients are fakes fed from the fixture.
 """
@@ -36,10 +34,6 @@ import app.services.industry_dossier_service as ids
 import app.services.industry_tam_service as its
 from app.integrations.census import CensusRevenueSnapshot
 from app.services.industry_dossier_service import IndustryDossierService, classify_lifecycle
-from app.services.industry_override_service import (
-    CURATED_OVERRIDE_INDUSTRIES,
-    IndustryOverrideService,
-)
 
 _BACKEND = Path(__file__).resolve().parents[1]
 SOURCES = json.loads(
@@ -145,7 +139,8 @@ def test_allow_listed_fred_series_were_verified_and_carry_us_source_markers():
         # An explicit label, not the generic `BEA <id>` fallback …
         assert series in its._FRED_SOURCE_LABELS, series
         label = its._fred_source_label(series)
-        # … with the markers Phase B's floor-skip and `_backfill_global_scope` read.
+        # … with the markers migration 188's purge reads to tell a Phase A row from a
+        # retired grounded one.
         assert label.startswith("BEA ") and "(via FRED)" in label, label
 
 
@@ -276,8 +271,8 @@ async def test_label_flipping_backups_stay_off_the_allow_list(
 
 # ── Deliberately unmapped ───────────────────────────────────────────────
 
-# An industry here has no NAICS code that measures it, so it shows "—" (or Phase B's
-# global figure when curated). Mapping one needs a new argument, not just a code.
+# An industry here has no NAICS code that measures it, so it shows "—". Mapping one
+# needs a new argument, not just a code.
 _UNMAPPED_ON_PURPOSE = {
     "Computer Hardware": "NAICS 3341 US plant shipments ($30.5B) are below Dell's US revenue — the market is imported",
     "Consumer Electronics": "NAICS 3343 is $5.5B of US plant shipments for Apple's industry",
@@ -320,47 +315,3 @@ def test_phase_a_coverage_of_the_universe():
     covered = {i for i in universe if its.expects_industry_grain(i)}
     # 16 before 2026-10-01's narrow-source pass (Census + allow-listed BEA), 85 after.
     assert len(covered) >= 85, sorted(set(universe) - covered)
-
-
-# ── Phase B floor for curated global industries that now have a Census figure ──
-
-# Phase B global rows as stored on 2026-10-01 (industry_dossier, tam_scope='global').
-_GLOBAL_ROW_2026_10_01 = {
-    "Aerospace & Defense": 904.29,
-    "Internet Content & Information": 1050.64,
-}
-
-
-def _payload(current_tam_b: float) -> dict:
-    return {
-        "current_tam_b": current_tam_b,
-        "future_tam_b": current_tam_b * 1.4,
-        "current_year": "2025",
-        "future_year": "2030",
-        "cagr_5y_pct": 7.0,
-        "source_label": "Research synthesis",
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("industry", sorted(_GLOBAL_ROW_2026_10_01))
-async def test_phase_b_census_floor_for_newly_census_mapped_curated_industries(census, industry):
-    assert industry in {ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES}
-    # Unshared code → the floor APPLIES (a shared one, like 5112, is skipped).
-    assert not its.census_naics_is_shared(industry)
-    us = await its._try_census_tam(industry)
-    global_now = _GLOBAL_ROW_2026_10_01[industry]
-    # Global ≥ US must leave room for an honest global estimate.
-    assert us.current_tam * 2 <= global_now, (us.current_tam, global_now)
-
-    svc = IndustryOverrideService()
-    ok = svc._validate_response(_payload(global_now), us.current_tam, us.source_label, industry)
-    assert ok["status"] == "ok"
-    low = svc._validate_response(_payload(us.current_tam - 1), us.current_tam, us.source_label, industry)
-    assert low["status"] == "rejected_below_phase_a"
-
-    # Whatever Phase A stores while Census is down carries a BEA label → the floor
-    # is skipped, never applied to value added.
-    fred_label = its._fred_source_label(its.INDUSTRY_TO_FRED_SERIES[industry])
-    skip = svc._validate_response(_payload(1.5), 500.0, fred_label, industry)
-    assert skip["status"] == "ok"

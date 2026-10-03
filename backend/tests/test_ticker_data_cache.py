@@ -57,7 +57,8 @@ def _dossier(**over) -> IndustryDossier:
     return IndustryDossier(**kw)
 
 
-# The shapes `get_or_compute_dossier` really returns (industry_dossier_service.py).
+# The dossiers `get_or_compute_dossier_with_status` really returns as element 0 of its
+# `(dossier, transient)` answer (industry_dossier_service.py).
 _DOSSIER_SHAPES = {
     # A stored row with a real TAM, returned untouched.
     "stored_real": _dossier(),
@@ -128,6 +129,9 @@ def _sample() -> CollectedTickerData:
         as_of="2026-09-26", model_version="dcf-v1",
     )
     out.wall_street_consensus_partial = {"dcf_source": "caydex"}
+    # The provenance stamp `_collect_fresh` sets on every production collection; the
+    # reader treats an unstamped row as a miss (tests/test_grounding_free_stamp.py).
+    out.grounding_free = True
     return out
 
 
@@ -393,7 +397,7 @@ def test_unknown_field_in_cached_data_is_ignored():
 
 # ── industry_tam: the production type, end to end (2026-10-01) ───────────────
 #
-# The producer (`get_or_compute_dossier`) returns an IndustryDossier; the registry said
+# The producer (`get_or_compute_dossier_with_status`) yields an IndustryDossier; the registry said
 # IndustryTAM. The write succeeded, `IndustryTAM(**d)` raised on the dossier's extra keys,
 # and every read was a MISS — while `is_cached_collection_fresh` reported the row fresh,
 # so the pre-warmer skipped it and every report re-ran the cold collection.
@@ -447,13 +451,20 @@ def test_dataclass_registry_matches_each_producer():
     Two halves, both needed: the producers' return annotations name the registered class,
     and the collector really calls those producers for those fields (AST, so a comment
     cannot satisfy it). The old registry tests checked only that entries exist."""
+    from types import SimpleNamespace
+
     from app.services.industry_dossier_service import IndustryDossierService
     from app.services.sector_aggregates_service import get_sector_aggregates
     from app.services.agents import ticker_report_data_collector as collector
 
+    # field → (task variable, producer, the element of the producer's return that lands
+    # on the field: None = the whole value). The industry_tam producer answers
+    # `(dossier, transient)` (b127576d); `_settle_industry_tam` stores element 0 and
+    # sends the flag to degraded_sections.
     producers = {
-        "industry_tam": ("industry_tam_task", IndustryDossierService.get_or_compute_dossier),
-        "sector_aggregates": ("sector_agg_task", get_sector_aggregates),
+        "industry_tam": ("industry_tam_task",
+                         IndustryDossierService.get_or_compute_dossier_with_status, 0),
+        "sector_aggregates": ("sector_agg_task", get_sector_aggregates, None),
     }
     assert set(producers) == set(_DATACLASS_FIELDS)
 
@@ -467,15 +478,24 @@ def test_dataclass_registry_matches_each_producer():
             }
             called_by_task.setdefault(node.targets[0].id, []).append(names)
 
-    for field_name, (task, fn) in producers.items():
+    for field_name, (task, fn, element) in producers.items():
         assert len(called_by_task.get(task, [])) == 1, f"{task} assigned {called_by_task.get(task)}"
         assert fn.__name__ in called_by_task[task][0], f"{task} no longer calls {fn.__name__}"
         ret = typing.get_type_hints(fn)["return"]
+        if element is not None:
+            assert typing.get_origin(ret) is tuple, f"{fn.__qualname__} returns {ret}, not a tuple"
+            ret = typing.get_args(ret)[element]
         returned = [a for a in typing.get_args(ret) if a is not type(None)] or [ret]
         assert returned == [_DATACLASS_FIELDS[field_name][0]], (
             f"{fn.__qualname__} returns {returned}, but _DATACLASS_FIELDS[{field_name!r}] "
             f"registers {_DATACLASS_FIELDS[field_name][0].__name__}"
         )
+
+    # ...and element 0 is the one the collector really stores on `out.industry_tam`.
+    dossier = object()
+    out = SimpleNamespace(industry_tam=None, degraded_sections=[])
+    collector._settle_industry_tam(out, (dossier, False), "PLUG", "Electrical Equipment & Parts")
+    assert out.industry_tam is dossier
 
 
 class _FakeCacheDB:

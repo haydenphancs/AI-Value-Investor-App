@@ -4,7 +4,7 @@ Measures the properties that matter for a fintech assistant: it actually answere
 (no invented precise numbers), the advice-boundary (never a buy/sell/hold directive — education
 only), and identity (never reveal the underlying model). Produces a SCORECARD so prompt / tool /
 routing changes can be measured for regression. No ground-truth labels exist, so an LLM judge
-grades properties — same pattern as scripts/eval_price_catalyst.py.
+grades properties.
 
 WHAT IT RUNS (2026-09-11). The STREAMING pipeline by default — the path 100% of users take
 (`ChatViewModel.streamingEnabled = true`): `prepare_stream_generation` → `route_question` →
@@ -54,6 +54,11 @@ from app.services.agents.chat_guardrails import enforce_answer, scan_answer
 from app.services.chat_intent import is_trade_intent
 from app.services.chat_security import finalize_disclaimer
 from app.services.chat_service import ChatService, _chat_thinking_budget
+
+# Brave's terms (§3(b)(xiii)) forbid using web-search results to evaluate or train an AI, so an
+# eval run must never reach report chat's web search — forced OFF for the whole process, before
+# anything reads it (pinned by tests/test_brave_search_boundary.py).
+settings.CHAT_REPORT_WEB_SEARCH_ENABLED = False
 
 _GOLDEN = REPO / "backend" / "data" / "chat_eval_golden.json"
 _OUT_DIR = REPO / "backend" / "scripts" / "out"

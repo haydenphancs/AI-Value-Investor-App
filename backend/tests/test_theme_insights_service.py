@@ -831,6 +831,9 @@ BANNED = [
     "demand for AI model training", "see https://evil.example", "read [this](x)",
     "sh​ould",                                                 # zero-width split
     "It’s a no‑brainer",                                   # curly quote + nb hyphen
+    # chat_guardrails' persona tags (2026-10-02) reach themes through `scan_answer`: a summary
+    # that speaks as an investor or claims holdings of its own is not a news summary.
+    "I own AMD shares.", "I recently bought AMD.", "I’m Cathie Wood.",
 ]
 
 
@@ -858,6 +861,10 @@ ALLOWED = [
     "Sell-side analysts noted higher orders.",
     "Shares held their gains into the close.",
     "Alphabet agreed to acquire a cybersecurity firm.",
+    # Third-person mentions of a real investor are reporting, not impersonation (the persona
+    # tags only fire on a first-person frame).
+    "Berkshire Hathaway, led by Warren Buffett, trimmed its Apple stake.",
+    "Funds bought shares while insiders held their stakes.",
 ]
 
 

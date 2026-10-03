@@ -196,7 +196,7 @@ async def test_report_collection_builds_sections_off_the_loop(monkeypatch):
     monkeypatch.setattr(coll, "_fetch_all", _fetch_all)
     monkeypatch.setattr(coll, "_compute_metrics", lambda out: None)
     monkeypatch.setattr(coll, "_build_sections", _build_sections)
-    for name in ("_precompute_price_catalyst", "_precompute_geopolitical", "_apply_intraday_chart"):
+    for name in ("_apply_intraday_chart",):
         monkeypatch.setattr(coll, name, _noop)
 
     out = await coll._collect_fresh("AAPL")

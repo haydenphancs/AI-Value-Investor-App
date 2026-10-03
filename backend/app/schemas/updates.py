@@ -74,12 +74,10 @@ class UpdatesTabsResponse(BaseModel):
 # ── AI Insights card ──────────────────────────────────────────────────
 
 class PriceMoveResponse(BaseModel):
-    """The grounded "why did it move" block shown on the card for a big move.
-
-    Populated only for a per-ticker Unusual/Extreme session move (never the
-    market scope). ``catalyst_tag`` is None for a "no clear catalyst" outcome
-    (broad-market / sector move). Distinct from the news ``bullets`` — this is
-    the web-search-grounded, cited price explanation.
+    """The retired "why did it move" block. Never populated: it was a Google Search
+    grounded answer, retired 2026-10-02, and the feed serves ``price_move: None``.
+    The model stays so the response shape (and its schema-parity test) is unchanged
+    for the iOS decoder, which keeps the field Optional and no longer renders it.
     """
 
     # 'Notable' | 'Unusual' | 'Extreme' (the volatility tier that triggered it).
@@ -144,8 +142,8 @@ class AIInsightCardResponse(BaseModel):
     ai_generated: bool = True
     # Which materiality branch produced this card. Analytics/debugging; iOS ignores it.
     trigger_reason: Optional[str] = None
-    # Grounded "why did it move" for a big per-ticker move; None otherwise. A
-    # SEPARATE, cited field from `bullets` (the news roll-up).
+    # Always None: the grounded "why did it move" block was retired 2026-10-02 (see
+    # PriceMoveResponse). Kept for the iOS decoder.
     price_move: Optional[PriceMoveResponse] = None
     # The source stories this summary was built from — tapping the card opens a
     # screen listing them, each tappable to the publisher. None/absent on older

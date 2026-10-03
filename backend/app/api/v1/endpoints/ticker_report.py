@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.services.dcf_report_gate import report_dcf_source_matches, strip_caydex_if_disabled
+from app.services.report_degradation import GROUNDING_FREE_KEY, report_is_grounding_free
 from app.api.error_response import (
     ErrorCode,
     error_response_from_exception,
@@ -406,6 +407,17 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
         )
         if result.data and result.data[0].get("ticker_report_data"):
             rpt = result.data[0]["ticker_report_data"]
+            # This row is ANOTHER user's report, served free. Without the provenance stamp
+            # the pre-retirement (Google Search grounded) code wrote it, after
+            # CACHE_SCHEMA_FLOOR as well as before — skip it, the close-aligned cache or a
+            # fresh generation answers instead.
+            if not report_is_grounding_free(rpt):
+                logger.warning(
+                    "Legacy report for %s/%s is a pre-retirement report (no %s stamp — "
+                    "possibly Google Search grounded) — skipping",
+                    ticker, persona, GROUNDING_FREE_KEY,
+                )
+                return None
             if _short_interest_payload_stale(rpt):
                 logger.info(
                     f"Legacy report for {ticker}/{persona} has short-interest "

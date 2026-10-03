@@ -314,15 +314,16 @@ async def test_a_cancelled_phase_propagates_cancellation(monkeypatch):
 
 
 def test_every_chain_phase_is_claimed_under_its_own_job_name():
-    """Source-scan, bound to the two job bodies: five distinct quarterly claims + one
-    weekly, each through `_run_claimed_phase`; no phase runs bare."""
+    """Source-scan, bound to the two job bodies: four distinct quarterly claims + one
+    weekly, each through `_run_claimed_phase`; no phase runs bare. (The competitor-intel
+    phase was retired with Google Search grounding, 2026-10-02.)"""
     import inspect
     import re
     src = inspect.getsource(m._run_industry_dossier_job)
     src = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
     jobs = re.findall(r"_run_claimed_phase\(\s*(JOB_[A-Z_]+)", src)
     assert jobs == [
-        "JOB_INDUSTRY_DOSSIER_QUARTERLY", "JOB_COMPETITOR_INTEL_QUARTERLY",
+        "JOB_INDUSTRY_DOSSIER_QUARTERLY",
         "JOB_IP_INTEL_QUARTERLY", "JOB_INDUSTRY_MOAT_QUARTERLY",
         "JOB_INDUSTRY_BENCHMARK_QUARTERLY",
     ], jobs
@@ -433,11 +434,11 @@ async def test_one_failed_quarterly_phase_re_enters_the_chain(monkeypatch):
     skipped by their own day-keyed claims, so only the failed one does work again."""
     runs, sleeps = _drive_loop(
         monkeypatch, anchor_fn_name="_last_quarterly_dossier_run",
-        phase_results={m.JOB_COMPETITOR_INTEL_QUARTERLY: [False, True]},
+        phase_results={m.JOB_IP_INTEL_QUARTERLY: [False, True]},
     )
     with pytest.raises(_StopLoop):
         await m._run_industry_dossier_job()
-    assert runs.count(m.JOB_COMPETITOR_INTEL_QUARTERLY) == 2
+    assert runs.count(m.JOB_IP_INTEL_QUARTERLY) == 2
     assert runs.count(m.JOB_INDUSTRY_BENCHMARK_QUARTERLY) == 2, "the chain re-entered once"
     assert sleeps.count(m._PHASE_RETRY_SECONDS) == 1
 

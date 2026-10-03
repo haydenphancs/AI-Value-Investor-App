@@ -392,6 +392,9 @@ _BLOB = {
     "macro_data": {},
     "critical_factors": [],
     "quality_score": 70,
+    # A report the current code assembled carries the provenance stamp; the shared-cache
+    # lookup skips one without it (tests/test_grounding_free_stamp.py).
+    "_grounding_free": True,
 }
 
 

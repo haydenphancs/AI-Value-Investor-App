@@ -99,16 +99,13 @@ class Settings(BaseSettings):
     # summaries). Falls back to the standard tier once if Flex is busy.
     SENTIMENT_BACKFILL_FLEX: bool = True
 
-    # Price-catalyst grounding (Gemini web-search "why did it move" for big moves)
-    PRICE_CATALYST_AI_ENABLED: bool = True       # kill switch; false → FMP fallback
-    PRICE_CATALYST_CACHE_TTL_HOURS: int = 24     # a move's reason is fresh daily
-
-    # Geopolitical macro grounding (Gemini web-search scan of REAL current
-    # macro-shock events — wars, trade wars, oil shocks, pandemics). One
-    # market-wide scan shared across every ticker, refreshed on-demand. When
-    # False, the Macro module shows deterministic FRED/FMP factors only.
-    GEOPOLITICAL_INTEL_AI_ENABLED: bool = True   # kill switch; false → no geo factors
-    GEOPOLITICAL_CACHE_TTL_DAYS: int = 7         # geopolitical regimes shift on weeks
+    # Gemini "Grounding with Google Search" was RETIRED on 2026-10-02 (its terms: show a
+    # grounded answer only to the user who asked, with Google's Search Suggestions, never
+    # cached, modified or analysed). Its five features and their kill switches are gone —
+    # PRICE_CATALYST_*, GEOPOLITICAL_*, INDUSTRY_OVERRIDE_AI_ENABLED,
+    # COMPETITOR_INTEL_AI_ENABLED, MOAT_INTEL_AI_ENABLED, CHAT_WEB_SEARCH_*. A Railway
+    # variable left with one of those names is ignored (`extra="ignore"`). The guard is
+    # tests/test_no_google_search_grounding.py.
 
     # Financial Modeling Prep
     FMP_API_KEY: str
@@ -164,26 +161,6 @@ class Settings(BaseSettings):
     # source (see app/services/industry_tam_service.py).
     CENSUS_API_KEY: str = ""
     CENSUS_BASE_URL: str = "https://api.census.gov/data"
-
-    # Industry dossier — AI-driven Phase B override toggle. When False,
-    # the quarterly recompute job runs Phase A (Census/FRED) only and
-    # skips the AI research overrides. Useful as a kill switch when
-    # Gemini quota is exhausted or a bad research run shipped and we
-    # need to revert to Census-only while debugging.
-    INDUSTRY_OVERRIDE_AI_ENABLED: bool = True
-
-    # Competitor intel — Phase 2 revenue-mix-aware peer selection via
-    # Gemini grounded research. When False, ticker_report_data_collector
-    # falls back to the Phase 1 deterministic peer-augmentation path
-    # (FMP /stock-peers + industry-universe). Kill switch for quota
-    # outages or bad-research-run incidents.
-    COMPETITOR_INTEL_AI_ENABLED: bool = True
-
-    # Moat intel — Phase 3D Gemini grounded fallback for moat pillars
-    # the deterministic scorer left at confidence='low'. When False,
-    # low-confidence pillars fall back to the legacy AI Stage A
-    # dimension (ungrounded). Kill switch for quota outages.
-    MOAT_INTEL_AI_ENABLED: bool = True
 
     # USPTO PatentsView API key (Phase 3C) — used by ip_intel_service to
     # fetch patent counts that boost the Intangible Assets pillar for
@@ -628,6 +605,16 @@ class Settings(BaseSettings):
     # specialists in parallel + a synthesizer. Kill switch → the plain single-agent streaming path.
     CHAT_MULTI_AGENT_ENABLED: bool = True
 
+    # Report chat MODE VOICE (2026-10-02): a REPORT session answers as "Cay AI · <Style> Agent"
+    # — the report persona's method as tone and priorities (agents/report_voice_prompt.py),
+    # chosen from the grounded report's own persona, else the reference segment. Cay AI stays
+    # the speaker; the block is name-free, third-person and never a greeting. Ships ON (owner
+    # decision); this is the ROLLBACK switch — False restores the neutral report chat on the
+    # next turn (a Railway variable + restart, no deploy). It is read per turn, so a chat
+    # already open simply loses or regains the voice. The iOS chip's mode label is
+    # independent of it (the app shows the label whatever the backend renders).
+    CHAT_REPORT_VOICE_ENABLED: bool = True
+
     # How many specialist lenses a cross-domain ("synthesize") turn may run in parallel.
     # This is the single most expensive path in chat and the only one that is not
     # comfortably profitable: each specialist is its own agentic stream (`max_rounds=2`,
@@ -809,26 +796,48 @@ class Settings(BaseSettings):
     # is a real account id, which is not rotatable.
     CHAT_DAILY_TURN_LIMIT_PER_IP: int = 300
 
-    # ── Chat web search (the one paid step in `chat_market_tools`) ────────────────
+    # ── Report-chat web search (Brave Search API, `chat_web_search_service`) ──────
     #
-    # Ask Cay AI may escalate an unexplained MATERIAL move to a grounded Google Search
-    # via `price_catalyst_service`. Google bills $35 per 1,000 grounded prompts on the
-    # 2.5 family, with the first 1,500/day free — and the Updates sweeper's own
-    # `_CATALYST_DAILY_CAP` spends at most 30 of those, so this cap sits inside the free
-    # allowance by design rather than by luck. It is a DENIAL-OF-WALLET ceiling, not a
-    # fair-use limit: the ladder's free tiers still answer when it binds.
+    # Report chat offers a `web_search` tool ONLY on a turn where the user explicitly asks to
+    # search the web, look something up or verify/double-check it (`chat_intent.
+    # is_web_search_intent`), in a REPORT session on a TICKER_REPORT screen, for a signed-in
+    # caller. Brave rather than Gemini's built-in search grounding: grounded answers must carry
+    # a Google-branded Search Suggestions chip and may not be modified, mixed or cached, which a
+    # "Cay AI by Caydex" answer cannot honour (IDENTITY_RULE), and gemini-2.5 cannot combine the
+    # built-in search tool with function tools. Brave's terms allow TRANSIENT storage only and
+    # forbid using results to evaluate or train an AI: so no Supabase tier, no cross-user cache,
+    # a short per-user in-process cache at most, and the eval scripts force the switch off.
     #
-    # Enforced GLOBALLY (one shared bucket in `chat_usage_budget`), not per user, because
-    # the cost is ours whoever spends it. The kill switch matches the five existing
-    # `*_AI_ENABLED` flags on the other grounded-search services.
-    CHAT_WEB_SEARCH_ENABLED: bool = True
-    CHAT_WEB_SEARCH_DAILY_CAP: int = 200
-    # ...plus a PER-ACCOUNT sub-bucket beneath it (S01-4). The global ceiling bounds the
-    # bill, but on its own one account looping "why did X move" over material movers drains
-    # the day's 200 units in minutes and every other user's turn falls back to the free
-    # tiers. Claimed BEFORE the global unit and refunded whenever the global unit is, so
-    # the two counts never drift; same `chat_usage_budget` table, no migration.
-    CHAT_WEB_SEARCH_USER_DAILY_CAP: int = 10
+    # `BRAVE_SEARCH_API_KEY` unset (the default) = the feature is OFF. Set it on the Railway WEB
+    # service only. `CHAT_REPORT_WEB_SEARCH_ENABLED` is the rollback switch, read per turn.
+    BRAVE_SEARCH_API_KEY: str = ""
+    BRAVE_SEARCH_BASE_URL: str = "https://api.search.brave.com/res/v1"
+    # Read / write / pool timeout per request (connect is a fixed 2 s); the service adds a hard
+    # bound of +2 s around the whole call.
+    BRAVE_SEARCH_TIMEOUT_SECONDS: float = 4.0
+    # Plan-dependent: a plan that rejects `extra_snippets` answers 422 on EVERY search, so it
+    # ships off and is turned on only after a smoke test on the live plan.
+    BRAVE_SEARCH_EXTRA_SNIPPETS: bool = False
+    CHAT_REPORT_WEB_SEARCH_ENABLED: bool = True
+    # Fail-CLOSED denial-of-wallet buckets in `chat_usage_budget` (no migration), per account
+    # first, then global. At about $5 per 1,000 requests the global cap bounds the bill at
+    # roughly $2.50 a day. `0` disables.
+    CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP: int = 10
+    CHAT_REPORT_WEB_SEARCH_DAILY_CAP: int = 500
+    # The per-user, process-local transient cache (an iOS re-POST of the same question, or the
+    # same query twice, must not pay twice). Never shared across users.
+    CHAT_REPORT_WEB_SEARCH_CACHE_TTL_SECONDS: int = 120
+    # Web source pills (`{kind:"web", label, detail, title, url, published_at}`) are shown LIVE —
+    # the re-sent `sources` frame and the `done` message — but NOT written into the stored
+    # `rich_content.sources` while this is False, because Brave's terms allow transient storage
+    # only (owner decision 2026-10-02: live only until Brave confirms storage rights in writing).
+    # `thinking.web_searched` (a flag, no result content) is stored either way. Turning it ON is
+    # a licence decision, not a code change: confirm storage on the live plan first
+    # (documents/OWNER_TASKS.md). ROLLBACK: set back to False — rows written while it was on
+    # keep their pills (history shows them); nothing new is stored. It covers the PILLS only: the
+    # answer text, `thinking.reasoning` and the session's rolling summary are stored as for any
+    # chat turn.
+    CHAT_WEB_SOURCES_PERSIST: bool = False
 
     # ── Pre-warmed suggestion-chip answers (`chat_starter_warm_service`) ──────────
     #

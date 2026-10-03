@@ -18,6 +18,11 @@ What is refused, and therefore dropped:
   * analyst consensus / ratings / upgrades — the analyst package is unlicensed and the
     prompt tells the model to say so.
 
+In a REPORT chat (``drop_web_search=True``) a chip that reads as an explicit web-search ask
+— "Any recent news on AVGO?", "What's the latest news?" — is dropped as well
+(`chat_intent.is_web_search_intent`): report chat offers its paid web search on an explicit
+ask ONLY, never one tap away on a chip the product wrote (owner decision, 2026-10-02).
+
 What is deliberately KEPT, because the same brief made it answerable: outlook framed
 as scenarios ("What's next for tech?", "what could drive it higher?"), venue questions
 ("where can I buy DOGE?", answered as availability), and background knowledge ("Who
@@ -32,7 +37,7 @@ import logging
 import re
 from typing import Any, Iterable, List
 
-from app.services.chat_intent import is_trade_intent
+from app.services.chat_intent import is_trade_intent, is_web_search_intent
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +110,18 @@ _EDUCATIONAL_FRAME_RE = re.compile(
 )
 
 
-def is_answerable_chip(text: Any) -> bool:
-    """True when a chip is a question the chat will answer rather than decline."""
+def is_answerable_chip(text: Any, *, drop_web_search: bool = False) -> bool:
+    """True when a chip is a question the chat will answer rather than decline.
+
+    `drop_web_search` (a REPORT chat): a chip that would open the paid web search is refused."""
     if not isinstance(text, str):
         return False
     t = text.strip().translate(_APOSTROPHES)
     if not t:
         return False
     if _UNANSWERABLE_CHIP_RE.search(t):
+        return False
+    if drop_web_search and is_web_search_intent(t):
         return False
     if _EDUCATIONAL_FRAME_RE.search(t):
         return True
@@ -121,7 +130,7 @@ def is_answerable_chip(text: Any) -> bool:
     return True
 
 
-def filter_answerable_chips(raw: Any, limit: int = 2) -> List[str]:
+def filter_answerable_chips(raw: Any, limit: int = 2, *, drop_web_search: bool = False) -> List[str]:
     """Normalise a model's / a stored row's chip list to at most `limit` answerable chips.
 
     Order-preserving, case-insensitive dedup (a duplicate chip collides the iOS
@@ -149,7 +158,7 @@ def filter_answerable_chips(raw: Any, limit: int = 2) -> List[str]:
         if key in seen:
             continue
         seen.add(key)
-        if not is_answerable_chip(t):
+        if not is_answerable_chip(t, drop_web_search=drop_web_search):
             dropped.append(t)
             continue
         out.append(t)

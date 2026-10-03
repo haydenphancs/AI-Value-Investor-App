@@ -218,6 +218,25 @@ class ChatTurnCost(BaseModel):
     label: Optional[str] = None        # server-authored display string (ships without an App Store release)
 
 
+class ChatSourcePill(BaseModel):
+    """The CONTRACT for one element of `ChatMessageResponse.sources` (documentation and the
+    parity tests validate every pill the backend builds against it; the response field itself
+    stays `List[Any]` so a legacy row can never fail validation).
+
+    A grounding pill is `{label, detail}`. A web pill (report chat's web search, built by
+    `chat_web_search_service` — never model text) adds `kind: "web"`, `title`, an https `url`
+    and a date-only `published_at`; `label` stays "Web" and `detail` is the publisher (named
+    from the URL's own host), so a shipped build that decodes only `{label, detail}` shows a
+    plain "Web · Reuters" pill. iOS: `ChatSource` in `Models/ChatConversationModels.swift`."""
+
+    label: str
+    detail: Optional[str] = None
+    kind: Optional[str] = None            # "web" for a web pill; absent on grounding pills
+    title: Optional[str] = None           # ≤ 120 chars
+    url: Optional[str] = None             # https only
+    published_at: Optional[str] = None    # "YYYY-MM-DD" or None
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     session_id: str
@@ -229,9 +248,16 @@ class ChatMessageResponse(BaseModel):
     citations: Optional[List[Any]] = None
     tokens_used: Optional[int] = None
     # Futuristic-chat additions (all Optional → legacy rows + old iOS builds stay valid):
-    #  • sources     — grounded-context "source" pills shown in the thinking card
+    #  • sources     — "source" pills shown in the thinking card: grounding pills
+    #                   `{label, detail}` first, then — report chat's web search only — up to 5
+    #                   web pills (`ChatSourcePill`, kind "web"). Stays `List[Any]`: tightening
+    #                   it would reject legacy rows. Web pills are LIVE only (the `sources`
+    #                   frame, `done`, the send-door response) while CHAT_WEB_SOURCES_PERSIST is
+    #                   False; a stored web pill with an unsafe URL is dropped on read.
     #  • suggestions — 1-2 AI-generated follow-up questions to show after the answer
-    #  • thinking    — {stages: [str], source_count: int, elapsed_ms: int} for the "Done in Xs · N sources" card
+    #  • thinking    — {stages: [str], source_count: int, elapsed_ms: int} for the "Done in Xs · N sources" card;
+    #                   `source_count` counts the STORED pills, and `web_searched: true` is
+    #                   present only on a turn whose web results reached the answer (the badge)
     #  • credit      — what this turn cost (see ChatTurnCost). Absent on every legacy row
     #                   and on any turn charged normally; present only when there is GOOD
     #                   news to show, so iOS renders a chip for a free or refunded turn

@@ -62,7 +62,9 @@ class ResearchViewModel: ObservableObject {
             UserDefaults.standard.set(reportSortOption.storageID, forKey: Self.reportSortKey)
         }
     }
-    @Published var communityInsights: [CommunityInsight] = CommunityInsight.mockInsights
+    /// Empty until a real community feed exists. It used to default to compiled-in mock
+    /// testimonials, which a release build would have shown as if real users wrote them.
+    @Published var communityInsights: [CommunityInsight] = []
 
     // MARK: - Reports Tab: Search + Multi-Select
     /// Distinct from `searchText` (which drives the Research-tab stock target

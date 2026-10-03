@@ -33,6 +33,50 @@ enum ReportAgentPersona: String, CaseIterable {
     case ackman
     case burry
 
+    /// Resolve a report's backend `agent` tag to its persona — THE ONLY agent-tag table on iOS.
+    ///
+    /// `toTickerReportData()` (the badge, the lens) and the report chat's mode (via
+    /// `AnalysisPersona.forPersonaToken`) both read it, so the screen and its chat cannot
+    /// disagree about which method a report used. Mirrors the backend's
+    /// `persona_config.AGENT_TAG_TO_KEY` plus `LEGACY_AGENT_TAGS`, and its
+    /// `persona_key_from_tag` normalisation (over 64 code points → nil, then trimmed and
+    /// lower-cased);
+    /// `backend/tests/test_ios_report_chat_agent_mode.py` pins the table equal to the backend's.
+    ///
+    /// nil for anything else. A DISPLAY default for an unknown tag is the caller's decision
+    /// (`toTickerReportData` keeps its `.buffett`), never this table's: the chat resolver must
+    /// be able to say "no persona" rather than invent one.
+    init?(agentTag raw: String) {
+        guard raw.unicodeScalars.count <= 64 else { return nil }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "buffett": self = .buffett
+        case "wood":    self = .wood
+        case "lynch":   self = .lynch
+        case "ackman":  self = .ackman
+        case "burry":   self = .burry
+        // Legacy: cached/history reports tagged the Ackman persona "dalio" before the badge
+        // was renamed. Every such report was an Ackman analysis (there was never a real Dalio
+        // persona), so it maps to .ackman rather than to nothing.
+        case "dalio":   self = .ackman
+        default:        return nil
+        }
+    }
+
+    /// The backend persona key (`PERSONA_KEYS`) this report was generated under — what a report
+    /// chat's `reference_id` ("TICKER|<key>|<report_id>") carries in its second segment.
+    ///
+    /// Exhaustive on purpose (no `default:`): a sixth case must not compile until it names its
+    /// key, or its report chat would silently borrow another method's mode.
+    var personaKey: String {
+        switch self {
+        case .buffett: return "warren_buffett"
+        case .wood:    return "cathie_wood"
+        case .lynch:   return "peter_lynch"
+        case .ackman:  return "bill_ackman"
+        case .burry:   return "michael_burry"
+        }
+    }
+
     /// Style word for this persona, e.g. "Quality".
     var shortName: String {
         switch self {
@@ -813,6 +857,10 @@ struct ReportInsiderData {
     // numbers). nil / empty → those blocks hide. Compact, not the full tab.
     var insiderFlow: SmartMoneyData? = nil
     var recentTransactions: [InsiderActivity] = []
+    /// The insider fetch failed for this report: say so, never "no insider trades".
+    /// No default on purpose: every construction must decide it (a defaulted flag let the
+    /// DTO mapping drop it without a compile error).
+    let isUnavailable: Bool
 }
 
 // MARK: - Key Management
@@ -1801,7 +1849,8 @@ extension TickerReportData {
                 ],
                 summary: SmartMoneyFlowSummary(totalNetFlow: -2.2, totalBuy: 0.3, totalSell: 2.5, isPositive: false, periodDescription: "12-Month", unit: .shares)
             ),
-            recentTransactions: Array(InsiderActivity.sampleData.prefix(5))
+            recentTransactions: Array(InsiderActivity.sampleData.prefix(5)),
+            isUnavailable: false
         ),
         keyManagement: ReportKeyManagement(
             topHolders: [

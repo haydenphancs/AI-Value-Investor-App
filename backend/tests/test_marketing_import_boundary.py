@@ -52,6 +52,11 @@ FORBIDDEN_MODULES = (
     "app.services.whale_service",
     "app.services.signals_service",
     "app.services.universe_data",
+    # Report chat's web search (2026-10-02): third-party web results, held transiently for one
+    # user's answer under Brave's terms, must never feed a public post (§1 "web-search output is
+    # third-party content"). `tests/test_brave_search_boundary.py` pins the wider import graph.
+    "app.integrations.brave_search",
+    "app.services.chat_web_search_service",
 )
 FORBIDDEN_NAME = "generate_grounded_research"
 
@@ -237,6 +242,10 @@ _MOD = "app.services.marketing.example"
     "from app.integrations.gemini import generate_grounded_research as g",
     "fn = getattr(client, 'generate_grounded_research')",
     "generate_grounded_research = None",
+    "from app.integrations import brave_search",
+    "from ...integrations.brave_search import web_search",
+    "from app.services.chat_web_search_service import run_web_search",
+    "def f():\n    from .. import chat_web_search_service\n",
 ])
 def test_the_scanner_flags(src):
     imported, problems = imports_of(src, _MOD)

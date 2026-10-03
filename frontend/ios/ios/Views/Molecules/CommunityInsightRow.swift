@@ -101,12 +101,19 @@ struct CommunityInsightRow: View {
 }
 
 #Preview {
+    // A neutral layout sample, built here so nothing like it ships in a release build:
+    // a placeholder user, no investor names, no endorsement of the product.
     ScrollView {
-        VStack(spacing: AppSpacing.md) {
-            ForEach(CommunityInsight.mockInsights) { insight in
-                CommunityInsightRow(insight: insight)
-            }
-        }
+        CommunityInsightRow(
+            insight: CommunityInsight(
+                userName: "Preview User",
+                userAvatarName: "",
+                postedAt: Date().addingTimeInterval(-7200),
+                comment: "Sample comment text, long enough to wrap onto a second line so the row's layout can be checked.",
+                likesCount: 3,
+                commentsCount: 1
+            )
+        )
         .padding()
     }
     .background(AppColors.background)

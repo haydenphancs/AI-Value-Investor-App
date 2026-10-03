@@ -87,6 +87,9 @@ def _stored_card():
         "sentiment": "bullish",
         "article_count": 3,
         "generated_at": _iso(timedelta(hours=3)),
+        "prompt_version": 7,   # a post-retirement row; older ones are never served
+        # A row stored before the grounded catalyst was retired (2026-10-02) still holds its
+        # block until migration 188; production never serves it (`price_move` is None).
         "price_move": {"tier": "Unusual", "catalyst_tag": "Earnings",
                        "reason": "Results beat on cloud.", "change_pct": 7.25},
     }, market_active=False)
@@ -147,10 +150,10 @@ async def test_a_ticker_feed_grounds_on_card_headlines_and_trend(monkeypatch):
     assert "Cay AI Insights card on screen, written " in block and "3 h ago" in block
     assert "sentiment Bullish: Oracle reports results after the close" in block
     assert "• Backlog grew." in block
-    # The catalyst line is the SAME string the card renders (catalyst_display_line), dated.
-    assert "Why it moved (+7.2%; as of the card, " in block or \
-           "Why it moved (+7.3%; as of the card, " in block
-    assert "): Earnings — Results beat on cloud." in block
+    # The grounded "why it moved" block is never served, so chat is never grounded on it
+    # (Google Search grounding retired 2026-10-02) — not even from a row stored before then.
+    assert CARD["price_move"] is None
+    assert "Why it moved" not in block and "Results beat on cloud." not in block
     assert "Oracle beats on cloud (bullish)" in block
     # An unscored row carries no label — never a default "neutral".
     assert "Oracle guidance preview" in block and "Oracle guidance preview (" not in block

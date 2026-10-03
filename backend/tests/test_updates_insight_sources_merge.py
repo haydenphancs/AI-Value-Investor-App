@@ -1,204 +1,125 @@
-"""Merging the "why it moved" catalyst web sources into a card's source list.
+"""The Insights card's `sources` list: the FMP-news corpus, and nothing grounded.
 
-The Insights card `sources` list is the FMP-news corpus (`_corpus_sources`). When a
-big-move catalyst runs a grounded web search, its outside sources are folded in via
-`_catalyst_web_sources` (shape-map + quality cap) and `_merge_sources` (reserved
-slots, dedup, overall cap). Both are pure transforms — no network, no DB. These
-tests pin the shape/openability/quality guarantees the user asked for:
-outside sources keep a title and an openable url, and only the best few are kept.
+A big-move "why it moved" catalyst's grounded web sources used to be MERGED into this list
+(`_catalyst_web_sources` + `_merge_sources`, reserved slots at the tail). That catalyst was
+retired on 2026-10-02 with Google Search grounding, and the merge went with it: a card's
+sources are now exactly `_corpus_sources(articles)`. Cards stored before the retirement can
+still hold grounding-redirect rows until migration 188 runs, so `_sanitize_sources` — the
+write AND read-back choke point — drops them; the pipeline tests pin that drop.
 """
 
+import json
+
+import pytest
+
 from app.services.news_insight_service import (
-    _MAX_CATALYST_SOURCES,
     _MAX_SOURCES,
-    _catalyst_web_sources,
+    NewsInsightService,
     _corpus_sources,
-    _merge_sources,
     _sanitize_sources,
 )
 
-# A real Vertex AI Search redirect uri — opens and redirects to the publisher.
+# A real Vertex AI Search redirect uri — the only form a grounded source ever took.
 _VERTEX = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc123"
 _VERTEX2 = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/def456"
 
-
-# ─────────────────────────── _catalyst_web_sources ───────────────────────────
-
-def test_web_source_real_headline_kept():
-    out = _catalyst_web_sources(
-        [{"title": "Salesforce cuts guidance on soft demand", "uri": _VERTEX, "publisher": "reuters"}]
-    )
-    assert out == [{
-        "title": "Salesforce cuts guidance on soft demand",
-        "url": _VERTEX,
-        # Carried so a merged list labels grounded rows the same way corpus rows
-        # are labelled; the row title here is the headline, not the outlet.
-        "publisher": "Reuters",
-    }]
-
-
-def test_web_source_bare_domain_title_falls_back_to_publisher():
-    # Grounding often returns title as a bare host — use the publisher name instead.
-    out = _catalyst_web_sources([{"title": "reuters.com", "uri": _VERTEX, "publisher": "reuters"}])
-    # No publisher key: it IS the row title here, and writing it too would render
-    # "Reuters" above "Reuters" on the card.
-    assert out == [{"title": "Reuters", "url": _VERTEX}]
-
-
-def test_web_source_bare_domain_no_publisher_strips_tld():
-    out = _catalyst_web_sources([{"title": "www.infosys.com", "uri": _VERTEX, "publisher": ""}])
-    # No publisher was reported, so no publisher key — the TLD-stripped host is
-    # already the row title and repeating it would render "Infosys" twice.
-    assert out == [{"title": "Infosys", "url": _VERTEX}]
-
-
-def test_web_source_empty_title_uses_publisher():
-    out = _catalyst_web_sources([{"title": "", "uri": _VERTEX, "publisher": "bloomberg"}])
-    assert out == [{"title": "Bloomberg", "url": _VERTEX}]   # same: title == publisher
-
-
-def test_web_source_no_name_and_no_url_skipped():
-    # url present but nothing nameable → skipped; no url → skipped.
-    assert _catalyst_web_sources([{"title": "", "uri": _VERTEX, "publisher": ""}]) == []
-    assert _catalyst_web_sources([{"title": "Reuters cuts", "uri": "", "publisher": "reuters"}]) == []
-
-
-def test_web_source_dedup_by_publisher():
-    out = _catalyst_web_sources([
-        {"title": "reuters.com", "uri": _VERTEX, "publisher": "reuters"},
-        {"title": "Another Reuters take", "uri": _VERTEX2, "publisher": "reuters"},
-    ])
-    assert len(out) == 1  # one link per publisher
-
-
-def test_web_source_dedup_by_url():
-    out = _catalyst_web_sources([
-        {"title": "Reuters A", "uri": _VERTEX, "publisher": "reuters"},
-        {"title": "CNBC B", "uri": _VERTEX, "publisher": "cnbc"},
-    ])
-    assert out == [{"title": "Reuters A", "url": _VERTEX, "publisher": "Reuters"}]
-
-
-def test_web_source_publisher_is_omitted_when_it_equals_the_title():
-    """A row must never label itself twice. Grounding returns a bare host as the
-    title far more often than a headline, and both label fallbacks resolve to the
-    publisher name — so this is the COMMON case, not an edge one."""
-    for item in ({"title": "reuters.com", "uri": _VERTEX, "publisher": "reuters"},
-                 {"title": "", "uri": _VERTEX, "publisher": "Reuters"},
-                 {"title": "REUTERS.COM", "uri": _VERTEX, "publisher": "REUTERS"}):
-        row = _catalyst_web_sources([item])[0]
-        assert "publisher" not in row, row
-
-
-def test_web_source_caps_at_max_and_keeps_head_order():
-    raw = [
-        {"title": f"Headline {i}", "uri": f"https://vertexaisearch.cloud.google.com/r/{i}",
-         "publisher": f"pub{i}"}
-        for i in range(6)
-    ]
-    out = _catalyst_web_sources(raw)
-    assert len(out) == _MAX_CATALYST_SOURCES == 3
-    assert [s["title"] for s in out] == ["Headline 0", "Headline 1", "Headline 2"]
-
-
-def test_web_source_malformed_input_yields_empty():
-    assert _catalyst_web_sources(None) == []
-    assert _catalyst_web_sources("nope") == []
-    assert _catalyst_web_sources({}) == []
-    assert _catalyst_web_sources([None, 3, "x", {"nope": 1}]) == []
-
-
-# ─────────────────────────────── _merge_sources ──────────────────────────────
 
 def _corpus(n):
     return [{"title": f"FMP story {i}", "url": f"https://fmp.example/{i}"} for i in range(n)]
 
 
-def test_merge_no_web_is_corpus_unchanged():
-    corpus = _corpus(5)
-    assert _merge_sources(corpus, []) == corpus
-    assert _merge_sources(corpus, None) == corpus
+# ────────────────────────── a stored card's mixed list ────────────────────────
 
-
-def test_merge_reserves_slots_so_web_always_shows():
-    # 8 corpus + 2 web, cap 8 → web must not be crowded out.
-    corpus = _corpus(8)
-    web = [{"title": "Reuters", "url": _VERTEX}, {"title": "CNBC", "url": _VERTEX2}]
-    merged = _merge_sources(corpus, web)
-    assert len(merged) == _MAX_SOURCES == 8
-    assert merged[-2:] == web            # web reserved at the tail
-    assert merged[:6] == corpus[:6]      # corpus fills the rest, in order
-
-
-def test_merge_carries_the_publisher_from_both_lists():
-    """`_merge_sources` REBUILDS each row, so it silently drops any key it does
-    not name. It is the last hop before storage on every card that has a
-    catalyst — losing the publisher here would send per-ticker cards back to
-    citing bare hosts while the market card looked fine."""
-    corpus = _corpus_sources(
-        [{"headline": "Fed holds rates", "article_url": "https://x/1",
-          "source_name": "CNBC Television"}]
-    )
-    web = _catalyst_web_sources(
-        [{"title": "Salesforce cuts guidance", "uri": _VERTEX, "publisher": "reuters"}]
-    )
-    merged = _merge_sources(corpus, web)
-    assert [s.get("publisher") for s in merged] == ["CNBC Television", "Reuters"]
-
-
-def test_merge_omits_the_publisher_key_when_there_is_none():
-    """Absent, not blank — the client falls back to the URL host on absent."""
-    merged = _merge_sources([{"title": "Old story", "url": "https://x/1"}], [])
-    assert merged == [{"title": "Old story", "url": "https://x/1"}]
-
-
-def test_merge_ignores_a_non_str_publisher():
-    merged = _merge_sources([{"title": "t", "url": "https://x", "publisher": {"a": 1}}], [])
-    assert merged == [{"title": "t", "url": "https://x"}]
-
-
-def test_merge_dedup_by_url_across_lists():
-    corpus = [{"title": "Shared", "url": "https://dup.example/x"}]
-    web = [{"title": "Shared web", "url": "https://dup.example/x"}]
-    merged = _merge_sources(corpus, web)
-    assert len(merged) == 1
-
-
-def test_merge_caps_web_at_max_catalyst():
-    web = [{"title": f"W{i}", "url": f"https://vertexaisearch.cloud.google.com/r/{i}"} for i in range(5)]
-    merged = _merge_sources([], web)
-    assert len(merged) == _MAX_CATALYST_SOURCES == 3
-
-
-def test_merge_empty_inputs():
-    assert _merge_sources([], []) == []
-    assert _merge_sources(None, None) == []
-
-
-def test_merge_skips_titleless_rows():
-    merged = _merge_sources([{"title": "", "url": "https://x"}], [{"title": "Ok", "url": _VERTEX}])
-    assert merged == [{"title": "Ok", "url": _VERTEX}]
-
-
-# ────────────────────────── end-to-end pipeline shape ────────────────────────
-
-def test_pipeline_corpus_plus_catalyst_survives_sanitize():
-    """The exact production path: corpus + mapped web → merge → sanitize (write)."""
+def test_pipeline_drops_grounded_links_at_sanitize_and_keeps_the_corpus():
+    """What a card stored before the retirement holds — corpus rows, then the grounded rows
+    the old merge appended — read back through the choke point: the grounding-redirect rows
+    are dropped, every FMP corpus row (and its publisher) survives, in order."""
     corpus_rows = [
-        {"headline": "CRM beats on revenue", "article_url": "https://fmp.example/a"},
+        {"headline": "CRM beats on revenue", "article_url": "https://fmp.example/a",
+         "source_name": "CNBC Television"},
         {"headline": "Analysts lift CRM target", "article_url": "https://fmp.example/b"},
     ]
-    grounding = [
-        {"title": "reuters.com", "uri": _VERTEX, "publisher": "reuters"},
-        {"title": "Salesforce guidance cut detailed", "uri": _VERTEX2, "publisher": "bloomberg"},
+    stored = _corpus_sources(corpus_rows) + [
+        {"title": "Reuters", "url": _VERTEX},
+        {"title": "Salesforce guidance cut detailed", "url": _VERTEX2, "publisher": "Bloomberg"},
     ]
-    merged = _merge_sources(_corpus_sources(corpus_rows), _catalyst_web_sources(grounding))
-    sanitized = _sanitize_sources(merged)
-    assert sanitized is not None
-    titles = [s["title"] for s in sanitized]
-    # Both FMP headlines AND the openable web sources are present, each nameable.
-    assert "CRM beats on revenue" in titles
-    assert "Reuters" in titles
-    assert "Salesforce guidance cut detailed" in titles
-    assert all(s["title"] for s in sanitized)          # every row has a title
-    assert any(s["url"] == _VERTEX for s in sanitized)  # web url is openable/kept
+    sanitized = _sanitize_sources(stored)
+    assert sanitized == [
+        {"title": "CRM beats on revenue", "url": "https://fmp.example/a",
+         "publisher": "CNBC Television"},
+        {"title": "Analysts lift CRM target", "url": "https://fmp.example/b"},
+    ]
+    assert _sanitize_sources(sanitized) == sanitized          # idempotent on read-back
+
+
+def test_a_dropped_grounded_row_never_spends_a_slot_of_the_cap():
+    """The old merge reserved the TAIL for grounded rows; dropping them must not leave the
+    list short when the stored corpus part already filled the cap."""
+    stored = [{"title": "Grounded", "url": _VERTEX}] * 3 + _corpus(_MAX_SOURCES + 2)
+    out = _sanitize_sources(stored)
+    assert out == _corpus(_MAX_SOURCES)
+    assert len(out) == _MAX_SOURCES == 8
+
+
+def test_an_all_grounded_list_reads_back_as_no_sources():
+    """None, not [] — the client then hides the tap affordance, as for a pre-092 card."""
+    assert _sanitize_sources([{"title": "R", "url": _VERTEX}, {"title": "B", "url": _VERTEX2}]) is None
+
+
+# ────────────────────────── the corpus rows themselves ─────────────────────────
+
+def test_corpus_sources_carry_the_publisher_and_sanitize_keeps_it():
+    """`_sanitize_sources` REBUILDS each row, so it drops any key it does not name — losing
+    `publisher` here would send every card back to citing bare hosts."""
+    rows = _sanitize_sources(_corpus_sources(
+        [{"headline": "Fed holds rates", "article_url": "https://x/1", "source_name": "CNBC Television"},
+         {"headline": "Oil climbs", "article_url": "https://x/2", "source_name": "   "},
+         {"headline": "Gold slips", "article_url": "https://x/3", "source_name": {"a": 1}}]
+    ))
+    assert [r.get("publisher") for r in rows] == ["CNBC Television", None, None]
+    assert all("publisher" not in r for r in rows[1:])        # absent, never blank
+
+
+# ──────────────────────── generation writes the corpus only ───────────────────────
+
+class _Gemini:
+    async def generate_json(self, **kwargs):
+        return {"text": json.dumps({
+            "headline": "Salesforce beats on revenue",
+            "points": ["Revenue beat estimates.", "Analysts lifted targets."],
+            "sentiment": "bullish",
+            "conclusion": "The beat and the target raises point the same way for Salesforce.",
+        })}
+
+
+class _Svc(NewsInsightService):
+    def __init__(self):
+        self.supabase = None
+        self._cache = {}
+        self._inflight = {}
+        self.gemini = _Gemini()
+        self.store_args = None
+
+    def _store(self, *args, **kwargs):
+        self.store_args = (args, kwargs)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_generate_and_store_writes_exactly_the_corpus_sources():
+    articles = [
+        {"headline": "Salesforce beats on revenue", "article_url": "https://fmp.example/a",
+         "source_name": "Reuters", "summary": "Revenue beat estimates."},
+        {"headline": "Analysts lift Salesforce targets", "article_url": "https://fmp.example/b",
+         "summary": "Analysts lifted targets."},
+    ]
+    svc = _Svc()
+    card = await svc.generate_and_store(
+        scope="CRM", corpus=articles, inputset_id="iid", price_band="extreme",
+        trigger_reason="t", quote=None, market_active=True,
+    )
+    assert card is not None
+    args, kwargs = svc.store_args
+    assert not kwargs
+    assert args[-1] == _corpus_sources(articles)
+    assert len(args) == 7          # scope, card, inputset, reason, count, market_active, sources

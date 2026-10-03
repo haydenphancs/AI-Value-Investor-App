@@ -786,3 +786,95 @@ def test_the_ai_consent_scan_is_not_vacuous(client):
         assert "we send your chat messages to advertisers" not in haystack, (
             f"{name} matches a sentence it does not contain — the haystack is not real prose"
         )
+
+
+# ── Report chat's web search (2026-10-02): privacy disclosure + the provider's flow-down ──
+#
+# A query DERIVED from what the user typed now goes to a second third-party service (Brave
+# Search), and Brave's terms (§4(c)) require that end users be bound by restrictions like its
+# own: results are third-party, for personal use, and may not be scraped, stored or used to train
+# an AI. Both promises live in three copies each (served HTML, documents/legal, the Swift
+# mirror) — the authored copy is pinned byte-equal above, so the website and the in-app mirror
+# are asserted here, the same shape as the AI-consent clauses.
+
+_WEB_SEARCH_CLAUSES = {
+    "privacy": (
+        "PrivacyPolicyView.swift",
+        [
+            "only when you are chatting about a research report and ask cay ai to search the web",
+            "a short search query that cay ai writes from your question",
+            "is sent to our web search provider",
+            "are never sent with it",
+            "is shown with the answer but is not kept",
+            "we keep no other copy of the search results",
+            "a temporary in-memory copy for a few minutes",
+            "brave software (web search, only when you ask cay ai to search the web in a report chat",
+        ],
+    ),
+    "terms": (
+        "TermsOfUseView.swift",
+        [
+            "web search results.",
+            "web pages found by our third-party web search provider",
+            "third-party content that we do not control or verify",
+            "only for your own personal, non-commercial use",
+            "you may not scrape, copy, store, cache, resell, or redistribute them",
+            "build, train, or improve any artificial intelligence or machine learning model",
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize("doc", sorted(_WEB_SEARCH_CLAUSES))
+def test_the_published_page_states_the_web_search_clauses(doc, client):
+    body = _normalized_prose(client.get(f"/{doc}").text, strip_tags=True)
+    for clause in _WEB_SEARCH_CLAUSES[doc][1]:
+        assert clause in body, f"/{doc} no longer states {clause!r}"
+
+
+@pytest.mark.parametrize("doc", sorted(_WEB_SEARCH_CLAUSES))
+def test_the_in_app_mirror_states_the_web_search_clauses(doc):
+    screen, clauses = _WEB_SEARCH_CLAUSES[doc]
+    prose = _normalized_prose(
+        _swift_user_facing_strings(_IOS_SCREENS_DIR / screen), strip_tags=False
+    )
+    for clause in clauses:
+        assert clause in prose, (
+            f"{screen} does not state {clause!r}, but the published /{doc} page does — the "
+            f"in-app copy is the one a user can reach without leaving the app"
+        )
+
+
+def test_the_not_kept_promise_matches_the_shipped_persistence_switch():
+    """The policy says the web source list "is shown with the answer but is not kept". That is
+    true only while `CHAT_WEB_SOURCES_PERSIST` ships False — flipping the default without
+    rewriting §3 in all three copies would publish a false privacy statement."""
+    from app.config import Settings
+
+    body = _normalized_prose((_SERVED / "privacy.html").read_text(encoding="utf-8"), strip_tags=True)
+    if "is shown with the answer but is not kept" in body:
+        assert Settings.model_fields["CHAT_WEB_SOURCES_PERSIST"].default is False, (
+            "the web-source pills are stored by default now — rewrite Privacy §3 (served HTML, "
+            "documents/legal, PrivacyPolicyView.swift) before shipping that default"
+        )
+
+
+def test_the_consent_sheet_discloses_the_web_search_query_without_naming_the_vendor():
+    path = _IOS_SCREENS_DIR / "AIDataConsentView.swift"
+    prose = _normalized_prose(_swift_user_facing_strings(path), strip_tags=False)
+    assert "search the web in a report chat, a short search query" in prose
+    assert "goes to a web search provider" in prose
+    for vendor in ("brave", "google", "gemini", "bing"):
+        assert vendor not in prose, vendor
+
+
+def test_the_summary_box_covers_the_web_search_on_both_sides(client):
+    """The summary bullet lives in the Swift intro's multi-line string, which the literal
+    scanner does not read — so, like `test_in_app_privacy_policy_carries_the_same_summary`, the
+    raw source is checked (lowercased, whitespace collapsed)."""
+    web = _normalized_prose(client.get("/privacy").text, strip_tags=True)
+    swift = _normalized_prose((_IOS_SCREENS_DIR / "PrivacyPolicyView.swift").read_text(encoding="utf-8"),
+                              strip_tags=False)
+    for haystack, name in ((web, "/privacy"), (swift, "PrivacyPolicyView.swift")):
+        assert "your identity is not sent to the ai or to our web search provider" in haystack, name
+        assert "not transmitted with your message or with a web search" in haystack, name

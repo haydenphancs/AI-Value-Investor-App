@@ -178,11 +178,14 @@ struct TickerReportView: View {
                 }
                 }   // ScrollViewReader
 
-                // Floating chat bar
+                // Floating chat bar. Send is disabled while an earlier answer is still
+                // streaming: the seed would be refused (`handleReportChatSend` keeps the text
+                // and does not present), and an enabled button would look like a dead tap.
                 CaydexAIChatBar(
                     inputText: $viewModel.aiInputText,
                     placeholder: "Chat with the report...",
-                    onSend: handleReportChatSend
+                    onSend: handleReportChatSend,
+                    isBusy: chatViewModel.isAITyping
                 )
             }
         }
@@ -565,10 +568,19 @@ struct TickerReportView: View {
     private func handleReportChatSend() {
         let text = viewModel.aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        viewModel.aiInputText = ""
+        // Both guards come BEFORE the input is cleared, so a send that cannot go out never
+        // eats what the user typed. The bar only renders over a loaded report, so this one is
+        // defensive.
+        guard let report = viewModel.reportData, !report.symbol.isEmpty else { return }
 
         // Context is fetched server-side by reference_id — no more shipping the
         // executive summary from the client on every chat.
+        //
+        // The persona segment comes from the report ON SCREEN (`report.agent`), never from
+        // the route that opened it: a notification route with no persona defaulted to
+        // warren_buffett, so a Growth Hunter report's chat ran — and was labelled — as the
+        // Quality Compounder. It is what the chat's mode ("Cay AI · Growth Hunter Agent") and
+        // the server's voice both read.
         //
         // The report id is the THIRD segment, and it is what makes the answer match
         // the screen. Without it the backend can only look in `ticker_report_cache`,
@@ -578,21 +590,27 @@ struct TickerReportView: View {
         // from live market data under a placeholder that says "Chat with the report".
         // The backend scopes the lookup to the signed-in user, so sending the id
         // grants no access the caller did not already have.
-        let symbol = viewModel.reportData?.symbol ?? ""
-        let reference: String? = {
-            guard !symbol.isEmpty else { return nil }
-            let base = "\(symbol)|\(viewModel.personaKey)"
-            guard let rid = viewModel.backendReportId, !rid.isEmpty else { return base }
-            return "\(base)|\(rid)"
-        }()
+        let base = "\(report.symbol)|\(report.agent.personaKey)"
+        let reference: String
+        if let rid = viewModel.backendReportId, !rid.isEmpty {
+            reference = "\(base)|\(rid)"
+        } else {
+            reference = base
+        }
 
-        chatViewModel.startNewConversation(
+        // FALSE when a previous answer is still streaming: nothing was seeded, and presenting
+        // would show the PREVIOUS conversation. The typed text then stays in the bar. The bar
+        // disables send for exactly that state (`isBusy`), so this is the backstop.
+        let seeded = chatViewModel.startNewConversation(
             firstMessage: text,
-            stockId: viewModel.reportData?.symbol,
+            stockId: report.symbol,
             contextType: .tickerReport,
             referenceId: reference
         )
-        showAIChat = true
+        if seeded {
+            viewModel.aiInputText = ""
+            showAIChat = true
+        }
     }
 
     // MARK: - Disclaimer

@@ -8,7 +8,7 @@ model now writes the conclusion as its own field, told to build it ONLY from its
 points — and these checks are how the service knows whether it did:
 
 * ``unsupported_figures`` — a money / percent / scaled figure in the conclusion that
-  no point, the headline, or the shown catalyst carries. The ETH "$5,000". This is
+  no point or the headline carries. The ETH "$5,000". This is
   the one HARD check: a new figure is a new fact.
 * ``opens_with_people_framing`` — "Investors should…", "For investors, …", "You…".
   The user asked for the point itself, not a sentence about who should care.
@@ -196,7 +196,7 @@ def _supported(fig: Figure, sources: Sequence[Figure]) -> bool:
 
 
 def pct_figure(value: object) -> Optional[Figure]:
-    """A trusted percent (a quote's change, the catalyst's move) as an allowed figure."""
+    """A trusted percent (a quote's change) as an allowed figure."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     if value != value or value in (float("inf"), float("-inf")):
@@ -437,13 +437,12 @@ def check_conclusion(
     points: Sequence[str],
     headline: str,
     *,
-    catalyst_line: str = "",
     extra_figures: Iterable[Optional[Figure]] = (),
     subject_terms: Iterable[str] = (),
     report_happened: bool = False,
 ) -> ConclusionCheck:
     """Everything the service needs to decide: accept, repair once, or reject."""
-    sources = [headline or "", *points, catalyst_line or ""]
+    sources = [headline or "", *points]
     allowed_text = " ".join(sources)
     timing: List[str] = []
     if report_happened:

@@ -323,8 +323,8 @@ _DOSSIER_REFUSAL_COPY: dict[str, str] = {
         "manual refresh). Nothing new was started — wait for it to finish."
     ),
     "already_ran_today": (
-        "The industry dossier already completed a run today (UTC). A second run would pay "
-        "Phase B's AI research again, so nothing was started. Retry after 00:00 UTC, or "
+        "The industry dossier already completed a run today (UTC). A second run would repeat "
+        "the whole Census/FRED recompute, so nothing was started. Retry after 00:00 UTC, or "
         "clear run_day for this job in notification_job_state if a re-run is truly needed."
     ),
     "disabled": (
@@ -428,16 +428,16 @@ async def refresh_industry_dossier(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     user: dict = Depends(get_current_user_or_guest),
 ):
-    """Manually trigger the industry_dossier recompute (Phase A + Phase B). Returns
-    immediately; the recompute runs in the background and takes ~5-10 minutes.
+    """Manually trigger the industry_dossier recompute (Census/FRED; the Gemini grounded
+    Phase B was retired 2026-10-02). Returns immediately; the recompute runs in the
+    background and takes ~5-10 minutes.
 
     Runs under the QUARTERLY CHAIN'S OWN day-keyed claim (`JOB_INDUSTRY_DOSSIER_QUARTERLY`,
     migration 147). It used to run outside it, so a manual refresh could overlap the
-    scheduled phase — two Phase A upserts racing on the same rows, and Phase B's Gemini
-    research paid twice. Now:
+    scheduled phase — two upserts racing on the same rows. Now:
 
       * the scheduled phase is running (or an earlier manual one is) → 409, nothing started;
-      * a run already completed today (UTC) → 409; a second would only re-pay Phase B;
+      * a run already completed today (UTC) → 409; a second would only repeat it;
       * the job's kill switch is off → 409;
       * the scheduled phase starting while this runs finds the claim HELD, waits, and —
         when this run settled the day — skips instead of re-running.
@@ -551,7 +551,9 @@ def _dossier_tam_audit(rows: list[dict]) -> dict[str, Any]:
         "tam_placeholder_count": len(placeholders),
         "tam_placeholder_industries": sorted(str(r.get("industry") or "") for r in placeholders),
         "tam_placeholder_by_grain": dict(Counter(r.get("source_grain") for r in placeholders)),
-        # Phase B (Gemini grounded research) rows: a GLOBAL TAM, not the US Census/FRED one.
+        # Rows still holding a retired Gemini grounded-research TAM (`tam_scope='global'`,
+        # never served — `_withdraw_grounded_tam`). Expected 0 once migration 188 has run
+        # and a recompute has replaced them; kept as the operator's check that it did.
         "global_scope_count": len(global_rows),
         "global_scope_industries": sorted(str(r.get("industry") or "") for r in global_rows),
     }
@@ -562,8 +564,7 @@ async def list_industry_dossier(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
     user: dict = Depends(get_current_user_or_guest),
 ):
-    """Audit view — every industry_dossier row plus a per-grain summary
-    AND the latest Phase B (AI override) run summary.
+    """Audit view — every industry_dossier row plus a per-grain summary.
 
     Returns:
         {
@@ -572,15 +573,9 @@ async def list_industry_dossier(
           "tam_placeholder_count": 2,
           "tam_placeholder_industries": ["...", "..."],
           "tam_placeholder_by_grain": {"all_industry": 2},
-          "global_scope_count": 21,
-          "global_scope_industries": ["Semiconductors", ...],
+          "global_scope_count": 0,
+          "global_scope_industries": [],
           "computed_at_latest": "...",
-          "last_override_run": {
-              "run_id": "...",
-              "computed_at": "...",
-              "status_counts": {"applied": 7, "rejected_sanity": 1, ...},
-              "rows": [...]
-          },
           "rows": [...]
         }
 
@@ -611,39 +606,11 @@ async def list_industry_dossier(
             default=None,
         )
 
-        # Latest Phase B (AI override) run summary
-        last_override_run = None
-        try:
-            audit_res = (
-                (await sb_exec(
-                    sb.table("industry_override_audit")
-                    .select("*")
-                    .order("computed_at", desc=True)
-                    .limit(50)
-                ))
-            )
-            audit_rows = audit_res.data or []
-            if audit_rows:
-                most_recent_run = audit_rows[0].get("run_id")
-                run_rows = [r for r in audit_rows if r.get("run_id") == most_recent_run]
-                last_override_run = {
-                    "run_id": most_recent_run,
-                    "computed_at": run_rows[0].get("computed_at"),
-                    "status_counts": dict(Counter(r.get("status") for r in run_rows)),
-                    "rows": run_rows,
-                }
-        except Exception as audit_exc:
-            logger.warning(
-                "industry-dossier audit: override audit log read failed (%s: %s) — "
-                "last_override_run is null", type(audit_exc).__name__, audit_exc,
-            )
-
         return {
             "summary": summary,
             "total": len(rows),
             **_dossier_tam_audit(rows),
             "computed_at_latest": latest_computed,
-            "last_override_run": last_override_run,
             "rows": rows,
         }
     except Exception as e:
@@ -757,36 +724,6 @@ async def industry_moat_benchmarks_status(
         raise HTTPException(
             status_code=500, detail="Failed to read benchmark status",
         )
-
-
-@router.post("/refresh-industry-overrides")
-async def refresh_industry_overrides(
-    dry_run: bool = False,
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-    user: dict = Depends(get_current_user_or_guest),
-):
-    """Manually trigger Phase B (AI-driven research overrides) only —
-    without re-running Phase A. Useful for:
-
-    - Smoke-testing Gemini prompts + validation gates after a code change
-    - `dry_run=true` to see what Gemini would produce WITHOUT writing
-      anything to Supabase (no audit log, no dossier mutations).
-
-    Auth: `X-Admin-Token` OR email-allowlisted user.
-
-    Returns the per-industry summary immediately (this is synchronous —
-    9 industries × ~5 sec each = ~45 sec total).
-    """
-    _authorize_admin(user, x_admin_token)
-    try:
-        from app.services.industry_override_service import get_industry_override_service
-
-        service = get_industry_override_service()
-        summary = await service.refresh_all_overrides(dry_run=dry_run)
-        return summary
-    except Exception as e:
-        logger.error(f"Manual industry override refresh failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to refresh industry overrides: {e}")
 
 
 # ── Notification verification ────────────────────────────────────────────────

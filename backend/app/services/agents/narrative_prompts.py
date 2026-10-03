@@ -406,6 +406,9 @@ def _executive_summary_text_prompt(
         + "\n".join(kept) + "\n"
         if kept else ""
     )
+    # The METHOD's name, not "a The Growth Hunter investor": the old wording rendered that,
+    # and its "fits your style" could come out addressed to the reader (a suitability read).
+    method_name = persona.display_name.removeprefix("The ")
     return f"""Write the Executive Summary — a GENERAL, plain-English overview that orients the reader before the detailed sections below.
 
 EVIDENCE:
@@ -417,7 +420,7 @@ LENGTH: Write 3-4 sentences, total under 65 words.
 Cover, in order:
 1. What the company is and does — its business and sector, in one plain sentence (use the company profile/description above).
 2. How it's doing overall — the big-picture trajectory and financial health, in broad strokes.
-3. The report's bottom-line take — the overall verdict in general terms, framed through your lens (what a {persona.display_name} investor concludes about how well this fits your style). This is a characterization, never a buy, sell, or hold call.
+3. The report's bottom-line take — the overall verdict in general terms, framed through your lens (how well the company fits the {method_name} method's criteria). This is a characterization, never a buy, sell, or hold call.
 
 Keep it GENERAL — this is the orientation, not the argument. Do NOT dump metrics or list pros/cons; the Bull/Bear case below carries the specific numbers. Use at most ONE light anchor number, and only if it genuinely helps."""
 
@@ -779,7 +782,7 @@ def _macro_intelligence_brief_prompt(
     return f"""Write the Macro "Insight" — a tight read that captures the WHOLE macro backdrop and lands it on how it hits THIS company.
 
 OVERALL THREAT LEVEL: {threat}
-ACTIVE MACRO RISK FACTORS (deterministic data + web-grounded geopolitical events): {factor_str}
+ACTIVE MACRO RISK FACTORS (deterministic FRED / market data): {factor_str}
 
 EVIDENCE (company fundamentals):
 {evidence}
@@ -829,20 +832,10 @@ def _price_action_narrative_prompt(
     else:
         headlines_block = "\nRECENT MATCHED HEADLINES: none in window\n"
 
-    # Web-grounded reason (primary evidence when present): a current web search
-    # found WHY the stock moved (price_catalyst_service, big moves only). When
-    # set, the narrative should LEAD with this over the FMP headlines.
-    grounded_reason = pa.get("_grounded_reason")
-    grounded_block = (
-        f"\nWEB-GROUNDED REASON (PRIMARY — current web search; lead with this):\n"
-        f"  {grounded_reason}\n"
-        if grounded_reason else ""
-    )
-
     # Macro context — fed stance, sector rotation, geopolitics. Reuse the
-    # report's own DETERMINISTIC macro_data (threat level + risk factors, incl.
-    # web-grounded geopolitical events) so the AI can attribute moves like
-    # "sector rotation" or "war" without paying for a second grounded search.
+    # report's own DETERMINISTIC macro_data (threat level + risk factors) so the AI
+    # can attribute moves like "sector rotation" or a rate shock from data already
+    # paid for. (Its web-grounded geopolitical overlay was retired 2026-10-02.)
     # NOTE: we deliberately do NOT read macro_data["intelligence_brief"] — that
     # is a Stage-B prose field written in PARALLEL with this one, so at build
     # time it still holds the assemble-time placeholder ("Data unavailable for
@@ -974,7 +967,7 @@ temporary market move."""
 
 GROUND TRUTH: {ground_truth}
 CATALYST EVENT IN WINDOW: {event_str}
-{grounded_block}{headlines_block}{macro_block}
+{headlines_block}{macro_block}
 POSTURE: {posture}
 
 EVIDENCE:
@@ -1286,8 +1279,8 @@ def _key_management_insight_prompt(
     synthesizes THREE topics into one read on alignment + capital stewardship:
     1. Ownership / management: the dominant 10%+ holder's stake (structural
        alignment).
-    2. Insider activity: recent buy/sell flow, applying the Lynch BUY/SELL
-       signal asymmetry (insiders buy for one reason, sell for many).
+    2. Insider activity: recent buy/sell flow, applying the BUY/SELL signal
+       asymmetry (open-market buys carry more signal than sales).
     3. Capital allocation: dividends plus whether the company is returning
        capital or NET-diluting (stock-comp issuance outpacing buybacks).
     """
@@ -1412,8 +1405,8 @@ EVIDENCE:
 {_style_block(persona)}
 LENGTH: 2 to 3 sentences, under 60 words.
 
-SIGNAL ASYMMETRY (most important rule, GARP method):
-- BUYS carry HIGH signal. Insiders buy for one reason only: they expect the stock to rise. Even a small buy alongside a dominant holder is a strong endorsement.
+SIGNAL ASYMMETRY (most important rule):
+- BUYS carry HIGH signal: insiders have few reasons to make an open-market buy besides expecting the business to do well. Weigh a small buy beside a dominant holder as meaningful, not decisive.
 - SELLS carry LOW to medium signal. They happen for many reasons (tax, diversification, estate, scheduled 10b5-1); name selling but qualify the motive, never treat it as proof of a bearish view.
 - A dominant holder's large stake structurally aligns interests but does NOT erase selling or dilution.
 
@@ -2832,8 +2825,7 @@ _VALID_CF_SEVERITY = {"high", "medium", "low"}
 
 def _format_macro_watch_block(report: Dict[str, Any]) -> str:
     """Ungated macro/geopolitical context for critical-factor 'watch' triggers
-    — threat level + every active risk factor (incl. web-grounded geopolitical
-    events), regardless of the high+ gating the thesis digest uses (a "watch
+    — threat level + every active risk factor, regardless of the high+ gating the thesis digest uses (a "watch
     the Fed / a war" trigger is relevant even at "elevated")."""
     try:
         macro = report.get("macro_data") or {}
@@ -2875,7 +2867,7 @@ MODULE DIGEST (final verdict of every Deep Dive module):
 BEAR CASE (the synthesized key risks — turn these into forward monitors, do NOT restate them):
 {bear_block}
 
-MACRO / GEOPOLITICAL (current threat level + active risk events, incl. web-grounded wars / tariffs / Fed / etc.):
+MACRO / GEOPOLITICAL (current threat level + active risk factors — rates, inflation, credit, commodities, etc.):
 {macro_watch}
 
 PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}

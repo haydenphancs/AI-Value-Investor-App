@@ -61,7 +61,20 @@ struct SmartMoneySection: View {
                     .padding(.top, AppSpacing.xs)
 
                 // Flow chart (price on top, buy/sell volume below)
-                if currentData.flowData.allSatisfy({ !$0.hasActivity }) {
+                if currentData.isUnavailable {
+                    // The tab's fetch FAILED: zero bars here are a placeholder, not "no activity".
+                    VStack(spacing: AppSpacing.sm) {
+                        Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                            .font(.system(size: 28))
+                            .foregroundColor(AppColors.textMuted)
+                        Text("\(selectedTab.rawValue) data couldn't be loaded. Try again in a few minutes.")
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.textMuted)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 200)
+                } else if currentData.flowData.allSatisfy({ !$0.hasActivity }) {
                     // Empty state when no data for this tab
                     VStack(spacing: AppSpacing.sm) {
                         Image(systemName: "chart.bar.xaxis")
@@ -83,7 +96,7 @@ struct SmartMoneySection: View {
                         // volume axis (uniformVolumeAxis) that parks the top label at
                         // a constant 80% of the domain — so Insider / Institutions /
                         // Congress all show the SAME clean two-axis layout regardless
-                        // of magnitude. (Report's insider chart omits both → unchanged.)
+                        // of magnitude. (The report's insider chart passes the same two.)
                         priceVolumeGap: AppSpacing.sm,
                         uniformVolumeAxis: true,
                         // Congress bars are dollars (STOCK Act ranges); Insider &

@@ -1852,11 +1852,14 @@ def test_the_lead_names_no_model_or_vendor():
 
 
 def test_duplicated_constants_match_their_sources():
-    """The resolver must not import the collector / the intel service (they pull the whole report
-    pipeline into every chat turn), so it duplicates three constants. Pinned equal here."""
-    from app.services import competitor_intel_service as cis
+    """The resolver must not import the collector (it pulls the whole report pipeline into
+    every chat turn), so it duplicates two constants. Pinned equal here.
+
+    The segment cap has no live source any more: the collector stopped writing "competes
+    in" segments when the grounded research list was retired (2026-10-02), and 48 was the
+    cap it wrote them under — so a stored segment is never cut by the resolver."""
     from app.services.agents import ticker_report_data_collector as col
-    assert _ccr._COMPETITOR_SEGMENT_CAP == cis.SEGMENT_MAX_CHARS
+    assert _ccr._COMPETITOR_SEGMENT_CAP == 48
     assert _ccr._THREAT_HIGH_AT == col._THREAT_HIGH_THRESHOLD
     assert _ccr._THREAT_LOW_AT == col._THREAT_LOW_THRESHOLD
 
@@ -2153,3 +2156,297 @@ async def test_non_string_lead_fields_still_ground_the_rest(resolver, monkeypatc
     assert block.startswith("The user is viewing the in-depth Cay research report for X (X).")
     assert "DURABLEMARK" in block and "1. NVIDIA Corporation (NVDA)" in block
     assert "Executive summary" not in block and "Recent price movement" not in block
+
+
+# ── The grounded report's persona (2026-10-02): shared tag map + the `meta` out-param ──
+#
+# The report chat's mode voice follows the report ACTUALLY grounded (its stored `agent` tag),
+# reported through `resolve(..., meta=)`. The cache lookup now goes through the shared
+# `persona_config.AGENT_TAG_TO_KEY` — CURRENT tags only, so a legacy `dalio` reference misses
+# the cache instead of grounding an old chat on today's Activist report.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ref, expected", [
+    ("AAPL|buffett", "warren_buffett"),
+    ("AAPL|lynch", "peter_lynch"),
+    ("AAPL|LYNCH", "peter_lynch"),
+    ("AAPL|peter_lynch", "peter_lynch"),
+    ("AAPL|burry|", "michael_burry"),
+    ("AAPL|", "warren_buffett"),          # empty segment → the documented default
+    ("AAPL|soros", "soros"),              # unknown passes through and simply misses
+    ("AAPL|dalio", "dalio"),              # LEGACY: never today's bill_ackman row
+])
+async def test_ticker_report_persona_segment_resolves_through_the_shared_table(resolver, monkeypatch, ref, expected):
+    seen = {}
+
+    async def fake_get(ticker, persona):
+        seen["persona"] = persona
+        return None
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    await resolver.resolve("TICKER_REPORT", ref, None)
+    assert seen["persona"] == expected
+
+
+def test_the_resolver_keeps_no_private_copy_of_the_tag_map():
+    """A renamed private copy would pass a name check, so look for the PAIRS — in the AST, so
+    neither a comment nor a quote style can satisfy or dodge it (testing.md §3)."""
+    import ast
+    import inspect
+    import app.services.chat_context_resolver as mod
+
+    tree = ast.parse(inspect.getsource(mod))
+    pairs = {("buffett", "warren_buffett"), ("lynch", "peter_lynch"), ("burry", "michael_burry"),
+             ("ackman", "bill_ackman"), ("wood", "cathie_wood"), ("dalio", "bill_ackman")}
+
+    def _const(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    for node in ast.walk(tree):
+        found = set()
+        if isinstance(node, ast.Dict):
+            found = {(_const(k), _const(v)) for k, v in zip(node.keys, node.values) if k is not None}
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "dict"):
+            found = {(kw.arg, _const(kw.value)) for kw in node.keywords}
+        assert not (found & pairs), f"a private tag map is back at line {node.lineno}: {found & pairs}"
+
+    # Nothing in the module may rebind the shared name (a local copy under the same name).
+    for node in ast.walk(tree):
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else [])
+        for t in targets:
+            assert not (isinstance(t, ast.Name) and t.id == "AGENT_TAG_TO_KEY"), t.lineno
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "_resolve_ticker_report")
+    imported = {a.name for n in ast.walk(fn) if isinstance(n, ast.ImportFrom)
+                and n.module == "app.services.agents.persona_config" for a in n.names}
+    assert "AGENT_TAG_TO_KEY" in imported, "the cache lookup must use the shared persona_config map"
+    lookups = [n for n in ast.walk(fn)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "get" and isinstance(n.func.value, ast.Name)
+               and n.func.value.id == "AGENT_TAG_TO_KEY"]
+    assert lookups, "_resolve_ticker_report no longer looks the segment up in AGENT_TAG_TO_KEY"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent, expected", [
+    ("lynch", "peter_lynch"),
+    ("peter_lynch", "peter_lynch"),
+    (" Burry ", "michael_burry"),
+    ("dalio", "bill_ackman"),             # legacy stored tag: its METHOD is fine for a voice
+])
+async def test_meta_reports_the_grounded_reports_own_persona(resolver, monkeypatch, agent, expected):
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return None
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    _stub_frozen_row(monkeypatch, data={"company_name": "Oracle Corporation", "agent": agent,
+                                        "executive_summary_text": "frozen"})
+    meta = {}
+    block = await resolver.resolve(
+        "TICKER_REPORT", "ORCL|warren_buffett|rid-1", None, user_id="user-42", meta=meta,
+    )
+    assert block and "frozen" in block
+    assert meta == {"report_persona_key": expected}
+
+
+@pytest.mark.asyncio
+async def test_a_persona_mismatch_is_logged_bounded(resolver, monkeypatch, caplog):
+    """The old build's notification route: reference says warren_buffett, the row is lynch."""
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return None
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    _stub_frozen_row(monkeypatch, data={"company_name": "Oracle", "agent": "lynch",
+                                        "executive_summary_text": "x"})
+    hostile_ticker = "ORCL\nERROR app.security: forged" + "Z" * 5000
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        meta = {}
+        await resolver.resolve(
+            "TICKER_REPORT", f"{hostile_ticker}|warren_buffett|rid-1", None,
+            user_id="user-42", meta=meta,
+        )
+    assert meta["report_persona_key"] == "peter_lynch"
+    rendered = [r.getMessage() for r in caplog.records if "persona mismatch" in r.getMessage()]
+    assert len(rendered) == 1
+    assert "peter_lynch" in rendered[0] and "warren_buffett" in rendered[0]
+    assert "\n" not in rendered[0] and len(rendered[0]) < 700
+
+
+@pytest.mark.asyncio
+async def test_a_matching_persona_logs_no_mismatch(resolver, monkeypatch, caplog):
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return {"company_name": "Oracle", "agent": "lynch", "executive_summary_text": "x"}
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        meta = {}
+        await resolver.resolve("TICKER_REPORT", "ORCL|lynch", None, meta=meta)
+    assert meta == {"report_persona_key": "peter_lynch"}
+    assert not [r for r in caplog.records if r.name == "app.services.chat_context_resolver"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent", [None, "", "soros", 5, ["lynch"], "x" * 500])
+async def test_an_unknown_stored_tag_vouches_for_nothing(resolver, monkeypatch, agent):
+    """Unknown or malformed `agent` → no meta key (the voice falls back to the reference),
+    the block still builds, and nothing of the stored value is echoed into meta."""
+    import app.services.ticker_report_cache as trc
+
+    report = {"company_name": "Oracle", "executive_summary_text": "x"}
+    if agent is not None:
+        report["agent"] = agent
+
+    async def fake_cache(ticker, persona):
+        return report
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    meta = {}
+    block = await resolver.resolve("TICKER_REPORT", "ORCL|lynch", None, meta=meta)
+    assert block and "Oracle" in block
+    assert meta == {}
+
+
+@pytest.mark.asyncio
+async def test_meta_is_untouched_when_nothing_resolves(resolver, monkeypatch):
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return None
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    meta = {}
+    assert await resolver.resolve("TICKER_REPORT", "ORCL|lynch", "cc", meta=meta) == "cc"
+    assert meta == {}
+
+
+@pytest.mark.asyncio
+async def test_meta_is_untouched_when_the_resolve_times_out(resolver, monkeypatch):
+    """A shielded handler that finishes AFTER the ceiling must not change a turn already built."""
+    import asyncio
+    from app.services import chat_context_resolver as mod
+
+    finished = asyncio.Event()
+
+    async def slow_ticker_report(self, ref, ctx, user_id=None, meta=None):
+        await asyncio.sleep(0.05)
+        if meta is not None:
+            meta["report_persona_key"] = "peter_lynch"
+        finished.set()
+        return "late block"
+
+    monkeypatch.setattr(mod, "_RESOLVE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ChatContextResolver, "_resolve_ticker_report", slow_ticker_report)
+    meta = {}
+    assert await resolver.resolve("TICKER_REPORT", "ORCL|lynch", "cc", meta=meta) == "cc"
+    await asyncio.wait_for(finished.wait(), timeout=1.0)
+    assert meta == {}, "the late handler wrote into the caller's meta"
+
+
+@pytest.mark.asyncio
+async def test_other_context_types_never_write_meta(resolver, monkeypatch):
+    async def fake_get(ticker, persona):
+        raise AssertionError("not a report")
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    meta = {}
+    await resolver.resolve("BOOK", "2", "guide text", meta=meta)
+    await resolver.resolve("STOCK", "AAPL", None, meta=meta)
+    await resolver.resolve(None, "AAPL|lynch", None, meta=meta)
+    assert meta == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ref", ["ORCL", "ORCL|", "ORCL|soros"])
+async def test_a_reference_naming_no_persona_is_not_a_mismatch(resolver, monkeypatch, caplog, ref):
+    """The two-segment-less form looks up the default row; it claims no persona, so the
+    stored one simply drives the voice — no mismatch warning per turn."""
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return {"company_name": "Oracle", "agent": "buffett", "executive_summary_text": "x"}
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        meta = {}
+        await resolver.resolve("TICKER_REPORT", ref, None, meta=meta)
+    assert meta == {"report_persona_key": "warren_buffett"}
+    assert not [r for r in caplog.records if "mismatch" in r.getMessage()]
+
+
+# ── The report's as-of date in `meta` (report chat's web search, 2026-10-02) ───
+#
+# The code-authored web-results caveat names the report date ("Your report reflects data as of
+# Sep 22, 2026."). It comes from the SAME `_report_date` the "Report dated …" lead line uses, and
+# reaches the caller's meta only when the handler finished inside the ceiling.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report_dates, expected", [
+    ({"price_close_date": "2026-09-22"}, "2026-09-22"),
+    ({"live_date": "As of Sep 22, 2026 close"}, "Sep 22, 2026 close"),
+    ({"price_close_date": "2026-09-22", "live_date": "As of Sep 23, 2026 close"}, "2026-09-22"),
+])
+async def test_meta_carries_the_report_date_the_lead_line_shows(resolver, monkeypatch, report_dates, expected):
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return {"company_name": "Oracle", "agent": "lynch", "executive_summary_text": "x",
+                **report_dates}
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    meta = {}
+    block = await resolver.resolve("TICKER_REPORT", "ORCL|lynch", None, meta=meta)
+    assert f"Report dated {expected}." in block
+    assert meta == {"report_persona_key": "peter_lynch", "report_as_of": expected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report_dates", [
+    {}, {"price_close_date": None}, {"price_close_date": ""}, {"price_close_date": 20260922},
+    {"live_date": "As of"}, {"price_close_date": ["2026-09-22"]},
+])
+async def test_an_undated_report_writes_no_report_date(resolver, monkeypatch, report_dates):
+    import app.services.ticker_report_cache as trc
+
+    async def fake_cache(ticker, persona):
+        return {"company_name": "Oracle", "agent": "lynch", "executive_summary_text": "x",
+                **report_dates}
+
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    meta = {}
+    block = await resolver.resolve("TICKER_REPORT", "ORCL|lynch", None, meta=meta)
+    assert block and "Report dated" not in block
+    assert "report_as_of" not in meta
+
+
+@pytest.mark.asyncio
+async def test_a_late_handler_never_writes_the_report_date(resolver, monkeypatch):
+    import asyncio
+    from app.services import chat_context_resolver as mod
+
+    finished = asyncio.Event()
+
+    async def slow_ticker_report(self, ref, ctx, user_id=None, meta=None):
+        await asyncio.sleep(0.05)
+        if meta is not None:
+            meta["report_as_of"] = "2026-09-22"
+        finished.set()
+        return "late block"
+
+    monkeypatch.setattr(mod, "_RESOLVE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ChatContextResolver, "_resolve_ticker_report", slow_ticker_report)
+    meta = {}
+    assert await resolver.resolve("TICKER_REPORT", "ORCL|lynch", "cc", meta=meta) == "cc"
+    await asyncio.wait_for(finished.wait(), timeout=1.0)
+    assert meta == {}

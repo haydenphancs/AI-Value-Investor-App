@@ -76,7 +76,7 @@ struct QuickTicker: Identifiable, Equatable {
 /// app release. Static instances + `allCases` preserve enum-style ergonomics.
 struct AnalysisPersona: Identifiable, Hashable {
     let key: String           // snake_case backend key (e.g. "warren_buffett")
-    let name: String          // display name (e.g. "Warren Buffett")
+    let name: String          // display name (e.g. "The Quality Compounder")
     let tagline: String
     let iconName: String
     let systemIconName: String
@@ -116,20 +116,14 @@ struct AnalysisPersona: Identifiable, Hashable {
         }
     }
 
-    /// The display name split for the two-line persona card, with the leading article
-    /// dropped: "The Quality Compounder" → ("Quality", "Compounder"); "The Everyday
-    /// Growth Hunter" → ("Everyday Growth", "Hunter").
-    ///
-    /// PersonaCard used to split `name` itself into first-word / last-word, which read
-    /// correctly while names were real people ("Warren" / "Buffett") and became
-    /// "The" / "Compounder" once the personas were renamed to style names.
     /// `name` without the leading article — "The Quality Compounder" → "Quality Compounder".
     ///
     /// For anywhere the name sits inline beside a label and cannot afford 22–26 characters.
     /// The General Settings "Default Analyst" row is the case that prompted it: at full length
-    /// the two longest truncated to "The Everyday Growth H…", which names nothing. Dropping the
-    /// article buys 4 characters and costs no meaning — the same trade `cardNameLines` already
-    /// makes, which is why that now shares this instead of repeating the rule.
+    /// the longest names truncated to a fragment that named nothing. Dropping the article buys
+    /// 4 characters and costs no meaning — the same trade `cardNameLines` already makes, which
+    /// is why that now shares this instead of repeating the rule. The report chat's mode label
+    /// ("Growth Hunter Agent") is built from it too.
     var compactName: String {
         let words = name.split(separator: " ").map(String.init)
         guard words.count > 1, words[0].caseInsensitiveCompare("the") == .orderedSame else {
@@ -138,6 +132,12 @@ struct AnalysisPersona: Identifiable, Hashable {
         return words.dropFirst().joined(separator: " ")
     }
 
+    /// The display name split for the two-line persona card, with the leading article
+    /// dropped: "The Quality Compounder" → ("Quality", "Compounder"); "The Deep Value
+    /// Skeptic" → ("Deep Value", "Skeptic").
+    ///
+    /// PersonaCard used to split `name` itself into first-word / last-word, which became
+    /// "The" / "Compounder" once the personas were renamed to style names.
     var cardNameLines: (top: String, bottom: String) {
         let words = compactName.split(separator: " ").map(String.init)
         guard let last = words.last else { return ("", name) }
@@ -191,11 +191,11 @@ struct AnalysisPersona: Identifiable, Hashable {
     static let warrenBuffett = AnalysisPersona(
         key: "warren_buffett",
         name: "The Quality Compounder",
-        tagline: "Safe, Long-term Value",
+        tagline: "Durable, Long-term Value",
         iconName: "icon_persona_buffett",
         systemIconName: "building.columns.fill",
         accentColorHex: "3B82F6",
-        description: "Focuses on fundamental value, strong moats, consistent earnings, and long-term competitive advantages. Ideal for conservative investors."
+        description: "Focuses on fundamental value, durable moats, consistent earnings, and long-term competitive advantages, and asks for a margin of safety on price."
     )
 
     static let cathieWood = AnalysisPersona(
@@ -215,7 +215,7 @@ struct AnalysisPersona: Identifiable, Hashable {
         iconName: "icon_persona_lynch",
         systemIconName: "chart.line.uptrend.xyaxis",
         accentColorHex: "06B6D4",
-        description: "Looks for growth at a reasonable price (GARP), with focus on companies you understand and can spot in everyday life."
+        description: "Looks for growth at a reasonable price (GARP), weighing earnings growth against valuation, with a focus on understandable businesses."
     )
 
     static let billAckman = AnalysisPersona(
@@ -257,7 +257,7 @@ struct AnalysisPersona: Identifiable, Hashable {
     static let defaultPersonaStorageKey = "default_persona"
 
     /// The user's "Default Analyst" (Settings → AI & Research), stored by `.key`.
-    /// Falls back to Warren Buffett when unset or unrecognized.
+    /// Falls back to the Quality Compounder when unset or unrecognized.
     ///
     /// ⚠️ A stored-property initializer must never be the ONLY read of this.
     /// `ResearchViewModel.selectedPersona` still seeds itself from here for first paint, which
@@ -308,6 +308,43 @@ struct AnalysisPersona: Identifiable, Hashable {
                 ?? "3B82F6",
             description: backend.description ?? fallback?.description ?? ""
         )
+    }
+}
+
+// MARK: - Report chat persona resolution
+
+extension AnalysisPersona {
+    /// The analysis style a report chat's `reference_id` ("TICKER|persona[|report_id]") names,
+    /// or nil when it names none.
+    ///
+    /// Mirrors the backend's `report_voice_prompt.report_persona_key` step for step: over 512
+    /// code points → nil, split KEEPING empty parts (Python's `split("|")`), segment [1] through
+    /// the token rule below. Swift's default `split` drops empty parts, so "AAPL||peter_lynch"
+    /// would have read Growth Hunter here while the server saw an empty segment and no mode.
+    static func forChatReference(_ referenceId: String?) -> AnalysisPersona? {
+        guard let referenceId, referenceId.unicodeScalars.count <= 512 else { return nil }
+        let parts = referenceId.split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        return forPersonaToken(String(parts[1]))
+    }
+
+    /// One persona token — an agent tag ("lynch", legacy "dalio") or a persona key
+    /// ("peter_lynch") — resolved the way the backend's `persona_key_from_tag` does.
+    ///
+    /// CLOSED, on purpose, in two ways:
+    /// - It matches only the hard-coded `allCases`, never the server-fetched persona list: a
+    ///   production `agent_personas` row can still carry an older display name, and that must
+    ///   never reach the chat's mode label.
+    /// - It has no fallback. The backend's grounding parse falls back to a default persona;
+    ///   this does not, so an unknown token shows NO mode rather than borrowing one.
+    ///
+    /// Lengths count Unicode code points (`unicodeScalars`), which is what Python's `len` counts.
+    static func forPersonaToken(_ raw: String) -> AnalysisPersona? {
+        guard raw.unicodeScalars.count <= 64 else { return nil }
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !token.isEmpty else { return nil }
+        let key = ReportAgentPersona(agentTag: token)?.personaKey ?? token
+        return allCases.first { $0.key == key }
     }
 }
 
@@ -759,6 +796,10 @@ struct AnalysisReport: Identifiable, Hashable {
 }
 
 // MARK: - Community Insight
+
+/// A community comment row. No sample rows are compiled in: the old static samples were invented
+/// testimonials ("Highly recommend!") naming real investors, shipped in release builds as the
+/// ViewModel's default. Previews build their own neutral sample inline.
 struct CommunityInsight: Identifiable {
     let id = UUID()
     let userName: String
@@ -773,25 +814,6 @@ struct CommunityInsight: Identifiable {
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: postedAt, relativeTo: Date())
     }
-
-    static let mockInsights: [CommunityInsight] = [
-        CommunityInsight(
-            userName: "David Martinez",
-            userAvatarName: "avatar_david",
-            postedAt: Date().addingTimeInterval(-7200), // 2h ago
-            comment: "Just completed a Buffett-style analysis on $AAPL. The moat is stronger than ever with the services ecosystem. Highly recommend!",
-            likesCount: 24,
-            commentsCount: 8
-        ),
-        CommunityInsight(
-            userName: "Sarah Johnson",
-            userAvatarName: "avatar_sarah",
-            postedAt: Date().addingTimeInterval(-18000), // 5h ago
-            comment: "The Cathie Wood persona nailed the $NVDA analysis. AI infrastructure thesis is spot on. Worth every credit!",
-            likesCount: 41,
-            commentsCount: 15
-        )
-    ]
 }
 
 // MARK: - Report Sort Option

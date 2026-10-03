@@ -27,6 +27,7 @@ import pytest
 from app.services.agents.persona_config import (
     IMPERSONATION_BOUNDARY,
     PERSONA_KEYS,
+    PERSONA_METHODS,
     get_persona_config,
     method_opening,
 )
@@ -102,15 +103,79 @@ def test_the_shared_opening_helper_is_byte_exact():
 
     Every persona opening must be reproducible from the helper alone. If someone edits a
     prompt's first sentence by hand, or the helper's spacing drifts, this fails.
+
+    Changed DELIBERATELY on 2026-10-02: the school sentence used to read "…school of value
+    investing associated with <a real investor>, analyzing a company as a potential
+    decades-long holding." It now names no one (PERSONA_METHODS).
     """
     out = method_opening(
         "QUALITY COMPOUNDER",
-        "the classic quality-and-moat school of value investing associated with Warren "
-        "Buffett, analyzing a company as a potential decades-long holding.",
+        "the classic quality-and-moat school of value investing, analyzing a company as a "
+        "business that could compound its value for decades.",
     )
     prompt = get_persona_config("warren_buffett").system_prompt
     assert out in prompt
     assert prompt[prompt.index("You are Cay AI applying the "):].startswith(out)
+
+
+# The five literal openings, pinned byte for byte. A change here is a change to what every
+# report's system prompt says first — make it on purpose, in PERSONA_METHODS, and update this.
+_EXPECTED_OPENINGS = {
+    "warren_buffett": (
+        "You are Cay AI applying the QUALITY COMPOUNDER method: the classic quality-and-moat "
+        "school of value investing, analyzing a company as a business that could compound its "
+        "value for decades. Apply the method; do not speak as, or claim to be, any real investor."
+    ),
+    "cathie_wood": (
+        "You are Cay AI applying the DISRUPTION SEEKER method: the disruptive-innovation growth "
+        "school, analyzing a company for exposure to technological S-curves. Apply the method; "
+        "do not speak as, or claim to be, any real investor."
+    ),
+    "peter_lynch": (
+        "You are Cay AI applying the GROWTH HUNTER method: growth-at-a-reasonable-price (GARP) "
+        "investing, weighing a company's earnings growth against the price paid for it and "
+        "favoring understandable businesses. Apply the method; do not speak as, or claim to be, "
+        "any real investor."
+    ),
+    "bill_ackman": (
+        "You are Cay AI applying the ACTIVIST CONCENTRATOR method: concentrated, high-conviction "
+        "activist value investing, looking for high-quality businesses where a specific catalyst "
+        "could unlock value. Apply the method; do not speak as, or claim to be, any real investor."
+    ),
+    "michael_burry": (
+        "You are Cay AI applying the DEEP VALUE SKEPTIC method: contrarian, forensic deep-value "
+        "analysis that asks what could go wrong before what could go right. Apply the method; do "
+        "not speak as, or claim to be, any real investor."
+    ),
+}
+
+
+def test_the_method_table_covers_exactly_the_persona_keys():
+    assert set(PERSONA_METHODS) == PERSONA_KEYS
+    assert set(_EXPECTED_OPENINGS) == PERSONA_KEYS
+
+
+@pytest.mark.parametrize("key", sorted(PERSONA_KEYS))
+def test_every_opening_is_byte_exact_and_comes_from_the_method_table(key: str):
+    prompt = get_persona_config(key).system_prompt
+    body = prompt[prompt.index("You are Cay AI applying the "):]
+    assert body.startswith(_EXPECTED_OPENINGS[key])
+    assert method_opening(*PERSONA_METHODS[key]) == _EXPECTED_OPENINGS[key]
+
+
+@pytest.mark.parametrize("key", sorted(PERSONA_KEYS))
+def test_the_opening_style_is_the_display_name(key: str):
+    """'EVERYDAY GROWTH HUNTER' survived migration 155's rename to 'The Growth Hunter' because
+    nothing tied the two. The style IS the display name without 'The ', upper-cased."""
+    style, _school = PERSONA_METHODS[key]
+    assert style == get_persona_config(key).display_name.removeprefix("The ").upper()
+
+
+@pytest.mark.parametrize("key", sorted(PERSONA_KEYS))
+def test_every_school_sentence_is_one_complete_sentence(key: str):
+    _style, school = PERSONA_METHODS[key]
+    assert school.endswith(".") and not school.startswith(" ") and "  " not in school
+    assert school.count(". ") == 0, "one sentence: the boundary follows it"
 
 
 def test_the_helper_joins_school_and_boundary_with_one_space():

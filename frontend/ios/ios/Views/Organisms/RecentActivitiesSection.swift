@@ -223,47 +223,66 @@ struct RecentActivitiesSection: View {
         let hasMore = allActivities.count > initialDisplayCount
 
         return VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Period label
-            Text(data.insiderActivities.summary.periodDescription)
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
-                .padding(.top, AppSpacing.xs)
+            if data.insiderActivities.isUnavailable {
+                // The insider fetch FAILED: no 0/0 card, no "+ 0" badge, no "no transactions".
+                Text("Insider trades couldn't be loaded. Try again in a few minutes.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, AppSpacing.sm)
+            } else {
+                // Period label
+                Text(data.insiderActivities.summary.periodDescription)
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.top, AppSpacing.xs)
 
-            // Informative Buys vs Sells summary card
-            InsiderFlowSummaryCard(summary: data.insiderActivities.summary)
+                // Informative Buys vs Sells summary card
+                InsiderFlowSummaryCard(summary: data.insiderActivities.summary)
 
-            // Net informative flow
-            InsiderNetFlowBadge(summary: data.insiderActivities.summary)
+                // Net informative flow
+                InsiderNetFlowBadge(summary: data.insiderActivities.summary)
 
-            // Filter selector (All / Informative)
-            InsiderFilterSelector(selectedFilter: InsiderActivityFilterOption.binding($insiderFilterID))
+                // Filter selector (All / Informative)
+                InsiderFilterSelector(selectedFilter: InsiderActivityFilterOption.binding($insiderFilterID))
 
-            // Activity list
-            if insidersExpanded {
-                ScrollView {
+                // Activity list
+                if displayedActivities.isEmpty {
+                    // Say so instead of a blank list under the filter pills. Filter-aware:
+                    // under "Informative" award/option/tax rows may still exist.
+                    Text(selectedFilter == .informative
+                         ? "No open-market insider buys or sells in the last 12 months."
+                         : "No insider transactions in the last 12 months.")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, AppSpacing.xs)
+                } else if insidersExpanded {
+                    ScrollView {
+                        LazyVStack(spacing: AppSpacing.sm) {
+                            ForEach(displayedActivities) { activity in
+                                InsiderActivityRow(activity: activity)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.visible)
+                    .frame(maxHeight: expandedListHeight)
+                } else {
                     LazyVStack(spacing: AppSpacing.sm) {
                         ForEach(displayedActivities) { activity in
                             InsiderActivityRow(activity: activity)
                         }
                     }
                 }
-                .scrollIndicators(.visible)
-                .frame(maxHeight: expandedListHeight)
-            } else {
-                LazyVStack(spacing: AppSpacing.sm) {
-                    ForEach(displayedActivities) { activity in
-                        InsiderActivityRow(activity: activity)
-                    }
-                }
-            }
 
-            // Show more / Show less button
-            if hasMore {
-                showMoreButton(
-                    isExpanded: insidersExpanded,
-                    totalCount: allActivities.count
-                ) {
-                    insidersExpanded.toggle()
+                // Show more / Show less button
+                if hasMore {
+                    showMoreButton(
+                        isExpanded: insidersExpanded,
+                        totalCount: allActivities.count
+                    ) {
+                        insidersExpanded.toggle()
+                    }
                 }
             }
         }

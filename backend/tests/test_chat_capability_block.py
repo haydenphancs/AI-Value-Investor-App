@@ -186,8 +186,9 @@ async def test_prep_hands_the_live_quote_to_the_tool_less_instruction_too(monkey
     async def _widget(*a, **k):
         return widget
 
-    async def _grounding(*a, **k):          # (context, server_grounded, replayed, cache_safe)
-        return None, False, False, True
+    async def _grounding(*a, **k):
+        # (context, server_grounded, replayed, cache_safe, report_persona_key)
+        return None, False, False, True, None
 
     async def _retrieve(*a, **k):
         return [], []
@@ -226,3 +227,57 @@ def test_prep_builds_a_tool_free_instruction_for_the_merge():
     assert "tools_granted=False" in src
     merge = inspect.getsource(cs.ChatService.stream_synthesis)
     assert 'prep.get("system_instruction_no_tools")' in merge
+
+
+# ── report chat's web_search: declared ONLY on a turn whose gate opened ──────
+
+_ALL_CLASSES = ["STOCK", "NORMAL", "ETF", "CRYPTO", "INDEX", "COMMODITY"]
+
+
+@pytest.mark.parametrize("asset_type", _ALL_CLASSES)
+def test_web_search_is_declared_only_when_granted(asset_type, licensed_analyst_data):
+    base = set(chat_tools.tools_for_asset_type(asset_type))
+    assert chat_tools.WEB_SEARCH_TOOL not in base, "never part of a class table"
+    granted = set(chat_tools.tools_for_asset_type(asset_type, web_search=True))
+    assert granted == base | {chat_tools.WEB_SEARCH_TOOL}
+    declared = {fd.name for t in chat_tools.build_chat_tool_declarations(asset_type, web_search=True)
+                for fd in (t.function_declarations or [])}
+    assert declared == granted
+    default_declared = {fd.name for t in chat_tools.build_chat_tool_declarations(asset_type)
+                        for fd in (t.function_declarations or [])}
+    assert chat_tools.WEB_SEARCH_TOOL not in default_declared
+    block = chat_tools.capability_block(frozenset(granted))
+    assert _named_tools(block) == granted
+    assert "web_search" not in chat_tools.capability_block(frozenset(base))
+
+
+@pytest.mark.parametrize("asset_type,symbol", [("STOCK", "AAPL"), ("INDEX", "^GSPC")])
+def test_the_full_instruction_names_web_search_only_on_a_granted_turn(asset_type, symbol, licensed_analyst_data):
+    svc = _svc()
+    granted = svc._build_system_instruction("REPORT", symbol, asset_type=asset_type,
+                                            web_search_granted=True)
+    allowed = set(chat_tools.tools_for_asset_type(asset_type, web_search=True))
+    assert _named_tools(granted) == allowed
+    plain = svc._build_system_instruction("REPORT", symbol, asset_type=asset_type)
+    assert "web_search" not in plain
+    # A tool-less build claims nothing, even on a web turn (the fallback / the synthesis merge).
+    tool_less = svc._build_system_instruction("REPORT", symbol, asset_type=asset_type,
+                                              tools_granted=False, web_search_granted=True)
+    assert _named_tools(tool_less) == set()
+
+
+def test_the_web_search_capability_says_explicit_ask_and_no_market_data():
+    cap = chat_tools.TOOL_CAPABILITIES[chat_tools.WEB_SEARCH_TOOL].lower()
+    desc = chat_tools.TOOL_DESCRIPTIONS[chat_tools.WEB_SEARCH_TOOL].lower()
+    assert "explicitly" in cap and "market data" in cap and "once per question" in cap
+    assert "explicitly asked" in desc and "at most once" in desc and "never a figure" in desc
+    for vendor in ("brave", "google", "gemini", "bing"):
+        assert vendor not in cap and vendor not in desc
+    # It names no OTHER tool identifier: the news tool may be absent on the class.
+    assert _named_tools(desc) == {chat_tools.WEB_SEARCH_TOOL} or _named_tools(desc) == set()
+
+
+def test_web_search_is_never_a_chip_scope():
+    assert chat_tools.WEB_SEARCH_TOOL not in chat_tools._CHIP_SCOPE_BY_TOOL
+    for asset_type in _ALL_CLASSES:
+        assert "web" not in chat_tools.chip_scope_block(asset_type, "TICKER_REPORT").lower().split()

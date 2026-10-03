@@ -36,6 +36,32 @@ _DEGRADED_KEY = "_stage_a_degraded"
 # Set on the *assembled report* by the orchestrators, for endpoint-level refund decisions.
 REPORT_DEGRADED_KEY = "_degraded"
 
+# POSITIVE provenance stamp: set on EVERY assembled report by `assemble_report` (True only
+# when its collection was built by code with no Google Search grounding — the collection's
+# own `grounding_free` field). Required by every reader that serves a report ACROSS users
+# (`ticker_report_cache.get_cached_report`, `research_service._lookup_shared_cache`, the
+# direct door's `_check_legacy_report_cache`); `upsert_cached_report` refuses to write a
+# report without it.
+#
+# Why a stamp and not a time floor: the grounded code (git HEAD before the 2026-10-02
+# retirement) kept running after migration 188 was applied — and Railway overlaps the old
+# and new deployments for up to ~300 s of healthcheck plus a 30 s drain — so it wrote
+# grounded reports AFTER `CACHE_SCHEMA_FLOOR`. There is no clean deploy instant, so any
+# time-based rule leaks; only the new code writes this key, so an unstamped report is, by
+# construction, one the old code wrote. Leading underscore, like `_scoring_inputs`: never
+# part of `TickerReportResponse`, so iOS never sees a contract change. Migration 189 and
+# tests/test_grounding_free_stamp.py pin the literal.
+#
+# A user's OWN saved report (GET /research/reports/{id}/ticker-report) is deliberately NOT
+# gated on it (owner decision 2026-10-02).
+GROUNDING_FREE_KEY = "_grounding_free"
+
+
+def report_is_grounding_free(report) -> bool:
+    """True only for a report the post-retirement code assembled (`_grounding_free` is
+    exactly the JSON boolean true). Missing, False, "true", 1, a non-dict → False."""
+    return isinstance(report, dict) and report.get(GROUNDING_FREE_KEY) is True
+
 
 def _mark_degraded(shell: dict, reason: str) -> dict:
     """Tag a fallback shell so the caller knows this report is not real."""

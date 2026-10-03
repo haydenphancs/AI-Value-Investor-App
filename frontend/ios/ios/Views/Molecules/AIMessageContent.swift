@@ -34,6 +34,9 @@ struct AIMessageContent: View {
     /// the way out is the server-sent "Continue your answer" chip, so the notice itself
     /// carries no button — one CTA, not two. `false` on every complete or legacy message.
     var truncated: Bool = false
+    /// Opens a web source pill's article. Handed straight to the thinking card; the chat
+    /// screen owns the in-app browser. nil → web pills render as plain labels.
+    var onOpenSource: ((URL) -> Void)? = nil
 
     /// True while the thinking card is still "working" (reasoning/answer streaming, not yet done).
     private var thinkingActive: Bool {
@@ -62,7 +65,7 @@ struct AIMessageContent: View {
 
             // Thinking card at the TOP of the answer (Copilot-style).
             if let thinking = thinking, thinking.shouldDisplay {
-                ThinkingProcessCard(thinking: thinking, sources: sources ?? [])
+                ThinkingProcessCard(thinking: thinking, sources: sources ?? [], onOpenSource: onOpenSource)
             }
 
             // Answer body (skipped entirely during the pre-token thinking phase).

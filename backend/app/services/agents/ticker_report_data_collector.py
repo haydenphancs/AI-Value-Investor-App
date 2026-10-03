@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import bisect
 import copy
-import inspect
 import json
 import logging
 import math
@@ -73,6 +72,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 from app.config import settings
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.services.dcf_report_gate import current_dcf_source, strip_caydex_if_disabled
+from app.services.report_degradation import GROUNDING_FREE_KEY
 from app.utils.period_labels import quarterly_period_label
 from app.services._analyst_common import analyst_is_usable
 from app.schemas.analyst import (
@@ -413,28 +413,11 @@ class CollectedTickerData:
     # revenue_growth into `_build_competitors` per-peer scoring (replaces
     # the old proxy that scored every peer off intraday %-change).
     peer_ratios: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    # Peer ranks keyed by uppercased ticker (1 = first in the source's list).
-    # `peer_source == "intel"`: the grounded-research order, most direct
-    # competitor first — `_build_competitors()` keeps the 5 lowest ranks and
-    # DISPLAYS them in this order. `peer_source == "heuristic"`: FMP
-    # `/stock-peers` list order + industry-universe augments — NOT a
-    # directness rank, only a scoring input; those rows display highest
-    # threat score first. Both feed `_relative_peer_score`'s directness blend.
+    # Peer ranks keyed by uppercased ticker (1 = first in the source's list):
+    # FMP `/stock-peers` list order + industry-universe augments — NOT a
+    # directness rank, only a scoring input; the rows display highest threat
+    # score first. Feeds `_relative_peer_score`'s directness blend.
     peer_ranks: Dict[str, int] = field(default_factory=dict)
-    # Which source produced `peer_ranks`: "intel" (competitor_intel_service
-    # answered with a list extracted under the current, most-direct-first
-    # prompt), "intel_stale" (it served an OLDER cached list after a failed
-    # re-extraction — selected by rank like "intel", but displayed highest
-    # threat first, since that prompt never asked for an order) or "heuristic"
-    # (the Phase-1 fallback). Drives the report's
-    # `moat_competition.competitor_order` marker ("direct" only for "intel").
-    # ⚠️ A collection cached before this field existed deserializes to the
-    # DEFAULT "heuristic" — CACHE_SCHEMA_FLOOR was bumped with it.
-    peer_source: str = "heuristic"
-    # {TICKER: {"segment": "<competes in, ≤48 chars>"}} for intel peers, from
-    # `competitor_intel_service.get_competitor_details`; {} on the heuristic
-    # path or when the service has none.
-    peer_details: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # The focal company's TTM ROIC (fraction) for the competitor scorer, so it
     # is compared with the peers' TTM ROIC rather than an annual figure up to
     # ~3 quarters old. Fetched in pass 2 only when peers exist; chain:
@@ -451,7 +434,7 @@ class CollectedTickerData:
     # Phase-B global row), used as a fallback when AI Stage A didn't extract
     # an explicit TAM quote from the earnings transcript. None when the
     # profile has no industry or the dossier read failed.
-    # ⚠️ An `IndustryDossier` (from `get_or_compute_dossier`), NOT an
+    # ⚠️ An `IndustryDossier` (from `get_or_compute_dossier_with_status`), NOT an
     # `IndustryTAM`: this comment said IndustryTAM, ticker_data_cache
     # registered that, and every cached collection read as a miss.
     industry_tam: Optional[Any] = None  # IndustryDossier (imported lazily)
@@ -475,10 +458,6 @@ class CollectedTickerData:
     # from these series simply don't appear; AI-driven factors still do.
     fred_indicators: List[Dict[str, Any]] = field(default_factory=list)
 
-    # ── Phase 3D: pre-computed moat scoring (deterministic + grounded
-    # fallback). Filled at the end of `_fetch_dependent` so assemble_report
-    # stays synchronous.
-    moat_grounded_pillars: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # ── Phase 3C: USPTO + FDA payload for Intangible Assets pillar.
     # None when both sources resolve empty (caller treats as absent).
     ip_intel: Optional[Dict[str, Any]] = None
@@ -501,15 +480,21 @@ class CollectedTickerData:
     insider_data_partial: Dict[str, Any] = field(default_factory=dict)
     key_management_partial: Dict[str, Any] = field(default_factory=dict)
     price_action_partial: Dict[str, Any] = field(default_factory=dict)
-    price_catalyst_grounded: Optional[Dict[str, Any]] = None
-    # Market-wide WEB-GROUNDED geopolitical/macro-shock factors (wars, trade
-    # wars, oil shocks, pandemics) — shared across every ticker. Each carries
-    # `sources` (citations) for the future PDF. Replaces the old ungrounded
-    # Stage A AI geopolitical overlay.
-    geopolitical_factors: List[Dict[str, Any]] = field(default_factory=list)
     revenue_engine_partial: Dict[str, Any] = field(default_factory=dict)
     wall_street_consensus_partial: Dict[str, Any] = field(default_factory=dict)
     fundamental_metrics_partial: List[Dict[str, Any]] = field(default_factory=list)
+
+    # ── Provenance stamp (Google Search grounding retirement, 2026-10-02) ──
+    # True ONLY on a collection built by `_collect_fresh` in code with no grounded web
+    # research. The default is deliberately the UNSAFE value: a `ticker_data_cache` row
+    # written by the pre-retirement code has no such key, so it deserializes to False and
+    # `ticker_data_cache.get_cached_collection` treats it as a miss — that code kept
+    # writing grounded collections AFTER `CACHE_SCHEMA_FLOOR` (migration 188 was applied
+    # before the deploy, and Railway overlaps old and new deployments), so no time floor
+    # can tell them apart. `assemble_report` copies it onto the report as
+    # `report_degradation.GROUNDING_FREE_KEY`. A plain bool, so the cache serializer
+    # needs no registry entry. Never set it anywhere but `_collect_fresh`.
+    grounding_free: bool = False
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -1209,9 +1194,8 @@ class TickerReportDataCollector:
         # ticker-keyed _INFLIGHT dedup, concurrent same-ticker callers all
         # receive the SAME base instance; a shallow dataclasses.replace would
         # leave every nested mutable (computed, the *_vital/*_partial dicts,
-        # moat_grounded_pillars, raw FMP lists) ALIASED across personas, so an
-        # in-place mutation in assemble_report (today: the grounded moat-pillar
-        # dicts) could bleed across concurrent reports. A deep copy gives this
+        # raw FMP lists) ALIASED across personas, so an in-place mutation in
+        # assemble_report could bleed across concurrent reports. A deep copy gives this
         # request its own object graph; cost is sub-ms vs. the Gemini Stage A/B
         # seconds that follow.
         return replace(
@@ -1225,6 +1209,10 @@ class TickerReportDataCollector:
         assembly. Built under a canonical default persona; collect() applies the
         real requesting persona afterward. This is what get_or_collect caches."""
         out = CollectedTickerData(ticker=ticker, persona_key="warren_buffett")
+        # The provenance stamp every cached-collection / cross-user report reader requires
+        # (see the field). Set here and ONLY here: this is the one producer of a collection
+        # that gets cached, and it runs no grounded research.
+        out.grounding_free = True
 
         await self._fetch_all(out)
         if not out.profile:
@@ -1238,81 +1226,12 @@ class TickerReportDataCollector:
         # section assembly is CPU work besides. `out` is not published to anyone until
         # this coroutine returns, so no other task can see it mid-build.
         await asyncio.to_thread(self._build_sections, out)
-        await self._precompute_price_catalyst(out)
-        await self._precompute_geopolitical(out)
+        # No grounded web research here any more: the price-move catalyst and the
+        # geopolitical overlay used Google Search grounding, retired 2026-10-02 for its
+        # terms (test_no_google_search_grounding.py). The FMP catalyst already in
+        # `price_action_partial` and the FRED/FMP macro factors are the report's sources.
         await self._apply_intraday_chart(out)
         return out
-
-    async def _precompute_price_catalyst(self, out: "CollectedTickerData") -> None:
-        """For a BIG move only (the section's z>=1 gate, already decided in
-        `_build_price_action` → tier != "Typical"), fetch the real reason via
-        Gemini web-search and fold it into `price_action_partial`: override the
-        badge `tag` and add `_grounded_reason` for the Stage B narrative.
-        Source citations are persisted to `price_catalyst_audit` (not shown in
-        the report). Any failure is a graceful no-op — the deterministic FMP
-        catalyst already in `price_action_partial` stays as the fallback.
-        """
-        pa = out.price_action_partial or {}
-        tier = pa.get("tier")
-        if not pa or not tier or tier == "Typical":
-            return  # not a big move (or σ unavailable) → no paid web search
-        try:
-            from app.services.price_catalyst_service import (
-                get_price_catalyst_service,
-            )
-            grounded = await get_price_catalyst_service().get_catalyst(
-                out.ticker,
-                float(pa.get("change_pct") or 0.0),
-                pa.get("window_label") or "",
-                company_name=(out.profile or {}).get("companyName"),
-            )
-        except Exception as exc:
-            logger.warning(
-                "price_catalyst precompute failed for %s: %s", out.ticker, exc,
-            )
-            return
-        if grounded is None:
-            return  # hard failure → keep the FMP catalyst fallback
-
-        out.price_catalyst_grounded = grounded
-        pa["_grounded_reason"] = grounded.get("reason") or ""
-        # Carry the grounded {title, uri, publisher} citations into the frozen
-        # report so the PDF can cite the Recent Price Movement insight (iOS
-        # ignores the key — same pattern as macro risk-factor sources).
-        pa["sources"] = grounded.get("sources") or []
-        tag = grounded.get("tag")
-        if tag:
-            pa["tag"] = tag
-            if isinstance(pa.get("event"), dict):
-                pa["event"]["tag"] = tag
-        else:
-            # Web search found no clear company catalyst → show the tier, not a
-            # (likely-wrong) FMP keyword badge, and drop the FMP event marker.
-            pa["tag"] = tier
-            pa["event"] = None
-        logger.info(
-            "price_catalyst for %s: tag=%s tier=%s (%.1f%%)",
-            out.ticker, pa.get("tag"), tier, pa.get("change_pct") or 0.0,
-        )
-
-    async def _precompute_geopolitical(self, out: "CollectedTickerData") -> None:
-        """Fetch the market-wide web-grounded geopolitical/macro-shock factors
-        (shared across every ticker, ~7-day cache, stale-while-revalidate). A
-        graceful no-op on failure — the Macro module then shows the
-        deterministic FRED/FMP factors only. Cheap: at most one grounded scan
-        per ~week total, reused by every report.
-        """
-        try:
-            from app.services.geopolitical_macro_service import (
-                get_geopolitical_macro_service,
-            )
-            out.geopolitical_factors = (
-                await get_geopolitical_macro_service().get_geopolitical_factors()
-            )
-        except Exception as exc:
-            logger.warning(
-                "geopolitical precompute failed for %s: %s", out.ticker, exc,
-            )
 
     async def _apply_intraday_chart(self, out: "CollectedTickerData") -> None:
         """For a short-window BIG move, swap the daily sparkline for HOURLY
@@ -1801,78 +1720,30 @@ class TickerReportDataCollector:
         sector = profile_data.get("sector")
         industry = profile_data.get("industry")
 
-        # ── Phase 2 (revenue-mix-aware): Gemini grounded research ──
+        # Peers are the deterministic set: FMP's `/stock-peers` plus same-industry
+        # universe constituents. (A Gemini grounded-research list — ranked, with a
+        # "competes in" segment per peer — used to come first; it was retired
+        # 2026-10-02 with Google Search grounding, whose terms forbid caching a grounded
+        # answer for 100 days and serving it to every user.)
         #
-        # Lazy import so the test paths and any code path that doesn't
-        # touch Moat data don't pay the Gemini-client import cost.
-        peers: List[str] = []
-        intel_svc: Any = None
-        try:
-            from app.services.competitor_intel_service import (
-                get_competitor_intel_service,
+        # FMP's `/stock-peers` is unreliable — micro-cap noise, mega-cap
+        # misclassifications, or too few candidates. We always augment from
+        # same-industry universe constituents when industry is known; FMP peers stay
+        # first in the dedup'd list, universe peers are supplemental. The "don't
+        # fabricate" guarantee is preserved by the max(focal × 5%, $5B) market-cap
+        # floor + the 5-row (`_COMPETITOR_MAX_N`) cap in `_build_competitors()`.
+        peers: List[str] = (out.peer_tickers or [])[:8]
+        if industry:
+            augment = _industry_universe_peers(
+                industry,
+                exclude={ticker.upper(), *(p.upper() for p in peers)},
             )
-            intel_svc = get_competitor_intel_service()
-            intel_peers = await intel_svc.get_competitors(
-                ticker, profile_data,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Collector pass 2: competitor_intel call failed for %s: "
-                "%s: %s — falling back to Phase 1 deterministic path",
-                ticker, type(exc).__name__, exc,
-            )
-            intel_peers = None
-
-        # Only non-empty strings, uppercased and de-duplicated: a duplicate
-        # would otherwise get the LATER index as its rank below. A non-list
-        # answer counts as none (a bare "MRVL" would iterate into letters).
-        if not isinstance(intel_peers, (list, tuple)):
-            intel_peers = None
-        intel_list = list(dict.fromkeys(
-            p.strip().upper() for p in (intel_peers or [])
-            if isinstance(p, str) and p.strip()
-        ))
-        if intel_list:
-            # Trust the Phase-2 list's membership and ORDER — already
-            # FMP-validated + capped at 7 inside the service, and listed
-            # most direct competitor first by the grounded research (the
-            # service's post-validation trim preserves that order).
-            # `_build_competitors()` keeps the 5 lowest ranks, displays them
-            # in rank order, and still scores each row (rank = directness).
-            peers = intel_list
-            out.peer_source = (
-                "intel" if await _intel_list_is_ranked(intel_svc, ticker)
-                else "intel_stale"
-            )
-            out.peer_details = await _fetch_intel_peer_details(
-                intel_svc, ticker, peers,
-            )
-        else:
-            out.peer_source = "heuristic"
-            out.peer_details = {}
-            # ── Phase 1 fallback (deterministic peer assembly) ──
-            #
-            # FMP's `/stock-peers` is unreliable — micro-cap noise,
-            # mega-cap misclassifications, or too few candidates. We
-            # always augment from same-industry universe constituents
-            # when industry is known; FMP peers stay first in the
-            # dedup'd list, universe peers are supplemental. The
-            # "don't fabricate" guarantee is preserved by the
-            # max(focal × 5%, $5B) market-cap floor + the 5-row
-            # (`_COMPETITOR_MAX_N`) cap in `_build_competitors()`.
-            peers = (out.peer_tickers or [])[:8]
-            if industry:
-                augment = _industry_universe_peers(
-                    industry,
-                    exclude={ticker.upper(), *(p.upper() for p in peers)},
-                )
-                peers = list(dict.fromkeys(peers + augment))[:12]
+            peers = list(dict.fromkeys(peers + augment))[:12]
 
         # Persist 1-based rank per peer ticker so downstream scoring
         # (in a different method on the same class) can blend the list
-        # order into the threat score as directness. Only the intel list's
-        # order is a real directness rank (most direct first); the Phase-1
-        # order is FMP's list order + universe augments. Stored uppercased
+        # order into the threat score as directness. This order is FMP's list
+        # order + universe augments, not a directness ranking. Stored uppercased
         # to match the casing convention `_build_competitors` uses to look
         # up peer ratios + moats.
         out.peer_ranks = {
@@ -1983,9 +1854,8 @@ class TickerReportDataCollector:
 
         # ── Phase 3C: fetch USPTO patents + FDA approvals for the
         # Intangible Assets pillar. Cached 180-day in ip_intel_cache so
-        # the second user benefits. Runs BEFORE _precompute_moat_grounded
-        # so the deterministic scorer can use the IP data when deciding
-        # whether grounded fallback is needed.
+        # the second user benefits. The deterministic moat scorer reads it
+        # inside assemble_report.
         try:
             from app.services.ip_intel_service import get_ip_intel_service
             out.ip_intel = await get_ip_intel_service().get_ip_intel(
@@ -1997,82 +1867,6 @@ class TickerReportDataCollector:
                 out.ticker, exc,
             )
             out.ip_intel = None
-
-        # ── Phase 3D: precompute Gemini grounded fallback for pillars
-        # the deterministic moat scorer would leave at low confidence.
-        # Runs here (async context) so the synchronous assemble_report
-        # can just read out.moat_grounded_pillars. The full deterministic
-        # scoring also re-runs inside assemble_report (cheap — sector
-        # benchmark lookup is in-memory cached for 1h), so we use the
-        # same logic here to decide whether grounded is needed.
-        await self._precompute_moat_grounded(out)
-
-    async def _precompute_moat_grounded(self, out: "CollectedTickerData") -> None:
-        """Run the deterministic moat scorer once to decide which pillars
-        would fall back; if any need fallback, call Gemini grounded
-        research and store the result on `out.moat_grounded_pillars`.
-        Safe to call even when there's no profile / sector data — silent
-        no-op in that case.
-        """
-        if not (out.profile and (out.profile.get("sector") or out.profile.get("industry"))):
-            return
-        try:
-            from app.services.moat_scoring_service import (
-                PILLAR_ORDER as _PILLAR_ORDER,
-                get_moat_scoring_service,
-                score_moat_dimensions,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Moat precompute: import failed for %s: %s", out.ticker, exc,
-            )
-            return
-
-        try:
-            det_pillars = await asyncio.to_thread(
-                score_moat_dimensions,
-                sector=out.profile.get("sector"),
-                industry=out.profile.get("industry"),
-                profile=out.profile or {},
-                income=out.income or [],
-                balance=out.balance or [],
-                ratios=out.ratios or [],
-                industry_tam=out.industry_tam,
-                transcript=out.transcript or None,
-                ip_intel=out.ip_intel,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Moat precompute: deterministic scoring failed for %s: %s",
-                out.ticker, exc,
-            )
-            return
-
-        low_conf = [
-            p for p in _PILLAR_ORDER
-            if (det_pillars.get(p) is None
-                or getattr(det_pillars[p], "score", None) is None)
-        ]
-        if not low_conf:
-            return
-
-        try:
-            grounded = await get_moat_scoring_service().gemini_grounded_fallback(
-                out.ticker, out.profile,
-            )
-            out.moat_grounded_pillars = grounded or {}
-            resolved = sorted(out.moat_grounded_pillars.keys())
-            still_missing = sorted(set(low_conf) - set(resolved))
-            logger.info(
-                "Moat grounded fallback for %s: requested=%s resolved=%s "
-                "still_missing=%s (those fall to legacy AI)",
-                out.ticker, low_conf, resolved, still_missing,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Moat precompute: grounded fallback failed for %s: %s",
-                out.ticker, exc,
-            )
 
     async def _fetch_sector_benchmark_history(
         self, industry: str, sector: str,
@@ -2867,9 +2661,9 @@ class TickerReportDataCollector:
         # FMP financials + sector benchmarks. Per-pillar: when ≥2
         # metrics resolve (confidence high/medium), use the
         # deterministic score; when <2 resolve (confidence low for
-        # that pillar), fall through to the legacy AI Stage A dimension
-        # — to be replaced in sub-phase 3D with Gemini grounded research
-        # (web-search-cited) rather than ungrounded LLM judgment.
+        # that pillar), fall through to the legacy AI Stage A dimension.
+        # (A Gemini grounded-research tier sat between the two until
+        # 2026-10-02, when Google Search grounding was retired for its terms.)
         from app.services.moat_scoring_service import (
             score_moat_dimensions,
             PILLAR_ORDER,
@@ -2897,12 +2691,6 @@ class TickerReportDataCollector:
             for d in (ai_moat.get("dimensions") or [])
             if isinstance(d, dict)
         }
-        # Phase 3D: grounded fallback for pillars deterministic left at
-        # low confidence. Both `deterministic_pillars` and the grounded
-        # scores were precomputed during the async `_fetch_dependent`
-        # pass — assemble_report stays sync.
-        grounded_scores: Dict[str, Dict[str, Any]] = out.moat_grounded_pillars or {}
-
         merged_dims: List[Dict[str, Any]] = []
         for pillar_name in PILLAR_ORDER:
             det = deterministic_pillars.get(pillar_name)
@@ -2910,11 +2698,6 @@ class TickerReportDataCollector:
                 dim = det.to_dict()
                 dim["source"] = "deterministic"
                 merged_dims.append(dim)
-                continue
-            grounded = grounded_scores.get(pillar_name)
-            if isinstance(grounded, dict) and grounded.get("score") is not None:
-                grounded["source"] = "grounded"
-                merged_dims.append(grounded)
                 continue
             # Final fallback — legacy AI Stage A dimension. The
             # peer-score floor still applies so the gray polygon doesn't
@@ -2998,31 +2781,11 @@ class TickerReportDataCollector:
                 out.ticker, exc,
             )
 
-        # Batch-read aggregate moat for surviving peer tickers so the
-        # relative-path scorer can apply the durability multiplier
-        # without triggering a per-peer moat recompute. Missing peers
-        # default to neutral inside `_build_competitors`. One Supabase
-        # `.in_()` query for up to `_COMPETITOR_MAX_N` tickers.
+        # No per-peer moat: the only stored one was the grounded `moat_intel_cache`
+        # average (retired 2026-10-02 with Google Search grounding), and per-ticker
+        # deterministic pillar scores are not persisted. Every peer takes the neutral
+        # 1.0× durability multiplier inside `_build_competitors`.
         peer_moats: Dict[str, float] = {}
-        try:
-            from app.services.moat_scoring_service import (
-                get_aggregate_moat_for_tickers,
-            )
-            peer_symbols_for_moat = [
-                (p.get("symbol") or "").upper()
-                for p in (out.peer_profiles or [])
-                if p.get("symbol")
-            ]
-            if peer_symbols_for_moat:
-                peer_moats = get_aggregate_moat_for_tickers(
-                    peer_symbols_for_moat,
-                )
-        except Exception as exc:
-            logger.warning(
-                "Competitor peer-moat lookup failed for %s: %s — "
-                "scoring will use neutral 1.0× durability multiplier",
-                out.ticker, exc,
-            )
 
         deterministic_competitors = _build_competitors(
             my_ticker=out.ticker,
@@ -3042,15 +2805,8 @@ class TickerReportDataCollector:
             # Rank 1 is always 10.0 directness, rank n is 10/n — regardless
             # of how many survive scoring.
             n_total_peers=len(out.peer_ranks),
-            peer_source=out.peer_source,
-            peer_details=out.peer_details,
             focal_roic_ttm=out.focal_roic_ttm,
         )
-        # The ORDER MARKER every "most direct first" claim depends on (chat,
-        # iOS caption, Stage-B prompts, PDF). Only the research list is
-        # ordered by directness; anything else is ordered by threat score.
-        competitors_are_direct = out.peer_source == "intel"
-        competitors_from_research = out.peer_source in _INTEL_PEER_SOURCES
         # Coverage-aware insight + durability note: when one or more
         # pillars fall flat because the industry's real moats live
         # outside the financial-statement lens (mining, banks, insurers,
@@ -3090,12 +2846,14 @@ class TickerReportDataCollector:
                 base_competitive_insight
                 + (coverage_note if (coverage_note and ai_competitive_insight) else "")
             ),
-            # Declared Optional on MoatCompetitionResponse; None on every report
-            # stored before 2026-10-01 (consumers read None as "threat").
-            "competitor_order": "direct" if competitors_are_direct else "threat",
-            "competitor_source": (
-                "research" if competitors_from_research else "industry_peers"
-            ),
+            # The ORDER MARKER every "most direct first" claim depends on (chat,
+            # iOS caption, Stage-B prompts, PDF). Always "threat" / "industry_peers"
+            # now: the one directness-ranked list ("direct" / "research") came from
+            # the grounded competitor research retired 2026-10-02. Consumers still
+            # read "direct" on reports stored before that, and None (read as
+            # "threat") on reports stored before 2026-10-01.
+            "competitor_order": "threat",
+            "competitor_source": "industry_peers",
         }
         moat_vital = _derive_moat_vital(moat_dims, deterministic_competitors)
 
@@ -3114,27 +2872,11 @@ class TickerReportDataCollector:
         fmp_factors = _build_macro_risk_factors_from_indicators(
             out.macro_indicators
         )
-        # Geopolitical / macro-shock factors are now WEB-GROUNDED (real current
-        # events with citations) from geopolitical_macro_service, replacing the
-        # old ungrounded Stage A AI overlay (which rendered "Data unavailable").
-        # The list is market-wide; sector relevance is applied via the sector β
-        # inside `_compute_macro_threat`.
-        grounded_factors = list(out.geopolitical_factors or [])
-
-        # Compute composite on the FULL (uncapped) factor set so breadth isn't
-        # truncated by the 6-card UI ceiling. Grounded factors that duplicate a
-        # deterministic category are dropped first (the FMP oil number wins over
-        # a grounded "energy" narrative). Grounded factors are sourced, so
-        # `_compute_macro_threat` treats them like deterministic ones (not
-        # severity-capped, and they count toward the breadth gate).
-        deterministic_categories = {
-            f.get("category") for f in (fred_factors + fmp_factors)
-        }
-        grounded_kept = [
-            f for f in grounded_factors
-            if f.get("category") not in deterministic_categories
-        ]
-        full_factor_set = fred_factors + fmp_factors + grounded_kept
+        # The web-grounded geopolitical overlay (geopolitical_macro_service) was retired
+        # 2026-10-02 with Google Search grounding; the two deterministic tiers are the
+        # whole factor set. Composite on the FULL (uncapped) set so breadth isn't
+        # truncated by the 6-card UI ceiling.
+        full_factor_set = fred_factors + fmp_factors
 
         # Was the deterministic macro tier actually read?
         #
@@ -3158,13 +2900,8 @@ class TickerReportDataCollector:
             full_factor_set, macro_sector,
         )
 
-        # Display list — dedupe by category (deterministic wins), surface the
-        # most severe first, cap at 6 (so a grounded geopolitical event isn't
-        # squeezed out by a stack of rate factors).
-        merged_after_fred = _merge_macro_risk_factors(fred_factors, fmp_factors)
-        risk_factors_internal = _merge_macro_risk_factors(
-            merged_after_fred, grounded_factors,
-        )
+        # Display list — dedupe by category (FRED wins), most severe first, cap at 6.
+        risk_factors_internal = _merge_macro_risk_factors(fred_factors, fmp_factors)
         # Strip internal `_`-prefixed markers (`_risk_group`, `_source`) before
         # the list goes to Pydantic. `sources` (public) is preserved for the PDF.
         risk_factors = [_strip_risk_group(rf) for rf in risk_factors_internal]
@@ -3338,6 +3075,15 @@ class TickerReportDataCollector:
         lost_sections = list(getattr(out, "degraded_sections", None) or [])
         if lost_sections:
             report[DEGRADED_SECTIONS_KEY] = lost_sections
+
+        # Provenance stamp, on EVERY report this returns (this is assemble_report's only
+        # return). Copied from the collection, never assumed: True only when the
+        # collection was built by the post-retirement `_collect_fresh`. Every cross-user
+        # report reader requires it and `upsert_cached_report` refuses a report without it
+        # (report_degradation.GROUNDING_FREE_KEY). Both doors store this dict as-is
+        # (research_reports.ticker_report_data and ticker_report_cache are written from
+        # the raw dict, never a model_dump, which would drop a leading-underscore key).
+        report[GROUNDING_FREE_KEY] = getattr(out, "grounding_free", False) is True
 
         return report
 
@@ -7770,8 +7516,7 @@ def _build_macro_risk_factors_from_indicators(
     #
     # `documents/legal/fmp-16-datasets-build-or-free.md` rules this DROP. Do not "restore"
     # it with CPER: a wrong number under a "Dr. Copper" heading is worse than no card.
-    # `supply_chain` therefore no longer appears in `deterministic_categories`, so a
-    # web-grounded supply-chain factor is free to surface in its place.
+    # `supply_chain` therefore produces no factor at all.
 
     # ── Equity volatility — absolute LEVEL (volatility regime) ──────
     # REALIZED, not implied. The description says so: it used to print
@@ -8157,7 +7902,7 @@ def _merge_macro_risk_factors(
     entry), then surface the MOST SEVERE first and cap at 6 (iOS shows up to 6).
 
     Severity-ranking the cap (rather than insertion order) ensures a
-    high-severity overlay factor — e.g. a grounded geopolitical event — isn't
+    high-severity factor from the second list isn't
     squeezed out of the 6 cards by a stack of lower-severity deterministic ones.
     Python's sort is stable, so within one severity tier deterministic factors
     still precede overlay ones.
@@ -8662,21 +8407,13 @@ def _latest_sector_medians(
     return out
 
 
-# HEURISTIC path only (FMP `/stock-peers` + industry universe): those lists
-# carry micro-cap misclassifications, so a size floor guards them. The
-# research ("intel") list has no size floor — it is curated and FMP-validated
-# (mktCap > 0) by competitor_intel_service, and a $3B company's real rivals
-# may be $1-2B.
+# FMP `/stock-peers` + industry-universe lists carry micro-cap misclassifications,
+# so a size floor guards them.
 _COMPETITOR_MKT_CAP_FLOOR_RATIO = 0.05    # 5% of focal mkt cap
 _COMPETITOR_MKT_CAP_FLOOR_ABS = 5_000_000_000.0   # $5B hard floor
-# Variable count, at most this many rows. Heuristic path: the top N by mkt
-# cap that survive the floor (WDAY-style edge-of-floor peers drop at the
-# cap). Intel path: the N LOWEST-RANKED (most direct) scorable peers —
-# never the N largest, which let a customer outrank a direct rival.
+# Variable count, at most this many rows: the top N by mkt cap that survive the
+# floor (WDAY-style edge-of-floor peers drop at the cap).
 _COMPETITOR_MAX_N = 5
-# Mirrors competitor_intel_service.SEGMENT_MAX_CHARS (the service cleans the
-# label; the collector re-checks it so a bad cache row can't widen a row).
-_COMPETITOR_SEGMENT_MAX_CHARS = 48
 
 
 # ── Industry-universe peer fallback ────────────────────────────────────
@@ -8739,97 +8476,6 @@ def _industry_universe_peers(industry: str, exclude: Set[str]) -> List[str]:
     return [t for t in sorted_tickers if t not in exclude][:20]
 
 
-def _clean_competitor_segment(raw: Any) -> Optional[str]:
-    """Defensive re-check of a peer's "competes in" label (competitor_intel_service
-    already cleans it): a non-empty str with control characters removed, whitespace
-    collapsed, and at most `_COMPETITOR_SEGMENT_MAX_CHARS` chars, cut at a word
-    boundary. Anything else → None (the row renders without a segment)."""
-    if not isinstance(raw, str):
-        return None
-    seg = " ".join(
-        "".join(ch if (ch.isprintable() or ch.isspace()) else " " for ch in raw).split()
-    )
-    if len(seg) > _COMPETITOR_SEGMENT_MAX_CHARS:
-        cut = seg[:_COMPETITOR_SEGMENT_MAX_CHARS]
-        space = cut.rfind(" ")
-        seg = (cut[:space] if space > 0 else cut).rstrip(" ,;:-–—&/(")
-    return seg or None
-
-
-def _clean_peer_details(
-    raw: Any, peers: List[str],
-) -> Dict[str, Dict[str, Any]]:
-    """`{TICKER: {"segment": str}}` restricted to `peers`, every segment re-checked.
-    A non-dict answer, a non-str key, a non-dict value or an unusable segment is
-    skipped — the row simply renders without a segment."""
-    if not isinstance(raw, dict):
-        return {}
-    allowed = {p.upper() for p in peers if isinstance(p, str)}
-    cleaned: Dict[str, Dict[str, Any]] = {}
-    for key, val in raw.items():
-        if not isinstance(key, str) or not isinstance(val, dict):
-            continue
-        sym = key.strip().upper()
-        if sym not in allowed:
-            continue
-        seg = _clean_competitor_segment(val.get("segment"))
-        if seg:
-            cleaned[sym] = {"segment": seg}
-    return cleaned
-
-
-# `peer_source` values whose peers came from competitor_intel_service (selected by
-# research rank, no size floor). Only "intel" is DISPLAYED in rank order.
-_INTEL_PEER_SOURCES = frozenset({"intel", "intel_stale"})
-
-
-async def _intel_list_is_ranked(svc: Any, ticker: str) -> bool:
-    """Whether the intel list just served is in most-direct-first order
-    (`competitor_intel_service.is_ranked_list`). A service or stub without the
-    method is trusted (True); a failed check is not (False → the rows display
-    highest threat first and the report never claims "most direct first")."""
-    checker = getattr(svc, "is_ranked_list", None)
-    if checker is None or not callable(checker):
-        return True
-    try:
-        raw = checker(ticker)
-        if inspect.isawaitable(raw):
-            raw = await raw
-    except Exception as exc:
-        logger.warning(
-            "Collector pass 2: competitor list-order check failed for %s: %s: %s — "
-            "displaying the research peers highest threat first",
-            ticker, type(exc).__name__, exc,
-        )
-        return False
-    return raw is True
-
-
-async def _fetch_intel_peer_details(
-    svc: Any, ticker: str, peers: List[str],
-) -> Dict[str, Dict[str, Any]]:
-    """Per-peer details from `competitor_intel_service.get_competitor_details`.
-
-    Looked up with `getattr` so a service (or a test stub) without the method still
-    works; never raises — the details are decoration on rows the list already holds,
-    so a failed read costs only the "competes in" labels."""
-    getter = getattr(svc, "get_competitor_details", None)
-    if getter is None or not callable(getter):
-        return {}
-    try:
-        raw = getter(ticker)
-        if inspect.isawaitable(raw):
-            raw = await raw
-    except Exception as exc:
-        logger.warning(
-            "Collector pass 2: competitor details read failed for %s: %s: %s — "
-            "competitor rows render without a segment",
-            ticker, type(exc).__name__, exc,
-        )
-        return {}
-    return _clean_peer_details(raw, peers)
-
-
 def _first_dict_row(rows: Any) -> Dict[str, Any]:
     """The first row of an FMP list answer (or a bare dict answer); {} otherwise."""
     if isinstance(rows, dict):
@@ -8871,14 +8517,12 @@ def _build_competitors(
     peer_moats: Optional[Dict[str, float]] = None,
     peer_ranks: Optional[Dict[str, int]] = None,
     n_total_peers: int = 0,
-    peer_source: str = "heuristic",
-    peer_details: Optional[Dict[str, Dict[str, Any]]] = None,
     focal_roic_ttm: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Real competitor list from FMP peer profiles, each row scored by a
     blended directness × financial × moat threat score.
 
-    Scoring is a two-path hybrid (unchanged by the selection rules below):
+    Scoring is a two-path hybrid:
       * Preferred — `_relative_peer_score`: blends the peer's rank in the
         source list as directness (60%) with ROIC delta vs focal (40%),
         then scales by the peer's aggregate moat (mean of 5 cached
@@ -8888,29 +8532,21 @@ def _build_competitors(
         margin, ROE, and revenue growth vs the PEER's own sector median.
         Used when the peer (or focal) lacks ROIC. `score_basis = "absolute"`.
 
-    Selection depends on `peer_source`:
-      * "intel" (the grounded-research list, ranks = most direct first):
-        no market-cap floor (a peer only needs a positive mktCap), score
-        EVERY peer, drop the unscorable, keep the `_COMPETITOR_MAX_N` with
-        the LOWEST rank, and return them IN RANK ORDER. The caller marks
-        the report `competitor_order = "direct"`. (Market cap must not pick
-        the rows: it dropped AVGO's #2 rival for its #7 suggestion, a
-        customer, and swapped rows on 2-3% price moves.)
-      * anything else ("heuristic" — FMP `/stock-peers` + industry universe,
-        whose ranks are list order, not directness): drop peers below
-        max(focal × 5%, $5B), keep the top `_COMPETITOR_MAX_N` by mktCap,
-        score, drop the unscorable, return highest score first. The caller
-        marks it `competitor_order = "threat"`.
+    Selection (FMP `/stock-peers` + industry universe, whose ranks are list
+    order, not directness): drop peers below max(focal × 5%, $5B), keep the
+    top `_COMPETITOR_MAX_N` by mktCap, score, drop the unscorable, return
+    highest score first. The caller marks the report
+    `competitor_order = "threat"`.
 
     Threat buckets read off the final score (≥7.0 high, ≤3.0 low, else
-    moderate) on both paths.
+    moderate) on both scoring paths.
 
     The focal ROIC is `focal_roic_ttm` (the same TTM period as the peers')
     when given; otherwise the annual /ratios → /key-metrics chain, with a
     warning that the periods are mixed.
 
-    `peer_moats` is `{ticker: aggregate_moat (0-10)}` from
-    `get_aggregate_moat_for_tickers`. Missing tickers default to a
+    `peer_moats` is `{ticker: aggregate_moat (0-10)}` (the report passes {} since the
+    grounded `moat_intel_cache` source was retired). Missing tickers default to a
     neutral 5.0 → multiplier 1.0 (no boost or penalty), keeping cache
     misses honest.
 
@@ -8918,9 +8554,6 @@ def _build_competitors(
     `n_total_peers` is the directness denominator — kept at the original
     peer count so scores stay stable when peers are dropped downstream.
     Both default to None/0 → directness defaults to the neutral 5.0 anchor.
-
-    `peer_details` is `{ticker: {"segment": str}}`; a row carries `segment`
-    only when a usable one is known.
 
     `market_share_percent` is emitted as 0.0 for every peer for
     backwards compatibility with the iOS DTO; iOS no longer renders
@@ -8938,20 +8571,7 @@ def _build_competitors(
     peer_ratios = peer_ratios or {}
     peer_moats = peer_moats or {}
     peer_ranks = peer_ranks or {}
-    peer_details = peer_details or {}
-    # Selection by research rank for both intel sources; DISPLAY in rank order
-    # only for a current ("intel") list — a stale one shows highest threat first.
-    is_intel = peer_source in _INTEL_PEER_SOURCES
-    display_by_rank = peer_source == "intel"
     focal_sym = (my_ticker or "").upper()
-
-    def _rank_of(sym: str) -> int:
-        """Rank for ordering; an unranked peer sorts after every ranked one
-        (the stable sort keeps its list position among the unranked)."""
-        r = peer_ranks.get(sym)
-        if isinstance(r, int) and not isinstance(r, bool):
-            return r
-        return 10 ** 9
 
     focal_mkt_cap = _finite_or_none((my_profile or {}).get("mktCap")) or 0.0
     floor = max(
@@ -8959,7 +8579,7 @@ def _build_competitors(
         _COMPETITOR_MKT_CAP_FLOOR_ABS,
     )
 
-    # ── 1. Candidates (floor + top N by mktCap on the heuristic path only) ─
+    # ── 1. Candidates (floor + top N by mktCap) ──────────────────────
     survivors: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     for p in peer_profiles:
@@ -8970,36 +8590,20 @@ def _build_competitors(
         if not sym or sym == focal_sym or sym in seen:
             continue
         mkt_cap = _finite_or_none(p.get("mktCap")) or 0.0
-        if is_intel:
-            # No size floor, but a peer FMP now reports with no market cap
-            # (delisted / acquired since the research ran) is not a live rival.
-            if mkt_cap <= 0:
-                continue
-        elif mkt_cap < floor:
+        if mkt_cap < floor:
             continue
         seen.add(sym)
         survivors.append({"profile": p, "symbol": sym, "mkt_cap": mkt_cap})
 
     if not survivors:
-        if is_intel:
-            logger.info(
-                f"_build_competitors({my_ticker}): no research peer had a "
-                f"positive market cap (had {len(peer_profiles)} candidates)"
-            )
-        else:
-            logger.info(
-                f"_build_competitors({my_ticker}): no peers passed mkt-cap "
-                f"floor ${floor / 1e9:.1f}B (had {len(peer_profiles)} candidates)"
-            )
+        logger.info(
+            f"_build_competitors({my_ticker}): no peers passed mkt-cap "
+            f"floor ${floor / 1e9:.1f}B (had {len(peer_profiles)} candidates)"
+        )
         return []
 
-    if is_intel:
-        # Score ALL of them (the cap is applied after the unscorable drop, so an
-        # unscorable rank-2 peer is replaced by the next rank, not by nothing).
-        survivors.sort(key=lambda s: _rank_of(s["symbol"]))
-    else:
-        survivors.sort(key=lambda s: s["mkt_cap"], reverse=True)
-        survivors = survivors[:_COMPETITOR_MAX_N]
+    survivors.sort(key=lambda s: s["mkt_cap"], reverse=True)
+    survivors = survivors[:_COMPETITOR_MAX_N]
 
     total_peer_cap = sum(s["mkt_cap"] for s in survivors)
     if total_peer_cap <= 0:
@@ -9143,9 +8747,6 @@ def _build_competitors(
             f"ratio data — returning empty list"
         )
         return []
-    if is_intel:
-        # Already in rank order (survivors were sorted); keep the most direct.
-        peer_data = peer_data[:_COMPETITOR_MAX_N]
 
     # ── 5. Emit rows with threat thresholds on the score ─────────────
     # Relative-path scores are already focal-anchored at 5.0, so threat
@@ -9171,18 +8772,11 @@ def _build_competitors(
             "threat_level": threat,
             "score_basis": p["scoring_path"],
         }
-        detail = peer_details.get(p["ticker"])
-        segment = _clean_competitor_segment(
-            detail.get("segment") if isinstance(detail, dict) else None
-        )
-        if segment:
-            row["segment"] = segment
         out.append(row)
 
-    if not display_by_rank:
-        # Heuristic or stale research list: strongest threats first (its order
-        # is not a most-direct-first ranking).
-        out.sort(key=lambda c: c["competitive_score"], reverse=True)
+    # Strongest threats first: the source list's order is not a most-direct-first
+    # ranking.
+    out.sort(key=lambda c: c["competitive_score"], reverse=True)
     return out
 
 

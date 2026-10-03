@@ -73,6 +73,11 @@ from app.services.chat_security import (                          # noqa: E402
 from app.services.chat_intent import is_trade_intent              # noqa: E402
 from app.services.chat_service import ChatService                  # noqa: E402
 
+# Brave's terms (§3(b)(xiii)) forbid using web-search results to evaluate or train an AI, so an
+# eval run must never reach report chat's web search — forced OFF for the whole process, before
+# anything reads it (pinned by tests/test_brave_search_boundary.py).
+settings.CHAT_REPORT_WEB_SEARCH_ENABLED = False
+
 # Candidates for the eligible class: conceptual, no ticker, no on-screen data. Whether a
 # given one IS eligible is decided by the real router below, not by this list — several
 # deliberately sit near the boundary (macro, chart, sentiment wording) so the split is

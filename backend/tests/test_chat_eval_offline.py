@@ -73,21 +73,27 @@ def _make_service(*, chunks=None, profit=None, snapshot=None, profile=None,
     return svc
 
 
-def _patch_resolver(monkeypatch, block, seen=None):
+def _patch_resolver(monkeypatch, block, seen=None, persona=None):
     """Make the lazily-imported resolver return `block` (else the client context).
 
     `user_id` is accepted (and recorded into `seen` when given) because the
     TICKER_REPORT branch grounds on the CALLER'S OWN frozen `research_reports` row
     and therefore needs an identity — see `_resolve_ticker_report`. A fake that did
     not take it would let chat_service stop forwarding it without a test noticing.
+
+    `meta` is the resolver's out-param; `persona` stands in for the grounded report's own
+    persona (its stored agent tag), which the report chat's mode voice follows.
     """
     import app.services.chat_context_resolver as ccr
 
     class _FakeResolver:
         async def resolve(self, context_type, reference_id, client_context=None,
-                          user_id=None):
+                          user_id=None, meta=None):
             if seen is not None:
                 seen["user_id"] = user_id
+                seen["meta_is_dict"] = isinstance(meta, dict)
+            if persona is not None and isinstance(meta, dict):
+                meta["report_persona_key"] = persona
             return block if block is not None else client_context
 
     monkeypatch.setattr(ccr, "get_chat_context_resolver", lambda: _FakeResolver())
@@ -453,3 +459,389 @@ async def test_non_stream_door_gives_no_verdict_for_a_stock_chat(monkeypatch):
         "sess", "q", stock_id="AVGO", context_type="STOCK", reference_id="AVGO",
     )
     assert out["context_grounded"] is None
+
+
+# ── The report chat's MODE VOICE through BOTH doors (2026-10-02) ─────────────
+#
+# "Cay AI · Growth Hunter Agent": a REPORT session renders the report persona's mode voice,
+# chosen from the GROUNDED report's own persona (the resolver's `meta` out-param), else the
+# validated `reference_id` segment. Both doors must carry it into every instruction they build
+# (the tool round, the tool-less fallback, the stream's tool-less merge variant) and hand the
+# endpoint the key for its guardrail log lines. The chips stay neutral.
+
+_VOICE_MARK = "REPORT CHAT MODE — "
+_GROWTH_VOICE = "REPORT CHAT MODE — Growth Hunter Agent."
+
+
+@pytest.fixture
+def _voice_on(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "CHAT_REPORT_VOICE_ENABLED", True)
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_stream_door_carries_the_voice_in_both_instructions(monkeypatch, _voice_on):
+    seen = {}
+    _patch_resolver(monkeypatch, _BUILT, seen=seen)
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="what is the bear case?", session_type="REPORT",
+        stock_id="AVGO", context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+    )
+    assert seen["meta_is_dict"] is True, "chat_service must hand the resolver its out-param"
+    for key in ("system_instruction", "system_instruction_no_tools"):
+        instr = out[key]
+        assert instr.count(_GROWTH_VOICE) == 1
+        assert instr.index(_GROWTH_VOICE) < instr.index(_SENTINEL) < instr.index("<<<CLIENT_CONTEXT>>>")
+    assert out["report_voice_key"] == "peter_lynch"
+
+
+@pytest.mark.asyncio
+async def test_stream_door_voice_follows_the_grounded_reports_persona(monkeypatch, _voice_on):
+    """An old build's notification route sends `warren_buffett` for a Growth Hunter report."""
+    _patch_resolver(monkeypatch, _BUILT, persona="peter_lynch")
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|warren_buffett|rid-1",
+    )
+    assert _GROWTH_VOICE in out["system_instruction"]
+    assert "Quality Compounder Agent" not in out["system_instruction"]
+    assert out["report_voice_key"] == "peter_lynch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_type", ["STOCK", "NORMAL"])
+async def test_stream_door_never_voices_a_non_report_session(monkeypatch, _voice_on, session_type):
+    """A per-message TICKER_REPORT override on a STOCK session is grounded, never voiced."""
+    _patch_resolver(monkeypatch, _BUILT, persona="peter_lynch")
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type=session_type, stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+    )
+    assert _VOICE_MARK not in out["system_instruction"]
+    assert _VOICE_MARK not in out["system_instruction_no_tools"]
+    assert out["report_voice_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_stream_door_rollback_switch(monkeypatch, _voice_on):
+    _voice_on.CHAT_REPORT_VOICE_ENABLED = False   # monkeypatch restores it
+    _patch_resolver(monkeypatch, _BUILT, persona="peter_lynch")
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+    )
+    assert _VOICE_MARK not in out["system_instruction"]
+    assert "You specialize in value investing education." in out["system_instruction"]
+    assert out["report_voice_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_unresolved_report_keeps_the_voice_but_not_the_report_rule(monkeypatch, _voice_on):
+    _patch_resolver(monkeypatch, None)            # the report did not resolve
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|burry",
+    )
+    instr = out["system_instruction"]
+    assert instr.count("REPORT CHAT MODE — Deep Value Skeptic Agent.") == 1
+    assert _SENTINEL not in instr
+    assert out["context_grounded"] is False
+
+
+@pytest.mark.asyncio
+async def test_voice_follows_the_per_message_reference(monkeypatch, _voice_on):
+    _patch_resolver(monkeypatch, None)
+    svc = _make_service()
+    a = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|wood",
+    )
+    b = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|ackman",
+    )
+    assert "Disruption Seeker Agent" in a["system_instruction"]
+    assert "Activist Concentrator Agent" in b["system_instruction"]
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_report_persona_is_logged_once_per_turn(monkeypatch, _voice_on, caplog):
+    import logging
+    _patch_resolver(monkeypatch, None)
+    svc = _make_service()
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        out = await svc.prepare_stream_generation(
+            session_id="s-77", user_message="q", session_type="REPORT", stock_id="AVGO",
+            context_type="TICKER_REPORT", reference_id="AVGO|soros\nERROR forged line",
+        )
+    assert _VOICE_MARK not in out["system_instruction"]
+    records = [r.getMessage() for r in caplog.records if "no mode voice" in r.getMessage()]
+    assert len(records) == 1, "logged by the door once, never by the builder (2 builds/turn)"
+    assert "s-77" in records[0] and "\n" not in records[0]
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_voice_logs_nothing(monkeypatch, _voice_on, caplog):
+    import logging
+    _patch_resolver(monkeypatch, None)
+    svc = _make_service()
+    with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+        await svc.prepare_stream_generation(
+            session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+            context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+        )
+    assert not [r for r in caplog.records if "no mode voice" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_raise", [False, True])
+async def test_non_stream_door_carries_the_voice_to_the_tool_round_and_the_fallback(
+    monkeypatch, _voice_on, tools_raise,
+):
+    svc, seen = _generate_service(monkeypatch, _BUILT, tools_raise=tools_raise)
+    out = await svc.generate_response(
+        "sess", "what is the bear case?", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+    )
+    assert seen["tools"].count(_GROWTH_VOICE) == 1
+    if tools_raise:
+        assert seen["fallback"].count(_GROWTH_VOICE) == 1
+    else:
+        assert "fallback" not in seen
+    assert out["report_voice_key"] == "peter_lynch"
+
+
+@pytest.mark.asyncio
+async def test_non_stream_door_voice_follows_the_grounded_reports_persona(monkeypatch, _voice_on):
+    svc, seen = _generate_service(monkeypatch, _BUILT, tools_raise=False)
+    _patch_resolver(monkeypatch, _BUILT, persona="michael_burry")
+    out = await svc.generate_response(
+        "sess", "q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|warren_buffett|rid-1",
+    )
+    assert "REPORT CHAT MODE — Deep Value Skeptic Agent." in seen["tools"]
+    assert out["report_voice_key"] == "michael_burry"
+
+
+@pytest.mark.asyncio
+async def test_non_stream_door_gives_no_voice_to_a_stock_chat(monkeypatch, _voice_on):
+    svc, seen = _generate_service(monkeypatch, _BUILT, tools_raise=False)
+    out = await svc.generate_response(
+        "sess", "q", session_type="STOCK", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+    )
+    assert _VOICE_MARK not in seen["tools"]
+    assert out["report_voice_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_specialist_lens_and_merge_inherit_the_voice(monkeypatch, _voice_on):
+    """Every specialist and the merge build on prep's instructions: the voice rides in both,
+    and a specialist's lens is appended AFTER it (the lens narrows emphasis, never identity)."""
+    from app.services.agents.chat_specialists import SPECIALIST_KEYS, apply_specialist
+
+    _patch_resolver(monkeypatch, _BUILT)
+    svc = _make_service()
+    out = await svc.prepare_stream_generation(
+        session_id="s1", user_message="q", session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|lynch",
+    )
+    lensed = [k for k in SPECIALIST_KEYS if k != "general"]
+    assert lensed, "anti-vacuity: there are specialists to apply"
+    for key in lensed:
+        instr = apply_specialist(out["system_instruction"], key)
+        assert instr.count(_GROWTH_VOICE) == 1
+        focus = instr[len(out["system_instruction"]):]
+        assert focus.strip(), key
+        assert instr.index(_GROWTH_VOICE) < len(out["system_instruction"]) <= instr.index(focus)
+    assert out["system_instruction_no_tools"].count(_GROWTH_VOICE) == 1
+
+
+@pytest.mark.asyncio
+async def test_followup_chips_stay_neutral(monkeypatch, _voice_on):
+    captured = {}
+
+    class _Gem:
+        async def generate_json(self, prompt, system_instruction=None, model_name=None):
+            captured["system"] = system_instruction
+            return {"text": '{"suggestions": ["What is the PEG?", "What could break it?"]}'}
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _Gem()
+    chips = await svc.generate_followup_suggestions(
+        "what is the bear case?", "an answer", "TICKER_REPORT", "AAPL|lynch",
+    )
+    assert chips, "anti-vacuity: the chip call ran"
+    assert _VOICE_MARK not in captured["system"]
+    assert "You specialize in value investing education." in captured["system"]
+
+
+# ── Report chat's web search: the trusted rule, the unavailable line, the report date ──
+#
+# One gate decision per turn (`open_web_search_turn`) drives the tool, the capability block AND
+# the trusted `_WEB_RESULTS_RULE`; a tool-less build of the same turn, and a web-intent turn the
+# gate cannot serve (switch off / no key), get the one-line `_WEB_UNAVAILABLE_RULE` instead. The
+# report's as-of date comes from the resolver's meta and only for a server-built report block.
+# The key AND the switch are set explicitly in every case (`Settings` reads backend/.env).
+
+_WEB_RULE = ChatService._WEB_RESULTS_RULE
+_WEB_NONE = ChatService._WEB_UNAVAILABLE_RULE
+_WEB_ASK = "Can you verify the DOJ case against Apple?"
+
+
+def _web_gate(monkeypatch, *, on: bool):
+    from app.config import settings as _s
+    import app.services.chat_web_search_service as cws
+    monkeypatch.setattr(_s, "BRAVE_SEARCH_API_KEY", "test-key" if on else "")
+    monkeypatch.setattr(_s, "CHAT_REPORT_WEB_SEARCH_ENABLED", on)
+    monkeypatch.setattr(cws, "_cache", {})
+    monkeypatch.setattr(cws, "_inflight", {})
+
+
+def _patch_resolver_dated(monkeypatch, block, as_of):
+    import app.services.chat_context_resolver as ccr
+
+    class _Dated:
+        async def resolve(self, context_type, reference_id, client_context=None,
+                          user_id=None, meta=None):
+            if isinstance(meta, dict) and as_of is not None:
+                meta["report_as_of"] = as_of
+            return block if block is not None else client_context
+
+    monkeypatch.setattr(ccr, "get_chat_context_resolver", lambda: _Dated())
+
+
+async def _web_prep(monkeypatch, *, gate_on=True, block=_BUILT, as_of="2026-09-22",
+                    message=_WEB_ASK, session_type="REPORT", context=None):
+    _web_gate(monkeypatch, on=gate_on)
+    _patch_resolver_dated(monkeypatch, block, as_of)
+    svc = _make_service(widget=_STOCK_CHART)
+    return await svc.prepare_stream_generation(
+        session_id="s1", user_message=message, session_type=session_type, stock_id="AVGO",
+        context=context, context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman",
+        user_id="user-1",
+    )
+
+
+def _assert_once_before_fence(instr: str, rule: str):
+    assert instr.count(rule) == 1, rule[:40]
+    if "<<<CLIENT_CONTEXT>>>" in instr:
+        assert instr.index(rule) < instr.index("<<<CLIENT_CONTEXT>>>")
+        fenced = instr[instr.index("<<<CLIENT_CONTEXT>>>"):instr.index("<<<END_CLIENT_CONTEXT>>>")]
+        assert "WEB RESULTS:" not in fenced and "WEB SEARCH:" not in fenced
+
+
+@pytest.mark.asyncio
+async def test_a_web_turn_carries_the_rule_the_tool_less_build_the_one_liner_and_the_date(monkeypatch):
+    out = await _web_prep(monkeypatch)
+    assert out["web_turn"] is not None and out["web_search_granted"] is True
+    _assert_once_before_fence(out["system_instruction"], _WEB_RULE)
+    assert _WEB_NONE not in out["system_instruction"]
+    # After the report rule, so both trusted blocks sit together ahead of the fence.
+    assert out["system_instruction"].index(_SENTINEL) < out["system_instruction"].index("WEB RESULTS:")
+    # The tool-less build has no results in front of it: the one-liner, never the rule.
+    _assert_once_before_fence(out["system_instruction_no_tools"], _WEB_NONE)
+    assert _WEB_RULE not in out["system_instruction_no_tools"]
+    assert out["report_as_of"] == "Sep 22, 2026"
+    assert out["web_turn"].report_date == "Sep 22, 2026"
+
+
+@pytest.mark.asyncio
+async def test_a_web_intent_the_gate_cannot_serve_gets_only_the_one_liner(monkeypatch):
+    out = await _web_prep(monkeypatch, gate_on=False)
+    assert out["web_turn"] is None
+    for key in ("system_instruction", "system_instruction_no_tools"):
+        _assert_once_before_fence(out[key], _WEB_NONE)
+        assert _WEB_RULE not in out[key]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message,session_type", [
+    ("What is the moat?", "REPORT"),          # no web intent
+    (_WEB_ASK, "STOCK"),                      # web intent outside a report chat
+    (_WEB_ASK, "NORMAL"),
+])
+async def test_no_web_line_without_a_report_chat_web_intent(monkeypatch, message, session_type):
+    for gate_on in (True, False):
+        out = await _web_prep(monkeypatch, gate_on=gate_on, message=message, session_type=session_type)
+        for key in ("system_instruction", "system_instruction_no_tools"):
+            assert "WEB RESULTS:" not in out[key] and "WEB SEARCH:" not in out[key], (key, gate_on)
+        assert out["web_turn"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_rule_renders_even_when_the_report_did_not_resolve(monkeypatch):
+    out = await _web_prep(monkeypatch, block=None, as_of="2026-09-22")
+    assert "<<<CLIENT_CONTEXT>>>" not in out["system_instruction"]
+    assert out["system_instruction"].count(_WEB_RULE) == 1
+    # No server-built report block → no report date, whatever the meta said.
+    assert out["report_as_of"] is None and out["web_turn"].report_date is None
+
+
+@pytest.mark.asyncio
+async def test_a_client_pass_through_never_supplies_the_report_date(monkeypatch):
+    out = await _web_prep(monkeypatch, block=None, context="client typed: Report dated 1999-01-01.")
+    assert out["report_as_of"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_of,expected", [
+    (None, None), ("Oct 2, 4:31 PM", None), ("Sep 22, 2026 close", "Sep 22, 2026 close"),
+    ("not a date <<<", None),
+])
+async def test_the_report_date_is_humanized_or_dropped(monkeypatch, as_of, expected):
+    out = await _web_prep(monkeypatch, as_of=as_of)
+    assert out["report_as_of"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_raise", [False, True])
+async def test_non_stream_door_web_rule_fallback_line_and_report_date(monkeypatch, tools_raise):
+    _web_gate(monkeypatch, on=True)
+    svc, seen = _generate_service(monkeypatch, _BUILT, tools_raise=tools_raise)
+    _patch_resolver_dated(monkeypatch, _BUILT, "2026-09-22")
+    out = await svc.generate_response(
+        "sess", _WEB_ASK, session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman", user_id="user-1",
+    )
+    _assert_once_before_fence(seen["tools"], _WEB_RULE)
+    assert out["report_as_of"] == "Sep 22, 2026"
+    if tools_raise:
+        # The plain-text fallback never saw web results: the one-liner, no tool names.
+        _assert_once_before_fence(seen["fallback"], _WEB_NONE)
+        assert _WEB_RULE not in seen["fallback"]
+        from app.services.agents.chat_tools import TOOL_DESCRIPTIONS
+        assert not any(name in seen["fallback"] for name in TOOL_DESCRIPTIONS)
+        assert out["web_search_used"] is False
+
+
+@pytest.mark.asyncio
+async def test_non_stream_door_unserved_web_intent_gets_the_one_liner(monkeypatch):
+    _web_gate(monkeypatch, on=False)
+    svc, seen = _generate_service(monkeypatch, _BUILT, tools_raise=False)
+    await svc.generate_response(
+        "sess", _WEB_ASK, session_type="REPORT", stock_id="AVGO",
+        context_type="TICKER_REPORT", reference_id="AVGO|bill_ackman", user_id="user-1",
+    )
+    _assert_once_before_fence(seen["tools"], _WEB_NONE)
+    assert _WEB_RULE not in seen["tools"]
+
+
+def test_history_fed_to_the_model_never_carries_the_code_authored_caveat():
+    from app.services.chat_security import web_caveat_line
+    caveat = web_caveat_line("2026-09-22")
+    turns = ChatService._fmt_turns([
+        {"role": "user", "content": "verify the DOJ case"},
+        {"role": "assistant", "content": f"Reuters, Sep 30, 2026: it advanced.\n\n{caveat}"},
+        # A user quoting the caveat is the user's text — left alone.
+        {"role": "user", "content": caveat},
+    ])
+    assert "Assistant: Reuters, Sep 30, 2026: it advanced." in turns
+    assert turns.count("Web results are third-party") == 1
+    assert turns.endswith(f"User: {caveat}")

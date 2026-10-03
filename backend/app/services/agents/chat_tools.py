@@ -186,10 +186,9 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     "explain_price_move": (
         "Explain why a ticker moved TODAY. Returns the identified cause (earnings, analyst "
         "action, company news, a sector-wide move, or an overnight gap), how unusual the move "
-        "is for THIS ticker specifically, how its industry and the wider market did, recent "
-        "headlines, and — for a large unexplained move — a web-researched catalyst with "
-        "sources. ALWAYS call this for any 'why is X up/down' question rather than answering "
-        "from the price alone."
+        "is for THIS ticker specifically, how its industry and the wider market did, and "
+        "recent headlines. ALWAYS call this for any 'why is X up/down' question rather than "
+        "answering from the price alone."
     ),
     _MARKET_TOOL: (
         "Fetch how the market is doing TODAY: every sector's daily move, the "
@@ -211,9 +210,11 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "`query`: a short search — the company name or ticker, the topic and, if needed, a "
         "year or quarter; never a figure, price or percentage, and nothing about the user. "
         "Optional `recency`: day, week, month or year. Returns third-party pages with their "
-        "publisher and date — not Caydex data and not the report's view. For a company's "
-        "recent headlines prefer the news-headlines tool when you have it; never use this for "
-        "prices, quotes, price changes or other market data."
+        "publisher and date — not Caydex data and not the report's view. This tool is offered "
+        "ONLY on a turn where the user explicitly asked for a web search or a check, so call it "
+        "for that request — including news requests: the headlines tool may add its licensed "
+        "headlines alongside it, never instead of it. Never use this for prices, quotes, price "
+        "changes or other market data."
     ),
 }
 
@@ -231,7 +232,7 @@ TOOL_CAPABILITIES: Dict[str, str] = {
     "explain_price_move": (
         "explain_price_move for why a specific ticker moved TODAY — it returns the actual "
         "cause, how unusual the move is for that ticker, how its industry and the market did, "
-        "and for a big unexplained move a web-researched catalyst with sources"
+        "and recent headlines"
     ),
     _MARKET_TOOL: (
         "get_market_snapshot for how the market itself is doing today — every sector's move, "

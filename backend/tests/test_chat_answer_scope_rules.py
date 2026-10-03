@@ -359,3 +359,19 @@ def test_the_assembled_web_instruction_carries_no_injection_words():
             low = low.split("<<<client_context>>>", 1)[0]
             for word in ("disregard", "ignore all previous", "ignore previous", "new system prompt"):
                 assert word not in low, (asset_type, word)
+
+
+def test_an_explicit_web_ask_runs_the_web_search_not_only_the_headlines_tool():
+    """Live finding 2026-10-03: with `web_search` offered, "Can you search the web for the latest
+    news on Microsoft?" made the model call ONLY the headlines tool — its description said "for
+    a company's recent headlines prefer the news-headlines tool", and the rule only said a search
+    "may run". The tool is declared solely on an explicit-ask turn, so both texts must tell the
+    model to run it; the headlines tool may complement it, never replace it."""
+    desc = TOOL_DESCRIPTIONS["web_search"]
+    assert "prefer the news-headlines tool" not in desc
+    assert "never instead of it" in desc
+    rule = ChatService._WEB_RESULTS_RULE
+    assert "run the web search once before you answer" in rule
+    assert "never replace it" in rule
+    # Prices still never come from the web.
+    assert "not the web" in rule and "Never take a price" in rule

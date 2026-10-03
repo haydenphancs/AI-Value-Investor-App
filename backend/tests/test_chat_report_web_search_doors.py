@@ -71,7 +71,6 @@ def web_env(monkeypatch):
     s = cws.settings
     monkeypatch.setattr(s, "BRAVE_SEARCH_API_KEY", "test-key")
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_ENABLED", True)
-    monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP", 10)
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_DAILY_CAP", 500)
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_CACHE_TTL_SECONDS", 120)
     monkeypatch.setattr(cws, "_cache", {})
@@ -154,6 +153,9 @@ async def test_a_report_web_ask_declares_and_handles_the_tool(web_env, monkeypat
     assert chat_tools.WEB_SEARCH_TOOL in _declared(svc.gemini.kw["tools"])
     assert chat_tools.WEB_SEARCH_TOOL in svc.gemini.kw["tool_handlers"]
     assert re.search(r"\bweb_search\b", svc.gemini.kw["system_instruction"])
+    # The gate saw an explicit ask, so the first request MUST call the search — the prompt rule
+    # alone lost to the headlines tool in prod (2026-10-03).
+    assert svc.gemini.kw["force_first_tool"] == chat_tools.WEB_SEARCH_TOOL
     assert out["web_search_used"] is False and out["web_sources"] == [], "declared but not called"
 
 
@@ -169,6 +171,7 @@ async def test_no_gate_no_tool(web_env, monkeypatch, override):
     assert chat_tools.WEB_SEARCH_TOOL not in _declared(svc.gemini.kw["tools"])
     assert chat_tools.WEB_SEARCH_TOOL not in svc.gemini.kw["tool_handlers"]
     assert "web_search" not in svc.gemini.kw["system_instruction"]
+    assert svc.gemini.kw["force_first_tool"] is None, "no gate, nothing forced"
     assert out["web_search_used"] is False and out["web_sources"] == []
 
 
@@ -181,6 +184,7 @@ async def test_no_key_or_switch_off_means_no_tool(web_env, monkeypatch, setting,
     svc.gemini = _Gem()
     await _gen(svc)
     assert chat_tools.WEB_SEARCH_TOOL not in svc.gemini.kw["tool_handlers"]
+    assert svc.gemini.kw["force_first_tool"] is None
 
 
 # ── generate_response: web_search_used ────────────────────────────────────────
@@ -214,7 +218,7 @@ async def test_a_failed_tool_round_is_not_web_used_even_though_the_search_ran(we
 @pytest.mark.asyncio
 async def test_a_capped_search_is_charged_and_not_web_used(web_env, monkeypatch):
     led, brave = web_env
-    monkeypatch.setattr(cws.settings, "CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP", 0)
+    monkeypatch.setattr(cws.settings, "CHAT_REPORT_WEB_SEARCH_DAILY_CAP", 0)
     svc = _svc(monkeypatch)
     svc.gemini = _Gem(call_web=True)
     out = await _gen(svc)
@@ -360,7 +364,7 @@ async def test_two_specialists_share_one_search(web_env, monkeypatch):
     prep = {"prompt": "p", "system_instruction": "s", "system_instruction_no_tools": "s"}
     events = [ev async for ev in svc.stream_synthesis(prep, WEB_MSG, route, [], handlers)]
     assert len(brave.calls) == 1
-    assert sorted(led.claims) == sorted([cws._user_report_web_search_bucket(UID), cws._REPORT_WEB_SEARCH_BUCKET])
+    assert led.claims == [cws._REPORT_WEB_SEARCH_BUCKET], "one global unit, no per-account bucket"
     assert [k for k, _ in events].count("tool") == 2
     assert "tool_start" not in [k for k, _ in events], "synthesis consumes the specialists' events"
 
@@ -425,6 +429,9 @@ def test_the_turn_reaches_the_handlers_the_declarations_and_the_fallback():
     (decls,) = _call_args(body, "build_chat_tool_declarations")
     assert "web_search=web_turn is not None" in decls
     assert any("web_search=web_turn is not None" in a for a in _call_args(body, "tools_for_asset_type"))
+    # Round 1 of a web turn MUST call the search (mode ANY on that one tool), and only then.
+    (agentic,) = _call_args(body, "stream_agentic")
+    assert re.search(r"\bforce_first_tool=WEB_SEARCH_TOOL if web_turn is not None else None\b", agentic)
     fallback = [a for a in _call_args(body, "chat_service.generate_response")]
     assert len(fallback) == 1 and re.search(r"\bweb_turn=web_turn\b", fallback[0])
     assert re.search(r"web_search_used = bool\(ai_result\.get\(\"web_search_used\"\)\)", body)

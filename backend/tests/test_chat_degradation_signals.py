@@ -624,3 +624,44 @@ async def test_a_clean_deep_dive_is_cached_by_the_same_gate(monkeypatch):
     out = await svc.generate_response("sess", "deep dive", stock_id="SPY", context="ctx")
     assert "truncated" not in out
     assert len(writes) == 1
+
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_failure_beside_a_model_shaped_error_stays_charged(monkeypatch):
+    """Review 2026-10-03: the stream door degrades only when EVERY call failed upstream
+    (failed == seen); this door refunded an upstream failure next to a decoy bad-ticker error —
+    one degraded answer, two prices. A forced web turn's extra round made the mix reachable."""
+    svc = _svc()
+
+    class _Gem:
+        async def generate_with_tools(self, **kw):
+            return {"text": "From the report: margins held.", "tokens_used": 40, "tool_results": [],
+                    "tool_errors": [
+                        {"name": "web_search", "error": "web search unavailable", "upstream": True},
+                        {"name": "get_stock_chart_data", "error": "invalid or missing ticker",
+                         "upstream": False},
+                    ]}
+
+    svc.gemini = _Gem()
+    _stub_generate_response_collaborators(svc, monkeypatch)
+    out = await svc.generate_response("sess", "how is AAPL doing?", stock_id="AAPL")
+    assert not out.get("degraded"), out.get("degraded")
+
+
+@pytest.mark.asyncio
+async def test_two_upstream_failures_still_degrade(monkeypatch):
+    svc = _svc()
+
+    class _Gem:
+        async def generate_with_tools(self, **kw):
+            return {"text": "answer from memory", "tokens_used": 40, "tool_results": [],
+                    "tool_errors": [
+                        {"name": "web_search", "error": "web search unavailable", "upstream": True},
+                        {"name": "get_ticker_news", "error": "FMP rate limit", "upstream": True},
+                    ]}
+
+    svc.gemini = _Gem()
+    _stub_generate_response_collaborators(svc, monkeypatch)
+    out = await svc.generate_response("sess", "how is AAPL doing?", stock_id="AAPL")
+    assert out["degraded"] == "no_tools"

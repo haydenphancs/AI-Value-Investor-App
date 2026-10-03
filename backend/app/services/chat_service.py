@@ -56,6 +56,7 @@ from app.services.chat_security import (
 # Report chat's live web search: the per-turn gate and the "did web results reach the model"
 # predicate (the tool itself is wired through `chat_tools`).
 from app.services.chat_web_search_service import (
+    WEB_SEARCH_TOOL,
     WebSearchTurn,
     open_web_search_turn,
     web_results_delivered,
@@ -471,6 +472,7 @@ class ChatService:
                 "report_voice_key": voice_key,
                 # A replay: no web search ran on it.
                 "web_search_used": False,
+                "web_search_spent": False,
                 "web_sources": [],
                 "report_as_of": report_as_of,
             }
@@ -508,6 +510,9 @@ class ChatService:
                 # green with the hole open. Reports keep 8192; chat does not.
                 max_output_tokens=_chat_output_cap(is_deep_dive),
                 thinking_budget=_chat_thinking_budget(),
+                # The gate saw an explicit ask: the first request MUST call the search (on the
+                # stream→non-stream fallback the turn REPLAYS its one search — no second call).
+                force_first_tool=WEB_SEARCH_TOOL if web_search_granted else None,
             )
 
             # If a renderable tool ran, extract its card — from ANY of the parallel calls
@@ -556,8 +561,12 @@ class ChatService:
             )
             # The round succeeded, but if EVERY tool the model called came back as an error
             # (an FMP rate limit, a timeout) the answer has none of its live data either.
-            errs = [e for e in (response.get("tool_errors") or []) if e.get("upstream")]
-            if errs and not response.get("tool_results"):
+            # The stream door's rule exactly: EVERY call failed UPSTREAM. An error the model
+            # shaped (a junk ticker, an unknown tool) beside an upstream failure stays charged on
+            # both doors — this door used to refund that mix while the stream door charged it.
+            all_errs = response.get("tool_errors") or []
+            errs = [e for e in all_errs if e.get("upstream")]
+            if errs and len(errs) == len(all_errs) and not response.get("tool_results"):
                 logger.warning(
                     "Every tool call failed on the non-streaming turn (%s) — marking degraded",
                     ", ".join(f"{e.get('name')}: {e.get('error')}" for e in errs)[:300],
@@ -624,6 +633,9 @@ class ChatService:
             # Report chat's web search: whether its results reached this answer, and the
             # turn's source pills when they did (the caveat and the pills key off these).
             "web_search_used": web_used,
+            # The turn's search kept a unit of the global cap (whatever it returned): the send
+            # door charges a cut answer on it (`chat._settles_no_cost`).
+            "web_search_spent": bool(web_turn is not None and web_turn.spent_a_unit()),
             "web_sources": web_turn.source_pills() if (web_used and web_turn is not None) else [],
             # The grounded report's humanized as-of date (None when the report did not resolve)
             # — the web-results caveat names it.

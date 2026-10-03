@@ -424,7 +424,13 @@ def _claim_chat_quota(user: dict, x_guest_id, *, session_id: Optional[str], req=
     # user who has since hit 0 still gets the answer they are already owed. The claim is
     # atomic (UPDATE ... RETURNING) so two racing turns cannot both go free, and it fails
     # CLOSED — a DB blip charges normally and leaves the allowance for the next turn.
-    if get_chat_budget_service().claim_free_followup(session_id):
+    # Not even CLAIMED while the window is 0 (owner decision 2026-10-03: no free follow-up,
+    # every chat question costs a credit): a window left over from an earlier non-zero setting
+    # can never make a turn free, and no turn pays an RPC for an allowance that cannot exist.
+    if (
+        int(settings.CHAT_FREE_FOLLOWUP_SECONDS or 0) > 0
+        and get_chat_budget_service().claim_free_followup(session_id)
+    ):
         return _ChatQuota(
             user, x_guest_id, is_guest=False, ref_id=turn_ref,
             session_id=session_id, free=True,
@@ -1166,6 +1172,22 @@ def _persist_turn(supabase, session_id: str, user_row: dict, ai_msg: dict) -> di
     return assistant_row
 
 
+def _settles_no_cost(degraded_reason: Any, web_search_used: bool, web_unit_spent: bool = False) -> bool:
+    """Should a DELIVERED, degraded turn be settled no-cost? ONE rule for both doors.
+
+    Every degraded shape is refunded EXCEPT a cut answer on a turn whose web search delivered
+    results (`web_search_used`) or kept a unit of the global daily cap (`web_unit_spent` —
+    `WebSearchTurn.spent_a_unit()`: it ran, even if nothing usable came back). Owner decision
+    2026-10-03: a web turn always searches (round 1 is forced) and every search spends a unit of
+    the ONE global cap, so refunding the cut answer made "search the web and write 3,000 words" a
+    free search one account could repeat — results or not — until the whole day's cap was gone for
+    everyone. The answer keeps its truncation mark and the Continue chip."""
+    if not degraded_reason:
+        return False
+    web_cost = web_search_used is True or web_unit_spent is True
+    return not (degraded_reason == "truncated" and web_cost)
+
+
 def _attach_turn_cost(supabase, assistant_row: dict, quota, rich: Optional[dict] = None):
     """Record what this turn cost into the assistant row's `rich_content`, best-effort.
 
@@ -1857,11 +1879,15 @@ async def send_chat_message(
         # real generation reporting None/unknown usage is never wrongly refunded.
         if ai_result.get("tokens_used") == 0:
             quota.settle_no_cost("chat_cache_hit")
-        elif ai_result.get("degraded"):
+        elif _settles_no_cost(ai_result.get("degraded"), web_used,
+                              ai_result.get("web_search_spent") is True):
             # `generate_response` fell back to a tool-less plain-text call (or every tool the
             # model called failed): the answer to a stock question with none of its live data.
             # The stream path already refunds its degraded shapes; this one only logged.
             quota.settle_no_cost(f"chat_degraded_{ai_result['degraded']}")
+        elif ai_result.get("degraded"):
+            logger.info("Chat send: cut answer built on web results stays charged (session %s)",
+                        session_id)
         # A charged turn earns this session one free follow-up (no-op after a refund).
         quota.on_delivered()
         # Settlement is final now → record it on the row so the response (and a later
@@ -2127,6 +2153,9 @@ async def stream_chat_message(
         # Bound before the try: the fallback and the persist block read them when prep raised.
         web_turn = None
         web_search_used = False
+        # Whether the turn's search kept a unit of the global cap — read from `web_turn`, or, when
+        # prep raised (no `web_turn` here), from the fallback's own turn (`web_search_spent`).
+        fallback_web_unit_spent = False
         # The grounded report's humanized as-of date, which the web-results caveat names (prep's,
         # REPLACED by the fallback's own when it has one), and the list the last `sources` frame
         # carried — a frame is re-sent only when the live list changed (iOS REPLACES its pills).
@@ -2355,6 +2384,9 @@ async def stream_chat_message(
                     # Correlates the GEMINI_USAGE line to a turn: without the route you
                     # cannot tell which lens (and so which model) served this answer.
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
+                    # A web turn (the gate saw an explicit ask) MUST search in round 1: the
+                    # prompt rule alone lost to the routed lens and to the headlines tool.
+                    force_first_tool=WEB_SEARCH_TOOL if web_turn is not None else None,
                 )
 
             async for kind, payload in _with_keepalive(
@@ -2657,6 +2689,7 @@ async def stream_chat_message(
                 # with its pills (the aborted stream's web pills are dropped unless the fallback
                 # used the results too) and its own report date.
                 web_search_used = bool(ai_result.get("web_search_used"))
+                fallback_web_unit_spent = ai_result.get("web_search_spent") is True
                 report_as_of = ai_result.get("report_as_of") or report_as_of
                 fb_base = _strip_web_pills(sources) if sources else _strip_web_pills(ai_result.get("sources"))
                 sources = _merge_web_pills(
@@ -2825,6 +2858,14 @@ async def stream_chat_message(
             degraded_reason = stream_signals.get("degraded") or fallback_degraded
             if tokens_used == 0:
                 quota.settle_no_cost("chat_cache_hit")
+            elif degraded_reason and not _settles_no_cost(
+                degraded_reason, web_search_used,
+                (web_turn is not None and web_turn.spent_a_unit()) or fallback_web_unit_spent,
+            ):
+                logger.info(
+                    "Chat stream: cut answer built on web results stays charged (session %s)",
+                    session_id,
+                )
             elif degraded_reason:
                 # Delivered, but materially less than promised: a synthesis that lost its
                 # lenses (`no_specialists` / `unmerged` — the `routing` frame already named

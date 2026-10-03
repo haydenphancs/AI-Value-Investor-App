@@ -2483,7 +2483,9 @@ def test_a_cut_web_answer_is_not_auto_continued(harness):
     r = _post(client, message="Can you verify the DOJ case?")
     assert r.status_code == 200, r.text
     assert _FakeGemini.continue_calls == [], "a continuation never saw the web results"
-    assert quota.settled == ["chat_degraded_truncated"]
+    # Charged since 2026-10-03 (owner): the forced, paid search was delivered — a refund here made
+    # every long web ask a free search against the one global daily cap.
+    assert quota.settled == [] and quota.refunds == []
 
 
 @pytest.mark.parametrize("tool_events", [
@@ -2841,3 +2843,141 @@ def test_a_replayed_web_search_call_sends_no_second_tool_start(harness, monkeypa
     steps = [d for e, d in frames if e == "tool_step"]
     assert len(steps) == 2 and not any(d.get("skipped") for d in steps)
     assert frames[-1][1]["message"]["content"].count(_CAVEAT_LEAD) == 1
+
+
+
+# ── a cut answer BUILT ON web results stays charged (owner decision 2026-10-03) ──
+#
+# A web turn always searches (round 1 is forced) and spends a unit of the ONE global daily cap;
+# its cut answer is never auto-continued. Refunding it made "search the web and write 3,000
+# words" a free search one account could repeat until the day's cap was gone for everyone.
+
+_DELIVERED_WEB = {"web_search": True, "status": "ok", "result_count": 1, "results": [
+    {"n": 1, "publisher": "Reuters", "title": "Apple DOJ case advances", "published": "2026-09-30",
+     "snippet": "The case moved forward."}], "note": "Third-party web pages."}
+
+
+def test_a_cut_answer_built_on_web_results_stays_charged_on_the_stream_door(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "Apple DOJ"}, "result": dict(_DELIVERED_WEB)}),
+        ("answer", "Reuters reported on Sep 30, 2026 that the case advanced, and **"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    r = _post(client, message="Search the web for the DOJ case and write 3,000 words")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == [], "charged: the paid search was delivered"
+    assert quota.delivered == 1
+    assert _FakeGemini.continue_calls == [], "a web answer is never auto-continued"
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["truncated"] is True and done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+
+
+@pytest.mark.parametrize("result,label", [
+    ({"web_search": True, "status": "daily_limit", "result_count": 0, "results": [], "note": "limit"},
+     "chat_degraded_truncated"),
+    # Every tool failed upstream: `no_tools` outranks `truncated` for the ledger label.
+    ({"web_search": True, "status": "unavailable", "error": "web search unavailable", "upstream": True},
+     "chat_degraded_no_tools"),
+], ids=["capped", "outage"])
+def test_a_cut_answer_without_delivered_web_results_is_still_refunded(harness, result, label):
+    """The twin: no web results reached the model, so the cut is continued (here: the harness's
+    empty continuation) and, still cut, settles no-cost exactly as before."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "Apple DOJ"}, "result": result}),
+        ("answer", "From the report: margins held, and **"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    r = _post(client, message="Search the web for the DOJ case")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [label]
+
+
+@pytest.mark.parametrize("web_used,settled", [
+    (True, []),
+    (False, ["chat_degraded_truncated"]),
+])
+def test_the_send_door_charges_a_cut_web_answer_and_refunds_any_other_cut(harness, monkeypatch,
+                                                                          web_used, settled):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _FakeChatService.fallback_result = {
+        "content": "Reuters, Sep 30, 2026: the case advanced, and", "tokens_used": 30,
+        "sources": [dict(_BASE_PILL)], "degraded": "truncated", "truncated": True,
+        "finish_reason": "MAX_TOKENS", "web_search_used": web_used,
+        "web_sources": [dict(_WEB_PILL)] if web_used else [], "report_as_of": "Sep 22, 2026",
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages",
+                    json={"message": "Search the web for the DOJ case and write 3,000 words"})
+    assert r.status_code == 200, r.text
+    assert quota.settled == settled and quota.refunds == []
+
+
+@pytest.mark.parametrize("reason,web_used,spent,no_cost", [
+    (None, True, True, False), (None, False, False, False), ("", True, False, False),
+    ("truncated", True, False, False),          # results delivered → charged
+    ("truncated", False, True, False),          # a unit spent, nothing usable → charged
+    ("truncated", True, True, False),
+    ("truncated", False, False, True),          # no search cost at all → refunded as before
+    ("no_tools", True, True, True), ("no_tools", False, False, True),
+    ("unmerged", True, False, True), ("partial_specialists", False, True, True),
+])
+def test_the_one_settlement_rule(reason, web_used, spent, no_cost):
+    assert chat_mod._settles_no_cost(reason, web_used, spent) is no_cost
+    if not spent:
+        assert chat_mod._settles_no_cost(reason, web_used) is no_cost, "spent defaults to False"
+
+
+def test_a_cut_answer_after_an_empty_search_that_spent_a_unit_stays_charged(harness):
+    """Review 2026-10-03 MED: `no_results` keeps its unit (the search ran) but delivers nothing,
+    so the cut was refunded — a free, repeatable spend of the one global cap."""
+    client, db, quota, _ = harness
+    turn = _web_turn()
+    turn._unit_spent = True                       # what `_search_once` records for no_results
+    _FakeChatService.prep_overrides = {"web_turn": turn, "web_search_granted": True,
+                                       "system_instruction_no_tools": "SYS-NO-TOOLS"}
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "xqzv"},
+                  "result": {"web_search": True, "status": "no_results", "result_count": 0,
+                             "results": []}}),
+        ("answer", "Nothing usable came back from the web; from the report, margins held and **"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    r = _post(client, message="Search the web for xqzv and write 6,000 words")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == []
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["truncated"] is True
+
+
+def test_the_send_door_charges_a_cut_answer_whose_search_spent_a_unit(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _FakeChatService.fallback_result = {
+        "content": "Nothing usable came back from the web, and", "tokens_used": 30,
+        "sources": [dict(_BASE_PILL)], "degraded": "truncated", "truncated": True,
+        "finish_reason": "MAX_TOKENS", "web_search_used": False, "web_search_spent": True,
+        "web_sources": [],
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages",
+                    json={"message": "Search the web for xqzv and write 6,000 words"})
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == []
+
+
+def test_a_fallback_after_prep_raised_carries_its_own_spent_unit(harness, monkeypatch):
+    """No `web_turn` on the stream side (prep raised): the fallback's own verdict decides."""
+    client, db, quota, _ = harness
+
+    async def _prep_boom(self, **kw):
+        raise RuntimeError("prep exploded")
+    monkeypatch.setattr(_FakeChatService, "prepare_stream_generation", _prep_boom)
+    _FakeChatService.fallback_result = {
+        "content": "Nothing usable came back from the web, and", "tokens_used": 30,
+        "degraded": "truncated", "truncated": True, "finish_reason": "MAX_TOKENS",
+        "web_search_used": False, "web_search_spent": True, "web_sources": [],
+    }
+    r = _post(client, message="Search the web for xqzv and write 6,000 words")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == []

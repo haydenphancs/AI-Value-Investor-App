@@ -792,6 +792,28 @@ def _stream_thinking_config(budget: Optional[int]) -> Any:
     return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
 
 
+#: `generate_with_tools` runs a forced turn's extra tool round only this early: the send door wraps
+#: the whole call in `CHAT_SEND_BUDGET_SECONDS` (50 s), and a cold round-2 tool can take 30 s.
+_FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS = 20.0
+
+
+def _forced_tool_config(config: Any, force_tool: Optional[str], tool_handlers: Dict[str, Any]) -> Any:
+    """A copy of `config` whose request MUST call `force_tool` (function calling mode ANY, that one
+    name allowed), or None when nothing is forced. Used for the FIRST round only: the caller's
+    gate has already decided the tool runs (report chat's explicit "search the web" ask), and
+    a prompt rule alone did not hold — under a routed lens, and whenever the question said
+    "news", the model took the headlines tool instead (prod 2026-10-03; a probe: 0/6 under the
+    sentiment lens, 1/6 under the general one). A name with no handler is never forced (the
+    call would end in an error result). The copy keeps every other field, thinking included."""
+    if not force_tool or tool_handlers.get(force_tool) is None:
+        return None
+    return config.model_copy(update={"tool_config": types.ToolConfig(
+        function_calling_config=types.FunctionCallingConfig(
+            mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=[force_tool],
+        ),
+    )})
+
+
 def truncate_tool_result(result: Any, budget: Optional[int] = None) -> Any:
     """Shrink a tool result to fit `budget` characters of JSON, STRUCTURALLY.
 
@@ -1442,6 +1464,7 @@ class GeminiClient:
         model_name: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        force_first_tool: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate a response using Gemini Function Calling (single-round).
@@ -1460,6 +1483,8 @@ class GeminiClient:
             thinking_budget: Optional thinking ceiling (`_thinking_config` semantics;
                 None = attach nothing). The chat door passes its own budget because
                 `max_output_tokens` bounds thoughts + answer together.
+            force_first_tool: Optional tool the FIRST request must call (`_forced_tool_config`);
+                the follow-up uses the ordinary config.
         """
         model = model_name or self.model_name
         config = self._config(
@@ -1467,28 +1492,35 @@ class GeminiClient:
             max_output_tokens=max_output_tokens,
             thinking_config=_thinking_config(thinking_budget),
         )
+        first_config = _forced_tool_config(config, force_first_tool, tool_handlers) or config
+        forced = first_config is not config
+        started = time.monotonic()
         try:
             response = await self._generate_content_retried(
-                model=model, contents=prompt, config=config, what="generate_with_tools",
+                model=model, contents=prompt, config=first_config, what="generate_with_tools",
             )
 
             tool_results: List[Dict[str, Any]] = []
             tool_errors: List[Dict[str, Any]] = []   # {name, error} per call that failed
             candidate = (response.candidates or [None])[0]
-            parts = (candidate.content.parts if candidate and candidate.content else None) or []
 
             # Collect EVERY function_call in the model's turn — gemini-2.5 can emit several in
             # parallel. Handling only the first (while echoing candidate.content, which carries ALL
             # the calls) sent back a function_response count that mismatched the call count → the API
             # 400s and the whole tool round is lost. Mirror stream_agentic: run each call and append
             # ONE function_response per call (an error response for an unknown handler) so counts match.
-            fn_calls = [
-                p.function_call for p in parts
-                if getattr(p, "function_call", None) and p.function_call.name
-            ]
-            if fn_calls:
+            def _calls_in(resp: Any) -> List[Any]:
+                cand = (resp.candidates or [None])[0]
+                ps = (cand.content.parts if cand and cand.content else None) or []
+                return [
+                    p.function_call for p in ps
+                    if getattr(p, "function_call", None) and p.function_call.name
+                ]
+
+            async def _run_calls(calls: List[Any]) -> List[Any]:
+                """Run every call; ONE function_response per call, in order."""
                 response_parts: List[Any] = []
-                for fc in fn_calls:
+                for fc in calls:
                     args = dict(fc.args) if fc.args else {}
                     handler = tool_handlers.get(fc.name)
                     if handler is not None:
@@ -1504,6 +1536,11 @@ class GeminiClient:
                         name=fc.name,
                         response={"result": truncate_tool_result(handler_result)},
                     ))
+                return response_parts
+
+            fn_calls = _calls_in(response)
+            if fn_calls:
+                response_parts = await _run_calls(fn_calls)
 
                 # Feed the results back. Append the model's turn VERBATIM (candidate.content) so any
                 # thought_signature is preserved, then ONE user turn with a response per call.
@@ -1525,7 +1562,37 @@ class GeminiClient:
                     finish=_response_finish(follow_up),
                 )
                 text = _response_text(follow_up)
-                if not text and _has_function_call(follow_up):
+                if (
+                    forced and _has_function_call(follow_up)
+                    and time.monotonic() - started < _FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS
+                ):
+                    # The FORCED first request could call only the forced tool, so this door's one
+                    # executed round would otherwise be spent on it: the follow-up's own calls
+                    # (the headlines, a chart) run once more here, as stream_agentic's round 2
+                    # does — or a web turn could never use another tool on this door, and a search
+                    # outage would settle `no_tools` here but charged on the stream door. Run even
+                    # when the follow-up ALSO carries text: that text is a preamble ("Let me also
+                    # pull the headlines"), and returning it alone delivered one sentence as a
+                    # charged answer. Skipped late in the send budget: the tool-less round below
+                    # still answers from what is in hand.
+                    more_parts = await _run_calls(_calls_in(follow_up))
+                    history = history + [
+                        follow_up.candidates[0].content,
+                        types.Content(role="user", parts=more_parts),
+                    ]
+                    follow_up = await self._generate_content_retried(
+                        model=model, contents=history, config=config,
+                        what="generate_with_tools forced-turn follow-up",
+                    )
+                    _log_gemini_usage(
+                        _response_usage(follow_up), call_site="generate_with_tools:follow_up_2",
+                        model=model, finish=_response_finish(follow_up),
+                    )
+                    text = _response_text(follow_up)
+                if _has_function_call(follow_up) and (not text or forced):
+                    # (A forced turn's follow-up that STILL calls tools here — after its extra
+                    # round, or with the round skipped late — answers tool-less too, never with a
+                    # bare preamble.)
                     # This door is single-round, but the follow-up was made with the SAME
                     # config that still declares the tools, so the model may answer with a
                     # SECOND function call (chart first, then news for the ticker it found).
@@ -1632,9 +1699,13 @@ class GeminiClient:
         usage_tag: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        force_first_tool: Optional[str] = None,
     ):
         """Stream a MULTI-ROUND agentic answer: the model can call function-calling tools
         mid-stream (manual FC), while reasoning + answer stream throughout.
+
+        `force_first_tool`: round 1 MUST call that tool (`_forced_tool_config`); later rounds
+        run on the ordinary config, so the model may add other tools and then answer.
 
         Yields tagged events:
           * ("thought", str) — a reasoning summary chunk (→ the thinking card)
@@ -1673,6 +1744,8 @@ class GeminiClient:
         config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
         resolved_model = model_name or self.model_name
         chat = self._client.aio.chats.create(model=resolved_model, config=config)
+        # A per-message config REPLACES the chat's for that request (google-genai), hence a full copy.
+        forced_config = _forced_tool_config(config, force_first_tool, tool_handlers)
 
         message: Any = prompt
         usage = _StreamUsage()
@@ -1694,7 +1767,10 @@ class GeminiClient:
             for _round in range(max_rounds):
                 fcalls: List[Any] = []
                 finish = None
-                stream = await chat.send_message_stream(message)
+                if _round == 0 and forced_config is not None:
+                    stream = await chat.send_message_stream(message, config=forced_config)
+                else:
+                    stream = await chat.send_message_stream(message)
                 async for chunk in stream:
                     usage.observe(chunk)
                     if not verdict:

@@ -59,7 +59,10 @@ def _no_live_free_followup_claim(monkeypatch):
 
 def _grant_free_followup(monkeypatch):
     """Opt into the earned-free-turn branch — the one the live call could never reach
-    deterministically. Returns the stub so callers can assert on it."""
+    deterministically. Returns the stub so callers can assert on it. Pins a non-zero window:
+    the claim is not even attempted while the shipped default (0, owner decision 2026-10-03:
+    no free follow-up) is in force."""
+    monkeypatch.setattr(chat.settings, "CHAT_FREE_FOLLOWUP_SECONDS", 300)
     budget = MagicMock()
     budget.claim_free_followup.return_value = True
     monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
@@ -226,6 +229,8 @@ def test_guest_ref_id_is_never_used_for_credits(monkeypatch):
 def _patch_followup(monkeypatch, *, claim_returns=False, claim_raises=False):
     """Patch the budget singleton chat.py reaches for the free-follow-up RPCs."""
     svc = MagicMock()
+    # The free branch is reachable only with a non-zero window (the shipped default is 0).
+    monkeypatch.setattr(chat.settings, "CHAT_FREE_FOLLOWUP_SECONDS", 300)
     if claim_raises:
         # The service itself swallows RPC errors and returns False (fail closed); this
         # models the layer above having already degraded.
@@ -536,3 +541,36 @@ def test_guest_settle_no_cost_touches_no_rpc(monkeypatch):
     credit.refund_ledgered.assert_not_called()
     svc.grant_free_followup.assert_not_called()
     assert rec["claimed"] == 1 and rec["refunded"] == 0, rec
+
+
+
+# ── owner decision 2026-10-03: no free follow-up, every chat question costs a credit ──
+
+def test_with_the_shipped_window_no_turn_is_ever_free(monkeypatch):
+    """The default window is 0, and then the claim is not even ATTEMPTED: an allowance left in
+    the table by an earlier non-zero setting (the RPC would answer True) still charges."""
+    from app.config import Settings
+    assert Settings.model_fields["CHAT_FREE_FOLLOWUP_SECONDS"].default == 0
+    monkeypatch.setattr(chat.settings, "CHAT_FREE_FOLLOWUP_SECONDS", 0)
+    budget = MagicMock()
+    budget.claim_free_followup.return_value = True          # a stale live window
+    monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
+    credit = _patch_credit(monkeypatch, precharge_return=100)
+
+    quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+
+    assert err is None and quota.outcome == "charged"
+    credit.precharge.assert_called_once()
+    budget.claim_free_followup.assert_not_called()
+
+
+@pytest.mark.parametrize("window", [None, -5])
+def test_a_degenerate_window_charges_too(monkeypatch, window):
+    monkeypatch.setattr(chat.settings, "CHAT_FREE_FOLLOWUP_SECONDS", window)
+    budget = MagicMock()
+    budget.claim_free_followup.return_value = True
+    monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
+    credit = _patch_credit(monkeypatch, precharge_return=100)
+    quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    assert err is None and quota.outcome == "charged"
+    budget.claim_free_followup.assert_not_called()

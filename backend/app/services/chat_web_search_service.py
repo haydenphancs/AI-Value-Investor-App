@@ -19,9 +19,10 @@ specialist and the stream→non-stream fallback (`generate_response(web_turn=…
 elects the search SYNCHRONOUSLY (no await between the check and the assignment); every later call,
 with any query, replays its outcome with no budget claim and no Brave call.
 
-THE BUDGET fails CLOSED, in its own `chat_usage_budget` buckets (per account, then global — the
-same RPC `explain_price_move` uses, through `chat_market_tools._claim_bucket_status`, so no
-migration). A unit is refunded only when the search provably did not run (`not_run` on the Brave
+THE BUDGET fails CLOSED, in its own `chat_usage_budget` bucket — ONE global daily cap across all
+accounts (`CHAT_REPORT_WEB_SEARCH_DAILY_CAP`; no per-account cap, owner decision 2026-10-03), on
+the same RPC `explain_price_move` used, through `chat_market_tools._claim_bucket_status`, so no
+migration. A unit is refunded only when the search provably did not run (`not_run` on the Brave
 exception, or a cancellation); a search that may have been billed keeps its unit. A capped search
 answers a fixed non-upstream result (the turn stays charged — one credit buys one answer), a
 budget or Brave OUTAGE answers `upstream: True` (if it was the turn's only tool, the turn settles
@@ -104,12 +105,8 @@ _HARD_BOUND_SLACK = 2.0
 
 _RECENCY = {"day": "pd", "week": "pw", "month": "pm", "year": "py"}
 
-# ── Budget buckets (uuid5, never a raw account id — the column is shared with chat turns) ──
+# ── Budget bucket (uuid5 — the column is shared with chat turns' per-account rows) ──
 _REPORT_WEB_SEARCH_BUCKET = str(uuid.uuid5(uuid.NAMESPACE_URL, "caydex:chat:report-web-search-budget"))
-
-
-def _user_report_web_search_bucket(user_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"caydex:chat:report-web-search-budget:{user_id}"))
 
 
 # ── Model-facing notes (fixed text; never name the search engine) ────────────
@@ -308,6 +305,7 @@ class WebSearchTurn:
     _message_key: Optional[Tuple[str, ...]] = field(default=None, repr=False)
     _task: Optional["asyncio.Future[WebSearchOutcome]"] = field(default=None, repr=False)
     _served_this_generation: bool = field(default=False, repr=False)
+    _unit_spent: bool = field(default=False, repr=False)
 
     def outcome(self) -> Optional[WebSearchOutcome]:
         """The search's outcome once it finished (not cancelled), else None."""
@@ -326,6 +324,14 @@ class WebSearchTurn:
         if out is None or out.status != STATUS_OK:
             return []
         return [dict(p) for p in out.pills[:MAX_WEB_PILLS]]
+
+    def spent_a_unit(self) -> bool:
+        """True when this turn's one search claimed a unit of the global daily cap that was NOT
+        handed back — it ran (or may have been billed), whatever it returned: results, nothing
+        usable (`no_results`), a refused request. The doors charge a cut answer on it (owner
+        decision 2026-10-03): a refund there let a search that came back empty be repeated for
+        free until the day's cap was gone."""
+        return self._unit_spent
 
     def begin_generation(self) -> None:
         """A NEW generation of the same turn (the stream→non-stream fallback): its first call
@@ -770,34 +776,24 @@ def _cache_put(key: Optional[Tuple[str, ...]], outcome: WebSearchOutcome) -> Non
     _cache[key] = (now, outcome)
 
 
-async def _claim_report_web_search(user_id: str) -> str:
-    """"ok" | "capped" | "unavailable". Per account first, then global; a global refusal hands the
-    per-account unit back. Fails CLOSED: a budget outage never runs a search."""
-    user_cap = int(settings.CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP)
+async def _claim_report_web_search() -> str:
+    """"ok" | "capped" | "unavailable" — one claim on the global daily bucket (no per-account
+    cap). Fails CLOSED: a budget outage never runs a search."""
     global_cap = int(settings.CHAT_REPORT_WEB_SEARCH_DAILY_CAP)
-    if user_cap <= 0 or global_cap <= 0:
+    if global_cap <= 0:
         return "capped"
-    user_bucket = _user_report_web_search_bucket(user_id)
-    status = await cmt._claim_bucket_status(user_bucket, user_cap, "report per-account")
-    if status != "ok":
-        return status
-    status = await cmt._claim_bucket_status(_REPORT_WEB_SEARCH_BUCKET, global_cap, "report global")
-    if status != "ok":
-        await cmt._refund_bucket(user_bucket, "report per-account")
-        return status
-    return "ok"
+    return await cmt._claim_bucket_status(_REPORT_WEB_SEARCH_BUCKET, global_cap, "report global")
 
 
-async def _release_report_web_search(user_id: str) -> None:
-    """Refund BOTH units — only for a search that provably did not run."""
+async def _release_report_web_search() -> None:
+    """Refund the unit — only for a search that provably did not run."""
     await cmt._refund_bucket(_REPORT_WEB_SEARCH_BUCKET, "report global")
-    await cmt._refund_bucket(_user_report_web_search_bucket(user_id), "report per-account")
 
 
-def _release_detached(user_id: str) -> None:
+def _release_detached() -> None:
     """Schedule the refund from a CANCELLED frame (awaiting there would itself be cancelled)."""
     try:
-        task = asyncio.get_running_loop().create_task(_release_report_web_search(user_id))
+        task = asyncio.get_running_loop().create_task(_release_report_web_search())
     except RuntimeError:
         return
     _background.add(task)
@@ -871,7 +867,7 @@ async def _lead(turn: WebSearchTurn, key: Tuple[str, ...], query: str, freshness
             outcome = WebSearchOutcome(status=STATUS_UNAVAILABLE, query=query, upstream_error=upstream)
             if e.not_run:
                 stats["refunded"] = True
-                await _release_report_web_search(turn.user_id)
+                await _release_report_web_search()
         except asyncio.TimeoutError:
             # The hard bound fired: the request may have been billed — the unit is kept.
             logger.warning("report web search: hard bound exceeded user=%s", _short(turn.user_id))
@@ -888,7 +884,7 @@ async def _lead(turn: WebSearchTurn, key: Tuple[str, ...], query: str, freshness
         # not-run arm above already started the refund (never two refunds for one claim).
         if not stats.get("refunded"):
             stats["refunded"] = True
-            _release_detached(turn.user_id)
+            _release_detached()
         if not fut.done():
             fut.set_result(WebSearchOutcome(status=STATUS_UNAVAILABLE, query=query, upstream_error=True))
         raise
@@ -927,7 +923,9 @@ async def _search_once(turn: WebSearchTurn, query: str, freshness: Optional[str]
             stats["joined"] = True
             outcome = await _join(leader, query)
             return outcome
-        claim = await _claim_report_web_search(turn.user_id)
+        claim = await _claim_report_web_search()
+        if claim == "ok":
+            stats["claimed"] = True
         if claim == "capped":
             outcome = WebSearchOutcome(status=STATUS_DAILY_LIMIT, query=query)
             return outcome
@@ -940,14 +938,14 @@ async def _search_once(turn: WebSearchTurn, query: str, freshness: Optional[str]
         # entry means this call IS the leader.
         hit = _cache_get(key) or _cache_get(turn._message_key)
         if hit is not None:
-            await _release_report_web_search(turn.user_id)
+            await _release_report_web_search()
             stats["cached"] = True
             stats["refunded"] = True
             outcome = hit
             return outcome
         leader = _inflight_for(key, turn._message_key)
         if leader is not None:
-            await _release_report_web_search(turn.user_id)
+            await _release_report_web_search()
             stats["joined"] = True
             stats["refunded"] = True
             outcome = await _join(leader, query)
@@ -962,6 +960,9 @@ async def _search_once(turn: WebSearchTurn, query: str, freshness: Optional[str]
         outcome = WebSearchOutcome(status=STATUS_UNAVAILABLE, query=query, upstream_error=True)
         return outcome
     finally:
+        # Every refund path (the claim-race re-checks here, `not_run` and cancellation in
+        # `_lead`) marks `refunded`, so this is exactly "a unit was claimed and kept".
+        turn._unit_spent = bool(stats.get("claimed")) and not stats.get("refunded")
         if "outcome" in locals():
             _log(turn, outcome, stats, started)
 

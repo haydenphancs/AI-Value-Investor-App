@@ -90,17 +90,12 @@ def _row(host: str = "www.reuters.com", path: str = "/legal/apple-doj/", title: 
 GLOBAL = cws._REPORT_WEB_SEARCH_BUCKET
 
 
-def USER(uid: str = UID) -> str:
-    return cws._user_report_web_search_bucket(uid)
-
-
 @pytest.fixture
 def env(monkeypatch):
     """Feature ON, a ledger and a Brave stub installed, caches empty. Returns (ledger, brave)."""
     s = cws.settings
     monkeypatch.setattr(s, "BRAVE_SEARCH_API_KEY", "test-key")
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_ENABLED", True)
-    monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP", 10)
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_DAILY_CAP", 500)
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_CACHE_TTL_SECONDS", 120)
     monkeypatch.setattr(s, "BRAVE_SEARCH_TIMEOUT_SECONDS", 4.0)
@@ -251,7 +246,7 @@ async def test_two_calls_in_a_turn_make_one_search_and_one_claim(env):
     first = await cws.run_web_search(t, "Apple DOJ case", "week")
     second = await cws.run_web_search(t, "something else entirely", None)
     assert len(brave.calls) == 1 and brave.calls[0]["freshness"] == "pw"
-    assert led.counts == {USER(): 1, GLOBAL: 1}
+    assert led.counts == {GLOBAL: 1}
     assert first["status"] == "ok" and "repeat_note" not in first
     assert second["status"] == "ok" and "one web search runs per question" in second["repeat_note"].lower()
     assert second["results"] == first["results"]
@@ -264,7 +259,7 @@ async def test_concurrent_calls_in_a_turn_make_one_search(env):
     t = _turn()
     outs = await asyncio.gather(*[cws.run_web_search(t, f"Apple DOJ {i}") for i in ("a", "b", "c")])
     assert len(brave.calls) == 1
-    assert led.counts == {USER(): 1, GLOBAL: 1}
+    assert led.counts == {GLOBAL: 1}
     assert [o["status"] for o in outs] == ["ok", "ok", "ok"]
 
 
@@ -328,7 +323,7 @@ async def test_another_user_never_shares_a_result(env):
     await cws.run_web_search(_turn(UID), "Apple DOJ case")
     await cws.run_web_search(_turn(UID2), "Apple DOJ case")
     assert len(brave.calls) == 2
-    assert led.counts[USER(UID)] == 1 and led.counts[USER(UID2)] == 1 and led.counts[GLOBAL] == 2
+    assert led.counts == {GLOBAL: 2}
 
 
 @pytest.mark.asyncio
@@ -371,7 +366,7 @@ async def test_only_ok_outcomes_are_cached(env, monkeypatch, brave_kw):
 @pytest.mark.asyncio
 async def test_a_daily_limit_is_never_cached(env):
     led, brave = env
-    led.caps[USER()] = 0
+    led.caps[GLOBAL] = 0
     await cws.run_web_search(_turn(session="s1"), "Apple DOJ case")
     assert cws._cache == {} and brave.calls == []
 
@@ -405,7 +400,7 @@ async def test_two_turns_in_flight_share_one_search_and_one_unit(env):
         cws.run_web_search(_turn(session="s2", message="verify b"), "Apple DOJ case"),
     )
     assert a["status"] == b["status"] == "ok"
-    assert len(brave.calls) == 1 and led.counts == {USER(): 1, GLOBAL: 1}
+    assert len(brave.calls) == 1 and led.counts == {GLOBAL: 1}
     assert cws._inflight == {}
 
 
@@ -428,8 +423,8 @@ async def test_a_leader_that_appears_during_the_claim_gets_the_unit_back(env, mo
                                                      "published": None, "snippet": "s"}]))
     out = await asyncio.wait_for(task, 2)
     assert out["status"] == "ok" and brave.calls == []
-    assert led.counts == {USER(): 0, GLOBAL: 0}, "the claimed units were handed back"
-    assert set(led.refunds) == {USER(), GLOBAL}
+    assert led.counts == {GLOBAL: 0}, "the claimed unit was handed back"
+    assert led.refunds == [GLOBAL]
 
 
 @pytest.mark.asyncio
@@ -446,7 +441,7 @@ async def test_a_re_post_worded_differently_joins_the_running_search(env):
                                       "Apple Justice Department antitrust lawsuit status")
     out = await asyncio.wait_for(first, 2)
     assert out["status"] == second["status"] == "ok"
-    assert len(brave.calls) == 1 and led.counts == {USER(): 1, GLOBAL: 1}
+    assert len(brave.calls) == 1 and led.counts == {GLOBAL: 1}
     assert cws._inflight == {}, "both keys are released by the leader"
 
 
@@ -458,7 +453,7 @@ async def test_a_different_message_in_the_same_session_is_not_joined(env):
         cws.run_web_search(_turn(session="s1", message="verify the DOJ case"), "Apple DOJ case"),
         cws.run_web_search(_turn(session="s1", message="any news on the recall?"), "Apple recall"),
     )
-    assert len(brave.calls) == 2 and led.counts == {USER(): 2, GLOBAL: 2}
+    assert len(brave.calls) == 2 and led.counts == {GLOBAL: 2}
 
 
 @pytest.mark.asyncio
@@ -475,7 +470,7 @@ async def test_a_twin_that_finishes_during_the_claim_is_served_from_cache_and_re
     led.on_claim = _twin_finished
     out = await cws.run_web_search(_turn(), "Apple DOJ case")
     assert out["status"] == "ok" and brave.calls == []
-    assert led.counts == {USER(): 0, GLOBAL: 0} and set(led.refunds) == {USER(), GLOBAL}
+    assert led.counts == {GLOBAL: 0} and led.refunds == [GLOBAL]
 
 
 @pytest.mark.asyncio
@@ -501,48 +496,68 @@ async def test_a_cancelled_joiner_does_not_cancel_the_shared_search(env):
 
 
 @pytest.mark.asyncio
-async def test_claim_order_and_limits(env):
+async def test_one_global_claim_and_no_per_account_bucket(env):
+    """Owner decision 2026-10-03: the global daily cap only — never a per-account claim."""
     led, _ = env
     await cws.run_web_search(_turn(), "Apple DOJ case")
-    assert led.claims == [(USER(), 10), (GLOBAL, 500)]
+    assert led.claims == [(GLOBAL, 500)]
+
+
+def test_the_default_cap_is_180_and_there_is_no_per_account_setting():
+    fields = Settings.model_fields
+    assert fields["CHAT_REPORT_WEB_SEARCH_DAILY_CAP"].default == 180
+    assert not any("WEB_SEARCH_USER" in name for name in fields), "the per-account cap was removed"
+    assert not hasattr(cws, "_user_report_web_search_bucket")
 
 
 @pytest.mark.asyncio
-async def test_the_per_account_cap_answers_the_daily_limit_without_a_global_unit(env):
+async def test_one_account_is_not_capped_below_the_global_cap(env):
+    """No per-account cap: 12 different questions from ONE account all search (the old
+    per-account cap of 10 refused the 11th)."""
     led, brave = env
-    led.caps[USER()] = 0
-    out = await cws.run_web_search(_turn(), "Apple DOJ case")
-    assert out["status"] == "daily_limit" and "daily web-search limit" in out["note"]
-    assert "error" not in out and "upstream" not in out, "a capped search stays charged"
-    assert brave.calls == [] and GLOBAL not in led.counts
+    topics = ["recall", "lawsuit", "antitrust", "earnings", "buyback", "dividend", "patent",
+              "layoffs", "acquisition", "outage", "tariffs", "guidance"]   # words: digits are stripped
+    outs = [await cws.run_web_search(_turn(session=f"s{i}"), f"Apple {topic}")
+            for i, topic in enumerate(topics)]
+    assert [o["status"] for o in outs] == ["ok"] * 12
+    assert len(brave.calls) == 12 and led.counts == {GLOBAL: 12}
 
 
 @pytest.mark.asyncio
-async def test_a_global_cap_refunds_the_per_account_unit(env):
+async def test_the_global_cap_is_shared_by_every_account(env):
+    """The trade-off the owner accepted: one account can use the day's allowance for everyone."""
+    led, brave = env
+    led.caps[GLOBAL] = 1
+    first = await cws.run_web_search(_turn(), "Apple DOJ case")
+    other = await cws.run_web_search(_turn(uid=UID2, session="s9"), "Apple recall")
+    assert first["status"] == "ok" and other["status"] == "daily_limit"
+    assert len(brave.calls) == 1 and led.counts == {GLOBAL: 1}
+
+
+@pytest.mark.asyncio
+async def test_the_global_cap_answers_the_daily_limit(env):
     led, brave = env
     led.caps[GLOBAL] = 0
     out = await cws.run_web_search(_turn(), "Apple DOJ case")
-    assert out["status"] == "daily_limit" and brave.calls == []
-    assert led.counts[USER()] == 0 and led.refunds == [USER()]
+    assert out["status"] == "daily_limit" and "daily web-search limit" in out["note"]
+    assert "error" not in out and "upstream" not in out, "a capped search stays charged"
+    assert brave.calls == [] and led.refunds == [], "nothing was claimed, so nothing is refunded"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bucket", ["user", "global"])
-async def test_a_budget_outage_fails_closed_as_upstream(env, bucket):
+async def test_a_budget_outage_fails_closed_as_upstream(env):
     led, brave = env
-    led.raise_on = {USER() if bucket == "user" else GLOBAL}
+    led.raise_on = {GLOBAL}
     out = await cws.run_web_search(_turn(), "Apple DOJ case")
     assert out["status"] == "unavailable" and out["upstream"] is True and out["error"]
-    assert brave.calls == []
-    if bucket == "global":
-        assert led.counts[USER()] == 0, "the per-account unit is handed back"
+    assert brave.calls == [] and led.refunds == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("setting", ["CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP", "CHAT_REPORT_WEB_SEARCH_DAILY_CAP"])
-async def test_a_zero_cap_refuses_without_touching_the_ledger(env, monkeypatch, setting):
+@pytest.mark.parametrize("cap", [0, -1])
+async def test_a_zero_or_negative_cap_refuses_without_touching_the_ledger(env, monkeypatch, cap):
     led, brave = env
-    monkeypatch.setattr(cws.settings, setting, 0)
+    monkeypatch.setattr(cws.settings, "CHAT_REPORT_WEB_SEARCH_DAILY_CAP", cap)
     out = await cws.run_web_search(_turn(), "Apple DOJ case")
     assert out["status"] == "daily_limit" and led.claims == [] and brave.calls == []
 
@@ -558,13 +573,11 @@ def _retired_user(user_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"caydex:chat:web-search-budget:{user_id}"))
 
 
-def test_the_buckets_are_derived_and_distinct():
-    assert GLOBAL != _RETIRED_GLOBAL and GLOBAL != _retired_user(UID)
-    assert USER() != _retired_user(UID) and USER() != _RETIRED_GLOBAL
-    assert USER() != UID and USER() != GLOBAL and USER(UID2) != USER(UID)
-    # Both are uuids (the column is uuid-typed) and stable across calls.
-    assert str(uuid.UUID(GLOBAL)) == GLOBAL and str(uuid.UUID(USER())) == USER()
-    assert USER() == cws._user_report_web_search_bucket(UID)
+def test_the_bucket_is_derived_and_distinct():
+    assert GLOBAL != _RETIRED_GLOBAL and GLOBAL != _retired_user(UID) and GLOBAL != UID
+    # A uuid (the column is uuid-typed) and stable across imports.
+    assert str(uuid.UUID(GLOBAL)) == GLOBAL
+    assert GLOBAL == str(uuid.uuid5(uuid.NAMESPACE_URL, "caydex:chat:report-web-search-budget"))
 
 
 @pytest.mark.asyncio
@@ -597,9 +610,9 @@ async def test_refund_matrix(env, monkeypatch, exc, refunded, upstream):
     assert out["status"] == "unavailable" and out["error"]
     assert bool(out.get("upstream")) is upstream
     if refunded:
-        assert led.counts == {USER(): 0, GLOBAL: 0} and set(led.refunds) == {USER(), GLOBAL}
+        assert led.counts == {GLOBAL: 0} and led.refunds == [GLOBAL]
     else:
-        assert led.counts == {USER(): 1, GLOBAL: 1} and led.refunds == []
+        assert led.counts == {GLOBAL: 1} and led.refunds == []
 
 
 @pytest.mark.asyncio
@@ -610,7 +623,7 @@ async def test_the_hard_bound_keeps_the_unit(env, monkeypatch):
     monkeypatch.setattr(cws.brave_search, "web_search", _Brave(delay=5.0))
     out = await cws.run_web_search(_turn(), "Apple DOJ case")
     assert out["status"] == "unavailable" and out["upstream"] is True
-    assert led.counts == {USER(): 1, GLOBAL: 1} and led.refunds == []
+    assert led.counts == {GLOBAL: 1} and led.refunds == []
     assert cws._inflight == {}
 
 
@@ -637,10 +650,10 @@ async def test_cancelling_the_search_refunds_and_settles(env, monkeypatch):
     out = await asyncio.wait_for(handler, 2)
     assert out["status"] == "unavailable" and out["upstream"] is True
     for _ in range(20):                    # the detached refund
-        if set(led.refunds) == {USER(), GLOBAL}:
+        if led.refunds == [GLOBAL]:
             break
         await asyncio.sleep(0.01)
-    assert set(led.refunds) == {USER(), GLOBAL}
+    assert led.refunds == [GLOBAL]
     assert shared.done() and not shared.cancelled() and shared.result().status == "unavailable"
     assert cws._inflight == {}
 
@@ -856,7 +869,7 @@ async def test_pills_shape_and_alignment(env, monkeypatch):
 @pytest.mark.asyncio
 async def test_pills_are_empty_unless_results_were_returned(env, monkeypatch):
     led, _ = env
-    led.caps[USER()] = 0
+    led.caps[GLOBAL] = 0
     t = _turn()
     await cws.run_web_search(t, "Apple DOJ case")
     assert t.outcome().status == "daily_limit" and t.source_pills() == []
@@ -894,7 +907,7 @@ async def test_every_fixed_result_is_judged_correctly(env, monkeypatch):
     """The real outputs of every status, through the predicate the doors use."""
     led, _ = env
     assert cws.web_results_delivered(await cws.run_web_search(_turn(session="s1"), "Apple DOJ")) is True
-    led.caps[USER(UID2)] = 0
+    led.caps[GLOBAL] = 1                     # the day's allowance is now used up
     assert cws.web_results_delivered(await cws.run_web_search(_turn(UID2), "Apple DOJ")) is False
 
 
@@ -939,3 +952,81 @@ def test_single_lens_route_does_not_mutate_its_input():
     route = {"specialists": ["a", "b"], "mode": "synthesize", "labels": ["A", "B"]}
     cws.single_lens_route(route)
     assert route == {"specialists": ["a", "b"], "mode": "synthesize", "labels": ["A", "B"]}
+
+
+
+# ── spent_a_unit: did the turn's ONE search keep a unit of the global cap? ────
+#
+# The doors charge a cut answer on it (owner decision 2026-10-03), so it must be True exactly when
+# a unit was claimed and never handed back — whatever the search returned.
+
+@pytest.mark.asyncio
+async def test_a_search_with_results_spent_a_unit(env):
+    t = _turn()
+    await cws.run_web_search(t, "Apple DOJ case")
+    assert t.outcome().status == "ok" and t.spent_a_unit() is True
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_came_back_empty_still_spent_a_unit(env, monkeypatch):
+    led, _ = env
+    monkeypatch.setattr(cws.brave_search, "web_search", _Brave(result={"results": [
+        _row(host="www.reddit.com")]}))                      # every row denied → no_results
+    t = _turn()
+    await cws.run_web_search(t, "Apple DOJ case")
+    assert t.outcome().status == "no_results" and t.spent_a_unit() is True
+    assert led.counts == {GLOBAL: 1} and led.refunds == []
+
+
+@pytest.mark.asyncio
+async def test_a_capped_search_spent_no_unit(env):
+    led, _ = env
+    led.caps[GLOBAL] = 0
+    t = _turn()
+    await cws.run_web_search(t, "Apple DOJ case")
+    assert t.outcome().status == "daily_limit" and t.spent_a_unit() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc,spent", [
+    (bs.BraveSearchAuthException("x", not_run=True, status=401), False),          # refunded
+    (bs.BraveSearchRequestException("x", not_run=True, status=422), False),       # refunded
+    (bs.BraveSearchUnavailableException("read timeout", not_run=False), True),    # may be billed
+    (bs.BraveSearchUnavailableException("502", not_run=False, status=502), True),
+])
+async def test_spent_a_unit_follows_the_refund_matrix(env, monkeypatch, exc, spent):
+    monkeypatch.setattr(cws.brave_search, "web_search", _Brave(exc=exc))
+    t = _turn()
+    await cws.run_web_search(t, "Apple DOJ case")
+    assert t.spent_a_unit() is spent
+
+
+@pytest.mark.asyncio
+async def test_a_cache_hit_spent_no_unit(env):
+    led, brave = env
+    await cws.run_web_search(_turn(session="s1"), "Apple DOJ case")
+    t = _turn(session="s1")                                   # the same question again
+    await cws.run_web_search(t, "Apple DOJ case")
+    assert len(brave.calls) == 1 and t.spent_a_unit() is False
+
+
+@pytest.mark.asyncio
+async def test_a_claim_race_refund_spent_no_unit(env):
+    led, brave = env
+    done = cws.WebSearchOutcome(status="ok", query="Apple DOJ case",
+                                results=[{"n": 1, "publisher": "Reuters", "title": "t",
+                                          "published": None, "snippet": "s"}])
+
+    def _twin_finished(bucket):
+        if bucket == GLOBAL:
+            cws._cache_put((UID, "apple doj case", ""), done)
+
+    led.on_claim = _twin_finished
+    t = _turn()
+    await cws.run_web_search(t, "Apple DOJ case")
+    assert led.refunds == [GLOBAL] and t.spent_a_unit() is False
+
+
+def test_a_fresh_turn_spent_nothing():
+    t = cws.WebSearchTurn(user_id=UID)
+    assert t.spent_a_unit() is False

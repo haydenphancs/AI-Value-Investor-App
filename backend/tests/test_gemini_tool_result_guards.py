@@ -516,3 +516,381 @@ async def test_stream_agentic_announces_a_tool_before_its_handler_runs():
     assert kinds.count("tool_start") == 1 and kinds.count("tool") == 3
     assert events[kinds.index("tool_start")][1] == {"name": "web_search"}
     assert kinds.index("tool_start") < kinds.index("tool")
+
+
+# ── force_first_tool: an explicit "search the web" ask MUST search in round 1 ─
+#
+# Prod 2026-10-03: the prompt rule alone lost — under the routed sentiment lens, and whenever the
+# question said "news", the model took the headlines tool (a probe: 0/6 under the lens, 1/6 under
+# the general one). The gate already decided the search runs, so round 1 is sent with function
+# calling mode ANY restricted to that one tool; every later round runs on the ordinary config.
+
+
+def _forced_names(cfg):
+    tc = getattr(cfg, "tool_config", None)
+    fcc = getattr(tc, "function_calling_config", None) if tc is not None else None
+    if fcc is None:
+        return None
+    return (str(fcc.mode), list(fcc.allowed_function_names or []))
+
+
+def _declared_names(cfg) -> set:
+    return {fd.name for t in (getattr(cfg, "tools", None) or []) for fd in (t.function_declarations or [])}
+
+
+def _real_tools():
+    from app.services.agents.chat_tools import build_chat_tool_declarations
+    tools = build_chat_tool_declarations("STOCK", web_search=True)
+    assert "web_search" in {fd.name for t in tools for fd in (t.function_declarations or [])}
+    return tools
+
+
+def test_forced_tool_config_is_a_full_copy_with_mode_any_on_that_one_name():
+    """A per-message config REPLACES the chat's (google-genai `chats.py`: `config if config else
+    self._config`), so a forced copy that dropped the declarations or the manual-FC flag would send
+    `allowedFunctionNames` with no tools — every web turn rejected, the suite green (review LOW)."""
+    from google.genai import types
+
+    async def h(args):
+        return {}
+
+    base = GeminiClient.__new__(GeminiClient)
+    base._temperature = 0.7
+    base._max_tokens = 8192
+    cfg = base._config(system_instruction="SYS", tools=_real_tools(), max_output_tokens=777,
+                       thinking_config=gem._stream_thinking_config(256))
+    cfg.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
+    forced = gem._forced_tool_config(cfg, "web_search", {"web_search": h})
+    assert forced is not cfg
+    mode, names = _forced_names(forced)
+    assert mode.endswith("ANY") and names == ["web_search"]
+    assert _declared_names(forced) == _declared_names(cfg) and "web_search" in _declared_names(forced)
+    assert forced.automatic_function_calling.disable is True
+    assert forced.temperature == cfg.temperature == 0.7
+    assert forced.system_instruction == "SYS" and forced.max_output_tokens == 777
+    assert forced.thinking_config.thinking_budget == 256 and forced.thinking_config.include_thoughts
+    assert getattr(cfg, "tool_config", None) is None, "the ordinary config is never mutated"
+    assert isinstance(forced.tool_config, types.ToolConfig)
+
+
+@pytest.mark.parametrize("name,handlers", [
+    (None, {"web_search": object()}),
+    ("", {"web_search": object()}),
+    ("web_search", {}),                       # declared nowhere → forcing would end in an error result
+    ("web_search", {"web_search": None}),
+])
+def test_nothing_is_forced_without_a_name_or_a_handler(name, handlers):
+    cfg = object()
+    assert gem._forced_tool_config(cfg, name, handlers) is None
+
+
+def _recording_stream_client(rounds):
+    configs: list = []
+
+    class _Chat:
+        async def send_message_stream(self, message, **kw):
+            configs.append(kw.get("config"))
+            chunks = rounds.pop(0)
+
+            async def _gen():
+                for c in chunks:
+                    yield c
+            return _gen()
+
+    class _Chats:
+        def create(self, **kw):
+            return _Chat()
+
+    class _Aio:
+        chats = _Chats()
+
+    class _C:
+        aio = _Aio()
+
+    client = GeminiClient.__new__(GeminiClient)
+    client.model_name = "gemini-2.5-flash"
+    client._temperature = 0.7
+    client._max_tokens = 8192
+    client._client = _C()
+    return client, configs
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_forces_only_the_first_round():
+    gem._quota_circuit.reset()
+    client, configs = _recording_stream_client([
+        [_StreamChunk(_Part(fc=_FC("web_search", {"query": "MSFT news"})))],
+        [_StreamChunk(_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"})))],
+        [_StreamChunk(_Part(text="Done."))],
+    ])
+
+    async def h(args):
+        return {"ok": True}
+
+    events = [e async for e in client.stream_agentic(
+        "p", tools=_real_tools(), tool_handlers={"web_search": h, "get_ticker_news": h},
+        max_rounds=4, force_first_tool="web_search",
+    )]
+    assert [p["name"] for k, p in events if k == "tool"] == ["web_search", "get_ticker_news"]
+    assert len(configs) == 3
+    mode, names = _forced_names(configs[0])
+    assert mode.endswith("ANY") and names == ["web_search"]
+    assert "web_search" in _declared_names(configs[0]), "the forced round still declares the tools"
+    assert configs[0].automatic_function_calling.disable is True
+    assert configs[1] is None and configs[2] is None, "later rounds run on the chat's own config"
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_without_a_forced_tool_sends_no_override():
+    gem._quota_circuit.reset()
+    client, configs = _recording_stream_client([[_StreamChunk(_Part(text="Hi."))]])
+
+    async def h(args):
+        return {}
+
+    _ = [e async for e in client.stream_agentic("p", tools=[], tool_handlers={"web_search": h})]
+    assert configs == [None]
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_never_forces_a_tool_with_no_handler():
+    """The endpoint filters handlers by the asset class's allow-list; a forced name missing from
+    the map must not be forced (the model would be made to call a tool that cannot run)."""
+    gem._quota_circuit.reset()
+    client, configs = _recording_stream_client([[_StreamChunk(_Part(text="Hi."))]])
+
+    async def h(args):
+        return {}
+
+    _ = [e async for e in client.stream_agentic(
+        "p", tools=[], tool_handlers={"get_ticker_news": h}, force_first_tool="web_search",
+    )]
+    assert configs == [None]
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_forces_only_the_first_request():
+    gem._quota_circuit.reset()
+    first = _Resp([_Part(fc=_FC("web_search", {"query": "MSFT news"}))])
+    follow = _Resp([_Part(text="Here is the answer.")])
+    client, calls = _client([first, follow])
+
+    async def h(args):
+        return {"web_search": True, "status": "ok"}
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=[], tool_handlers={"web_search": h}, force_first_tool="web_search",
+    )
+    assert out["text"] == "Here is the answer."
+    assert len(calls) == 2
+    mode, names = _forced_names(calls[0]["config"])
+    assert mode.endswith("ANY") and names == ["web_search"]
+    assert _forced_names(calls[1]["config"]) is None, "the follow-up answers on the ordinary config"
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_without_a_forced_tool_is_unchanged():
+    gem._quota_circuit.reset()
+    client, calls = _client([_Resp([_Part(text="Hi.")])])
+
+    async def h(args):
+        return {}
+
+    await client.generate_with_tools(prompt="p", tools=[], tool_handlers={"web_search": h})
+    assert _forced_names(calls[0]["config"]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_forced_first_request_still_lets_the_follow_up_run_its_tools():
+    """Review LOW: the non-stream door had ONE executed tool round, and forcing spent it on the
+    search — the follow-up's headlines call was dropped for a tool-less answer, and a search outage
+    settled `no_tools` (refunded) here but charged on the stream door, whose round 2 ran it."""
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("web_search", {"query": "MSFT news"}))]),
+        _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Answer with both.")]),
+    ]
+    follow_up_content = responses[1].candidates[0].content
+    client, calls = _client(responses)
+    ran: list = []
+
+    async def web(args):
+        ran.append("web_search")
+        return {"error": "web search unavailable", "upstream": True}
+
+    async def news(args):
+        ran.append("get_ticker_news")
+        return {"articles": [{"title": "t"}]}
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(), tool_handlers={"web_search": web, "get_ticker_news": news},
+        force_first_tool="web_search",
+    )
+    assert out["text"] == "Answer with both."
+    assert ran == ["web_search", "get_ticker_news"]
+    assert out["tool_results"] == [{"articles": [{"title": "t"}]}], "the headlines reached the answer"
+    assert [e["name"] for e in out["tool_errors"]] == ["web_search"]
+    assert len(calls) == 3
+    assert _forced_names(calls[0]["config"])[1] == ["web_search"]
+    assert _forced_names(calls[1]["config"]) is None and _forced_names(calls[2]["config"]) is None
+    assert "get_ticker_news" in _declared_names(calls[2]["config"])
+    # One function_response per call, after the model turn that made it (review LOW: pin the
+    # PAIRING — the follow-up's own model turn, verbatim, then its responses).
+    last = calls[2]["contents"]
+    assert last[-2] is follow_up_content
+    assert [p.function_response.name for p in last[-1].parts] == ["get_ticker_news"]
+    assert len(last[-1].parts) == len([p for p in last[-2].parts if p.function_call])
+
+
+@pytest.mark.asyncio
+async def test_a_forced_turn_gets_one_extra_round_then_a_tool_less_answer():
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("web_search", {"query": "q"}))]),
+        _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "MSFT"}))]),   # still calling
+        _Resp([_Part(text="Final.")]),
+    ]
+    client, calls = _client(responses)
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(),
+        tool_handlers={n: make(n) for n in ("web_search", "get_ticker_news", "get_stock_chart_data")},
+        force_first_tool="web_search",
+    )
+    assert out["text"] == "Final."
+    assert ran == ["web_search", "get_ticker_news"], "bounded: one extra executed round only"
+    assert len(calls) == 4 and not _declared_names(calls[3]["config"]), "the last answer is tool-less"
+
+
+@pytest.mark.asyncio
+async def test_an_unforced_turn_keeps_its_single_executed_round():
+    """Unchanged for every non-web turn: a follow-up call is answered tool-less, not run."""
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "MSFT"}))]),
+        _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Final.")]),
+    ]
+    client, calls = _client(responses)
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(),
+        tool_handlers={n: make(n) for n in ("get_stock_chart_data", "get_ticker_news")},
+    )
+    assert out["text"] == "Final." and ran == ["get_stock_chart_data"] and len(calls) == 3
+
+
+
+@pytest.mark.asyncio
+async def test_a_forced_follow_up_with_a_preamble_and_a_call_still_runs_the_call():
+    """Review 2026-10-03 MED: a follow-up of [text "Let me also pull the headlines.", a call]
+    returned the preamble as the whole (charged) answer and never ran the call."""
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("web_search", {"query": "MSFT news"}))]),
+        _Resp([_Part(text="Let me also pull the latest headlines for MSFT."),
+               _Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="The full answer.")]),
+    ]
+    client, calls = _client(responses)
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(),
+        tool_handlers={n: make(n) for n in ("web_search", "get_ticker_news")},
+        force_first_tool="web_search",
+    )
+    assert out["text"] == "The full answer." and ran == ["web_search", "get_ticker_news"]
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_forced_round_two_preamble_with_another_call_answers_tool_less():
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("web_search", {"query": "q"}))]),
+        _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="One more thing first."), _Part(fc=_FC("get_stock_chart_data", {}))]),
+        _Resp([_Part(text="Final.")]),
+    ]
+    client, calls = _client(responses)
+
+    async def h(args):
+        return {"ok": True}
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(),
+        tool_handlers={n: h for n in ("web_search", "get_ticker_news", "get_stock_chart_data")},
+        force_first_tool="web_search",
+    )
+    assert out["text"] == "Final." and len(calls) == 4 and not _declared_names(calls[3]["config"])
+
+
+@pytest.mark.asyncio
+async def test_an_unforced_follow_up_with_text_and_a_call_keeps_its_text():
+    """Unchanged for every non-web turn: text beside a call is returned as before."""
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Here is the chart."), _Part(fc=_FC("get_ticker_news", {}))]),
+    ]
+    client, calls = _client(responses)
+
+    async def h(args):
+        return {"ok": True}
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(), tool_handlers={"get_stock_chart_data": h, "get_ticker_news": h},
+    )
+    assert out["text"] == "Here is the chart." and len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_extra_round_is_skipped_late_in_the_send_budget(monkeypatch):
+    """Unverified review LOW: round 2's tools run sequentially inside the 50 s send budget; past
+    the threshold the turn answers tool-less from what it already has."""
+    gem._quota_circuit.reset()
+    monkeypatch.setattr(gem, "_FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS", 0.0)
+    responses = [
+        _Resp([_Part(fc=_FC("web_search", {"query": "q"}))]),
+        _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Answer from the web results.")]),
+    ]
+    client, calls = _client(responses)
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(),
+        tool_handlers={n: make(n) for n in ("web_search", "get_ticker_news")},
+        force_first_tool="web_search",
+    )
+    assert out["text"] == "Answer from the web results." and ran == ["web_search"]
+    assert len(calls) == 3 and not _declared_names(calls[2]["config"]), "the tool-less final round"

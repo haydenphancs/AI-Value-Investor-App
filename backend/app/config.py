@@ -819,11 +819,14 @@ class Settings(BaseSettings):
     # ships off and is turned on only after a smoke test on the live plan.
     BRAVE_SEARCH_EXTRA_SNIPPETS: bool = False
     CHAT_REPORT_WEB_SEARCH_ENABLED: bool = True
-    # Fail-CLOSED denial-of-wallet buckets in `chat_usage_budget` (no migration), per account
-    # first, then global. At about $5 per 1,000 requests the global cap bounds the bill at
-    # roughly $2.50 a day. `0` disables.
-    CHAT_REPORT_WEB_SEARCH_USER_DAILY_CAP: int = 10
-    CHAT_REPORT_WEB_SEARCH_DAILY_CAP: int = 500
+    # ONE fail-CLOSED denial-of-wallet bucket in `chat_usage_budget` (no migration): searches a
+    # day across ALL accounts. No per-account cap (owner decision 2026-10-03: the global cap
+    # only), so one account can use the whole day's allowance; what bounds it is that account's
+    # credits and the per-minute chat rate limit — a turn whose search ran always costs its credit
+    # (no free follow-up; its cut answer stays charged, `chat._settles_no_cost`). At about $5 per 1,000 requests,
+    # 180 bounds the bill at about $0.90 a day (~$27 a month) — sized to the owner's Brave
+    # dashboard limit ($25 a month plus the $5 monthly credit). `0` disables the search.
+    CHAT_REPORT_WEB_SEARCH_DAILY_CAP: int = 180
     # The per-user, process-local transient cache (an iOS re-POST of the same question, or the
     # same query twice, must not pay twice). Never shared across users.
     CHAT_REPORT_WEB_SEARCH_CACHE_TTL_SECONDS: int = 120
@@ -887,9 +890,11 @@ class Settings(BaseSettings):
     # ChatTurnCostDTO "free_followup" arm and the server-authored badge label are all still
     # here, and `tests/test_chat_free_followup.py` still exercises them against an explicitly
     # pinned non-zero window, so the coverage does not go vacuous while the default is 0.
-    # To bring it back, set CHAT_FREE_FOLLOWUP_SECONDS=300 in the Railway environment
-    # and RESTART (settings is an lru_cache'd singleton — a redeploy is not required, but a
-    # restart is). Nothing else needs to change.
+    # OWNER DECISION 2026-10-03: no free follow-up — every chat question costs a credit. While
+    # this is 0, `_claim_chat_quota` does not even call `claim_free_followup`, so a window left
+    # in the table can never make a turn free. Re-enabling is an owner pricing decision; the
+    # mechanism is unchanged: CHAT_FREE_FOLLOWUP_SECONDS=300 in the Railway environment and a
+    # RESTART (settings is an lru_cache'd singleton).
     CHAT_FREE_FOLLOWUP_SECONDS: int = 0
 
     # Report pre-warming. After each market close the persona-neutral

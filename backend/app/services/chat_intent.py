@@ -259,6 +259,14 @@ _WEB_MASK_RE = re.compile("|".join((
     r"\blook\w*\s+(?:\w+\s+){0,2}?up\b[^.?!\n]{0,60}?\b(?:in|from)\s+(?:the|this|your|my)\s+report\b",
     # "investors look up to Buffett"
     r"\blook(?:s|ed|ing)?\s+up\s+to\b",
+    # "web" / "internet" / "website" as a business, not a request: Amazon Web Services, web
+    # traffic, an internet company, "the company's website" (owner test 2026-10-03 widened the
+    # terse website asks below, so their nouns must not fire inside finance prose).
+    r"\bweb\s+(?:services?|traffic|hosting|browsers?|apps?|platforms?|3|3\.0|summit)\b",
+    r"\bweb3\b",
+    r"\binternet\s+(?:company|companies|business(?:es)?|stocks?|giants?|services?|traffic|"
+    r"advertising|ads?|retail(?:ers?)?|sales)\b",
+    r"\b(?:company's|companies'|its|their|corporate|investor|official)\s+websites?\b",
 )), re.IGNORECASE)
 
 # The request frames that turn a verify / confirm verb into an ask ("can you verify…"). Bare
@@ -298,6 +306,19 @@ _WEB_INTENT_RE = re.compile("|".join((
     r"\bresearch\w*\s+(?:(?:it|this|that|them)\s+)?(?:online|on\s+the\s+(?:web|internet|net))\b",
     r"\b(?:saying|say|said|written|posted|out\s+there)\b[^.?!\n]{0,30}?"
     r"\b(?:online|on\s+the\s+(?:web|internet))\b",
+    # terse website / internet asks (owner test 2026-10-03: "Website for me on this" did not
+    # search): "website for me", "check the website(s) for this", "use the internet", "get it from
+    # the web", "what do websites say", "website search".
+    r"\b(?:web\s*sites?|web|internet)\s+(?:for\s+me|for\s+(?:this|that|it)|on\s+(?:this|that|it))\b",
+    r"\b(?:check|scan|search|look\s+(?:at|on|through)|go\s+(?:to|through)|try|visit)\w*\s+"
+    r"(?:the\s+|some\s+|other\s+|a\s+few\s+|any\s+)?(?:web\s*sites?|websites?|internet|web)\b",
+    r"(?:\b" + _WEB_REQUEST_FRAME + r"\s+|" + _WEB_IMPERATIVE_START + r")"
+    r"(?:use|try)\s+(?:the\s+)?(?:web|internet|net)\b",
+    r"\b(?:get|pull|grab|fetch|find|bring)\w*\s+(?:(?:it|this|that|them|these|those|some|more)\s+)?"
+    r"(?:info\w*\s+)?(?:from|off|on)\s+(?:the\s+)?(?:web|internet|net|web\s*sites?|websites?)\b",
+    r"\bwhat\s+(?:do|does|are|did)\s+(?:the\s+|other\s+)?(?:web\s*sites?|websites?|sites|web|internet|"
+    r"online\s+sources|sources\s+online)\s+(?:say|saying|report|show)\w*\b",
+    r"\bweb\s*sites?\s+search\w*\b",
     # google it
     r"\bgoogle\s+(?:it|that|this|them)\b",
     r"\b(?:please|pls|can\s+you|could\s+you|would\s+you|you\s+should|just)\s+google\b",

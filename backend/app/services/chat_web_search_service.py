@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "WEB_SEARCH_TOOL", "WebSearchOutcome", "WebSearchTurn", "open_web_search_turn",
     "report_web_search_available", "web_search_intent_unserved", "web_results_delivered",
+    "web_search_offered_on_request",
     "single_lens_route", "sanitize_web_query", "run_web_search", "MAX_WEB_PILLS",
 ]
 
@@ -405,6 +406,16 @@ def web_search_intent_unserved(
             and is_web_search_intent(user_message)
             and not report_web_search_available()
         )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def web_search_offered_on_request(session_type: Optional[str], context_type: Optional[str]) -> bool:
+    """A report chat where web search IS available (switch on, key set) — whether or not this turn
+    asked for it. On a turn that did not ask, the prompt tells the model it can search when asked,
+    so it never answers "I cannot browse the web" (owner test 2026-10-03). Pure, never raises."""
+    try:
+        return _report_chat(session_type, context_type) and report_web_search_available()
     except Exception:  # noqa: BLE001
         return False
 

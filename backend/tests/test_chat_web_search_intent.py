@@ -178,6 +178,9 @@ def test_empty_and_wrong_types_never_raise(junk):
     # ~1.1 s per call before the quantifiers were bounded (review 2026-10-02 HIGH).
     "." * 4000, "!" * 4000, "?" * 4000, ";" * 4000, ":" * 4000, ". " * 2000, ".\n" * 2000,
     ".  " * 1333, "." * 2000, "?!" * 2000, ("." * 3990) + "search",
+    # the terse website asks (2026-10-03)
+    "web " * 1000, "website " * 500, "get it " * 600, "what do websites " * 230,
+    "check the web for me on this? " * 140, "check" + " " * 3990 + "web",
 ])
 def test_adversarial_long_input_is_bounded(payload):
     started = time.perf_counter()
@@ -207,3 +210,30 @@ def test_independent_of_trade_intent():
     assert is_trade_intent(msg) is True
     assert is_web_search_intent(msg) is True
     assert is_trade_intent("search the web for the recall") is False
+
+
+
+# ── terse website / internet asks (owner test 2026-10-03) ─────────────────────
+#
+# "Website for me on this" (after "No, I mean stocks grade. Downgrade and upgrade") did not search,
+# and the model answered that it could not browse the web.
+
+@pytest.mark.parametrize("msg", [
+    "Website for me on this", "website for me on this", "Internet for me on this",
+    "check the website for this", "search website for this", "look at other websites",
+    "check the web", "use the internet", "Can you use the web for this?",
+    "what do websites say about this", "get it from the web", "pull this from the internet",
+    "website search on analyst upgrades",
+])
+def test_terse_website_asks_fire(msg):
+    assert is_web_search_intent(msg) is True, msg
+
+
+@pytest.mark.parametrize("msg", [
+    "How big is Amazon Web Services?", "AWS is the web services leader",
+    "is MSFT an internet company?", "what is the company's website?", "web traffic is growing",
+    "Does it sell through its website?", "how do they use the internet in their stores",
+    "internet advertising revenue", "Is it a web3 play?",
+])
+def test_website_as_a_business_word_does_not_fire(msg):
+    assert is_web_search_intent(msg) is False, msg

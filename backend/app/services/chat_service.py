@@ -61,6 +61,7 @@ from app.services.chat_web_search_service import (
     open_web_search_turn,
     web_results_delivered,
     web_search_intent_unserved,
+    web_search_offered_on_request,
 )
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
@@ -418,6 +419,11 @@ class ChatService:
             not web_search_granted
             and web_search_intent_unserved(session_type, context_type, user_message)
         )
+        # …and a report chat where search is available but this turn did not ask for it.
+        web_search_on_request = (
+            not web_search_granted and not web_search_unavailable
+            and web_search_offered_on_request(session_type, context_type)
+        )
 
         # ONE kwargs dict for both builds on this door (the tool round and the tool-less
         # fallback below), like the stream door's — so a new argument cannot reach one and
@@ -436,6 +442,7 @@ class ChatService:
             report_persona_key=report_persona_key,
             web_search_granted=web_search_granted,
             web_search_unavailable=web_search_unavailable,
+            web_search_on_request=web_search_on_request,
         )
         system_instruction = self._build_system_instruction(session_type, stock_id, **instr_kwargs)
         prompt = self._build_prompt(user_message, conversation_block, chunks)
@@ -745,6 +752,10 @@ class ChatService:
             web_turn is None
             and web_search_intent_unserved(session_type, context_type, user_message)
         )
+        web_search_on_request = (
+            web_turn is None and not web_search_unavailable
+            and web_search_offered_on_request(session_type, context_type)
+        )
         instr_kwargs = dict(
             profit_summary=profit_summary,
             snapshot_summary=snapshot_summary,
@@ -757,6 +768,7 @@ class ChatService:
             report_persona_key=report_persona_key,
             web_search_granted=web_turn is not None,
             web_search_unavailable=web_search_unavailable,
+            web_search_on_request=web_search_on_request,
         )
         system_instruction = self._build_system_instruction(session_type, stock_id, **instr_kwargs)
         # The same instruction WITHOUT tool claims, for the calls on this turn that carry no
@@ -2564,6 +2576,16 @@ class ChatService:
     _WEB_UNAVAILABLE_RULE = (
         "\nWEB SEARCH: No web search is available on this turn; never say you searched the web. "
     )
+    # A report chat where web search IS available, on a turn that did not ask for it: the model
+    # had no word about it and told a user "I do not have the ability to browse the web" (owner
+    # test 2026-10-03). It points the user at the explicit ask instead — which opens the gate.
+    _WEB_ON_REQUEST_RULE = (
+        "\nWEB SEARCH: You can search the web, but only on a turn where the user explicitly asks "
+        "you to (for example 'search the web for …'). This turn did not ask, so no web results "
+        "are in front of you: if outside or newer information would help, say they can ask you to "
+        "search the web for it. Never say you cannot browse or search the web, and never say you "
+        "searched on this turn. "
+    )
 
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
@@ -2581,6 +2603,7 @@ class ChatService:
         report_persona_key: Optional[str] = None,
         web_search_granted: bool = False,
         web_search_unavailable: bool = False,
+        web_search_on_request: bool = False,
     ) -> str:
         # `report_grounded`: the caller's server-side verdict that `client_context` is a
         # TICKER_REPORT block the resolver BUILT (never the client's own text) — it adds the
@@ -2809,6 +2832,8 @@ class ChatService:
             base += self._WEB_RESULTS_RULE
         elif web_search_granted or web_search_unavailable:
             base += self._WEB_UNAVAILABLE_RULE
+        elif web_search_on_request:
+            base += self._WEB_ON_REQUEST_RULE
 
         if client_context:
             # Spotlighting (OWASP LLM01, indirect injection): client_context is

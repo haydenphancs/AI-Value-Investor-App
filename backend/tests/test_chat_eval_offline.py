@@ -763,16 +763,33 @@ async def test_a_web_intent_the_gate_cannot_serve_gets_only_the_one_liner(monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("message,session_type", [
-    ("What is the moat?", "REPORT"),          # no web intent
     (_WEB_ASK, "STOCK"),                      # web intent outside a report chat
     (_WEB_ASK, "NORMAL"),
+    ("What is the moat?", "STOCK"),
 ])
-async def test_no_web_line_without_a_report_chat_web_intent(monkeypatch, message, session_type):
+async def test_no_web_line_outside_a_report_chat(monkeypatch, message, session_type):
     for gate_on in (True, False):
         out = await _web_prep(monkeypatch, gate_on=gate_on, message=message, session_type=session_type)
         for key in ("system_instruction", "system_instruction_no_tools"):
             assert "WEB RESULTS:" not in out[key] and "WEB SEARCH:" not in out[key], (key, gate_on)
         assert out["web_turn"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_report_chat_turn_that_did_not_ask_is_told_it_can_search_on_request(monkeypatch):
+    """Owner test 2026-10-03: with no word about web search the model answered "I do not have the
+    ability to browse the web" in a report chat that has one. With search available, a turn that
+    did not ask gets the one on-request line (no tool, no results rule); with it off, nothing."""
+    from app.services.chat_service import ChatService
+    out = await _web_prep(monkeypatch, gate_on=True, message="What is the moat?", session_type="REPORT")
+    assert out["web_turn"] is None
+    for key in ("system_instruction", "system_instruction_no_tools"):
+        _assert_once_before_fence(out[key], ChatService._WEB_ON_REQUEST_RULE)
+        assert "WEB RESULTS:" not in out[key] and _WEB_NONE not in out[key]
+        assert "web_search" not in out[key], "the tool is not offered on this turn"
+    off = await _web_prep(monkeypatch, gate_on=False, message="What is the moat?", session_type="REPORT")
+    for key in ("system_instruction", "system_instruction_no_tools"):
+        assert "WEB SEARCH:" not in off[key] and "WEB RESULTS:" not in off[key]
 
 
 @pytest.mark.asyncio

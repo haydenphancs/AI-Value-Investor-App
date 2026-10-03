@@ -462,3 +462,31 @@ def test_tool_start_is_consumed_before_the_stream_counts_as_started():
     body = _event_gen_source()
     start = body.index('if kind == "tool_start":')
     assert body.index("continue", start) < body.index("streamed_any = True", start)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override,expect", [
+    (dict(msg="what is the moat?"), True),                       # a report chat, search available
+    (dict(msg="what is the moat?", session_type="NORMAL"), False),
+    (dict(msg="what is the moat?", context_type="STOCK"), False),
+])
+async def test_the_send_door_tells_a_report_chat_it_can_search_on_request(web_env, monkeypatch,
+                                                                         override, expect):
+    """Owner test 2026-10-03: "I do not have the ability to browse the web" in a report chat that
+    has web search. A turn that did not ask gets the one on-request line — never the tool."""
+    svc = _svc(monkeypatch)
+    svc.gemini = _Gem()
+    await _gen(svc, **override)
+    instr = svc.gemini.kw["system_instruction"]
+    assert (ChatService._WEB_ON_REQUEST_RULE in instr) is expect
+    assert chat_tools.WEB_SEARCH_TOOL not in svc.gemini.kw["tool_handlers"]
+    assert svc.gemini.kw["force_first_tool"] is None
+
+
+@pytest.mark.asyncio
+async def test_no_on_request_line_when_search_is_off(web_env, monkeypatch):
+    monkeypatch.setattr(cws.settings, "BRAVE_SEARCH_API_KEY", "")
+    svc = _svc(monkeypatch)
+    svc.gemini = _Gem()
+    await _gen(svc, msg="what is the moat?")
+    assert "WEB SEARCH:" not in svc.gemini.kw["system_instruction"]

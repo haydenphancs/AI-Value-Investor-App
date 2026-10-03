@@ -132,3 +132,23 @@ def test_the_guard_catches_every_spelling(snippet):
 ])
 def test_the_guard_ignores_prose_and_unrelated_names(snippet):
     assert forbidden_uses(snippet) == [], snippet
+
+
+def test_no_chat_tool_but_web_search_promises_web_research():
+    """The prompt half of the retirement: `explain_price_move` lost its grounded catalyst tier on
+    2026-10-02, but its description and capability line still promised "a web-researched
+    catalyst with sources" — an invitation to claim web research no tool performed. Only the
+    Brave `web_search` tool may mention the web."""
+    import re
+
+    from app.services.agents.chat_tools import TOOL_CAPABILITIES, TOOL_DESCRIPTIONS, WEB_SEARCH_TOOL
+
+    web = re.compile(r"\bweb\b|web-|\binternet\b|\bgoogle\b|\bonline\b", re.IGNORECASE)
+    offenders = [
+        f"{table}[{name}]"
+        for table, texts in (("TOOL_DESCRIPTIONS", TOOL_DESCRIPTIONS), ("TOOL_CAPABILITIES", TOOL_CAPABILITIES))
+        for name, text in texts.items()
+        if name != WEB_SEARCH_TOOL and web.search(text)
+    ]
+    assert offenders == [], offenders
+    assert web.search(TOOL_DESCRIPTIONS[WEB_SEARCH_TOOL]), "the regex must still match the real web tool"

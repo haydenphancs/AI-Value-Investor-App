@@ -16,6 +16,7 @@ Pinned here, against a fake FMP client (hermetic — nothing reaches FMP):
 """
 from __future__ import annotations
 
+import zlib
 import json
 import logging
 import math
@@ -45,6 +46,16 @@ def _row(sym: str, cap: Any = 2e9, sector: str = "Financial Services", **over: A
 Spec = Union[List[Any], BaseException, Callable[[Dict[str, Any]], Any]]
 
 
+
+def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
+    """A `ratios-ttm` answer unique to `sym`: every listing reports its own statements, so
+    the statement-twin pass (2026-10-08) drops nothing these tests did not ask for. The
+    twin pass itself is pinned in test_benchmark_universe_builder_twins_2026_10_09.py."""
+    seed = zlib.crc32(sym.encode("utf-8")) + 1
+    return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
+             "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
+             "debtToEquityRatioTTM": 0.8}]
+
 class _FakeFMP:
     """`_make_request` double: industries from a list, screener rows per industry.
 
@@ -66,6 +77,8 @@ class _FakeFMP:
             if isinstance(self.industries, list):
                 return [{"industry": n} for n in self.industries]
             return self.industries
+        if endpoint == "ratios-ttm":     # the statement-twin pass: one set per listing
+            return _distinct_ratios(params["symbol"])
         assert endpoint == "company-screener", endpoint
         spec = self.screener[params["industry"]]
         if isinstance(spec, BaseException):
@@ -129,7 +142,10 @@ async def test_screener_is_asked_for_us_listed_operating_companies(tmp_path):
     assert params["isEtf"] == "false" and params["isFund"] == "false"
     assert params["isActivelyTrading"] == "true"
     assert set(params["exchange"].split(",")) == {"NYSE", "NASDAQ", "AMEX"}
-    assert params["marketCapMoreThan"] == str(FLOOR)
+    # The floor is NEVER sent (2026-10-08): FMP hides every row whose server-side cap is
+    # null (VMRK, VYLR, SKYD), so it is applied to the rows' own marketCap instead.
+    assert "marketCapMoreThan" not in params and "marketCapLowerThan" not in params
+    assert params["limit"] == str(bu._SCREENER_PAGE_LIMIT)
     # Domicile is NOT the filter: a US-listed foreign issuer (TSM, ASML) is a US listing.
     assert "country" not in params
     assert "page" not in params  # page 0 is the default, as `get_company_screener` sends it
@@ -215,14 +231,19 @@ async def test_a_few_rows_just_under_the_floor_are_drift_not_an_alarm(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_mass_sub_floor_rows_mean_the_floor_filter_was_ignored(tmp_path, caplog):
+async def test_mass_sub_floor_rows_are_the_client_side_floor_not_an_alarm(tmp_path, caplog):
+    """The screener is asked for EVERY cap since 2026-10-08, so most rows of an industry
+    fall under the floor: applied here, logged at INFO. (It used to mean the server's
+    `marketCapMoreThan` was ignored — that filter is no longer sent.)"""
     rows = [_row("BIG", cap=9e9)] + [_row(f"M{chr(65 + i)}", cap=5e6) for i in range(5)]
+    rows += [_row("ZRO", cap=0), _row("NUL", cap=None)]       # FMP's zero / missing caps
     out = tmp_path / "u.json"
     with caplog.at_level(logging.INFO, logger=bu.__name__):
         assert await _run(_FakeFMP({"Shell Companies": rows}), out) == bu.EXIT_OK
     assert _tickers(out) == ["BIG"]
-    assert _drop_log_levels(caplog) == {"below_floor": logging.WARNING}
-    assert "not honoured" in caplog.text
+    assert _drop_log_levels(caplog) == {"below_floor": logging.INFO,
+                                        "bad_market_cap": logging.INFO}
+    assert "not honoured" not in caplog.text
 
 
 @pytest.mark.parametrize("short,long_form,kept", [
@@ -301,34 +322,40 @@ async def test_a_fund_fmp_did_not_flag_is_kept_but_named(tmp_path, caplog):
     assert "ABCDX" in caplog.text and "fifth-letter" in caplog.text
 
 
-# ── paging: never a silent truncation ───────────────────────────────────────────────
+# ── one call per industry: never a silent truncation ────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_a_full_page_is_paged_not_truncated(tmp_path, caplog):
+async def test_a_full_page_fails_instead_of_being_paged(tmp_path, caplog):
+    """A second page cannot be made consistent with the first (2026-10-09 review), so an
+    industry that fills the page is refused — never paged, never written short."""
     syms = [f"AM{chr(65 + i)}" for i in range(7)]
     fmp = _FakeFMP({"Asset Management": [_row(s) for s in syms]})
     out = tmp_path / "u.json"
-    with caplog.at_level(logging.WARNING, logger=bu.__name__):
-        assert await _run(fmp, out, page_limit=3, max_pages=5) == bu.EXIT_OK
-    assert _tickers(out) == sorted(syms)
-    pages = [p.get("page") for p in fmp.screener_calls()]
-    assert pages == [None, "1", "2"]
-    assert "needed 3 screener pages" in caplog.text
+    with caplog.at_level(logging.ERROR, logger=bu.__name__):
+        assert await _run(fmp, out, page_limit=3) == bu.EXIT_BUILD_FAILED
+    assert not out.exists()
+    assert [p.get("page") for p in fmp.screener_calls()] == [None]
+    assert "TruncatedIndustryError" in caplog.text and "full 3-row page" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_an_exact_multiple_of_the_page_ends_on_the_empty_page(tmp_path):
+async def test_exactly_a_full_page_fails_one_short_is_complete(tmp_path):
+    """The boundary: `page_limit` rows may be a cut list; `page_limit - 1` cannot be."""
     syms = [f"AM{chr(65 + i)}" for i in range(6)]
     fmp = _FakeFMP({"Asset Management": [_row(s) for s in syms]})
     out = tmp_path / "u.json"
-    assert await _run(fmp, out, page_limit=3, max_pages=5) == bu.EXIT_OK
+    assert await _run(fmp, out, page_limit=6) == bu.EXIT_BUILD_FAILED
+    assert not out.exists()
+    fmp = _FakeFMP({"Asset Management": [_row(s) for s in syms]})
+    assert await _run(fmp, out, page_limit=7) == bu.EXIT_OK
     assert _tickers(out) == sorted(syms)
-    assert len(fmp.screener_calls()) == 3
+    assert len(fmp.screener_calls()) == 1
+    assert "page" not in fmp.screener_calls()[0]
 
 
 @pytest.mark.asyncio
-async def test_an_industry_still_full_at_the_page_cap_fails_and_writes_nothing(tmp_path, caplog):
+async def test_a_full_industry_fails_and_keeps_the_previous_file(tmp_path, caplog):
     """The 2026-06-24 'Asset Management' was exactly 1,000 rows: cut, not complete."""
     out = tmp_path / "u.json"
     before = _previous_file(out, 3)
@@ -337,21 +364,19 @@ async def test_an_industry_still_full_at_the_page_cap_fails_and_writes_nothing(t
         "Banks - Regional": [_row("FITB")],
     })
     with caplog.at_level(logging.ERROR, logger=bu.__name__):
-        assert await _run(fmp, out, page_limit=2, max_pages=2) == bu.EXIT_BUILD_FAILED
+        assert await _run(fmp, out, page_limit=2) == bu.EXIT_BUILD_FAILED
     assert out.read_text(encoding="utf-8") == before
     assert "Asset Management" in caplog.text and "TruncatedIndustryError" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_a_screener_that_ignores_page_fails_loudly(tmp_path, caplog):
-    page0 = [_row("AMA"), _row("AMB")]
-    fmp = _FakeFMP({"Asset Management": lambda params: list(page0)})
+async def test_a_non_list_screener_answer_fails_loudly(tmp_path, caplog):
+    fmp = _FakeFMP({"Asset Management": lambda params: {"Error Message": "x"}})
     out = tmp_path / "u.json"
     with caplog.at_level(logging.ERROR, logger=bu.__name__):
-        assert await _run(fmp, out, page_limit=2, max_pages=5) == bu.EXIT_BUILD_FAILED
+        assert await _run(fmp, out) == bu.EXIT_BUILD_FAILED
     assert not out.exists()
-    assert "not honouring `page`" in caplog.text
-    assert len(fmp.screener_calls()) == 2      # stopped at the first repeat, not the cap
+    assert "UnusableAnswerError" in caplog.text and "expected a list" in caplog.text
 
 
 # ── failures fail the build ─────────────────────────────────────────────────────────

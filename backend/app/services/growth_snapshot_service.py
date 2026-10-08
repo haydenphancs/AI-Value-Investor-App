@@ -112,7 +112,11 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     chart line (the industry when it is mature at the line's newest period, else the
 #     sector), are absent for a period not yet fully reported, and never borrow another
 #     period's value — a v2 row could score against a held-back or partial-year median.
-_SNAPSHOT_PAYLOAD_VERSION = 3
+# 4 (2026-10-09, owner decision NET-4; Growth is v6): a listed non-lender member of
+#     "Financial - Credit Services" (`financials_metric_gate.NON_LENDER_MEMBERS`) gets no
+#     peer value from Growth, so its rows score on the absolute bands. A v3 row of MA
+#     scored +15.7% operating-income growth 2/5 against the lenders' +24.6%.
+_SNAPSHOT_PAYLOAD_VERSION = 4
 _VERSION_KEY = "_schema_v"
 
 # GrowthService legs this card does NOT read: it scores only the newest ANNUAL point of

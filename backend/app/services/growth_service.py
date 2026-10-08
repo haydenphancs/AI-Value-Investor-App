@@ -29,6 +29,11 @@ from app.utils.period_labels import (
     quarterly_period_label,
 )
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
+from app.services.financials_metric_gate import (
+    comparable_peer_metrics,
+    resolve_payment_network,
+    trailing_interest_row,
+)
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
     benchmark_levels,
@@ -65,7 +70,12 @@ _CACHE_TTL = 300  # 5 minutes
 #     line's NEWEST period — its older, thinner periods included, each that industry's own
 #     median — else the sector's. A period that is not fully reported is hidden, and no
 #     period borrows another period's value; the unused QoQ peer value is gone.
-_GROWTH_PAYLOAD_VERSION = 5
+# 6 (2026-10-09, owner decision NET-4): a listed non-lender member of "Financial - Credit
+#     Services" (`financials_metric_gate.NON_LENDER_MEMBERS`) is never compared with that
+#     industry's median (a lenders' yardstick): no peer line, `peer_group_levels` empty,
+#     no benchmark read (`comparable_peer_metrics`). A v5 row of MA drew the lenders'
+#     +24.6% operating-income line under its +15.7%.
+_GROWTH_PAYLOAD_VERSION = 6
 _VERSION_KEY = "payload_version"
 
 
@@ -773,11 +783,21 @@ class GrowthService:
         fcf_annual_points = _compute_growth_points(annual_cashflow, "freeCashFlow", is_quarterly=False)
         fcf_quarterly_points = _compute_growth_points(quarterly_cashflow, "freeCashFlow", is_quarterly=True)
 
-        # Phase 4: look up pre-computed sector benchmarks (fast DB lookup, cached)
-        all_yoy_metrics = [
-            "eps_yoy", "revenue_yoy", "net_income_yoy",
-            "operating_income_yoy", "fcf_yoy",
-        ]
+        # Phase 4: look up pre-computed sector benchmarks (fast DB lookup, cached) — only
+        # for the metrics this company may be compared on at all (`financials_metric_gate`):
+        # none for a listed non-lender member of a mixed industry (its industry median is a
+        # lenders' yardstick). The verdict reads the trailing four of the quarters fetched
+        # above (one input on every surface; unreadable → the curated list stands).
+        network = resolve_payment_network(
+            ticker, industry, trailing_interest_row(quarterly_income), source="growth",
+        )
+        all_yoy_metrics = comparable_peer_metrics(
+            [
+                "eps_yoy", "revenue_yoy", "net_income_yoy",
+                "operating_income_yoy", "fcf_yoy",
+            ],
+            industry, network=network,
+        )
 
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
@@ -791,7 +811,14 @@ class GrowthService:
         # build must therefore not be persisted (a peer-less chart, and a snapshot
         # re-scored on absolute heuristics, pinned for 24h).
         failed_lookups: List[str] = []
-        if sector:
+        if sector and not all_yoy_metrics:
+            # Nothing comparable: neither series read runs, no peer line is drawn, and the
+            # build is NOT degraded (a company state, not an outage).
+            logger.info(
+                "Growth %s: no metric is compared with a peer median (industry=%r) — no "
+                "benchmark read, no peer line", ticker, industry,
+            )
+        elif sector:
             lookup = get_sector_benchmark_lookup()
             # The lookup is SYNCHRONOUS (sync supabase-py + a time.sleep retry), and a
             # cold key costs two paginated PostgREST reads. Run each on a worker thread

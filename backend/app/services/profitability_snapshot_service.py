@@ -28,6 +28,10 @@ from app.schemas.stock_overview import (
     with_cached_build_time,
 )
 from app.services.asset_class import profile_is_fund
+from app.services.financials_metric_gate import (
+    comparable_peer_metrics,
+    resolve_payment_network,
+)
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 from app.services.valuation_snapshot_service import split_peer_cells
@@ -150,7 +154,13 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     negative value never prints a negative multiple ("-14.40x sector avg"); the rating
 #     is weighted over the SCORED metrics only (renormalised, like the Growth card); each
 #     metric carries `peer_level` and the card `computed_at`.
-_SNAPSHOT_PAYLOAD_VERSION = 3
+# 4 (2026-10-09, owner decision NET-4): a listed non-lender member of "Financial - Credit
+#     Services" (`financials_metric_gate.NON_LENDER_MEMBERS`: V, MA, PYPL, WU, GPN, TREE,
+#     PMTS) is never compared with that industry's median (a lenders' yardstick): every
+#     row scores on the absolute bands with a bare label and `peer_level` None, and no
+#     lookup is made (`comparable_peer_metrics`). A v3 row of such a company compared its
+#     margins, ROE and ROA with lenders.
+_SNAPSHOT_PAYLOAD_VERSION = 4
 _VERSION_KEY = "_schema_v"
 
 # ── Ticker validation ────────────────────────────────────────────
@@ -782,11 +792,34 @@ class ProfitabilitySnapshotService:
         # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
+        # Which medians this card may compare at all (`financials_metric_gate`): none for a
+        # listed non-lender member of a mixed industry — the Credit Services median is a
+        # lenders' yardstick, so V's margins, ROE and ROA score on the absolute bands with
+        # bare labels. This card fetches no quarterly income, so the verdict rests on the
+        # curated list alone (income row None — the same rule as every surface without
+        # quarters; never an annual row on one card only).
+        network = resolve_payment_network(
+            ticker, industry, None, source="profitability_snapshot",
+        )
+        bench_metrics = comparable_peer_metrics(
+            ["gross_margin", "operating_margin", "net_margin", "roe", "roa"],
+            industry, network=network,
+        )
+
         # CURRENT benchmark per metric (`get_current_benchmarks`: mature industry TTM →
         # mature sector TTM → newest complete mature annual → none), with its peer level.
         cur_bench: Dict[str, Optional[float]] = {}
         cur_levels: Dict[str, Optional[str]] = {}
-        if sector:
+        if sector and not bench_metrics:
+            # Nothing comparable: NO lookup, and NOT degraded — a peer-free card is the
+            # company's state, not an outage (a failed read would otherwise keep it out of
+            # the 24h tier and the report for medians it never uses).
+            logger.info(
+                "Profitability snapshot for %s: no metric is compared with a peer median "
+                "(industry=%r) — no benchmark lookup; every row on absolute bands",
+                ticker, industry,
+            )
+        elif sector:
             try:
                 lookup = get_sector_benchmark_lookup()
                 # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
@@ -794,7 +827,7 @@ class ProfitabilitySnapshotService:
                     lookup.get_current_benchmarks,
                     industry,
                     sector,
-                    ["gross_margin", "operating_margin", "net_margin", "roe", "roa"],
+                    bench_metrics,
                 )
                 cur_bench, cur_levels = split_peer_cells(cells)
                 # A FAILED lookup (swallowed DB error) answers the same all-None shape as

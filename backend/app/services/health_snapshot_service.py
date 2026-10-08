@@ -32,8 +32,16 @@ from app.schemas.stock_overview import (
     with_cached_build_time,
 )
 from app.services.financials_metric_gate import (
-    interest_coverage_applicable,
-    liquidity_ratios_applicable,
+    CURRENT_RATIO,
+    DEBT_TO_EQUITY,
+    INTEREST_COVERAGE,
+    QUICK_RATIO,
+    company_metric_applicable,
+    comparable_peer_metrics,
+    peer_median_comparable,
+    resolve_payment_network,
+    resolve_withheld_company_rows,
+    trailing_interest_row,
 )
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
@@ -62,7 +70,26 @@ _CACHE_TTL = 300  # 5 minutes
 #     no comparison on either path; and a card with fewer than two SCORED rows is rated 0
 #     (unavailable) with no `weighted_score` — a bank's card rested on D/E alone (see
 #     `_MIN_SCORED_FOR_RATING`).
-_SNAPSHOT_PAYLOAD_VERSION = 5
+# 6 (2026-10-08, owner decision 3, first cut — never deployed): a card network / payment
+#     processor in "Financial - Credit Services" (interest income < 25% of revenue) got
+#     current ratio, interest coverage and quick ratio back on both paths, on absolute
+#     bands — so its card is RATED again; a v5 row of such a company is an unrated
+#     D/E-only card, rebuilt.
+# 7 (2026-10-08, same day): only a LISTED payment network (`financials_metric_gate.
+#     PAYMENT_NETWORKS`: V, MA, PYPL, WU, GPN, unless its own income reads as a lender's)
+#     gets them back, and its debt-to-equity is judged on absolute bands too (no peer
+#     median, `peer_level` None; the Health Check is v8). A v6 row may be a first-cut card
+#     of an unlisted lender (ENVA, SEZL) with the three rows, or a network's D/E compared
+#     against lenders — written only by a local run, rebuilt either way.
+# 8 (2026-10-09, owner decisions NET-4 / NET-5; the Health Check is v9): the non-lender fee
+#     businesses TREE and PMTS join the listed members (`NON_LENDER_MEMBERS`) and keep the
+#     three rows on absolute bands; a curated per-company fact withholds WU's current
+#     ratio, quick ratio and interest coverage on the fallback too (`CURATED_WITHHELD_ROWS`
+#     — its card is then unrated, one scored row); the fallback asks the lookup only for
+#     the metrics it may compare (`comparable_peer_metrics`) and none at all for a listed
+#     member, so a lookup failure no longer degrades a peer-free card. A v7 row of WU may
+#     carry its made-up rows (local runs only); one of TREE / PMTS lacks theirs.
+_SNAPSHOT_PAYLOAD_VERSION = 8
 _VERSION_KEY = "_schema_v"
 
 
@@ -670,6 +697,7 @@ class HealthSnapshotService:
                 f"HealthCheckService returned None for {ticker} — using local fallback"
             )
             from app.services.health_check_service import (
+                _absolute_status,
                 _bank_pooled_sector_cell,
                 altman_z_applicable,
             )
@@ -678,9 +706,31 @@ class HealthSnapshotService:
             sector = _normalize_sector(raw_sector) if raw_sector else ""
             # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
             industry = profile.get("industry", "") if isinstance(profile, dict) else ""
+            # A listed non-lender member of a MIXED industry keeps the liquidity and coverage
+            # rows (the same verdict as the Health Check: the curated list, vetoed only by
+            # a trailing-four-quarter income that reads as a lender's — from the quarters
+            # fetched above). Every other member, and a call with no ticker, is gated.
+            network = resolve_payment_network(
+                ticker, industry, trailing_interest_row(inc_raw),
+                source="health_snapshot_fallback",
+            )
+            # The medians this card may compare at all (`comparable_peer_metrics`): none for
+            # a listed non-lender member (every row on absolute bands), D/E alone for a bank
+            # or a lender. Nothing to compare → no lookup, so a failed read cannot mark a
+            # peer-free card degraded.
+            fb_metrics = comparable_peer_metrics(
+                ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
+                industry, network=network,
+            )
             sector_ic = sector_qr = sector_de = sector_cr = None
             fb_levels: Dict[str, Optional[str]] = {}
-            if sector:
+            if sector and not fb_metrics:
+                logger.info(
+                    "Health snapshot fallback %s: no metric is compared with a peer median "
+                    "(industry=%r) — no benchmark lookup; every row on absolute bands",
+                    ticker, industry,
+                )
+            elif sector:
                 try:
                     # CURRENT benchmark per metric (`get_current_benchmarks`: mature
                     # industry TTM → mature sector TTM → newest complete mature annual →
@@ -690,7 +740,7 @@ class HealthSnapshotService:
                         get_sector_benchmark_lookup().get_current_benchmarks,
                         industry,
                         sector,
-                        ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
+                        fb_metrics,
                     )
                     cur, fb_levels = split_peer_cells(cells)
                     # A FAILED lookup (swallowed DB error) answers the same all-None
@@ -709,10 +759,24 @@ class HealthSnapshotService:
                     # producer leaves those out, shells, exchanges and developers: no
                     # comparison (the Health Check's PERMANENT rule,
                     # `_bank_pooled_sector_cell`).
-                    for metric in ("interest_coverage", "quick_ratio", "current_ratio"):
-                        if cur.get(metric) is not None and _bank_pooled_sector_cell(
-                            metric, fb_levels.get(metric), sector,
-                        ):
+                    # Nor is ANY median of these ratios for a gated or mixed industry, nor
+                    # any median at all for a listed non-lender member
+                    # (`peer_median_comparable`; not even asked for above — this guard is
+                    # the backstop for a lookup that answers more than it was asked).
+                    for metric in (
+                        "interest_coverage", "quick_ratio", "current_ratio", "debt_to_equity",
+                    ):
+                        if cur.get(metric) is None:
+                            continue
+                        if not peer_median_comparable(metric, industry, network=network):
+                            logger.info(
+                                "Health snapshot fallback %s: %s median %r (%s) is no peer "
+                                "group for industry=%r — no comparison",
+                                ticker, metric, cur.get(metric), fb_levels.get(metric),
+                                industry,
+                            )
+                            cur = {**cur, metric: None}
+                        elif _bank_pooled_sector_cell(metric, fb_levels.get(metric), sector):
                             logger.info(
                                 "Health snapshot fallback %s: %s median %r is the Financial "
                                 "Services SECTOR's (industry=%r) — not a peer group, no "
@@ -753,6 +817,22 @@ class HealthSnapshotService:
                 ))
             z_rating = _zscore_rating(z_score)
 
+            def _row_score(
+                metric: str, value: Optional[float], median: Optional[float],
+                *, lower_is_better: bool = False,
+            ) -> Optional[int]:
+                """The fallback's 4 / 2 score against a peer median — or, for a row that is
+                never compared (`peer_median_comparable` False: every row of a listed
+                non-lender member), the Health Check's own ABSOLUTE band, so both paths
+                judge it alike."""
+                if peer_median_comparable(metric, industry, network=network):
+                    return _fallback_sector_score(
+                        value, median, lower_is_better=lower_is_better,
+                    )
+                if value is None:
+                    return None
+                return _status_score(_absolute_status(metric, value))
+
             # Debt-to-Equity = total debt / shareholders' equity
             total_debt = _safe_float(bs, "totalDebt")
             equity = (
@@ -767,25 +847,41 @@ class HealthSnapshotService:
                 value=_fmt_value("debt_to_equity", de),
                 metric_key="debt_to_equity",
                 peer_level=_peer_level(fb_levels.get("debt_to_equity"), de, sector_de),
-                score=_fallback_sector_score(de, sector_de, lower_is_better=True),
+                score=_row_score(DEBT_TO_EQUITY, de, sector_de, lower_is_better=True),
             ))
 
             # Current ratio, interest coverage and quick ratio are omitted for a bank /
-            # insurer / capital-markets firm, and current + quick ratio only for an
+            # insurer / capital-markets firm / lender, and current + quick ratio only for an
             # insurance broker, exactly as the health check omits them
-            # (`financials_metric_gate`), so the two paths of this card show the same rows.
-            # Their values stay None, so they are not scored in pass_rating below either.
-            liquidity_ok = liquidity_ratios_applicable(industry)
-            coverage_ok = interest_coverage_applicable(industry)
-            if not (liquidity_ok and coverage_ok):
+            # (`financials_metric_gate`), so the two paths of this card show the same rows;
+            # a mixed-industry company keeps them only when it is a listed non-lender member
+            # (`network`), and a curated per-company fact withholds them in any industry
+            # (`CURATED_WITHHELD_ROWS`: WU — logged once here). Omitted values stay None, so
+            # they are not scored in pass_rating below either.
+            curated_withheld = resolve_withheld_company_rows(
+                ticker, source="health_snapshot_fallback",
+            )
+            liquidity_ok = company_metric_applicable(
+                CURRENT_RATIO, industry, network=network, ticker=ticker,
+            )
+            coverage_ok = company_metric_applicable(
+                INTEREST_COVERAGE, industry, network=network, ticker=ticker,
+            )
+            quick_ok = company_metric_applicable(
+                QUICK_RATIO, industry, network=network, ticker=ticker,
+            )
+
+            industry_omitted = [
+                name for name, key, ok in (
+                    ("current ratio", CURRENT_RATIO, liquidity_ok),
+                    ("interest coverage", INTEREST_COVERAGE, coverage_ok),
+                    ("quick ratio", QUICK_RATIO, quick_ok),
+                ) if not ok and key not in curated_withheld
+            ]
+            if industry_omitted:
                 logger.info(
                     "Health snapshot fallback %s: %s omitted — not meaningful for "
-                    "industry=%r", ticker,
-                    ", ".join(name for name, ok in (
-                        ("current ratio", liquidity_ok), ("interest coverage", coverage_ok),
-                        ("quick ratio", liquidity_ok),
-                    ) if not ok),
-                    industry,
+                    "industry=%r", ticker, ", ".join(industry_omitted), industry,
                 )
 
             # Current Ratio = total current assets / total current liabilities
@@ -803,7 +899,7 @@ class HealthSnapshotService:
                     value=_fmt_value("current_ratio", cr),
                     metric_key="current_ratio",
                     peer_level=_peer_level(fb_levels.get("current_ratio"), cr, sector_cr),
-                    score=_fallback_sector_score(cr, sector_cr, lower_is_better=False),
+                    score=_row_score("current_ratio", cr, sector_cr),
                 ))
 
             # Interest Coverage = EBIT / |Interest Expense|. interestExpense
@@ -822,24 +918,24 @@ class HealthSnapshotService:
                     value=_fmt_value("interest_coverage", ic),
                     metric_key="interest_coverage",
                     peer_level=_peer_level(fb_levels.get("interest_coverage"), ic, sector_ic),
-                    score=_fallback_sector_score(ic, sector_ic, lower_is_better=False),
+                    score=_row_score("interest_coverage", ic, sector_ic),
                 ))
 
             # Quick Ratio = (cash + receivables) / current liabilities
             cash = _safe_float(bs, "cashAndCashEquivalents")
             receivables = _safe_float(bs, "netReceivables")
             qr = None
-            if liquidity_ok and curr_liab is not None and curr_liab > 0:
+            if quick_ok and curr_liab is not None and curr_liab > 0:
                 qr_numerator = (cash or 0) + (receivables or 0)
                 if qr_numerator > 0:
                     qr = round(qr_numerator / curr_liab, 2)
-            if liquidity_ok:
+            if quick_ok:
                 metrics.append(SnapshotMetricResponse(
                     name=_metric_name("quick_ratio", qr, sector_qr),
                     value=_fmt_value("quick_ratio", qr),
                     metric_key="quick_ratio",
                     peer_level=_peer_level(fb_levels.get("quick_ratio"), qr, sector_qr),
-                    score=_fallback_sector_score(qr, sector_qr, lower_is_better=False),
+                    score=_row_score("quick_ratio", qr, sector_qr),
                 ))
 
         # ── Rating blend: 40% Altman Z + 60% pass-rate over the 4 sector-
@@ -881,10 +977,10 @@ class HealthSnapshotService:
             # 3, so a leveraged/illiquid company's D/E, CR, IC, QR did not move the
             # overall Financial Health rating at all (it was driven by Altman Z alone).
             _fb = [
-                _fallback_sector_score(de, sector_de, lower_is_better=True),
-                _fallback_sector_score(cr, sector_cr, lower_is_better=False),
-                _fallback_sector_score(ic, sector_ic, lower_is_better=False),
-                _fallback_sector_score(qr, sector_qr, lower_is_better=False),
+                _row_score(DEBT_TO_EQUITY, de, sector_de, lower_is_better=True),
+                _row_score("current_ratio", cr, sector_cr),
+                _row_score("interest_coverage", ic, sector_ic),
+                _row_score("quick_ratio", qr, sector_qr),
             ]
             _fb = [s for s in _fb if s is not None]
             if _fb:

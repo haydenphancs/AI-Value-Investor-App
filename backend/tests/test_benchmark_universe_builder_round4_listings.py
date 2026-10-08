@@ -22,6 +22,7 @@ the family. Hermetic: pure functions, plus `main()` against a fake FMP client.
 """
 from __future__ import annotations
 
+import zlib
 import json
 import logging
 import math
@@ -426,19 +427,30 @@ def test_operating_trusts_are_still_not_named(caplog, name):
 
 
 def test_the_documented_bdc_policy():
-    """Docstring: a BDC votes as an operating company, except one whose name says Fund,
-    which the name rule cannot tell from a closed-end fund. Pinned so a change to either
-    half is deliberate (and updates the docstring + OWNER_TASKS)."""
+    """Docstring: a BDC votes as an operating company — since the owner call of 2026-10-08
+    also one whose name says "Lending Fund" (MSDL, BXSL); any other fund name still drops.
+    Pinned so a change to either half is deliberate (and updates the docstring +
+    OWNER_TASKS). The full matrix is test_benchmark_universe_builder_decisions_2026_10_08.py."""
     assert bu._drop_reason(_row("ARCC", "Ares Capital Corporation", "NASDAQ"), FLOOR) is None
     assert bu._drop_reason(_row("OBDC", "Blue Owl Capital Corporation"), FLOOR) is None
-    assert bu._drop_reason(_row("MSDL", "Morgan Stanley Direct Lending Fund"), FLOOR) \
-        == "fund_name"
-    assert bu._drop_reason(_row("BXSL", "Blackstone Secured Lending Fund"), FLOOR) \
+    assert bu._drop_reason(_row("MSDL", "Morgan Stanley Direct Lending Fund"), FLOOR) is None
+    assert bu._drop_reason(_row("BXSL", "Blackstone Secured Lending Fund"), FLOOR) is None
+    assert bu._drop_reason(_row("UTF", "Cohen & Steers Infrastructure Fund"), FLOOR) \
         == "fund_name"
 
 
 # ── end to end through main() ─────────────────────────────────────────────────────────
 
+
+
+def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
+    """A `ratios-ttm` answer unique to `sym`: every listing reports its own statements, so
+    the statement-twin pass (2026-10-08) drops nothing these tests did not ask for. The
+    twin pass itself is pinned in test_benchmark_universe_builder_twins_2026_10_09.py."""
+    seed = zlib.crc32(sym.encode("utf-8")) + 1
+    return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
+             "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
+             "debtToEquityRatioTTM": 0.8}]
 
 class _FakeFMP:
     def __init__(self, screener: Dict[str, List[Dict[str, Any]]]):
@@ -447,6 +459,8 @@ class _FakeFMP:
     async def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None):
         if endpoint == "available-industries":
             return [{"industry": n} for n in self.screener]
+        if endpoint == "ratios-ttm":     # the statement-twin pass: one set per listing
+            return _distinct_ratios(params["symbol"])
         rows = self.screener[params["industry"]]
         limit, page = int(params["limit"]), int(params.get("page", 0))
         return rows[page * limit:(page + 1) * limit]

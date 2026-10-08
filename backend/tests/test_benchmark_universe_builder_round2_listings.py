@@ -24,6 +24,7 @@ Hermetic: pure functions, plus `main()` against a fake FMP client.
 """
 from __future__ import annotations
 
+import zlib
 import ast
 import json
 import logging
@@ -497,6 +498,16 @@ def test_a_long_suspect_list_is_capped(caplog):
 # ── end to end through main(): the file written and the log lines ───────────────────────
 
 
+
+def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
+    """A `ratios-ttm` answer unique to `sym`: every listing reports its own statements, so
+    the statement-twin pass (2026-10-08) drops nothing these tests did not ask for. The
+    twin pass itself is pinned in test_benchmark_universe_builder_twins_2026_10_09.py."""
+    seed = zlib.crc32(sym.encode("utf-8")) + 1
+    return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
+             "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
+             "debtToEquityRatioTTM": 0.8}]
+
 class _FakeFMP:
     def __init__(self, screener: Dict[str, List[Dict[str, Any]]]):
         self.screener = screener
@@ -504,6 +515,8 @@ class _FakeFMP:
     async def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None):
         if endpoint == "available-industries":
             return [{"industry": n} for n in self.screener]
+        if endpoint == "ratios-ttm":     # the statement-twin pass: one set per listing
+            return _distinct_ratios(params["symbol"])
         rows = self.screener[params["industry"]]
         limit, page = int(params["limit"]), int(params.get("page", 0))
         return rows[page * limit:(page + 1) * limit]
@@ -571,10 +584,12 @@ def test_the_search_grammar_is_the_same_object_not_a_copy():
 
 
 def test_the_fund_name_patterns_equal_the_search_endpoints():
-    """Copied (so the script does not import the endpoint layer) — kept equal here."""
+    """Copied (so the script does not import the endpoint layer) — kept equal here. The
+    "Lending Fund" exemption too (owner call 2026-10-08): the universe counts MSDL / BXSL as
+    companies, and the search must type them "stock" by the same words."""
     import app.api.v1.endpoints.stocks as stocks_ep
 
-    for name in ("_FUND_NAME_RE", "_ETF_NAME_RE"):
+    for name in ("_FUND_NAME_RE", "_ETF_NAME_RE", "_LENDING_FUND_RE"):
         mine, theirs = getattr(bu, name), getattr(stocks_ep, name)
         assert (mine.pattern, mine.flags) == (theirs.pattern, theirs.flags), name
 

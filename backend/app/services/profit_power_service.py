@@ -35,6 +35,11 @@ from app.utils.period_labels import (
     quarterly_period_label,
 )
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
+from app.services.financials_metric_gate import (
+    comparable_peer_metrics,
+    resolve_payment_network,
+    trailing_interest_row,
+)
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
     benchmark_levels,
@@ -79,7 +84,12 @@ _DEGRADED_CACHE_TTL = 60
 # "annual"/"quarterly" are now the NET-margin line's level (was a vote pooled over all
 # four margins), plus per-metric "annual.<metric>" / "quarterly.<metric>" keys — so a v6
 # row can label a sector line "Industry" and lacks the keys the report drill-down reads.
-_PP_PAYLOAD_VERSION = 7
+# v8 (2026-10-09, owner decision NET-4): a listed non-lender member of "Financial - Credit
+# Services" (`financials_metric_gate.NON_LENDER_MEMBERS`) is never compared with that
+# industry's median (a lenders' yardstick): no margin peer line, `peer_group_levels` empty,
+# no benchmark read (`comparable_peer_metrics`) — so Cay AI's peer net-margin sentence is
+# gone for them too. A v7 row of V drew the lenders' margins beside V's.
+_PP_PAYLOAD_VERSION = 8
 _VERSION_KEY = "payload_version"
 
 # The margin whose peer line the live Profit Power card draws (and Cay AI quotes): its
@@ -673,12 +683,29 @@ class ProfitPowerService:
         _MARGIN_BENCHMARK_METRICS = [
             "net_margin", "gross_margin", "operating_margin", "fcf_margin",
         ]
+        # Only the margins this company may be compared on at all (`financials_metric_gate`):
+        # none for a listed non-lender member of a mixed industry (its industry median is a
+        # lenders' yardstick). The verdict reads the trailing four of the quarters fetched
+        # above (one input on every surface; unreadable → the curated list stands).
+        network = resolve_payment_network(
+            ticker, industry, trailing_interest_row(quarterly_income), source="profit_power",
+        )
+        bench_metrics = comparable_peer_metrics(
+            _MARGIN_BENCHMARK_METRICS, industry, network=network,
+        )
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
         # Peer level of the value each benchmark cell SHOWS, per metric and period.
         levels_annual: Dict[str, Dict[str, Optional[str]]] = {}
         levels_quarterly: Dict[str, Dict[str, Optional[str]]] = {}
-        if sector:
+        if sector and not bench_metrics:
+            # Nothing comparable: no read, no peer line, and NOT degraded (a company state,
+            # not an outage).
+            logger.info(
+                "profit_power[%s]: no margin is compared with a peer median (industry=%r) — "
+                "no benchmark read, no peer line", ticker, industry,
+            )
+        elif sector:
             lookup = get_sector_benchmark_lookup()
             # The lookup is SYNCHRONOUS (sync supabase-py + a time.sleep retry): run it on
             # a worker thread so a cold key cannot stall the event loop.
@@ -688,14 +715,14 @@ class ProfitPowerService:
             # peer value, never an earlier year's median).
             rich = await asyncio.to_thread(
                 lookup.get_benchmark_series,
-                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual",
+                industry, sector, bench_metrics, "annual",
             )
             # Quarterly peers are the CALENDAR-quarter rows (migration 184), never the
             # legacy fiscal-keyed 'quarterly' rows (peer quarters 3-10 months apart for
             # every off-calendar company).
             q_rich: Optional[Dict[str, Any]] = await asyncio.to_thread(
                 lookup.get_benchmark_series,
-                industry, sector, _MARGIN_BENCHMARK_METRICS, CALENDAR_QUARTER_PERIOD_TYPE,
+                industry, sector, bench_metrics, CALENDAR_QUARTER_PERIOD_TYPE,
             )
             # A FAILED lookup (a Supabase blip that outlasted the lookup's retry) answers
             # the same empty shape as "this peer group has no rows", flagged only by its

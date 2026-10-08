@@ -413,9 +413,12 @@ def _row(json_data, age=timedelta(hours=2)):
 
 
 @pytest.mark.parametrize("modname,clsname,category,current", [
+    # 4 (2026-10-09, NET-4): a listed non-lender member is never compared with lenders.
     ("app.services.profitability_snapshot_service", "ProfitabilitySnapshotService",
-     "Profitability", 3),
-    ("app.services.health_snapshot_service", "HealthSnapshotService", "Financial Health", 5),
+     "Profitability", 4),
+    # 7 (2026-10-08): payment networks keep their liquidity rows, on absolute bands.
+    # 8 (2026-10-09, NET-5): TREE / PMTS join; WU's curated withheld rows.
+    ("app.services.health_snapshot_service", "HealthSnapshotService", "Financial Health", 8),
 ])
 def test_version_bump_rebuilds_old_rows_and_keeps_the_build_time(
     modname, clsname, category, current,

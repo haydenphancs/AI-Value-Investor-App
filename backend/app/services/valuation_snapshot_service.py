@@ -32,6 +32,10 @@ from app.schemas.stock_overview import (
     snapshot_build_time,
     with_cached_build_time,
 )
+from app.services.financials_metric_gate import (
+    comparable_peer_metrics,
+    resolve_payment_network,
+)
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
@@ -82,7 +86,14 @@ _CACHE_TTL = 300  # 5 minutes
 #     same-period cell, never a partial year). Each snapshot service versions its OWN rows
 #     (one `snapshot_cache` table, one row per category, same `_schema_v` key), so this
 #     bump rebuilds the Price card only.
-_SNAPSHOT_PAYLOAD_VERSION = 6
+# 7 (2026-10-09, owner decision NET-4): a listed non-lender member of "Financial - Credit
+#     Services" (`financials_metric_gate.NON_LENDER_MEMBERS`) is never compared with that
+#     industry's median (a lenders' yardstick): no lookup, bare labels, and the card is
+#     RATED only when at least two multiples were actually judged
+#     (`_MIN_JUDGED_FOR_RATING`), else rating 0 with no `weighted_score` — the network-
+#     scoped rule; every other company is unchanged. A v6 row of V read "P/E (2.72x sector
+#     avg 11.7)" and 1/5 against lenders.
+_SNAPSHOT_PAYLOAD_VERSION = 7
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -701,12 +712,32 @@ class ValuationSnapshotService:
         # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
+        # Which medians this card may compare at all (`financials_metric_gate`): none for a
+        # listed non-lender member of a mixed industry — V's P/E against a median of
+        # lenders read "2.72x sector avg 11.7", 1/5. The verdict rests on the curated list
+        # alone here (income row None): this card fetches only an ANNUAL income row, and
+        # every surface uses one input — the trailing quarters where fetched, else none.
+        network = resolve_payment_network(
+            ticker, industry, None, source="valuation_snapshot",
+        )
+        bench_metrics = comparable_peer_metrics(
+            ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
+            industry, network=network,
+        )
+
         # CURRENT benchmark per metric (`get_current_benchmarks`: mature industry TTM →
         # mature sector TTM → newest complete mature annual → none), as the median
         # {metric: value | None} plus the peer level of each cell for `peer_level`.
         cur_bench: Dict[str, Optional[float]] = {}
         cur_levels: Dict[str, Optional[str]] = {}
-        if sector:
+        if sector and not bench_metrics:
+            # Nothing comparable: NO lookup, and NOT degraded (a company state, not an
+            # outage — a failed read would keep a peer-free card out of the 24h tier).
+            logger.info(
+                "Valuation snapshot for %s: no multiple is compared with a peer median "
+                "(industry=%r) — no benchmark lookup", ticker, industry,
+            )
+        elif sector:
             try:
                 lookup = get_sector_benchmark_lookup()
                 # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
@@ -714,7 +745,7 @@ class ValuationSnapshotService:
                     lookup.get_current_benchmarks,
                     industry,
                     sector,
-                    ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
+                    bench_metrics,
                 )
                 cur_bench, cur_levels = split_peer_cells(cells)
                 # A FAILED lookup (swallowed DB error) answers the same all-None shape as
@@ -739,6 +770,9 @@ class ValuationSnapshotService:
         snapshot = build_price_snapshot(
             fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile,
             bench=cur_bench, bench_levels=cur_levels, ticker=ticker,
+            # The network-scoped two-judged-multiples rule: only when the gate withheld
+            # the medians for a listed non-lender member.
+            peers_withheld=network is True,
         )
         # While DCF_ENABLED, FMP's DCF is retired and the Caydex estimate is attached at SERVE
         # time (get_valuation_snapshot), never stored in this row.
@@ -810,6 +844,12 @@ def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:
 
 
 
+#: The Price card of a company whose peer medians were withheld (`peers_withheld`) is rated
+#: only when at least this many multiples were actually judged (NET-4, 2026-10-09). With
+#: the medians withheld only P/E can be judged, so today such a card is always unrated.
+_MIN_JUDGED_FOR_RATING = 2
+
+
 def build_price_snapshot(
     *,
     fr: Dict[str, Any],
@@ -821,6 +861,7 @@ def build_price_snapshot(
     bench: Dict[str, Optional[float]],
     bench_levels: Optional[Dict[str, Optional[str]]] = None,
     ticker: str = "?",
+    peers_withheld: bool = False,
 ) -> SnapshotItemResponse:
     """Ratios + benchmark medians -> the "Price" snapshot card.
 
@@ -846,6 +887,24 @@ def build_price_snapshot(
     caller owns the I/O and the caching policy. `ticker` is diagnostics only —
     it names the symbol in the EV/EBITDA reconstruction log lines, which are the
     only way to see WHY a ticker fell to "—" without re-instrumenting.
+
+    `peers_withheld` (owner decision 2026-10-09, NET-4; network-scoped, NOT a global rule):
+    True only when `financials_metric_gate` withheld every median for a listed non-lender
+    member of a mixed industry. The card is then RATED only when at least
+    `_MIN_JUDGED_FOR_RATING` multiples were actually judged — a positive P/E (its absolute
+    bands), or a positive P/B, P/S, P/FCF or EV/EBITDA beside a usable median; otherwise
+    rating 0 and no `weighted_score` (iOS: unavailable; the report's valuation vital falls
+    back to the DCF upside), each row keeping its own score, logged as
+    ``[valuation-unrated]``. Without it, P/E on bands plus four neutral 3 votes made a
+    "fair" rating out of nothing (the precedent the Health card and the Overview Price
+    fallback already set). Every other caller: unchanged.
+
+    IN PRACTICE TODAY a withheld card is ALWAYS unrated: with the medians withheld,
+    `_compute_with_status` makes no lookup and passes ``bench={}``, so no multiple but P/E
+    has a usable median and at most ONE multiple can be judged (V, MA, PYPL, WU, GPN,
+    TREE, PMTS: rating 0). The two-judged branch is reachable only if a member is ever
+    given a real peer median (e.g. a payments peer group) — revisit this rule then; the
+    tests that rate a withheld card with medians cover that future path, not production.
 
     Stamps `computed_at` with the build instant.
     """
@@ -1109,6 +1168,30 @@ def build_price_snapshot(
         + _vote(score_ev) * 0.25
     )
     rating = max(1, min(5, round(weighted)))
+    weighted_score: Optional[float] = round(weighted, 3)
+
+    if peers_withheld:
+        # How many multiples were actually JUDGED (never a neutral vote): P/E on its own
+        # bands when positive; the other four only beside a usable median.
+        judged = sum((
+            pe is not None and pe > 0,
+            *(
+                value is not None and value > 0 and _usable_median(median) is not None
+                for value, median in (
+                    (pb, sector_pb), (ps, sector_ps), (pfcf, sector_pfcf), (ev_ebitda, sector_ev),
+                )
+            ),
+        ))
+        if judged < _MIN_JUDGED_FOR_RATING:
+            logger.info(
+                "[valuation-unrated] ticker=%s judged=%d: the peer medians were withheld "
+                "(a listed non-lender member — so only P/E, on its own bands, can be "
+                "judged) and fewer than %d multiples were judged — rating 0, no "
+                "weighted_score; each row keeps its own score",
+                ticker, judged, _MIN_JUDGED_FOR_RATING,
+            )
+            rating = 0
+            weighted_score = None
 
     def _metric(label, key, bench_key, value, display, score, pct=False):
         ctx = (_sector_ctx_pct if pct else _sector_ctx)(value, _median(bench_key))
@@ -1142,7 +1225,7 @@ def build_price_snapshot(
         rating=rating,
         metrics=metrics,
         full_report_available=True,
-        weighted_score=round(weighted, 3),
+        weighted_score=weighted_score,
         computed_at=snapshot_build_time(),
     )
 

@@ -716,7 +716,8 @@ def test_the_profitability_upsert_stamps_the_version():
     svc._upsert_supabase_cache("AAPL", card)
     (payload,) = svc.supabase.upserts
     assert payload["category"] == "Profitability"
-    assert payload["response_json"][ps._VERSION_KEY] == ps._SNAPSHOT_PAYLOAD_VERSION == 3
+    # 4 since 2026-10-09 (NET-4: a listed non-lender member is never compared with lenders).
+    assert payload["response_json"][ps._VERSION_KEY] == ps._SNAPSHOT_PAYLOAD_VERSION == 4
 
     # What it writes, it reads back.
     _, reader = _prof_svc_with_rows([_row(payload["response_json"])])

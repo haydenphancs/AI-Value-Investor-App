@@ -14,6 +14,7 @@ Hermetic: `main()` against a fake FMP client, and the CLI parser on argument lis
 """
 from __future__ import annotations
 
+import zlib
 import ast
 import json
 import logging
@@ -41,6 +42,16 @@ def _syms(prefix: str, n: int) -> List[str]:
     return [f"{prefix}{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(n)]
 
 
+
+def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
+    """A `ratios-ttm` answer unique to `sym`: every listing reports its own statements, so
+    the statement-twin pass (2026-10-08) drops nothing these tests did not ask for. The
+    twin pass itself is pinned in test_benchmark_universe_builder_twins_2026_10_09.py."""
+    seed = zlib.crc32(sym.encode("utf-8")) + 1
+    return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
+             "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
+             "debtToEquityRatioTTM": 0.8}]
+
 class _FakeFMP:
     def __init__(self, screener: Dict[str, List[Dict[str, Any]]]):
         self.screener = screener
@@ -50,6 +61,8 @@ class _FakeFMP:
         self.calls += 1
         if endpoint == "available-industries":
             return [{"industry": n} for n in self.screener]
+        if endpoint == "ratios-ttm":     # the statement-twin pass: one set per listing
+            return _distinct_ratios(params["symbol"])
         rows = self.screener[params["industry"]]
         limit, page = int(params["limit"]), int(params.get("page", 0))
         return rows[page * limit:(page + 1) * limit]

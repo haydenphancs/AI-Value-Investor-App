@@ -9,7 +9,14 @@ insight text. Altman Z-Score uses absolute thresholds (no peer benchmark). Banks
 insurers, capital-markets firms, asset managers and lenders get no Current Ratio, Quick
 Ratio or Interest Coverage row (`financials_metric_gate`; insurance brokers keep Interest
 Coverage), and no Altman Z for the Financial Services / Real Estate sectors
-(`altman_z_applicable`) — the models assume an operating company's balance sheet.
+(`altman_z_applicable`) — the models assume an operating company's balance sheet. In the
+mixed "Financial - Credit Services" industry a listed non-lender member (the payment
+networks V, MA, PYPL, WU, GPN and the fee businesses TREE, PMTS; `NON_LENDER_MEMBERS`)
+keeps those three rows, and EVERY row of it — Debt-to-Equity, P/E and ROE included — is
+judged on absolute bands only: no peer median, `peer_level` None (the industry's median is
+a lenders' yardstick). A curated per-company fact withholds rows in any industry
+(`CURATED_WITHHELD_ROWS`: WU has no Current Ratio, Quick Ratio or Interest Coverage row —
+its filings carry no current/non-current split, and FMP's interest expense is not WU's).
 """
 
 from typing import List, Optional

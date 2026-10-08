@@ -499,7 +499,9 @@ async def test_negative_live_cagr_is_kept_and_lifecycle_declines(sb, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_small_constituent_count_stays_emerging(monkeypatch):
+async def test_a_small_constituent_count_no_longer_means_emerging(monkeypatch):
+    """Growth-rate only (owner decision 2026-10-09): 3 constituents and a 20% CAGR is
+    secular growth, not "emerging". Mutation: restoring the constituent rule."""
     fake = _FakeSB([_row(constituent_count=3, concentration_label="fragmented")])
     monkeypatch.setattr(ids, "get_supabase", lambda: fake)
 
@@ -507,7 +509,7 @@ async def test_small_constituent_count_stays_emerging(monkeypatch):
         return _live(cagr_5y_pct=20.0)
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials")
-    assert d.lifecycle_phase == "emerging"
+    assert d.lifecycle_phase == "secular_growth"
 
 
 @pytest.mark.asyncio
@@ -1054,3 +1056,14 @@ def test_construction_industries_are_not_industry_grain():
     assert its.expects_industry_grain(PLUG_INDUSTRY)
     assert its.expects_industry_grain("Restaurants")
     assert not its.expects_industry_grain("Construction")
+
+
+def test_a_stored_emerging_row_is_rederived_from_its_cagr():
+    """Rows written before 2026-10-09 carry "emerging" from a constituent count; reading
+    one re-derives the phase from its stored CAGR. Mutation: trusting the stored column."""
+    from app.services.industry_dossier_service import IndustryDossier
+    for cagr, phase in [(None, "mature"), (4.0, "mature"), (22.0, "secular_growth"),
+                        (-3.0, "declining")]:
+        row = _row(constituent_count=3, concentration_label="fragmented")
+        row.update({"lifecycle_phase": "emerging", "cagr_5y_pct": cagr})
+        assert IndustryDossier.from_db_row(row).lifecycle_phase == phase

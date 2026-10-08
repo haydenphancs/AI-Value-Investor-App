@@ -208,7 +208,9 @@ class IndustryDossier:
             cagr_5y_pct=_f("cagr_5y_pct"),
             industry=str(row.get("industry") or ""),
             sector=str(row.get("sector") or ""),
-            lifecycle_phase=str(row.get("lifecycle_phase") or "mature"),
+            # Re-derived from the stored CAGR on every read (2026-10-09): rows written
+            # before the growth-only rule carry "emerging" from a constituent count.
+            lifecycle_phase=classify_lifecycle(_f("cagr_5y_pct")),
             hhi=_f("hhi"),
             top1_share_pct=_f("top1_share_pct"),
             top2_share_pct=_f("top2_share_pct"),
@@ -239,10 +241,15 @@ def classify_concentration(top1_pct: float, top2_pct: float, hhi: float) -> str:
     return "fragmented"
 
 
-def classify_lifecycle(cagr_5y_pct: Optional[float], num_constituents: int) -> str:
-    """Mirror of `ticker_report_data_collector._classify_lifecycle`."""
-    if 0 < num_constituents < 5:
-        return "emerging"
+def classify_lifecycle(
+    cagr_5y_pct: Optional[float], num_constituents: Optional[int] = None,
+) -> str:
+    """Mirror of `ticker_report_data_collector._classify_lifecycle`: the phase comes from
+    the industry's growth rate ALONE (owner decision 2026-10-09). `num_constituents` is
+    accepted and IGNORED: "fewer than 5 constituents = emerging" read FMP's coverage and the
+    universe's US-only filter as industry maturity — the cleaned US-only roster would have
+    labelled ~10 more industries "emerging" (moat Network Effects 7.5 instead of 5.0 / 3.0)
+    with no change in their growth."""
     if cagr_5y_pct is None:
         return "mature"
     if cagr_5y_pct > 15.0:
@@ -361,7 +368,7 @@ def _merge_live_tam(stored: "IndustryDossier", live: "IndustryDossier") -> "Indu
         cagr_5y_pct=cagr,
         source_grain=live.source_grain,
         tam_scope="us",  # Phase A sources (Census/FRED) are US-domestic
-        lifecycle_phase=classify_lifecycle(cagr, stored.constituent_count or 0),
+        lifecycle_phase=classify_lifecycle(cagr),
         sector=stored.sector or live.sector,
     )
 
@@ -957,7 +964,7 @@ class IndustryDossierService:
             # we can't see).
             concentration_label = "fragmented"
 
-        lifecycle = classify_lifecycle(tam_proxy.cagr_5y_pct, len(caps))
+        lifecycle = classify_lifecycle(tam_proxy.cagr_5y_pct)
 
         return IndustryDossier(
             current_tam=tam_proxy.current_tam,

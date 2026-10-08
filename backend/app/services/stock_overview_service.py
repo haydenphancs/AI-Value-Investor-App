@@ -1353,6 +1353,8 @@ class StockOverviewService:
             sector_name,
             profile=profile,
             industry=profile.get("industry", "") if isinstance(profile, dict) else "",
+            ticker=ticker,
+            income_quarterly=income_quarterly,
             profitability_snapshot=profitability_snapshot,
             growth_snapshot=growth_snapshot,
             valuation_snapshot=valuation_snapshot,
@@ -1743,7 +1745,8 @@ class StockOverviewService:
         cashflow_annual: List[Dict], price: float, market_cap: float,
         sector: str, profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
-        profile: Optional[Dict] = None, industry: str = "",
+        profile: Optional[Dict] = None, industry: str = "", ticker: Optional[str] = None,
+        income_quarterly: Optional[List[Dict]] = None,
     ) -> List[SnapshotItemResponse]:
         snapshots = []
 
@@ -1784,6 +1787,7 @@ class StockOverviewService:
         else:
             snapshots.append(self._build_health_snapshot(
                 bs, inc0, cf0, fr, km, market_cap, sector=sector, industry=industry,
+                ticker=ticker, income_quarterly=income_quarterly,
             ))
 
         # 5. Insiders & Ownership (use cached snapshot if available)
@@ -1964,6 +1968,7 @@ class StockOverviewService:
     def _build_health_snapshot(
         self, bs: Dict, inc: Dict, cf: Dict, fr: Dict, km: Dict,
         market_cap: float, *, sector: str = "", industry: str = "",
+        ticker: Optional[str] = None, income_quarterly: Optional[List[Dict]] = None,
     ) -> SnapshotItemResponse:
         # Altman Z-Score — ONE implementation, shared with `health_check_service`.
         #
@@ -1986,7 +1991,13 @@ class StockOverviewService:
         #
         # Imported inside the method: module-scope would couple two large services at
         # import time for one helper, and this mirrors how the rest of the file defers.
-        from app.services.financials_metric_gate import interest_coverage_applicable
+        from app.services.financials_metric_gate import (
+            INTEREST_COVERAGE,
+            company_metric_applicable,
+            resolve_payment_network,
+            resolve_withheld_company_rows,
+            trailing_interest_row,
+        )
         from app.services.health_check_service import _compute_z_score, altman_z_applicable
 
         # `_compute_z_score` reads the raw dicts with its OWN Optional-returning
@@ -2048,7 +2059,23 @@ class StockOverviewService:
         # manager or lender (interest IS its cost of goods): the Health Check omits the row
         # for them (`financials_metric_gate.interest_coverage_applicable` — an insurance
         # broker keeps it: a fee business whose lenders watch it), and so does this card.
-        if interest_coverage_applicable(industry):
+        # In a MIXED industry ("Financial - Credit Services") only a listed non-lender member
+        # keeps the row (`financials_metric_gate.resolve_payment_network`: the ticker is on
+        # the curated `NON_LENDER_MEMBERS` and its trailing four quarters — the
+        # ``income_quarterly`` the overview already fetched, the SAME input every other
+        # surface uses, never this card's annual `inc` — do not read as a lender's; no
+        # quarters → the list stands); every other member, and a call with no ticker, does
+        # not (fail closed). A curated per-company fact withholds it in any industry
+        # (`CURATED_WITHHELD_ROWS`: WU). The row is never compared or scored here (this card
+        # rates on Altman Z only).
+        network = resolve_payment_network(
+            ticker, industry, trailing_interest_row(income_quarterly),
+            source="overview_fallback_health",
+        )
+        resolve_withheld_company_rows(ticker, source="overview_fallback_health")
+        if company_metric_applicable(
+            INTEREST_COVERAGE, industry, network=network, ticker=ticker,
+        ):
             metrics.append(SnapshotMetricResponse(
                 name="Interest Coverage",
                 value=f"{interest_coverage:.1f}x" if interest_coverage else "—"

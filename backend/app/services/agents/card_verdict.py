@@ -51,6 +51,16 @@ _VOCAB = {
     "altman_z": ("Rock-Solid Balance Sheet", "Bankruptcy Risk"),
 }
 
+# The peer-free twin of every "{peer}" phrase above (2026-10-09, NET-4), used when the
+# card compared nothing with peers (`peer_compared=False`): a listed non-lender member's
+# P/E and EV/EBITDA are scored on absolute bands (or not at all) and its gross margin on
+# absolute thresholds, so "Pricey vs Industry" would claim a comparison nobody made.
+_PEER_FREE_VOCAB = {
+    "gross_margin": ("High Gross Margins", "Low Gross Margins"),
+    "pe": ("Low P/E", "High P/E"),
+    "ev_ebitda": ("Low EV/EBITDA", "High EV/EBITDA"),
+}
+
 
 def _peer_word(peer_level: Optional[str]) -> str:
     return "Industry" if peer_level == "industry" else "Sector"
@@ -58,8 +68,18 @@ def _peer_word(peer_level: Optional[str]) -> str:
 
 _NOT_RATED: Tuple[str, str] = ("Not Rated", "neutral")
 
+# A card none of whose rows was compared with a peer median (`peer_compared=False`) says
+# nothing about peers: its neutral and rating-fallback labels name no peer group, and a
+# "{peer}" phrase uses its `_PEER_FREE_VOCAB` twin. The report passes it for a Health card
+# with no compared row, and for EVERY card of a listed non-lender member (2026-10-09).
+_PEER_FREE_NEUTRAL = "Neither Strong Nor Weak"
+_PEER_FREE_STRONG = "Strong on Absolute Measures"
+_PEER_FREE_WEAK = "Weak on Absolute Measures"
 
-def _rating_fallback(star_rating: int, peer: str) -> Tuple[str, str]:
+
+def _rating_fallback(
+    star_rating: int, peer: str, *, peer_compared: bool = True,
+) -> Tuple[str, str]:
     """No usable per-metric scores → a generic, peer-aware label from the rating.
 
     A card rated 0 never reaches here: `generate_card_verdict` answers "Not Rated" first
@@ -67,10 +87,10 @@ def _rating_fallback(star_rating: int, peer: str) -> Tuple[str, str]:
     if star_rating <= 0:
         return _NOT_RATED
     if star_rating >= 4:
-        return f"Beats {peer} Average", "positive"
+        return (f"Beats {peer} Average" if peer_compared else _PEER_FREE_STRONG), "positive"
     if 1 <= star_rating <= 2:
-        return f"Below {peer} Average", "negative"
-    return f"In Line With {peer}", "neutral"
+        return (f"Below {peer} Average" if peer_compared else _PEER_FREE_WEAK), "negative"
+    return (f"In Line With {peer}" if peer_compared else _PEER_FREE_NEUTRAL), "neutral"
 
 
 def generate_card_verdict(
@@ -78,6 +98,8 @@ def generate_card_verdict(
     star_rating: int,
     peer_level: Optional[str],
     scored_metrics: List[Tuple[Optional[str], Optional[int]]],
+    *,
+    peer_compared: bool = True,
 ) -> Tuple[str, str]:
     """Return (label, sentiment) for one card.
 
@@ -98,6 +120,19 @@ def generate_card_verdict(
     (`health_snapshot_service._MIN_SCORED_FOR_RATING`). Composing from that one row gave
     0 stars beside "Light Debt Load" / "Heavy Debt Load" / "In Line With Industry": a
     card-level verdict on a card the design declared unrated.
+
+    `peer_compared=False` (2026-10-08): no row of the card was compared with a peer
+    median, so no label may name one. The real shape is a listed non-lender member's
+    (`NON_LENDER_MEMBERS`: V, MA, … TREE, PMTS) Financial Health card: Altman Z does not apply in Financial Services and every
+    kept row — D/E, current, quick, interest coverage — is judged on absolute bands
+    (`financials_metric_gate.peer_median_comparable`), while the ticker-wide peer level
+    still says "industry". "In Line With Industry" there claimed a comparison nobody made.
+    A failed benchmark lookup leaves the same card. The neutral and rating-fallback labels
+    name no peer group, and since 2026-10-09 (NET-4: every card of a listed non-lender
+    member is peer-free) a "{peer}" phrase — gross margin, P/E, EV/EBITDA — uses its
+    peer-free twin (`_PEER_FREE_VOCAB`: "High P/E", not "Pricey vs Industry"). Every other
+    phrase names no peer and is unchanged. The default (``True``) keeps every direct
+    caller's output exactly as before.
     """
     if star_rating is None or star_rating <= 0:
         return _NOT_RATED
@@ -109,7 +144,7 @@ def generate_card_verdict(
         if k and s is not None and k in _VOCAB
     ]
     if not valid:
-        return _rating_fallback(star_rating, peer)
+        return _rating_fallback(star_rating, peer, peer_compared=peer_compared)
 
     def weight(k: str) -> float:
         return weights.get(k, 0.1)
@@ -126,7 +161,8 @@ def generate_card_verdict(
     )
 
     def phrase(key: str, strong: bool) -> str:
-        return _VOCAB[key][0 if strong else 1].replace("{peer}", peer)
+        vocab = _VOCAB if peer_compared or key not in _PEER_FREE_VOCAB else _PEER_FREE_VOCAB
+        return vocab[key][0 if strong else 1].replace("{peer}", peer)
 
     if strengths and drags:
         return f"{phrase(strengths[0][0], True)}, {phrase(drags[0][0], False)}", "neutral"
@@ -134,4 +170,4 @@ def generate_card_verdict(
         return phrase(strengths[0][0], True), "positive"
     if drags:
         return phrase(drags[0][0], False), "negative"
-    return f"In Line With {peer}", "neutral"
+    return (f"In Line With {peer}" if peer_compared else _PEER_FREE_NEUTRAL), "neutral"

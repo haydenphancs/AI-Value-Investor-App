@@ -443,7 +443,8 @@ def test_valuation_cache_hit_keeps_the_original_build_time(monkeypatch):
     writer = _valuation_with_rows([])
     writer._upsert_supabase_cache("KO", built)
     (payload,) = writer.supabase.upserts
-    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 6
+    # 7 (2026-10-09, NET-4): a listed non-lender member's Price card is peer-free.
+    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 7
     assert payload["response_json"]["computed_at"] == "2026-10-07T10:00:00Z"
     assert payload["response_json"]["metrics"][0]["peer_level"] is None   # the key travels
 

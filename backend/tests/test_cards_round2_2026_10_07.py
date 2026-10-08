@@ -114,7 +114,7 @@ def _overview() -> StockOverviewService:
     ("", set()), (None, set()), (7, set()),
 ])
 def test_omitted_financial_rows(industry, omitted):
-    assert hc.omitted_financial_rows(industry) == frozenset(omitted)
+    assert hc.omitted_financial_rows(industry, ticker=None) == frozenset(omitted)
     for metric in _GATED:
         assert gate.peer_metric_applicable(metric, industry) is (metric not in omitted)
 

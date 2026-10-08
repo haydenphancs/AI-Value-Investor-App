@@ -36,10 +36,15 @@ from app.services.asset_class import profile_is_fund
 from app.services.financials_metric_gate import (  # noqa: F401  (re-exported names)
     GATED_METRICS,
     _NO_LIQUIDITY_INDUSTRIES as _LIQUIDITY_NA_INDUSTRIES,
+    company_metric_applicable,
     industry_key as _industry_key,
     interest_coverage_applicable,
     liquidity_ratios_applicable,
+    peer_median_comparable,
     peer_metric_applicable,
+    resolve_payment_network,
+    resolve_withheld_company_rows,
+    trailing_interest_row,
 )
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
@@ -77,7 +82,33 @@ _CACHE_TTL = 300  # 5 minutes
 #     pools bank and insurer values, and once the producer leaves those out it is shells,
 #     exchanges and developers — never a peer group. A v5 row (a local run may have
 #     written one) is rebuilt.
-_HC_PAYLOAD_VERSION = 6
+# 7 (2026-10-08, owner decision 3, first cut — never deployed): card networks and payment
+#     processors in "Financial - Credit Services" kept current ratio, quick ratio and
+#     interest coverage when their interest income was under 25% of revenue. A v6 row of a
+#     network lacks the three rows, so it is rebuilt.
+# 8 (2026-10-08, same day): the 25% share misread real LENDERS whose interest income FMP
+#     zero-fills (ENVA, SEZL, QFIN, FINV looked exactly like V). A Credit Services company
+#     is now a payment network only when its ticker is on the curated
+#     `financials_metric_gate.PAYMENT_NETWORKS` (V, MA, PYPL, WU, GPN) and its own income
+#     does not read as a lender's; every other member stays gated. A network's current
+#     ratio, quick ratio, interest coverage AND debt-to-equity are judged on ABSOLUTE bands
+#     only (the industry's medians pool lenders: `peer_median_comparable`, `peer_level`
+#     None). A v7 row is rebuilt: a local run of the first cut (`uvicorn --reload` against
+#     the shared cache) may have written one for an unlisted lender with the three rows,
+#     or a network with its D/E compared against lenders. v7 never shipped, so in
+#     production this bump rebuilds nothing that v7 would not.
+# 9 (2026-10-09, owner decisions NET-4 / NET-5): a listed non-lender member of "Financial -
+#     Credit Services" is never compared with that industry's median on ANY metric — its
+#     P/E and ROE rows join D/E and the three liquidity / coverage rows on the absolute
+#     bands (`peer_median_comparable`, `peer_level` None), and when nothing is left to ask
+#     no benchmark lookup is made (so a Supabase blip cannot mark that build degraded).
+#     The list grows by the non-lender fee businesses TREE and PMTS
+#     (`financials_metric_gate.NON_LENDER_MEMBERS`), and a curated per-company fact
+#     withholds WU's current ratio, quick ratio and interest coverage
+#     (`CURATED_WITHHELD_ROWS`: FMP's split and its interest expense are not WU's). A v8
+#     row of V / MA / PYPL / GPN compared P/E and ROE with lenders; a v8 row of WU (local
+#     runs only — v8 never shipped) carries its made-up rows; TREE / PMTS lacked theirs.
+_HC_PAYLOAD_VERSION = 9
 _HC_VERSION_KEY = "payload_version"
 
 # ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────
@@ -1165,6 +1196,15 @@ def _peer_noun(level: Optional[str]) -> str:
 # and an equity REIT's interest coverage is the number its lenders watch. Those keep the
 # three rows, deliberately. Insurance brokers keep interest coverage and lose only the
 # current / quick ratio (review round 2: their fiduciary funds distort only those two).
+# "Financial - Credit Services" is MIXED (2026-10-08, owner decision 3; widened 2026-10-09):
+# a listed non-lender member in it (`financials_metric_gate.NON_LENDER_MEMBERS`: the
+# payment networks V, MA, PYPL, WU, GPN and the fee businesses TREE, PMTS, unless its own
+# income reads as a lender's) keeps the three rows, and EVERY row of it — D/E, P/E and ROE
+# included — is judged on absolute bands only; every other member — a lender, an unlisted
+# company, a build with no ticker — does not (`resolve_payment_network` /
+# `omitted_financial_rows(industry, network=..., ticker=...)`). A curated per-company fact
+# withholds rows whatever the industry (`CURATED_WITHHELD_ROWS`: WU's current ratio, quick
+# ratio and interest coverage).
 # `tests/test_health_check_2026_10_07*.py` walks every Financial Services and Real Estate
 # industry in the universe files, so a new FMP industry name fails the build until someone
 # decides which side it is on.
@@ -1205,12 +1245,23 @@ def _bank_pooled_sector_cell(metric: str, level: Optional[str], sector: Any) -> 
     return (_normalize_sector(sector.strip()) or "").lower() in _BANK_POOLED_SECTORS
 
 
-def omitted_financial_rows(industry: Optional[str]) -> frozenset:
-    """The Health Check metric types omitted for ``industry`` (`financials_metric_gate`):
-    current + quick ratio and interest coverage for banks, insurers, capital-markets firms,
-    asset managers and lenders; current + quick ratio only for insurance brokers; none for
-    every other industry, and for an unknown or empty one."""
-    return frozenset(m for m in GATED_METRICS if not peer_metric_applicable(m, industry))
+def omitted_financial_rows(
+    industry: Optional[str], *, network: bool = False, ticker: Any,
+) -> frozenset:
+    """The Health Check metric types omitted for a company in ``industry``
+    (`financials_metric_gate`): current + quick ratio and interest coverage for banks,
+    insurers, capital-markets firms, asset managers and lenders; current + quick ratio only
+    for insurance brokers; none for every other industry, and for an unknown or empty one.
+
+    In a MIXED industry ("Financial - Credit Services") the company decides: ``network``
+    True (a listed non-lender member, `financials_metric_gate.resolve_payment_network`)
+    keeps all three; False — the default, a lender, an unlisted member or no ticker —
+    omits them, as before. ``ticker`` (REQUIRED keyword; None = no ticker) adds the rows a
+    curated per-company fact withholds in every industry (`CURATED_WITHHELD_ROWS`: WU)."""
+    return frozenset(
+        m for m in GATED_METRICS
+        if not company_metric_applicable(m, industry, network=network, ticker=ticker)
+    )
 
 
 def _overall_rating(passed: int, total: int) -> str:
@@ -1553,17 +1604,50 @@ class HealthCheckService:
         # Banks, insurers, capital-markets firms, asset managers, lenders: no interest
         # coverage, current or quick ratio; insurance brokers: no current or quick ratio
         # (`omitted_financial_rows`, from `financials_metric_gate`). Decided once, logged once.
-        omitted_rows = omitted_financial_rows(industry)
-        if omitted_rows:
+        # In a MIXED industry (payment networks and fee businesses beside lenders) only a
+        # listed non-lender member — `NON_LENDER_MEMBERS`: a payment network (V, MA, PYPL,
+        # WU, GPN) or a non-lender fee business (TREE, PMTS) — keeps them, unless a curated
+        # fact withholds one (`resolve_payment_network`: the ticker is on the curated list
+        # and its trailing-four-quarter income, from the quarters already fetched — no extra
+        # FMP call — does not read as a lender's; unreadable income leaves the list's
+        # answer standing, and a failed income leg already marks the build degraded).
+        network = resolve_payment_network(
+            ticker, industry, trailing_interest_row(inc_raw), source="health_check",
+        )
+        # A curated per-company fact (WU: no current/non-current split in its own filings;
+        # FMP's interest expense is not its own) withholds rows whatever the industry —
+        # logged once here, applied by `omitted_financial_rows` below.
+        curated_withheld = resolve_withheld_company_rows(ticker, source="health_check")
+        omitted_rows = omitted_financial_rows(industry, network=network, ticker=ticker)
+        industry_omitted = omitted_rows - curated_withheld
+        if industry_omitted:
             logger.info(
                 "Health check %s: %s omitted — not meaningful for industry=%r (a financial "
                 "balance sheet has no current/non-current split, and a lender's interest "
                 "expense is a funding cost)",
-                ticker, ", ".join(sorted(omitted_rows)), industry,
+                ticker, ", ".join(sorted(industry_omitted)), industry,
+            )
+        # A kept row whose peer median is no peer group — EVERY row of a listed non-lender
+        # member of a mixed industry (V's P/E, ROE, D/E and liquidity rows against a median
+        # of lenders), and the liquidity / coverage rows of a gated industry: judged on the
+        # absolute bands, never compared, so its median is not even asked for
+        # (`peer_median_comparable`).
+        absolute_only = sorted(
+            mdef["type"] for mdef in METRIC_DEFS
+            if mdef["benchmark_name"] and mdef["type"] not in omitted_rows
+            and not peer_median_comparable(mdef["type"], industry, network=network)
+        )
+        if absolute_only:
+            logger.info(
+                "Health check %s: %s judged on absolute bands only — no peer median of "
+                "industry=%r is a comparison for this company (a gated ratio, or a listed "
+                "non-lender member against a lenders' median)",
+                ticker, ", ".join(absolute_only), industry,
             )
         bench_metrics = [
             mdef["benchmark_name"] for mdef in METRIC_DEFS
             if mdef["benchmark_name"] and mdef["type"] not in omitted_rows
+            and mdef["type"] not in absolute_only
         ]
 
         # CURRENT peer cell per metric (`get_current_benchmarks`): the industry TTM median
@@ -1572,7 +1656,16 @@ class HealthCheckService:
         # in the text.
         cur_bench: Dict[str, Optional[float]] = {}
         cur_levels: Dict[str, Optional[str]] = {}
-        if sector:
+        if sector and not bench_metrics:
+            # Nothing is comparable (a listed non-lender member: every row on absolute
+            # bands). No lookup at all — a failed read could only mark a peer-free build
+            # degraded (served, never persisted, rebuilt from FMP on every view) for
+            # medians it would never use.
+            logger.info(
+                "Health check %s: no metric is compared with a peer median (industry=%r) — "
+                "no benchmark lookup; every row on absolute bands", ticker, industry,
+            )
+        elif sector:
             lookup = get_sector_benchmark_lookup()
             try:
                 # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.

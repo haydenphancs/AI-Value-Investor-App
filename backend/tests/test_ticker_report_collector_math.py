@@ -1243,11 +1243,14 @@ def test_market_dynamics_declining_when_cagr_negative():
     assert md["lifecycle_phase"] == "declining"
 
 
-def test_market_dynamics_emerging_when_few_constituents():
-    """Sectors with very few public constituents (e.g. brand-new niches)
-    get the `emerging` label regardless of CAGR sign."""
-    md = _build_market_dynamics({}, _agg(num_constituents=3, cagr_5yr_pct=5.0))
-    assert md["lifecycle_phase"] == "emerging"
+@pytest.mark.parametrize("n,cagr,phase", [
+    (3, 5.0, "mature"), (1, 20.0, "secular_growth"), (2, -1.0, "declining"),
+])
+def test_market_dynamics_ignores_a_small_constituent_count(n, cagr, phase):
+    """Growth-rate only (owner decision 2026-10-09): a handful of public players no longer
+    makes an industry "emerging" — that measured FMP's coverage, not maturity."""
+    md = _build_market_dynamics({}, _agg(num_constituents=n, cagr_5yr_pct=cagr))
+    assert md["lifecycle_phase"] == phase
 
 
 def test_market_dynamics_mature_default():
@@ -2570,14 +2573,15 @@ def test_apply_tam_hides_broad_dossier_tam_and_cagr(grain):
     assert md["concentration"] == "oligopoly"
 
 
-def test_apply_tam_broad_dossier_keeps_emerging_lifecycle():
-    """'emerging' comes from the constituent count, not from the broad CAGR,
-    so it survives the hide."""
+def test_apply_tam_broad_dossier_lifecycle_is_never_trusted():
+    """A BROAD dossier's phase came from the sector-wide CAGR; the constituent-count
+    'emerging' it used to carry is retired (2026-10-09), so no broad phase is applied —
+    not even a stored 'emerging'. Mutation: keeping the old 'emerging' exemption."""
     md = _md_with_zero_tam()
     md["cagr_5yr"] = None
     md["lifecycle_phase"] = "mature"
     _apply_tam_source(md, {"tam_source_quote": ""}, _broad_dossier("sector", lifecycle_phase="emerging"))
-    assert md["lifecycle_phase"] == "emerging"
+    assert md["lifecycle_phase"] == "mature"
     assert md["cagr_5yr"] is None
 
 
@@ -2686,9 +2690,14 @@ def test_dossier_classification_helpers_match_collector_thresholds():
     for top1, top2, hhi in cases:
         assert ds_concentration(top1, top2, hhi) == collector_concentration(top1, top2, hhi)
 
-    # Lifecycle: emerging / secular_growth / declining / mature.
-    for cagr, n in [(None, 3), (None, 10), (20.0, 10), (-2.0, 10), (8.0, 10)]:
-        assert ds_lifecycle(cagr, n) == collector_lifecycle(cagr, n)
+    # Lifecycle: secular_growth / declining / mature, from growth alone — a constituent
+    # count (still accepted for old callers) changes nothing (2026-10-09).
+    for cagr, n in [(None, 3), (None, 10), (20.0, 10), (-2.0, 10), (8.0, 10), (20.0, 1),
+                    (15.0, 2), (0.0, 4)]:
+        assert ds_lifecycle(cagr, n) == collector_lifecycle(cagr, n) == ds_lifecycle(cagr)
+    assert ds_lifecycle(None, 3) == "mature" and ds_lifecycle(20.0, 1) == "secular_growth"
+    assert "emerging" not in {ds_lifecycle(c, n) for c in (None, -5.0, 3.0, 40.0)
+                              for n in (0, 1, 2, 3, 4, 5, 100)}
 
 
 # ── PR 3: transcript excerpt builder ───────────────────────────────

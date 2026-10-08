@@ -59,8 +59,16 @@ from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
 from app.utils.peer_wording import peer_worded_metric_name
 from app.services.financials_metric_gate import (
     GATED_METRICS,
+    comparable_peer_metrics,
+    excluded_from_industry_median,
+    is_mixed_lender_industry,
     liquidity_ratios_applicable,
+    peer_median_comparable,
     peer_metric_applicable,
+    resolve_payment_network,
+    resolve_withheld_company_rows,
+    trailing_interest_row,
+    withheld_company_rows,
 )
 from app.services._earnings_common import eps_digit_shift_suspect
 from app.services.price_volatility import (  # noqa: E402  (import-after-import block)
@@ -438,6 +446,20 @@ class CollectedTickerData:
     # sector_benchmarks table in pass 2. Feeds the drill-down's sector-average
     # line. Plain nested dict → cache-serializes cheaply; {} when unavailable.
     sector_benchmark_history: Dict[str, Any] = field(default_factory=dict)
+    # The pass-2 company verdict (`financials_metric_gate.resolve_payment_network`): True
+    # only for a LISTED non-lender member of a mixed industry (V, MA, PYPL, WU, GPN, TREE,
+    # PMTS in "Financial - Credit Services"), whose every card is peer-free — no ticker-wide
+    # `peer_group_level`, no peer wording in any verdict (`_build_sections`). False (the
+    # fail-closed default) for everyone else and for a collection pass 2 never judged. A
+    # plain bool, so the cache serializer needs no registry entry.
+    non_lender_member: bool = False
+    # The ticker is on the curated list in a mixed industry at all
+    # (`financials_metric_gate.excluded_from_industry_median`), whatever its own income
+    # says. A listed member VETOED as a lender (`non_lender_member` False) is judged as a
+    # member by the surfaces that read no quarters (profitability, valuation: the list
+    # stands) and as a lender by those that do, so its cards' verdicts read each card's
+    # own rows (`_snapshot_to_card`). Plain bool, like the field above.
+    listed_non_lender: bool = False
     # Industry-size projection (the industry dossier: Census → FRED, or a
     # Phase-B global row), used as a fallback when AI Stage A didn't extract
     # an explicit TAM quote from the earnings transcript. None when the
@@ -1177,12 +1199,26 @@ def _ttm_point_fits_line(
 
 def _withheld_peer_line_reason(
     metric: str, line_level: Optional[str], industry: Any, sector: Any,
+    *, network: bool = False,
 ) -> Optional[str]:
     """Why a drill-down peer line (or TTM point) of ``metric`` is never drawn, or None.
 
-    Only the liquidity / coverage metrics (`financials_metric_gate.GATED_METRICS`:
-    current ratio, quick ratio, interest coverage) are ever withheld:
+    ``network`` is the company's `financials_metric_gate.resolve_payment_network` verdict
+    (True only for a listed non-lender member — `NON_LENDER_MEMBERS`: a payment network or
+    a non-lender fee business — of a mixed industry; the default False is the fail-closed
+    answer for a caller with no ticker). Reasons:
 
+      * ``"mixed_industry"`` — current ratio, quick ratio or interest coverage in an
+        industry that mixes lenders with payment networks ("Financial - Credit Services":
+        V, MA, PYPL beside AXP, COF, ENVA). A lender's row is omitted; a network's is kept
+        but judged on absolute bands only, because the industry median pools lenders'
+        meaningless values — so NO line, industry or sector, for any company there
+        (`financials_metric_gate.peer_median_comparable`);
+      * ``"payment_network"`` — EVERY other metric of a listed non-lender member of that
+        industry (owner decision 2026-10-09, NET-4: D/E, ROE, margins, the multiples, the
+        growth rates …): its cards judge everything on absolute bands (the Credit Services
+        median is a lenders' yardstick), so no line either. A lender's lines there are
+        drawn, as before;
       * ``"not_applicable"`` — the metric means nothing for the company's own industry
         (banks, insurers, lenders …): the Health card omits the row, so no line either;
       * ``"financial_services_sector"`` — the line is the Financial Services SECTOR median
@@ -1198,12 +1234,102 @@ def _withheld_peer_line_reason(
     from app.services.health_check_service import _bank_pooled_sector_cell
 
     if metric not in GATED_METRICS:
+        if not peer_median_comparable(metric, industry, network=network):
+            return "payment_network"
         return None
+    if is_mixed_lender_industry(industry):
+        return "mixed_industry"
     if not peer_metric_applicable(metric, industry):
         return "not_applicable"
+    if not peer_median_comparable(metric, industry, network=network):
+        # Unreachable while every non-comparable metric is a non-applicable one or a mixed
+        # industry's; kept so a future gate rule cannot draw a line the card refuses.
+        return "not_comparable"
     if line_level != "industry" and _bank_pooled_sector_cell(metric, "sector", sector):
         return "financial_services_sector"
     return None
+
+
+def _withhold_payment_network_lines(
+    history: Any, *, network: bool, industry: Any, sector: Any, ticker: str,
+) -> None:
+    """Withhold, IN PLACE, every drill-down peer line a listed non-lender member's cards
+    never compare — since 2026-10-09 (NET-4) EVERY line and every TTM point injected into
+    one, on top of the liquidity / coverage lines `_fetch_sector_benchmark_history` already
+    withheld for the whole mixed industry (the Credit Services median is a lenders'
+    yardstick). Pass 2 applies it after that fetch, which gates without a company verdict
+    (it knows no ticker). ``network`` is
+    `financials_metric_gate.resolve_payment_network`'s verdict; False (a lender, an
+    unlisted member, no ticker) changes nothing. A non-dict ``history`` (an empty or
+    failed read) is left alone; a `BenchmarkLookupFailed` keeps its type. Never raises."""
+    if network is not True or not isinstance(history, dict):
+        return
+    all_levels = history.get("levels")
+    withheld: List[str] = []
+    for tag in ("annual", "quarterly"):
+        line = history.get(tag)
+        levels = all_levels.get(tag) if isinstance(all_levels, dict) else None
+        if not isinstance(levels, dict):
+            levels = {}
+        if not isinstance(line, dict):
+            continue
+        for metric in list(dict.fromkeys([*line, *levels])):
+            reason = _withheld_peer_line_reason(
+                metric, levels.get(metric), industry, sector, network=True)
+            if reason is None:
+                continue
+            drawn = line.pop(metric, None)
+            levels.pop(metric, None)
+            if isinstance(drawn, dict) and any(
+                _finite_or_none(v) is not None for v in drawn.values()
+            ):
+                withheld.append(f"{tag}:{metric}[{reason}]")
+    if withheld:
+        logger.info(
+            "[report-sector-history] ticker=%s industry=%r sector=%r "
+            "step=peer_line_gate_network: withheld %s — a listed non-lender member's cards "
+            "judge every metric on absolute bands (the industry median pools lenders)",
+            ticker, industry, sector, ", ".join(withheld),
+        )
+
+
+def _withhold_curated_company_lines(
+    history: Any, *, withheld: Any, ticker: str,
+) -> None:
+    """Withhold, IN PLACE, the drill-down peer lines (and their levels) of every metric a
+    curated per-company fact withholds (`financials_metric_gate.CURATED_WITHHELD_ROWS`: WU's
+    current ratio, quick ratio and interest coverage) — the card omits those rows, so no
+    line either, whatever the industry. ``withheld`` is the set
+    `resolve_withheld_company_rows` returned (it logged the reasons). A non-dict
+    ``history`` is left alone; a `BenchmarkLookupFailed` keeps its type. Never raises."""
+    if not withheld or not isinstance(history, dict):
+        return
+    all_levels = history.get("levels")
+    dropped: List[str] = []
+    for tag in ("annual", "quarterly"):
+        line = history.get(tag)
+        levels = all_levels.get(tag) if isinstance(all_levels, dict) else None
+        for metric in sorted(withheld):
+            drawn = line.pop(metric, None) if isinstance(line, dict) else None
+            if isinstance(levels, dict):
+                levels.pop(metric, None)
+            if drawn is not None:
+                dropped.append(f"{tag}:{metric}")
+    if dropped:
+        logger.info(
+            "[report-sector-history] ticker=%s step=peer_line_gate_curated: withheld %s — "
+            "a curated per-company fact withholds these rows", ticker, ", ".join(dropped),
+        )
+
+
+def _peer_free_history() -> Dict[str, Any]:
+    """The sector history of a company that compares no metric with a peer median (a
+    listed non-lender member of a mixed industry): every line empty, as if every line had
+    been read and withheld — `_fetch_dependent` makes no read for it. A fresh dict per
+    call (pass 2 mutates the history in place)."""
+    return {
+        "annual": {}, "quarterly": {}, "levels": {"annual": {}, "quarterly": {}},
+    }
 
 
 def _settle_sector_history(out: Any, result: Any, ticker: str) -> None:
@@ -1962,12 +2088,40 @@ class TickerReportDataCollector:
             if industry else asyncio.sleep(0, result=(None, False))
         )
 
+        # The company verdict comes FIRST, so the gate decides before the benchmark read
+        # (`income_q` settled in pass 1): `resolve_payment_network` — the curated list,
+        # vetoed only by a trailing-four-quarter income that reads as a lender's. Kept on
+        # `out` (`non_lender_member`): `_build_sections` makes every card of such a
+        # company peer-free.
+        network = False
+        if sector:
+            network = resolve_payment_network(
+                ticker, industry, trailing_interest_row(getattr(out, "income_q", None)),
+                source="report_peer_lines",
+            )
+            out.non_lender_member = network is True
+            out.listed_non_lender = excluded_from_industry_median(ticker, industry)
+
         # Sector-median history for the "*" drill-down line (pre-computed in
         # the sector_benchmarks table; one cached Supabase read per granularity).
-        sector_bench_task = (
-            self._fetch_sector_benchmark_history(industry, sector)
-            if sector else asyncio.sleep(0, result={})
-        )
+        # A listed non-lender member of a mixed industry compares NO metric with the
+        # industry median (`comparable_peer_metrics` → []), so every line would be
+        # withheld below: no read at all, and so no failed read can mark this build
+        # degraded and keep a peer-free report out of the shared caches (spec D1).
+        if sector and not comparable_peer_metrics(
+            _SECTOR_HISTORY_METRIC_NAMES, industry, network=network,
+        ):
+            logger.info(
+                "[report-sector-history] ticker=%s industry=%r sector=%r "
+                "step=sector_history: no peer read — a listed non-lender member compares "
+                "no metric with the industry median (every line withheld; not degraded)",
+                ticker, industry, sector,
+            )
+            sector_bench_task = asyncio.sleep(0, result=_peer_free_history())
+        elif sector:
+            sector_bench_task = self._fetch_sector_benchmark_history(industry, sector)
+        else:
+            sector_bench_task = asyncio.sleep(0, result={})
 
         (
             peer_profiles, peer_ratios, sector_agg, industry_tam, sector_bench,
@@ -1983,6 +2137,21 @@ class TickerReportDataCollector:
         )
 
         _settle_sector_history(out, sector_bench, ticker)
+        # A listed non-lender member's peer lines are ALL withheld like its cards'
+        # comparisons (`_withhold_payment_network_lines`; with the read skipped above
+        # there is nothing left to withhold — kept as the backstop should any read land
+        # for one). The fetch gated without a company verdict (it knows no ticker). A
+        # curated per-company fact (WU) withholds its rows' lines too.
+        if sector:
+            _withhold_payment_network_lines(
+                out.sector_benchmark_history, network=network, industry=industry,
+                sector=sector, ticker=ticker,
+            )
+        _withhold_curated_company_lines(
+            out.sector_benchmark_history,
+            withheld=resolve_withheld_company_rows(ticker, source="report_peer_lines"),
+            ticker=ticker,
+        )
 
         if isinstance(peer_profiles, Exception):
             logger.warning(
@@ -2063,7 +2232,14 @@ class TickerReportDataCollector:
         snapshot services do before they look up the card's "*" comparison —
         the table is keyed by canonical names (e.g. FMP "Information
         Technology" → "Technology"), so skipping this would silently return an
-        empty sector line even where the card's asterisk renders."""
+        empty sector line even where the card's asterisk renders.
+
+        The lines are gated here WITHOUT a company verdict (`_withheld_peer_line_reason`'s
+        fail-closed default: not a non-lender member). A listed non-lender member
+        (`NON_LENDER_MEMBERS`) is never read at all: `_fetch_dependent` asks
+        `comparable_peer_metrics` first, which leaves it nothing to compare; should a read
+        land for one, pass 2's `_withhold_payment_network_lines` withholds every line and
+        TTM point of it (this method knows no ticker)."""
         from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
         from app.services.sector_benchmark_service import _normalize_sector
 
@@ -2112,9 +2288,12 @@ class TickerReportDataCollector:
         # Liquidity / coverage lines the Health card never compares against
         # (`_withheld_peer_line_reason`): a Financial Services SECTOR median of current
         # ratio, quick ratio or interest coverage (SPGI, ICE, CME: thin industries fall to
-        # the sector line), or a metric meaningless for the company's own industry. The
+        # the sector line), a metric meaningless for the company's own industry, or ANY
+        # line of these metrics in a mixed industry (V's industry line pools lenders). The
         # line AND its level go, and no TTM point is injected in their place below — an
-        # empty line would otherwise take the sector TTM point as its whole line.
+        # empty line would otherwise take the sector TTM point as its whole line. (Every
+        # line of a listed non-lender member goes in pass 2 — it is not read at all:
+        # `_fetch_dependent`; `_withhold_payment_network_lines` is the backstop.)
         withheld: List[str] = []
         for tag, line, line_levels in (
             ("annual", annual, annual_levels), ("quarterly", quarterly, quarterly_levels),
@@ -2675,6 +2854,13 @@ class TickerReportDataCollector:
         #    arrays already on `out` plus the transient *_q quarterly
         #    fetches. Baked here so it travels with the frozen report.
         fundamentals_history = _build_fundamentals_history(out)
+        # A curated per-company fact (WU: no current/non-current split in its own filings;
+        # FMP's interest expense is not its own) withholds those rows on every card, so the
+        # report freezes none of their made-up series either (pass 2 logged the reasons).
+        for withheld_key in withheld_company_rows(getattr(out, "ticker", None)):
+            fundamentals_history.pop(withheld_key, None)
+        non_lender_member = getattr(out, "non_lender_member", False) is True
+        listed_non_lender = getattr(out, "listed_non_lender", False) is True
 
         # One peer-group level for the 4 cards' "vs industry/sector" labels:
         # "industry" when the company's industry has benchmark rows, else "sector".
@@ -2682,7 +2868,14 @@ class TickerReportDataCollector:
         # this lookup never blocks the event loop even when the async sector-history
         # fetch failed to warm its gb: key. Best-effort: any failure leaves it None →
         # iOS keeps the "sector" wording.
+        # A listed non-lender member (pass 2's verdict) is compared with no peer group on any
+        # card, so it has no ticker-wide level and no lookup is made.
         peer_group_level: Optional[str] = None
+        if non_lender_member:
+            logger.info(
+                "[report-peer-level] ticker=%s: a listed non-lender member — every card is "
+                "peer-free, peer_group_level None (no lookup)", getattr(out, "ticker", "?"),
+            )
         try:
             from app.services.sector_benchmark_service import _normalize_sector
             from app.services.sector_benchmark_lookup import (
@@ -2693,7 +2886,7 @@ class TickerReportDataCollector:
             _raw_sector = _profile.get("sector") or ""
             _norm_sector = _normalize_sector(_raw_sector) if _raw_sector else ""
             _industry = _profile.get("industry") or ""
-            if _norm_sector:
+            if _norm_sector and not non_lender_member:
                 # Derive the label from the SAME current-snapshot lookup that produces
                 # the displayed card values (the snapshot services use
                 # get_current_benchmark_values → get_current_benchmarks: TTM-first with
@@ -2724,6 +2917,8 @@ class TickerReportDataCollector:
             health=out.snap_health,
             history_lookup=fundamentals_history,
             peer_group_level=peer_group_level,
+            non_lender_member=non_lender_member,
+            listed_non_lender=listed_non_lender,
         )
 
     # ── Phase 4: merge with AI output into final TickerReportResponse ─
@@ -5352,12 +5547,23 @@ def _snapshot_to_card(
     extra_metrics: Optional[List[Dict[str, Any]]] = None,
     history_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
     peer_group_level: Optional[str] = None,
+    *,
+    non_lender_member: bool = False,
+    listed_non_lender: bool = False,
 ) -> Dict[str, Any]:
     """Map a SnapshotItemResponse onto a FundamentalMetricCardResponse dict.
 
     `peer_group_level` ("industry"/"sector"/None) is the ticker-wide peer group
     the card's benchmark comparisons use — it labels the "vs industry/sector"
     footnote + drill-down legend.
+
+    `non_lender_member` (2026-10-09, NET-4): the company is a listed non-lender member of a
+    mixed industry (pass 2's verdict), compared with no peer group on ANY card, so every
+    card's verdict is peer-free (`peer_compared=False`). Everyone else keeps the Health-only
+    rule below — except a ticker on the curated list that its own income VETOED as a lender
+    (`listed_non_lender` without `non_lender_member`): the surfaces judged it differently
+    (the list alone where no quarters are read, the quarters elsewhere), so each card's
+    verdict reads its own rows, peer-free when none printed a median.
 
     Honest fallback when the snapshot is missing: star_rating=0, empty
     metrics, quality_label="Data unavailable" — Pydantic still validates
@@ -5404,11 +5610,28 @@ def _snapshot_to_card(
     # sector-relative scores (no AI). Replaces the old Stage-B Gemini label job, so
     # the comment always matches the data, the star rating, and the chart bands.
     from app.services.agents.card_verdict import generate_card_verdict
+    # A Health card none of whose rows printed a peer median compared nothing with peers
+    # (a listed non-lender member: Altman Z omitted, every kept row on absolute bands; or a
+    # failed benchmark lookup), so its verdict names no peer group even though the
+    # ticker-wide `peer_group_level` says "industry". `peer_level` is set on a snapshot
+    # row exactly when its name prints a median (`SnapshotMetricResponse`).
+    # A listed non-lender member compared nothing with peers on ANY card (2026-10-09); a
+    # listed ticker vetoed as a lender is judged card by card from its rows.
+    rows_compared = any(
+        getattr(m, "peer_level", None) in ("industry", "sector") for m in snap.metrics
+    )
+    if non_lender_member is True:
+        peer_compared = False
+    elif listed_non_lender is True or title == "Health":
+        peer_compared = rows_compared
+    else:
+        peer_compared = True
     label, sentiment = generate_card_verdict(
         title,
         int(snap.rating or 0),
         peer_group_level,
         [(m.metric_key, m.score) for m in snap.metrics],
+        peer_compared=peer_compared,
     )
     return {
         "title": title,
@@ -5427,6 +5650,9 @@ def _build_fundamental_metrics_from_snapshots(
     health: Optional[SnapshotItemResponse],
     history_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
     peer_group_level: Optional[str] = None,
+    *,
+    non_lender_member: bool = False,
+    listed_non_lender: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build the 4 fundamental cards from the same snapshot services
     TickerDetailView's Financials tab uses, so the values match exactly.
@@ -5437,12 +5663,18 @@ def _build_fundamental_metrics_from_snapshots(
 
     `peer_group_level` ("industry"/"sector") is uniform per ticker (the industry
     either has benchmark rows or it doesn't), so the same value labels all 4 cards.
+    `non_lender_member` makes all four verdicts peer-free; `listed_non_lender` (a listed
+    ticker vetoed as a lender) makes each verdict read its own rows (`_snapshot_to_card`).
     """
+    kwargs = dict(
+        history_lookup=history_lookup, peer_group_level=peer_group_level,
+        non_lender_member=non_lender_member, listed_non_lender=listed_non_lender,
+    )
     return [
-        _snapshot_to_card("Profitability", profitability, history_lookup=history_lookup, peer_group_level=peer_group_level),
-        _snapshot_to_card("Growth", growth, history_lookup=history_lookup, peer_group_level=peer_group_level),
-        _snapshot_to_card("Valuation", valuation, history_lookup=history_lookup, peer_group_level=peer_group_level),
-        _snapshot_to_card("Health", health, history_lookup=history_lookup, peer_group_level=peer_group_level),
+        _snapshot_to_card("Profitability", profitability, **kwargs),
+        _snapshot_to_card("Growth", growth, **kwargs),
+        _snapshot_to_card("Valuation", valuation, **kwargs),
+        _snapshot_to_card("Health", health, **kwargs),
     ]
 
 
@@ -7266,8 +7498,7 @@ def _apply_tam_source(
       "CAGR shows —" bug: a valid AI TAM quote used to `return` early and silently
       skip the dossier's CAGR. CAGR only fills when sector_aggregates (higher
       trust) didn't already set it, so that precedence is preserved. A broad
-      dossier contributes no CAGR, and only an 'emerging' lifecycle (that one
-      comes from the constituent count, not from the broad CAGR).
+      dossier contributes no CAGR and no lifecycle (both would be the sector's).
 
     `tam_scope` (the "US"/"Global" header prefix) is set only when a TAM is
     actually shown — the placeholder used to yield "US - Market Size (TAM) —".
@@ -7351,12 +7582,12 @@ def _apply_tam_source(
         shown_tam = _finite_or_none(market_dynamics.get("current_tam"))
         if dossier_is_specific and shown_tam is not None and shown_tam > 0:
             market_dynamics["tam_scope"] = getattr(industry_tam, "tam_scope", "us")
-        # Dossier-derived lifecycle wins outright when present (already
-        # incorporates CAGR + constituent count). From a BROAD dossier only
-        # 'emerging' is trusted — the other phases were derived from the
-        # sector-wide CAGR.
+        # Dossier-derived lifecycle wins outright when present (derived from the
+        # industry's CAGR). From a BROAD dossier nothing is trusted: its phase came
+        # from the sector-wide CAGR (the constituent-count 'emerging' it used to
+        # carry is retired, 2026-10-09).
         dossier_lifecycle = getattr(industry_tam, "lifecycle_phase", None)
-        if not dossier_is_specific and dossier_lifecycle != "emerging":
+        if not dossier_is_specific:
             dossier_lifecycle = None
         if dossier_lifecycle and dossier_lifecycle != "mature":
             # `mature` is the dataclass default — only override when the
@@ -8375,18 +8606,17 @@ def _classify_concentration(
 
 
 def _classify_lifecycle(
-    cagr_5yr: Optional[float], num_constituents: int,
+    cagr_5yr: Optional[float], num_constituents: Optional[int] = None,
 ) -> str:
-    """Map a sector CAGR + constituent count to the iOS lifecycle enum.
+    """Map an industry / sector CAGR to the iOS lifecycle enum — from the growth rate ALONE
+    (owner decision 2026-10-09): > 15% → `secular_growth`, < 0% → `declining`, otherwise
+    `mature`; CAGR None → `mature` (no growth signal to differentiate).
 
-    `emerging` wins on low constituent count (a brand-new niche with
-    only a few public players is "emerging" regardless of growth rate).
-    Past that, CAGR drives: > 15% → `secular_growth`, < 0% → `declining`,
-    otherwise `mature`. CAGR=None falls through to `mature` since we
-    have no growth signal to differentiate.
+    `num_constituents` is accepted and IGNORED. "Fewer than 5 public players = emerging"
+    measured FMP's coverage (and the US-only universe, or a ticker's peer list), not the
+    industry's maturity: the cleaned roster would have labelled ~10 more industries
+    "emerging" and lifted their moat Network Effects score with no change in growth.
     """
-    if 0 < num_constituents < 5:
-        return "emerging"
     if cagr_5yr is None:
         return "mature"
     if cagr_5yr > 15.0:
@@ -8411,8 +8641,8 @@ def _build_market_dynamics(
     Lifecycle enum (Swift `LifecyclePhase`):
       - `secular_growth` — sector 5Y CAGR > 15% (only when CAGR known)
       - `declining`      — CAGR < 0
-      - `emerging`       — fewer than 5 sector constituents
-      - `mature`         — default
+      - `mature`         — default (the constituent-count `emerging` rule is retired,
+                           2026-10-09: lifecycle comes from growth alone)
 
     TAM stays 0.0 here — `_apply_tam_source` overlays the AI-extracted
     quote OR the FRED industry proxy in `assemble_report`.

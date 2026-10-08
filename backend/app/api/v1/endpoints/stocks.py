@@ -249,6 +249,13 @@ def _is_crypto(item: Dict[str, Any]) -> bool:
 # Toyota company row beside TM.
 _ETF_NAME_RE = re.compile(r"\b(?:etfs?|etns?|adrhedged)\b", re.IGNORECASE)
 _FUND_NAME_RE = re.compile(r"\bfunds?\b", re.IGNORECASE)
+# A listed business development company named "… Lending Fund" is an operating company
+# (owner call 2026-10-08): MSDL "Morgan Stanley Direct Lending Fund" and BXSL "Blackstone
+# Secured Lending Fund" file a 10-K like ARCC / OBDC, and the benchmark universe counts them
+# (`scripts/build_benchmark_universe._is_listed_lending_fund`, whose pattern this equals —
+# tests/test_benchmark_universe_builder_round2_listings.py pins it). Typed "fund", iOS folds
+# them into `.etf` and opens the ETF screen on a company.
+_LENDING_FUND_RE = re.compile(r"\blending\s+fund\b", re.IGNORECASE)
 
 # Corporate-entity markers (whole word) — `_CORP_ENTITY_RE`, now defined in
 # `stock_search_service` and imported above, which also uses it. Their presence means
@@ -276,12 +283,44 @@ _ETF_ISSUER_KEYWORDS = (
 )
 
 
+def _is_listed_lending_fund(item: Dict[str, Any], name: str) -> bool:
+    """Is a fund-named search row a listed BDC named "… Lending Fund" (MSDL, BXSL)? The
+    builder's exemption, gate for gate (owner call 2026-10-08):
+
+      * the whole-word phrase "Lending Fund" — never a bare "Fund", "Lending Funds",
+        "Microlending Fund" or "Lending Risk Premium Fund";
+      * no OTHER fund / ETF / ETN word once that phrase is cut out ("… Lending Fund Income
+        Fund", "… Lending Fund ETF");
+      * FMP's `isFund` / `isEtf`, WHEN the row carries them, are explicitly false. A search
+        row usually has neither (the builder's screener rows always do, so it needs an
+        explicit false); a present flag that is true, or junk, keeps the row a fund;
+      * not NASDAQ's fifth-letter-X mutual-fund symbol: "Cliffwater Corporate Lending Fund"
+        (CCLFX) is an interval fund.
+    """
+    if not _LENDING_FUND_RE.search(name):
+        return False
+    rest = _LENDING_FUND_RE.sub(" ", name)
+    if _FUND_NAME_RE.search(rest) or _ETF_NAME_RE.search(rest):
+        return False
+    for flag in ("isFund", "isEtf"):
+        value = item.get(flag)
+        if value is None:
+            continue
+        if not (value is False or (isinstance(value, str) and value.strip().lower() == "false")):
+            return False
+    symbol = item.get("symbol")
+    symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
+    return not (len(symbol) == 5 and symbol.endswith("X"))
+
+
 def _get_asset_type(item: Dict[str, Any]) -> Optional[str]:
     """Determine the asset type for a search result. Returns None if it should be excluded.
 
     Order matters: an explicit ETF/Fund word wins, THEN a corporate-entity marker
     forces "stock" (so an asset-manager's own stock isn't hidden by its brand
-    keyword), THEN issuer-brand ETFs without an "ETF" word, THEN indices.
+    keyword), THEN issuer-brand ETFs without an "ETF" word, THEN indices. The one
+    exception to the Fund word: a listed BDC named "… Lending Fund" is "stock"
+    (`_is_listed_lending_fund`, owner call 2026-10-08).
     """
     if _is_crypto(item):
         return "crypto"
@@ -295,6 +334,8 @@ def _get_asset_type(item: Dict[str, Any]) -> Optional[str]:
     if _ETF_NAME_RE.search(name):
         return "etf"
     if _FUND_NAME_RE.search(name):
+        if _is_listed_lending_fund(item, name):
+            return "stock"
         return "fund"
     # 2) A corporate entity is the operating company's stock — even if a brand
     #    keyword ("invesco", "schwab") or "trust" (banks/REITs) appears in it.

@@ -15,10 +15,11 @@ Hermetic: a fake FMP client raises a real httpx error built from a fake key.
 """
 from __future__ import annotations
 
+import zlib
 import ast
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import pytest
@@ -52,6 +53,16 @@ def _row(sym: str) -> Dict[str, Any]:
             "isActivelyTrading": True}
 
 
+
+def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
+    """A `ratios-ttm` answer unique to `sym`: every listing reports its own statements, so
+    the statement-twin pass (2026-10-08) drops nothing these tests did not ask for. The
+    twin pass itself is pinned in test_benchmark_universe_builder_twins_2026_10_09.py."""
+    seed = zlib.crc32(sym.encode("utf-8")) + 1
+    return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
+             "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
+             "debtToEquityRatioTTM": 0.8}]
+
 class _FakeFMP:
     def __init__(self, screener: Dict[str, Any], industries: Any = None):
         self.screener = screener
@@ -62,6 +73,8 @@ class _FakeFMP:
             if isinstance(self.industries, BaseException):
                 raise self.industries
             return [{"industry": n} for n in self.industries]
+        if endpoint == "ratios-ttm":     # the statement-twin pass: one set per listing
+            return _distinct_ratios(params["symbol"])
         spec = self.screener[params["industry"]]
         if isinstance(spec, BaseException):
             raise spec

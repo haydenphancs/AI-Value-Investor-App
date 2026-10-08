@@ -15,6 +15,7 @@ functions, plus `main()` against a fake FMP client.
 """
 from __future__ import annotations
 
+import zlib
 import json
 import logging
 import re
@@ -113,8 +114,12 @@ LATAM_ADR_PREFERREDS = [
              "Shares", True),
     ("XYZD", "XYZ Bank Ltd. American Depositary Shares Series B 6.5%", True),
     ("XYZE", "XYZ Ltd. American Depositary Shares Series C Pfd", True),
-    ("BXYZ", "Banco XYZ S.A. American Depositary Shares, each representing one Preferred "
-             "Share", True),
+    # "Banco XYZ S.A. American Depositary Shares, each representing one Preferred Share"
+    # used to be the last row here. Owner call 2026-10-08: an ADR over a foreign issuer's
+    # preferred share CLASS is its equity (Brazil: ITUB, BBD, PBR-A), so that row is a
+    # must-KEEP now. It and its fixed-income twins (coupon, non-cumulative, series,
+    # fractional interest — all still dropped) are in
+    # test_benchmark_universe_builder_decisions_2026_10_08.py.
 ]
 
 
@@ -182,6 +187,16 @@ def test_the_latam_adrs_survive_the_market_filter():
 # ── end to end through main() ─────────────────────────────────────────────────────────
 
 
+
+def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
+    """A `ratios-ttm` answer unique to `sym`: every listing reports its own statements, so
+    the statement-twin pass (2026-10-08) drops nothing these tests did not ask for. The
+    twin pass itself is pinned in test_benchmark_universe_builder_twins_2026_10_09.py."""
+    seed = zlib.crc32(sym.encode("utf-8")) + 1
+    return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
+             "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
+             "debtToEquityRatioTTM": 0.8}]
+
 class _FakeFMP:
     def __init__(self, screener: Dict[str, List[Dict[str, Any]]]):
         self.screener = screener
@@ -189,6 +204,8 @@ class _FakeFMP:
     async def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None):
         if endpoint == "available-industries":
             return [{"industry": n} for n in self.screener]
+        if endpoint == "ratios-ttm":     # the statement-twin pass: one set per listing
+            return _distinct_ratios(params["symbol"])
         rows = self.screener[params["industry"]]
         limit, page = int(params["limit"]), int(params.get("page", 0))
         return rows[page * limit:(page + 1) * limit]

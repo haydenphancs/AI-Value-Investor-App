@@ -1412,6 +1412,11 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   hides the TAM, CAGR and scope prefix of any `sector` / `all_industry` row — an honest "—"
   instead of an airline's "TAM" being all of US manufacturing GDP (owner decision, 2026-10-01).
   The dossier's concentration still applies; it comes from the industry's constituents.
+- **Lifecycle comes from the growth rate alone** (owner decision 2026-10-09): CAGR > 15% →
+  secular growth, < 0% → declining, else mature. The old "fewer than 5 constituents = emerging"
+  rule measured FMP's coverage (and the US-only roster), not maturity, so it is retired in both
+  copies (`classify_lifecycle`, `_classify_lifecycle`), a stored row's phase is re-derived from its
+  CAGR on read, and a broad dossier contributes no phase at all.
 - **Coverage is one NAICS argument per industry.** 85 of the 156 universe industries have an
   industry-level source: Census AIES revenue for 84 (3- to 6-digit NAICS 2017 codes) and the BEA
   rail series for Railroads, which the Economic Census does not cover. The other 66 show "—":
@@ -1527,7 +1532,32 @@ lenders). Readers go further, permanently: a financial company's current ratio, 
 interest coverage are never compared with the Financial Services SECTOR median at all (what remains
 of it is shell companies, exchanges and developers) — only with a mature industry median, else
 judged on absolute bands (`health_check_service._bank_pooled_sector_cell`, also applied to the
-report drill-down lines). Moat industries with too few scorable peers never write and are not failures, so a
+report drill-down lines). One industry is MIXED: `Financial - Credit Services` holds card networks
+and fee businesses beside lenders, so every member is gated as a lender except a CURATED non-lender
+(`financials_metric_gate.NON_LENDER_MEMBERS`: the payment networks V, MA, PYPL, WU, GPN and the fee
+businesses TREE, PMTS — owner decisions 2026-10-08/09; the list is the only way in, and a member is
+vetoed when its own trailing-four-quarter income reads as a lender's, interest income ≥ 25% of
+revenue). A member keeps the three rows, and EVERY metric it shows — margins, returns, all five
+multiples, growth, D/E, liquidity — is judged without the industry median (absolute bands or
+unscored), because that median is a lenders' median: no lookup is made (`comparable_peer_metrics`
+returns nothing, so a Supabase blip cannot mark a peer-free build degraded), no peer line is drawn,
+no label names a peer, and a report gives it no ticker-wide peer level. Its Price card is rated only
+when at least two multiples were actually judged (network-scoped; rating 0 otherwise, and the
+persona valuation factor falls back to the DCF). The producer computes the industry's medians from
+lenders only (`excluded_from_industry_median`, before the top-N cut). Per-company facts the vendor
+gets wrong are withheld by hand (`CURATED_WITHHELD_ROWS`: WU files no current/non-current split and
+FMP's interest expense is not WU's, so its current ratio, quick ratio and interest coverage are never
+shown), and `REVIEWED_CREDIT_SERVICES_LENDERS` records the reviewed lenders: the universe builder
+names any member in neither set at WARNING. The builder itself (`scripts/build_benchmark_universe.py`,
+quarterly, by hand) applies the market-cap floor client-side — FMP's server-side cap filter hides
+real listings whose stored cap is null (VMRK, SKYD) — keeps one vote per set of statements (a paced
+`ratios-ttm` fingerprint per kept row: exact twins inside an industry keep the most liquid listing,
+twins across industries are kept and named; a scan that fingerprints almost nothing fails the build),
+drops hand-checked notes / preferreds / finance vehicles (`_HAND_CHECKED_ISSUERS`, keyed by issuer
+name), and refuses a floor change, a large shrink or a vanished industry without an explicit flag.
+The industry universe file (moat, dossier and competitor rosters) is the same builder at floor 0
+(`scripts/discover_industries.py`).
+Moat industries with too few scorable peers never write and are not failures, so a
 same-day re-run that attempts only those settles. Fresh-skips, the industries-only validation
 path and `dry_run` still return. The owner-facing
 view of all of this — what runs itself and what must be done by hand — is

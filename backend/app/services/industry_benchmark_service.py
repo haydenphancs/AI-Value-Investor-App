@@ -34,6 +34,13 @@ current ratio, quick ratio and interest coverage leave out the banks, insurers, 
 markets firms and lenders (`financials_metric_gate.peer_metric_applicable`), so a Financial
 Services exchange or data vendor compared with its sector is not compared with banks. Their
 own industry rows are still written (never served for a gated company).
+
+A MIXED industry's median is computed from its lenders only (owner decision 2026-10-09,
+NET-4): `_load_universe` drops the curated non-lender members of "Financial - Credit
+Services" (`financials_metric_gate.excluded_from_industry_median`: V, MA, PYPL, WU, GPN, TREE,
+PMTS) before the top-N cut, with one INFO line naming them. They are never compared with
+that median, and it is a lenders' yardstick for the lenders who are. They also leave the
+Financial Services sector pool (5 of ~620 companies, immaterial).
 """
 
 import asyncio
@@ -49,7 +56,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.services.financials_metric_gate import peer_metric_applicable
+from app.services.financials_metric_gate import (
+    excluded_from_industry_median,
+    normalize_ticker,
+    peer_metric_applicable,
+)
 from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
 from app.services.sector_benchmark_service import (
     SectorBenchmarkService,
@@ -933,6 +944,8 @@ class IndustryBenchmarkService:
             # `load_universe` already logged at ERROR with the reason.
             return []
         by_sector: Dict[str, List[Tuple[str, List[Tuple[str, float]]]]] = defaultdict(list)
+        # Curated non-lender members left out of a MIXED industry's median, per industry.
+        excluded: Dict[str, List[str]] = defaultdict(list)
         for entry in industries:
             ind = entry.get("industry")
             sector = entry.get("sector")
@@ -946,6 +959,10 @@ class IndustryBenchmarkService:
             # sector, zero rows). Drop + warn the bad ticker instead so the job degrades.
             pairs: List[Tuple[str, float]] = []
             for t, c in mcaps.items():
+                # BEFORE the top-N cut, so a dropped member frees its slot for a lender.
+                if excluded_from_industry_median(t, ind):
+                    excluded[ind].append(normalize_ticker(t))
+                    continue
                 try:
                     cap = float(c)
                 except (TypeError, ValueError):
@@ -962,6 +979,16 @@ class IndustryBenchmarkService:
             )[:TOP_TICKERS_PER_INDUSTRY]
             if sorted_tkrs:
                 by_sector[sector].append((ind, sorted_tkrs))
+        if excluded:
+            logger.info(
+                "industry_benchmark: left out of the mixed industry's median (curated "
+                "non-lender members — never compared with it; the median is the lenders'): "
+                "%s",
+                "; ".join(
+                    f"{ind}: {', '.join(sorted(tickers))}"
+                    for ind, tickers in sorted(excluded.items())
+                ),
+            )
         return sorted(by_sector.items())
 
     async def _universe_for_run(
@@ -1295,10 +1322,12 @@ class IndustryBenchmarkService:
     @staticmethod
     def _log_sample(label: str, rows: List[Dict[str, Any]]) -> None:
         """Log a few headline medians at each metric's MOST-SAMPLED annual year (so a
-        thin partial current year doesn't mislead) — a sanity check before a full run."""
+        thin partial current year doesn't mislead) — a sanity check before a full run. A
+        `--ttm` run writes only `ttm` rows (one per metric): those are logged, where an
+        annual-only filter used to print the header over nothing (2026-10-08)."""
         best: Dict[str, Any] = {}
         for r in rows:
-            if r["period_type"] != "annual":
+            if r["period_type"] not in ("annual", "ttm"):
                 continue
             cur = best.get(r["metric_name"])
             if cur is None or r["sample_size"] > cur["sample_size"] or (
@@ -1307,11 +1336,12 @@ class IndustryBenchmarkService:
             ):
                 best[r["metric_name"]] = r
         logger.info(
-            "DRY-RUN %s — %d rows. Median at each metric's most-sampled annual year:",
+            "DRY-RUN %s — %d rows. Median at each metric's most-sampled annual year (or TTM):",
             label, len(rows),
         )
         for m in ("gross_margin", "operating_margin", "net_margin", "fcf_margin",
-                  "roe", "roa", "pe_ratio", "pb_ratio", "ps_ratio", "interest_coverage"):
+                  "roe", "roa", "pe_ratio", "pb_ratio", "ps_ratio", "pfcf_ratio", "ev_ebitda",
+                  "earnings_yield", "debt_to_equity", "interest_coverage"):
             r = best.get(m)
             if r:
                 logger.info(

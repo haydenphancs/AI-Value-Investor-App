@@ -251,7 +251,24 @@ TABLE_NAME = "ticker_report_cache"
 #     unless purged (the cleanup SQL in the 1.01 OWNER_TASKS item). The full suite ran BEFORE
 #     this literal was written, then commit and push followed at once (integration review
 #     2026-10-08: keep the floor-to-push window minimal).
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 8, 17, 35, 0, tzinfo=timezone.utc)
+# 2026-10-08 (23:40 UTC = 19:40 ET): bumped for the peer-benchmark follow-ups (owner decisions
+#     2026-10-08/09). This ONE bump supersedes every instant above. Cached collections and
+#     reports carry:
+#     (a) the curated non-lender members of "Financial - Credit Services" (V, MA, PYPL, WU, GPN,
+#     TREE, PMTS) compared with a lenders' median on every card, drill-down line and verdict —
+#     now peer-free (no ticker-wide peer level, peer-free verdicts, the Price card unrated
+#     unless two multiples are judged), and WU's current ratio, quick ratio and interest
+#     coverage (FMP's made-up figures) now withheld everywhere; payload versions Health Check 9,
+#     health snapshot 8, profitability 4, valuation 7, growth 6, growth snapshot 4, profit
+#     power 8;
+#     (b) a lifecycle phase from the retired "fewer than 5 constituents = emerging" rule (moat
+#     Network Effects 7.5) — now from the growth rate alone;
+#     (c) competitor candidates read from the US-only industry universe uploaded the same
+#     evening (it loads at this deploy's boot).
+#     Pushed after the 18:00 ET close, so only tonight's handful of cached reports rebuild. The
+#     full suite ran on the exported commit tree BEFORE this literal was written; commit and
+#     push followed at once.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 8, 23, 40, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

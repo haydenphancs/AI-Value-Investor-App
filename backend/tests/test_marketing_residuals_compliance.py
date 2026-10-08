@@ -653,6 +653,23 @@ def test_every_steering_rewrite_passes_and_every_quoted_example_is_refused(refus
     assert any(code == "promissory" for code, _ in _scan(_sentence(refused), True)), refused
 
 
+#: PHRASING's "buy when" pair (prompt 2026-10-07.1): the timed-trade row refuses "buy when" even about
+#: what a company buys (the 10-07 preview's LVMH hook), so the prompt quotes a refused example and a
+#: rewrite. The example must really be refused, and the rewrite must pass — here and on every item.
+_BUY_WHEN_PAIR = ("What does the company buy when it expands?",
+                  "What does the company look for when it buys a brand?")
+
+
+def test_the_buy_when_steering_pair_is_quoted_refused_and_rewritten():
+    refused, rewrite = _BUY_WHEN_PAIR
+    body = _wp.SYSTEM_BODY
+    assert f'"{refused}"' in body and f'"{rewrite}"' in body
+    assert '"buy when" or "sell when" anywhere' in body
+    for strict in (True, False):
+        assert "class_b_recommendation" in _codes(refused, strict), strict
+        assert _scan(rewrite, strict) == [], strict
+
+
 def test_the_risk_reward_denials_the_preview_wrote_are_still_refused():
     """Pinned as the over-block the prompt now steers around (not relaxed — decision above)."""
     for text in ("High reward with no risk is not possible in investing.",
@@ -667,6 +684,10 @@ def test_the_risk_reward_denials_the_preview_wrote_are_still_refused():
 # "U.S. markets", which grounding refused as `ungrounded_acronym "U.S"` on 34 of 34 items).
 # ---------------------------------------------------------------------------------------------
 
+#: The example hook HOOK AND TITLES quotes (2026-10-05) — "a shape to learn from, not a line to
+#: copy", but a model copies examples, so it must pass on every item like any recommendation.
+_EXAMPLE_HOOK = "Why can a profitable company still run out of cash?"
+
 #: Every phrasing SYSTEM_BODY or REPAIR_HINTS tells the model to WRITE, as a sentence.
 _RECOMMENDED_SENTENCES = (
     "Prices in US markets move every day.",
@@ -675,6 +696,8 @@ _RECOMMENDED_SENTENCES = (
     "Bonds usually swing less, and usually grow less.",
     "Higher rewards come with higher risk.",
     "Be wary of anyone who promises big rewards with little risk.",
+    _EXAMPLE_HOOK,
+    _BUY_WHEN_PAIR[1],
 )
 
 
@@ -691,7 +714,7 @@ def _production_hits(text: str) -> List[tuple]:
 def test_the_recommended_fragments_are_the_ones_the_prompt_quotes():
     body = _wp.SYSTEM_BODY + " " + " ".join(_wp.REPAIR_HINTS.values())
     for frag in ("US markets", "e.g. banks", "revenue grew year after year",
-                 "higher rewards come with higher risk"):
+                 "higher rewards come with higher risk", f'"{_EXAMPLE_HOOK}"'):
         assert frag in body, frag
     # The prompt must never RECOMMEND the dotted form grounding refuses (the review found the
     # `link` hint doing exactly that): it may name it only as refused.
@@ -701,6 +724,50 @@ def test_the_recommended_fragments_are_the_ones_the_prompt_quotes():
 @pytest.mark.parametrize("text", _RECOMMENDED_SENTENCES)
 def test_every_recommended_rewrite_passes_the_production_scan_on_every_item(text):
     assert _production_hits(text) == []
+
+
+def test_the_example_hook_obeys_the_hook_rules_it_teaches():
+    """The prompt's one example hook is a LESSON's hook, so it must be the shape HOOK AND TITLES
+    asks for: within the asked length, a how/why/what question (never a yes/no one), no number,
+    and no company at all (COMPANIES: an investing lesson names none, "not even as an example")."""
+    words = _EXAMPLE_HOOK.split()
+    assert len(words) <= _wp._ASK_HOOK_WORDS, (len(words), _wp._ASK_HOOK_WORDS)
+    assert words[0] in ("How", "Why", "What") and _EXAMPLE_HOOK.endswith("?")
+    assert not any(ch.isdigit() for ch in _EXAMPLE_HOOK)
+    assert c.clean(_EXAMPLE_HOOK) == _EXAMPLE_HOOK
+    assert c.sentence_company_mentions(c.skeleton(_EXAMPLE_HOOK)) == []
+
+
+def _case_studies() -> List[content_pool.ContentItem]:
+    items = [content_pool.get_item(k) for k in content_pool.eligible_keys()]
+    return [i for i in items if i.kind == content_pool.MONEY_MOVES]
+
+
+#: A case study's hook and YouTube title now name the company its TITLE names (HOOK AND TITLES,
+#: 2026-10-05). The plain honest shape of that ask must pass the production scan on its own item
+#: for EVERY title company — a rule that refused it would turn the prompt's main ask into a repair.
+_TITLE_COMPANY_SHAPES = (
+    ("hook", "How did {name} change the way it makes money?"),
+    ("youtube_title", "How {name} Changed the Way It Makes Money"),   # Title-Case: the headline rule
+)
+
+
+@pytest.mark.parametrize("field, shape", _TITLE_COMPANY_SHAPES, ids=[f for f, _s in _TITLE_COMPANY_SHAPES])
+def test_every_case_study_hook_can_name_its_title_company(field, shape):
+    items = _case_studies()
+    assert items, "sentinel: the pool holds case studies"
+    checked, hits = 0, []
+    for item in items:
+        names = content_pool.title_companies(item)
+        assert names, f"{item.key}: its title names no company the scan knows"   # anti-vacuity
+        for name in names:
+            text = c.clean(shape.format(name=name))
+            vs = ws._scan(field, text, item, allow_emoji=field != "hook")
+            checked += 1
+            if vs:
+                hits.append((item.key, text, [(v.code, v.detail) for v in vs]))
+    assert hits == []
+    assert checked > len(items), "sentinel: head-to-head titles name both companies"
 
 
 #: A dotted place acronym stays REFUSED by grounding — on purpose. A W1 fix (2026-09-26)

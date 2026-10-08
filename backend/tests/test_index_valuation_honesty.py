@@ -13,6 +13,13 @@ never filtered `industry = ''`. `sector_benchmarks` is ONE table where `industry
 sector row (migration 072) and the quarterly job writes 153 INDUSTRY rows against 11 sector
 rows, so the published index P/E was an unweighted mean of industry medians — and the read
 was unpaged against PostgREST's 1,000-row clamp.
+
+2026-10-07: the index P/E reads the sector TTM rows (period_type 'ttm') instead of the
+newest calendar quarter, which swung with one quarter (Utilities Q1'26 15.4 → Q2'26 23.7,
+TTM 20.1). The F27 tests below were moved from calendar-quarter rows to TTM rows; what they
+pin (sector rows only, paged, ordered, >= 8 sectors) is unchanged. A sector counts only
+with a median from >= 20 companies, and a TTM row older than 21 days is ignored
+(`tests/test_report_moat_index_benchmarks_2026_10_07.py`).
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ from pathlib import Path
 import pytest
 
 import app.services.index_service as idx
-from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
+from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE, TTM_PERIOD_TYPE
 
 
 # ── F29: no fabricated forward P/E, and nothing narrates one ────────────────────────
@@ -156,16 +163,17 @@ def _with_ids(rows):
     return rows
 
 
+def _ttm(sector, value, *, industry="", n=40, period_type=TTM_PERIOD_TYPE, label="TTM"):
+    """One stored row. No `computed_at`: the serving gate keeps a TTM row of unknown age."""
+    return {"sector": sector, "industry": industry, "period_type": period_type,
+            "metric_name": "pe_ratio", "period_label": label, "median_value": value,
+            "sample_size": n}
+
+
 def _rows():
-    """11 sector rows at 22.0 for the newest label, buried under 1,500 industry rows at 45.0."""
-    out = []
-    for q in ("Q1'26", "Q2'26"):
-        for i in range(11):
-            out.append({"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-                        "period_label": q, "median_value": 22.0})
-    for i in range(1500):
-        out.append({"sector": f"S{i % 11}", "industry": f"Ind{i}", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-                    "period_label": "Q2'26", "median_value": 45.0})
+    """11 sector TTM rows at 22.0, buried under 1,500 industry TTM rows at 45.0."""
+    out = [_ttm(f"S{i}", 22.0) for i in range(11)]
+    out += [_ttm(f"S{i % 11}", 45.0, industry=f"Ind{i}") for i in range(1500)]
     return _with_ids(out)
 
 
@@ -178,24 +186,22 @@ def test_only_sector_aggregate_rows_are_averaged(monkeypatch):
 
 
 def test_the_read_is_paged_past_the_postgrest_clamp(monkeypatch):
-    """The newest period is deliberately placed PAST row 1,000.
+    """The mature sector rows are deliberately placed PAST row 1,000.
 
-    Rows come back in heap order, so the newest quarter is not guaranteed to be early —
-    and an unpaged read returns an arbitrary first 1,000. Here the 11 newest sector rows
-    are the LAST rows in the table: only a paged read can see them.
+    Rows come back in heap order and an unpaged read returns an arbitrary first 1,000.
+    The TTM set is one row per sector today, so the filler is 1,210 thin (n=5) rows of
+    other groups that match the filter and must be skipped: the 11 rows that decide the
+    figure are the LAST rows in the table, and only a paged read can see them.
     """
-    rows = [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-             "period_label": f"Q{(q % 4) + 1}'{10 + q // 16:02d}", "median_value": 30.0}
-            for q in range(110) for i in range(11)]          # 1,210 old rows, years '10-'16
-    rows += [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-              "period_label": "Q4'26", "median_value": 99.0} for i in range(11)]
+    rows = [_ttm(f"Thin{i}", 99.0, n=5) for i in range(1210)]
+    rows += [_ttm(f"S{i}", 30.0) for i in range(11)]
     _with_ids(rows)
     assert len(rows) > 1000
     rec = _Recorder(rows)
     monkeypatch.setattr(idx, "get_supabase", lambda: rec)
     value = idx._compute_index_pe_from_sectors()
     assert len(rec.ranges) > 1, "a single un-paged read silently truncates at 1,000 rows"
-    assert value == 99.0, f"the newest period sat past the clamp and was lost: {value}"
+    assert value == 30.0, f"the sector rows sat past the clamp and were lost: {value}"
 
 
 def test_an_empty_table_is_none_not_zero(monkeypatch):
@@ -203,15 +209,15 @@ def test_an_empty_table_is_none_not_zero(monkeypatch):
     assert idx._compute_index_pe_from_sectors() is None
 
 
-def test_a_period_with_too_few_sectors_is_skipped(monkeypatch):
-    rows = [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-             "period_label": "Q2'26", "median_value": 30.0} for i in range(7)]
-    rows += [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-              "period_label": "Q1'26", "median_value": 20.0} for i in range(9)]
-    _with_ids(rows)
+def test_too_few_sectors_is_unknown_not_a_partial_average(monkeypatch):
+    """Fewer than 8 sectors with a mature TTM median → None (`pe_known=False`).
+
+    Was `test_a_period_with_too_few_sectors_is_skipped`: with calendar quarters an older
+    quarter with >= 8 sectors stood in. There is one TTM snapshot, so there is no older
+    period to fall back to — and an older quarter is exactly the jump the switch removed."""
+    rows = _with_ids([_ttm(f"S{i}", 30.0) for i in range(7)])
     monkeypatch.setattr(idx, "get_supabase", lambda: _Recorder(rows))
-    # Q2'26 is newer but has 7 < 8 sectors, so Q1'26 wins — the existing contract.
-    assert idx._compute_index_pe_from_sectors() == 20.0
+    assert idx._compute_index_pe_from_sectors() is None
 
 
 def test_the_query_shape_is_not_asserted_from_prose():
@@ -268,16 +274,17 @@ def test_the_pager_actually_orders_the_read(monkeypatch):
 
 
 
-def test_legacy_fiscal_keyed_quarterly_rows_are_ignored(monkeypatch):
-    """Finding #34: the legacy period_type 'quarterly' rows pooled each company by its FISCAL
-    quarter number. Only the calendar-quarter rows may decide the index P/E — a NEWER legacy
-    label with a full set of sectors must not win."""
-    rows = [{"sector": f"S{i}", "industry": "", "period_type": "quarterly",
-             "period_label": "Q4'26", "median_value": 99.0} for i in range(11)]
-    rows += [{"sector": f"S{i}", "industry": "", "period_type": CALENDAR_QUARTER_PERIOD_TYPE,
-              "period_label": "Q2'26", "median_value": 18.0} for i in range(11)]
+def test_only_the_ttm_rows_decide_the_index_pe(monkeypatch):
+    """Finding #34 kept the legacy fiscal-keyed 'quarterly' rows out; since 2026-10-07 the
+    calendar-quarter rows are out too. A full set of NEWER-looking quarterly rows of either
+    kind must not move the figure: only the sector TTM rows decide it."""
+    rows = [_ttm(f"S{i}", 99.0, period_type="quarterly", label="Q4'26") for i in range(11)]
+    rows += [_ttm(f"S{i}", 50.0, period_type=CALENDAR_QUARTER_PERIOD_TYPE, label="Q2'26")
+             for i in range(11)]
+    rows += [_ttm(f"S{i}", 18.0) for i in range(11)]
     _with_ids(rows)
     rec = _Recorder(rows)
     monkeypatch.setattr(idx, "get_supabase", lambda: rec)
     assert idx._compute_index_pe_from_sectors() == 18.0
-    assert ("period_type", CALENDAR_QUARTER_PERIOD_TYPE) in rec.eq_calls
+    assert ("period_type", TTM_PERIOD_TYPE) in rec.eq_calls
+    assert ("metric_name", "pe_ratio") in rec.eq_calls

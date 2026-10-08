@@ -108,7 +108,10 @@ def budget_micros() -> int:
         return 0
     if usd != usd or usd in (float("inf"), float("-inf")) or usd <= 0:
         return 0
-    return int(round(usd * 1_000_000))
+    micros = usd * 1_000_000
+    if micros in (float("inf"), float("-inf")):   # a finite but absurd budget (≥ ~1.8e302 USD)
+        return 0                                   # overflows to inf; round(inf) would RAISE
+    return int(round(micros))
 
 
 def metrics_headroom_micros() -> int:

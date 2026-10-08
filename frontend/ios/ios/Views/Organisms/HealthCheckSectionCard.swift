@@ -13,6 +13,10 @@ struct HealthCheckSectionCard: View {
 
     let healthCheckData: HealthCheckSectionData
     let onDetailTapped: () -> Void
+    /// The PEER lookup failed upstream (`degraded` holds "benchmarks"): the ratios are the
+    /// company's own, but no "vs industry / vs sector" median backs them, so a muted line
+    /// says so. Defaults to false, so a caller that does not pass it keeps today's card.
+    var peerComparisonUnavailable: Bool = false
 
     // MARK: - State
 
@@ -24,6 +28,12 @@ struct HealthCheckSectionCard: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header with title, status badge, info icon, and detail link
             headerSection
+
+            // The peer lookup failed: say why no metric shows a "vs" median.
+            if peerComparisonUnavailable {
+                PeerComparisonUnavailableNote()
+                    .padding(.horizontal, AppSpacing.lg)
+            }
 
             // Metric cards in horizontal scroll
             metricsSection
@@ -115,6 +125,13 @@ struct HealthCheckSectionCard: View {
                 HealthCheckSectionCard(
                     healthCheckData: HealthCheckSectionData.sampleNegativeEquity,
                     onDetailTapped: {}
+                )
+
+                // `degraded: ["benchmarks"]`: no row carries a peer median, one muted note.
+                HealthCheckSectionCard(
+                    healthCheckData: HealthCheckSectionData.sampleNegativeEquity,
+                    onDetailTapped: {},
+                    peerComparisonUnavailable: true
                 )
             }
             .padding()

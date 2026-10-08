@@ -11,11 +11,13 @@ Smart Money tabs currently return placeholder data.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import re
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from app.database import get_supabase
@@ -38,6 +40,7 @@ from app.services._insider_common import (
     normalize_insider_name,
     prepare_insider_rows,
 )
+from app.services._insider_holdings import insider_holdings_from_rows
 from app.services.corporate_actions_service import (
     effective_window_for_quarter,
     corporate_actions_source,
@@ -68,6 +71,8 @@ from app.schemas.holders import (
     InsiderActivitiesDataSchema,
     InsiderActivitySchema,
     InsiderActivitySummarySchema,
+    InsiderHoldingsSchema,
+    OwnershipDetailSchema,
     RecentActivitiesFlowSummarySchema,
     RecentActivitiesSchema,
     ShareholderBreakdownSchema,
@@ -280,6 +285,90 @@ def _settle_insider_window(ticker: str, value: Any, degraded: List[str]) -> List
 _issuer_roster = issuer_roster
 
 
+# ── Insider-feed freshness (Ask Cay AI's ownership tool, 2026-10-07) ───────────────
+#
+# The Holders row lives up to 24 h and nothing invalidates it when a Form 4 lands, so the chat
+# tool asks one cheap question before trusting an old build: does the feed's newest page hold
+# a filing this build did not read? The build records its NEWEST filing date and the identity
+# of every raw row filed on it; the probe reads one page and compares.
+
+#: Rows the freshness probe reads (the feed is newest first; one call).
+_PROBE_ROWS = 50
+#: More rows than this on the newest filing date: identities are not kept, and only a LATER
+#: filing date counts as new (a busy day must not make every probe look new).
+_MARKER_MAX_IDS = 500
+_FILED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _latest_filing_day(today: Optional[date] = None) -> str:
+    """The last filing date a feed row may carry: today (UTC) plus a day of slack — the bound
+    `_insider_holdings` puts on the same feed's filing dates."""
+    return ((today or datetime.now(timezone.utc).date()) + timedelta(days=1)).isoformat()
+
+
+def _filed_day10(row: Dict[str, Any], latest: str) -> str:
+    """A raw row's filing date (``YYYY-MM-DD``; FMP may append a time), else "" — "" too for
+    a date that is not a real calendar day or falls after `latest` (`_latest_filing_day`).
+
+    Review F6 (2026-10-07): unbounded, one corrupt filing date ('2062-…', '2026-99-99') became
+    the build's newest filing — the freshness marker — and every later probe answered 'nothing
+    newer' for as long as the feed kept that row. The marker and the probe both read dates
+    through here, so they ignore such a row alike."""
+    filed = row.get("filingDate")
+    if not isinstance(filed, str) or not _FILED_RE.match(filed):
+        return ""
+    day = filed[:10]
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        return ""
+    return day if day <= latest else ""
+
+
+def _impossible_filing_date(row: Dict[str, Any], latest: str) -> bool:
+    """The row CARRIES a filing date, and no real filing can have it."""
+    return row.get("filingDate") not in (None, "") and not _filed_day10(row, latest)
+
+
+def _insider_row_identity(row: Dict[str, Any]) -> str:
+    """A short, stable fingerprint of one raw feed row — the fields a filing reports."""
+    fields = [row.get(k) for k in (
+        "reportingCik", "reportingName", "transactionDate", "filingDate", "formType",
+        "transactionType", "securityName", "securitiesTransacted", "securitiesOwned",
+        "directOrIndirect", "acquisitionOrDisposition", "price",
+    )]
+    return hashlib.sha1(json.dumps(fields, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def _insider_feed_marker(
+    rows: Any, *, ticker: str = "", today: Optional[date] = None,
+) -> Tuple[Optional[str], List[str]]:
+    """``(newest filing date among the raw rows, sorted identities of the rows filed on it)``;
+    ``(None, [])`` with no dated row. A row with an impossible filing date is left out (F6)."""
+    latest = _latest_filing_day(today)
+    dated: List[Tuple[str, Dict[str, Any]]] = []
+    impossible = 0
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        day = _filed_day10(r, latest)
+        if day:
+            dated.append((day, r))
+        elif _impossible_filing_date(r, latest):
+            impossible += 1
+    if impossible:
+        logger.warning(
+            "[holders-insider-marker] %s: %d insider row(s) carry an impossible filing date (not "
+            "a calendar day, or after %s) — left out of the freshness marker", ticker or "?",
+            impossible, latest,
+        )
+    if not dated:
+        return None, []
+    newest = max(day for day, _ in dated)
+    ids = sorted({_insider_row_identity(r) for day, r in dated if day == newest})
+    return newest, (ids if len(ids) <= _MARKER_MAX_IDS else [])
+
+
 _SUPABASE_CACHE_TTL_HOURS = 24
 
 #: Stamped into `holders_cache.response_json`; a row without the current value is
@@ -292,7 +381,18 @@ _SUPABASE_CACHE_TTL_HOURS = 24
 #: 2 → insider rows rebuilt (2026-10-03): "Ordinary Shares" / "Common Shares" lines counted
 #:     (NYAX read Buys 0 beside a Home CEO Buys card), warrants dropped, other issuers'
 #:     rows filtered by CIK (BRK-B), Form 4/A amendments counted once, cleaned titles.
-_HOLDERS_PAYLOAD_VERSION = 2
+#: 3 → the row carries `ownership_detail` (2026-10-05): each insider's balance after their
+#:     latest Form 4 transactions, for Ask Cay AI's ownership tool. A v2 row has none, and
+#:     serving it would answer "how many shares does he own?" with "unavailable" for a day.
+#: 4 → `ownership_detail` computed by the final review's rules (2026-10-07): a traded direct
+#:     lot stays beside the main holding, equal same-day trusts stay two holdings, the stale
+#:     cut reads filing dates, and the freshness marker ignores impossible filing dates. A v3
+#:     row (written only by pre-release servers) could pin a marker in the future for a day.
+#: 5 → round-5 review (2026-10-07): a direct holding opened from 0 and emptied over several
+#:     days keeps its reported 0 as the current figure (a v4 row showed an older figure in
+#:     its place), the direct cap keeps the running holding behind a run of from-zero awards,
+#:     and an emptied from-zero lot no longer joins a same-day 'one of 0 or X'.
+_HOLDERS_PAYLOAD_VERSION = 5
 _VERSION_KEY = "payload_version"
 
 #: Below this insider block, `institutions + insiders > 100` is physically impossible
@@ -452,43 +552,57 @@ class HoldersService:
         return result
 
     async def get_holders_with_status(
-        self, ticker: str
+        self, ticker: str, *, force_refresh: bool = False,
     ) -> Tuple[HoldersResponse, List[str]]:
         """The holders payload and the critical sources that failed building it (``[]`` for
         a complete build, including every Supabase hit — only complete builds are persisted).
 
         For callers that FREEZE the result beyond holders' own 5-minute tier: a non-empty
         list means "serve it, never pin it".
+
+        ``force_refresh`` skips both cache tiers and rebuilds from the filings. It joins only
+        another FORCED rebuild in flight — never a plain read, which may be resolved from the
+        24h row: the very build the caller set out to replace (review F3, 2026-10-07: a forced
+        call joined a Holders-tab read served from Supabase and got the 20-hour-old build
+        back). Ask Cay AI's ownership tool passes it only when a probe found an insider filing
+        newer than the cached build (`newer_insider_filing`). A forced build that comes back
+        DEGRADED is returned to its caller but never replaces the 5-minute entry other readers
+        get: a transient failure must not trade a good, older build for an empty one.
         """
         ticker = _validate_ticker(ticker)
         cache_key = f"holders:{ticker}"
+        flight_key = f"holders-rebuild:{ticker}" if force_refresh else cache_key
 
         # Tier 1: in-memory
-        cached = _cache_get(cache_key)
+        cached = None if force_refresh else _cache_get(cache_key)
         if cached is not None:
             logger.info(f"Holders in-memory cache HIT for {ticker}")
             entry = _as_entry(cached)
             return entry.result, list(entry.degraded)
 
         # In-flight dedup
-        if cache_key in _inflight:
-            logger.info(f"Holders in-flight JOIN for {ticker}")
+        if flight_key in _inflight:
+            logger.info("Holders in-flight JOIN for %s%s", ticker,
+                        " (forced rebuild)" if force_refresh else "")
             # SHIELDED. Awaiting the shared future directly means a joiner that gives up
             # (client disconnect, request timeout) CANCELS THE FUTURE ITSELF — and the leader's
             # `set_result` then raises InvalidStateError, 500ing a request whose data loaded
             # perfectly, while every other joiner gets a CancelledError. Verified: an
             # unshielded joiner cancellation makes the leader's set_result raise; a shielded
             # one leaves it untouched. Matches profit_power_service.py.
-            entry = _as_entry(await asyncio.shield(_inflight[cache_key]))
+            entry = _as_entry(await asyncio.shield(_inflight[flight_key]))
             return entry.result, list(entry.degraded)
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        _inflight[cache_key] = future
+        _inflight[flight_key] = future
 
         try:
             # Tier 2: Supabase persistent cache
-            db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
+            db_cached = (
+                None if force_refresh
+                else await asyncio.to_thread(self._check_supabase_cache, ticker)
+            )
             if db_cached is not None:
                 logger.info(f"Holders Supabase cache HIT for {ticker}")
                 entry = _HoldersEntry(db_cached, ())
@@ -498,10 +612,19 @@ class HoldersService:
                 return db_cached, []
 
             # Cache miss — build from FMP
-            logger.info(f"Holders cache MISS for {ticker} — fetching from FMP")
+            if force_refresh:
+                logger.info("Holders FORCED refresh for %s — rebuilding from FMP", ticker)
+            else:
+                logger.info(f"Holders cache MISS for {ticker} — fetching from FMP")
             result, degraded = await self._build_holders(ticker)
             entry = _HoldersEntry(result, tuple(degraded))
-            _cache_set(cache_key, entry)
+            if force_refresh and degraded:
+                logger.warning(
+                    "Holders forced refresh for %s DEGRADED (%s) — returned to its caller, "
+                    "the 5-minute tier keeps its previous entry", ticker, ", ".join(degraded),
+                )
+            else:
+                _cache_set(cache_key, entry)
             if not future.done():
                 future.set_result(entry)
 
@@ -533,7 +656,7 @@ class HoldersService:
             fail_shared_future(future, e)
             raise
         finally:
-            _inflight.pop(cache_key, None)
+            _inflight.pop(flight_key, None)
             # CancelledError is a BaseException (3.8+), so the `except Exception`
             # above never fires when the originating client disconnects mid-build.
             # Popping the key stops NEW joiners, but every request that already
@@ -635,10 +758,18 @@ class HoldersService:
 
     def _upsert_supabase_cache_safe(self, ticker: str, result: HoldersResponse):
         try:
+            # `ownership_detail` is excluded from `model_dump()` (it never goes on the wire),
+            # so it is written explicitly; `_check_supabase_cache` reads it back through
+            # `HoldersResponse(**response_json)` like every other key.
+            detail = result.ownership_detail
             self.supabase.table("holders_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": {**result.model_dump(), _VERSION_KEY: _HOLDERS_PAYLOAD_VERSION},
+                    "response_json": {
+                        **result.model_dump(),
+                        "ownership_detail": detail.model_dump() if detail is not None else None,
+                        _VERSION_KEY: _HOLDERS_PAYLOAD_VERSION,
+                    },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker",
@@ -795,7 +926,19 @@ class HoldersService:
         issuer_cik = await self._issuer_cik(
             ticker, inst_ownership_summary, inst_quarter_aggregate, degraded
         )
+        raw_insider_rows = insider_trading
         insider_trading, foreign = prepare_insider_rows(insider_trading, issuer_cik)
+        # Each insider's balance after their latest transactions, for Ask Cay AI — from EVERY
+        # prepared row, before the 12-month trim below: the fetch returns whole pages, so a
+        # light filer's older rows are here too, and a person's newest rows are always in
+        # whatever span arrived (the feed is newest first). Pure CPU over up to five pages
+        # of rows, so off the event loop. Stamped with when the filings were read (`now`, the
+        # start of this build) and what the newest of them was, for the chat's freshness probe.
+        ownership_detail = await asyncio.to_thread(
+            self._ownership_detail,
+            ticker, insider_trading, degraded, data_year, data_quarter, issuer_cik=issuer_cik,
+            built_at=now.isoformat(timespec="seconds"), raw_rows=raw_insider_rows,
+        )
         # The list is "Last 12 Months" too, like the chart and the summary card: a 1000-row
         # page reaches back years, and the old 100-row pager's ~99-row overshoot became up to
         # thousands of out-of-window rows under that label. Supersession has already run.
@@ -942,7 +1085,143 @@ class HoldersService:
             hedge_funds_data=hedge_sm,
             congress_data=congress_sm,
             recent_activities=recent,
+            ownership_detail=ownership_detail,
         ), degraded
+
+    @staticmethod
+    def _ownership_detail(
+        ticker: str,
+        rows: List[Dict[str, Any]],
+        degraded: List[str],
+        data_year: int,
+        data_quarter: int,
+        *,
+        issuer_cik: Optional[str] = None,
+        built_at: Optional[str] = None,
+        raw_rows: Optional[List[Dict[str, Any]]] = None,
+    ) -> OwnershipDetailSchema:
+        """Chat-only ownership detail (`HoldersResponse.ownership_detail`, never on the wire).
+
+        Insider holdings are WITHHELD (None — the chat tool says "unavailable") when the rows
+        cannot be trusted to be this issuer's: the CIK lookup failed (BRK-B's feed would read
+        Berkshire's stakes in other companies as its insiders' holdings) — or no CIK was found
+        at all and the rows name more than one issuer — or the fetch failed with nothing to
+        show. A fetch that lost a later page still has every listed person's
+        newest rows (the feed is newest first) — served, marked incomplete.
+
+        Every outcome is stamped with `built_at` (when the filings were read) and the feed
+        marker of `raw_rows` (`_insider_feed_marker`), which the chat's freshness probe
+        compares against (`newer_insider_filing`).
+
+        Never raises: a defect here must not cost the Holders tab its build.
+        """
+        try:
+            newest_filed, newest_ids = _insider_feed_marker(
+                raw_rows if raw_rows is not None else rows, ticker=ticker,
+            )
+        except Exception:  # noqa: BLE001 — a missing marker only costs a re-read
+            logger.exception("[holders-insider-holdings] %s: feed marker failed", ticker)
+            newest_filed, newest_ids = None, []
+        stamps = dict(
+            institutions_quarter=f"Q{data_quarter} {data_year}", built_at=built_at,
+            newest_filed=newest_filed, newest_filed_ids=newest_ids,
+        )
+        if "Issuer CIK" in degraded:
+            logger.warning(
+                "[holders-insider-holdings] %s: issuer CIK unknown (lookup failed) — insider "
+                "holdings withheld: other issuers' rows cannot be told apart", ticker,
+            )
+            return OwnershipDetailSchema(insider_holdings=None, **stamps)
+        if issuer_cik is None:
+            issuers = {
+                cik for cik in (_normalize_cik(r.get("companyCik")) for r in rows if isinstance(r, dict))
+                if cik
+            }
+            if len(issuers) > 1:
+                logger.warning(
+                    "[holders-insider-holdings] %s: no issuer CIK and the rows name %d issuers "
+                    "(%s) — insider holdings withheld", ticker, len(issuers), sorted(issuers)[:5],
+                )
+                return OwnershipDetailSchema(insider_holdings=None, **stamps)
+        fetch_failed = "Insider trading" in degraded
+        if fetch_failed and not rows:
+            logger.warning(
+                "[holders-insider-holdings] %s: insider fetch failed with no rows — holdings "
+                "unavailable (not 'no holdings')", ticker,
+            )
+            return OwnershipDetailSchema(insider_holdings=None, **stamps)
+        try:
+            built = insider_holdings_from_rows(rows)
+            skipped = built.pop("rows_skipped", 0)
+            if skipped:
+                logger.info(
+                    "[holders-insider-holdings] %s: %d of %d insider row(s) carried nothing to read "
+                    "(empty records, no reporter or no date) — skipped", ticker, skipped, len(rows),
+                )
+            holdings = InsiderHoldingsSchema(complete=not fetch_failed, **built)
+        except Exception:  # noqa: BLE001 — a chat-only extra must never fail the Holders build
+            logger.exception(
+                "[holders-insider-holdings] %s: holdings derivation FAILED — withheld from "
+                "chat; the Holders tab itself is unaffected", ticker,
+            )
+            holdings = None
+        return OwnershipDetailSchema(insider_holdings=holdings, **stamps)
+
+    async def newer_insider_filing(
+        self, ticker: str, detail: Optional[OwnershipDetailSchema],
+    ) -> Optional[bool]:
+        """Has an insider filing landed since `detail`'s build read the feed?
+
+        ONE call: the feed's newest page (`_PROBE_ROWS` rows; the feed is newest first). True
+        when it holds a row filed after the build's newest filing date, or a row filed ON that
+        date that the build did not read (`_insider_row_identity`); False when it holds
+        neither; None when it could not be checked (a failed or unreadable read) — the caller
+        says so instead of guessing. Ask Cay AI's ownership tool calls this before trusting a
+        Holders build cached hours ago: a user asks "how many shares does he own now?" right
+        after a new Form 4, exactly when the 24-hour row predates it.
+        """
+        try:
+            page = await self.fmp.get_insider_trading(_validate_ticker(ticker), limit=_PROBE_ROWS)
+        except Exception as e:  # noqa: BLE001 — "could not check" is an answer
+            logger.warning(
+                "[holders-insider-probe] %s: probe failed: %s: %s", ticker, type(e).__name__, e,
+            )
+            return None
+        if getattr(page, "fetch_failed", False) or not isinstance(page, list):
+            logger.warning(
+                "[holders-insider-probe] %s: probe unreadable (%s) — freshness unknown",
+                ticker, getattr(page, "reason", None) or type(page).__name__,
+            )
+            return None
+        newest = getattr(detail, "newest_filed", None) if detail is not None else None
+        known = set(getattr(detail, "newest_filed_ids", None) or [])
+        latest = _latest_filing_day()
+        if newest is not None and _filed_day10({"filingDate": newest}, latest) != newest:
+            # A marker no real filing can carry (stored before the F6 bound): nothing to compare
+            # against, so 'newer' — one rebuild, whose marker is bounded — never a day of 'no'.
+            logger.warning(
+                "[holders-insider-probe] %s: the build's marker %r is not a possible filing "
+                "date — treated as unknown", ticker, newest,
+            )
+            newest = None
+        newer, impossible = False, 0
+        for row in page:
+            if not isinstance(row, dict):
+                continue
+            filed = _filed_day10(row, latest)
+            if not filed:
+                impossible += _impossible_filing_date(row, latest)
+                continue
+            if newest is None or filed > newest:
+                newer = True
+            elif filed == newest and known and _insider_row_identity(row) not in known:
+                newer = True
+        if impossible:
+            logger.warning(
+                "[holders-insider-probe] %s: %d probed row(s) carry an impossible filing date "
+                "(not a calendar day, or after %s) — ignored", ticker, impossible, latest,
+            )
+        return newer
 
     async def _issuer_cik(
         self,

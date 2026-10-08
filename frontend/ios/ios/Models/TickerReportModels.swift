@@ -370,6 +370,10 @@ struct DeepDiveMetric: Identifiable {
     // Sector-average overlay (the "*" metrics), aligned to the company periods.
     let sectorAnnualHistory: [MetricHistoryPoint]?
     let sectorQuarterlyHistory: [MetricHistoryPoint]?
+    // "industry" | "sector": the peer group each overlay line is drawn from. nil on
+    // older reports → the drill-down uses the card's `peerGroupLevel`.
+    let sectorAnnualLevel: String?
+    let sectorQuarterlyLevel: String?
 
     init(
         label: String,
@@ -380,7 +384,9 @@ struct DeepDiveMetric: Identifiable {
         annualHistory: [MetricHistoryPoint]? = nil,
         quarterlyHistory: [MetricHistoryPoint]? = nil,
         sectorAnnualHistory: [MetricHistoryPoint]? = nil,
-        sectorQuarterlyHistory: [MetricHistoryPoint]? = nil
+        sectorQuarterlyHistory: [MetricHistoryPoint]? = nil,
+        sectorAnnualLevel: String? = nil,
+        sectorQuarterlyLevel: String? = nil
     ) {
         self.label = label
         self.value = value
@@ -391,6 +397,8 @@ struct DeepDiveMetric: Identifiable {
         self.quarterlyHistory = quarterlyHistory
         self.sectorAnnualHistory = sectorAnnualHistory
         self.sectorQuarterlyHistory = sectorQuarterlyHistory
+        self.sectorAnnualLevel = sectorAnnualLevel
+        self.sectorQuarterlyLevel = sectorQuarterlyLevel
     }
 
     /// True when a sector-average series exists for this metric (the "*"
@@ -446,13 +454,15 @@ struct DeepDiveMetric: Identifiable {
         return nil
     }
 
-    /// Clean metric title for the chart header / picker — strips the sector
+    /// Clean metric title for the chart header / picker — strips the peer
     /// suffix and "(YoY)" but keeps full words (unlike the compact
-    /// `displayLabel` used in the narrow card grid).
+    /// `displayLabel` used in the narrow card grid). "industry" as well as
+    /// "sector" (2026-10-07): today's backend always writes "sector avg", but an
+    /// industry wording on the wire must not render raw.
     var historyTitle: String {
         label
             .replacingOccurrences(
-                of: #"\s*\([^)]*sector[^)]*\)"#, with: "",
+                of: #"\s*\([^)]*(?:sector|industry)[^)]*\)"#, with: "",
                 options: .regularExpression)
             .replacingOccurrences(
                 of: #"\s*\(YoY\)"#, with: "", options: .regularExpression)
@@ -460,12 +470,12 @@ struct DeepDiveMetric: Identifiable {
     }
 
     /// Compact label suitable for the narrow 2-column metric grid.
-    /// Strips verbose sector-comparison suffix (e.g. "(0.98x sector avg 27)"
-    /// or "(vs sector 4.5)"), drops "(YoY)" boilerplate, and applies common
-    /// abbreviations (ROE, ROA, FCF).
+    /// Strips verbose peer-comparison suffix (e.g. "(0.98x sector avg 27)",
+    /// "(vs sector 4.5)", or an "industry" twin of either), drops "(YoY)"
+    /// boilerplate, and applies common abbreviations (ROE, ROA, FCF).
     var displayLabel: String {
         let withoutSector = label.replacingOccurrences(
-            of: #"\s*\([^)]*sector[^)]*\)"#,
+            of: #"\s*\([^)]*(?:sector|industry)[^)]*\)"#,
             with: "",
             options: .regularExpression
         )
@@ -813,9 +823,9 @@ struct ReportCapitalAllocation {
         if dataPoints.last?.cashFlowReported == false { return "—" }
         guard let amt = dataPoints.last?.buybackAmount, amt.isFinite, amt > 0 else { return "$0" }
         // amt is $ millions. One rule with both SoC charts (SignalOfConfidenceFormat), so
-        // the report header and the Financials tab print the same figure for a quarter;
-        // only a sub-$1M amount keeps a decimal instead of rounding to "$0M".
-        if amt < 1 { return String(format: "$%.1fM", amt) }
+        // the report header and the Financials tab print the same figure for a quarter —
+        // including under $1M, which the formatter now handles itself: a $30K buyback reads
+        // "<$0.1M" everywhere, never this header's old "$0.0M" (review 2026-10-07).
         return SignalOfConfidenceFormat.money(millions: amt)
     }
     var newestBuybackColor: Color {

@@ -29,6 +29,8 @@ from app.schemas.stock_overview import (
     DcfEstimateResponse,
     SnapshotItemResponse,
     SnapshotMetricResponse,
+    snapshot_build_time,
+    with_cached_build_time,
 )
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
@@ -71,7 +73,16 @@ _CACHE_TTL = 300  # 5 minutes
 # 5 (2026-09-30): a failed peer-benchmark lookup now marks the build degraded and it is
 #     never persisted. A v4 row may have been written heuristic-only during such a
 #     failure (the old lookup swallowed it) and would read back as clean; rebuild them.
-_SNAPSHOT_PAYLOAD_VERSION = 5
+# 6 (2026-10-07): P/FCF reads `priceToFreeCashFlowRatioTTM` — the key `/stable` sends —
+#     instead of falling to market cap ÷ LAST FISCAL YEAR's FCF (KO 69.93 vs a true TTM
+#     25.83); the peer median prints with decimals ("sector avg 0.98", was "sector avg 1");
+#     with no peer median P/B, P/S, P/FCF and EV/EBITDA are unscored instead of scored on
+#     P/E bands; NaN/inf inputs are dropped; each metric carries `peer_level` and the card
+#     `computed_at`; the peer median itself comes from the 2026-10-07 lookup (a mature
+#     same-period cell, never a partial year). Each snapshot service versions its OWN rows
+#     (one `snapshot_cache` table, one row per category, same `_schema_v` key), so this
+#     bump rebuilds the Price card only.
+_SNAPSHOT_PAYLOAD_VERSION = 6
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -166,9 +177,51 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     if val is None:
         return None
     try:
-        return float(val)
+        f = float(val)
     except (ValueError, TypeError):
         return None
+    # NaN / ±inf ("NaN" / "Infinity" strings, an upstream overflow) are absent, as in the
+    # sibling snapshot services: a NaN multiple fails every `<= 0` guard below, then prints
+    # "nan" and scores 1 (`nan / median` compares False against every band).
+    return f if math.isfinite(f) else None
+
+
+def split_peer_cells(
+    cells: Any,
+) -> Tuple[Dict[str, Optional[float]], Dict[str, Optional[str]]]:
+    """``({metric: median | None}, {metric: "industry" | "sector" | None})`` from
+    `SectorBenchmarkLookup.get_current_benchmarks`' ``{metric: cell | None}``.
+
+    Shared by the Price, Profitability and Financial Health cards: the value scores and
+    labels a metric, the level is that metric's `peer_level`. A level is reported only
+    beside a usable value, and a value that is not a finite number is dropped (logged) —
+    it would otherwise print "nan" into a label."""
+    values: Dict[str, Optional[float]] = {}
+    levels: Dict[str, Optional[str]] = {}
+    if not isinstance(cells, dict):
+        return values, levels
+    for metric, cell in cells.items():
+        value: Optional[float] = None
+        level: Optional[str] = None
+        if isinstance(cell, dict):
+            raw = cell.get("value")
+            if raw is not None:
+                try:
+                    f = float(raw)
+                except (TypeError, ValueError):
+                    f = None
+                if f is not None and math.isfinite(f) and not isinstance(raw, bool):
+                    value = f
+                else:
+                    logger.warning(
+                        "[peer-cell-malformed] metric=%s value=%r level=%r — no peer "
+                        "comparison for this metric", metric, raw, cell.get("level"),
+                    )
+            if value is not None and cell.get("level") in ("industry", "sector"):
+                level = cell["level"]
+        values[metric] = value
+        levels[metric] = level
+    return values, levels
 
 
 def _fmt_ratio(val: Optional[float]) -> str:
@@ -210,20 +263,26 @@ def _fmt_pfcf(
 ) -> str:
     """P/FCF is undefined when free cash flow is negative. Surface that
     explicitly as "Neg." so the user knows the company is burning cash —
-    different signal from "data missing" ("—"). Detected via the FMP
-    `freeCashFlowYield` field which carries the sign of FCF; falls back to
-    the cash-flow statement's `freeCashFlow` when TTM yield is absent.
+    different signal from "data missing" ("—"). Detected via the TTM
+    `freeCashFlowYieldTTM` field (key-metrics-ttm), which carries the sign of
+    TTM FCF; falls back to the LAST FISCAL YEAR's `freeCashFlow` only when no
+    TTM yield is known at all.
     """
     # The ratio itself carries the sign when we have it, so `_fmt_ratio` now answers the
     # whole question — this function exists only for the case FMP leaves the ratio absent
-    # (MRNA: `priceToFreeCashFlowsRatioTTM` is null) and the SIGN has to be recovered from
-    # a sibling field. `!= 0` keeps the old fall-through for a zero ratio, which on these
-    # fields means "absent" rather than "zero".
+    # (MRNA: the TTM ratio is null) and the SIGN has to be recovered from a sibling field.
+    # `!= 0` keeps the old fall-through for a zero ratio, which on these fields means
+    # "absent" rather than "zero".
     if pfcf is not None and pfcf != 0:
         return _fmt_ratio(pfcf)
-    fcf_yield = _safe_float(km, "freeCashFlowYield")
-    if fcf_yield is not None and fcf_yield < 0:
-        return "Neg."
+    # `freeCashFlowYieldTTM` FIRST: it is the name /key-metrics-ttm sends, and the bare
+    # name is never populated there — so the old read missed every TTM sign and decided on
+    # the fiscal-year statement below, printing "Neg." for a company whose FY FCF was
+    # negative but whose trailing year is positive. A known TTM sign decides; the FY
+    # statement is consulted only when there is none.
+    fcf_yield = _ttm_fcf_yield(km)
+    if fcf_yield is not None:
+        return "Neg." if fcf_yield < 0 else "—"
     if cf:
         fcf = _safe_float(cf, "freeCashFlow")
         if fcf is not None and fcf < 0:
@@ -231,17 +290,35 @@ def _fmt_pfcf(
     return "—"
 
 
+def _ttm_fcf_yield(km: Dict[str, Any]) -> Optional[float]:
+    """TTM free-cash-flow yield from /key-metrics-ttm (decimal; its sign is TTM FCF's)."""
+    return _first_valid(
+        _safe_float(km, "freeCashFlowYieldTTM"),
+        _safe_float(km, "freeCashFlowYield"),
+    )
+
+
+def _first_valid(*vals: Optional[float]) -> Optional[float]:
+    """The first value that is not None (0 counts as a value), else None."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _valuation_score(value: Optional[float], sector_median: Optional[float]) -> int:
     """
     Score 1-5 based on how a company's valuation compares to sector median.
     Lower multiples = better value (inverted scoring).
+
+    The no-median branch is a set of P/E BANDS. Only P/E may use it: the other four
+    multiples go through `_peer_relative_score`, which has no fallback (2026-10-07).
     """
     if value is None or value <= 0:
         return 3  # neutral if no data
 
     if sector_median is None or sector_median <= 0:
-        # Absolute fallback thresholds (no sector data available)
-        # These are general "reasonable" ranges for any sector
+        # Absolute fallback thresholds (no sector data available) — P/E bands
         if value < 10:
             return 5
         if value < 18:
@@ -264,33 +341,61 @@ def _valuation_score(value: Optional[float], sector_median: Optional[float]) -> 
     return 1        # 50%+ more expensive
 
 
-# Single-value sector comparisons use the mature-period picker
-# (`mature_benchmark_value`) — it holds the last fully-reported year instead of a
-# thin just-closed one. (The old `_get_latest_benchmark` max-year helper was
-# replaced; it had no sample-size floor.)
+def _peer_relative_score(value: Optional[float], sector_median: Optional[float]) -> Optional[int]:
+    """1-5 score of P/B, P/S, P/FCF or EV/EBITDA against its peer median; None with no
+    usable median.
+
+    These four used to fall through to `_valuation_score`'s P/E bands when the median was
+    missing, so a P/S of 7.5 (rich for most groups) read "5/5, under 10" and a P/B of 45
+    "1/5" on a scale built for earnings multiples. With no peer the metric is UNSCORED:
+    its `score` is None (not a verdict driver) and it votes the neutral 3 in the card's
+    composite — exactly what a missing value already votes."""
+    median = _usable_median(sector_median)
+    if median is None:
+        return None
+    return _valuation_score(value, median)
+
+
+def _usable_median(median: Optional[float]) -> Optional[float]:
+    """A peer multiple's median the card may print and compare against, else None.
+
+    Finite and still positive at the two decimals it prints with. A non-positive median
+    anchors nothing, and one that prints "0.00" would sit beside a "1500.00x" multiple."""
+    if median is None or not math.isfinite(median):
+        return None
+    return median if round(median, 2) > 0 else None
+
+
+def _fmt_median(median: float) -> str:
+    """A peer median as printed in a label: two decimals below 10, one from 10 up —
+    "0.98", "4.25", "16.0", "22.4". It printed with NO decimals, so a P/S median of 0.98
+    read "sector avg 1" beside a "7.50x" multiple and a 0.4 median "sector avg 0"."""
+    return f"{median:.2f}" if round(median, 2) < 10 else f"{median:.1f}"
 
 
 def _sector_ctx(val: Optional[float], sector_median: Optional[float]) -> str:
-    """Build sector context string like '1.2x sector avg 25'. When the
+    """Build sector context string like '1.30x sector avg 22.4'. When the
     company's value is missing or non-positive (e.g. P/FCF rendered as
     "Neg." or EV/EBITDA unavailable) but the sector benchmark exists, we
     still emit "sector avg N" — iOS's displayLabel regex picks that up to
     render the "*" footnote marker. Returns '' only when no sector data.
+
+    The words stay "sector avg" whatever the peer level: shipped iOS builds strip the
+    suffix by the word "sector", and newer builds swap the wording by `peer_level`.
     """
-    if sector_median is None or sector_median <= 0:
+    median = _usable_median(sector_median)
+    if median is None:
         return ""
     if val is None or val <= 0:
-        return f"sector avg {sector_median:.0f}"
-    ratio = val / sector_median
-    return f"{ratio:.2f}x sector avg {sector_median:.0f}"
+        return f"sector avg {_fmt_median(median)}"
+    ratio = val / median
+    return f"{ratio:.2f}x sector avg {_fmt_median(median)}"
 
 
-def _metric_name(label: str, val: Optional[float], sector_median: Optional[float]) -> str:
-    """Build metric name with optional sector context. No '(—)' when data is missing."""
-    ctx = _sector_ctx(val, sector_median)
-    if ctx:
-        return f"{label} ({ctx})"
-    return label
+def _metric_name(label: str, ctx: str) -> str:
+    """Metric name with its sector context (`_sector_ctx` / `_sector_ctx_pct`), if any.
+    No '(—)' when data is missing."""
+    return f"{label} ({ctx})" if ctx else label
 
 
 def _fmt_pct(val: Optional[float]) -> str:
@@ -304,21 +409,19 @@ def _sector_ctx_pct(val: Optional[float], sector_median: Optional[float]) -> str
     """Sector context for percentage metrics. Both inputs are decimals
     (e.g. 0.0425 for 4.25%). Output displays the median as a percent.
     Same fallback as `_sector_ctx`: emit "sector avg X%" when the company
-    value is missing so iOS still adds the asterisk."""
-    if sector_median is None or sector_median <= 0:
+    value is missing so iOS still adds the asterisk. A median that would print
+    "0.00%" (or is not finite) is no benchmark."""
+    if (
+        sector_median is None
+        or not math.isfinite(sector_median)
+        or round(sector_median * 100, 2) <= 0
+    ):
         return ""
     if val is None or val <= 0:
         return f"sector avg {sector_median * 100:.2f}%"
     ratio = val / sector_median
     return f"{ratio:.2f}x sector avg {sector_median * 100:.2f}%"
 
-
-def _metric_name_pct(label: str, val: Optional[float], sector_median: Optional[float]) -> str:
-    """Same as `_metric_name` but for decimal percentage metrics."""
-    ctx = _sector_ctx_pct(val, sector_median)
-    if ctx:
-        return f"{label} ({ctx})"
-    return label
 
 
 # ── Service ───────────────────────────────────────────────────────
@@ -497,7 +600,7 @@ class ValuationSnapshotService:
                     version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
                 )
                 return None
-            return SnapshotItemResponse(**json_data)
+            return SnapshotItemResponse(**with_cached_build_time(json_data, cached_at))
 
         except Exception as e:
             logger.warning(f"Valuation snapshot cache check failed for {ticker}: {e}")
@@ -598,24 +701,27 @@ class ValuationSnapshotService:
         # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        # CURRENT benchmark per metric: TTM row if present, else latest mature
-        # annual value (fallback). {metric: value | None}.
+        # CURRENT benchmark per metric (`get_current_benchmarks`: mature industry TTM →
+        # mature sector TTM → newest complete mature annual → none), as the median
+        # {metric: value | None} plus the peer level of each cell for `peer_level`.
         cur_bench: Dict[str, Optional[float]] = {}
+        cur_levels: Dict[str, Optional[str]] = {}
         if sector:
             try:
                 lookup = get_sector_benchmark_lookup()
                 # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
-                cur_bench = await asyncio.to_thread(
-                    lookup.get_current_benchmark_values,
+                cells = await asyncio.to_thread(
+                    lookup.get_current_benchmarks,
                     industry,
                     sector,
                     ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
                 )
+                cur_bench, cur_levels = split_peer_cells(cells)
                 # A FAILED lookup (swallowed DB error) answers the same all-None shape as
                 # "this peer group has no rows" — but it is a transient hole, not an
                 # answer: every multiple loses its sector comparison and scores on
                 # absolute heuristics. Serve it; never persist it for 24h.
-                if lookup_failed(cur_bench):
+                if lookup_failed(cells):
                     logger.warning(
                         "Valuation snapshot: benchmark lookup FAILED for %s "
                         "(industry=%r, sector=%r) — scoring without peers, build marked "
@@ -627,13 +733,12 @@ class ValuationSnapshotService:
                     "Valuation snapshot: benchmark lookup raised for %s: %s: %s — scoring "
                     "without peers, build marked degraded", ticker, type(e).__name__, e,
                 )
-                cur_bench = {}
+                cur_bench, cur_levels = {}, {}
                 degraded.append("benchmarks")
-
 
         snapshot = build_price_snapshot(
             fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile,
-            bench=cur_bench, ticker=ticker,
+            bench=cur_bench, bench_levels=cur_levels, ticker=ticker,
         )
         # While DCF_ENABLED, FMP's DCF is retired and the Caydex estimate is attached at SERVE
         # time (get_valuation_snapshot), never stored in this row.
@@ -714,6 +819,7 @@ def build_price_snapshot(
     bs: Dict[str, Any],
     profile: Dict[str, Any],
     bench: Dict[str, Optional[float]],
+    bench_levels: Optional[Dict[str, Optional[str]]] = None,
     ticker: str = "?",
 ) -> SnapshotItemResponse:
     """Ratios + benchmark medians -> the "Price" snapshot card.
@@ -731,20 +837,22 @@ def build_price_snapshot(
     empty dict is fine and degrades each label to a bare name — which is the
     honest rendering, and the reason the hardcoded averages could be deleted.
 
+    `bench_levels` is `{metric_key: "industry" | "sector" | None}` — the peer level of
+    each median (`split_peer_cells`), copied to the metric's `peer_level` whenever its
+    label prints that median. Optional: a caller holding only the medians (the overview's
+    degraded fallback) gets `peer_level` None and the client keeps its generic wording.
+
     Takes the parsed FMP payloads rather than fetching, so it is pure and the
     caller owns the I/O and the caching policy. `ticker` is diagnostics only —
     it names the symbol in the EV/EBITDA reconstruction log lines, which are the
     only way to see WHY a ticker fell to "—" without re-instrumenting.
+
+    Stamps `computed_at` with the build instant.
     """
     # Extract valuation metrics. /ratios-ttm uses a `TTM` suffix on field
     # names; /key-metrics-ttm uses a different convention. Cover both
     # plus the legacy names so a quiet FMP rename doesn't NULL out the
-    # whole card.
-    def _first_valid(*vals) -> Optional[float]:
-        for v in vals:
-            if v is not None:
-                return v
-        return None
+    # whole card (`_first_valid`: the first that is present).
 
     # ── Why there are TWO P/E values on the ticker detail screen ────────────
     #
@@ -804,7 +912,15 @@ def build_price_snapshot(
         _safe_float(km, "pbRatioTTM"),
         _safe_float(km, "pbRatio"),
     )
+    # ⚠️ `priceToFreeCashFlowRatioTTM` (singular "Flow") FIRST — it is the key `/stable`
+    # ratios-ttm sends. This read the plural `priceToFreeCashFlowsRatioTTM` first, which
+    # /stable never populates, so EVERY ticker fell to the market-cap ÷ LAST FISCAL YEAR
+    # FCF reconstruction below: verified on prod 2026-10-07, KO showed 69.93 against FMP's
+    # TTM 25.83 and MSFT 57.37 against 58.72. The plural names stay behind it in case an
+    # upstream rename goes back.
     pfcf = _first_valid(
+        _safe_float(fr, "priceToFreeCashFlowRatioTTM"),
+        _safe_float(fr, "priceToFreeCashFlowRatio"),
         _safe_float(fr, "priceToFreeCashFlowsRatioTTM"),
         _safe_float(fr, "priceToFreeCashFlowsRatio"),
         _safe_float(km, "pfcfRatioTTM"),
@@ -845,13 +961,31 @@ def build_price_snapshot(
     # handled one layer down, and duplicating it here just implies the shim is absent.
     mcap = _safe_float(km, "marketCap") or _safe_float(profile, "mktCap")
 
-    # Fallback: compute P/FCF from marketCap / freeCashFlow. When FCF is
-    # negative the ratio is meaningless (negative multiples don't compare),
-    # so we leave pfcf as None and the renderer shows "—".
+    # Fallbacks when no P/FCF key is populated, TTM before fiscal year:
+    #   1. 1 / freeCashFlowYieldTTM — the same TTM FCF over market cap, inverted. A
+    #      negative yield leaves pfcf None and `_fmt_pfcf` prints "Neg." from its sign.
+    #   2. marketCap / the LAST FISCAL YEAR's freeCashFlow — only when no TTM yield is
+    #      known at all. A trailing-year sign must never be overruled by an older year's
+    #      (a negative FY FCF beside a positive TTM one printed "Neg."; the reverse
+    #      printed a multiple for a company burning cash today). When FCF is negative the
+    #      ratio is meaningless (negative multiples don't compare), so pfcf stays None.
+    # A ratio of exactly 0 is FMP's "absent" on these fields (`_fmt_pfcf` already reads it
+    # so), so it takes the fallbacks too instead of scoring a neutral 3 beside a "—".
+    if pfcf == 0:
+        pfcf = None
     if pfcf is None:
-        fcf = _safe_float(cf, "freeCashFlow")
-        if mcap and mcap > 0 and fcf and fcf > 0:
-            pfcf = round(mcap / fcf, 2)
+        fcf_yield_ttm = _ttm_fcf_yield(km)
+        if fcf_yield_ttm is not None:
+            if fcf_yield_ttm > 0:
+                pfcf = round(1.0 / fcf_yield_ttm, 2)
+        else:
+            fcf = _safe_float(cf, "freeCashFlow")
+            if mcap and mcap > 0 and fcf and fcf > 0:
+                pfcf = round(mcap / fcf, 2)
+                logger.info(
+                    "P/FCF for %s reconstructed from the last fiscal year's FCF "
+                    "(no TTM ratio or yield): %.2f", ticker, pfcf,
+                )
 
     # Fallback chain for EV/EBITDA when both /ratios-ttm and /key-metrics-ttm
     # return null:
@@ -941,70 +1075,66 @@ def build_price_snapshot(
         if ni is not None and ni > 0 and mcap and mcap > 0:
             ey = round(ni / mcap, 4)
 
-    sector_pe = bench.get("pe_ratio")
-    sector_ps = bench.get("ps_ratio")
-    sector_pb = bench.get("pb_ratio")
-    sector_pfcf = bench.get("pfcf_ratio")
-    sector_ev = bench.get("ev_ebitda")
-    sector_ey = bench.get("earnings_yield")
+    levels = bench_levels or {}
 
-    # Score each metric against sector median (lower = better)
-    score_pe = _valuation_score(pe, sector_pe)
-    score_ps = _valuation_score(ps, sector_ps)
-    score_pb = _valuation_score(pb, sector_pb)
-    score_pfcf = _valuation_score(pfcf, sector_pfcf)
-    score_ev = _valuation_score(ev_ebitda, sector_ev)
+    def _median(key: str) -> Optional[float]:
+        # The overview's fallback hands in its own flat dict: coerce like `_safe_float`.
+        return _safe_float(bench, key) if isinstance(bench, dict) else None
+
+    sector_pe = _median("pe_ratio")
+    sector_ps = _median("ps_ratio")
+    sector_pb = _median("pb_ratio")
+    sector_pfcf = _median("pfcf_ratio")
+    sector_ev = _median("ev_ebitda")
+
+    # Score each metric against sector median (lower = better). P/E keeps its absolute
+    # bands as the no-peer fallback (they are P/E bands); the other four are scored
+    # against a peer median or not at all (`_peer_relative_score` → None), and an
+    # unscored multiple votes the neutral 3 in the composite, as a missing one does.
+    score_pe = _valuation_score(pe, _usable_median(sector_pe))
+    score_ps = _peer_relative_score(ps, sector_ps)
+    score_pb = _peer_relative_score(pb, sector_pb)
+    score_pfcf = _peer_relative_score(pfcf, sector_pfcf)
+    score_ev = _peer_relative_score(ev_ebitda, sector_ev)
+
+    def _vote(score: Optional[int]) -> int:
+        return 3 if score is None else score
 
     # Weighted average: P/E 25%, P/B 15%, P/S 15%, P/FCF 20%, EV/EBITDA 25%
     weighted = (
         score_pe * 0.25
-        + score_pb * 0.15
-        + score_ps * 0.15
-        + score_pfcf * 0.20
-        + score_ev * 0.25
+        + _vote(score_pb) * 0.15
+        + _vote(score_ps) * 0.15
+        + _vote(score_pfcf) * 0.20
+        + _vote(score_ev) * 0.25
     )
     rating = max(1, min(5, round(weighted)))
 
+    def _metric(label, key, bench_key, value, display, score, pct=False):
+        ctx = (_sector_ctx_pct if pct else _sector_ctx)(value, _median(bench_key))
+        # `peer_level` is the level of the median the label PRINTS — None when it prints none.
+        level = levels.get(bench_key) if ctx else None
+        return SnapshotMetricResponse(
+            name=_metric_name(label, ctx), value=display, metric_key=key, score=score,
+            peer_level=level if level in ("industry", "sector") else None,
+        )
+
     metrics = [
-        SnapshotMetricResponse(
-            name=_metric_name("P/E", pe, sector_pe),
-            value=_fmt_ratio(pe),
-            metric_key="pe",
-            score=score_pe if pe is not None else None,
-        ),
-        SnapshotMetricResponse(
-            name=_metric_name("P/B", pb, sector_pb),
-            value=_fmt_ratio(pb),
-            metric_key="pb",
-            score=score_pb if pb is not None else None,
-        ),
-        SnapshotMetricResponse(
-            name=_metric_name("P/S", ps, sector_ps),
-            value=_fmt_ratio(ps),
-            metric_key="ps",
-            score=score_ps if ps is not None else None,
-        ),
-        SnapshotMetricResponse(
-            name=_metric_name("P/FCF", pfcf, sector_pfcf),
-            value=_fmt_pfcf(pfcf, km, cf),
-            metric_key="pfcf",
-            score=score_pfcf if pfcf is not None else None,
-        ),
-        SnapshotMetricResponse(
-            name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),
-            value=_fmt_ratio(ev_ebitda),
-            metric_key="ev_ebitda",
-            score=score_ev if ev_ebitda is not None else None,
-        ),
+        _metric("P/E", "pe", "pe_ratio", pe, _fmt_ratio(pe),
+                score_pe if pe is not None else None),
+        _metric("P/B", "pb", "pb_ratio", pb, _fmt_ratio(pb),
+                score_pb if pb is not None else None),
+        _metric("P/S", "ps", "ps_ratio", ps, _fmt_ratio(ps),
+                score_ps if ps is not None else None),
+        _metric("P/FCF", "pfcf", "pfcf_ratio", pfcf, _fmt_pfcf(pfcf, km, cf),
+                score_pfcf if pfcf is not None else None),
+        _metric("EV/EBITDA", "ev_ebitda", "ev_ebitda", ev_ebitda, _fmt_ratio(ev_ebitda),
+                score_ev if ev_ebitda is not None else None),
         # Earnings Yield: informational — not part of the composite
         # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
         # to keep historical ratings comparable. score=None → not a verdict driver.
-        SnapshotMetricResponse(
-            name=_metric_name_pct("Earnings Yield", ey, sector_ey),
-            value=_fmt_pct(ey),
-            metric_key="earnings_yield",
-            score=None,
-        ),
+        _metric("Earnings Yield", "earnings_yield", "earnings_yield", ey, _fmt_pct(ey),
+                None, pct=True),
     ]
 
     return SnapshotItemResponse(
@@ -1013,6 +1143,7 @@ def build_price_snapshot(
         metrics=metrics,
         full_report_available=True,
         weighted_score=round(weighted, 3),
+        computed_at=snapshot_build_time(),
     )
 
 # ── Singleton ─────────────────────────────────────────────────────

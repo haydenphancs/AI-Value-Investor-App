@@ -297,26 +297,34 @@ extension PlanFeature {
     ///
     /// ⚠️ The credit figures are computed from THIS PLAN's `monthlyCredits`, which is on
     /// the wire even on a pre-features backend — so the number most likely to be retuned
-    /// never goes stale here. The ticker and follow limits are the residual duplication,
-    /// and `backend/tests/test_paywall_copy_guards.py` pins them against
-    /// `entitlements.UPDATES_TICKER_LIMITS` / `WHALE_FOLLOW_LIMITS` so they cannot drift
-    /// silently. Do not add a third hardcoded number here without extending that guard.
+    /// never goes stale here. The ticker, follow and theme-company limits are the residual
+    /// duplication, and `backend/tests/test_paywall_copy_guards.py` pins them against
+    /// `entitlements.UPDATES_TICKER_LIMITS` / `WHALE_FOLLOW_LIMITS` / `theme_company_limit`
+    /// so they cannot drift silently. Do not add another hardcoded number here without
+    /// extending that guard.
     static func bundled(
         for tier: UserTier,
         monthlyCredits: Int,
         reportCost: Int,
         chatCost: Int
     ) -> [PlanFeature] {
-        // Mirrors entitlements.UPDATES_TICKER_LIMITS / WHALE_FOLLOW_LIMITS.
-        // `whaleFollows == nil` means unlimited.
+        // Mirrors entitlements.UPDATES_TICKER_LIMITS / WHALE_FOLLOW_LIMITS /
+        // theme_company_limit. `whaleFollows == nil` / `themeCompanies == nil` mean unlimited.
         let updatesTickers: Int
         let whaleFollows: Int?
+        let themeCompanies: Int?
         switch tier {
-        case .free:    updatesTickers = 1;  whaleFollows = 1
-        case .pro:     updatesTickers = 15; whaleFollows = 10
-        case .premium: updatesTickers = 30; whaleFollows = nil
+        case .free:    updatesTickers = 1;  whaleFollows = 1;   themeCompanies = 5
+        case .pro:     updatesTickers = 15; whaleFollows = 10;  themeCompanies = nil
+        case .premium: updatesTickers = 30; whaleFollows = nil; themeCompanies = nil
         }
         let paid = tier != .free
+        // Precomputed (explicit types) rather than inline in the array literal below.
+        let themeTitle: String = themeCompanies.map { "Top \($0) \($0 == 1 ? "company" : "companies") in each theme" }
+            ?? "Every company in every theme"
+        let themeDetail: String = themeCompanies == nil
+            ? "The full company list behind each Emerging Frontiers theme on Home."
+            : "Each Emerging Frontiers theme on Home shows its largest companies first. A plan shows the full list."
 
         return [
             PlanFeature(
@@ -344,6 +352,15 @@ extension PlanFeature {
                 symbol: validatedSymbol("antenna.radiowaves.left.and.right"),
                 accentKey: "signals",
                 included: paid
+            ),
+            // A QUANTITY (Free really gets the first companies of every list), so `included`
+            // stays true on every tier — like the Updates row.
+            PlanFeature(
+                key: "theme_companies",
+                title: themeTitle,
+                detail: themeDetail,
+                symbol: validatedSymbol("square.stack.3d.up.fill"),
+                accentKey: "updates"
             ),
             PlanFeature(
                 key: "whale_tracking",
@@ -475,6 +492,12 @@ enum PaywallContext: String, Sendable, CaseIterable {
     /// backend `TRILLION_CLUB_DETAIL_UNLOCKED_TIERS` — the whale-detail floor). The cards, the
     /// top 3 holdings, the latest changes and every disclosed stake stay free.
     case trillionClub = "trillion_club"
+    /// An Emerging Frontiers theme's full company list (Pro/Max, backend
+    /// `THEME_COMPANIES_UNLOCKED_TIERS` — the same floor, 2026-10-04). Every theme card, its
+    /// performance and the first companies of each list stay free. "Why it's moving" reaches
+    /// Free as written only when it names no withheld company (backend `_prose_is_safe`);
+    /// otherwise Free reads fixed wording that points at the full list.
+    case themeCompanies = "theme_companies"
 
     var headline: String {
         switch self {
@@ -487,6 +510,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .learnAudio:       return "Listen instead of reading"
         case .congressHolders:  return "See what Congress is trading"
         case .trillionClub:     return "See every holding and every quarter"
+        case .themeCompanies:   return "See every company in each theme"
         }
     }
 
@@ -513,6 +537,8 @@ enum PaywallContext: String, Sendable, CaseIterable {
             return "Insider and institutional flow stay free on every ticker. A plan adds congressional trades and the members behind them."
         case .trillionClub:
             return "You already see each company's largest holdings, its latest changes and its disclosed stakes. A plan adds the full holdings list and earlier quarters."
+        case .themeCompanies:
+            return "You already see every theme, how it is performing and its largest companies. A plan shows the full list and why it's moving."
         }
     }
 
@@ -530,6 +556,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         // Same paid floor and the same thing unlocked — a filer's full 13F holdings and its
         // history — as the whale profile's Current Picks, so the same feature row.
         case .trillionClub:          return "whale_detail"
+        case .themeCompanies:        return "theme_companies"
         }
     }
 
@@ -544,13 +571,14 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .learnAudio:       return "headphones"
         case .congressHolders:  return "building.columns.fill"
         case .trillionClub:     return "building.2.fill"
+        case .themeCompanies:   return "square.stack.3d.up.fill"
         }
     }
 
     var accent: Color {
         switch self {
         case .general, .moreCredits: return AppColors.alertOrange
-        case .updatesTickers:        return AppColors.primaryBlue
+        case .updatesTickers, .themeCompanies: return AppColors.primaryBlue
         case .signals, .congressHolders: return AppColors.accentCyan
         case .whaleFollowLimit, .whaleDetail, .trillionClub: return AppColors.alertPurple
         case .learnAudio:            return AppColors.gain

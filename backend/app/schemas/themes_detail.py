@@ -11,8 +11,8 @@ The theme's constituent tickers live in the `trending_themes` Supabase row
 (editable → NO app release); this endpoint resolves them to live quotes.
 """
 
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, PrivateAttr
+from typing import FrozenSet, List, Optional
 
 
 class ThemeConstituentResponse(BaseModel):
@@ -89,7 +89,8 @@ class ThemeDetailResponse(BaseModel):
 
     ``constituents`` is ordered largest-market-cap first. An empty list (an FMP
     hiccup, or a theme with no tickers) → iOS shows an honest empty state under
-    the hero, which still renders from the row's title/subtitle/image.
+    the hero, which still renders from the row's title/subtitle/image. For a locked
+    (Free) caller it holds only the first companies of that order — see ``is_locked``.
     """
 
     slug: str
@@ -104,3 +105,23 @@ class ThemeDetailResponse(BaseModel):
     performance: Optional[ThemePerformanceResponse] = None
     insight: Optional[ThemeInsightResponse] = None
     news: List[ThemeNewsItemResponse] = []
+    # ── Plan gate (`entitlements.theme_companies_unlocked`, 2026-10-04) ──
+    # A locked (Free) caller is sent the first THEME_FREE_COMPANY_LIMIT companies plus COUNTS
+    # of what was withheld; iOS draws one blurred stand-in row per withheld company from the
+    # count alone. The withheld companies are never serialised for a locked caller (see
+    # `services/theme_detail_redaction.py`) — the blur is cosmetic on top of a server-side
+    # redaction, not the gate itself.
+    #
+    # All four are DEFAULTED so an already-shipped build, which knows none of them, decodes
+    # this response unchanged (it simply shows the shorter list).
+    is_locked: bool = False                  # True for every locked-tier caller
+    tier_required: Optional[str] = None      # "pro" when locked, else None
+    locked_constituents_count: int = 0       # companies withheld (0 → no blurred rows)
+    locked_changes_count: int = 0            # "What changed this month" rows withheld
+
+    # NOT serialised (a pydantic private attribute): the theme's members whose quote did not
+    # resolve in THIS build — `_build_constituents` drops them, so they are in no list and the
+    # Free prose gate cannot check their names; it fails closed while any are missing
+    # (`theme_detail_redaction._prose_is_safe`, adversarial review 2026-10-07). Set by
+    # `HomeDashboardService._build_theme_detail`; empty everywhere else.
+    _unresolved_members: FrozenSet[str] = PrivateAttr(default_factory=frozenset)

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.schemas.updates import SentimentTrendDayResponse, SentimentTrendResponse
-from app.services.news_sentiment_trend_service import TREND_DAYS
+from app.services.news_sentiment_trend_service import RETENTION_DAYS, TREND_DAYS
 
 IOS = Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
 MODELS = IOS / "Models" / "UpdatesModels.swift"
@@ -132,15 +132,19 @@ def test_no_updates_surface_seeds_a_paid_turn(path):
     )
 
 
-def test_all_three_entries_route_through_the_one_opener():
+def test_both_entries_route_through_the_one_opener():
     body = _decl_block(_read(VIEW), "var body: some View")
     assert "openUpdatesChat(focus: .card)" in body, "the Insights card's pill"
-    assert "openUpdatesChat(focus: .trend)" in body, "the news-tone chart's button"
     assert "onAskCay: { pendingChatFocus = .card }" in body, "the detail sheet's button"
     assert ".sheet(item: $insightSources, onDismiss: presentPendingChat)" in body
     pending = _decl_block(_read(VIEW), "private func presentPendingChat(")
     assert "openUpdatesChat(focus: focus)" in pending
     assert "pendingChatFocus = nil" in pending
+    # Owner, TestFlight 1.0 (11): the news-tone chart has no Ask button of its own any more —
+    # a tone question is asked from the Insights card, whose chat is grounded on every window.
+    assert "openUpdatesChat(focus: .trend)" not in body
+    assert "case trend" not in _decl_block(_read(IOS / "Models" / "ChatModels.swift"),
+                                           "enum UpdatesChatFocus")
 
 
 def test_a_presentation_reset_cannot_reopen_the_chat():
@@ -212,15 +216,19 @@ def test_the_chart_gate_lives_outside_body():
 def test_identity_change_clears_the_trend_before_the_active_tab_gate():
     fn = _decl_block(_read(VM), "func handleIdentityChange(")
     gate = fn.index("guard isActiveTab")
-    for token in ("trendCache.removeAll()", "sentimentTrend = nil", "trendTask?.cancel()"):
+    for token in ("trendCache.removeAll()", "trendSource = nil", "sentimentTrend = nil",
+                  "trendTask?.cancel()"):
         assert fn.index(token) < gate, f"{token} must run even for a hidden tab"
 
 
-def test_a_late_trend_response_for_another_scope_or_window_is_dropped():
+def test_a_late_trend_response_for_another_scope_is_dropped_but_never_for_a_window():
+    """The answer is the 90-day series every window is cut from: checking the WINDOW too threw
+    away a load a toggle tap overlapped and re-fetched it (TestFlight 1.0 (11))."""
     fn = _decl_block(_read(VM), "private func loadTrend(")
-    assert fn.count("selectedTab?.scope == scope, trendWindow == window") == 2, (
+    assert fn.count("guard !Task.isCancelled, selectedTab?.scope == scope else { return }") == 2, (
         "both the success and the failure path must check they still own the chart"
     )
+    assert "trendWindow == window" not in fn
 
 
 def test_the_trend_load_never_blocks_the_feed():
@@ -228,7 +236,11 @@ def test_the_trend_load_never_blocks_the_feed():
     assert "startTrendLoad(scope: scope, force: force)" in fn
     start = _decl_block(_read(VM), "private func startTrendLoad(")
     assert "trendTask = Task" in start
-    assert "if sentimentTrend?.scope != scope { sentimentTrend = nil }" in start
+    # Another scope's chart is cleared before the request goes out; the SAME scope's is
+    # redrawn from the answer it already holds.
+    same = start[start.index("if let source = trendSource, source.scope == scope {"):]
+    assert same.index("show(source)") < same.index("} else {") < same.index("sentimentTrend = nil")
+    assert same.index("trendSource = nil") < same.index("trendTask = Task")
 
 
 
@@ -280,14 +292,15 @@ def test_a_fund_is_declared_to_the_chat():
 # ── 2026-09-27: adaptive window, clipped label, building state ────────────────
 
 
-def test_a_short_history_opens_on_7d_cut_from_the_30d_answer():
+def test_a_short_history_opens_on_7d_and_every_window_is_cut_from_the_90d_answer():
     vm = _read(VM)
     start = _decl_block(vm, "private func startTrendLoad(")
-    assert "let fetchWindow: SentimentTrendWindow = userPickedWindow ? window : .month" in start
     assert "if !userPickedWindow && isNewScope { trendWindow = .month }" in start
-    present = _decl_block(vm, "private func present(")
-    assert "trend.trackedDays() < SentimentTrend.shortHistoryDays ? .week : .month" in present
-    assert "sentimentTrend = trend.trimmed(to: display)" in present
+    show = _decl_block(vm, "private func show(")
+    assert "source.trackedDays() < SentimentTrend.shortHistoryDays ? .week : .month" in show
+    assert "sentimentTrend = source.trimmed(to: trendWindow)" in show
+    assert "trendSource = source" in show
+    assert "show(source)" in _decl_block(vm, "private func present(")
     # Only the user's tap marks the window as chosen.
     assert vm.count("userPickedWindow = true") == 1
     assert "userPickedWindow = true" in _decl_block(vm, "func setTrendWindow(")
@@ -322,7 +335,7 @@ def test_the_building_poll_is_bounded_and_cancelled():
     assert "trendPollAttempt < trendPollDelays.count" in poll
     assert "self.selectedTab?.scope == scope" in poll
     load = _decl_block(vm, "private func loadTrend(")
-    assert "if !trend.isBuildingHistory { trendCache[key] = (Date(), trend) }" in load
+    assert "if !trend.isBuildingHistory { trendCache[scope] = (Date(), trend) }" in load
     identity = _decl_block(vm, "func handleIdentityChange(")
     gate = identity.index("guard isActiveTab")
     # 2026-10-01: the window pick is a saved DEVICE preference now, so an identity change
@@ -422,3 +435,127 @@ def test_the_ask_cay_pill_has_an_in_card_tap_target():
     frame = body.index(".frame(minHeight: Self.minHitHeight)")
     shape = body.index(".contentShape(Rectangle())")
     assert overlay < frame < shape
+
+
+# ── TestFlight 1.0 (11), 2026-10-05: the window toggle lagged on its first use ────────────
+# Each window was its own request: the first tap on 7D / 30D / 90D showed a spinner over the
+# previous window's bars and numbers until that window's answer arrived. Now ONE 90-day
+# answer per scope serves every window (the backend's 7D / 30D answers are exact cuts of it —
+# test_news_sentiment_trend::test_every_window_is_an_exact_cut_of_the_90_day_answer).
+
+
+def _call_args(src: str, header: str) -> str:
+    """The parenthesis-balanced argument list of the first `header(` call, comments stripped."""
+    start = src.find(header)
+    assert start != -1, f"{header!r} not found — this scan has drifted"
+    open_paren = start + len(header) - 1
+    assert src[open_paren] == "(", f"{header!r} must end at its opening parenthesis"
+    depth = 0
+    for i in range(open_paren, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return _strip_comments(src[open_paren:i + 1])
+    pytest.fail(f"unbalanced parentheses after {header!r}")
+
+
+def test_one_request_serves_every_window():
+    vm = _strip_comments(_read(VM))
+    assert vm.count(".getSentimentTrend(") == 1, "the trend is fetched in exactly one place"
+    load = _decl_block(_read(VM), "private func loadTrend(")
+    assert "let fetchWindow = SentimentTrendWindow.widest" in load
+    assert ".getSentimentTrend(scope: scope, days: fetchWindow.days)" in load
+    assert "SentimentTrend(dto: response, window: fetchWindow)" in load
+    # The cache holds ONE answer per scope, not one per window.
+    assert "trendCache[scope]" in _decl_block(_read(VM), "private func startTrendLoad(")
+    widest = _read(MODELS)
+    assert ("static let widest: SentimentTrendWindow = allCases.max { $0.days < $1.days } ?? .quarter"
+            in _decl_block(widest, "enum SentimentTrendWindow"))
+
+
+def test_a_window_switch_redraws_from_the_held_answer_before_any_request():
+    vm = _read(VM)
+    tap = _decl_block(vm, "func setTrendWindow(")
+    assert "startTrendLoad(scope: scope, force: false)" in tap
+    start = _decl_block(vm, "private func startTrendLoad(")
+    # A fresh answer redraws and returns; a stale one still redraws FIRST, then refreshes.
+    hit = start.index("if !force, let hit = trendCache[scope]")
+    assert hit < start.index("present(hit.trend)") < start.index("return") < start.index("trendTask = Task")
+    assert start.index("show(source)") < start.index("trendTask = Task")
+    for name in ("private func show(", "private func present("):
+        block = _decl_block(vm, name)
+        assert "apiClient" not in block and "Task" not in block, f"{name} must never wait on a request"
+
+
+def test_trimming_uses_the_backend_window_rule():
+    """`trimmed` must cut exactly what the endpoint would have served for that window:
+    today and the N − 1 ET days before it, from the ET day the backend counts in."""
+    fn = _decl_block(_read(MODELS), "func trimmed(")
+    assert "guard target.days < window.days else { return self }" in fn
+    assert "value: -(target.days - 1)" in fn
+    assert "to: calendar.startOfDay(for: today)" in fn
+    assert "days.filter { calendar.startOfDay(for: $0.date) >= start }" in fn
+    assert "trackingSince: trackingSince, historyStatus: historyStatus" in fn
+    header = _read(MODELS).split("func trimmed(")[1][:300]
+    assert "today: Date = SentimentTrendDayParser.etToday()" in header
+
+
+# ── TestFlight 1.0 (11), 2026-10-05: the card's footer and its "Ask about this" are gone ───
+
+
+def test_the_tone_card_has_no_ask_button_and_no_scored_by_footer():
+    chart = _strip_comments(_read(CHART))
+    assert "AskCayAIPill" not in chart and "onAskCay" not in chart
+    # Who scored the headlines is still said — to VoiceOver, on the chart — but never as
+    # visible card text any more.
+    a11y = re.findall(r'\.accessibilityLabel\(([^\n]*)\)', chart)
+    assert any("Cay AI scored" in label for label in a11y), "the chart's VoiceOver label names the scorer"
+    visible = re.sub(r'\.accessibilityLabel\([^\n]*\)', "", chart)
+    assert "Cay AI scored" not in visible
+    assert "footer" not in _decl_block(_read(CHART), "var body: some View")
+    call = _call_args(_decl_block(_read(VIEW), "var body: some View"), "NewsSentimentTrendChart(")
+    assert "onAskCay" not in call and "trend: trend" in call
+
+
+def test_the_since_date_sits_right_aligned_on_the_legend_row():
+    chart = _read(CHART)
+    legend = _decl_block(chart, "private var legend: some View")
+    assert "ViewThatFits(in: .horizontal)" in legend
+    row = legend[legend.index("HStack(spacing: AppSpacing.md)"):legend.index("VStack(")]
+    # Legend first, then a Spacer pushing the label to the right edge of the SAME row.
+    assert row.index("legendItems") < row.index("Spacer(minLength: AppSpacing.sm)") \
+        < row.index("coverageLabel(coverage)")
+    # The fallback (the row does not fit) keeps it on the right, on its own line.
+    fallback = legend[legend.index("VStack("):]
+    assert ".frame(maxWidth: .infinity, alignment: .trailing)" in fallback
+    # Data-driven: the scope's first scored day from the backend, never a literal date and
+    # never a date guessed from the window's bars.
+    text = _decl_block(chart, "private var coverageText: String?")
+    assert 'return "since \\(Self.shortDate(since))"' in text
+    assert "guard let since = trend.trackingSince else { return nil }" in text
+    assert "days.first" not in text
+    assert not re.search(r'"since (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
+                         _strip_comments(chart))
+
+
+def test_the_since_label_states_only_what_the_log_supports():
+    """Review 2026-10-06: `tracking_since` is the OLDEST label still on file (the backend sweep
+    keeps RETENTION_DAYS; nothing records a scope's first day beyond it). Past that edge a
+    "since" date moves forward daily while reading like the day scoring began, so the label
+    says "120+ days" there — the same rule as the chat's `since_phrase`."""
+    text = _decl_block(_read(CHART), "private var coverageText: String?")
+    edge = text.index("if trend.historyReachesRetentionEdge() {")
+    assert edge < text.index('return "since \\(Self.shortDate(since))"'), "the edge is checked first"
+    assert 'return "\\(SentimentTrend.retentionDays)+ days"' in text[edge:text.index("return \"since")]
+    models = _read(MODELS)
+    rule = _decl_block(models, "func historyReachesRetentionEdge(")
+    assert "value: -Self.retentionDays" in rule and "to: calendar.startOfDay(for: today)" in rule
+    # `<=`, like the backend's `at_retention_edge`: the sweep deletes days BEFORE the cutoff.
+    assert "return calendar.startOfDay(for: since) <= edge" in rule
+    signature = models.split("func historyReachesRetentionEdge(")[1][:200]
+    assert "today: Date = SentimentTrendDayParser.etToday()" in signature
+    kept = re.findall(r"static let retentionDays = (\d+)",
+                      _decl_block(models, "struct SentimentTrend: Equatable"))
+    assert kept == [str(RETENTION_DAYS)], f"the app's retention ({kept}) must equal the backend's"

@@ -1490,6 +1490,9 @@ class ChatViewModel: ObservableObject {
         // retired on 2026-10-02), so "Digging deeper" is true on every path. The web-search
         // label belongs to the one tool that does search the web, below.
         case "explain_price_move":                return "Digging deeper"
+        // Who owns the stock (2026-10-05): each insider's shares after their latest Form 4 and
+        // the 13F institutional holders, read from the Holders data — never the web.
+        case "check_ownership_filings":           return "Checking ownership filings"
         // Report chat's live web search (owner decision, 2026-10-02). The server declares this
         // tool only on a turn that asked for a web search and passed its gate, and a skipped
         // step never reaches this label, so the words are true wherever they render.

@@ -19,6 +19,9 @@ struct ReportDeepDiveMetricCard: View {
         switch data.starRating {
         case 4...5: return AppColors.bullish
         case 3: return AppColors.neutral
+        // 0 = NOT rated ("Data unavailable", or a bank's Health card left with one
+        // comparable row): no verdict, so no verdict colour — never the 1-2 star red.
+        case ...0: return AppColors.textSecondary
         default: return AppColors.bearish
         }
     }

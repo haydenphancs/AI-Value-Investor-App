@@ -19,6 +19,9 @@ Written independently of the module, adversarially. What is pinned, and why each
 * **A floor on the eligible pool**, so the corpus-wide guards cannot go vacuous by the pool
   shrinking to nothing.
 * **An unreadable corpus degrades to an empty pool with an ERROR log**, never an exception.
+* **`title_companies`** (2026-10-05) — whom a case study's hook names — reads the TITLE, never the
+  fact sheet or the company terms (which carry executives' names): every eligible case study
+  names at least one company, every lesson (and any other kind) none, each pinned by hand.
 
 Tests that swap the corpus paths clear `load_corpus`'s cache before AND after (fixture), so the
 real corpus is re-read by whichever test runs next.
@@ -26,6 +29,7 @@ real corpus is re-read by whichever test runs next.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -684,6 +688,109 @@ def test_a_money_moves_company_term_makes_a_tier2_word_a_violation_end_to_end(tm
     assert ("Sears was a bargain back then.", "class_b_evaluative") in jr.dropped
     assert "Sears was a bargain back then." not in jr.fact_sentences
     assert "Everything looked like a bargain back then." in jr.fact_sentences
+
+
+# ── title_companies: whom a case study's hook names (writer prompt, HOOK AND TITLES) ─────
+
+#: Written HERE from each title, never read back from the module: the companies the TITLE names,
+#: as it spells them, in its order. The fact sheets name many more (Tesla's: Ford, GM, Toyota).
+_TITLE_COMPANIES = {
+    "money_moves:amd-vs-intel-the-cpu-wars": ("AMD", "Intel"),
+    "money_moves:apples-services-revolution": ("Apple",),
+    "money_moves:boeing-vs-airbus-the-aerospace-duopoly": ("Boeing", "Airbus"),
+    "money_moves:costcos-membership-magic": ("Costco",),
+    "money_moves:how-amazon-built-its-moat": ("Amazon",),
+    "money_moves:metas-metaverse-pivot": ("Meta",),                       # never "Metaverse"
+    "money_moves:microsofts-cloud-metamorphosis": ("Microsoft",),
+    "money_moves:netflix-vs-disney-plus": ("Netflix", "Disney"),           # "Disney+"
+    "money_moves:nvidias-ai-dominance": ("NVIDIA",),                       # the title's own casing
+    "money_moves:tesla-vs-traditional-auto": ("Tesla",),                   # "Traditional Auto" is no company
+    "money_moves:the-home-depot-vs-lowes": ("Home Depot", "Lowe"),         # the possessive stays outside
+    "money_moves:the-rise-of-lvmh": ("LVMH",),
+    "money_moves:the-rise-of-tiktok-vs-instagram-reels": ("TikTok", "Instagram"),   # Reels: a product
+    "money_moves:tsmc-the-foundry-that-runs-the-world": ("TSMC",),
+    "money_moves:visa-vs-mastercard": ("Visa", "Mastercard"),              # Visa: the item's own word-brand
+}
+
+
+@pytest.mark.parametrize("key", sorted(_TITLE_COMPANIES))
+def test_title_companies_are_the_titles_own(key):
+    item = cp.get_item(key)
+    assert item is not None and item.eligible and item.kind == cp.MONEY_MOVES, key
+    assert cp.title_companies(item) == _TITLE_COMPANIES[key], (key, item.title)
+
+
+def test_every_case_study_names_a_title_company_and_no_lesson_does():
+    """The prompt asks a case study's hook to name its title's company and a lesson's to name
+    none: an eligible case study with no title company would get an impossible ask, a lesson with
+    one a forbidden one."""
+    items = _eligible_items()
+    case_studies = [i for i in items if i.kind == cp.MONEY_MOVES]
+    lessons = [i for i in items if i.kind == cp.JOURNEY]
+    assert len(case_studies) >= 10 and len(lessons) >= 10, (len(case_studies), len(lessons))
+    for item in case_studies:
+        names = cp.title_companies(item)
+        assert isinstance(names, tuple) and names, (item.key, item.title)
+        assert len(set(names)) == len(names), (item.key, names)
+        # As the title spells them: each one is a piece of the (accent-folded) title itself.
+        assert all(isinstance(n, str) and n and n in cp.skeleton(item.title) for n in names), names
+    for item in lessons:
+        assert cp.title_companies(item) == (), (item.key, item.title)
+
+
+def test_any_kind_but_money_moves_names_no_title_company():
+    """() for a lesson even when its title would name a company, and for an unknown kind too —
+    the fail-safe is the hook that names nobody."""
+    costco = cp.get_item("money_moves:costcos-membership-magic")
+    assert cp.title_companies(costco) == ("Costco",)                         # anti-vacuity
+    for kind in (cp.JOURNEY, "podcast", ""):
+        assert cp.title_companies(dataclasses.replace(costco, kind=kind)) == (), kind
+
+
+def test_the_title_is_the_authority_not_the_fact_sheet():
+    """Tesla's sheet names Ford, GM and Toyota as its company terms; the hook names only the
+    title's Tesla. A case study whose title names no company (or is blank) gets (), whatever its
+    sheet says."""
+    tesla = cp.get_item("money_moves:tesla-vs-traditional-auto")
+    assert {"ford", "gm", "toyota"} <= tesla.company_terms                  # the sheet does name them
+    assert cp.title_companies(tesla) == ("Tesla",)
+    costco = cp.get_item("money_moves:costcos-membership-magic")
+    for title in ("Membership Magic", "", "   "):
+        assert cp.title_companies(dataclasses.replace(costco, title=title)) == (), repr(title)
+
+
+def test_title_companies_keep_the_titles_order_and_name_each_company_once():
+    visa = cp.get_item("money_moves:visa-vs-mastercard")
+    assert cp.title_companies(dataclasses.replace(visa, title="Mastercard vs. Visa")) == ("Mastercard", "Visa")
+    costco = cp.get_item("money_moves:costcos-membership-magic")
+    assert cp.title_companies(dataclasses.replace(costco, title="Costco vs. Costco")) == ("Costco",)
+
+
+def test_visa_is_found_only_through_the_items_own_word_brand():
+    """"Visa" is an ordinary word as well as a brand: the lexicon alone finds only Mastercard in
+    "Visa vs. Mastercard", so the hook ask depends on the item's OWN word-brands being passed."""
+    visa = cp.get_item("money_moves:visa-vs-mastercard")
+    plain = [name for name, _a, _b in compliance.sentence_company_mentions(cp.skeleton(visa.title))]
+    assert plain == ["mastercard"], plain
+    assert "visa" in compliance.own_word_brands(visa.company_terms)
+    assert cp.title_companies(visa) == ("Visa", "Mastercard")
+
+
+def test_no_person_ever_comes_back_as_a_title_company():
+    """A case study's company terms DO carry its executives' names, so handing the terms back
+    instead of reading the title would put a real person in the hook ask (marketing.md §1). A
+    person named in the title itself is not a company either."""
+    corpus = cp.load_corpus()
+    for key, person in (("money_moves:how-amazon-built-its-moat", "bezos"),
+                        ("money_moves:microsofts-cloud-metamorphosis", "nadella"),
+                        ("money_moves:the-rise-of-lvmh", "arnault")):
+        assert person in corpus[key].company_terms, (key, person)           # anti-vacuity
+    rx = re.compile(r"(?<![a-z])(?:" + "|".join(re.escape(n) for n in _FROZEN_EXECUTIVES) + r")(?![a-z])")
+    for item in _eligible_items():
+        for name in cp.title_companies(item):
+            assert not rx.search(compliance.fold(name)), (item.key, name)
+    amazon = corpus["money_moves:how-amazon-built-its-moat"]
+    assert cp.title_companies(dataclasses.replace(amazon, title="Bezos and the Amazon Moat")) == ("Amazon",)
 
 
 # ── eligibility threshold ─────────────────────────────────────────────────────

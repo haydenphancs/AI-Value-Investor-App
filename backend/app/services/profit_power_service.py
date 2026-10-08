@@ -37,9 +37,11 @@ from app.utils.period_labels import (
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
+    benchmark_levels,
+    flatten_benchmark_values,
     get_sector_benchmark_lookup,
-    hold_back_thin_benchmarks,
     lookup_failed,
+    series_peer_level,
 )
 from app.services.sector_benchmark_service import _normalize_sector
 
@@ -68,8 +70,31 @@ _DEGRADED_CACHE_TTL = 60
 # persisted, so a NULL `next_earnings_date` now means "no pending announcement"; an older
 # row's NULL may be a swallowed calendar 429 (no report-day bound), so it is rebuilt.
 # Growth copies this table's column WITHOUT a version check, so this bump does not reach it.
-_PP_PAYLOAD_VERSION = 5
+# v6 (2026-10-07): ONE peer group per chart line (`get_benchmark_series`): a metric's
+# line is its industry's medians when that industry is mature (>= 20 companies) at the
+# line's NEWEST period — its older, thinner periods included, each that industry's own
+# median — else the sector's. A period that is not fully reported is hidden, and no
+# period borrows another period's value. The legend level is read off the drawn points.
+# v7 (2026-10-08, PP-LEVEL-1): `peer_group_levels` names each drawn line on its own —
+# "annual"/"quarterly" are now the NET-margin line's level (was a vote pooled over all
+# four margins), plus per-metric "annual.<metric>" / "quarterly.<metric>" keys — so a v6
+# row can label a sector line "Industry" and lacks the keys the report drill-down reads.
+_PP_PAYLOAD_VERSION = 7
 _VERSION_KEY = "payload_version"
+
+# The margin whose peer line the live Profit Power card draws (and Cay AI quotes): its
+# level is the per-tab "annual" / "quarterly" key and the legacy `peer_group_level`.
+_HEADLINE_PEER_METRIC = "net_margin"
+
+
+def _drawable_cells(table: Dict[str, Any]) -> Dict[str, float]:
+    """The benchmark cells `_to_schemas` actually draws: finite numbers only. A NaN / inf /
+    non-numeric cell is dropped there (loudly), so it must not vote on the line's legend
+    level either — a line's level names the points on screen, nothing else."""
+    return {
+        key: raw for key, raw in table.items()
+        if not isinstance(raw, bool) and isinstance(raw, (int, float)) and math.isfinite(raw)
+    }
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -650,35 +675,31 @@ class ProfitPowerService:
         ]
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
-        # "industry" if the benchmark lines come from the company's industry peers,
-        # "sector" on fallback — labels the drill-down legend/footer.
-        peer_group_level: Optional[str] = None
+        # Peer level of the value each benchmark cell SHOWS, per metric and period.
+        levels_annual: Dict[str, Dict[str, Optional[str]]] = {}
+        levels_quarterly: Dict[str, Dict[str, Optional[str]]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
             # The lookup is SYNCHRONOUS (sync supabase-py + a time.sleep retry): run it on
             # a worker thread so a cold key cannot stall the event loop.
             #
-            # RICH cells (value + sample size n), flattened through the same thin-cell
-            # hold-back Growth uses: a just-closed fiscal period is only partly reported
-            # (the Semiconductors FY2026 median came from n=9 early reporters), and the
-            # flat `get_benchmark_values` dropped n, so that thin median was drawn as the
-            # latest "Industry Avg" point and fed the report drill-down's verdict and Cay
-            # AI's "sector avg net margin". A thin cell now shows the latest MATURE median
-            # at or before it (never a later one), or its own value if none exists.
+            # RICH cells, one peer group per line (`get_benchmark_series`), and the lookup
+            # hides a period that is not fully reported (a just-closed fiscal year draws NO
+            # peer value, never an earlier year's median).
             rich = await asyncio.to_thread(
-                lookup.get_benchmarks,
+                lookup.get_benchmark_series,
                 industry, sector, _MARGIN_BENCHMARK_METRICS, "annual",
             )
             # Quarterly peers are the CALENDAR-quarter rows (migration 184), never the
             # legacy fiscal-keyed 'quarterly' rows (peer quarters 3-10 months apart for
             # every off-calendar company).
             q_rich: Optional[Dict[str, Any]] = await asyncio.to_thread(
-                lookup.get_benchmarks,
+                lookup.get_benchmark_series,
                 industry, sector, _MARGIN_BENCHMARK_METRICS, CALENDAR_QUARTER_PERIOD_TYPE,
             )
             # A FAILED lookup (a Supabase blip that outlasted the lookup's retry) answers
             # the same empty shape as "this peer group has no rows", flagged only by its
-            # type — which `hold_back_thin_benchmarks` flattens away. Read the flag first:
+            # type — which `flatten_benchmark_values` drops. Read the flag first:
             # a peer-less build caused by an outage is DEGRADED (60 s in memory, never
             # persisted, refused by the report), not a 24-hour fact about the company.
             failed_types = [
@@ -693,28 +714,38 @@ class ProfitPowerService:
                     ticker, "+".join(failed_types), industry, sector,
                 )
                 degraded.append("benchmarks")
-            benchmarks_annual = hold_back_thin_benchmarks(rich)
+            benchmarks_annual = flatten_benchmark_values(rich)
+            levels_annual = benchmark_levels(rich)
             if q_rich is not None:
-                benchmarks_quarterly = hold_back_thin_benchmarks(q_rich)
-            # One ticker-level peer group for the label, by majority of the margin
-            # benchmark cells — read from the UN-held rich cells above.
-            # Only cells that actually declare a level get a vote. A set of
-            # all-None levels used to win the `0 >= 0` tie for "industry",
-            # labelling the drill-down "Industry Avg" when no industry benchmark
-            # was involved at all. No votes -> leave the level unknown (None) so
-            # the UI keeps its neutral wording.
-            levels = [
-                lvl
-                for periods in rich.values()
-                for c in periods.values()
-                if (lvl := c.get("level")) in ("industry", "sector")
-            ]
-            if levels:
-                peer_group_level = (
-                    "industry"
-                    if levels.count("industry") >= levels.count("sector")
-                    else "sector"
+                benchmarks_quarterly = flatten_benchmark_values(q_rich)
+                levels_quarterly = benchmark_levels(q_rich)
+
+        # Legend levels, one per DRAWN LINE (2026-10-08, PP-LEVEL-1). `get_benchmark_series`
+        # picks industry-or-sector separately for every metric, so the four margin lines
+        # of one tab can come from different groups (fcf_margin's cash-flow ∩ income join
+        # is the thinnest). A vote pooled over all four named the FCF line "Industry" over
+        # a sector median, and could name the net-margin line — the only one the live card
+        # draws and the one Cay AI quotes — by the other margins' group.
+        #   "<period>.<metric>"  the level of THAT metric's drawn points (report drill-down)
+        #   "<period>"           the NET-margin line's level (live card legend + tooltip)
+        # A line with no drawn peer point gets no key, so no client names a missing line.
+        peer_group_levels: Dict[str, str] = {}
+        for series, pts, bench, lvls in (
+            ("annual", annual_points, benchmarks_annual, levels_annual),
+            ("quarterly", quarterly_points, benchmarks_quarterly, levels_quarterly),
+        ):
+            for metric in _MARGIN_BENCHMARK_METRICS:
+                level = series_peer_level(
+                    pts, _drawable_cells(bench.get(metric, {})), lvls.get(metric, {}),
                 )
+                if level is not None:
+                    peer_group_levels[f"{series}.{metric}"] = level
+            headline = peer_group_levels.get(f"{series}.{_HEADLINE_PEER_METRIC}")
+            if headline is not None:
+                peer_group_levels[series] = headline
+        # Single-level field kept for shipped clients, the report and Cay AI's peer sentence:
+        # the annual net-margin line's level, else the quarterly one's.
+        peer_group_level = peer_group_levels.get("annual") or peer_group_levels.get("quarterly")
 
         # Phase 5: attach sector averages and build response.
         # sector_benchmarks stores every margin as a raw DECIMAL (0.12 = 12%), so
@@ -766,6 +797,7 @@ class ProfitPowerService:
             annual=_to_schemas(annual_points, benchmarks_annual),
             quarterly=_to_schemas(quarterly_points, benchmarks_quarterly),
             peer_group_level=peer_group_level,
+            peer_group_levels=peer_group_levels,
             degraded=list(degraded),
         )
 

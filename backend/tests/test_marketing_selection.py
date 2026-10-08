@@ -17,10 +17,17 @@ public brand feed depends on, each checked against a brute-force oracle or over 
   a bounded number of posting days; the item and template rotations are independent (a shared
   salt would pin each item to one template forever — shown by flipping the salt).
 * **Determinism**: same inputs, same output, whatever the pool order or duplicates.
+* **Template wording** (2026-10-05, shorter videos): every template opens on the hook; none asks
+  for a fourth "opening card" or for "things to understand" (the primer of the 09-26 study-verb
+  hooks); the counted templates forbid a count, the question-shaped ones a yes/no hook; only a
+  money_moves-only template tells the hook to name the company; and rewriting a template's TEXT
+  (or reordering the list) can never move the public schedule — only the set of ids can.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import re
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Sequence
 
@@ -84,6 +91,55 @@ def test_cadence_constants():
     # Every kind has at least two templates, or "rotation" would be a constant.
     for kind in ("money_moves", "journey"):
         assert len(_eligible_ids(kind)) >= 2
+
+
+# ── template wording: every template opens on the hook (2026-10-05) ───────────
+
+
+def test_every_template_opens_on_the_hook():
+    """The hook is the first line a viewer hears, so the opener is the first thing each template
+    asks for. "Opening card" asked for a fourth card against the prompt's exactly three; "things
+    to understand" primed 5 of the 6 study-verb hooks ("Understand…") of the 2026-09-26 run."""
+    for t in sel.TEMPLATES:
+        assert t.instructions.startswith("Open"), (t.id, t.instructions[:40])
+        low = t.instructions.lower()
+        assert "opening card" not in low, t.id
+        assert "to understand" not in low, t.id
+
+
+@pytest.mark.parametrize("template_id", ["three_takeaways", "checklist"])
+def test_the_counted_templates_forbid_a_count_in_the_hook(template_id):
+    """"Three lessons from…" / "5 things to check" summarises instead of opening on a tension, and
+    a number in the hook breaks the prompt's rule 5. These two are the templates built on a count."""
+    low = sel.TEMPLATES_BY_ID[template_id].instructions.lower()
+    assert re.search(r"\bnever\b.{0,80}?\bcount\b", low), low
+
+
+@pytest.mark.parametrize("template_id", ["question_hook", "myth_vs_fact"])
+def test_the_question_shaped_openers_rule_out_a_yes_no_hook(template_id):
+    """The hook asks how, why or what; a yes/no myth question belongs in the script, never the hook."""
+    low = sel.TEMPLATES_BY_ID[template_id].instructions.lower()
+    assert re.search(r"\bnever (?:as )?a yes/no question\b", low), low
+
+
+def test_only_a_case_study_template_tells_the_hook_to_name_the_company():
+    """An investing lesson's hook names no company (the writer prompt's HOOK AND TITLES), so a
+    template whose opener names the company must never be eligible for a Journey lesson."""
+    naming = {t.id for t in sel.TEMPLATES if "naming the company" in t.instructions.lower()}
+    assert naming == {"case_story"}, naming
+    for tid in naming:
+        assert sel.TEMPLATES_BY_ID[tid].kinds == frozenset({"money_moves"}), tid
+
+
+def test_three_takeaways_matches_the_prompts_card_and_line_asks():
+    """Three lessons, one per card, two script lines each: the writer prompt's exactly-3-cards and
+    6-line ask. It used to add "an opening card" — four cards against the prompt's three."""
+    from app.services.marketing import writer_prompts as wp
+
+    low = sel.TEMPLATES_BY_ID["three_takeaways"].instructions.lower()
+    assert "exactly three lessons" in low and "one lesson each" in low, low
+    assert "two script lines each" in low, low
+    assert (wp._ASK_CARD_COUNT, wp._LINES_PER_CARD) == (3, 2)
 
 
 # ── posting ordinal ───────────────────────────────────────────────────────────
@@ -393,6 +449,22 @@ _GOLDEN = {
 def test_golden_schedule(d):
     ref, template, ordinal = _GOLDEN[d]
     assert choose(_GOLDEN_POOL, d) == Selection(False, ref, template, ordinal)
+
+
+def test_template_wording_and_order_never_move_the_schedule(monkeypatch):
+    """Rewriting a template's TEXT (2026-10-05: every opener) must not reshuffle the public
+    schedule: only the SET of template ids per kind feeds the rotation (`pick_for_day` sorts its
+    pool). Proved with every name and instruction blanked and the list reversed — and, so this
+    can fail, by dropping one id, which does move it."""
+    days = _posting_days(EPOCH - timedelta(days=200), 400)
+    before = [choose(_GOLDEN_POOL, d) for d in days]
+    blank = tuple(dataclasses.replace(t, name="x", instructions="x") for t in reversed(TEMPLATES))
+    monkeypatch.setattr(sel, "TEMPLATES", blank)
+    assert [choose(_GOLDEN_POOL, d) for d in days] == before
+    for d, (ref, template, ordinal) in _GOLDEN.items():
+        assert choose(_GOLDEN_POOL, d) == Selection(False, ref, template, ordinal), d
+    monkeypatch.setattr(sel, "TEMPLATES", tuple(t for t in blank if t.id != "checklist"))
+    assert [choose(_GOLDEN_POOL, d) for d in days] != before
 
 
 def test_choose_never_returns_an_item_outside_the_pool():

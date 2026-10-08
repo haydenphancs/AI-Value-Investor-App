@@ -60,10 +60,12 @@ FORBIDDEN_MODULES = (
 )
 FORBIDDEN_NAME = "generate_grounded_research"
 
-#: The pure modules the plan requires to be FMP-free even transitively.
+#: The pure modules the plan requires to be FMP-free even transitively. `publish_clock` is on the
+#: public /go request path (smart_link imports it); `tests/test_marketing_smart_link.py` also pins it
+#: stdlib-only.
 PURE_MODULES = (
     "numbers", "compliance", "grounding", "content_pool", "selection", "post_copy",
-    "writer_prompts", "smart_link", "judge", "generation_budget",
+    "writer_prompts", "smart_link", "judge", "generation_budget", "publish_clock",
 )
 EXEMPT_MODULE = "app.services.marketing.writer_service"
 

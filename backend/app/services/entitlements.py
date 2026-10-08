@@ -131,6 +131,36 @@ CONGRESS_HOLDERS_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 # Applied by `trillion_club_service.redact_trillion_club_detail`, per request.
 TRILLION_CLUB_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 
+# ── Home: Emerging Frontiers themes — the full company list is paid ──────────────────
+#
+# Owner request (TestFlight 1.0 (11), 2026-10-04): "For Free tier, show the top 5 only.
+# Blur the rest, clickable to upgrade to Pro/Max to see all." FREE keeps every theme card
+# and, on the detail, the hero, the performance chart and the theme's first
+# THEME_FREE_COMPANY_LIMIT companies in the list's own order (largest market cap first);
+# "Why it's moving" reaches Free as written only when it names no withheld company
+# (`theme_detail_redaction._prose_is_safe`, fail closed). PAID adds the rest of the list.
+# Same floor as the other paid surfaces, and deliberately the same frozenset so they cannot
+# drift into "Pro unlocks one, Max another".
+#
+# Applied per request by `theme_detail_redaction.redact_theme_detail`, on a COPY of the
+# shared cached detail. iOS draws one blurred stand-in per withheld company from the COUNT
+# it is sent; a locked caller never receives the withheld companies themselves.
+THEME_COMPANIES_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
+# A QUANTITY, like UPDATES_TICKER_LIMITS: the paywall row states it (`plan_features`) and
+# `PlanFeature.bundled` mirrors it on iOS, pinned by tests/test_paywall_copy_guards.py.
+THEME_FREE_COMPANY_LIMIT = 5
+
+# The first app version that can DRAW the locked theme list (blurred rows + the upgrade
+# prompt). Build 1.0 has neither, so a caller saying it is older keeps the FULL list
+# (`home.get_theme_detail`) and is not shown the paywall row that states the limit
+# (`billing.get_plans`). One constant so both sunset together; SUNSET once most users run
+# 1.1 — a free caller could send "X-App-Version: 1.0" by hand (decided 2026-10-05).
+# The release after 1.0 is named "1.01" (owner, 2026-10-08): Apple and `parse_app_version` both read
+# it as (1, 1, 0), so it is gated in. tests/test_app_version_release_parity.py pins that the version
+# the app ships passes this gate (a "1.0.x" name would silently read as build 1.0).
+THEME_LOCK_MIN_APP_VERSION = (1, 1, 0)
+
 # ── Wiser (Learn): read free, listen with Pro — EXCEPT the Investor Journey ──────────
 #
 # TEXT is free on every tier — all 27 Journey lessons, 13 Money Moves articles and 10
@@ -273,6 +303,29 @@ def trillion_club_detail_unlocked(tier: Optional[str]) -> bool:
 def required_tier_for_trillion_club_detail(tier: Optional[str]) -> Optional[str]:
     """Pure: the plan that unlocks the full detail, or None if already unlocked (a floor)."""
     return None if trillion_club_detail_unlocked(tier) else TIER_PRO
+
+
+def theme_companies_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier see every company in an Emerging Frontiers theme?
+
+    False for Free, for guests (identity dict hardcodes ``"free"``), and for anything
+    unrecognised — the unknown case must fall CLOSED onto the paid surface.
+    """
+    return normalize_tier(tier) in THEME_COMPANIES_UNLOCKED_TIERS
+
+
+def theme_company_limit(tier: Optional[str]) -> Optional[int]:
+    """Pure: how many of a theme's companies this tier is sent. ``None`` means all of them.
+
+    Callers MUST branch on None rather than compare it (same contract as
+    ``whale_follow_limit``): a sentinel int would eventually be enforced as a real cap.
+    """
+    return None if theme_companies_unlocked(tier) else THEME_FREE_COMPANY_LIMIT
+
+
+def required_tier_for_theme_companies(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that shows the whole list, or None if already unlocked (a floor)."""
+    return None if theme_companies_unlocked(tier) else TIER_PRO
 
 
 def learn_audio_unlocked(tier: Optional[str]) -> bool:

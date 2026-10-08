@@ -37,6 +37,7 @@ from app.services.chat_security import (
     strip_web_caveat,
     neutralize_fences,
 )
+from app.core.client_app_version import capture_client_app_version
 from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
 from app.services.credit_service import CreditService, CreditServiceUnavailable, refund_did_not_happen
@@ -71,7 +72,9 @@ logger = logging.getLogger(__name__)
 # (and scrubbed by the root SecretRedactingFilter, per app/log_redaction.py).
 sec_logger = logging.getLogger("chat.security")
 
-router = APIRouter()
+# Records the caller's `X-App-Version` for the request, so report chat's web search can stay off
+# on an app version whose in-app copy predates it (`chat_web_search_service.report_web_search_available`).
+router = APIRouter(dependencies=[Depends(capture_client_app_version)])
 
 
 # Fixed namespace for the IP-derived budget bucket. Random once, constant forever — changing

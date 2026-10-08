@@ -104,6 +104,11 @@ def _bank_answers(sector: str, industry: str) -> Dict[str, Any]:
 
 
 class _Lookup:
+    # The health check reads the rich cells (2026-10-07); health_snapshot's local
+    # fallback still reads the flat values.
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return {m: None for m in metrics}
+
     def get_current_benchmark_values(self, industry, sector, metrics):
         return {m: None for m in metrics}
 
@@ -166,8 +171,10 @@ def test_stock_overview_fallback_card_omits_z_for_financials():
         _BANK_BS, _BANK_INC, {}, {}, {}, _BANK_MCAP,
         sector="Financial Services", industry="Banks - Diversified",
     )
-    z_row = next(m for m in bank.metrics if m.name == "Altman Z-Score")
-    assert z_row.value == "—" and bank.rating == 0, "a bank's card read 'distress' (rating 1)"
+    # No Z row at all for a bank (2026-10-07, HC-5: it printed a bare "—"), and the card
+    # is unrated rather than reading 'distress' (rating 1).
+    assert not any(m.name == "Altman Z-Score" for m in bank.metrics)
+    assert bank.rating == 0, "a bank's card read 'distress' (rating 1)"
 
     ungated = svc._build_health_snapshot(_BANK_BS, _BANK_INC, {}, {}, {}, _BANK_MCAP)
     assert next(m for m in ungated.metrics if m.name == "Altman Z-Score").value == (

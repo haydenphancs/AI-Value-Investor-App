@@ -33,6 +33,16 @@ def _set_universe(monkeypatch, payload):
     """
     industries = payload.get("industries", []) if isinstance(payload, dict) else []
     monkeypatch.setattr(ibs, "load_universe", lambda _name: industries)
+    _no_storage_fetch(monkeypatch)
+
+
+def _no_storage_fetch(monkeypatch):
+    """Since 2026-10-07 every run first asks Storage for a FRESH copy
+    (`_fetch_benchmark_universe`) and falls back to `load_universe` when it cannot get one.
+    Stub that leg to "no fresh copy" (and clear the copy an earlier run fetched), so these
+    tests keep exercising `load_universe` — and never reach the network."""
+    monkeypatch.setattr(ibs, "_fetch_benchmark_universe", lambda: None)
+    monkeypatch.setattr(ibs, "_last_fetched_universe", None)
 
 
 def test_nonnumeric_market_cap_does_not_abort(monkeypatch):
@@ -95,6 +105,7 @@ def test_a_missing_universe_returns_empty_rather_than_raising(monkeypatch):
     """`load_universe` answers [] on any failure (and logs at ERROR itself), so the caller
     degrades instead of 500ing a request path."""
     monkeypatch.setattr(ibs, "load_universe", lambda _name: [])
+    _no_storage_fetch(monkeypatch)
     assert _svc()._load_universe() == []
 
 

@@ -629,9 +629,8 @@ _FAILED_QUOTE = {"quote": {}, "chart_data": None}
 
 
 def _full(svc, fund: Dict[str, Any], vol: Dict[str, Any]):
-    # `valuation_bench={}` exactly as `get_overview` passes it (prefetched, even when
-    # empty): `None` would make the fallback Price card read Supabase inline.
-    return svc._build_full_response("VB", fund, vol, "3M", None, False, valuation_bench={})
+    # The fallback Price card reads no benchmark (2026-10-07), so this builds offline.
+    return svc._build_full_response("VB", fund, vol, "3M", None, False)
 
 
 @pytest.mark.asyncio
@@ -741,6 +740,9 @@ class _PlainLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return {m: None for m in metrics}
 
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return {m: None for m in metrics}
+
 
 def _prof_svc(monkeypatch, fmp_answers: Dict[str, Any], pp: Any = None, lookup: Any = None):
     from app.services import profit_power_service
@@ -848,6 +850,9 @@ async def test_a_fund_with_a_failed_benchmark_lookup_is_not_admitted(monkeypatch
 
     class _Failed:
         def get_current_benchmark_values(self, industry, sector, metrics):
+            return BenchmarkLookupFailed({m: None for m in metrics})
+
+        def get_current_benchmarks(self, industry, sector, metrics):
             return BenchmarkLookupFailed({m: None for m in metrics})
 
     _inline_executor(monkeypatch)

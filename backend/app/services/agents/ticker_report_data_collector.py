@@ -50,10 +50,18 @@ from datetime import date, datetime, timedelta, timezone
 # here under the original names so `_build_price_action` is unchanged.
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
+    MATURE_SAMPLE_FLOOR,
+    TTM_PERIOD_TYPE,
     BenchmarkLookupFailed,
     lookup_failed,
 )
-from app.utils.period_labels import calendar_quarter_key
+from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
+from app.utils.peer_wording import peer_worded_metric_name
+from app.services.financials_metric_gate import (
+    GATED_METRICS,
+    liquidity_ratios_applicable,
+    peer_metric_applicable,
+)
 from app.services._earnings_common import eps_digit_shift_suspect
 from app.services.price_volatility import (  # noqa: E402  (import-after-import block)
     _BASELINE_DAYS,
@@ -839,8 +847,29 @@ def _narrow_profit_power(resp: Any, blocking: List[str]) -> Optional[Any]:
     quarterly = update.get("quarterly", getattr(resp, "quarterly", None) or [])
     if not annual and not quarterly:
         return None
+    # The per-series peer levels follow the peer lines, exactly as `_narrow_growth_chart`
+    # does: no peer line left → no level; an emptied period list → its level goes. A
+    # frozen report must never name an "Industry"/"Sector" line that is not drawn.
+    levels = dict(getattr(resp, "peer_group_levels", None) or {})
     if strip_peers:
+        levels = {}
         update["peer_group_level"] = None
+    else:
+        emptied = [p for p in ("annual", "quarterly") if p in update and not update[p]]
+        for period in emptied:
+            levels.pop(period, None)
+            # …and its per-margin keys ("annual.fcf_margin", profit_power v7).
+            for key in [k for k in levels if k.startswith(f"{period}.")]:
+                levels.pop(key, None)
+        # A blanked FCF line (a failed cash-flow leg) loses its own level key too.
+        for p, kind in [_PROFIT_POWER_LEG[r] for r in blocking if r in _PROFIT_POWER_LEG]:
+            if kind == "fcf":
+                levels.pop(f"{p}.fcf_margin", None)
+        if emptied and getattr(resp, "peer_group_levels", None):
+            # The single-level field is the annual line's level, else the quarterly
+            # line's (profit_power_service); re-derive it from what is left.
+            update["peer_group_level"] = levels.get("annual") or levels.get("quarterly")
+    update["peer_group_levels"] = levels
     return resp.model_copy(update=update)
 
 
@@ -996,25 +1025,41 @@ def _settle_snapshot_result(out: Any, attr: str, result: Any, ticker: str) -> No
 
 # Recorded on `out.degraded_sections` when a sector-history benchmark read FAILED.
 _SECTOR_HISTORY_DEGRADED = "sector_history:benchmarks"
+# Recorded on the REPORT's `DEGRADED_SECTIONS_KEY` (not on `out`) when `assemble_report`'s
+# own benchmark reads FAILED: the moat scorer's sector medians or the radar's industry
+# peer averages (`moat:benchmarks`, recorded once for either), or the competitor scoring's
+# sector medians (a failed read there scores those peers on the fixed fallback bands).
+_MOAT_BENCHMARKS_DEGRADED = "moat:benchmarks"
+_COMPETITOR_BENCHMARKS_DEGRADED = "competitors:benchmarks"
 
 
-def _read_sector_history(
+def _read_peer_line(
     lookup: Any, industry: str, sector: str, metrics: List[str], period_type: str,
-) -> Tuple[Dict[str, Dict[str, Any]], bool]:
-    """One sector-history read: flat ``{metric: {period_label: value}}`` and whether the
-    read FAILED (a DB error inside the lookup) rather than answering "no rows".
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Optional[str]], bool]:
+    """One drill-down peer-line read: flat ``{metric: {period_label: value}}``, the peer
+    level each metric's line comes from (``"industry"`` / ``"sector"``, or None when the
+    line is empty or its cells do not name ONE level), and whether the read FAILED (a DB
+    error inside the lookup) rather than answering "no rows".
 
-    Reads the rich cells (`get_benchmarks`) and flattens them itself, exactly as
-    `get_benchmark_values` does, because that flat view rebuilds a plain dict and drops
-    the `BenchmarkLookupFailed` flag. A lookup exposing only the flat reader is read
-    through it, and its own flag is honoured. Synchronous: run it via `to_thread`.
+    Reads `get_benchmark_series`: every period of a metric's line from ONE peer group (the
+    industry when it is mature at the newest period, else the sector), so the dashed line
+    never steps between populations where an industry's n crosses 20. The per-period
+    merge (`get_benchmarks`) is right for a single value, not for a line (review
+    2026-10-07). A lookup without the series reader (an older double) is read through
+    `get_benchmarks`, and one exposing only the flat reader through
+    `get_benchmark_values` (no levels); the `BenchmarkLookupFailed` flag is honoured on
+    every path — the flat view's own plain-dict rebuild used to drop it.
+    Synchronous: run it via `to_thread`.
     """
-    rich_reader = getattr(lookup, "get_benchmarks", None)
+    rich_reader = getattr(lookup, "get_benchmark_series", None)
+    if not callable(rich_reader):
+        rich_reader = getattr(lookup, "get_benchmarks", None)
     if callable(rich_reader):
         raw = rich_reader(industry, sector, metrics, period_type)
         if not isinstance(raw, dict):
-            return {}, True
+            return {}, {}, True
         flat: Dict[str, Dict[str, Any]] = {}
+        levels: Dict[str, Optional[str]] = {}
         for metric, periods in raw.items():
             if not isinstance(periods, dict):
                 continue
@@ -1023,14 +1068,142 @@ def _read_sector_history(
                 for label, cell in periods.items()
                 if isinstance(cell, dict) and "value" in cell
             }
-        return flat, lookup_failed(raw)
+            # A list, not a set: a malformed level (an unhashable value) must read as
+            # "no single level", never raise the whole read into a failure.
+            drawn = [
+                cell.get("level")
+                for cell in periods.values()
+                if isinstance(cell, dict) and _finite_or_none(cell.get("value")) is not None
+            ]
+            first = drawn[0] if drawn else None
+            levels[metric] = (
+                first
+                if first in ("industry", "sector") and all(lvl == first for lvl in drawn)
+                else None
+            )
+        return flat, levels, lookup_failed(raw)
     raw = lookup.get_benchmark_values(industry, sector, metrics, period_type)
     if not isinstance(raw, dict):
-        return {}, True
+        return {}, {}, True
     return (
         {m: dict(p) for m, p in raw.items() if isinstance(p, dict)},
+        {},
         lookup_failed(raw),
     )
+
+
+def _read_sector_history(
+    lookup: Any, industry: str, sector: str, metrics: List[str], period_type: str,
+) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    """`_read_peer_line` without the levels: flat ``{metric: {period_label: value}}`` and
+    whether the read FAILED. Synchronous: run it via `to_thread`."""
+    flat, _levels, failed = _read_peer_line(lookup, industry, sector, metrics, period_type)
+    return flat, failed
+
+
+def _read_ttm_peer_cells(
+    lookup: Any, industry: str, sector: str, metrics: List[str],
+) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    """The merged TTM peer cell per metric (``{metric: {value, level, n, ...}}``) and
+    whether the read FAILED. Rich cells, not `_read_sector_history`'s flat values: the
+    drill-down injects a TTM median only when it is mature, and only the cell knows its
+    sample size. A lookup exposing only the flat reader (a test double) cannot say, so it
+    yields no cell — nothing is injected — while its failure flag is still honoured.
+    Synchronous: run it via `to_thread`."""
+    rich_reader = getattr(lookup, "get_benchmarks", None)
+    if not callable(rich_reader):
+        raw = lookup.get_benchmark_values(industry, sector, metrics, TTM_PERIOD_TYPE)
+        return {}, (not isinstance(raw, dict)) or lookup_failed(raw)
+    raw = rich_reader(industry, sector, metrics, TTM_PERIOD_TYPE)
+    if not isinstance(raw, dict):
+        return {}, True
+    cells: Dict[str, Dict[str, Any]] = {}
+    for metric, periods in raw.items():
+        if not isinstance(periods, dict):
+            continue
+        # One TTM cell per metric (period_label "TTM"); tolerate another label spelling.
+        cell = periods.get("TTM")
+        if not isinstance(cell, dict):
+            cell = next((c for c in periods.values() if isinstance(c, dict)), None)
+        if cell is not None:
+            cells[metric] = cell
+    return cells, lookup_failed(raw)
+
+
+# Drill-down metrics that must never take the TTM point: a growth rate's TTM median is
+# not the same quantity as a fiscal-year YoY (and the TTM job computes none today).
+_NO_TTM_POINT_SUFFIXES = ("_yoy", "_qoq", "_growth")
+
+
+def _mature_ttm_value(metric: str, cell: Any) -> Optional[float]:
+    """The TTM median the drill-down pins as the current year's peer point, or None.
+
+    Exactly the first two tiers of `SectorBenchmarkLookup.get_current_benchmarks` (the
+    merged TTM cell, used only when it holds at least MATURE_SAMPLE_FLOOR companies), so
+    the chart's newest peer point is the Overview card's value whenever the card shows a
+    TTM median. A thin TTM cell (KO: Beverages, n=13) is never injected; the card then
+    falls back to a complete annual year, which the chart already draws at that year.
+    """
+    if any(metric.endswith(suffix) for suffix in _NO_TTM_POINT_SUFFIXES):
+        return None
+    if not isinstance(cell, dict):
+        return None
+    value = _finite_or_none(cell.get("value"))
+    n = _finite_or_none(cell.get("n"))
+    if value is None or n is None:
+        return None
+    return value if n >= MATURE_SAMPLE_FLOOR else None
+
+
+def _ttm_point_fits_line(
+    ttm_cell: Any, line: Any, line_level: Optional[str],
+) -> bool:
+    """Whether the mature TTM median may be drawn as the current year's point of a peer
+    line, so the line stays ONE population (decision 2026-10-07):
+
+      * the line draws nothing yet → yes: the point is the whole line, one peer group;
+      * else only when the TTM cell's level ("industry"/"sector") is the line's level.
+        An industry TTM point is never put on a sector line (a thin industry's line
+        whose TTM job reached 20 companies) nor a sector TTM point on an industry line
+        (a mature industry whose TTM cell is thin); an unknown level on either side is
+        not drawn. The line then simply ends at its last complete year.
+    """
+    values = line.values() if isinstance(line, dict) else ()
+    if not any(_finite_or_none(v) is not None for v in values):
+        return True
+    ttm_level = ttm_cell.get("level") if isinstance(ttm_cell, dict) else None
+    return ttm_level in ("industry", "sector") and ttm_level == line_level
+
+
+def _withheld_peer_line_reason(
+    metric: str, line_level: Optional[str], industry: Any, sector: Any,
+) -> Optional[str]:
+    """Why a drill-down peer line (or TTM point) of ``metric`` is never drawn, or None.
+
+    Only the liquidity / coverage metrics (`financials_metric_gate.GATED_METRICS`:
+    current ratio, quick ratio, interest coverage) are ever withheld:
+
+      * ``"not_applicable"`` — the metric means nothing for the company's own industry
+        (banks, insurers, lenders …): the Health card omits the row, so no line either;
+      * ``"financial_services_sector"`` — the line is the Financial Services SECTOR median
+        (`health_check_service._bank_pooled_sector_cell`), which the Health card already
+        refuses to compare against. PERMANENT (2026-10-08), not a pending-rebuild guard:
+        even with banks and insurers excluded, what remains of that sector for these
+        metrics is shells, exchanges and developers — no peer group for SPGI's interest
+        coverage or ICE's current ratio. A line not provably the INDUSTRY's own (level
+        "sector" or unknown) counts as the sector's: fail closed.
+
+    An industry line of a kept Financial Services industry is the company's own peers and
+    is drawn; every other sector is untouched."""
+    from app.services.health_check_service import _bank_pooled_sector_cell
+
+    if metric not in GATED_METRICS:
+        return None
+    if not peer_metric_applicable(metric, industry):
+        return "not_applicable"
+    if line_level != "industry" and _bank_pooled_sector_cell(metric, "sector", sector):
+        return "financial_services_sector"
+    return None
 
 
 def _settle_sector_history(out: Any, result: Any, ticker: str) -> None:
@@ -1871,8 +2044,8 @@ class TickerReportDataCollector:
     async def _fetch_sector_benchmark_history(
         self, industry: str, sector: str,
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
-        """Pre-computed sector-median history (annual + quarterly) for the
-        "*" card metrics — overlaid as the drill-down's sector-average line.
+        """Pre-computed peer-median history (annual + quarterly) for the "*" card
+        metrics — overlaid as the drill-down's industry/sector-average line.
 
         The lookup is synchronous (Supabase sync SDK) + 1h-cached, so it's run
         via `to_thread`. Degrades to {} on any failure — the chart simply omits
@@ -1880,6 +2053,11 @@ class TickerReportDataCollector:
         a `BenchmarkLookupFailed`, which `_settle_sector_history` records so the
         collection is not shared-cached. Quarterly is best-effort (the table may only
         carry annual rows for some sectors/metrics).
+
+        Each metric's line is ONE peer group across every period
+        (`get_benchmark_series`, via `_read_peer_line`): the industry when it is mature
+        at the newest period, else the sector. Until 2026-10-07 each period took its own
+        merged cell, so a line switched population wherever an industry's n crossed 20.
 
         The sector name is NORMALIZED (`_normalize_sector`) exactly as the
         snapshot services do before they look up the card's "*" comparison —
@@ -1895,55 +2073,113 @@ class TickerReportDataCollector:
 
         lookup = get_sector_benchmark_lookup()
         metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
-        # Industry-first values (sector fallback per cell). Also fetch the TTM
-        # current-snapshot row so we can pin the chart's latest annual point to it.
-        # Each read reports whether it FAILED (`_read_sector_history`), which the flat
-        # `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped the
+        # Annual and calendar-quarter LINES (`_read_peer_line`: one peer group per metric;
+        # an incomplete period is never served), plus the TTM current-snapshot cells
+        # (`_read_ttm_peer_cells`: the merged single value the Overview card shows) to pin
+        # the chart's current-year point. Each read reports whether it FAILED, which the
+        # flat `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped the
         # `BenchmarkLookupFailed` flag, so a Supabase error read like "no rows" and the
         # report froze a missing sector line into every shared cache (round 3, P6/P23).
-        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE, "ttm")
+        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE, TTM_PERIOD_TYPE)
         reads = await asyncio.gather(
-            asyncio.to_thread(_read_sector_history, lookup, industry, sector, metrics, "annual"),
+            asyncio.to_thread(_read_peer_line, lookup, industry, sector, metrics, "annual"),
             # Calendar-quarter rows (migration 184), joined by `_history_period_id`.
             asyncio.to_thread(
-                _read_sector_history, lookup, industry, sector, metrics,
+                _read_peer_line, lookup, industry, sector, metrics,
                 CALENDAR_QUARTER_PERIOD_TYPE,
             ),
-            asyncio.to_thread(_read_sector_history, lookup, industry, sector, metrics, "ttm"),
+            asyncio.to_thread(_read_ttm_peer_cells, lookup, industry, sector, metrics),
             return_exceptions=True,
         )
-        values: List[Dict[str, Dict[str, Any]]] = []
         failed_reads: List[str] = []
+        loaded: Dict[str, Tuple[Any, ...]] = {}
         for period_type, read in zip(period_types, reads):
             if isinstance(read, BaseException):
                 logger.warning(
                     "[report-sector-history] industry=%r sector=%r step=%s: read raised "
                     "%s: %s", industry, sector, period_type, type(read).__name__, read,
                 )
-                values.append({})
                 failed_reads.append(period_type)
                 continue
-            flat, failed = read
-            values.append(flat)
+            *payload, failed = read
+            loaded[period_type] = tuple(payload)
             if failed:
                 failed_reads.append(period_type)
-        annual, quarterly, ttm = values
+        annual, annual_levels = loaded.get("annual", ({}, {}))
+        quarterly, quarterly_levels = loaded.get(CALENDAR_QUARTER_PERIOD_TYPE, ({}, {}))
+        (ttm_cells,) = loaded.get(TTM_PERIOD_TYPE, ({},))
 
-        # "Keep history + TTM current": overwrite the CURRENT calendar year's annual
-        # benchmark point with the TTM value — a full rolling-12-months median, so the
-        # chart's latest sector point doesn't spike on a thin partial fiscal year while
-        # older years keep their complete-fiscal values. A company whose latest period
-        # isn't the current year aligns to its own (complete) fiscal point, so the
-        # injected point is simply unused for it. `_read_sector_history` returns fresh
+        # Liquidity / coverage lines the Health card never compares against
+        # (`_withheld_peer_line_reason`): a Financial Services SECTOR median of current
+        # ratio, quick ratio or interest coverage (SPGI, ICE, CME: thin industries fall to
+        # the sector line), or a metric meaningless for the company's own industry. The
+        # line AND its level go, and no TTM point is injected in their place below — an
+        # empty line would otherwise take the sector TTM point as its whole line.
+        withheld: List[str] = []
+        for tag, line, line_levels in (
+            ("annual", annual, annual_levels), ("quarterly", quarterly, quarterly_levels),
+        ):
+            for metric in list(dict.fromkeys([*line, *line_levels])):
+                reason = _withheld_peer_line_reason(
+                    metric, line_levels.get(metric), industry, sector)
+                if reason is None:
+                    continue
+                drawn = line.pop(metric, None)
+                line_levels.pop(metric, None)
+                if isinstance(drawn, dict) and any(
+                    _finite_or_none(v) is not None for v in drawn.values()
+                ):
+                    withheld.append(f"{tag}:{metric}[{reason}]")
+
+        # "Keep history + TTM current": the CURRENT calendar year's annual point is the
+        # TTM median — a full rolling 12 months. The stored annual cell of the current
+        # year is never served (its year has not ended + 75 days), so this never
+        # overwrites a real row. Only a MATURE TTM cell is injected (`_mature_ttm_value`,
+        # the same rule as the Overview card's current benchmark); a thin one leaves the
+        # current year blank. And only onto a line of the SAME peer group
+        # (`_ttm_point_fits_line`): an industry TTM point on a sector line, or the
+        # reverse, would make the line's last step a change of population. A company
+        # whose latest period isn't the current year aligns to its own fiscal point, so
+        # the injected point is simply unused for it. `_read_peer_line` returns fresh
         # dicts → safe to mutate. Annual only (quarterly multiples are single-quarter
-        # scale; injecting an annual-scale TTM there would mix scales).
+        # scale; an annual-scale TTM would mix scales).
         from datetime import datetime, timezone
         cur_year = str(datetime.now(timezone.utc).year)
-        for metric, periods in ttm.items():
-            if periods:
-                annual.setdefault(metric, {})[cur_year] = next(iter(periods.values()))
+        other_group: List[str] = []
+        for metric, cell in ttm_cells.items():
+            value = _mature_ttm_value(metric, cell)
+            if value is None:
+                continue
+            reason = _withheld_peer_line_reason(metric, cell.get("level"), industry, sector)
+            if reason is not None:
+                withheld.append(f"ttm:{metric}[{reason}]")
+                continue
+            if not _ttm_point_fits_line(cell, annual.get(metric), annual_levels.get(metric)):
+                other_group.append(f"{metric}({cell.get('level')}≠{annual_levels.get(metric)})")
+                continue
+            annual.setdefault(metric, {})[cur_year] = value
+            # The point may be the whole line (an otherwise empty line): name its group.
+            if annual_levels.get(metric) is None and cell.get("level") in ("industry", "sector"):
+                annual_levels[metric] = cell["level"]
+        if other_group:
+            logger.info(
+                "[report-sector-history] industry=%r sector=%r: no %s TTM point on %s — "
+                "the TTM median is another peer group's than the line's; the line ends at "
+                "its last complete year", industry, sector, cur_year, ", ".join(other_group),
+            )
+        if withheld:
+            logger.info(
+                "[report-sector-history] industry=%r sector=%r step=peer_line_gate: "
+                "withheld %s — the Health card makes no such liquidity/coverage "
+                "comparison", industry, sector, ", ".join(withheld),
+            )
 
-        history = {"annual": annual, "quarterly": quarterly}
+        # `levels`: each metric line's peer group, for the drill-down legend (a line is one
+        # population, which can differ from the card-wide peer word).
+        history = {
+            "annual": annual, "quarterly": quarterly,
+            "levels": {"annual": dict(annual_levels or {}), "quarterly": dict(quarterly_levels or {})},
+        }
         if failed_reads:
             logger.warning(
                 "[report-sector-history] industry=%r sector=%r: benchmark read(s) FAILED "
@@ -2317,6 +2553,7 @@ class TickerReportDataCollector:
         out.financial_health_vital = _build_health_vital(
             c.get("altman_z"), c.get("debt_equity"), c.get("fcf_negative"),
             card_weighted=(out.snap_health.weighted_score if out.snap_health else None),
+            industry=(profile or {}).get("industry"),
         )
 
         # ── Profitability vital (Profitability card → persona factor) ──
@@ -2668,6 +2905,12 @@ class TickerReportDataCollector:
             score_moat_dimensions,
             PILLAR_ORDER,
         )
+        # Benchmark reads made HERE (after the collection was stored) that FAILED. They
+        # ride the report's `DEGRADED_SECTIONS_KEY` below, never `out.degraded_sections`:
+        # the collection is shared by every persona assembled from it (and by in-flight
+        # waiters) and is already in ticker_data_cache, so this assembly's outage must not
+        # be written onto it.
+        assembly_degraded: List[str] = []
         try:
             deterministic_pillars = score_moat_dimensions(
                 sector=(out.profile or {}).get("sector"),
@@ -2686,6 +2929,14 @@ class TickerReportDataCollector:
                 "legacy AI dimensions for all pillars", out.ticker, exc,
             )
             deterministic_pillars = {}
+        if lookup_failed(deterministic_pillars):
+            # The moat service already logged the failed read; say what it costs here.
+            logger.warning(
+                "[report-degraded-section] ticker=%s step=moat: the sector-median read "
+                "FAILED — pillars that needed a median fell to the AI dimension; the "
+                "report is delivered but will not be shared-cached", out.ticker,
+            )
+            assembly_degraded.append(_MOAT_BENCHMARKS_DEGRADED)
         ai_dims_by_name = {
             (d.get("name") or ""): d
             for d in (ai_moat.get("dimensions") or [])
@@ -2713,8 +2964,15 @@ class TickerReportDataCollector:
         # anchor). Falls back to that 5.0 floor when the industry has
         # no benchmark row yet — new ticker, niche industry, or before
         # the first recompute_all() bootstrap completes.
+        # A FAILED read (flagged `BenchmarkLookupFailed`, a non-mapping answer, or a raise)
+        # is an outage, not the industry's shape: the radar falls to the 5.0 baseline for
+        # THIS report, which is delivered and billed as usual but kept out of every shared
+        # cache via `_MOAT_BENCHMARKS_DEGRADED` (the next caller re-reads). A malformed
+        # industry name is skipped, never read, so a vendor quirk cannot keep a ticker out
+        # of the shared caches for good.
         focal_industry = (out.profile or {}).get("industry")
-        if focal_industry:
+        if isinstance(focal_industry, str) and focal_industry.strip():
+            peer_avgs: Any = {}
             try:
                 from app.services.industry_moat_benchmark_service import (
                     get_industry_moat_benchmark_lookup,
@@ -2722,16 +2980,26 @@ class TickerReportDataCollector:
                 peer_avgs = get_industry_moat_benchmark_lookup().get_pillar_benchmarks(
                     focal_industry,
                 )
-                for dim in merged_dims:
-                    ind_avg = peer_avgs.get(dim.get("name"))
-                    if ind_avg is not None:
-                        dim["peer_score"] = ind_avg
+                read_failed = not isinstance(peer_avgs, dict) or lookup_failed(peer_avgs)
+                failure = "the read FAILED" if read_failed else ""
             except Exception as exc:
+                read_failed = True
+                failure = f"the read raised {type(exc).__name__}: {exc}"
+            if read_failed:
                 logger.warning(
-                    "Moat peer-average overlay failed for %s / %s: %s — "
-                    "falling through to 5.0 baseline",
-                    out.ticker, focal_industry, exc,
+                    "[report-degraded-section] ticker=%s step=moat_peer_averages: "
+                    "industry=%r — %s; the radar's Peer Avg falls to the 5.0 baseline; "
+                    "the report is delivered but will not be shared-cached",
+                    out.ticker, focal_industry, failure,
                 )
+                if _MOAT_BENCHMARKS_DEGRADED not in assembly_degraded:
+                    assembly_degraded.append(_MOAT_BENCHMARKS_DEGRADED)
+                peer_avgs = {}
+            for dim in merged_dims:
+                name = dim.get("name")
+                ind_avg = peer_avgs.get(name) if isinstance(name, str) else None
+                if ind_avg is not None:
+                    dim["peer_score"] = ind_avg
         moat_dims = _apply_peer_score_baseline(merged_dims)
         deterministic_market_dynamics = _build_market_dynamics(
             out.profile, out.sector_aggregates, out.peer_profiles,
@@ -2748,9 +3016,12 @@ class TickerReportDataCollector:
         # Build the sector-medians map keyed by NORMALIZED sector so
         # `_build_competitors` can score each peer (and the focal)
         # against ITS OWN sector — gives absolute, comparable 0-10
-        # scores instead of min-max-within-set. One Supabase query per
-        # unique sector (1-hour cache), so worst case ~5 batched calls
-        # for a 5-peer set spanning 5 sectors.
+        # scores instead of min-max-within-set. One CURRENT-benchmark read per
+        # unique sector (`get_current_benchmarks` with industry="": the sector TTM
+        # median when mature — the same basis as the peers' TTM op margin / ROE —
+        # else the newest COMPLETE annual year with a mature median, else None;
+        # 1-hour cache). Until 2026-10-07 this took max(label) of the annual map with
+        # no floor: the partial current year, from the early filers only.
         sector_medians_by_sector: Dict[str, Dict[str, Optional[float]]] = {}
         try:
             from app.services.sector_benchmark_service import _normalize_sector
@@ -2758,28 +3029,40 @@ class TickerReportDataCollector:
                 get_sector_benchmark_lookup,
             )
             seen_sectors: Set[str] = set()
-            focal_raw_sector = (out.profile or {}).get("sector") or ""
-            if focal_raw_sector:
-                seen_sectors.add(_normalize_sector(focal_raw_sector))
-            for p in out.peer_profiles or []:
-                raw = (p or {}).get("sector") or ""
-                if raw:
+            # A malformed profile (non-dict, non-string sector) is skipped, not raised:
+            # a raise here now marks the report degraded, and a vendor-shape quirk must
+            # not keep a ticker out of the shared caches for good.
+            for p in [out.profile, *(out.peer_profiles or [])]:
+                raw = p.get("sector") if isinstance(p, dict) else None
+                if isinstance(raw, str) and raw.strip():
+                    # Same key `_build_competitors._sector_medians_for` computes.
                     seen_sectors.add(_normalize_sector(raw))
             seen_sectors.discard("")
             if seen_sectors:
                 lookup = get_sector_benchmark_lookup()
                 metrics_to_fetch = list(_COMPETITOR_BENCHMARK_METRICS.keys())
-                for sec in seen_sectors:
-                    bms = lookup.get_sector_benchmarks(
-                        sec, metrics_to_fetch, "annual",
+                failed_sectors: List[str] = []
+                for sec in sorted(seen_sectors):
+                    cells = lookup.get_current_benchmarks("", sec, metrics_to_fetch)
+                    if lookup_failed(cells) or not isinstance(cells, dict):
+                        failed_sectors.append(sec)
+                    sector_medians_by_sector[sec] = _current_sector_medians(cells)
+                if failed_sectors:
+                    logger.warning(
+                        "[report-degraded-section] ticker=%s step=competitors: the sector "
+                        "median read FAILED for %s — those peers are scored on the "
+                        "fixed bands; the report is delivered but will not be "
+                        "shared-cached", out.ticker, ", ".join(failed_sectors),
                     )
-                    sector_medians_by_sector[sec] = _latest_sector_medians(bms)
+                    assembly_degraded.append(_COMPETITOR_BENCHMARKS_DEGRADED)
         except Exception as exc:
             logger.warning(
-                "Competitor sector_medians lookup failed for %s: %s — "
-                "falling back to absolute-threshold scoring",
-                out.ticker, exc,
+                "[report-degraded-section] ticker=%s step=competitors: sector-median "
+                "lookup raised %s: %s — falling back to absolute-threshold scoring; the "
+                "report is delivered but will not be shared-cached",
+                out.ticker, type(exc).__name__, exc,
             )
+            assembly_degraded.append(_COMPETITOR_BENCHMARKS_DEGRADED)
 
         # No per-peer moat: the only stored one was the grounded `moat_intel_cache`
         # average (retired 2026-10-02 with Google Search grounding), and per-ticker
@@ -3072,7 +3355,10 @@ class TickerReportDataCollector:
         # response schema ignores it — and read by BOTH report doors: the report is still
         # delivered to (and billed to) this caller, but never written to a shared cache,
         # so the next caller re-collects instead of inheriting the hole.
+        # Plus the benchmark reads THIS assembly made that failed (moat sector medians,
+        # competitor sector medians) — recorded on the report only, never on `out`.
         lost_sections = list(getattr(out, "degraded_sections", None) or [])
+        lost_sections += [s for s in assembly_degraded if s not in lost_sections]
         if lost_sections:
             report[DEGRADED_SECTIONS_KEY] = lost_sections
 
@@ -3643,12 +3929,22 @@ def _build_health_vital(
     debt_equity: Optional[float],
     fcf_negative: bool,
     card_weighted: Optional[float] = None,
+    industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Continuous 0-10 `score.value` blending Altman-Z (solvency core) with
     leverage and FCF. The old version set `level` from Altman-Z ONLY and left
     D/E and negative FCF as cosmetic labels that never touched the score — so
     a heavily-levered, cash-burning company with a benign Z scored as healthy.
     Now leverage + FCF apply real penalties. `level` is kept for the card.
+
+    UNMEASURED (``score.value`` None, so `compute_quality_score` renormalizes the
+    dimension out) for a bank / insurer / lender — an `industry` whose liquidity ratios
+    `financials_metric_gate` calls meaningless — when neither the Health card's composite
+    (the card is unrated: one comparable row left, or no card) nor an Altman Z (refused
+    for these balance sheets) is there (2026-10-08). The absolute fallback below would
+    otherwise vote on absolute D/E bands and the sign of FCF: deposits are a bank's
+    funding and loan growth is its business, so a bank with D/E 2.9 and a negative FCF
+    read "critical" (2.5) in every persona's headline score.
     """
     # The health FACTOR score now comes from the Health card's industry-relative
     # composite (40% Altman-Z + 60% sector-pass-rate) when present; the absolute
@@ -3663,6 +3959,17 @@ def _build_health_vital(
         elif debt_equity > 1.0:
             leverage_penalty = 0.5
     fcf_penalty = 1.0 if fcf_negative else 0.0
+
+    if altman_z is None and card10 is None and not liquidity_ratios_applicable(industry):
+        return {
+            "score": {"value": None, "status": "unmeasured"},
+            "level": "moderate",
+            "altman_z_score": 0.0,
+            "altman_z_label": "Data unavailable",
+            "additional_metric": "Leverage not comparable for this industry",
+            "additional_metric_status": "neutral",
+            "fcf_note": "FCF not comparable for this industry",
+        }
 
     if altman_z is None:
         # No solvency core — card score when present, else neutral base docked
@@ -4616,7 +4923,9 @@ def _history_period_id(
     """Return (join_key, display_label, cal_year, quarter|None, sort_date), or None.
 
     - `join_key` / `cal_year` / `quarter` are CALENDAR-based: annual rows use
-      calendarYear or the date's year; quarterly rows use the CALENDAR quarter the
+      `annual_benchmark_key` (the year of the period end minus 7 days; calendarYear /
+      the date's year only when the date is unusable); quarterly rows use the CALENDAR
+      quarter the
       period ends in (`calendar_quarter_key`, 1-7-day spill), the key of the stored
       'calendar_quarter' benchmark rows. This identity dedups the arrays, looks up
       the sector benchmark, and anchors same-quarter-prior-year growth.
@@ -4648,8 +4957,16 @@ def _history_period_id(
         disp_year = cal_year
 
     if not quarterly:
-        return (str(cal_year), str(disp_year), cal_year, None,
-                date_str or str(cal_year))
+        # JOIN on `annual_benchmark_key` (the year of the period end minus 7 days): the
+        # key the producer stores annual peer rows under, and the one growth_service's
+        # `_match_period`, profit_power_service and the moat scorer join on. The old
+        # calendarYear / date[:4] key put a 52/53-week year ending Jan 1-7 (Cadence FY2025,
+        # 2026-01-03) on the NEXT year's peer median, and gave FY2021 (2022-01-01) and
+        # FY2022 (2022-12-31) one key. The display label stays on the fiscal year.
+        join_key = annual_benchmark_key(rec)
+        join_year = int(join_key) if join_key.isdigit() else cal_year
+        return (str(join_year), str(disp_year), join_year, None,
+                date_str or str(join_year))
 
     quarter: Optional[int] = None
     period = rec.get("period")
@@ -4995,6 +5312,12 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
     bench = out.sector_benchmark_history if isinstance(getattr(out, "sector_benchmark_history", None), dict) else {}
     annual_bench = bench.get("annual") or {}
     quarterly_bench = bench.get("quarterly") or {}
+    # Each line's peer group; absent on a collection cached before 2026-10-07.
+    bench_levels = bench.get("levels") if isinstance(bench.get("levels"), dict) else {}
+    annual_levels = bench_levels.get("annual") if isinstance(bench_levels.get("annual"), dict) else {}
+    quarterly_levels = (
+        bench_levels.get("quarterly") if isinstance(bench_levels.get("quarterly"), dict) else {}
+    )
     # fiscal-label → calendar-key, so the (calendar-keyed) sector benchmark can
     # be joined onto the (fiscal-labelled) company series.
     ann_keys = _period_calendar_keys(out.income or [], out.ratios or [], quarterly=False)
@@ -5013,8 +5336,12 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
             _sector_period_map(quarterly_bench.get(sector_name, {})), to_percent)
         if sa_has:
             payload["sector_annual"] = sa
+            if annual_levels.get(sector_name) in ("industry", "sector"):
+                payload["sector_annual_level"] = annual_levels[sector_name]
         if sq_has:
             payload["sector_quarterly"] = sq
+            if quarterly_levels.get(sector_name) in ("industry", "sector"):
+                payload["sector_quarterly_level"] = quarterly_levels[sector_name]
 
     return result
 
@@ -5050,6 +5377,8 @@ def _snapshot_to_card(
     metrics: List[Dict[str, Any]] = []
     for m in snap.metrics:
         md: Dict[str, Any] = {"label": m.name, "value": m.value, "trend": None}
+        if getattr(m, "peer_level", None) in ("industry", "sector"):
+            md["peer_level"] = m.peer_level   # for the model prompts' peer wording
         # Attach tap-to-expand history when we have a series for this metric.
         hk = _resolve_history_key(m.name)
         h = history_lookup.get(hk) if (hk and history_lookup) else None
@@ -5062,8 +5391,12 @@ def _snapshot_to_card(
             # have benchmark coverage; aligned to the company period labels).
             if h.get("sector_annual"):
                 md["sector_annual_history"] = h["sector_annual"]
+                if h.get("sector_annual_level"):
+                    md["sector_annual_level"] = h["sector_annual_level"]
             if h.get("sector_quarterly"):
                 md["sector_quarterly_history"] = h["sector_quarterly"]
+                if h.get("sector_quarterly_level"):
+                    md["sector_quarterly_level"] = h["sector_quarterly_level"]
         metrics.append(md)
     if extra_metrics:
         metrics.extend(extra_metrics)
@@ -8206,8 +8539,9 @@ def _absolute_threshold_fallback(
 ) -> float:
     """Map a peer's percentage value onto a 0-10 score via fixed bands.
 
-    Used only when the peer's sector has no benchmark row (rare —
-    11 canonical sectors all populated by the daily recompute job).
+    Used only when the peer's sector has no current mature median (no sector TTM
+    and no complete annual year with enough companies, or a failed read — which
+    `assemble_report` records as degraded).
     """
     bands = _FALLBACK_BANDS.get(metric_key, _PROFITABILITY_BANDS)
     return _interpolate_bands(bands, peer_value_pct)
@@ -8386,24 +8720,24 @@ def _absolute_peer_score(
     return round(sum(components) / len(components), 1)
 
 
-def _latest_sector_medians(
-    benchmarks: Dict[str, Dict[str, float]],
+def _current_sector_medians(
+    cells: Any,
 ) -> Dict[str, Optional[float]]:
-    """Pick the most recent period_label per metric.
+    """``{metric: median or None}`` for the competitor-scoring metrics, from
+    `SectorBenchmarkLookup.get_current_benchmarks(industry="", sector, ...)` —
+    ``{metric: cell | None}``, where a cell is already the CURRENT mature median (sector
+    TTM, else the newest complete annual year with at least MATURE_SAMPLE_FLOOR
+    companies). A missing, malformed or non-finite cell is None, so that component falls
+    to the fixed bands instead of being anchored on a wrong number.
 
-    `benchmarks` is the raw output of
-    `SectorBenchmarkLookup.get_sector_benchmarks(...)` —
-    `{metric: {period_label: median_value}}`. Returns
-    `{metric: latest_value or None}` for the 3 keys we care about.
+    Replaces `_latest_sector_medians`, which took ``max(period_label)`` of the raw annual
+    map with no sample floor: the partial current year, from its early filers only.
     """
+    cells = cells if isinstance(cells, dict) else {}
     out: Dict[str, Optional[float]] = {}
     for key in _COMPETITOR_BENCHMARK_METRICS:
-        periods = benchmarks.get(key) or {}
-        if periods:
-            latest_label = max(periods.keys())
-            out[key] = periods.get(latest_label)
-        else:
-            out[key] = None
+        cell = cells.get(key)
+        out[key] = _finite_or_none(cell.get("value")) if isinstance(cell, dict) else None
     return out
 
 
@@ -8561,7 +8895,7 @@ def _build_competitors(
 
     `sector_medians_by_sector` is keyed by NORMALIZED sector name
     (e.g., "Technology"); each value is the output of
-    `_latest_sector_medians(...)`. Used only on the absolute-path
+    `_current_sector_medians(...)`. Used only on the absolute-path
     fallback.
 
     Returns [] when no peer survives selection or the rankable-data drop.
@@ -9449,9 +9783,15 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
     for title, snap in snaps:
         if snap is None or not snap.metrics:
             continue
-        rendered.append(f"\n{title} ({int(snap.rating or 0)}/5):")
+        rating = int(snap.rating or 0)
+        # 0 = not rated (no peer comparison), never "0 out of 5" to the model.
+        rendered.append(f"\n{title} ({rating}/5):" if rating > 0 else f"\n{title} (unrated):")
         for m in snap.metrics:
-            rendered.append(f"  {m.name}: {m.value}")
+            # The wire name says "sector avg" / "vs sector" for every median (shipped iOS
+            # strips the suffix by that word); `peer_level` names whose median it is. The
+            # 1.1 card calls an industry median "industry avg", so the model must too, or
+            # the frozen narrative says "sector average" beside it (2026-10-08).
+            rendered.append(f"  {peer_worded_metric_name(m)}: {m.value}")
     if not rendered:
         return ""
     header = (

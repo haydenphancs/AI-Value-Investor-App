@@ -106,6 +106,12 @@ class _StubBenchmarkLookup:
     def get_sector_benchmarks(self, sector, metrics, period="annual"):
         return {}
 
+    # The moat scorer's read. Without it the scorer's lookup RAISES AttributeError, which
+    # it now reports as a failed read (`MoatScores.lookup_failed`) and the report records
+    # as degraded — the stub must answer "no rows", not fail.
+    def get_sector_benchmarks_with_n(self, sector, metrics, period_type="annual"):
+        return {m: {} for m in metrics}
+
     def get_benchmarks(self, *a, **k):
         return {}
 
@@ -723,10 +729,11 @@ def test_capital_allocation_block_forwards_data_points():
     """The Insider & Management capital-allocation card now carries the
     per-quarter `data_points` series so iOS can draw the dilution mini-chart
     and label the share-count window. The block must forward each point with
-    the exact 7 keys the iOS SignalOfConfidenceDataPointDTO decodes (P19 added
-    `cash_flow_reported`), preserve oldest→newest order, and validate against
-    CapitalAllocationResponse — drift here is a JSONDecoder crash on the report
-    screen."""
+    the exact 8 keys the iOS SignalOfConfidenceDataPointDTO decodes (P19 added
+    `cash_flow_reported`; 2026-10-05 added the Optional `market_cap`, the yields'
+    denominator the Capital view scales against), preserve oldest→newest order, and
+    validate against CapitalAllocationResponse — drift here is a JSONDecoder crash on
+    the report screen."""
     block = _build_capital_allocation_block(_make_signal_of_confidence())
 
     assert block is not None
@@ -739,7 +746,7 @@ def test_capital_allocation_block_forwards_data_points():
     expected_keys = {
         "period", "dividend_yield", "buyback_yield",
         "dividend_amount", "buyback_amount", "shares_outstanding",
-        "cash_flow_reported",
+        "cash_flow_reported", "market_cap",
     }
     for dp in dps:
         assert set(dp.keys()) == expected_keys
@@ -747,6 +754,10 @@ def test_capital_allocation_block_forwards_data_points():
         for key in ("dividend_yield", "buyback_yield", "dividend_amount", "buyback_amount"):
             assert isinstance(dp[key], float), (key, dp[key])
         assert dp["cash_flow_reported"] is True
+        # Optional on BOTH sides (iOS `Double?`): null, or a positive cap — never 0.
+        assert dp["market_cap"] is None or (
+            isinstance(dp["market_cap"], float) and dp["market_cap"] > 0
+        ), dp["market_cap"]
     # oldest → newest preserved (drives the window label + chart x-axis)
     assert dps[0]["period"] == "Q2 '23"
     assert dps[-1]["period"] == "Q2 '25"

@@ -464,17 +464,23 @@ def insider_reporter_key(row: Dict[str, Any]) -> str:
     return ""
 
 
-_SHARE_CLASS_RE = re.compile(r"\bclass\s+[\"'“”]?([a-z0-9])\b", re.I)
+# "Series" names a security exactly as "Class" does: Liberty-style trackers (FWONA/FWONK,
+# LBRDA/LBRDK, BATRA/BATRK, QRTEA) file "Series A" and "Series B/C Common Stock". Matching
+# only "Class" put every series in ONE amendment group, so a 4/A on one series consumed
+# another series' original line (2026-10-07). The word is kept in the token, so a "Class A"
+# line and a "Series A" line never merge either.
+_SHARE_CLASS_RE = re.compile(r"\b(class|series)\s+[\"'“”]?([a-z0-9])\b", re.I)
 
 
 def _share_class_token(security_name: object) -> str:
-    """"a" for "Class A Common Stock", "" for an unclassed line. Grouping on the class, not
-    the raw label, lets a 4/A that rewords the label ("Ordinary shares" for "Ordinary
-    Shares") still replace its original, while BRK-A and BRK-B lines stay apart."""
+    """"class-a" for "Class A Common Stock", "series-c" for "Series C Common Stock", "" for an
+    unclassed line. Grouping on the class or series, not the raw label, lets a 4/A that
+    rewords the label ("Ordinary shares" for "Ordinary Shares") still replace its original,
+    while BRK-A and BRK-B lines — and Series A and Series C lines — stay apart."""
     if not isinstance(security_name, str):
         return ""
-    m = _SHARE_CLASS_RE.search(security_name)
-    return m.group(1).lower() if m else ""
+    m = _SHARE_CLASS_RE.search(security_name[:_SECURITY_NAME_MAX])
+    return f"{m.group(1).lower()}-{m.group(2).lower()}" if m else ""
 
 
 def _finite_number(value: object) -> Optional[float]:
@@ -510,7 +516,8 @@ def supersede_form4_amendments(rows: Any) -> List[Dict[str, Any]]:
 
     Generalised from ``signals_service._extract_ceo_buys`` (the CEO card), for every
     transaction type. Rows are grouped by (symbol, reporter, trade date, direct/indirect,
-    raw ``transactionType``, share class). Within a group, the amendment that counts is
+    raw ``transactionType``, share class or series — `_share_class_token`). Within a group,
+    the amendment that counts is
     every 4/A filed on the LATEST amendment date, and:
 
       * when it restates at least as many lines as the originals (a 4/A re-files the whole

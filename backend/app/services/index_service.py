@@ -35,7 +35,12 @@ from app.schemas.index import (
 )
 from app.database import get_supabase
 from app.utils.postgrest_paging import fetch_all_rows
-from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
+from app.services.sector_benchmark_lookup import (
+    MATURE_SAMPLE_FLOOR,
+    TTM_MAX_AGE_DAYS,
+    TTM_PERIOD_TYPE,
+    servable_benchmark_rows,
+)
 from app.utils.market_hours import ET, market_status_fields, to_utc_instant
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.price_service import price_source
@@ -189,10 +194,12 @@ _SECTOR_PERF_TTL = 900      # 15 min — today's sector moves, shared by every i
 _HISTORY_TTL = 43_200       # 12h — daily EOD bars, close-cycle aligned
 _DERIVED_TTL = 43_200       # 12h — performance periods + the moving averages, same
 # `_compute_index_pe_from_sectors` pages its read: PostgREST clamps a response to ~1,000
-# rows however large a `.limit()` you pass, and the sector-aggregate pe_ratio set is 11
-# sectors × the quarterly backfill depth — already ~880 rows and growing one page per year.
+# rows however large a `.limit()` you pass. The sector TTM pe_ratio set is one row per
+# sector (11), so one page; the helper still reads to completion and warns at its backstop.
 _PE_PAGE = 1000
 _PE_MAX_PAGES = 20
+# Fewer sectors than this with a mature TTM P/E median → the index P/E is unknown.
+_INDEX_PE_MIN_SECTORS = 8
 
 _CONSTITUENTS_TTL = 43_200  # 12h — index membership changes quarterly at most
 
@@ -454,91 +461,110 @@ def _compute_ytd_return(prices: List[Dict], now: Optional[datetime] = None) -> O
     return ytd_return(prices, now)
 
 
-def _compute_index_pe_from_sectors() -> Optional[float]:
+def _compute_index_pe_from_sectors(now: Optional[datetime] = None) -> Optional[float]:
     """
-    Compute aggregate index P/E from sector benchmark medians.
+    Aggregate index P/E: the simple average of the SECTOR-aggregate TTM P/E medians.
 
-    Queries the sector_benchmarks table for pe_ratio entries,
-    picks the most recent CALENDAR quarter that has >= 8 sectors,
-    and returns the simple average across all sectors.
+    Reads `sector_benchmarks` rows with metric pe_ratio, period_type 'ttm' (the weekly
+    current-snapshot job: every company's rolling 12 months from FMP /ratios-ttm, the
+    same TTM the stock cards show) and industry '' (the sector rows), and returns their
+    mean when at least _INDEX_PE_MIN_SECTORS sectors each carry a median from at least
+    MATURE_SAMPLE_FLOOR companies — else None (the snapshot then says "unknown",
+    `pe_known=False`, rather than averaging a handful of sectors).
 
-    Reads period_type CALENDAR_QUARTER_PERIOD_TYPE, never the legacy 'quarterly' rows:
-    those pooled each company by its FISCAL quarter number, so a sector's "Q1" median
-    mixed Microsoft's Jul-Sep quarter with everyone else's Jan-Mar.
+    Every row passes the benchmark lookup's serving gate first
+    (`sector_benchmark_lookup.servable_benchmark_rows`): a TTM row older than
+    TTM_MAX_AGE_DAYS belongs to a run that no longer rewrites it and is not a current
+    median.
 
-    ⚠️ TWO things this read must do, and did not until 2026-09-12:
+    Why TTM, not the newest calendar quarter (until 2026-10-07): a calendar-quarter P/E
+    median is annual-scale but swings with one quarter's prices and filers (Utilities
+    Q1'26 15.4 → Q2'26 23.7 against a TTM of 20.1), and the newest quarter is hidden for
+    75 days after it ends, so the index figure jumped whenever the "newest complete"
+    quarter rolled over.
 
-    1. **`industry = ''` — the sector-AGGREGATE rows only.** `sector_benchmarks` is ONE
-       table where `industry=''` IS the sector row (migration 072); the quarterly job
-       writes a row per INDUSTRY too — 153 of them against 11 sectors
-       (`data/benchmark_universe.json`). Without the filter the "simple average across all
-       sectors" was an unweighted mean of industry medians, and it shipped with
-       `pe_known=True`. Both siblings already filter: `sector_benchmark_lookup._fetch_rows`
-       and `sector_benchmark_service._get_existing_periods`.
-    2. **Page it.** PostgREST clamps any response to 1,000 rows whatever you ask for
-       (verified in `market_movers_service`), and even filtered this is 11 sectors ×
-       ~80 quarterly labels ≈ 880 rows — one more backfilled quarter and the newest
-       period silently falls off the page, which is invisible because the read succeeds.
+    Kept from the 2026-09-12 fix: **`industry = ''`** — `sector_benchmarks` is ONE table
+    where `industry=''` IS the sector row (migration 072) and the jobs also write a row per
+    INDUSTRY (153 against 11 sectors); without the filter the mean was an unweighted mean
+    of industry medians. And the read is paged through `fetch_all_rows` (one row per
+    sector today, but a page clamp must never truncate it silently).
     """
     try:
         supabase = get_supabase()
-        # `fetch_all_rows`, NOT a hand-rolled `.range()` loop. This read was written as one
-        # in the same change that introduced the shared helper, and it reproduced both of
-        # the defects the helper exists to prevent:
-        #   * NO `ORDER BY` — Postgres may order each page independently, so a row can
-        #     appear on two pages or on neither. `sector_benchmarks.id` (bigint identity)
-        #     is the unique key the helper's contract asks for.
-        #   * a SILENT cap — it stopped at 20 pages with no log, which is the same
-        #     "the read succeeded, so the truncation is invisible" failure it was fixing.
-        #     The helper WARNs when it hits its own backstop.
+        # `fetch_all_rows`, NOT a hand-rolled `.range()` loop: the helper requires a
+        # total ORDER BY (`sector_benchmarks.id`, the bigint identity) so a row can never
+        # appear on two pages or on neither, and it WARNs when it hits its own backstop
+        # instead of truncating quietly.
         rows: List[Dict[str, Any]] = fetch_all_rows(
             lambda: supabase.table("sector_benchmarks")
-            .select("sector, period_type, period_label, median_value")
+            .select("sector, period_label, median_value, sample_size, computed_at")
             .eq("metric_name", "pe_ratio")
-            .eq("period_type", CALENDAR_QUARTER_PERIOD_TYPE)
+            .eq("period_type", TTM_PERIOD_TYPE)
             .eq("industry", ""),
             order_by="id",
-            what="index P/E: sector benchmark medians",
+            what="index P/E: sector TTM P/E medians",
             page_size=_PE_PAGE,
             max_pages=_PE_MAX_PAGES,
         )
-        if not rows:
-            return None
-
-        # Group by period_label
-        from collections import defaultdict
-        periods: Dict[str, List[float]] = defaultdict(list)
-        for row in rows:
-            val = row.get("median_value")
-            if val and val > 0:
-                periods[row["period_label"]].append(val)
-
-        # Sort periods descending (Q1'26 > Q4'25 > Q3'25 ...) and pick
-        # the most recent one with >= 8 sectors
-        def period_sort_key(label: str) -> str:
-            # Labels are "Q1'25" / "Q4'24" (no space) — sort by year then quarter.
-            # The old `.split()` (whitespace) returned a single token for the
-            # spaceless label, so `q, y = ...` always raised and every label fell
-            # back to a raw lexicographic sort that ordered Q4'24 ahead of Q1'25.
-            try:
-                q_part, y_part = label.replace("Q", "").split("'")
-                return f"{int(y_part):02d}-{int(q_part):02d}"
-            except Exception:
-                return label
-
-        for label in sorted(periods.keys(), key=period_sort_key, reverse=True):
-            pes = periods[label]
-            if len(pes) >= 8:
-                avg_pe = sum(pes) / len(pes)
-                logger.info(
-                    f"Index PE computed from {len(pes)} sectors ({label}): {avg_pe:.2f}"
-                )
-                return round(avg_pe, 2)
-
-        return None
     except Exception as e:
-        logger.warning(f"Failed to compute index PE from sectors: {e}")
+        logger.warning(
+            "index P/E: sector TTM P/E read failed: %s: %s — P/E reported unknown",
+            type(e).__name__, e,
+        )
         return None
+    if not rows:
+        logger.info("index P/E: no sector TTM P/E rows — P/E reported unknown")
+        return None
+
+    servable, dropped = servable_benchmark_rows(rows, TTM_PERIOD_TYPE, now=now)
+    if dropped:
+        logger.warning(
+            "index P/E: ignored %d stale sector TTM P/E row(s) (older than %d days)",
+            sum(dropped.values()), TTM_MAX_AGE_DAYS,
+        )
+
+    # One median per sector. The table is unique per (sector, industry, metric, period),
+    # so a duplicate means a malformed read: keep the newest computed one.
+    per_sector: Dict[str, Tuple[str, float]] = {}
+    thin: List[str] = []
+    for row in servable:
+        sector = row.get("sector")
+        if not isinstance(sector, str) or not sector.strip():
+            continue
+        value = _finite_positive(row.get("median_value"))
+        n = _finite_positive(row.get("sample_size"))
+        if value is None:
+            continue
+        if n is None or n < MATURE_SAMPLE_FLOOR:
+            thin.append(sector)
+            continue
+        computed = str(row.get("computed_at") or "")
+        held = per_sector.get(sector)
+        if held is None or computed > held[0]:
+            per_sector[sector] = (computed, value)
+
+    if len(per_sector) < _INDEX_PE_MIN_SECTORS:
+        logger.info(
+            "index P/E: only %d sector(s) carry a mature TTM P/E median (need %d; thin: "
+            "%s) — P/E reported unknown",
+            len(per_sector), _INDEX_PE_MIN_SECTORS, ", ".join(sorted(thin)) or "none",
+        )
+        return None
+    pes = [value for _computed, value in per_sector.values()]
+    avg_pe = sum(pes) / len(pes)
+    logger.info("Index PE computed from %d sector TTM medians: %.2f", len(pes), avg_pe)
+    return round(avg_pe, 2)
+
+
+def _finite_positive(value: Any) -> Optional[float]:
+    """`float(value)` when it is a finite number above zero, else None (bools rejected)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def _get_market_status() -> MarketStatusResponse:

@@ -374,6 +374,9 @@ def test_x_prepare_records_the_exact_text_hash_and_never_puts_the_text_in_the_su
 @pytest.mark.parametrize("raw, micros", [
     (0, 0), (0.0, 0), (-1, 0), (-0.01, 0), (float("nan"), 0), (float("inf"), 0), (float("-inf"), 0),
     (None, 0), ("", 0), ("abc", 0), ("nan", 0), ("inf", 0), (1e-7, 0),
+    # a finite but absurd budget whose micro-dollars overflow to inf: X off, never an OverflowError
+    # (round(inf) raised here — and outside the digest's _optional, it took the whole digest down)
+    (1e303, 0), ("1e303", 0), (1e308, 0),
     ("2", 2_000_000), (2, 2_000_000), (2.0, 2_000_000), (0.015, 15_000), ("0.5", 500_000),
 ])
 def test_x_budget_micros_parsing_is_fail_closed(monkeypatch, raw, micros):

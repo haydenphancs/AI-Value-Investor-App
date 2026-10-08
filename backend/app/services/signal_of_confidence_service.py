@@ -111,7 +111,99 @@ logger = logging.getLogger(__name__)
 #:       interior gap, a late-starting cash-flow history, a company listed under a year) is
 #:       annualised (sum x 4/N) instead of read as a year — a v9 row of a young company
 #:       persisted 3.0% "High" for a 4.0% "Very High" repurchaser, and v10 refuses it.
-_PAYLOAD_VERSION = 10
+#: 11 → (2026-10-05, TestFlight 1.0 (11), CRWV) bumped for:
+#:     - the per-share dividend record is COMMON-only: `ratios.dividendPerShare` is FMP's
+#:       `netDividendsPaid / weightedAverageShsOut` — common PLUS preferred — so it is scaled
+#:       by the common share of that fiscal year's dividend cash on the ANNUAL cash-flow
+#:       statement (`_common_dividend_ratios`). CRWV has never paid a common dividend; its
+#:       pre-IPO Series C preferred dividends ($57.7M FY2024, $29M FY2025) read as a payer
+#:       record of $0.1428 / $0.0667 per share, so a $2.59M preferred payment FMP mis-tagged
+#:       `commonDividendsPaid` in the Q2 2025 quarterly row charted as a lone "$3M"
+#:       dividend bar and the card showed a dividend history. WFC / MET's DPS were also
+#:       overstated by their preferred dividends (WFC FY2025 2.0396 → 1.7093, declared 1.70).
+#:     - a one-quarter spike or dip in `weightedAverageShsOut` that contradicts both
+#:       neighbouring quarters (FMP copies the ANNUAL weighted average into some fiscal-Q4
+#:       rows: CRWV Q4 2025 read 435M between 498M and 527M while its own EPS implies ~508M)
+#:       ships as `shares_outstanding: null` instead of a fake 13% buyback-like drop.
+#:     - each data point carries `market_cap` (USD millions, the yields' denominator) so
+#:       the Capital ($) view can keep an immaterial amount from filling the chart.
+#: 12 → (2026-10-07, adversarial review of 11, which never deployed — bumped anyway, the v6
+#:     precedent: a local server on the shared cache table may have stamped 11):
+#:     - a quarter whose own EPS agrees with its count is never refused as a glitch (a real
+#:       issuance / tender quarter beside FMP's annual copy was nulled);
+#:     - the NEWEST fiscal-Q4 row is judged too, on its own EPS's word (the annual copy sits
+#:       there from each 10-K to the next 10-Q);
+#:     - a REFUSED newest displayed quarter never ships a null count (build 1.0 (10) prints
+#:       a bold "0.00M"): it ships its EPS-implied count, or stays as FMP sent it;
+#:     - an EMPTY annual cash-flow answer against a paying record is a failed leg
+#:       (`annual_cash_flow`, not persisted).
+#: 13 → (2026-10-08, final review; 12 never deployed — bumped for the same reason): the
+#:     newest fiscal-Q4 row is refused only on the annual copy's SIGNATURE (its count IS the
+#:     FY annual weighted average the annual statements imply) and replaced by its
+#:     like-for-like EPS count — v12 judged it on raw net income / EPS, which preferred
+#:     dividends and cent rounding bias, and replaced REAL 5-12% moves (a -7% tender read
+#:     "Diluting"); and a newest count FMP sent as 0 / null / missing ships its
+#:     like-for-like EPS count instead of null where one is sound (build 1.0 (10) printed
+#:     "0.00M"). Values change; the shape does not.
+#: 14 → (2026-10-08, round-5 review; 13 never deployed — bumped for the same reason):
+#:     - the newest fiscal-Q4 refusal needs the reported count to have MOVED > 5% off the
+#:       quarter before: a flat or slow count IS its year's annual average, and v13 replaced
+#:       it with a noisy like-for-like figure (a flat 3% repurchaser read "Diluting");
+#:     - an EPS estimate on the newest point is display only: the summary's share-count
+#:       change and buyback verdict measure reported counts (a v13 row may carry a verdict
+#:       an estimate moved);
+#:     - a failed annual cash-flow leg with a fiscal-Q4 newest quarter is `annual_cash_flow`
+#:       (memory only) — a v13 row may hold FMP's uncorrected copy from such a build.
+#:     Values change; the shape does not.
+#:     Round 6 (same day) needed NO bump: it changes only WHICH builds are persisted (a
+#:     failed annual leg degrades only a newest fiscal-Q4 count the annual figure can change;
+#:     a failed RATIOS leg counts there too) — never a value a given input produces.
+#:     Round 7 likewise: a ratios answer that is not a list is `annual_ratios`, like a raise,
+#:     so such a build is no longer stored; what any build holds is unchanged. Round 8 the
+#:     same for a `[]` ratios answer beside a common dividend in the annual cash flow.
+_PAYLOAD_VERSION = 14
+
+#: The per-share record (`ratios.dividendPerShare`) is scaled by the common share of the
+#: year's dividend cash only when that share is below this — common == net (no preferred
+#: line) is the norm, and a ratio a hair under 1.0 from vendor rounding must not move a
+#: payer's figure.
+_COMMON_SHARE_UNCHANGED = 0.995
+#: The common/preferred split is read only from a row whose two lines add up to its
+#: `netDividendsPaid` — within 1% (or $1,000 of rounding), measured against the live rows
+#: (WFC, MET, CRWV exact; ET FY2023 off by $3M of $4.2B).
+_COMMON_SPLIT_TOLERANCE = 0.01
+_COMMON_SPLIT_SLACK_USD = 1_000.0
+
+#: A quarter's weighted-average share count that lies outside the range of BOTH adjacent
+#: quarters by more than this fraction is a one-quarter vendor artifact, not a share count
+#: (`_share_count_glitches`). Weighted averages are smooth; a real issuance or buyback moves
+#: the count and it STAYS moved (a step), it does not snap back the next quarter (a V).
+#: The tighter bound applies when the row's own EPS confirms it (net income / EPS lands
+#: between the neighbours); without that confirmation only a gross V is refused.
+_SHARES_GLITCH_CONFIRMED = 0.05
+_SHARES_GLITCH_UNCONFIRMED = 0.10
+#: |EPS| below this is too coarse after FMP's two-decimal rounding to imply a count (±10%
+#: at 0.05), so it never confirms.
+_SHARES_EPS_MIN = 0.05
+#: How far outside the neighbours' range the EPS-implied count may land and still confirm
+#: (EPS rounding plus the net income attributable to preferred / minority holders).
+_SHARES_EPS_SLACK = 0.02
+#: The newest fiscal-Q4 row is refused only when its count IS the fiscal year's annual
+#: weighted average — FMP's copy — to within this fraction of the average the annual
+#: statements already fetched imply (`_annual_share_counts`). FMP copies it exactly; the
+#: derived average carries FMP's per-share rounding (live 2026-10-08: CRWV / AAPL exact,
+#: WFC FY2025 0.05% off), so the margin is 4x that. Never alone: a flat count IS its annual
+#: average too, so the count must also have moved off the quarter before
+#: (`_share_count_glitches`).
+_ANNUAL_COPY_TOLERANCE = 0.002
+#: An EPS-implied count may STAND IN for a share count (the newest quarter only) only from
+#: rows whose |EPS| is at least this: cent rounding then moves it by at most 5%
+#: (0.005 / 0.10) — at 0.06 it was 5.7%, enough on its own to replace a real +6% move.
+_SHARES_EPS_ESTIMATE_MIN = 0.10
+#: …and only when it lands within this fraction of the quarter it is anchored on.
+_SHARES_ESTIMATE_BAND = 0.10
+#: The anchor for a missing newest count may sit at most two quarters back.
+_SHARES_ANCHOR_MAX_DAYS = 250
 
 #: How many newest quarters the cash-flow statement may LAG the income statement by
 #: before the trim stops being "the row has not landed yet" (round-2 R47) and becomes a
@@ -401,6 +493,23 @@ def _cash_known(dp: Any, missing: Set[str]) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _ShareGlitch:
+    """One share count `_share_count_glitches` refuses as a vendor artifact."""
+
+    #: Why, for the `[soc-shares-glitch]` log line.
+    detail: str
+    #: The quarter's count as its OWN EPS puts it, set only when that EPS CONFIRMED the
+    #: refusal: like with like against the quarter before (`_like_for_like_count`) where
+    #: both rows' EPS is usable, else (an interior refusal only) the raw net income / EPS,
+    #: which the neighbours' range already bounds. None for a refusal on the neighbours
+    #: alone. `_build_quarters` ships it for the newest DISPLAYED quarter, which must never
+    #: be null: build 1.0 (10) draws `dataPoints.last?.sharesOutstanding ?? 0` as a bold
+    #: "0.00M" on the right axis. DISPLAY ONLY: the summary's share-count change and buyback
+    #: verdict skip it (`_QuarterDiagnostics.estimated_share_periods`).
+    estimate: Optional[float] = None
+
+
 @dataclass
 class _QuarterDiagnostics:
     """What `_build_quarters` could NOT measure, for the builder's degraded gate.
@@ -434,6 +543,19 @@ class _QuarterDiagnostics:
     #: series ends more than `_CF_STALE_MAX_DAYS` before the newest income quarter: the
     #: cash-flow feed is STALE, not lagging one filing. The builder flags `cash_flow`.
     cash_flow_stale: bool = False
+    #: Labels of points whose `shares_outstanding` is an EPS ESTIMATE, not a reported count
+    #: (only ever the newest displayed quarter: a refused count's `_ShareGlitch.estimate`,
+    #: or a count FMP sent as 0 / null). Display only — the summary's share-count change and
+    #: buyback verdict skip them (round-5 review 2026-10-08: the estimate's error, up to the
+    #: 10% band, flipped a flat repurchaser to "Diluting").
+    estimated_share_periods: List[str] = field(default_factory=list)
+    #: The fiscal year of the newest displayed quarter when it was judged as the NEWEST
+    #: quarter (nothing trimmed after it) and only its missing annual weighted average stood
+    #: between it and a verdict: a fiscal Q4 that moved past the bound with a like-for-like
+    #: count that disagrees (`_newest_q4_copy_like`), so whether it is FMP's copy cannot be
+    #: told. The builder marks the build with the failed annual leg's reason, else says so in
+    #: a log. A count the annual figure could not change never sets it (round-6 review).
+    newest_q4_unjudged_year: Optional[str] = None
 
 
 # ── Service ───────────────────────────────────────────────────────
@@ -730,8 +852,8 @@ class SignalOfConfidenceService:
         (`_SocBuild.fund_shape`)."""
         degraded: List[str] = []
 
-        # Phase 1: parallel FMP fetch (6 calls). historical-market-cap covers
-        # ~6y so every displayed quarter can be valued at ITS OWN period end.
+        # Phase 1: parallel FMP fetch. historical-market-cap covers ~6y so every
+        # displayed quarter can be valued at ITS OWN period end.
         today = datetime.now(timezone.utc).date()
         mcap_from = (today - timedelta(days=6 * 365)).strftime("%Y-%m-%d")
         mcap_to = today.strftime("%Y-%m-%d")
@@ -745,6 +867,7 @@ class SignalOfConfidenceService:
             hist_mcap_raw,
             ex_dividend_dates,
             profile_raw,
+            annual_cashflow,
         ) = await asyncio.gather(
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=20),
             self.fmp.get_income_statement(ticker, period="quarter", limit=20),
@@ -773,6 +896,15 @@ class SignalOfConfidenceService:
             # dividend this fiscal year has before `ratios` (completed FYs only) catches
             # up. The quote row above is profile-backed but `_shape` does not forward it.
             self.fmp.get_company_profile(ticker),
+            # The ANNUAL cash-flow statement splits each fiscal year's dividend cash into
+            # common and preferred. `ratios.dividendPerShare` is the net (common +
+            # preferred) per share, so this split is what makes it a COMMON record
+            # (`_common_dividend_ratios`). The annual rows, not the quarterly ones: FMP
+            # tagged CRWV's Q2 2025 preferred payment `commonDividendsPaid` in the
+            # quarterly row while its FY2025 row books all $29M as preferred.
+            self.fmp.get_cash_flow_statement(
+                ticker, period="annual", limit=_ANNUAL_DIVIDEND_YEARS
+            ),
             return_exceptions=True,
         )
 
@@ -788,6 +920,8 @@ class SignalOfConfidenceService:
             isinstance(quarterly_cashflow, list) and not quarterly_cashflow
         )
         raw_ratios_answered_list = isinstance(annual_ratios, list)
+        # …and, for the newest fiscal-Q4 check (round-6 review), whether it answered `[]`.
+        raw_ratios_answered_empty = raw_ratios_answered_list and not annual_ratios
 
         # Handle failures gracefully
         if isinstance(quarterly_cashflow, Exception):
@@ -861,12 +995,139 @@ class SignalOfConfidenceService:
                 ticker, type(quarterly_cashflow).__name__,
             )
             degraded.append("cash_flow")
+        # The same for the ratios leg (round-7 review 2026-10-08): an error dict or a null
+        # body is `annual_ratios`, exactly like a raise — payer or not. Without the per-share
+        # record a never-payer cannot be told from a STOPPED payer (both read lastDividend 0;
+        # only the record keeps INTC's real bars) or a payer's card kept (history, DPS and
+        # growth erased), and it is what keeps PLUG's mis-tagged line off the chart: the
+        # getter's rule above, a build that ran without it is never pinned for a day.
+        if not raw_ratios_answered_list and "annual_ratios" not in degraded:
+            logger.warning(
+                "[soc-ratios-not-a-list] ticker=%s step=annual_ratios: the annual ratios leg "
+                "answered %s, not a list — treated as a failed leg (the per-share dividend "
+                "record is unknown); this build is served from memory only, not persisted",
+                ticker, type(annual_ratios).__name__,
+            )
+            degraded.append("annual_ratios")
+        # …and an EMPTY ratios answer while the annual cash-flow statement books a COMMON
+        # dividend in some year (round-8 review): `ratios` is derived from those very
+        # statements, so the record was erased, not absent — the mirror of
+        # `[soc-annual-cashflow-empty]` below. Never on the profile's `lastDividend`: a
+        # recent-IPO initiator's record is genuinely empty. A non-payer's `[]` (CRWV books
+        # preferred dividends only) stays cacheable: its build is the healthy one (R6-1).
+        if (
+            raw_ratios_answered_empty
+            and "annual_ratios" not in degraded
+            and isinstance(annual_cashflow, list)
+            and any(
+                (paid := _safe_float(row, "commonDividendsPaid")) is not None and paid < 0
+                for row in annual_cashflow if isinstance(row, dict)
+            )
+        ):
+            logger.warning(
+                "[soc-ratios-empty] ticker=%s step=annual_ratios: the annual ratios leg answered "
+                "[] while the annual cash-flow statement books a common dividend — the "
+                "per-share dividend record is unknown, not absent; this build is served from "
+                "memory only, not persisted",
+                ticker,
+            )
+            degraded.append("annual_ratios")
 
         # Ensure all are lists
         quarterly_cashflow = _as_list(quarterly_cashflow)
         quarterly_income = _as_list(quarterly_income)
         annual_ratios = _as_list(annual_ratios)
         hist_mcap_raw = _as_list(hist_mcap_raw)
+
+        # The per-share record becomes COMMON-only before anything reads it (the payer
+        # verdict, the per-fiscal-year bar gate, the card's history and growth all do).
+        # Without the annual split a record with any positive year cannot be told apart
+        # from preferred dividends (CRWV), so that build is not persisted; an all-zero
+        # record has nothing to apportion and needs no split.
+        annual_cashflow_failed = isinstance(annual_cashflow, Exception) or not isinstance(
+            annual_cashflow, list
+        )
+        # An operating filer's EMPTY annual answer (its quarterly statement answered rows) is
+        # a failed leg too for the newest fiscal-Q4 check below: a fiscal-Q4 row comes from
+        # the very 10-K the annual statement is built from.
+        annual_cashflow_empty = (
+            not annual_cashflow_failed and not annual_cashflow and bool(quarterly_cashflow)
+        )
+        if annual_cashflow_failed:
+            record_has_dividends = any(
+                (v := _safe_float(r, "dividendPerShare")) is not None and v > 0
+                for r in annual_ratios
+            )
+            logger.warning(
+                "[soc-annual-cashflow-unavailable] ticker=%s step=annual_cash_flow: %s — the "
+                "per-share dividend record cannot be split into common and preferred%s",
+                ticker,
+                (
+                    f"{type(annual_cashflow).__name__}: {annual_cashflow}"
+                    if isinstance(annual_cashflow, Exception)
+                    else f"answered {type(annual_cashflow).__name__}, not a list"
+                ),
+                (
+                    "; it is used as FMP sent it (preferred dividends included) and this "
+                    "build is served from memory only, not persisted"
+                    if record_has_dividends
+                    else " (the record has no dividend year to split; the leg still matters "
+                    "only for a newest fiscal-Q4 count that moved past the bound, and the "
+                    "share-count warning names one when it does)"
+                ),
+            )
+            if record_has_dividends:
+                degraded.append("annual_cash_flow")
+            annual_cashflow = []
+        else:
+            # The leg ANSWERED, but a dividend year may still have no readable split (review
+            # 2026-10-07: an empty answer, or rows that lost `preferredDividendsPaid`, kept
+            # the preferred-inclusive record and persisted it with no log line).
+            annual_rows = _as_list(annual_cashflow)
+            unsplit = self._dividend_years_without_split(
+                annual_ratios, self._common_dividend_shares(annual_rows)
+            )
+            if unsplit and not annual_rows and quarterly_cashflow:
+                # An operating filer (its quarterly statement answered rows) whose annual
+                # statement came back EMPTY while `ratios` — derived from that very
+                # statement — shows a paying year: a contradiction, so a bad answer, not the
+                # company's state. Same as a failed leg: memory only, never persisted. A
+                # fund's annual answer is a genuine [] (no quarterly rows either) and
+                # never lands here.
+                logger.warning(
+                    "[soc-annual-cashflow-empty] ticker=%s step=annual_cash_flow: the annual "
+                    "cash-flow statement answered [] while the per-share record shows "
+                    "dividends in FY%s — the split into common and preferred is unknown, the "
+                    "record is used as FMP sent it, and this build is served from memory "
+                    "only, not persisted",
+                    ticker, ", FY".join(unsplit),
+                )
+                degraded.append("annual_cash_flow")
+            elif unsplit and annual_rows:
+                # Rows came back but these years cannot be split (a missing line, lines that
+                # do not add up). Possibly permanent vendor drift, so NOT a degraded reason
+                # (it would keep every such payer's report out of the shared caches for
+                # good); said loudly instead, because for a preferred issuer the record
+                # below still includes preferred dividends for these years.
+                logger.warning(
+                    "[soc-annual-split-unreadable] ticker=%s step=annual_cash_flow: no "
+                    "readable common/preferred split for FY%s (%d annual row(s) answered) — "
+                    "the per-share record is used as FMP sent it for those years, preferred "
+                    "dividends included",
+                    ticker, ", FY".join(unsplit), len(annual_rows),
+                )
+            elif unsplit:
+                # No statements at all — a fund (its per-share record is a distribution
+                # history with no preferred line to separate). Nothing to correct.
+                logger.info(
+                    "[soc-annual-split-none] ticker=%s step=annual_cash_flow: no cash-flow "
+                    "statements (annual or quarterly) — the per-share record for FY%s is used "
+                    "as FMP sent it",
+                    ticker, ", FY".join(unsplit),
+                )
+        annual_ratios = self._common_dividend_ratios(
+            annual_ratios, _as_list(annual_cashflow), ticker
+        )
 
         # Phase 2: build per-quarter data points
         #
@@ -894,7 +1155,55 @@ class SignalOfConfidenceService:
             ticker,
             pays_common_dividend=pays_common_dividend,
             dividend_by_year=self._annual_dividend_map(annual_ratios),
+            # The FY annual weighted averages the annual statements already fetched imply:
+            # what recognises FMP's copy in the newest fiscal-Q4 row (no extra call).
+            annual_share_counts=self._annual_share_counts(
+                annual_ratios, _as_list(annual_cashflow)
+            ),
         )
+
+        # Only the newest fiscal-Q4 quarter's missing annual weighted average stood between it
+        # and a verdict — it moved past the bound and its like-for-like count disagrees — so
+        # whether its count is FMP's copy cannot be told, and it ships as sent (round-5/6
+        # review 2026-10-08). The average needs BOTH annual legs (`_annual_share_counts`).
+        # A FAILED leg is a transient gap: memory only, never persisted, under its own
+        # reason — the cash-flow statement (raised, not a list, or [] beside quarterly rows),
+        # the ratios (raised or not a list — `annual_ratios` already, above, wherever the
+        # newest quarter is — or [] while a statement answered rows). When both answered
+        # rows the year is underivable (per-share figures gone, pairs that disagree):
+        # possibly permanent vendor drift, so said, not degraded.
+        if diag.newest_q4_unjudged_year is not None:
+            failed_legs: List[str] = []
+            if annual_cashflow_failed or annual_cashflow_empty:
+                failed_legs.append("the annual cash-flow statement")
+                if "annual_cash_flow" not in degraded:
+                    degraded.append("annual_cash_flow")
+            if (
+                "annual_ratios" in degraded          # raised, or not a list (above)
+                or (raw_ratios_answered_empty
+                    and bool(_as_list(annual_cashflow) or quarterly_cashflow or quarterly_income))
+            ):
+                failed_legs.append("the annual ratios")
+                if "annual_ratios" not in degraded:
+                    degraded.append("annual_ratios")
+            logger.warning(
+                "[soc-annual-share-count-unavailable] ticker=%s step=annual_share_count: the "
+                "newest quarter %s (fiscal Q4 of FY%s) moved past the bound and its own EPS "
+                "disagrees with it, but %s — whether it is FMP's copy of the annual average "
+                "cannot be told and the count ships as FMP sent it%s",
+                ticker, data_points[-1].period if data_points else "?",
+                diag.newest_q4_unjudged_year,
+                (
+                    " and ".join(failed_legs) + " failed" if failed_legs
+                    else "no annual weighted average can be derived for that year"
+                ),
+                (
+                    "; this build is served from memory only, not persisted"
+                    if failed_legs
+                    else " (both annual legs answered rows: possibly permanent vendor drift, "
+                    "so the build stays cacheable)"
+                ),
+            )
 
         # A quarter that returned capital but could not be priced charts 0.00%, and the
         # verdicts below read that as "returns nothing". Served from memory only.
@@ -957,6 +1266,7 @@ class SignalOfConfidenceService:
         summary = self._build_summary(
             data_points, current_market_cap, missing_cash_flow_periods=missing_cf,
             ttm_fallback_periods=fallback_x4, ticker=ticker,
+            estimated_share_periods=set(diag.estimated_share_periods),
         )
 
         # A spin-off inside the window makes every pre-spin historical cap too small
@@ -1166,6 +1476,357 @@ class SignalOfConfidenceService:
                 return False
         return (days[-1] - days[0]).days <= _TTM_SPAN_MAX_DAYS
 
+    @staticmethod
+    def _eps_implied_shares(rec: Any, min_eps: float = _SHARES_EPS_MIN) -> Optional[float]:
+        """``|netIncome / eps|`` — the share count the row's own EPS implies — or None when
+        EPS is too coarse to imply one (|EPS| < ``min_eps``), the two disagree in sign, or
+        either is missing / zero / non-finite.
+
+        ⚠️ BIASED, never a count by itself: basic EPS is struck after preferred dividends
+        (a profitable preferred issuer's figure reads HIGH, a loss-maker's LOW — BAC / KEY
+        ran 0.88-1.13x live) and rounded to cents. Comparisons against a count go through
+        the neighbours' range or `_like_for_like_count`."""
+        if not isinstance(rec, dict):
+            return None
+        net_income = _safe_float(rec, "netIncome")
+        eps = _safe_float(rec, "eps")
+        if net_income is None or eps is None or net_income == 0 or abs(eps) < min_eps:
+            return None
+        if (net_income > 0) != (eps > 0):
+            return None
+        implied = abs(net_income / eps)
+        return implied if math.isfinite(implied) and implied > 0 else None
+
+    @classmethod
+    def _like_for_like_count(
+        cls, rec: Any, anchor_rec: Any, anchor_count: Optional[float]
+    ) -> Optional[float]:
+        """The quarter's count as its own EPS puts it, LIKE WITH LIKE: its implied count
+        scaled by the anchor quarter's reported-to-implied ratio,
+        ``implied × anchor_count / implied_anchor``. Whatever sits between net income and
+        EPS (preferred dividends, minority income) biases both rows the same way and
+        cancels (final review 2026-10-08: the raw implied count turned a real -7% tender
+        into "Diluting" and erased a real +10% issuance).
+
+        None unless both rows' |EPS| is at least `_SHARES_EPS_ESTIMATE_MIN` and the result
+        lands within `_SHARES_ESTIMATE_BAND` of ``anchor_count`` — a figure further out is
+        not one this ratio can vouch for."""
+        if anchor_count is None or not anchor_count > 0 or not math.isfinite(anchor_count):
+            return None
+        implied = cls._eps_implied_shares(rec, _SHARES_EPS_ESTIMATE_MIN)
+        implied_anchor = cls._eps_implied_shares(anchor_rec, _SHARES_EPS_ESTIMATE_MIN)
+        if implied is None or implied_anchor is None:
+            return None
+        estimate = implied * anchor_count / implied_anchor
+        if not math.isfinite(estimate) or estimate <= 0:
+            return None
+        if abs(estimate / anchor_count - 1.0) > _SHARES_ESTIMATE_BAND:
+            return None
+        return estimate
+
+    @classmethod
+    def _unreported_newest_count(
+        cls,
+        quarters: List[Tuple[str, str, Dict[str, Any]]],
+        newest_date: str,
+        share_glitches: Dict[str, _ShareGlitch],
+    ) -> Optional[float]:
+        """A count for a newest quarter FMP sent as 0 / null / missing, or None.
+
+        Anchored on the newest REPORTED quarter before it — not refused, at most
+        `_SHARES_ANCHOR_MAX_DAYS` back: its like-for-like EPS count against that quarter
+        (`_like_for_like_count`, which cancels the preferred / minority bias); only when the
+        anchor's own EPS is unusable, the raw EPS-implied count, under the same |EPS| floor
+        and band. Anything else is None — the point then ships as not reported."""
+        ordered = sorted(quarters, key=lambda q: str(q[0]))
+        index = next((k for k, q in enumerate(ordered) if q[0] == newest_date), None)
+        newest_day = _day(newest_date)
+        if index is None or newest_day is None:
+            return None
+        newest_rec = ordered[index][2]
+        for k in range(index - 1, -1, -1):
+            date, _label, rec = ordered[k]
+            day = _day(date)
+            if day is None:
+                continue
+            if (newest_day - day).days > _SHARES_ANCHOR_MAX_DAYS:
+                return None
+            count = _safe_float(rec, "weightedAverageShsOut")
+            if count is None or count <= 0 or date in share_glitches:
+                continue
+            like = cls._like_for_like_count(newest_rec, rec, count)
+            if like is not None:
+                return like
+            if cls._eps_implied_shares(rec, _SHARES_EPS_ESTIMATE_MIN) is None:
+                raw = cls._eps_implied_shares(newest_rec, _SHARES_EPS_ESTIMATE_MIN)
+                if raw is not None and abs(raw / count - 1.0) <= _SHARES_ESTIMATE_BAND:
+                    return raw
+            return None
+        return None
+
+    @staticmethod
+    def _annual_rows_by_year(rows: Any) -> Dict[str, Dict[str, Any]]:
+        """``{fiscal_year: row}`` for annual statement rows: a row whose ``period`` is
+        present and not ``FY`` is skipped (a quarter is not the year), and two rows for one
+        fiscal year keep the later ``date`` (the `_annual_dividend_map` rule)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            period = str(row.get("period") or "").strip().upper()
+            if period and period != "FY":
+                continue
+            year = annual_fiscal_year(row)
+            if len(year) != 4 or not year.isdigit():
+                continue
+            date = str(row.get("date") or "")[:10]
+            kept = out.get(year)
+            if kept is not None and date <= str(kept.get("date") or "")[:10]:
+                continue
+            out[year] = row
+        return out
+
+    @classmethod
+    def _annual_share_counts(cls, annual_ratios: Any, annual_cashflow: Any) -> Dict[str, float]:
+        """``{fiscal_year: annual weighted-average share count}``, with no extra call: FMP's
+        annual `ratios` per-share figures are that year's statement totals over that count,
+        so the annual cash-flow statement's totals divided by them give it back exactly
+        (CRWV FY2025: operating cash flow 3,058M / 7.0299 per share = net income -1,167M /
+        -2.6828 = 435,000,000 — the very figure FMP copied into its Q4 2025 row).
+
+        A year is left out unless at least one pair is usable and every usable pair agrees
+        within 0.5% — never a guess."""
+        ratios_by_year = cls._annual_rows_by_year(annual_ratios)
+        cashflow_by_year = cls._annual_rows_by_year(annual_cashflow)
+        out: Dict[str, float] = {}
+        for year, ratio_row in ratios_by_year.items():
+            cash_row = cashflow_by_year.get(year)
+            if cash_row is None:
+                continue
+            counts: List[float] = []
+            for total_key, per_share_key in (
+                ("operatingCashFlow", "operatingCashFlowPerShare"),
+                ("netIncome", "netIncomePerShare"),
+            ):
+                total = _safe_float(cash_row, total_key)
+                per_share = _safe_float(ratio_row, per_share_key)
+                if total is None or per_share is None or total == 0 or abs(per_share) < 1e-6:
+                    continue
+                if (total > 0) != (per_share > 0):
+                    continue
+                count = total / per_share
+                if math.isfinite(count) and count > 0:
+                    counts.append(count)
+            if not counts or max(counts) / min(counts) - 1.0 > 0.005:
+                continue
+            out[year] = sum(counts) / len(counts)
+        return out
+
+    @classmethod
+    def _judge_share_counts(
+        cls,
+        quarters: List[Tuple[str, str, Dict[str, Any]]],
+        annual_share_counts: Optional[Dict[str, float]] = None,
+    ) -> Tuple[Dict[str, _ShareGlitch], Optional[str]]:
+        """``({period_end: _ShareGlitch}, annual_year_needed)``: the quarters whose
+        ``weightedAverageShsOut`` is a one-quarter vendor artifact rather than the quarter's
+        count (`_share_count_glitches` is this half alone), and the fiscal year of the
+        newest quarter when only its missing annual weighted average stood between it and
+        a verdict — every other precondition of the newest rule held
+        (`_newest_q4_copy_like`) — else None.
+
+        A weighted average cannot jump and snap back: an issuance or buyback moves it and
+        it stays moved. Measured live 2026-10-05: FMP copies the ANNUAL weighted average
+        into fiscal-Q4 rows (CRWV Q4 2025 435M — its FY2025 annual figure — between Q3
+        498M and Q1 2026 527M, while net income / EPS gives 508M; AAPL FY2025's Q4 is the
+        annual figure too, but only 0.3% off its neighbours, so it is kept; MSFT, PG, CSCO,
+        ADP, SMCI, STX and WDC's newest Q4 rows were all the annual figure on 2026-10-06).
+        Charted, CRWV's dip read as a 13% share-count fall in a quarter with no buyback.
+
+        * **A row whose own EPS agrees with its count is never refused** (the implied
+          count within `_SHARES_EPS_SLACK`): whatever its neighbours say, that is what the
+          filing reported. A real issuance, IPO or tender quarter sitting beside an annual
+          copy looks like a V too — the copy is the neighbour that moved (review
+          2026-10-07: a real 450M step beside a 376M copy, and a 20% tender at 800M beside
+          a 900M copy, were both refused).
+        * **An interior quarter** is refused when it lies outside the range of BOTH
+          adjacent quarters (consecutive, both reporting a count) by more than
+          `_SHARES_GLITCH_CONFIRMED` if its EPS-implied count lands inside that range
+          (± `_SHARES_EPS_SLACK`, "confirmed"), else by more than
+          `_SHARES_GLITCH_UNCONFIRMED`.
+        * **The newest quarter** has one neighbour, so its own EPS cannot be trusted to
+          convict it — net income / EPS is biased by preferred dividends and cent rounding,
+          and judging the reported count against it replaced REAL 5-12% moves (final review
+          2026-10-08: a -7% tender read "Diluting", a +10% issuance vanished). It is refused
+          only on the artifact's own signature: a fiscal-Q4 row whose count MOVED more than
+          `_SHARES_GLITCH_CONFIRMED` off the quarter before, IS the fiscal year's annual
+          weighted average (``annual_share_counts``, within `_ANNUAL_COPY_TOLERANCE`), and
+          whose like-for-like EPS count (`_like_for_like_count` against the quarter before,
+          both |EPS| ≥ `_SHARES_EPS_ESTIMATE_MIN`) is more than `_SHARES_GLITCH_CONFIRMED`
+          away from it — and never when that previous quarter is itself a confirmed
+          artifact (nothing sound to anchor on). All three, because none convicts alone: a
+          FLAT or slowly moving real count IS its year's annual average (within 0.2% below
+          ~0.5% a year), and like for like is noise of its own — cent rounding on two rows
+          (up to ~10% at |EPS| 0.10) and a preferred share that shifts with net income
+          (round-5 review 2026-10-08: a flat 3% repurchaser read "Diluting"). FMP's copy of
+          a year that moved does all three; a count that stayed put never moves.
+        * **A refusal on the neighbours alone is withdrawn beside a confirmed one**: the
+          confirmed artifact is the likelier cause of the V.
+
+        A confirmed refusal carries its ``estimate`` — the like-for-like count when usable
+        (and, for an interior quarter, inside the neighbours' range), else for an interior
+        quarter the raw EPS-implied count that range already bounds. The oldest quarter is
+        never judged (it sits outside the eight displayed quarters of a twenty-quarter
+        history). Rows are judged in date order whatever order they arrive in. A refused
+        quarter ships ``shares_outstanding: None`` — the not-reported value every reader
+        already handles (the line skips it, the label row prints "—", the summary's
+        oldest → newest change ignores it) — except the newest DISPLAYED quarter, which
+        `_build_quarters` never nulls (see `_ShareGlitch`).
+        """
+        quarters = sorted(quarters, key=lambda q: str(q[0]))
+        n = len(quarters)
+        counts: List[Optional[float]] = []
+        days: List[Optional[datetime]] = []
+        implied: List[Optional[float]] = []
+        for date, _label, rec in quarters:
+            value = _safe_float(rec, "weightedAverageShsOut")
+            counts.append(value if (value is not None and value > 0) else None)
+            days.append(_day(date))
+            implied.append(cls._eps_implied_shares(rec))
+
+        def consecutive(a: int, b: int) -> bool:
+            if days[a] is None or days[b] is None:
+                return False
+            gap = (days[b] - days[a]).days
+            return _TTM_GAP_MIN_DAYS <= gap <= _TTM_GAP_MAX_DAYS
+
+        def millions(v: float) -> str:
+            return f"{v / 1e6:,.1f}M"
+
+        # Interior quarters, against both neighbours: (deviation, confirmed, detail, estimate).
+        candidates: Dict[int, Tuple[float, bool, str, Optional[float]]] = {}
+        for i in range(1, n - 1):
+            cur, prev, nxt, imp = counts[i], counts[i - 1], counts[i + 1], implied[i]
+            if cur is None or prev is None or nxt is None:
+                continue
+            if not (consecutive(i - 1, i) and consecutive(i, i + 1)):
+                continue   # not three consecutive quarters: a move may span the gap
+            if imp is not None and abs(imp / cur - 1.0) <= _SHARES_EPS_SLACK:
+                continue   # the row's own EPS agrees with its count: a real count
+            lo, hi = min(prev, nxt), max(prev, nxt)
+            if cur > hi:
+                deviation = cur / hi - 1.0
+            elif cur < lo:
+                deviation = 1.0 - cur / lo
+            else:
+                continue
+            band_lo, band_hi = lo * (1.0 - _SHARES_EPS_SLACK), hi * (1.0 + _SHARES_EPS_SLACK)
+            confirmed = imp is not None and band_lo <= imp <= band_hi
+            bound = _SHARES_GLITCH_CONFIRMED if confirmed else _SHARES_GLITCH_UNCONFIRMED
+            if deviation <= bound:
+                continue
+            estimate: Optional[float] = None
+            if confirmed:
+                like = cls._like_for_like_count(quarters[i][2], quarters[i - 1][2], prev)
+                estimate = like if (like is not None and band_lo <= like <= band_hi) else imp
+            date, label, _rec = quarters[i]
+            candidates[i] = (
+                deviation,
+                confirmed,
+                f"{label} {date} {millions(cur)} vs neighbours {millions(prev)} / "
+                f"{millions(nxt)} ({deviation:.1%} outside"
+                + (f", EPS implies {millions(imp)}" if confirmed else ", EPS unconfirmed")
+                + ")",
+                estimate,
+            )
+
+        # The newest quarter: refused only on the annual copy's own signature, and only once
+        # every precondition that does NOT need the annual figure holds
+        # (`_newest_q4_copy_like`). When they hold and the year has no annual figure, that
+        # year is the answer's second half: the one case the annual statements could change.
+        annual_year_needed: Optional[str] = None
+        if n >= 2:
+            i = n - 1
+            date, label, rec = quarters[i]
+            cur, prev = counts[i], counts[i - 1]
+            like = cls._newest_q4_copy_like(
+                label, cur, prev, rec, quarters[i - 1][2],
+                prev_is_artifact=(i - 1) in candidates and candidates[i - 1][1],
+                consecutive=consecutive(i - 1, i),
+            )
+            if like is not None and cur is not None and prev is not None:
+                year = annual_fiscal_year(rec)
+                annual = (annual_share_counts or {}).get(year)
+                if annual is None or not annual > 0:
+                    annual_year_needed = year
+                elif abs(cur / annual - 1.0) <= _ANNUAL_COPY_TOLERANCE:
+                    candidates[i] = (
+                        abs(cur / prev - 1.0),
+                        True,
+                        f"{label} {date} {millions(cur)} = the FY annual average "
+                        f"{millions(annual)} (newest quarter; like-for-like EPS puts it at "
+                        f"{millions(like)} beside {millions(prev)})",
+                        like,
+                    )
+
+        confirmed_idx = {i for i, c in candidates.items() if c[1]}
+        flagged: Dict[str, _ShareGlitch] = {}
+        for i, (_dev, confirmed, detail, estimate) in sorted(candidates.items()):
+            if not confirmed and ({i - 1, i + 1} & confirmed_idx):
+                continue   # a confirmed artifact beside it is the likelier cause of the V
+            flagged[quarters[i][0]] = _ShareGlitch(
+                detail=detail, estimate=estimate if confirmed else None,
+            )
+        return flagged, annual_year_needed
+
+    @classmethod
+    def _share_count_glitches(
+        cls,
+        quarters: List[Tuple[str, str, Dict[str, Any]]],
+        annual_share_counts: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, _ShareGlitch]:
+        """The refusals of `_judge_share_counts` alone (``{period_end: _ShareGlitch}``)."""
+        return cls._judge_share_counts(quarters, annual_share_counts)[0]
+
+    @classmethod
+    def _newest_q4_copy_like(
+        cls,
+        label: str,
+        cur: Optional[float],
+        prev: Optional[float],
+        rec: Any,
+        prev_rec: Any,
+        *,
+        prev_is_artifact: bool,
+        consecutive: bool,
+    ) -> Optional[float]:
+        """The newest quarter's like-for-like count when EVERY precondition of the
+        annual-copy refusal that does not need the annual figure holds, else None:
+
+        * a fiscal-Q4 label, both counts reported, consecutive with the quarter before,
+          and that quarter not itself a confirmed artifact (nothing sound to anchor on);
+        * the count MOVED more than `_SHARES_GLITCH_CONFIRMED` off it — a flat or slowly
+          moving count IS its year's annual average (round-5 review 2026-10-08);
+        * a usable like-for-like count (`_like_for_like_count`) more than
+          `_SHARES_GLITCH_CONFIRMED` away from it.
+
+        Only then can the annual figure change a value: it decides whether the count is
+        FMP's copy. ONE place for both the refusal and the "the annual figure was needed"
+        answer `_judge_share_counts` gives the builder, so the two cannot drift (round-6
+        review 2026-10-08: a failed annual leg degraded flat counts it could not change)."""
+        if not str(label).startswith("Q4") or cur is None or prev is None:
+            return None
+        if prev_is_artifact or not consecutive:
+            return None
+        if abs(cur / prev - 1.0) <= _SHARES_GLITCH_CONFIRMED:
+            return None
+        like = cls._like_for_like_count(rec, prev_rec, prev)
+        if like is None or abs(like / cur - 1.0) <= _SHARES_GLITCH_CONFIRMED:
+            return None
+        return like
+
     def _build_quarters(
         self,
         cashflow_records: List[Dict[str, Any]],
@@ -1175,8 +1836,13 @@ class SignalOfConfidenceService:
         ticker: str = "",
         pays_common_dividend: Optional[bool] = None,
         dividend_by_year: Optional[Dict[str, float]] = None,
+        annual_share_counts: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[SignalOfConfidenceDataPointSchema], _QuarterDiagnostics]:
         """Build per-quarter data points from FMP data, plus what could not be measured.
+
+        ``annual_share_counts`` (`_annual_share_counts`, ``{fiscal_year: annual weighted
+        average}``) lets `_share_count_glitches` recognise FMP's annual copy in the NEWEST
+        fiscal-Q4 row; without it that row is never refused.
 
         **Yields are TRAILING TWELVE MONTHS** (owner decision, 2026-09-30): the gated cash
         of this quarter and the three before it, over the market cap at THIS quarter's
@@ -1258,6 +1924,21 @@ class SignalOfConfidenceService:
             slot_by_label[label] = len(labelled)
             labelled.append((date, label, rec))
         quarters = [q for q in labelled if q is not None]
+        # One-quarter share-count artifacts, judged over the WHOLE income history (before
+        # the newest-edge trim and the eight-quarter window) so the oldest displayed
+        # quarter and the one before a trimmed edge still have both neighbours.
+        share_glitches, annual_year_needed = self._judge_share_counts(
+            quarters, annual_share_counts
+        )
+        if share_glitches:
+            logger.warning(
+                "[soc-shares-glitch] ticker=%s step=shares: %d quarter(s) report a weighted-"
+                "average share count their neighbours and/or their own EPS contradict (%s) — "
+                "a vendor artifact (FMP copies the annual average into fiscal-Q4 rows), "
+                "shipped as not reported (null) rather than charted; the newest displayed "
+                "quarter is handled apart below",
+                tag, len(share_glitches), "; ".join(g.detail for g in share_glitches.values()),
+            )
         if dup_cf or dup_income or dup_label:
             logger.warning(
                 "[soc-dup-label] %s: collapsed %d duplicate cash-flow date(s), %d duplicate "
@@ -1358,6 +2039,15 @@ class SignalOfConfidenceService:
                     _MAX_CF_LAG_QUARTERS, _CF_STALE_MAX_DAYS,
                 )
 
+        # Only the missing annual average stood between the newest judged quarter and a
+        # verdict (a fiscal Q4 that moved past the bound, with a like-for-like count that
+        # disagrees — `_newest_q4_copy_like`), and it is still the newest displayed one
+        # (nothing trimmed after it): whether its count is FMP's copy cannot be told. The
+        # builder decides what that means (a failed annual leg → not persisted; else said in
+        # a log). A count the annual figure could not change never gets here (round 6).
+        if not unmeasured_tail and annual_year_needed is not None:
+            diag.newest_q4_unjudged_year = annual_year_needed
+
         # Take the most recent 8 DISTINCT quarters.
         recent = quarters[-8:]
         if recent:
@@ -1365,6 +2055,70 @@ class SignalOfConfidenceService:
         diag.cash_flow_rows_found = any(
             cash_flow_date_for(d) is not None for d, _lbl, _r in recent
         )
+
+        # The newest DISPLAYED quarter does not ship a null share count where a figure
+        # exists: public build 1.0 (10) draws `dataPoints.last?.sharesOutstanding ?? 0` as a
+        # bold "0.00M" over the axis minimum (the CD bug). Two ways it would be null:
+        #   * it is a REFUSED count — it becomes the newest when the quarter after it is
+        #     trimmed for a cash-flow row that has not landed (review 2026-10-07), or it is
+        #     the newest fiscal-Q4 annual copy itself. A refusal its own EPS confirmed ships
+        #     that refusal's estimate (`_ShareGlitch.estimate`); a refusal on the neighbours
+        #     alone has no better figure → withdrawn, the count ships as FMP sent it.
+        #   * FMP sent it as 0 / null / missing (live on CD's 2026-06-30 row; final review
+        #     2026-10-08): its like-for-like EPS count against the newest REPORTED quarter
+        #     before it (`_like_for_like_count`), else — when that quarter's own EPS is
+        #     unusable — its raw EPS-implied count, either way only from |EPS| ≥
+        #     `_SHARES_EPS_ESTIMATE_MIN` and within `_SHARES_ESTIMATE_BAND` of that quarter.
+        #     No such figure → it stays null (said in the log): nothing is invented.
+        # Either figure is an ESTIMATE for the chart's label (`diag.estimated_share_periods`):
+        # the summary's share-count change and buyback verdict skip it (round-5 review).
+        newest_shares_override: Dict[str, float] = {}
+        if recent and recent[-1][0] in share_glitches:
+            newest_date, newest_label, _newest_rec = recent[-1]
+            glitch = share_glitches[newest_date]
+            if glitch.estimate is not None:
+                newest_shares_override[newest_date] = glitch.estimate
+                diag.estimated_share_periods.append(newest_label)
+                logger.warning(
+                    "[soc-shares-glitch-newest] ticker=%s step=shares: the newest displayed "
+                    "quarter %s %s is a refused count (%s) — shipped as the %.1fM its own "
+                    "EPS puts it at, never null (build 1.0 (10) would print a bold '0.00M'); "
+                    "display only, the summary measures reported counts",
+                    tag, newest_label, newest_date, glitch.detail, glitch.estimate / 1e6,
+                )
+            else:
+                share_glitches = {d: g for d, g in share_glitches.items() if d != newest_date}
+                logger.warning(
+                    "[soc-shares-glitch-newest] ticker=%s step=shares: the newest displayed "
+                    "quarter %s %s was refused on its neighbours alone (%s) — kept as FMP "
+                    "sent it: there is no better figure and it must not ship null",
+                    tag, newest_label, newest_date, glitch.detail,
+                )
+        elif recent:
+            newest_date, newest_label, newest_rec = recent[-1]
+            raw_count = _safe_float(newest_rec, "weightedAverageShsOut")
+            if raw_count is None or raw_count <= 0:
+                estimate = self._unreported_newest_count(quarters, newest_date, share_glitches)
+                if estimate is not None:
+                    newest_shares_override[newest_date] = estimate
+                    diag.estimated_share_periods.append(newest_label)
+                    logger.warning(
+                        "[soc-shares-newest-unreported] ticker=%s step=shares: FMP sent the "
+                        "newest displayed quarter %s %s with weightedAverageShsOut=%r — "
+                        "shipped as the %.1fM its own EPS puts it at, never null (build "
+                        "1.0 (10) would print a bold '0.00M'); display only, the summary "
+                        "measures reported counts",
+                        tag, newest_label, newest_date, newest_rec.get("weightedAverageShsOut"),
+                        estimate / 1e6,
+                    )
+                else:
+                    logger.warning(
+                        "[soc-shares-newest-unreported] ticker=%s step=shares: FMP sent the "
+                        "newest displayed quarter %s %s with weightedAverageShsOut=%r and its "
+                        "EPS gives no usable count beside the quarter before — shipped as "
+                        "not reported (null)",
+                        tag, newest_label, newest_date, newest_rec.get("weightedAverageShsOut"),
+                    )
 
         def fiscal_year(date: str) -> str:
             src = income_by_date.get(date) or cf_by_date.get(date) or {}
@@ -1401,9 +2155,13 @@ class SignalOfConfidenceService:
             # share-count change came out as a flat -100%, rendered as a spectacular
             # buyback. Keep it as None so the summary can SKIP the point instead.
             shares_raw = _safe_float(rec, "weightedAverageShsOut")
+            if date in newest_shares_override:
+                # A refused newest count, replaced by its own EPS-implied count (above).
+                shares_raw = newest_shares_override[date]
             shares_outstanding = (
                 round(shares_raw / 1_000_000, 2)
-                if (shares_raw is not None and shares_raw > 0)
+                if (shares_raw is not None and shares_raw > 0
+                    and (date in newest_shares_override or date not in share_glitches))
                 else None
             )
 
@@ -1480,6 +2238,13 @@ class SignalOfConfidenceService:
                 buyback_amount=buyback_amount,
                 shares_outstanding=shares_outstanding,
                 cash_flow_reported=has_cash_flow,
+                # The yields' own denominator, for the Capital view's scale (iOS). None —
+                # never 0 — when no cap was usable.
+                market_cap=(
+                    round(period_mcap / 1_000_000, 2)
+                    if period_mcap is not None and period_mcap > 0
+                    else None
+                ),
             ))
 
         if fell_back_to_current:
@@ -1593,6 +2358,7 @@ class SignalOfConfidenceService:
         missing_cash_flow_periods: Optional[Set[str]] = None,
         ttm_fallback_periods: Optional[Set[str]] = None,
         ticker: Optional[str] = None,
+        estimated_share_periods: Optional[Set[str]] = None,
     ) -> SignalOfConfidenceSummarySchema:
         """Build T12M summary from the most recent 4 quarters that HAVE a cash-flow row.
 
@@ -1614,6 +2380,11 @@ class SignalOfConfidenceService:
         ``ttm_fallback_periods`` (labels whose yield is the single quarter x4) matters only
         on the no-current-cap fallback below, which reads a point's own yield.
         ``ticker`` only tags the log line.
+
+        ``estimated_share_periods`` (`_QuarterDiagnostics.estimated_share_periods`) are
+        points whose share count is an EPS estimate shipped for the chart's label only: the
+        share-count change and the buyback verdict measure REPORTED counts and skip them —
+        an estimate never moves a verdict (round-5 review 2026-10-08).
         """
 
         if not data_points:
@@ -1682,9 +2453,12 @@ class SignalOfConfidenceService:
         # quarter at either end produced a ±100% change out of nothing. With fewer than
         # two reported counts the change is UNKNOWN: 0.0 stays on the wire (a
         # non-Optional Double on shipped iOS) and `share_count_change_known` says so.
+        # An EPS ESTIMATE is not a reported count (see the docstring).
+        estimated = estimated_share_periods or set()
         measured = [
             dp for dp in data_points
             if dp.shares_outstanding is not None and dp.shares_outstanding > 0
+            and dp.period not in estimated
         ]
         share_count_change_known = len(measured) >= 2
         if share_count_change_known:
@@ -1765,6 +2539,137 @@ class SignalOfConfidenceService:
             by_year[year] = value
             dated[year] = date
         return by_year
+
+    @staticmethod
+    def _common_dividend_shares(annual_cashflow: Any) -> Dict[str, float]:
+        """``{fiscal_year: common share of that year's dividend cash}``, 0.0-1.0, from the
+        ANNUAL cash-flow statement — only for years whose split can actually be read.
+
+        `ratios.dividendPerShare` is FMP's ``|netDividendsPaid| / weightedAverageShsOut``,
+        and ``netDividendsPaid`` is common PLUS preferred (verified 2026-10-05: WFC FY2025
+        2.0396 = 6,484M / 3,179M shares, its common line alone 1.7093 against a declared
+        $1.70; CRWV FY2025 0.0667 = 29M of Series C PREFERRED dividends / 435M shares,
+        common 0). This is the fraction that turns it back into a common figure.
+
+        A year is left out — its record then stays exactly as FMP sent it — when the
+        split is unknowable: either ``commonDividendsPaid`` or ``preferredDividendsPaid``
+        missing (or not a number), the two not adding up to ``netDividendsPaid`` (within
+        `_COMMON_SPLIT_TOLERANCE` / `_COMMON_SPLIT_SLACK_USD` — a row that zeroed both lines
+        and kept only the net must never read as "0% common" and erase a real payer), or
+        nothing paid at all. With no net, the total is common + preferred. A row that is not
+        annual (``period`` other than ``FY``) is never read: a quarter's split is not the
+        year's. Two rows for one fiscal year keep the later ``date``, the
+        `_annual_dividend_map` rule. Outflows are negative; an inflow (a refund, a sign
+        error) on the common line counts as no common dividend, and the fraction is clamped
+        to 1.0.
+        """
+        rows_by_year: Dict[str, Dict[str, Any]] = {}
+        if not isinstance(annual_cashflow, list):
+            return {}
+        for row in annual_cashflow:
+            if not isinstance(row, dict):
+                continue
+            period = str(row.get("period") or "").strip().upper()
+            if period and period != "FY":
+                continue
+            year = annual_fiscal_year(row)
+            if len(year) != 4 or not year.isdigit():
+                continue
+            date = str(row.get("date") or "")[:10]
+            kept = rows_by_year.get(year)
+            if kept is not None and date <= str(kept.get("date") or "")[:10]:
+                continue
+            rows_by_year[year] = row
+
+        shares: Dict[str, float] = {}
+        for year, row in rows_by_year.items():
+            common = _safe_float(row, "commonDividendsPaid")
+            preferred = _safe_float(row, "preferredDividendsPaid")
+            if common is None or preferred is None:
+                # Without BOTH lines the row does not say where the rest of the net went.
+                continue
+            total = _safe_float(row, "netDividendsPaid")
+            if total is None:
+                total = common + preferred
+            elif abs(common + preferred - total) > max(
+                _COMMON_SPLIT_TOLERANCE * abs(total), _COMMON_SPLIT_SLACK_USD
+            ):
+                # The two lines do not add up to the net (a vendor row that zeroed both
+                # and kept only `netDividendsPaid`): the split is unknown, and reading it as
+                # "0% common" would erase a real payer's dividend.
+                continue
+            total_out = max(0.0, -total)
+            if total_out <= 0:
+                continue
+            common_out = max(0.0, -common)
+            shares[year] = min(1.0, common_out / total_out)
+        return shares
+
+    @staticmethod
+    def _dividend_years_without_split(annual_ratios: Any, shares: Dict[str, float]) -> List[str]:
+        """Fiscal years (sorted) whose per-share record is POSITIVE but which
+        `_common_dividend_shares` could not split — exactly the years the record stands for
+        as FMP sent it, preferred dividends included. A zero or missing year needs no split."""
+        years: Set[str] = set()
+        if not isinstance(annual_ratios, list):
+            return []
+        for row in annual_ratios:
+            if not isinstance(row, dict):
+                continue
+            year = annual_fiscal_year(row)
+            dps = _safe_float(row, "dividendPerShare")
+            if len(year) == 4 and year.isdigit() and dps is not None and dps > 0 \
+                    and year not in shares:
+                years.add(year)
+        return sorted(years)
+
+    @classmethod
+    def _common_dividend_ratios(
+        cls, annual_ratios: Any, annual_cashflow: Any, ticker: str = ""
+    ) -> List[Dict[str, Any]]:
+        """`annual_ratios` with each year's ``dividendPerShare`` scaled to its COMMON part.
+
+        Every reader of the per-share record — `_pays_common_dividend`, the per-fiscal-
+        year bar gate (`_annual_dividend_map`), `_build_annual_dividends`, the growth and
+        the initiation check — reads these rows, so one correction here keeps them in
+        step. Rows are copied, never mutated. A year without a readable split
+        (`_common_dividend_shares`) keeps FMP's figure, as does a zero or missing one.
+
+        The shape this exists for: CRWV (TestFlight 1.0 (11), 2026-10-04). It has never
+        declared a common dividend; FY2024 / FY2025 read 0.1428 / 0.0667 per share from
+        Series C preferred dividends, so it passed as a payer, the per-year gate kept a
+        $2.59M preferred payment FMP mis-tagged `commonDividendsPaid` in the Q2 2025
+        quarterly row (a lone "$3M" dividend bar on a $47B company), and the card showed
+        a dividend history. Its annual rows book both years as 100% preferred → 0.0.
+        """
+        if not isinstance(annual_ratios, list):
+            return annual_ratios
+        shares = cls._common_dividend_shares(annual_cashflow)
+        if not shares:
+            return list(annual_ratios)
+        corrected: List[Dict[str, Any]] = []
+        changed: List[str] = []
+        for row in annual_ratios:
+            if not isinstance(row, dict):
+                corrected.append(row)
+                continue
+            year = annual_fiscal_year(row)
+            dps = _safe_float(row, "dividendPerShare")
+            share = shares.get(year)
+            if dps is None or dps <= 0 or share is None or share >= _COMMON_SHARE_UNCHANGED:
+                corrected.append(row)
+                continue
+            common_dps = dps * share
+            corrected.append({**row, "dividendPerShare": common_dps})
+            changed.append(f"FY{year} {dps:.4f} -> {common_dps:.4f} (common {share:.1%})")
+        if changed:
+            logger.info(
+                "[soc-dividend-common-share] ticker=%s step=annual_dividends: the per-share "
+                "record includes non-common (preferred) dividends — scaled to the common "
+                "share of each year's dividend cash: %s",
+                ticker or "?", "; ".join(changed),
+            )
+        return corrected
 
     @staticmethod
     def _initiation_observed(rows: Any, series: List[AnnualDividendSchema]) -> bool:

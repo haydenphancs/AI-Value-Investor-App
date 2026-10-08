@@ -42,7 +42,13 @@ database read at all while a job is not due or after this process finished it to
   when Monday's never succeeded (`owed_since` = this week's Monday). It covers the previous
   Monday–Sunday in ET dates: `gather_digest` reads the ledger, the pure `summarize_week` turns the rows
   into numbers and the pure `compose_digest` writes ONE plain-text message within Telegram's 4,096
-  UTF-16 units (rows are capped first; a hard cut at a line break is the last resort).
+  UTF-16 units (rows are capped first; a hard cut at a line break is the last resort). Right under the
+  date line sits the weekly COST line (`weekly_cost`, `_cost_lines`), also from our database only and in
+  integer micro-dollars: X exact to our charges journal (each entry by its own time, so a metrics read
+  on an old post lands in the week it was billed), Gemini / the worker / the Upload-Post plan fee as
+  labelled estimates (≈), the week before beside it, and a ⚠️ line when last week's usage (X + Gemini +
+  worker) passed MARKETING_WEEKLY_COST_WARN_USD. Each part degrades alone to "unreadable" and the total
+  then reads "≥" — never a wrong number, never a silent 0.
 
 Delivery follows `publish_feed.feed_cycle`: the review bot configured + its review chat, the shared
 Telegram flood back-off (`review_service._rate_limited_until` — while it is open no claim is taken, and
@@ -76,11 +82,13 @@ from app.integrations.telegram import MAX_MESSAGE_CHARS, TelegramException, Tele
 from app.schemas.marketing import RUN_STAGES
 from app.services.marketing import metrics_service, outlets, review_service, selection, smart_link
 from app.services.marketing.outlet_base import scrub
+from app.services.marketing.outlet_upload_post import PLATFORMS as UPLOAD_POST_PLATFORMS
 from app.services.marketing.review_service import REJECT_REASONS, _Pacer, _truncate_utf16, utf16_len
 from app.services.marketing.run_service import (
     _exec,
     _parse_ts,
     _touched,
+    charges_between,
     expired_unreviewed,
     get_marketing_run_service,
     month_start_utc,
@@ -125,6 +133,38 @@ FOLLOWER_LOOKBACK = timedelta(days=21)
 WEEK_POST_LIMIT = 500
 MEASURED_POST_LIMIT = 200
 ESCALATED_LIMIT = 20
+#: The X journal read behind the cost line (`list_charge_rows_since` RAISES past it: never a partial
+#: sum). About 20-40 X rows are touched in two weeks at four posts a week. Its probe (limit + 1) must
+#: fit in one PostgREST response (max-rows ≈1,000): at 1,000 the probe row could never arrive.
+X_CHARGE_ROW_LIMIT = 500
+
+#: The weekly COST line (`weekly_cost`) — integer micro-dollars throughout, so it can never be NaN or
+#: inf. X is exact to OUR ledger; the rest are labelled estimates (≈):
+#: * Gemini: every token the writer and the judge spent (`marketing_scripts.tokens_used`) at ONE
+#:   blended, upper-side rate of $1.50 per 1M (writer gemini-2.5-flash $0.30 in / $2.50 out; judge
+#:   gemini-3.8-flash $0.75 / $3.75 through 2026-12-31, DOUBLED from 2027-01-01 — revisit then,
+#:   documents/OWNER_TASKS.md §2.5).
+#: * worker: Railway list prices ($10 per GB-month, $20 per vCPU-month, over 30 days, in nano-dollars
+#:   per second) for every second a run's stages took, at its highest memory peak and 4 busy vCPUs —
+#:   upper-side (Railway meters actual use). The hourly no-op ticks and the web service (shared with
+#:   the whole app) are not counted.
+#: * Upload-Post: the plan's fixed monthly fee (MARKETING_UPLOAD_POST_MONTHLY_USD) × 7 / 30.4375.
+GEMINI_MICROS_PER_MILLION_TOKENS = 1_500_000
+RAILWAY_NANO_PER_GB_SECOND = 3_860
+RAILWAY_NANO_PER_VCPU_SECOND = 7_720
+#: The marketing-worker service: 4 GB (marketing/railway.toml) and at least 4 vCPUs (its render runs
+#: four x264 threads from the cgroup quota) — an ASSUMPTION, labelled ≈.
+WORKER_VCPUS = 4
+WORKER_MEMORY_MB = 4096
+#: A stage time beyond this is not a measurement (a worker tick's deadline is 30 minutes).
+STAGE_SECONDS_MAX = 3600
+#: The run timings that are wall seconds of the worker's own work (marketing/main.py: `preflight_s`
+#: and one `<stage>_s` per media stage); the memory keys and any unknown key are not billed.
+_BILLED_TIMINGS = ("preflight_s",) + tuple(f"{s}_s" for s in RUN_STAGES[1:])
+#: One month of the fee, in days × 10,000 (365.25 / 12 = 30.4375).
+_MONTH_DAYS_X10000 = 304_375
+#: A cost part beyond ±$1,000,000 is not a week of this engine: it reads "unreadable".
+_MICROS_BOUND = 10 ** 12
 
 #: Telegram's message limit, in UTF-16 code units.
 MAX_DIGEST_UNITS = MAX_MESSAGE_CHARS
@@ -244,6 +284,10 @@ def _n(value: int) -> str:
 
 
 def _usd(micros: int) -> str:
+    """Micro-dollars as "$0.123". Total: anything but an int within ±$1,000,000,000 reads "unreadable"
+    (a 400-digit hand-edited amount used to raise OverflowError and take the whole digest down)."""
+    if type(micros) is not int or abs(micros) > 10 ** 15:
+        return "unreadable"
     return f"{'-' if micros < 0 else ''}${abs(micros) / 1_000_000:.3f}"
 
 
@@ -339,6 +383,36 @@ def run_hour_et() -> int:
     logger.warning("marketing run health: MARKETING_RUN_HOUR_ET=%r is not an hour 0-23 — using the default %s",
                    hour, default)
     return default
+
+
+def _usd_setting_micros(name: str, value: Any) -> Optional[int]:
+    """A USD setting (0-10,000) in micro-dollars, or None when it is not one. Settings refuses anything
+    else at boot (Field ge/le/allow_inf_nan), so None is reachable only through a test's monkeypatch —
+    and it is logged, never a crash in the tick."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        ok = False
+    else:
+        ok = math.isfinite(value) and 0 <= value <= 10_000
+    if not ok:
+        logger.warning("marketing digest: %s=%r is not a USD amount between 0 and 10,000", name, value)
+        return None
+    return int(round(value * 1_000_000))
+
+
+def upload_post_fee_micros() -> Optional[int]:
+    """The Upload-Post plan's monthly fee (MARKETING_UPLOAD_POST_MONTHLY_USD; 0 = Free) in micro-dollars,
+    read at call time — or None, which makes the cost line's Upload-Post part "unreadable" (never a
+    guessed $0)."""
+    return _usd_setting_micros("MARKETING_UPLOAD_POST_MONTHLY_USD", settings.MARKETING_UPLOAD_POST_MONTHLY_USD)
+
+
+def weekly_cost_warn_micros() -> int:
+    """The weekly usage alert line (MARKETING_WEEKLY_COST_WARN_USD; 0 = off) in micro-dollars, read at
+    call time; an unreadable value is the declared default (logged)."""
+    micros = _usd_setting_micros("MARKETING_WEEKLY_COST_WARN_USD", settings.MARKETING_WEEKLY_COST_WARN_USD)
+    if micros is None:
+        micros = int(round(type(settings).model_fields["MARKETING_WEEKLY_COST_WARN_USD"].default * 1_000_000))
+    return micros
 
 
 def health_hour_et() -> int:
@@ -880,8 +954,12 @@ def _followers(posts: List[Dict[str, Any]], *, now: datetime) -> Dict[str, Dict[
 
 
 def _taps(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """/go taps per campaign, with the EARLY rows — the server-constant `<campaign>_early` keys, taps in
+    the first minutes after that campaign's post went out (`smart_link.EARLY_KEYS`), mostly link
+    scanners — summed apart into `early` and never into `total`. Any other row is an ordinary campaign
+    (a stray "foo_early" included); an unreadable count is counted as an unreadable row, never 0."""
     by: Counter = Counter()
-    unreadable = 0
+    unreadable = early = 0
     for r in rows:
         if not isinstance(r, dict):
             unreadable += 1
@@ -891,10 +969,13 @@ def _taps(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             unreadable += 1
             continue
         campaign = r.get("campaign")
+        if isinstance(campaign, str) and campaign in smart_link.EARLY_BASE:
+            early += hits
+            continue
         campaign = campaign if isinstance(campaign, str) and _CAMPAIGN_RE.fullmatch(campaign) else "(unreadable)"
         by[campaign] += hits
     ordered = sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))
-    return {"rows": ordered, "total": sum(by.values()), "unreadable_rows": unreadable}
+    return {"rows": ordered, "total": sum(by.values()), "early": early, "unreadable_rows": unreadable}
 
 
 def _latency(posts: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -922,9 +1003,8 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
     for run in runs:
         if not isinstance(run, dict):
             continue
-        try:
-            d = date.fromisoformat(str(run.get("run_date"))[:10])
-        except ValueError:
+        d = _run_day(run)
+        if d is None:
             continue
         by_day[d] = run
     rows: List[Tuple[date, str]] = []
@@ -967,6 +1047,221 @@ def _listed(value: Any) -> Optional[List[Any]]:
     return list(value) if isinstance(value, (list, tuple)) else None
 
 
+def _run_day(run: Dict[str, Any]) -> Optional[date]:
+    """The ET day a run row is for (`run_date`), or None when it cannot be read."""
+    try:
+        return date.fromisoformat(str(run.get("run_date"))[:10])
+    except ValueError:
+        return None
+
+
+# ── the weekly cost line (pure, integer micro-dollars) ────────────────────────
+
+
+def run_worker_micros(run: Dict[str, Any]) -> Optional[int]:
+    """The worker's ≈ cost of ONE run in micro-dollars: the wall seconds of its billed timings
+    (`_BILLED_TIMINGS`; a missing key adds 0, an unknown key is ignored) × (its highest readable cgroup
+    memory peak, clamped to the 4 GB service — 4 GB when none was recorded — at the GB rate + 4 vCPUs at
+    the vCPU rate). None when the timings cannot be priced: not a dict, or a billed value that is not a
+    finite number of seconds in 0..STAGE_SECONDS_MAX (a bool, a string, NaN, a negative, a hand edit) —
+    never a silent 0. Every key is rounded to milliseconds before the sum, so there is no float drift."""
+    timings = run.get("timings")
+    if not isinstance(timings, dict):
+        return None
+    ms = 0
+    for key in _BILLED_TIMINGS:
+        if key not in timings:
+            continue
+        value = timings[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            seconds = float(value)
+        except (OverflowError, ValueError):
+            return None
+        if not math.isfinite(seconds) or not 0 <= seconds <= STAGE_SECONDS_MAX:
+            return None
+        ms += int(round(seconds * 1000))
+    peaks = [mb for mb, _stage in _memory_peaks(run)]
+    mb = min(int(round(max(peaks))), WORKER_MEMORY_MB) if peaks else WORKER_MEMORY_MB
+    # nano-$ per second = (mb / 1024) × GB rate + vCPUs × vCPU rate; × ms / 1000 → nano-$; / 1000 → micro-$.
+    numerator = ms * (mb * RAILWAY_NANO_PER_GB_SECOND + WORKER_VCPUS * RAILWAY_NANO_PER_VCPU_SECOND * 1024)
+    return (numerator + 512_000_000) // 1_024_000_000   # half-up
+
+
+def _worker_week(runs: Optional[List[Any]], first: date, last: date) -> Optional[int]:
+    """The worker ≈ cost of the runs dated `first`..`last` (ET), or None: the runs could not be read,
+    or ONE run in the window cannot be priced (logged with its id) — never a partial sum."""
+    if runs is None:
+        return None
+    total = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        day = _run_day(run)
+        if day is None or not first <= day <= last:
+            continue
+        micros = run_worker_micros(run)
+        if micros is None:
+            logger.warning("marketing digest: run_id=%s (%s) has timings the cost line cannot price — the worker "
+                           "part of the week %s..%s is unreadable", _clean(run.get("id"), 60), day, first, last)
+            return None
+        total += micros
+    return total if total <= _MICROS_BOUND else None
+
+
+def _gemini_week(rows: Optional[List[Any]], first: date, last: date) -> Optional[int]:
+    """The Gemini ≈ cost of the scripts dated `first`..`last` (ET): their summed `tokens_used` at the one
+    blended rate, rounded half-up. None when the rows could not be read, a row's day cannot be read (it
+    cannot be placed in either week), or an in-window count is not a plain non-negative int."""
+    if rows is None:
+        return None
+    tokens = 0
+    for row in rows:
+        day = _ledger_date(row.get("run_date")) if isinstance(row, dict) else None
+        if day is None:
+            logger.warning("marketing digest: a script row cannot be dated — the Gemini part of the week %s..%s "
+                           "is unreadable", first, last)
+            return None
+        if not first <= day <= last:
+            continue
+        count = _count(row.get("tokens_used"))
+        if count is None:
+            logger.warning("marketing digest: the script of %s has an unreadable tokens_used — the Gemini part "
+                           "of the week %s..%s is unreadable", day, first, last)
+            return None
+        tokens += count
+    micros = (tokens * GEMINI_MICROS_PER_MILLION_TOKENS + 500_000) // 1_000_000
+    return micros if micros <= _MICROS_BOUND else None
+
+
+def _x_week(rows: Optional[List[Any]], start: datetime, end: datetime) -> Tuple[Optional[int], int]:
+    """(X spend in [start, end) by each journal entry's OWN time — exact to our ledger — or None, and the
+    number of undated entries seen). None when the rows could not be read, an in-window amount cannot
+    be read (logged with the post id), or the sum is beyond ±$1,000,000. Undated entries are never
+    counted into any week."""
+    if rows is None:
+        return None, 0
+    total = undated = 0
+    unreadable_posts: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        window = charges_between(row, start, end)
+        undated += window.undated
+        if window.unreadable:
+            unreadable_posts.append(_clean(row.get("id"), 60))
+        total += window.micros
+    if unreadable_posts:
+        logger.warning("marketing digest: X charges in %s..%s that cannot be read on post_id(s) %s — X is "
+                       "unreadable for that week", start.isoformat(), end.isoformat(), ", ".join(unreadable_posts[:5]))
+        return None, undated
+    if abs(total) > _MICROS_BOUND:
+        logger.warning("marketing digest: X charges in %s..%s sum beyond ±$1,000,000 — X is unreadable for that "
+                       "week", start.isoformat(), end.isoformat())
+        return None, undated
+    return total, undated
+
+
+#: The publish states of a `queued` Upload-Post post whose send may or may not have reached Upload-Post
+#: (an ambiguous answer, its escalation, a crash mid-send), and of a `failed` one the owner marked "Not
+#: posted" (it is not on the platform, but Upload-Post may still have taken the job). While one is in
+#: the week, the upload count is a floor.
+_UPLOAD_UNSURE_QUEUED = frozenset({"unknown", "escalated", "sending"})
+_UPLOAD_UNSURE_FAILED = frozenset({"owner_not_posted"})
+
+
+def _given(value: Any) -> bool:
+    """An id Upload-Post or the platform answered with: a non-blank string or an int (never a bool)."""
+    return (isinstance(value, str) and value.strip() != "") or type(value) is int
+
+
+def _uploads(live: List[Dict[str, Any]]) -> Tuple[int, bool]:
+    """(The live posts on an Upload-Post platform that Upload-Post TOOK — each an upload against the plan's
+    quota, whatever happened to it next — and whether that count is only a floor.) Upload-Post took the
+    job when it acknowledged it (`metadata.publish.upload_post.submitted_at`, `job_id` or `poll_id`), when
+    the post was found on the platform (`platform_post_id`, or status `published` / `retracted`: an
+    ambiguous send that reconcile later FOUND carries none of the first three), or when reconcile read the
+    job's own failure from Upload-Post (`publish.state` `failed_on_platform`). A post whose send may or may
+    not have reached it (`_UPLOAD_UNSURE_QUEUED`, `_UPLOAD_UNSURE_FAILED`) is not counted, and makes the
+    count a floor ("≥")."""
+    n, floor = 0, False
+    for post in live:
+        if _platform(post) not in UPLOAD_POST_PLATFORMS:
+            continue
+        pub = _meta(post).get("publish")
+        pub = pub if isinstance(pub, dict) else {}
+        upload = pub.get("upload_post")
+        upload = upload if isinstance(upload, dict) else {}
+        status = post.get("status")
+        state = pub.get("state") if isinstance(pub.get("state"), str) else None   # a hand edit is no state
+        took = (_parse_ts(upload.get("submitted_at")) is not None
+                or any(_given(upload.get(key)) for key in ("job_id", "poll_id", "platform_post_id"))
+                or status in ("published", "retracted") or state == "failed_on_platform")
+        if took:
+            n += 1
+        elif ((status == "queued" and state in _UPLOAD_UNSURE_QUEUED)
+              or (status == "failed" and state in _UPLOAD_UNSURE_FAILED)):
+            floor = True
+    return n, floor
+
+
+def _fee_week(monthly_micros: int) -> int:
+    """A week's share (7 / 30.4375) of a monthly fee, in micro-dollars, rounded half-up."""
+    return (monthly_micros * 70_000 + _MONTH_DAYS_X10000 // 2) // _MONTH_DAYS_X10000
+
+
+def _usage_part(x: Optional[int], gemini: Optional[int], worker: Optional[int]) -> Dict[str, Any]:
+    """One week's USAGE — the parts that move with what the engine did (X, Gemini, the worker) — and the
+    usage parts that could not be read (the sum then leaves them out: a floor)."""
+    values = (("X", x), ("Gemini", gemini), ("worker", worker))
+    unreadable = [name for name, v in values if v is None]
+    return {"x": x, "gemini": gemini, "worker": worker, "usage": sum(v for _name, v in values if v is not None),
+            "usage_unreadable": unreadable, "usage_partial": bool(unreadable)}
+
+
+def _cost_part(x: Optional[int], gemini: Optional[int], worker: Optional[int],
+               upload_post: Optional[int]) -> Dict[str, Any]:
+    """Last week's whole cost: its usage (`_usage_part`) plus the plan fee's share."""
+    part = _usage_part(x, gemini, worker)
+    part.update(upload_post=upload_post, total=part["usage"] + (upload_post if upload_post is not None else 0),
+                unreadable=part["usage_unreadable"] + ([] if upload_post is not None else ["Upload-Post"]))
+    return part
+
+
+def weekly_cost(
+    *, week_start: date, week_end: date, live: List[Dict[str, Any]], posts_capped: bool,
+    runs: Optional[List[Any]], prev_runs: Optional[List[Any]], charge_rows: Optional[List[Any]],
+    script_rows: Optional[List[Any]], upload_post_fee_micros: Any, cost_warn_micros: Any,
+) -> Dict[str, Any]:
+    """Last week's cost part by part (`_cost_part`), the week before's USAGE (`_usage_part`), and the
+    usage alert line. Pure. A part that cannot be read is None — the sum then leaves it out and says so —
+    never a guess, never NaN. The X windows are the digest's own [start, end) instants (DST-correct); runs
+    and scripts are placed by their ET `run_date`. The fee share is 7/30.4375 of a month for every week
+    (the November week is 169 hours, still 7 days of the plan). The week before carries NO fee: the plan
+    in force then is not recorded, and today's fee (MARKETING_UPLOAD_POST_MONTHLY_USD, read at call time)
+    would misprice it by the whole fee the first Monday after a plan change — so the two weeks are
+    compared by usage, like with like."""
+    start, end = week_bounds(week_start, week_end)
+    prev_first, prev_last = week_start - timedelta(days=7), week_start - timedelta(days=1)
+    prev_start, _prev_end = week_bounds(prev_first, prev_last)   # _prev_end == start
+    fee = (upload_post_fee_micros if type(upload_post_fee_micros) is int
+           and 0 <= upload_post_fee_micros <= _MICROS_BOUND else None)
+    warn = cost_warn_micros if type(cost_warn_micros) is int and 0 <= cost_warn_micros <= _MICROS_BOUND else 0
+    fee_week = _fee_week(fee) if fee is not None else None
+
+    x_last, undated = _x_week(charge_rows, start, end)
+    x_prev, _undated_prev = _x_week(charge_rows, prev_start, start)
+    last = _cost_part(x_last, _gemini_week(script_rows, week_start, week_end),
+                      _worker_week(runs, week_start, week_end), fee_week)
+    uploads, uploads_unsure = _uploads(live)
+    last.update(undated=undated, uploads=uploads, uploads_floor=bool(posts_capped) or uploads_unsure,
+                free=fee == 0)
+    before = _usage_part(x_prev, _gemini_week(script_rows, prev_first, prev_last),
+                         _worker_week(prev_runs, prev_first, prev_last))
+    return {"last": last, "before": before, "warn": warn}
+
+
 def summarize_week(
     *, now: datetime, week_start: date, week_end: date, posts: List[Dict[str, Any]],
     runs: Optional[List[Dict[str, Any]]] = None, measured: Optional[List[Dict[str, Any]]] = None,
@@ -974,12 +1269,18 @@ def summarize_week(
     budget_micros: int = 0, escalated: Optional[List[Dict[str, Any]]] = None,
     runway: Optional[Dict[str, Any]] = None, metrics_job: Optional[Dict[str, Any]] = None,
     metrics_enabled: bool = False, store: str = "prelaunch", posts_capped: bool = False,
+    charge_rows: Optional[List[Dict[str, Any]]] = None, prev_runs: Optional[List[Dict[str, Any]]] = None,
+    script_rows: Optional[List[Dict[str, Any]]] = None, upload_post_fee_micros: Any = 0,
+    cost_warn_micros: Any = 0,
 ) -> Dict[str, Any]:
     """The digest's numbers from the rows the gather read. Pure. A section whose rows could not be read
-    is passed as None and stays None ("unreadable" in the message) — never an empty or zero section."""
+    is passed as None and stays None ("unreadable" in the message) — never an empty or zero section.
+    The cost line's inputs (`charge_rows`, `prev_runs`, `script_rows`) follow the same rule: None makes
+    only their part of the cost "unreadable"."""
     now = _aware(now)
     runs, measured, link_hits, escalated = (_listed(runs), _listed(measured), _listed(link_hits),
                                             _listed(escalated))
+    charge_rows, prev_runs, script_rows = _listed(charge_rows), _listed(prev_runs), _listed(script_rows)
     spend = spend if isinstance(spend, dict) else None
     runway = runway if isinstance(runway, dict) else None
     metrics_job = metrics_job if isinstance(metrics_job, dict) else None
@@ -1034,9 +1335,21 @@ def summarize_week(
                 continue
             name = op if isinstance(op, str) and _KEY_RE.fullmatch(op) else "unreadable_op"
             by_op[name] = by_op.get(name, 0) + micros
-        spend_out = {"month": month_start_utc(now).strftime("%Y-%m"), "total": sum(by_op.values()),
-                     "by_op": sorted(by_op.items(), key=lambda kv: (-kv[1], kv[0])),
-                     "budget": budget_micros if type(budget_micros) is int and budget_micros > 0 else 0}
+        total = sum(by_op.values())
+        if abs(total) > _MICROS_BOUND or any(abs(m) > _MICROS_BOUND for m in by_op.values()):
+            # A hand-edited 400-digit amount used to raise OverflowError in the % and take the whole
+            # digest down; now only this line says "unreadable".
+            logger.warning("marketing digest: the X spend by op (%s) is beyond ±$1,000,000 — the X spend line "
+                           "is unreadable", ", ".join(sorted(by_op)))
+        else:
+            spend_out = {"month": month_start_utc(now).strftime("%Y-%m"), "total": total,
+                         "by_op": sorted(by_op.items(), key=lambda kv: (-kv[1], kv[0])),
+                         "budget": budget_micros if type(budget_micros) is int and budget_micros > 0 else 0}
+
+    cost = weekly_cost(
+        week_start=week_start, week_end=week_end, live=live, posts_capped=bool(posts_capped), runs=runs,
+        prev_runs=prev_runs, charge_rows=charge_rows, script_rows=script_rows,
+        upload_post_fee_micros=upload_post_fee_micros, cost_warn_micros=cost_warn_micros)
 
     run_rows, peak = _run_rows(runs, week_start, week_end) if runs is not None else (None, None)
     return {
@@ -1048,7 +1361,7 @@ def summarize_week(
         "followers": _followers([p for p in measured if isinstance(p, dict)], now=now) if measured is not None else None,
         "taps": _taps(link_hits) if link_hits is not None else None, "store": store,
         "spend": spend_out, "latency": _latency(live), "runway": runway, "escalated": escalated_rows,
-        "metrics_job": metrics_job, "runs": run_rows, "memory_peak": peak,
+        "metrics_job": metrics_job, "runs": run_rows, "memory_peak": peak, "cost": cost,
     }
 
 
@@ -1065,11 +1378,74 @@ def _ordered_statuses(counts: Dict[str, int]) -> str:
     return " · ".join(f"{s} {_n(counts[s])}" for s in keys)
 
 
+def _and(names: List[str]) -> str:
+    """'X' · 'X and worker' · 'X, Gemini and worker'."""
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _usage_text(part: Dict[str, Any]) -> str:
+    """"≈ $0.235", or "≥ $0.174 (X unreadable)" when a usage part could not be read; "unreadable" when the
+    part itself cannot be read."""
+    usage, unread = part.get("usage"), part.get("usage_unreadable")
+    if type(usage) is not int or not isinstance(unread, list):
+        return "unreadable"
+    names = [str(name) for name in unread]
+    return f"≥ {_usd(usage)} ({_and(names)} unreadable)" if names else f"≈ {_usd(usage)}"
+
+
+def _cost_lines(cost: Any) -> List[str]:
+    """The weekly cost block: last week's total and parts; then USAGE (X + Gemini + worker, never the plan
+    fee) for last week beside the week before — like with like, as the fee in force a week earlier is not
+    recorded; and the usage alert when last week's usage passed MARKETING_WEEKLY_COST_WARN_USD. It sits
+    right under the date line, so the row caps never touch it and the last-resort cut (which keeps the
+    top) never drops it. An unreadable part is named and its sum becomes a floor ("≥")."""
+    if not isinstance(cost, dict) or not isinstance(cost.get("last"), dict) or not isinstance(cost.get("before"), dict):
+        return ["💵 Cost last week: unreadable (see the web logs)"]
+    last, before = cost["last"], cost["before"]
+
+    def head(part: Dict[str, Any]) -> Tuple[str, str]:
+        unread = part.get("unreadable") or []
+        return ("≥", f" ({_and(unread)} unreadable)") if unread else ("≈", "")
+
+    # Read with .get(): a part that is missing reads "unreadable" (`_usd` of a non-int), never a KeyError.
+    x, gemini, worker, upload = (last.get("x"), last.get("gemini"), last.get("worker"),
+                                 last.get("upload_post"))
+    if type(x) is not int:
+        x_txt = "X unreadable"
+    elif last.get("undated"):
+        x_txt = (f"X {_usd(x)} (our ledger; "
+                 f"{_plural(int(last['undated']), 'undated charge', 'undated charges')} not counted)")
+    else:
+        x_txt = f"X {_usd(x)} (our ledger)"
+    gemini_txt = f"Gemini ≈ {_usd(gemini)}" if type(gemini) is int else "Gemini unreadable"
+    worker_txt = f"worker ≈ {_usd(worker)}" if type(worker) is int else "worker unreadable"
+    if type(upload) is not int:
+        upload_txt = "Upload-Post unreadable"
+    else:
+        plan = "Free plan" if last.get("free") else "plan fee"
+        uploads = _plural(int(last.get("uploads") or 0), "upload", "uploads")
+        upload_txt = (f"Upload-Post {_usd(upload)} "
+                      f"({plan} · {'≥ ' if last.get('uploads_floor') else ''}{uploads})")
+    approx, note = head(last)
+    lines = [f"💵 Cost last week {approx} {_usd(last.get('total'))}{note}: "
+             f"{x_txt} · {gemini_txt} · {worker_txt} · {upload_txt}",
+             f"Usage (X + Gemini + worker): last week {_usage_text(last)} · week before {_usage_text(before)}"]
+    warn = cost.get("warn") if type(cost.get("warn")) is int else 0
+    usage = last.get("usage")
+    if warn > 0 and type(usage) is int and usage > warn:
+        lines.append(f"⚠️ Usage {'≥' if last.get('usage_partial') else '≈'} {_usd(usage)} passed your "
+                     f"${warn / 1_000_000:.2f} alert line")
+    return lines
+
+
 def _render_digest(r: Dict[str, Any], cap: int) -> str:
     unreadable = "unreadable (see the web logs)"
     lines: List[str] = [
         "📊 Caydex marketing — weekly digest",
         f"{r['week_start'].strftime('%a %Y-%m-%d')} → {r['week_end'].strftime('%a %Y-%m-%d')} (ET)",
+        *_cost_lines(r.get("cost")),
         "",
     ]
     # runs
@@ -1160,28 +1536,42 @@ def _render_digest(r: Dict[str, Any], cap: int) -> str:
     if taps is None:
         lines.append(f"/go taps: {unreadable}")
     else:
+        # Approximate: crawlers that pass as browsers, at-least-once delivery (smart_link). Taps in the
+        # first minutes after a post went out are shown apart — mostly link scanners.
+        early = taps.get("early") or 0
+        early_txt = f" — plus {_n(early)} in the first minutes after posting (mostly link scanners)" if early else ""
         if taps["rows"]:
             shown = taps["rows"][: max(cap, 1)]
             more = len(taps["rows"]) - len(shown)
             tail = f" · … {_n(more)} more" if more > 0 else ""
-            lines.append("/go taps: " + " · ".join(f"{c} {_n(h)}" for c, h in shown) + tail
-                         + f" — {_n(taps['total'])} in total")
+            lines.append("/go taps (approximate): " + " · ".join(f"{c} {_n(h)}" for c, h in shown) + tail
+                         + f" — {_n(taps['total'])} in total" + early_txt)
         else:
-            lines.append("/go taps: none")
+            lines.append("/go taps (approximate): none" + early_txt)
         if taps.get("unreadable_rows"):
             lines.append(f"  ({_n(taps['unreadable_rows'])} unreadable row(s) not counted)")
     store = r.get("store")
+    # The app is on the App Store since 2026-10-05, so a missing or broken store URL is a
+    # misconfiguration either way: every /go tap lands on the landing page, which has no store link.
     if store == "prelaunch":
-        lines.append("Pre-launch: every /go tap lands on the Coming soon page (MARKETING_APP_STORE_URL is unset).")
+        lines.append("⚠️ MARKETING_APP_STORE_URL is unset — every /go tap lands on the landing page, "
+                     "which has no App Store link.")
     elif store == "invalid":
-        lines.append("⚠️ MARKETING_APP_STORE_URL is set but invalid — /go falls back to the Coming soon page.")
+        lines.append("⚠️ MARKETING_APP_STORE_URL is set but invalid — /go falls back to the landing page, "
+                     "which has no App Store link.")
+    elif store == "preorder":
+        lines.append("⚠️ MARKETING_APP_STORE_PREORDER is on — new captions say \"pre-order on the App Store\" "
+                     "and the landing button \"Pre-order\"; the app is on sale, so turn it off.")
 
     # X spend
     spend = r.get("spend")
     if spend is None:
         lines.append(f"X spend: {unreadable}")
     else:
-        if spend["budget"]:
+        if spend["budget"] > _MICROS_BOUND:
+            head = (f"X spend {spend['month']} (UTC, to date): {_usd(spend['total'])} — the cap "
+                    f"MARKETING_X_MONTHLY_BUDGET_USD is over $1,000,000 (check it)")
+        elif spend["budget"]:
             pct = 100.0 * spend["total"] / spend["budget"]
             head = f"X spend {spend['month']} (UTC, to date): {_usd(spend['total'])} of the ${spend['budget'] / 1e6:.2f} cap ({pct:.0f}%)"
         else:
@@ -1335,8 +1725,11 @@ async def _spend(svc: Any, now: datetime) -> Dict[str, int]:
 
 
 def _store_state() -> str:
+    """What the digest says about the store: `live`, `preorder` (a valid URL with
+    MARKETING_APP_STORE_PREORDER on — new captions then say "pre-order on the App Store"), `invalid` or
+    `prelaunch` (unset). Since the 2026-10-05 release only `live` is right; the others get a ⚠️."""
     if smart_link.store_url() is not None:
-        return "live"
+        return "preorder" if smart_link.store_state() == smart_link.STORE_PREORDER else "live"
     return "invalid" if str(settings.MARKETING_APP_STORE_URL or "").strip() else "prelaunch"
 
 
@@ -1350,6 +1743,8 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
     today = _et_day(now)
     week_start, week_end = digest_week(today)
     start, end = week_bounds(week_start, week_end)
+    prev_week_start, prev_week_end = week_start - timedelta(days=7), week_start - timedelta(days=1)
+    prev_start = week_bounds(prev_week_start, prev_week_end)[0]
     posts = await svc.list_posts_created_between(start, end, limit=WEEK_POST_LIMIT)
     runs = await _optional("the week's runs", svc.list_runs_between(week_start, week_end))
     measured = await _optional("follower snapshots",
@@ -1359,6 +1754,13 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
                        "be missing", len(measured), FOLLOWER_LOOKBACK)
     link_hits = await _optional("/go taps", svc.link_hits_between(week_start, week_end))
     spend = await _optional("X spend", _spend(svc, now))
+    # The cost line: X posts touched since the week before began (every charge — a metrics read on an
+    # old post, a back-dated correction — bumps its row's updated_at), the week before's runs (this
+    # week's are `runs`), and both weeks' script token counts. Each read fails alone.
+    charge_rows = await _optional("the X charge journal",
+                                  svc.list_charge_rows_since("x", prev_start, limit=X_CHARGE_ROW_LIMIT))
+    prev_runs = await _optional("the week before's runs", svc.list_runs_between(prev_week_start, prev_week_end))
+    script_rows = await _optional("the scripts' token counts", svc.script_tokens_between(prev_week_start, week_end))
     escalated = await _optional("escalated posts", svc.list_posts_filtered(
         status="queued", order="claimed_at", limit=ESCALATED_LIMIT, not_null=("metadata->>escalated_at",)))
     runway = await _optional("the content pool's runway", _runway(svc, today))
@@ -1369,6 +1771,8 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
         runway=runway, metrics_job=job,
         metrics_enabled=bool(settings.MARKETING_ENABLED and settings.MARKETING_METRICS_ENABLED),
         store=_store_state(), posts_capped=len(posts) >= WEEK_POST_LIMIT,
+        charge_rows=charge_rows, prev_runs=prev_runs, script_rows=script_rows,
+        upload_post_fee_micros=upload_post_fee_micros(), cost_warn_micros=weekly_cost_warn_micros(),
     )
 
 

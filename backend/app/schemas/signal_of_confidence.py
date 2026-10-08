@@ -33,7 +33,15 @@ class SignalOfConfidenceDataPointSchema(BaseModel):
     buyback_amount: float = Field(0.0, description="Share buybacks in the quarter (USD millions)")
     # Optional because 0.0 is not a share count any listed company can have — FMP
     # genuinely returns `weightedAverageShsOut: 0` on some rows, and treating that as a
-    # measurement produced a fabricated -100% share-count change. None = "not reported".
+    # measurement produced a fabricated -100% share-count change. None = "not reported",
+    # also for an interior quarter whose count the service refuses as a vendor artifact
+    # (FMP's annual-average copy in a fiscal-Q4 row). The NEWEST point is never None for
+    # that reason — build 1.0 (10) prints a null newest count as a bold "0.00M" — so a
+    # refused newest count carries the count the quarter's own EPS puts it at instead
+    # (`signal_of_confidence_service._ShareGlitch`); a newest count FMP sent as 0 / null
+    # carries that figure too where one is sound beside the quarter before, else None.
+    # Such an estimate is for the chart only: the summary's `share_count_change` and
+    # `buyback_status` measure reported counts and skip it (round-5 review 2026-10-08).
     shares_outstanding: Optional[float] = Field(
         None, description="Weighted-average shares outstanding (millions); None if unreported"
     )
@@ -48,6 +56,19 @@ class SignalOfConfidenceDataPointSchema(BaseModel):
         description=(
             "False when the vendor has no cash-flow row for this quarter; the four cash "
             "fields are then 0.0 placeholders, non-Optional on shipped iOS, not measurements"
+        ),
+    )
+    # 2026-10-05 (TestFlight 1.0 (11), CRWV): the market cap this point's yields were
+    # divided by — the cap at THIS period end, else the current cap where the history does
+    # not reach (a pre-IPO quarter). iOS scales the Capital ($) view against it, so a
+    # $2.6M amount on a ~$50B company draws as the sliver it is instead of a full-height
+    # bar on a "$0-$3M" axis. Additive and Optional: shipped builds ignore it, and None
+    # (no usable cap — the yields then read 0.00) means "no scale floor", never a zero cap.
+    market_cap: Optional[float] = Field(
+        None,
+        description=(
+            "Market cap (USD millions) this point's yields were computed against; None "
+            "when no cap was available"
         ),
     )
 

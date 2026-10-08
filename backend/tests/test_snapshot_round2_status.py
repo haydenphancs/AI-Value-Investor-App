@@ -69,6 +69,10 @@ class _PlainLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return {m: None for m in metrics}
 
+    # The snapshot services read the RICH cells since 2026-10-07 (`peer_level`).
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return {m: None for m in metrics}
+
 
 class _FailedLookup:
     """The shape `sector_benchmark_lookup` returns when its DB call failed."""
@@ -76,9 +80,15 @@ class _FailedLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return BenchmarkLookupFailed({m: None for m in metrics})
 
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return BenchmarkLookupFailed({m: None for m in metrics})
+
 
 class _RaisingLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
+        raise RuntimeError("supabase down")
+
+    def get_current_benchmarks(self, industry, sector, metrics):
         raise RuntimeError("supabase down")
 
 
@@ -706,7 +716,7 @@ def test_the_profitability_upsert_stamps_the_version():
     svc._upsert_supabase_cache("AAPL", card)
     (payload,) = svc.supabase.upserts
     assert payload["category"] == "Profitability"
-    assert payload["response_json"][ps._VERSION_KEY] == ps._SNAPSHOT_PAYLOAD_VERSION == 2
+    assert payload["response_json"][ps._VERSION_KEY] == ps._SNAPSHOT_PAYLOAD_VERSION == 3
 
     # What it writes, it reads back.
     _, reader = _prof_svc_with_rows([_row(payload["response_json"])])

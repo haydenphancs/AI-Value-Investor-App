@@ -2746,7 +2746,7 @@ class HomeDashboardService:
                                            action=ch.action, reason=ch.reason)
                        for ch in review.changes if _canonical_symbol(ch.ticker)]
         insight_fields = _detail_insight_fields((await insights_task).get(slug), tickers)
-        return ThemeDetailResponse(
+        detail = ThemeDetailResponse(
             slug=str(row.get("slug") or slug),
             title=str(row.get("title") or "").strip(),
             subtitle=str(row.get("subtitle") or "").strip(),
@@ -2761,6 +2761,19 @@ class HomeDashboardService:
             news=await news_task,
             **insight_fields,
         )
+        # Members whose quote did not resolve are in no list, so the Free prose gate cannot
+        # check their names: it fails closed while any are missing (adversarial review
+        # 2026-10-07). Not serialised — a private attribute of the cached detail.
+        members = {_canonical_symbol(t) for t in tickers} - {""}
+        unresolved = members - {c.ticker for c in constituents}
+        if unresolved:
+            logger.warning(
+                "Theme detail %s: %d of %d member(s) did not resolve (%s) — the list omits "
+                "them and the Free insight prose is locked for this build",
+                slug, len(unresolved), len(members), ", ".join(sorted(unresolved)[:8]),
+            )
+        detail._unresolved_members = frozenset(unresolved)
+        return detail
 
     async def _company_names(self, tickers: List[str]) -> Dict[str, str]:
         """Names for stocks no longer in the list (a removal's row). Best effort."""

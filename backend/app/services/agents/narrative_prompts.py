@@ -31,6 +31,7 @@ import math
 import re
 import statistics
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.config import settings
@@ -40,6 +41,7 @@ from app.services.agents.persona_config import PersonaConfig
 # Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
 from app.services.agents.persona_scoring import _vital_score
+from app.utils.peer_wording import peer_worded_metric_name
 
 logger = logging.getLogger(__name__)
 
@@ -528,7 +530,12 @@ def _fundamentals_trajectory_block(shell: Dict[str, Any]) -> str:
         for m in (card.get("metrics") or []):
             if not isinstance(m, dict):
                 continue
-            ml = _metric_trajectory_line(m, peer)
+            # The line is ONE peer group, named by its own level when the report carries
+            # it (2026-10-07); the card-wide word only for reports frozen before that.
+            line_level = m.get("sector_annual_level")
+            ml = _metric_trajectory_line(
+                m, line_level if line_level in ("industry", "sector") else peer,
+            )
             if ml:
                 metric_lines.append(ml)
         if metric_lines:
@@ -544,6 +551,16 @@ def _overall_assessment_text_prompt(
     avg = shell.get("overall_assessment", {}).get("average_rating", 0.0)
     strong = shell.get("overall_assessment", {}).get("strong_count", 0)
     weak = shell.get("overall_assessment", {}).get("weak_count", 0)
+    # The average covers RATED cards only (`_overall_assessment_from_cards`); a bank's
+    # Health card is unrated (0) since 2026-10-07, so say how many cards it covers.
+    cards = [c for c in (shell.get("fundamental_metrics") or []) if isinstance(c, dict)]
+    unrated = [str(c.get("title", "?")) for c in cards
+               if isinstance(c.get("star_rating"), int) and not isinstance(c.get("star_rating"), bool)
+               and c.get("star_rating") <= 0]
+    rated_n = len(cards) - len(unrated) if cards else 4
+    across = f"across {rated_n} rated card{'s' if rated_n != 1 else ''}" + (
+        f" ({', '.join(unrated)} not rated)" if unrated else ""
+    )
     # Cross-section coherence: the Fundamentals & Growth verdict should agree with
     # the forward trajectory (Future Forecast) and the revenue mix (Revenue
     # Engine) — e.g. don't call a business "stalling" when the forecast shows
@@ -556,7 +573,7 @@ def _overall_assessment_text_prompt(
     trajectory_block = f"{trajectory}\n\n" if trajectory else ""
     return f"""Write the overall quality read for the Fundamentals & Growth section — the whole-picture verdict across all four cards.
 
-CONTEXT: Average rating {avg}/5 across four cards ({strong} strong, {weak} weak).
+CONTEXT: Average rating {avg}/5 {across} ({strong} strong, {weak} weak).
 {related}
 {trajectory_block}EVIDENCE:
 {evidence}
@@ -2317,11 +2334,21 @@ def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
         if not isinstance(c, dict):
             continue
         stars = c.get("star_rating")
+        # An INDUSTRY median keeps the wire words "sector avg" in its label; name it the
+        # industry's here, as the EVIDENCE block does (`app/utils/peer_wording.py`).
         mstr = ", ".join(
-            f"{m.get('label', '?')} {m.get('value', '?')}"
+            f"{peer_worded_metric_name(SimpleNamespace(name=m.get('label', '?'), peer_level=m.get('peer_level')))} "
+            f"{m.get('value', '?')}"
             for m in (c.get("metrics") or []) if isinstance(m, dict)
         )
-        star_s = f" {stars}/5" if isinstance(stars, int) else ""
+        # A card rated 0 is NOT rated (a bank's / insurer's Financial Health card keeps one
+        # comparable row, 2026-10-07): "Health 0/5" would read as the worst possible score to
+        # the thesis and critical-factors syntheses. Mirrors the collector's
+        # `_format_snapshot_card_values` "(unrated)".
+        if isinstance(stars, int) and not isinstance(stars, bool):
+            star_s = f" {stars}/5" if stars > 0 else " unrated"
+        else:
+            star_s = ""
         card_strs.append(f"{c.get('title', '?')}{star_s} [{mstr}]")
     if card_strs:
         out.append("FUNDAMENTALS & GROWTH: " + " | ".join(card_strs))
@@ -2391,14 +2418,23 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
         )
         if scc is not None:
             # share_count_change spans the whole series (oldest→newest, up to
-            # ~2yr), NOT year-over-year — cite the real window so the narrative
-            # doesn't annualize it. Matches the iOS card's window caption.
-            dps = ca.get("data_points") or []
+            # ~2yr), NOT year-over-year — cite where the window STARTS so the narrative
+            # doesn't annualize it: the oldest point that REPORTS a count (the SoC
+            # summary's own rule — an edge quarter can ship `shares_outstanding: null`, a
+            # refused vendor artifact or an unreported count, and naming it would claim a
+            # quarter the figure does not span). The END is not named ("since <start>", as
+            # the iOS card says it): the newest point can carry an EPS ESTIMATE drawn for
+            # the chart only, which the summary's change skips (round-5 review 2026-10-08),
+            # so the newest point is not always where the figure ends.
+            dps = [
+                d for d in (ca.get("data_points") or [])
+                if isinstance(d, dict)
+                and isinstance(d.get("shares_outstanding"), (int, float))
+                and not isinstance(d.get("shares_outstanding"), bool)
+                and d["shares_outstanding"] > 0
+            ]
             if len(dps) >= 2:
-                ca_bits.append(
-                    f"share count {scc}% over "
-                    f"{dps[0].get('period')} to {dps[-1].get('period')}"
-                )
+                ca_bits.append(f"share count {scc}% since {dps[0].get('period')}")
             else:
                 ca_bits.append(f"share count {scc}%")
         if ca_bits:

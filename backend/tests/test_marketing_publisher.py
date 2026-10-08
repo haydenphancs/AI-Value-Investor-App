@@ -26,7 +26,14 @@ What must never regress:
   * the late steps (measure → run health → weekly digest) run after the feed, each behind its own gate
     (both new switches fail-closed), import their module only when they run (a broken one fails its
     step alone), and — the real functions behind the real tick — do each day's work once, in order,
-    without calling a platform.
+    without calling a platform;
+  * the /go EARLY window (`publish_clock`, read by `smart_link.record_hit`): `record_outcome` opens the
+    post's campaign window BEFORE its ledger write — PUBLISHED or AMBIGUOUS for 240 s, SUBMITTED for
+    300 s — only for a LIVE row whose caption carries its OWN /go link (`post_copy.carries_go_link`).
+    "Link in bio.", a link-free X caption, another platform's link, `/go/xyz` for x, NOT_SENT, REFUSED,
+    a dry run and a reconcile FOUND never open one; a reconcile resend does (it is a send); a ledger
+    failure after the send still does; a later post of the campaign extends the window, never shortens
+    it; a clock that raises costs only a WARNING, never the publish.
 
 The tick ORDER across all 16 switch combinations and step isolation are pinned by
 tests/test_marketing_review_bot.py with every step stubbed; the late steps' wiring is pinned here.
@@ -42,8 +49,10 @@ import copy
 import importlib
 import inspect
 import logging
+import re
 import sys
 import textwrap
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -52,7 +61,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from app.services.marketing import outlet_x, outlets
+from app.schemas.marketing import POST_PLATFORMS
+from app.services.marketing import outlet_x, outlets, post_copy, publish_clock
 from app.services.marketing import publisher_service as pub
 from app.services.marketing import run_service as mrs
 from app.services.marketing.outlet_base import (
@@ -310,7 +320,12 @@ def env(monkeypatch, caplog):
     monkeypatch.setitem(outlets.ADAPTERS, "bluesky", e.bsky)
     monkeypatch.setattr(outlets, "enabled_platforms", lambda: list(e.enabled))
     monkeypatch.setattr(outlet_x, "budget_micros", lambda: e.budget)
-    return e
+    # The /go early-window clock is module state: a window a publish here opens (real time, ~2026-10)
+    # must never leak into another test — smart_link's tests read it on a fixed clock near 2026-09-21,
+    # where any leaked window would still be open and relabel their taps.
+    publish_clock.clear()
+    yield e
+    publish_clock.clear()
 
 
 # ── publish: what is decided BEFORE the claim ─────────────────────────────────
@@ -1797,6 +1812,526 @@ async def test_a_lost_submitted_write_leaves_the_request_id_for_reconcile(env, m
     assert any(pid in m for m in _messages(caplog, "outcome submitted NOT RECORDED", logging.ERROR))
     await pub.publish_cycle()
     assert len(up.sends) == 1
+
+
+# ── the /go early window (publish_clock) ──────────────────────────────────────
+#
+# Link scanners (Meta's fetchers, preview and security services) fetch a post's /go link within
+# seconds to a few minutes of it going out — production 2026-10: within ~200 s, many with an ordinary
+# browser user agent — so `smart_link.record_hit` counts a tap apart, under `<campaign>_early`, while
+# the campaign's window is open. The publisher opens it in `record_outcome`, BEFORE the ledger write,
+# and only for a LIVE row whose caption carries its OWN /go link: PUBLISHED or AMBIGUOUS (it may be
+# live) for 240 s, an Upload-Post SUBMITTED job (live seconds later) for 300 s. Windows are checked
+# against the wall clock read around the call: a stamp made between t0 and t1 closes in
+# [t0 + window, t1 + window].
+
+#: The code-owned value line (store state "live", as production runs since 2026-10-05) and the short
+#: disclaimer, as `post_copy.compose` writes them for the computed-budget fields (x/threads/bluesky).
+_VALUE_LINE = "Caydex: AI research on public companies — on the App Store."
+_SHORT_DISCLAIMER = "Educational only, not investment advice. AI-assisted. Caydex"
+
+
+def _linked(platform: str, *, slug: Optional[str] = None) -> str:
+    """A link-bearing caption shaped as `post_copy.compose` writes it: the body, then the value line
+    and `https://caydexinvest.com/go/<platform>` (or `<slug>` — another link), then the disclaimer."""
+    return (f"Three habits that quietly compound.\n\n{_VALUE_LINE} Learn more: "
+            f"https://caydexinvest.com/go/{platform if slug is None else slug}\n\n{_SHORT_DISCLAIMER}")
+
+
+def _linked_before_the_value_line(platform: str) -> str:
+    """A caption composed BEFORE the value line existed (2026-10-05): a row approved before that deploy
+    and published after it ends '\\n\\nLearn more: <its /go link>\\n\\n<disclaimer>'."""
+    return (f"Three habits that quietly compound.\n\nLearn more: https://caydexinvest.com/go/{platform}"
+            f"\n\n{_SHORT_DISCLAIMER}")
+
+
+#: X composed WITH allow_x_url (the bare link after the value line) and WITHOUT it (no link at all).
+_X_WITH_LINK = (f"Three habits that quietly compound.\n\n#businessstrategy\n\n{_VALUE_LINE} "
+                f"https://caydexinvest.com/go/x\n\n{_SHORT_DISCLAIMER}")
+_X_WITHOUT_LINK = f"Three habits that quietly compound.\n\n#businessstrategy\n\n{_VALUE_LINE}\n\n{_SHORT_DISCLAIMER}"
+#: TikTok / Instagram: captions are not clickable there.
+_IN_BIO = ("Three habits that quietly compound.\n\n#businessstrategy #investing #financialliteracy\n\n"
+           f"{_VALUE_LINE} Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice.")
+
+
+def _windows() -> Dict[str, float]:
+    """The clock's whole state: campaign → the epoch second its early window closes."""
+    return dict(publish_clock._until)
+
+
+def _assert_window(campaign: str, t0: float, t1: float, seconds: float) -> float:
+    until = publish_clock.open_until(campaign)
+    assert until is not None, f"{campaign}: no early window was opened ({_windows()})"
+    assert t0 + seconds <= until <= t1 + seconds, (campaign, seconds, until - t0, until - t1)
+    return until
+
+
+def _window_lines(caplog) -> List[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == PUB_LOGGER and r.levelno == logging.INFO and "early window open" in r.getMessage()]
+
+
+def _clock_warnings(caplog) -> List[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == PUB_LOGGER and r.levelno == logging.WARNING and "publish clock" in r.getMessage()]
+
+
+def _adapter(env: Env, monkeypatch, platform: str) -> FakeAdapter:
+    """The Env's X / Bluesky fake, or a fresh Upload-Post-shaped fake registered (and enabled) for
+    `platform`."""
+    if platform == "x":
+        return env.x
+    if platform == "bluesky":
+        return env.bsky
+    return _up_adapter(env, monkeypatch, platform)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["with-the-value-line", "before-the-value-line"])
+async def test_a_published_link_bearing_post_opens_its_campaigns_early_window(env, caplog, shape):
+    caption = _linked("bluesky") if shape == "with-the-value-line" else _linked_before_the_value_line("bluesky")
+    assert caption.endswith(f"Learn more: https://caydexinvest.com/go/bluesky\n\n{_SHORT_DISCLAIMER}")
+    pid = env.seed(platform="bluesky", caption=caption)
+    env.bsky.outcomes = [Outcome(PUBLISHED, external_id="at://did:plc:abc/app.bsky.feed.post/3k")]
+    assert _windows() == {}
+    t0 = time.time()
+    counters = await pub.publish_cycle()
+    t1 = time.time()
+    assert counters["published"] == 1 and env.row(pid)["status"] == "published"
+    until = _assert_window("bluesky", t0, t1, 240)
+    assert abs(until - (time.time() + 240)) < 5           # the spec's tolerance, on top of the bracket
+    assert set(_windows()) == {"bluesky"}                 # its own campaign, and nothing else
+    assert publish_clock.is_early("bluesky")              # what smart_link.record_hit reads
+    iso = datetime.fromtimestamp(until, timezone.utc).isoformat()
+    assert _window_lines(caplog) == [
+        f"marketing publish clock: campaign=bluesky early window open until {iso} (published) post_id={pid}"]
+    assert _clock_warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, caption, kind", [
+    ("x", None, PUBLISHED),                                      # the Env's default, link-free caption
+    ("x", _X_WITHOUT_LINK, PUBLISHED),                           # composed without allow_x_url
+    ("threads", _linked("threads", slug="bluesky"), PUBLISHED),  # ANOTHER platform's link
+    ("bluesky", _linked("bluesky", slug="bluesky_early"), PUBLISHED),  # a longer slug is not its link
+    ("tiktok", _IN_BIO, SUBMITTED),
+    ("instagram", _IN_BIO, PUBLISHED),
+], ids=["x-default", "x-no-url", "threads-carrying-bluesky", "bluesky-longer-slug", "tiktok-in-bio",
+        "instagram-in-bio"])
+async def test_a_post_without_its_own_go_link_never_stamps(env, monkeypatch, caplog, platform, caption, kind):
+    adapter = _adapter(env, monkeypatch, platform)
+    pid = env.seed(platform=platform, caption=caption)
+    adapter.outcomes = [Outcome(PUBLISHED, external_id=f"{platform}-ext-1") if kind == PUBLISHED
+                        else Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    counters = await pub.publish_cycle()
+    # The outcome WAS recorded (record_outcome ran) — it just opened no window, for any campaign: a
+    # caption carrying bluesky's link must not open bluesky's window from a Threads post either.
+    assert counters["published" if kind == PUBLISHED else "submitted"] == 1 and len(adapter.sends) == 1
+    assert env.row(pid)["status"] == ("published" if kind == PUBLISHED else "queued")
+    assert _windows() == {}
+    assert _window_lines(caplog) == [] and _clock_warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caption, stamped", [
+    (_X_WITH_LINK, True),                                                        # composed with allow_x_url
+    ("Three habits that quietly compound. https://caydexinvest.com/go/x", True),  # the caption's last token
+    ("Read more at https://caydexinvest.com/go/x. Educational only.", True),     # punctuation ends a slug
+    ("https://caydexinvest.com/go/xyz first, then https://caydexinvest.com/go/x\n\nEducational only.", True),
+    (_X_WITH_LINK.replace("/go/x", "/go/xyz"), False),                           # another campaign's slug
+    (_X_WITH_LINK.replace("/go/x", "/go/x_early"), False),
+    (_X_WITH_LINK.replace("/go/x", "/go/x-2"), False),
+    (_X_WITHOUT_LINK, False),
+], ids=["with-url", "at-the-end", "before-a-period", "after-a-longer-slug", "go-xyz", "go-x-early", "go-x-2",
+        "no-url"])
+@pytest.mark.parametrize("allow_urls_now", [False, True], ids=["urls-off-now", "urls-on-now"])
+async def test_an_x_post_stamps_only_when_its_caption_carries_go_x(env, monkeypatch, caption, stamped,
+                                                                   allow_urls_now):
+    """X carries a link only when its caption was COMPOSED with allow_x_url, and the flag can differ by
+    publish time — so the caption decides, whatever MARKETING_X_ALLOW_URLS says when it goes out (the
+    fake adapter sends either way; the real one would refuse a link while the flag is off)."""
+    monkeypatch.setattr(pub.settings, "MARKETING_X_ALLOW_URLS", allow_urls_now)
+    pid = env.seed(platform="x", caption=caption)
+    t0 = time.time()
+    counters = await pub.publish_cycle()
+    t1 = time.time()
+    assert counters["published"] == 1 and env.row(pid)["status"] == "published"
+    if stamped:
+        _assert_window("x", t0, t1, 240)
+        assert set(_windows()) == {"x"}
+    else:
+        assert _windows() == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, kind, seconds, status", [
+    ("linkedin", SUBMITTED, 300, "queued"),     # an async Upload-Post job: live seconds later
+    ("youtube", SUBMITTED, 300, "queued"),      # the YouTube DESCRIPTION carries /go/youtube
+    ("facebook", PUBLISHED, 240, "published"),  # a synchronous Upload-Post answer: live now
+])
+async def test_an_upload_post_job_opens_its_window_by_how_it_answered(env, monkeypatch, caplog, platform, kind,
+                                                                       seconds, status):
+    up = _adapter(env, monkeypatch, platform)
+    pid = env.seed(platform=platform, caption=_linked(platform))
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()}) if kind == SUBMITTED
+                   else Outcome(PUBLISHED, external_id=f"{platform}-ext-1")]
+    t0 = time.time()
+    await pub.publish_cycle()
+    t1 = time.time()
+    assert env.row(pid)["status"] == status
+    _assert_window(platform, t0, t1, seconds)
+    assert set(_windows()) == {platform}
+    lines = _window_lines(caplog)
+    assert len(lines) == 1 and f"campaign={platform} " in lines[0] and f"post_id={pid}" in lines[0]
+    assert f"({publish_clock.SUBMITTED if kind == SUBMITTED else publish_clock.PUBLISHED})" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_a_later_post_of_the_campaign_extends_its_window_and_never_shortens_it(env, monkeypatch, caplog):
+    """Two link-bearing posts of one campaign minutes apart (a second post, a resend): the window closes
+    at the LATER of their two ends. Every send stamps — a window already open is no reason to skip one —
+    and a send whose window would end sooner leaves the open one as it is (and logs nothing). The
+    clock's wall time is driven here (whole seconds, so the sums are exact)."""
+    clock = {"t": float(int(time.time()))}
+    monkeypatch.setattr(publish_clock, "_wall", lambda: clock["t"])
+    up = _adapter(env, monkeypatch, "linkedin")
+    day = mrs.run_date_et().isoformat()
+    start = clock["t"]
+
+    first = env.seed(platform="linkedin", caption=_linked("linkedin"), key=f"{day}:linkedin:text")
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    await pub.publish_cycle()
+    assert publish_clock.open_until("linkedin") == start + 300
+
+    clock["t"] = start + 30            # a synchronous answer 30 s later: its 240 s would end at +270
+    env.seed(platform="linkedin", caption=_linked("linkedin"), key=f"{day}:linkedin:image")
+    up.outcomes = [Outcome(PUBLISHED, external_id="li-ext-2")]
+    await pub.publish_cycle()
+    assert publish_clock.open_until("linkedin") == start + 300
+
+    clock["t"] = start + 100           # 100 s after the first: 240 s from now ends at +340, later
+    third = env.seed(platform="linkedin", caption=_linked("linkedin"), key=f"{day}:linkedin:video")
+    up.outcomes = [Outcome(PUBLISHED, external_id="li-ext-3")]
+    await pub.publish_cycle()
+    assert publish_clock.open_until("linkedin") == start + 340
+    assert len(up.sends) == 3 and set(_windows()) == {"linkedin"}
+    assert [line.rsplit("post_id=", 1)[1] for line in _window_lines(caplog)] == [first, third]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome, attempts, status", [
+    (Outcome(NOT_SENT, "transport", error="ConnectError: connection refused"), 0, "approved"),
+    (Outcome(NOT_SENT, "transport", error="ConnectTimeout"), 2, "failed"),           # at the attempt cap
+    (Outcome(REFUSED, "forbidden", error="403 not permitted", alert="failed"), 0, "failed"),
+], ids=["not-sent", "not-sent-at-the-cap", "refused"])
+async def test_not_sent_and_refused_never_stamp(env, caplog, outcome, attempts, status):
+    """Nothing went live: a NOT_SENT provably never left, a REFUSED was a definite no."""
+    pid = env.seed(platform="bluesky", caption=_linked("bluesky"), attempts=attempts)
+    env.bsky.outcomes = [outcome]
+    await pub.publish_cycle()
+    assert len(env.bsky.sends) == 1 and env.row(pid)["status"] == status
+    assert _windows() == {}
+    assert _window_lines(caplog) == [] and _clock_warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["bluesky", "linkedin"])
+@pytest.mark.parametrize("answer, category", [
+    ("ambiguous", "server"),
+    ("adapter-raises", "bug"),          # an adapter that raises is read as AMBIGUOUS
+])
+async def test_an_ambiguous_send_stamps_the_published_window_and_stays_queued(env, monkeypatch, caplog, platform,
+                                                                              answer, category):
+    """An unknown outcome may already be live — and its scanners arrive on the post's schedule, not
+    on reconcile's — so it opens the PUBLISHED window (240 s, on an Upload-Post outlet too: an unknown
+    answer is never read as a job that is still to go live); the row still waits for reconcile."""
+    adapter = _adapter(env, monkeypatch, platform)
+    pid = env.seed(platform=platform, caption=_linked(platform))
+    adapter.outcomes = [Outcome(AMBIGUOUS, "server", error=f"{platform}: HTTP 503") if answer == "ambiguous"
+                        else ValueError("our own bug")]
+    t0 = time.time()
+    counters = await pub.publish_cycle()
+    t1 = time.time()
+    row = env.row(pid)
+    assert counters["unknown"] == 1 and row["status"] == "queued" and len(adapter.sends) == 1
+    assert row["metadata"]["publish"]["state"] == "unknown" and row["metadata"]["publish"]["category"] == category
+    _assert_window(platform, t0, t1, 240)
+    assert set(_windows()) == {platform}
+    lines = _window_lines(caplog)
+    assert len(lines) == 1 and lines[0].endswith(f"({publish_clock.PUBLISHED}) post_id={pid}"), lines
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, kind, seconds, log_needle", [
+    ("x", PUBLISHED, 240, "PUBLISHED BUT LEDGER WRITE FAILED"),
+    ("threads", SUBMITTED, 300, "outcome submitted NOT RECORDED"),
+])
+async def test_a_ledger_failure_after_the_send_still_stamps(env, monkeypatch, caplog, platform, kind, seconds,
+                                                           log_needle):
+    """The stamp runs BEFORE the ledger write: a post that went out but whose write failed is live all
+    the same, and its scanners must still be counted apart."""
+    adapter = _adapter(env, monkeypatch, platform)
+    pid = env.seed(platform=platform, caption=_X_WITH_LINK if platform == "x" else _linked(platform))
+    adapter.outcomes = [Outcome(PUBLISHED, external_id="1840000000000000777") if kind == PUBLISHED
+                        else Outcome(SUBMITTED, publish_meta={"upload_post": {"request_id": "k:a1"}})]
+    adapter.on_send = lambda _post: env.posts.fail_updates.append(RuntimeError("PostgREST 520"))
+    t0 = time.time()
+    await pub.publish_cycle()
+    t1 = time.time()
+    row = env.row(pid)
+    assert row["status"] == "queued" and row["metadata"]["publish"]["state"] == "sending"   # the write was lost
+    assert any(pid in m for m in _messages(caplog, log_needle, logging.ERROR))
+    _assert_window(platform, t0, t1, seconds)
+    assert set(_windows()) == {platform}
+
+
+#: A wall-clock instant as this ledger writes one (`datetime.isoformat()`, UTC).
+_INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\+00:00|Z)")
+
+
+def _comparable(row: Dict[str, Any]) -> Dict[str, Any]:
+    """`row` as two posts recorded the same way must agree on it: its identity (its own id wherever it
+    appears, its run id and key) and every wall-clock instant are blanked; everything else is kept."""
+    pid = row["id"]
+
+    def norm(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: norm(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [norm(v) for v in value]
+        if isinstance(value, str):
+            value = value.replace(pid, "<id>")
+            return "<instant>" if _INSTANT.fullmatch(value) else value
+        return value
+
+    return {**norm(row), "run_id": "<run>", "idempotency_key": "<key>"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, kind", [("bluesky", PUBLISHED), ("linkedin", SUBMITTED)])
+async def test_a_raising_clock_never_costs_the_publish(env, monkeypatch, caplog, platform, kind):
+    """The window is a measurement: a clock that raises is one WARNING naming the post, and the post
+    is recorded exactly as it would be without the clock — compared field by field with a control
+    post sent the same way with the real clock."""
+    adapter = _adapter(env, monkeypatch, platform)
+
+    def answer() -> Outcome:
+        return (Outcome(PUBLISHED, external_id="at://did:plc:abc/app.bsky.feed.post/3k") if kind == PUBLISHED
+                else Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()}))
+
+    day = mrs.run_date_et().isoformat()     # a key is `<run day>:…` — anything else is never fresh
+    control = env.seed(platform=platform, caption=_linked(platform), key=f"{day}:{platform}:text")
+    adapter.outcomes = [answer()]
+    control_counters = await pub.publish_cycle()
+    assert len(adapter.sends) == 1 and publish_clock.open_until(platform) is not None   # the control stamped
+    publish_clock.clear()
+    caplog.clear()
+
+    real_stamp = publish_clock.stamp
+    calls: List[Dict[str, Any]] = []
+
+    def boom(*args: Any, **kwargs: Any) -> bool:
+        calls.append(dict(inspect.signature(real_stamp).bind(*args, **kwargs).arguments))
+        raise RuntimeError("clock exploded")
+
+    monkeypatch.setattr(publish_clock, "stamp", boom)
+    pid = env.seed(platform=platform, caption=_linked(platform), key=f"{day}:{platform}:image")
+    adapter.outcomes = [answer()]
+    counters = await pub.publish_cycle()
+    assert len(adapter.sends) == 2
+    assert [(c["campaign"], c["kind"]) for c in calls] == [
+        (platform, publish_clock.PUBLISHED if kind == PUBLISHED else publish_clock.SUBMITTED)]   # it WAS reached
+    assert counters == control_counters
+    assert _comparable(env.row(pid)) == _comparable(env.row(control))
+    row = env.row(pid)
+    p = row["metadata"]["publish"]
+    if kind == PUBLISHED:
+        assert counters["published"] == 1 and row["status"] == "published" and p["state"] == "published"
+        assert row["external_id"] == "at://did:plc:abc/app.bsky.feed.post/3k" and row["published_at"]
+    else:
+        assert counters["submitted"] == 1 and row["status"] == "queued" and p["state"] == "submitted"
+        assert p["upload_post"] == _up_meta()
+    assert p["history"][-1]["kind"] == kind and row["last_error"] is None and row["attempts"] == 1
+    _assert_review_kept(row)
+    assert _windows() == {}
+    warnings = _clock_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    assert f"post_id={pid}" in warnings[0] and "RuntimeError: clock exploded" in warnings[0]
+    assert [r for r in caplog.records if r.name == PUB_LOGGER and r.levelno >= logging.ERROR] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, kind, state", [
+    ("bluesky", PUBLISHED, "published"),
+    ("bluesky", AMBIGUOUS, "unknown"),
+    ("linkedin", SUBMITTED, "submitted"),
+])
+async def test_the_window_is_open_before_the_outcome_is_written(env, monkeypatch, platform, kind, state):
+    """Scanners arrive within seconds of the post going live, and the outcome write may take a retry:
+    the window is already open when `record_outcome` writes the outcome — never opened after it, and
+    never before the send (the write-ahead claim finds it closed)."""
+    adapter = _adapter(env, monkeypatch, platform)
+    pid = env.seed(platform=platform, caption=_linked(platform))
+    adapter.outcomes = [{PUBLISHED: Outcome(PUBLISHED, external_id=f"{platform}-ext-1"),
+                         AMBIGUOUS: Outcome(AMBIGUOUS, "server", error=f"{platform}: HTTP 503"),
+                         SUBMITTED: Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})}[kind]]
+    writes: List[tuple] = []
+    real = env.svc.transition_post
+
+    async def spy(post_id: str, *args: Any, **kwargs: Any) -> Any:
+        writes.append((post_id, (kwargs.get("publish") or {}).get("state"), len(adapter.sends),
+                       publish_clock.open_until(platform)))
+        return await real(post_id, *args, **kwargs)
+
+    monkeypatch.setattr(env.svc, "transition_post", spy)
+    await pub.publish_cycle()
+    before_send = [w for w in writes if w[2] == 0]      # the claim's write-ahead, if it comes this way
+    after_send = [w for w in writes if w[2] == 1]
+    assert [w[3] for w in before_send] == [None] * len(before_send), writes
+    assert [(p, s) for p, s, _n, _until in after_send] == [(pid, state)], writes   # the one outcome write
+    assert after_send[0][3] is not None and after_send[0][3] == publish_clock.open_until(platform)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("why", ["dry_switch", "rehearsal_row", "reconcile_dry_switch", "reconcile_rehearsal_row"])
+async def test_a_dry_run_never_stamps(env, monkeypatch, caplog, why):
+    """Neither send path sends a rehearsal: not the publish pass, and not reconcile's resend of a post
+    confirmed absent (under the switch, or for a row whose `dry_run` is not exactly False)."""
+    if why == "dry_switch":
+        monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", True)
+        env.seed(platform="bluesky", caption=_linked("bluesky"))
+        env.seed(platform="x", caption=_X_WITH_LINK)
+    elif why == "rehearsal_row":
+        env.seed(platform="bluesky", caption=_linked("bluesky"), meta=_review_meta(dry_run=True))
+    else:
+        pid = env.seed_queued(platform="bluesky", started_ago=700, caption=_linked("bluesky"))
+        if why == "reconcile_dry_switch":
+            monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", True)
+        else:
+            env.raw(pid)["metadata"]["dry_run"] = True
+        env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    if why.startswith("reconcile"):
+        counters = await pub.reconcile_cycle()
+        assert counters["absent"] == 1 and counters.get("resent", 0) == 0
+        assert len(env.bsky.reconciles) == 1 and env.row(pid)["status"] == "queued"
+    else:
+        await pub.publish_cycle()
+    assert env.bsky.sends == [] and env.x.sends == []
+    assert _windows() == {}
+    assert _window_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, meta, caption, stamped", [
+    ("bluesky", _review_meta(), _linked("bluesky"), True),                    # the live control
+    ("bluesky", _review_meta(dry_run=True), _linked("bluesky"), False),       # a rehearsal row
+    ("bluesky", _review_meta(dry_run="false"), _linked("bluesky"), False),    # live means exactly False
+    ("bluesky", {"review": {"decision": "approved", "by": OWNER, "at": REVIEW_AT}}, _linked("bluesky"), False),
+    ("myspace", _review_meta(), _linked("myspace"), False),                   # no post platform: no campaign
+    ("bluesky", _review_meta(), None, False),                                 # no caption at all
+    ("bluesky", _review_meta(), 123, False),                                  # a caption that is not text
+], ids=["live", "rehearsal", "dry-run-string", "no-dry-run-key", "not-a-post-platform", "caption-none",
+        "caption-not-str"])
+async def test_record_outcome_stamps_only_a_live_row_of_a_post_platform(env, caplog, platform, meta, caption,
+                                                                      stamped):
+    """`record_outcome` re-checks what the send path already guarantees: rehearsal rows never reach a
+    send (the publish query and the reconcile resend both refuse them), and every campaign key is a
+    POST platform (smart_link's EARLY_KEYS) — so the clock's own guard is driven directly here."""
+    pid = env.seed(platform=platform, status="queued", meta=copy.deepcopy(meta), attempts=1,
+                   caption=caption if isinstance(caption, str) else "placeholder")
+    if not isinstance(caption, str):
+        env.raw(pid)["caption"] = caption
+    t0 = time.time()
+    state = await pub.record_outcome(env.svc, env.bsky, env.row(pid), Outcome(PUBLISHED, external_id="ext-1"))
+    t1 = time.time()
+    assert state == "published" and env.row(pid)["status"] == "published"   # the outcome itself always lands
+    if stamped:
+        _assert_window(platform, t0, t1, 240)
+        assert set(_windows()) == {platform}
+    else:
+        assert _windows() == {}
+    assert _clock_warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, kind, seconds, status", [
+    ("bluesky", PUBLISHED, 240, "published"),
+    ("linkedin", SUBMITTED, 300, "queued"),     # Upload-Post resends with the same request id
+])
+async def test_a_reconcile_resend_stamps_through_record_outcome(env, monkeypatch, caplog, platform, kind, seconds,
+                                                               status):
+    """A resend IS a send: the post goes live now, so its window opens now — through `record_outcome`,
+    like a first send, by how the platform answered."""
+    adapter = _adapter(env, monkeypatch, platform)
+    pid = env.seed_queued(platform=platform, started_ago=700, caption=_linked(platform))
+    adapter.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    adapter.outcomes = [Outcome(PUBLISHED, external_id=f"{platform}-ext-1") if kind == PUBLISHED
+                        else Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    assert _windows() == {}
+    t0 = time.time()
+    counters = await pub.reconcile_cycle()
+    t1 = time.time()
+    assert counters["resent"] == 1 and len(adapter.sends) == 1 and env.row(pid)["status"] == status
+    _assert_window(platform, t0, t1, seconds)
+    assert set(_windows()) == {platform}
+    clock_kind = publish_clock.PUBLISHED if kind == PUBLISHED else publish_clock.SUBMITTED
+    assert len([m for m in _window_lines(caplog) if m.endswith(f"({clock_kind}) post_id={pid}")]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("published_at", [None, "garbage"])
+async def test_a_reconcile_found_never_opens_a_window_at_now(env, published_at):
+    """A FOUND arrives at least MARKETING_PUBLISH_RECONCILE_AFTER_SECONDS (600 s) after the send —
+    after every scanner tail. Its time is unknown (Bluesky reports none) or unreadable here, and the
+    publisher writes `now` into `published_at` for it: stamping that would count real taps ten minutes
+    later as scanners. Only `record_outcome` (a send) stamps."""
+    pid = env.seed_queued(platform="bluesky", started_ago=700, caption=_linked("bluesky"))
+    env.bsky.reconcile_results = [ReconcileResult(FOUND, external_id="at://did:plc:abc/app.bsky.feed.post/3k",
+                                                  published_at=published_at)]
+    counters = await pub.reconcile_cycle()
+    assert counters["found"] == 1 and env.row(pid)["status"] == "published" and env.bsky.sends == []
+    assert _windows() == {}
+
+
+#: Model-written bodies for every caption field `post_copy.compose` reads.
+_COMPOSE_BODIES = {
+    "tiktok": "Three habits that quietly compound over a decade.",
+    "youtube_title": "Three habits that compound",
+    "youtube_description": "A short lesson on habits that compound over time.",
+    "instagram": "Three habits that quietly compound.",
+    "facebook": "Three habits that quietly compound over a decade.",
+    "x": "Three habits that quietly compound.",
+    "threads": "Three habits that quietly compound.",
+    "bluesky": "Three habits that quietly compound.",
+    "linkedin": "Three habits that quietly compound over a decade.",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_state", post_copy.STORE_STATES)
+@pytest.mark.parametrize("allow_x_url", [False, True])
+async def test_the_composed_captions_open_exactly_the_link_bearing_campaigns(env, monkeypatch, caplog, allow_x_url,
+                                                                             store_state):
+    """End to end over the REAL composed copy, one post per outlet in one publish pass: bluesky,
+    facebook, linkedin, threads and youtube (its description) carry their own /go link and open their
+    window; TikTok and Instagram say "Link in bio."; X opens one only when its caption was composed
+    with allow_x_url. The value line's store state changes none of it."""
+    for platform in ("tiktok", "youtube", "instagram", "facebook", "threads", "linkedin"):
+        _up_adapter(env, monkeypatch, platform)
+    for platform in post_copy.PLATFORMS:
+        composed = post_copy.compose(platform, _COMPOSE_BODIES, category="blueprints", run_date=mrs.run_date_et(),
+                                     allow_x_url=allow_x_url, store_state=store_state)
+        env.seed(platform=platform, caption=composed.caption, title=composed.title)
+    t0 = time.time()
+    counters = await pub.publish_cycle()
+    t1 = time.time()
+    assert counters["published"] == len(post_copy.PLATFORMS) == 8
+    expected = {"bluesky", "facebook", "linkedin", "threads", "youtube"} | ({"x"} if allow_x_url else set())
+    assert set(_windows()) == expected
+    for campaign in expected:
+        _assert_window(campaign, t0, t1, 240)
+    assert len(_window_lines(caplog)) == len(expected)
+    assert set(_windows()) <= set(POST_PLATFORMS)
 
 
 # ── the tick: the late steps (measure → run health → weekly digest) ───────────

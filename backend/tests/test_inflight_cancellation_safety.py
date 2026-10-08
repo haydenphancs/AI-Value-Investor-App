@@ -159,6 +159,10 @@ _INFLIGHT_MODULES = [
     # and joiners attach through `asyncio.shield`. Its per-turn guard is a Task joined the same
     # shielded way. Never shared across users (Brave allows transient storage only).
     "chat_web_search_service.py",
+    # Added 2026-10-07 with the ownership tool's single-flight freshness check (review F4):
+    # one probe-and-rebuild per ticker; concurrent questions join it under `asyncio.shield`
+    # (the tool runs under a timeout), and a cancelled leader settles the future in `finally`.
+    "chat_ownership_tool.py",
 ]
 
 

@@ -764,6 +764,14 @@ enum SentimentTrendWindow: String, CaseIterable, Equatable {
         case .quarter: return 90
         }
     }
+
+    /// The window the app FETCHES — the widest. The backend's 7D and 30D answers are exact
+    /// cuts of its 90D answer (same day rule, tracking start, partial days and history
+    /// status — pinned by `test_every_window_is_an_exact_cut_of_the_90_day_answer`), so ONE
+    /// request serves every window and a toggle redraws without waiting on the network
+    /// (`SentimentTrend.trimmed`). TestFlight 1.0 (11): one request per window made the first
+    /// tap on each window lag behind a spinner and the previous window's numbers.
+    static let widest: SentimentTrendWindow = allCases.max { $0.days < $1.days } ?? .quarter
 }
 
 extension SentimentTrendWindow {
@@ -835,7 +843,10 @@ struct SentimentTrend: Equatable {
     let window: SentimentTrendWindow
     /// Oldest first.
     let days: [SentimentTrendDay]
-    /// The first ET day this scope was scored at all (not just in this window).
+    /// The OLDEST ET day this scope has a scored headline on file (not just in this window). The
+    /// backend log keeps `retentionDays`, and nothing records a scope's first day beyond that:
+    /// this is the day scoring began only until the history reaches that edge
+    /// (`historyReachesRetentionEdge`); after it, just the oldest day still kept.
     let trackingSince: Date?
     /// A `var` with a default so the memberwise init (previews) keeps compiling.
     var historyStatus: SentimentHistoryStatus? = nil
@@ -844,6 +855,22 @@ struct SentimentTrend: Equatable {
     static let minimumTrackedDays = 3
     /// Below this many tracked days the chart opens on 7D rather than a mostly empty 30D.
     static let shortHistoryDays = 7
+    /// How many ET days the backend's label log keeps (`RETENTION_DAYS`, test-pinned equal).
+    static let retentionDays = 120
+
+    /// True when `trackingSince` sits at — or past — the log's retention edge. The backend
+    /// sweep deletes days before `today − retentionDays`, so a scope whose oldest kept day is
+    /// that old has lost (or loses at the next sweep) its first days, and the date moves
+    /// forward every day: the card then says "120+ days", never a "since" date that would
+    /// pass for the start of scoring. Same rule as the backend's `at_retention_edge`.
+    func historyReachesRetentionEdge(
+        today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
+    ) -> Bool {
+        guard let since = trackingSince,
+              let edge = calendar.date(byAdding: .day, value: -Self.retentionDays,
+                                       to: calendar.startOfDay(for: today)) else { return false }
+        return calendar.startOfDay(for: since) <= edge
+    }
 
     var isBuildingHistory: Bool { historyStatus == .building }
 
@@ -864,8 +891,10 @@ struct SentimentTrend: Equatable {
         trackedDays(today: today, calendar: calendar) >= Self.minimumTrackedDays
     }
 
-    /// Calendar days from the scope's first scored day through `today`, inclusive; 0 when
-    /// nothing was ever scored. A property of the SCOPE (`trackingSince`), never of the window.
+    /// Calendar days from the scope's oldest scored day on file through `today`, inclusive; 0
+    /// when nothing was ever scored. A property of the SCOPE (`trackingSince`), never of the
+    /// window. Only its small values matter (`minimumTrackedDays`, `shortHistoryDays`), which
+    /// the retention edge (`retentionDays`) never reaches.
     func trackedDays(
         today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
     ) -> Int {
@@ -876,8 +905,9 @@ struct SentimentTrend: Equatable {
         return max(0, span + 1)
     }
 
-    /// The same trend cut to a shorter window (the adaptive 7D view is cut from the 30D
-    /// answer, so it costs no request). Never widens: asking for a longer window returns self.
+    /// The same trend cut to a shorter window: today and the `target.days − 1` ET days before
+    /// it — the backend's own window rule — so every window the toggle offers is cut from the
+    /// one 90-day answer at no request. Never widens: asking for a longer window returns self.
     func trimmed(
         to target: SentimentTrendWindow,
         today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current

@@ -430,6 +430,8 @@ def test_declarations_default_to_the_full_equity_set(monkeypatch):
     equity = {
         "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
         "get_ticker_news", "explain_price_move", "get_market_snapshot",
+        # Who holds the stock, from its filings (TestFlight 1.0 (11), 2026-10-05).
+        "check_ownership_filings",
     }
     assert _tool_names() == equity
     assert _tool_names("STOCK") == equity

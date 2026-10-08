@@ -31,76 +31,19 @@ from app.utils.period_labels import (
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
-    MATURE_SAMPLE_FLOOR,
-    _period_sort_key,
+    benchmark_levels,
+    flatten_benchmark_values,
     get_sector_benchmark_lookup,
-    hold_back_thin_benchmarks,
     lookup_failed,
+    series_peer_level,
 )
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
 
 
-# `_hold_back_thin_benchmarks` moved to sector_benchmark_lookup (shared with
-# profit_power_service); re-exported here so existing imports keep working.
-_hold_back_thin_benchmarks = hold_back_thin_benchmarks
-
-
-def _held_back_levels(
-    rich: Dict[str, Dict[str, Dict[str, Any]]],
-) -> Dict[str, Dict[str, Optional[str]]]:
-    """``{metric: {period: "industry" | "sector" | None}}`` — the peer level of the cell
-    whose VALUE each period shows after `_hold_back_thin_benchmarks`.
-
-    A thin cell is drawn with the latest MATURE value at or before it, and that donor can
-    sit on the other level (the lookup falls back industry → sector per cell). Mirrors the
-    hold-back's selection exactly (same floor, same sort key, same at-or-before rule), so
-    the legend names the peer group the plotted point actually came from.
-    """
-    out: Dict[str, Dict[str, Optional[str]]] = {}
-    for metric, cells in rich.items():
-        mature_sorted = sorted(
-            (
-                (_period_sort_key(lab), c.get("level"))
-                for lab, c in cells.items()
-                if (c.get("n") or 0) >= MATURE_SAMPLE_FLOOR and c.get("value") is not None
-            ),
-            key=lambda t: t[0],
-        )
-        levels: Dict[str, Optional[str]] = {}
-        for period, cell in cells.items():
-            if (cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
-                levels[period] = cell.get("level")
-                continue
-            pk = _period_sort_key(period)
-            prior = [lvl for (sk, lvl) in mature_sorted if sk <= pk]
-            levels[period] = prior[-1] if prior else cell.get("level")
-        out[metric] = levels
-    return out
-
-
-def _series_peer_level(
-    points: List[Dict[str, Any]],
-    metric_benchmarks: Dict[str, Any],
-    metric_levels: Dict[str, Optional[str]],
-) -> Optional[str]:
-    """Peer group a series' dashed line comes from: a majority vote over the points that
-    actually DRAW a benchmark value and whose cell declares a level. A tie goes to
-    "industry" only when there are votes (profit_power_service's rule); no votes → None,
-    so the client keeps its neutral wording instead of claiming "Industry" for a line
-    that does not exist."""
-    votes: List[str] = []
-    for p in points:
-        key = p.get("_match_period", p["period"])
-        if not key or metric_benchmarks.get(key) is None:   # "" = no peer value drawn
-            continue
-        level = metric_levels.get(key)
-        if level in ("industry", "sector"):
-            votes.append(level)
-    if not votes:
-        return None
-    return "industry" if votes.count("industry") >= votes.count("sector") else "sector"
+# Moved to sector_benchmark_lookup (shared with profit_power_service).
+_series_peer_level = series_peer_level
 
 # ── In-memory cache ───────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
@@ -117,7 +60,12 @@ _CACHE_TTL = 300  # 5 minutes
 #     still show a peer value 6-12 months off.
 # 4 (2026-09-30): quarterly peers come from the CALENDAR-quarter benchmark rows and join
 #     on the calendar quarter of the period end; the off-calendar hide is gone.
-_GROWTH_PAYLOAD_VERSION = 4
+# 5 (2026-10-07): ONE peer group per chart line (`get_benchmark_series`): a series' line
+#     is its industry's medians when that industry is mature (>= 20 companies) at the
+#     line's NEWEST period — its older, thinner periods included, each that industry's own
+#     median — else the sector's. A period that is not fully reported is hidden, and no
+#     period borrows another period's value; the unused QoQ peer value is gone.
+_GROWTH_PAYLOAD_VERSION = 5
 _VERSION_KEY = "payload_version"
 
 
@@ -830,13 +778,11 @@ class GrowthService:
             "eps_yoy", "revenue_yoy", "net_income_yoy",
             "operating_income_yoy", "fcf_yoy",
         ]
-        all_qoq_metrics = ["eps_qoq", "revenue_qoq"]
 
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
-        benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
-        # Peer level of the value each benchmark cell SHOWS (after the hold-back), per
-        # metric and period label — feeds `peer_group_levels` for the legend wording.
+        # Peer level of the value each benchmark cell SHOWS, per metric and period
+        # label — feeds `peer_group_levels` for the legend wording.
         levels_annual: Dict[str, Dict[str, Optional[str]]] = {}
         levels_quarterly: Dict[str, Dict[str, Optional[str]]] = {}
         # Which benchmark reads FAILED (a DB error inside the lookup), as opposed to
@@ -853,31 +799,28 @@ class GrowthService:
             # Sequential on purpose: the keys differ, and a thread per call would only
             # add concurrent use of the shared sync client.
             rich_annual = await asyncio.to_thread(
-                lookup.get_benchmarks, industry, sector, all_yoy_metrics, "annual",
+                lookup.get_benchmark_series, industry, sector, all_yoy_metrics, "annual",
             )
             # Quarterly peers are the CALENDAR-quarter rows (migration 184): never the
             # legacy fiscal-keyed 'quarterly' rows, which pooled peer quarters 3-10
             # months apart for every off-calendar company.
             rich_quarterly = await asyncio.to_thread(
-                lookup.get_benchmarks, industry, sector, all_yoy_metrics,
-                CALENDAR_QUARTER_PERIOD_TYPE,
-            )
-            rich_qoq_quarterly = await asyncio.to_thread(
-                lookup.get_benchmarks, industry, sector, all_qoq_metrics,
+                lookup.get_benchmark_series, industry, sector, all_yoy_metrics,
                 CALENDAR_QUARTER_PERIOD_TYPE,
             )
             if lookup_failed(rich_annual):
                 failed_lookups.append("annual")
-            if lookup_failed(rich_quarterly) or lookup_failed(rich_qoq_quarterly):
+            if lookup_failed(rich_quarterly):
                 failed_lookups.append("quarterly")
-            # Hold thin just-completed periods back to the last mature (n>=20) value
-            # so a contaminated latest-FY median can't make a real grower read weak.
-            # The levels are read from the RICH cells first: the flatten discards them.
-            levels_annual = _held_back_levels(rich_annual)
-            levels_quarterly = _held_back_levels(rich_quarterly)
-            benchmarks_annual = _hold_back_thin_benchmarks(rich_annual)
-            benchmarks_quarterly = _hold_back_thin_benchmarks(rich_quarterly)
-            benchmarks_qoq_quarterly = _hold_back_thin_benchmarks(rich_qoq_quarterly)
+            # One peer group per line (`get_benchmark_series`): every point of a metric's
+            # line is the same group's median for its own period, and the lookup already
+            # hid incomplete periods, so a just-closed year draws NO peer value (never an
+            # earlier year's). The levels are read from the RICH cells: the flatten
+            # discards them.
+            levels_annual = benchmark_levels(rich_annual)
+            levels_quarterly = benchmark_levels(rich_quarterly)
+            benchmarks_annual = flatten_benchmark_values(rich_annual)
+            benchmarks_quarterly = flatten_benchmark_values(rich_quarterly)
 
         if failed_lookups:
             logger.warning(
@@ -891,11 +834,8 @@ class GrowthService:
             points: List[Dict],
             metric_name: str,
             benchmarks: Dict[str, Dict[str, float]],
-            qoq_metric_name: str = "",
-            qoq_benchmarks: Optional[Dict[str, Dict[str, float]]] = None,
         ) -> List[GrowthDataPointSchema]:
             metric_benchmarks = benchmarks.get(metric_name, {})
-            qoq_metric_benchmarks = (qoq_benchmarks or {}).get(qoq_metric_name, {})
 
             def _peer(cells: Dict[str, float], p: Dict[str, Any]) -> Optional[float]:
                 # Match on the join key (_match_period), not the fiscal display label,
@@ -910,7 +850,8 @@ class GrowthService:
                     value=p["value"],
                     yoy_change_percent=p["yoy_change_percent"],
                     sector_average_yoy=_peer(metric_benchmarks, p),
-                    sector_average_qoq=_peer(qoq_metric_benchmarks, p),
+                    # sector_average_qoq stays None: no client reads a QoQ peer value,
+                    # and its lookup's failure used to degrade the whole build.
                 )
                 for p in points
             ]
@@ -937,15 +878,9 @@ class GrowthService:
         response = GrowthResponse(
             symbol=ticker,
             eps_annual=_to_schemas(eps_annual_points, "eps_yoy", benchmarks_annual),
-            eps_quarterly=_to_schemas(
-                eps_quarterly_points, "eps_yoy", benchmarks_quarterly,
-                "eps_qoq", benchmarks_qoq_quarterly,
-            ),
+            eps_quarterly=_to_schemas(eps_quarterly_points, "eps_yoy", benchmarks_quarterly),
             revenue_annual=_to_schemas(rev_annual_points, "revenue_yoy", benchmarks_annual),
-            revenue_quarterly=_to_schemas(
-                rev_quarterly_points, "revenue_yoy", benchmarks_quarterly,
-                "revenue_qoq", benchmarks_qoq_quarterly,
-            ),
+            revenue_quarterly=_to_schemas(rev_quarterly_points, "revenue_yoy", benchmarks_quarterly),
             net_income_annual=_to_schemas(ni_annual_points, "net_income_yoy", benchmarks_annual),
             net_income_quarterly=_to_schemas(
                 ni_quarterly_points, "net_income_yoy", benchmarks_quarterly,

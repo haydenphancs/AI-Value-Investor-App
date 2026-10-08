@@ -540,7 +540,11 @@ def test_minimal_payload_decodes_under_swift_optionality(filename, dto, model):
 _NEW_SWIFT_FIELDS = {
     ("HomeDashboardModels.swift", "TrendingThemeDTO"): ["updatedOn", "changeCount", "return1m", "spark1m"],
     ("ThemeDetailModels.swift", "ThemeConstituentDTO"): ["role", "isNew"],
-    ("ThemeDetailModels.swift", "ThemeDetailDTO"): ["updatedOn", "changes", "performance", "insight", "news"],
+    # + the plan gate (2026-10-04). Their Pydantic defaults are False/None/0, not None/[], so
+    # they are pinned in tests/test_theme_detail_entitlement.py rather than in _NEW_PY_FIELDS.
+    ("ThemeDetailModels.swift", "ThemeDetailDTO"): ["updatedOn", "changes", "performance", "insight", "news",
+                                                    "isLocked", "tierRequired", "lockedConstituentsCount",
+                                                    "lockedChangesCount"],
 }
 _NEW_PY_FIELDS = {
     TrendingThemeResponse: ["updated_on", "change_count", "return_1m", "spark_1m"],

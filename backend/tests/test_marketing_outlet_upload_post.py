@@ -26,6 +26,7 @@ in-memory PostgREST fake; settings are monkeypatched; backend/conftest.py blocks
 
 from __future__ import annotations
 
+import asyncio
 import email
 import email.policy
 import hashlib
@@ -589,6 +590,34 @@ async def test_usage_is_a_best_effort_measurement(up, ledger):
     assert outcome.kind == SUBMITTED
     meta = outcome.publish_meta["upload_post"]
     assert meta["usage_before"] is None and meta["usage_after"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_slow_usage_read_never_holds_the_outcome(up, ledger, monkeypatch):
+    """Review 2026-10-07: the quota reads around an upload had no bound of their own (one attempt, a 30 s
+    read timeout), and the /go early window opens only once `send` returns — with the post already live —
+    so a slow /uploadposts/me let a live post's first scanner taps count as people. Each read is now cut
+    off after USAGE_READ_TIMEOUT_SECONDS: the same outcome, the reading None."""
+    assert 0 < oup.USAGE_READ_TIMEOUT_SECONDS <= 2.0
+    calls: List[int] = []
+
+    async def slow_usage() -> Dict[str, Any]:
+        calls.append(1)
+        await asyncio.sleep(30)
+        return {"count": 99, "limit": 10}
+
+    monkeypatch.setattr(upload_post, "get_usage", slow_usage)
+    monkeypatch.setattr(oup, "USAGE_READ_TIMEOUT_SECONDS", 0.05)
+    up.answer("/upload", _ack(_rid("tiktok")))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    outcome, _ = await _send("tiktok")
+    assert loop.time() - started < 5.0                                  # never the 30 s read
+    assert outcome.kind == SUBMITTED and len(calls) == 2                # before AND after the upload
+    meta = outcome.publish_meta["upload_post"]
+    assert meta["usage_before"] is None and meta["usage_after"] is None
+    assert meta["request_id"] == _rid("tiktok") and _ts(meta["submitted_at"])
+    assert len(up.uploads) == 1                                         # the upload itself went out once
 
 
 @pytest.mark.asyncio

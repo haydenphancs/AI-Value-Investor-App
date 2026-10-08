@@ -61,6 +61,7 @@ from app.schemas.marketing import (
     WORKER_RUN_STATUSES,
 )
 from app.utils.market_hours import ET
+from app.utils.postgrest_paging import PAGE_SIZE as POSTGREST_MAX_ROWS
 from app.utils.supabase_async import sb_exec
 from app.utils.supabase_errors import is_unique_violation
 
@@ -152,8 +153,10 @@ class MarketingRunNotHeld(MarketingRunError):
 class MarketingRequestInvalid(MarketingRunError):
     """The worker asked for something the contract forbids — a (platform, format) the server
     does not record, a media post with no media, a stage moving backwards, a status only the
-    claim or the publisher may write. 422 MARKETING_REQUEST_INVALID: the same request can never
-    succeed, so it must not be retried as a 5xx."""
+    claim or the publisher may write — or `create_posts` met a run whose content class has no
+    post gate (anything but class A, until another class gets its own branch). 422
+    MARKETING_REQUEST_INVALID: the same request can never succeed, so it must not be retried as a
+    5xx."""
 
 
 class MarketingJudgeNotEnforced(MarketingRunError):
@@ -161,7 +164,8 @@ class MarketingJudgeNotEnforced(MarketingRunError):
     (`shadow` accepts drafts the judge flagged; `off` never asked it). Such a script may be voiced
     and rendered for inspection, but it never becomes a post — the judge is the gate that makes a
     reviewed, and later an auto-published, post safe (§12.5). 409 MARKETING_JUDGE_NOT_ENFORCED:
-    deterministic for the run, so the worker closes the day `skipped` instead of retrying."""
+    deterministic for the run, so the worker closes the day `skipped` instead of retrying. The
+    class-A branch only: any other content class is `MarketingRequestInvalid`."""
 
 
 class MarketingAssetMismatch(MarketingRunError):
@@ -357,33 +361,99 @@ UNKNOWN_CHARGE_OP = "unknown"
 _CHARGE_OP_MAX_CHARS = 64
 
 
+#: One journal entry beyond ±$1,000 is a hand edit, not a charge (X's dearest op is $0.20). Only the
+#: digest's weekly cost line applies this bound — it reads such an entry as UNREADABLE; the X cap
+#: never does (it keeps counting every readable amount: fail-closed).
+CHARGE_MICROS_BOUND = 10 ** 9
+
+
+def _journal(post: Dict[str, Any]) -> List[Any]:
+    """A post's `metadata.charges` journal, or [] when there is none (or it is not a list)."""
+    meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    journal = meta.get("charges")
+    return journal if isinstance(journal, list) else []
+
+
+def _charge_entry(entry: Any) -> Optional[Tuple[str, Optional[int], Optional[datetime]]]:
+    """(op, micros, at) of ONE journal entry — the reading rule shared by the X cap
+    (`_dated_charges`) and the weekly cost line (`charges_between`). None for a non-dict entry.
+    `micros` is None when the amount is missing or cannot be read (a bool, not a number, one too
+    large for an int); `at` is None when the time cannot be read; a missing or junk op is
+    `UNKNOWN_CHARGE_OP`."""
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("micros")
+    micros: Optional[int] = None
+    if raw is not None and not isinstance(raw, bool):
+        try:
+            micros = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            micros = None
+    op = entry.get("op")
+    op = op[:_CHARGE_OP_MAX_CHARS] if isinstance(op, str) and op.strip() else UNKNOWN_CHARGE_OP
+    return op, micros, _parse_ts(entry.get("at"))
+
+
 def _dated_charges(post: Dict[str, Any], since: datetime) -> Iterator[Tuple[str, int]]:
     """(op, micros) of every `metadata.charges` entry of `post` dated at or after `since` — the ONE
     reading rule behind `charges_since` and `charges_by_op_since`. An entry whose time cannot be read
     is COUNTED (an over-count can only pause X early); one whose amount is missing or cannot be read
     (a bool, not a number, one too large for an int) is skipped — never an `op: 0` line in the
-    digest; a missing or junk op is `UNKNOWN_CHARGE_OP`."""
-    meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
-    journal = meta.get("charges")
-    if not isinstance(journal, list):
+    digest; a missing or junk op is `UNKNOWN_CHARGE_OP`. Entries are parsed by `_charge_entry`, the
+    rule the weekly cost line shares."""
+    journal = _journal(post)
+    if not journal:
         return
     if since.tzinfo is None:   # naive = UTC, as everywhere here (an aware/naive compare would raise)
         since = since.replace(tzinfo=timezone.utc)
     for entry in journal:
-        if not isinstance(entry, dict):
+        parsed = _charge_entry(entry)
+        if parsed is None or parsed[1] is None:
             continue
-        raw = entry.get("micros")
-        if raw is None or isinstance(raw, bool):
-            continue
-        try:
-            micros = int(raw)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        at = _parse_ts(entry.get("at"))
+        op, micros, at = parsed
         if at is None or at >= since:
-            op = entry.get("op")
-            op = op[:_CHARGE_OP_MAX_CHARS] if isinstance(op, str) and op.strip() else UNKNOWN_CHARGE_OP
             yield op, micros
+
+
+@dataclass(frozen=True)
+class ChargeWindow:
+    """What one post's journal holds for a half-open window: `micros` summed over the readable
+    entries dated inside it, `undated` entries whose time cannot be read (never summed into ANY
+    window — a weekly figure that counted them would count them every week), and `unreadable`
+    entries dated inside it whose amount cannot be read or is beyond `CHARGE_MICROS_BOUND`."""
+
+    micros: int = 0
+    undated: int = 0
+    unreadable: int = 0
+
+
+def charges_between(post: Dict[str, Any], start: datetime, end: datetime) -> ChargeWindow:
+    """A post's journal over [start, end) — the weekly cost line's reader. Pure and never raises;
+    naive instants are UTC. Unlike the X cap's `_dated_charges` it has an upper bound, it NEVER
+    counts an undated entry (it reports how many there were), and an in-window amount it cannot read
+    makes the window unreadable instead of being skipped — the cost line says "unreadable", never a
+    wrong number."""
+    journal = _journal(post)
+    if not journal:
+        return ChargeWindow()
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    micros_sum = undated = unreadable = 0
+    for entry in journal:
+        parsed = _charge_entry(entry)
+        if parsed is None:
+            continue
+        _op, micros, at = parsed
+        if at is None:
+            undated += 1
+        elif start <= at < end:
+            if micros is None or abs(micros) > CHARGE_MICROS_BOUND:
+                unreadable += 1
+            else:
+                micros_sum += micros
+    return ChargeWindow(micros=micros_sum, undated=undated, unreadable=unreadable)
 
 
 def charges_since(post: Dict[str, Any], since: datetime) -> int:
@@ -1481,16 +1551,29 @@ class MarketingRunService:
             raise MarketingScriptNotReady(
                 f"run {run_id} has no accepted script (status={(script or {}).get('status')})"
             )
-        # The semantic judge is the gate behind every class-A post (§12.5): `shadow` accepts drafts
-        # it flagged and `off` never asks it, so a package it did not check in `enforce` mode never
-        # becomes a post — whatever MARKETING_AUTO_PUBLISH or a reviewer later says. The writer
-        # records the mode IN the package (`output.judge.mode`; absent means off).
-        if str(run.get("content_class") or "A") == "A":
+        # Every content class needs its OWN post gate, dispatched explicitly — never "not A → pass".
+        # Class A: the semantic judge (§12.5): `shadow` accepts drafts it flagged and `off` never asks
+        # it, so a package it did not check in `enforce` mode never becomes a post — whatever
+        # MARKETING_AUTO_PUBLISH or a reviewer later says. The writer records the mode IN the package
+        # (`output.judge.mode`; absent means off). Any other value — class C before its template gate
+        # exists as its own branch, a NULL, an unknown or mis-cased letter — is refused before any
+        # asset read or INSERT. (Today only `_heal_mirror` writes the class, always "A", so this is
+        # reachable only through a hand edit; it used to let every non-A value through ungated.)
+        content_class = run.get("content_class")
+        if content_class == "A":
             judge = output.get("judge") if isinstance(output.get("judge"), dict) else {}
             if judge.get("mode") != "enforce":
                 raise MarketingJudgeNotEnforced(
                     f"run {run_id}: the accepted script was judged in mode {judge.get('mode') or 'off'!r}, "
                     "not 'enforce' — no post is recorded (set MARKETING_JUDGE_MODE=enforce on the web)")
+        else:
+            shown = str(content_class)[:20]
+            logger.error("marketing create_posts REFUSED run_id=%s: content_class %r has no post gate "
+                         "(only class A, judged in enforce mode, becomes a post) — nothing recorded",
+                         run_id, shown)
+            raise MarketingRequestInvalid(
+                f"run {run_id}: content_class {shown!r} has no post gate — only class A, judged in "
+                "enforce mode, becomes a post; nothing recorded")
         copy_by_platform = output.get("posts") if isinstance(output.get("posts"), dict) else {}
         wants_assets = any(spec.get("asset_ids") for spec in specs)
         assets = {a.get("id"): a for a in await self.list_assets(run_id)} if wants_assets else {}
@@ -2151,6 +2234,36 @@ class MarketingRunService:
                 out[op] = out.get(op, 0) + micros
         return out
 
+    async def list_charge_rows_since(self, platform: str, since: Any, *, limit: int = 500) -> List[Dict[str, Any]]:
+        """`{id, metadata, updated_at}` of every `platform` post touched at or after `since` (an
+        instant; a naive one is UTC), oldest touch first — the weekly cost line's charge read.
+        Every journal write bumps `updated_at` in the same UPDATE (`_merged_post_patch`), and a
+        reversal dated at the charge it reverses is still WRITTEN now, so every entry dated at or
+        after `since` sits on a returned row. Unlike the cap's reads this one is never a partial
+        sum: it asks for `limit + 1` rows and RAISES when more than `limit` come back. The probe
+        must fit in ONE response: PostgREST cuts every answer at its max-rows (≈1,000 here,
+        `postgrest_paging.PAGE_SIZE`) whatever `.limit()` asks, so at a limit of 1,000 the probe row
+        could never arrive and a cut answer would read as complete — a limit whose probe does not
+        fit is a ValueError, before any read."""
+        since_at = _as_instant(since, "since")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError(f"limit must be a positive int, not {limit!r}")
+        if limit + 1 > POSTGREST_MAX_ROWS:
+            raise ValueError(f"limit {limit} + 1 does not fit in one PostgREST response ({POSTGREST_MAX_ROWS} "
+                             "rows) — the probe row could never arrive")
+        res = await _exec(
+            self.sb.table(POSTS).select("id,metadata,updated_at")
+            .eq("platform", platform).gte("updated_at", _ts_filter(since_at))
+            .order("updated_at").limit(limit + 1),
+            op="list_charge_rows_since", platform=platform, since=_ts_filter(since_at),
+        )
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) > limit:
+            raise MarketingRunError(
+                f"list_charge_rows_since: more than {limit} {platform} posts touched since "
+                f"{_ts_filter(since_at)} — the cost line is never a partial sum")
+        return rows
+
     async def link_hits_between(self, start_day: Any, end_day: Any) -> List[Dict[str, Any]]:
         """`/go` taps — `{campaign, day, hits}` rows of `marketing_link_hits` for ET days
         `start_day`..`end_day` INCLUSIVE, oldest day first. Raw values: the caller sanitises `hits`.
@@ -2271,6 +2384,32 @@ class MarketingRunService:
         rows = [r for r in (getattr(res, "data", None) or []) if r.get("source_ref")]
         rows.sort(key=lambda r: str(r.get("run_date") or ""), reverse=True)
         return [str(r["source_ref"]) for r in rows][:limit]
+
+    async def script_tokens_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
+        """`{run_date, tokens_used}` of the scripts dated `start_date`..`end_date` INCLUSIVE (ET days),
+        oldest first — the weekly cost line's Gemini read. Raw values: the caller validates them. One
+        script per run (PK run_id) and one run per day (UNIQUE run_date) bound the read by the day
+        count; more rows than days, or two rows on one day (a hand edit — possible in a sparse window
+        too), cannot be told apart from a double count, so it RAISES instead of returning a sum that
+        might count one twice. An inverted window reads nothing."""
+        start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
+        if start > end:
+            return []
+        days = (end - start).days + 1
+        res = await _exec(
+            self.sb.table(SCRIPTS).select("run_date,tokens_used")
+            .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
+            .order("run_date").limit(days + 1),
+            op="script_tokens_between", start=start, end=end,
+        )
+        rows = [{"run_date": r.get("run_date"), "tokens_used": r.get("tokens_used")}
+                for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        days_seen = [str(r["run_date"]) for r in rows]
+        if len(rows) > days or len(set(days_seen)) != len(days_seen):
+            raise MarketingRunError(
+                f"script_tokens_between: {len(rows)} scripts for the {days} days {start}..{end} and a day "
+                "holds two — the cost line refuses to sum them")
+        return rows
 
 
 async def sb_exec_storage(fn):

@@ -32,7 +32,13 @@ HONESTY RULES the endpoint and the chart rely on
   * Days with no labelled article are ABSENT, never zero: "nothing scored" is not "no news".
   * The labels cover what the sweeper and readers enriched — Market plus the top-200
     watchlist tickers, the newest 25 in-window articles per pass — not every article
-    published. The app says "Headlines Cay AI scored", never "all news".
+    published. The card counts "headlines", never "all news", and the chat is told they are
+    the headlines Cay AI scored (:func:`summarize_tone`).
+  * ``tracking_since`` is the OLDEST DAY STILL ON FILE (``MIN(et_day)``), not a stored first
+    day: the sweep keeps :data:`RETENTION_DAYS` and nothing records a scope's start beyond it.
+    It is the day scoring began only until the feed's history reaches that edge; from then on
+    it moves forward daily, so the card says "120+ days" and the chat "at least 120 days"
+    instead of a date (:func:`at_retention_edge`, :func:`since_phrase`).
 """
 
 from __future__ import annotations
@@ -223,7 +229,7 @@ def _count(value: Any) -> int:
         return 0
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # OverflowError: int(float("inf"))
         return 0
     return n if n > 0 else 0
 
@@ -307,6 +313,51 @@ def _fmt_day(d: date) -> str:
     return f"{d:%a %b} {d.day}"
 
 
+def at_retention_edge(tracking_since: date, today: date) -> bool:
+    """True when a scope's oldest label on file sits at (or past) the log's retention edge.
+
+    ``tracking_since`` is ``MIN(et_day)`` over what the log still holds, and
+    :meth:`NewsSentimentTrendService.sweep_expired` deletes every day before
+    ``today − RETENTION_DAYS``. So once a scope's oldest kept day is that old, its first days
+    are gone (or go at the next sweep) and the date no longer marks when Cay AI started scoring
+    the feed — it moves forward every day. The app mirrors this rule
+    (``SentimentTrend.historyReachesRetentionEdge``, test-pinned).
+    """
+    return tracking_since <= today - timedelta(days=RETENTION_DAYS)
+
+
+def since_phrase(tracking_since: Optional[date], today: date) -> str:
+    """How far back a scope's scored headlines go, as a clause for chat grounding ("" when the
+    answer carried no date). Pure.
+
+    What the data supports, and no more. The log keeps RETENTION_DAYS and no record of a
+    scope's first scored day survives the sweep, so the date is worded as the oldest headline
+    ON FILE — the start of scoring for a young feed, but after a gap in a sparse feed's coverage
+    an older, swept day can hide behind it. At the retention edge the date is dropped for "at
+    least RETENTION_DAYS days", which stays true and stops the daily drift.
+    """
+    if tracking_since is None:
+        return ""
+    if at_retention_edge(tracking_since, today):
+        # True on EVERY edge day, including exactly RETENTION_DAYS back, when that day is still
+        # on file (the sweep deletes only older days) — so never claim the first day is gone.
+        return (f"; scored for at least {RETENTION_DAYS} days (the log keeps only the last "
+                f"{RETENTION_DAYS} days and records no start date)")
+    return (f"; oldest scored headline on file: {_fmt_day(tracking_since)} "
+            f"(the log keeps {RETENTION_DAYS} days)")
+
+
+_BUILDING_NOTE = (
+    "This feed's 90-day history is still being built, so older days in this window "
+    "are incomplete: do not read a trend from them yet."
+)
+#: The same caveat when no window detail carries it (the focus window has no scored day).
+_BUILDING_NOTE_WINDOWS = (
+    "This feed's 90-day history is still being built, so its older days are incomplete: "
+    "do not read a trend from them yet."
+)
+
+
 def summarize_trend(
     series: List[Dict[str, Any]], *, days: int, today: date, tracking_since: Optional[date] = None,
     history_status: Optional[str] = None,
@@ -316,7 +367,7 @@ def summarize_trend(
     Pure and deterministic, so the chat sees exactly the numbers the chart draws — for the
     window the chart is showing (`days`). While the 90-day history is still being built
     (`history_status` "building"), older days are NOT final and the text says so: the chart's
-    own footer says "filling in 90 days…", and the model must not call a trend from a history
+    legend row says "filling in 90 days…", and the model must not call a trend from a history
     that is still arriving.
     """
     if not series:
@@ -327,7 +378,7 @@ def summarize_trend(
     total = bull + bear + neut
     parts = [
         f"News tone over the last {days} days (headlines Cay AI scored, by ET day"
-        + (f"; tracked since {_fmt_day(tracking_since)}" if tracking_since else "")
+        + since_phrase(tracking_since, today)
         + f"): {total} scored — {bull} bullish, {bear} bearish, {neut} neutral; "
         f"net tone {net_score(bull, bear, total):+d} on a -100..+100 scale."
     ]
@@ -358,11 +409,172 @@ def summarize_trend(
             "overnight and after weekends)" + ("." if building else "; earlier days are final.")
         )
     if building:
-        parts.append(
-            "This feed's 90-day history is still being built, so older days in this window "
-            "are incomplete: do not read a trend from them yet."
-        )
+        parts.append(_BUILDING_NOTE)
     return " ".join(parts)
+
+
+#: The News Tone card's summary line calls a window "Mostly positive" at a net score of +20 or
+#: more, "Mostly negative" at -20 or less, else "Mixed" (iOS `NewsSentimentTrendChart.toneWord`;
+#: pinned equal by tests/test_chat_updates_scope_context.py), so the chat can name the card's
+#: verdict in the card's own words.
+TONE_WORD_THRESHOLD = 20
+
+
+def tone_word(net: int) -> str:
+    """The word the News Tone card's summary line shows for a window's net score."""
+    if net >= TONE_WORD_THRESHOLD:
+        return "Mostly positive"
+    if net <= -TONE_WORD_THRESHOLD:
+        return "Mostly negative"
+    return "Mixed"
+
+
+def _signed(value: int) -> str:
+    """The card's own sign rule (iOS `signed`): "+21", "0", "-7" — never "+0"."""
+    return f"+{value}" if value > 0 else str(value)
+
+
+def _series_day(value: Any) -> Optional[date]:
+    """A wire day ("YYYY-MM-DD", or a plain `date`) → the date, or None. A `datetime` is an
+    instant, not a calendar day, and is refused (it would also break every date comparison)."""
+    if isinstance(value, datetime):
+        return None
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def coerce_series(series: Any) -> List[Dict[str, Any]]:
+    """A wire series made safe to summarise, oldest first. Pure; never raises.
+
+    ``get_trend`` already serves :func:`shape_series` output, but the chat reads whatever the
+    service (or its cache) hands back, and one malformed row must cost that row — never the
+    whole tone block (:func:`summarize_trend` indexes keys, so a bad row raised and dropped the
+    trend as a "failed read"). Mirrors the iOS decoder (``SentimentTrend(dto:)``): a row that
+    is not a dict or cannot be dated is skipped, the first row for a day wins, counts are
+    non-negative ints (``_count``), an all-zero day is dropped, ``total`` and ``net_score``
+    are recomputed from the counts, and ``is_partial`` holds only when it is literally true.
+    """
+    if not isinstance(series, (list, tuple)):
+        return []
+    by_day: Dict[date, Dict[str, Any]] = {}
+    for row in series:
+        if not isinstance(row, dict):
+            continue
+        day = _series_day(row.get("date"))
+        if day is None or day in by_day:
+            continue
+        counts = {s: _count(row.get(s)) for s in SENTIMENTS}
+        total = sum(counts.values())
+        if total == 0:
+            continue
+        by_day[day] = {
+            "date": day.isoformat(),
+            "bullish": counts["bullish"],
+            "bearish": counts["bearish"],
+            "neutral": counts["neutral"],
+            "total": total,
+            "net_score": net_score(counts["bullish"], counts["bearish"], total),
+            "is_partial": row.get("is_partial") is True,
+        }
+    return [by_day[d] for d in sorted(by_day)]
+
+
+def window_slice(series: List[Dict[str, Any]], *, days: int, today: date) -> List[Dict[str, Any]]:
+    """The days of a (coerced) series inside the ``days``-day window ending ``today``.
+
+    The endpoint's own window rule (``_fetch``: ``since = today − (days − 1)``), and the rule
+    the app cuts its 7D / 30D views from the 90-day answer with (``SentimentTrend.trimmed``):
+    a window of N days is today and the N − 1 ET days before it.
+    """
+    start = today - timedelta(days=days - 1)
+    return [d for d in series if start <= date.fromisoformat(d["date"]) <= today]
+
+
+def summarize_tone_windows(
+    series: Any, *, today: date, tracking_since: Optional[date] = None,
+) -> Optional[str]:
+    """The News Tone card as one compact clause per window its toggle offers (7D / 30D / 90D),
+    for chat grounding. Pure. None when the widest window has no scored headline.
+
+    Every window is cut from ONE series (the 90-day answer) by :func:`window_slice`, so each
+    clause equals what the card shows on that window. Written in the card's words — Positive /
+    Negative / Neutral, the headline count, the net score with the card's sign rule and the
+    summary line's tone word — with one sentence mapping them to Cay AI's bullish / bearish /
+    neutral labels, which the headline list and the day-level text use. A window with no
+    scored headline says so: the card shows "No scored headlines in this window yet." there.
+    """
+    rows = coerce_series(series)
+    windows: List[Tuple[int, int, int, int]] = []
+    for days in sorted(TREND_DAYS):
+        cut = window_slice(rows, days=days, today=today)
+        windows.append((
+            days,
+            sum(d["bullish"] for d in cut),
+            sum(d["bearish"] for d in cut),
+            sum(d["neutral"] for d in cut),
+        ))
+    if sum(windows[-1][1:]) == 0:
+        return None
+    clauses = []
+    for days, bull, bear, neut in windows:
+        total = bull + bear + neut
+        if total == 0:
+            clauses.append(f"{days}D: no scored headlines")
+            continue
+        net = net_score(bull, bear, total)
+        clauses.append(
+            f"{days}D: {total} headline{'' if total == 1 else 's'} ({bull} positive, "
+            f"{bear} negative, {neut} neutral), net {_signed(net)} ({tone_word(net)})"
+        )
+    # "as the News Tone card counts it", never "on screen": the app hides the card until a
+    # feed has a few days of history, and the model must not point at a card that is not there.
+    return (
+        "News tone for this feed, as the News Tone card counts it (headlines Cay AI scored, "
+        "by ET day" + since_phrase(tracking_since, today)
+        + "). The card's Positive / Negative / Neutral are Cay AI's bullish / bearish / neutral "
+        "labels; net = (positive - negative) / all scored, as a whole percent from -100 to "
+        "+100. " + "; ".join(clauses) + "."
+    )
+
+
+def summarize_tone(data: Any, *, focus_days: int, today: date) -> Optional[str]:
+    """The Updates chat's whole news-tone grounding, from ONE 90-day ``get_trend`` answer.
+
+    Two parts: :func:`summarize_tone_windows` (every window the card offers, and how far back
+    the feed's scored headlines on file go — :func:`since_phrase`), then
+    :func:`summarize_trend`'s day-level detail for ``focus_days`` — the window the chart was
+    showing when the chat opened (``window=N``), or 30. The detail's own date clause is left
+    out (the first part says it), and when the
+    focus window is empty the building caveat, which the detail would have carried, is added
+    here instead. A focus outside the card's windows gets no detail (never a guessed one).
+    None when nothing was scored in 90 days, or ``data`` is not a trend answer.
+    """
+    if not isinstance(data, dict):
+        return None
+    series = coerce_series(data.get("series"))
+    windows = summarize_tone_windows(
+        series, today=today, tracking_since=_series_day(data.get("tracking_since")),
+    )
+    if windows is None:
+        return None
+    status = data.get("history_status")
+    status = status if status in (HISTORY_BUILDING, HISTORY_READY) else None
+    detail = (
+        summarize_trend(
+            window_slice(series, days=focus_days, today=today),
+            days=focus_days, today=today, history_status=status,
+        )
+        if focus_days in TREND_DAYS else None
+    )
+    if detail is None and status == HISTORY_BUILDING:
+        detail = _BUILDING_NOTE_WINDOWS
+    return windows + ("\n" + detail if detail else "")
 
 
 def history_status_for(supabase: Any, scope: str, today: date) -> Optional[str]:
@@ -549,6 +761,9 @@ class NewsSentimentTrendService:
     async def get_trend(self, scope: str, days: int, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         """``{scope, days, series, tracking_since, history_status}``.
 
+        ``tracking_since`` is the scope's oldest day still in the log — the start of scoring
+        only until the history reaches the retention edge (:func:`at_retention_edge`).
+
         Raises :class:`SentimentTrendUnavailable`."""
         if days not in TREND_DAYS:
             raise ValueError(f"days must be one of {TREND_DAYS}, got {days!r}")
@@ -706,10 +921,18 @@ __all__ = [
     "read_history_status",
     "upsert_log_rows",
     "SOURCES",
+    "TONE_WORD_THRESHOLD",
+    "at_retention_edge",
+    "coerce_series",
     "net_score",
     "normalize_sentiment",
     "open_since",
     "record_labels",
     "shape_series",
+    "since_phrase",
+    "summarize_tone",
+    "summarize_tone_windows",
     "summarize_trend",
+    "tone_word",
+    "window_slice",
 ]

@@ -405,3 +405,55 @@ def test_signals_copy_matches_between_backend_and_swift_fallback():
     assert pf._signals_row("pro")["detail"] == paid_swift
     assert pf._signals_row("free")["detail"] == free_swift
     assert "CEO" in paid_swift, "the paid copy lists the signal families — CEO Buys is one"
+
+
+# ── 6. The theme-companies row (Emerging Frontiers plan gate, 2026-10-04) ─────────────
+#
+# The third hardcoded number in `PlanFeature.bundled` (`themeCompanies`), which its own doc
+# comment says may not exist without a guard. Pinned to `entitlements.theme_company_limit` —
+# the function `GET /home/themes/{slug}` enforces — and its copy to `plan_features`.
+
+_THEME_TITLE_TEMPLATE = r'"Top \($0) \($0 == 1 ? "company" : "companies") in each theme"'
+
+
+def _bundled_theme_limits(body: str) -> dict[str, object]:
+    """{swift tier case: theme-company limit or None}, from the bundled switch."""
+    return {
+        case: (None if value == "nil" else int(value))
+        for case, value in re.findall(r"case \.(\w+):[^\n]*?\bthemeCompanies = (\d+|nil)", body)
+    }
+
+
+def test_the_theme_company_fallback_matches_the_enforced_limit():
+    limits = _bundled_theme_limits(_bundled_body())
+    assert set(limits) == set(_SWIFT_TO_TIER), f"parsed {limits}"
+    for swift_case, value in limits.items():
+        enforced = entitlements.theme_company_limit(_SWIFT_TO_TIER[swift_case])
+        assert value == enforced, (
+            f"{swift_case}: the Swift fallback says {value} theme companies, "
+            f"entitlements enforces {enforced}")
+
+
+def test_the_theme_company_parser_is_not_vacuous():
+    body = _bundled_body()
+    assert "themeCompanies = 5" in body
+    mutated = body.replace("themeCompanies = 5", "themeCompanies = 6")
+    assert _bundled_theme_limits(mutated)["free"] == 6
+    assert _bundled_theme_limits(body)["free"] != 6
+
+
+def test_theme_company_copy_matches_between_backend_and_swift_fallback():
+    """Same anti-drift contract as the signals row: the offline copy states exactly what
+    the served row states, for both a capped and an uncapped plan."""
+    row = _fallback_row("theme_companies")
+    body = _bundled_body()
+    free, paid = pf._theme_companies_row("free"), pf._theme_companies_row("pro")
+    assert f'"{paid["title"]}"' in body
+    assert f'"{paid["detail"]}"' in body and f'"{free["detail"]}"' in body
+    # The capped title is interpolated in Swift; render it with the parsed Free limit.
+    assert _THEME_TITLE_TEMPLATE in body
+    limit = _bundled_theme_limits(body)["free"]
+    assert free["title"] == f"Top {limit} {'company' if limit == 1 else 'companies'} in each theme"
+    # A quantity row: never `included: paid` (Free really gets the first companies).
+    assert "included:" not in row and "isAlwaysIncluded" not in row
+    assert 'accentKey: "updates"' in row and paid["accent"] == pf.ACCENT_UPDATES

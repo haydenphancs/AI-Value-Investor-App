@@ -205,6 +205,14 @@ def _upstream_error(e: BaseException) -> Dict[str, Any]:
     return {"error": redact_secrets(f"{type(e).__name__}: {e}")[:200], "upstream": True}
 
 
+# How an unrated (rating 0) snapshot category is introduced to the model; the summary guard
+# `_snapshot_summary_has_data` also reads it.
+_UNRATED_SNAPSHOT_MARK = ": not rated ("
+
+# Shared with the paid report's model context (`app/utils/peer_wording.py`).
+from app.utils.peer_wording import peer_worded_metric_name as _peer_worded_metric_name  # noqa: E402
+
+
 class ChatService:
     def __init__(self):
         self.supabase = get_supabase()
@@ -297,8 +305,9 @@ class ChatService:
     @staticmethod
     def _snapshot_summary_has_data(summary: Optional[str]) -> bool:
         """True only when at least one snapshot actually arrived — a present category renders
-        a `(N/5).` rating; the all-missing marker never does."""
-        return bool(summary) and "/5)." in summary
+        a `(N/5).` rating, or `: not rated (` when it is unrated (rating 0, 2026-10-07); the
+        all-missing marker never does either."""
+        return bool(summary) and ("/5)." in summary or _UNRATED_SNAPSHOT_MARK in summary)
 
     # ── Public entry-point ──────────────────────────────────────────
 
@@ -1843,6 +1852,13 @@ class ChatService:
 
         return await fetch_market_snapshot()
 
+    async def _fetch_ownership_data(self, ticker: str) -> Dict[str, Any]:
+        """Who holds `ticker`, from its filings — each insider's shares after their latest
+        Form 4 transaction and 13F institutional ownership (`chat_ownership_tool`)."""
+        from app.services.chat_ownership_tool import fetch_ownership
+
+        return await fetch_ownership(ticker)
+
     @staticmethod
     def _get_valuation_level(pe: Optional[float]) -> str:
         # A missing / non-positive / NaN P/E means "no earnings data" (e.g. the index
@@ -2064,12 +2080,13 @@ class ChatService:
         "not available", the most recent year WITH margins is quoted under its own year,
         and the peer figure is always named as a peer figure.
 
-        The peer figure is never attributed to FY{latest}: Profit Power flattens a THIN
-        latest-year peer cell (n below the mature floor — the newest fiscal year early in
-        every reporting season, always for an off-calendar filer) to the latest MATURE
-        median at or before it (``hold_back_thin_benchmarks``), and the response carries
-        only the value, not its year. "(peer group, same year)" put FY2025's median under
-        FY2026, and Cay AI repeated it as "the industry's FY2026 average".
+        The peer figure is the median for the SAME period as that point (joined by period
+        end): since 2026-10-07 the net-margin line is ONE peer group (`get_benchmark_series`;
+        `peer_group_level` names it), no period borrows another's median, and a period not
+        yet fully reported carries none (``sector_benchmark_lookup``). Until then a
+        thin latest-year cell was painted with an earlier year's median, so this line
+        said "it may be from a year before" — and before THAT, "(peer group, same year)"
+        put FY2025's median under FY2026. No peer value → no peer sentence.
         """
         def _margins(p: Any) -> List[str]:
             out = []
@@ -2083,9 +2100,7 @@ class ChatService:
         latest = data.annual[-1]
         company = _margins(latest)
         peer_net = latest.sector_average_net_margin
-        peer_year = (
-            f"latest available peer reading; it may be from a year before FY{latest.period}"
-        )
+        peer_year = "peers' median for the same period"
         if company:
             text = f"Latest annual margins for {ticker} (FY{latest.period}): {', '.join(company)}"
             if peer_net is not None:
@@ -2100,9 +2115,11 @@ class ChatService:
         if prior is not None:
             text += f" Most recent year with margins: FY{prior.period}: {', '.join(_margins(prior))}."
         if peer_net is not None:
+            # This peer value belongs to the LATEST (gap) year's point, not to the prior
+            # year quoted just before it, so name its period instead of "the same period".
             text += (
                 f" {peer} peer-group median net margin: {peer_net:.1f}% "
-                f"(peers, not {ticker}; {peer_year})."
+                f"(peers, not {ticker}; peers' median for the FY{latest.period} period)."
             )
         return text
 
@@ -2144,9 +2161,20 @@ class ChatService:
                         )
                     missing.append(name)
                     continue
-                metrics_str = ", ".join(f"{m.name}: {m.value}" for m in snap.metrics)
-                label = rating_labels.get(snap.rating, "Unknown")
-                parts.append(f"{snap.category}: {label} ({snap.rating}/5). {metrics_str}.")
+                metrics_str = ", ".join(
+                    f"{_peer_worded_metric_name(m)}: {m.value}" for m in snap.metrics
+                )
+                if (snap.rating or 0) > 0:
+                    label = rating_labels.get(snap.rating, "Unknown")
+                    parts.append(f"{snap.category}: {label} ({snap.rating}/5). {metrics_str}.")
+                else:
+                    # Rating 0 = NOT rated (e.g. a bank's Financial Health card: only D/E is
+                    # comparable once liquidity and coverage are omitted) — never "0/5", which
+                    # the model read as the worst possible verdict. Same as the report.
+                    parts.append(
+                        f"{snap.category}{_UNRATED_SNAPSHOT_MARK}too few comparable metrics). "
+                        f"{metrics_str}."
+                    )
 
             if not parts and not missing:
                 return None

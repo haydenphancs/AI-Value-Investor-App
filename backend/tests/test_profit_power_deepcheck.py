@@ -74,6 +74,10 @@ class _FakeLookup:
         self._by_type = {"annual": annual, CALENDAR_QUARTER_PERIOD_TYPE: quarterly or {}}
         self.calls: List[str] = []
 
+    def get_benchmark_series(self, industry, sector, metrics, period_type):
+        # Growth / Profit Power read one-group-per-line cells; this fake's cells already are.
+        return self.get_benchmarks(industry, sector, metrics, period_type)
+
     def get_benchmarks(self, industry, sector, metrics, period_type):
         self.calls.append(period_type)
         src = self._by_type.get(period_type, {})
@@ -300,22 +304,36 @@ _QUARTERLY_CELLS = {
 
 
 @pytest.mark.asyncio
-async def test_thin_benchmark_cells_are_held_back_to_the_last_mature_median(monkeypatch):
-    lookup = _FakeLookup(_ANNUAL_CELLS, _QUARTERLY_CELLS)
+async def test_each_period_draws_its_own_cell_and_levels_follow_the_drawn_points(monkeypatch):
+    """The lookup chooses each period's cell (`merge_peer_cells`) and hides periods that
+    are not fully reported, so Profit Power draws every period's OWN cell. Until
+    2026-10-07 a thin cell was painted with an earlier period's mature median. The legend
+    level is read per LINE (metric × period) off the points actually drawn
+    (`peer_group_levels`, 2026-10-08)."""
+    annual = {
+        "net_margin": {"2025": _cell(0.12, 77), "2026": _cell(0.40, 9)},
+        "gross_margin": {"2025": _cell(0.55, 77, "sector"), "2026": _cell(0.70, 9, "sector")},
+    }
+    quarterly = {"net_margin": {"Q4'25": _cell(0.10, 30, "sector"), "Q1'26": _cell(0.50, 6, "sector")}}
+    lookup = _FakeLookup(annual, quarterly)
     monkeypatch.setattr(pp, "get_sector_benchmark_lookup", lambda: lookup)
     result, _next, degraded = await _bare_service(_fmp())._build_profit_power("ZZZ")
 
     assert degraded == [] and result.degraded == []
     by_period = {p.period: p for p in result.annual}
-    # FY2026 (ends June 2026) joins the thin n=9 "2026" cell: NOT its 40%, the mature 12%.
-    assert by_period["2026"].sector_average_net_margin == 12.0
-    assert by_period["2026"].sector_average_gross_margin == 55.0
+    assert by_period["2026"].sector_average_net_margin == 40.0
+    assert by_period["2026"].sector_average_gross_margin == 70.0
     assert by_period["2025"].sector_average_net_margin == 12.0
-    # The quarterly twin across a year boundary: Q1'26 (n=6) holds back to Q4'25.
     q = {p.period: p for p in result.quarterly}
-    assert q["Q1 '26"].sector_average_net_margin == 10.0
+    assert q["Q1 '26"].sector_average_net_margin == 50.0
     assert q["Q4 '25"].sector_average_net_margin == 10.0
-    # The peer-group vote still reads the un-held rich cells.
+    # One level per DRAWN LINE (2026-10-08): the net line is industry, the gross line is
+    # sector — never pooled into one tie-broken word. "annual"/"quarterly" are the NET
+    # line's (the live card's line); no key for a margin that draws no peer point.
+    assert result.peer_group_levels == {
+        "annual.net_margin": "industry", "annual.gross_margin": "sector", "annual": "industry",
+        "quarterly.net_margin": "sector", "quarterly": "sector",
+    }
     assert result.peer_group_level == "industry"
     assert lookup.calls == ["annual", "calendar_quarter"]
 
@@ -558,6 +576,10 @@ def test_a_row_written_before_the_payload_version_is_rebuilt():
 class _StubCurrentLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return {m: 0.08 for m in metrics}
+
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return {m: {"value": 0.08, "level": "sector", "peer_group_name": sector, "n": 50}
+                for m in metrics}
 
 
 def _snapshot_service(monkeypatch, pp_result, ratios):

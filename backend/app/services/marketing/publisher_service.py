@@ -63,7 +63,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from app.config import settings
-from app.services.marketing import outlets, publish_feed, publisher_wake, review_service
+from app.schemas.marketing import POST_PLATFORMS
+from app.services.marketing import outlets, post_copy, publish_clock, publish_feed, publisher_wake, review_service
 from app.services.marketing.outlet_base import (
     ABSENT,
     AMBIGUOUS,
@@ -161,6 +162,28 @@ def _alert(kind: str, text: str) -> Dict[str, Any]:
     return {"alert_kind": kind, "alert_text": scrub(text), "alert_at": _now().isoformat()}
 
 
+def _stamp_clock(row: Dict[str, Any], kind: str) -> None:
+    """Open the post's campaign's /go EARLY window (`publish_clock`, read by `smart_link.record_hit`):
+    link scanners fetch a post's link in the first minutes after it goes out, many with an ordinary
+    browser user agent, so taps then are counted apart. Only a LIVE row whose caption carries its OWN
+    /go link (`post_copy.carries_go_link`) — a TikTok/Instagram "Link in bio." post, or an X post
+    composed without a link, opens nothing. A measurement: any failure is logged and never costs the
+    publish."""
+    try:
+        platform = row.get("platform")
+        if platform not in POST_PLATFORMS or is_rehearsal(row):
+            return
+        if not post_copy.carries_go_link(platform, row.get("caption")):
+            return
+        if publish_clock.stamp(platform, kind):
+            logger.info("marketing publish clock: campaign=%s early window open until %s (%s) post_id=%s",
+                        platform, datetime.fromtimestamp(publish_clock.open_until(platform) or 0, timezone.utc)
+                        .isoformat(), kind, row.get("id"))
+    except Exception as e:
+        logger.warning("marketing publish clock: could not stamp post_id=%s (%s: %s) — its /go taps count as "
+                       "people", row.get("id"), type(e).__name__, e)
+
+
 class _Budget:
     """A platform's monthly spend cap for ONE cycle: the month's journaled charges are read once,
     then kept as a running total. A failed read blocks the platform this cycle (fail-closed)."""
@@ -241,6 +264,13 @@ async def record_outcome(svc: Any, adapter: Adapter, row: Dict[str, Any], outcom
     now = _now()
     attempt = int(row.get("attempts") or 0)
     entry = {"attempt": attempt, "kind": outcome.kind, "category": outcome.category, "at": now.isoformat()}
+    # The /go early window opens BEFORE the ledger write, so a post that went out but whose write
+    # failed still has its scanner taps counted apart. AMBIGUOUS may be live; SUBMITTED goes live
+    # seconds later (Upload-Post).
+    if outcome.kind in (PUBLISHED, AMBIGUOUS):
+        _stamp_clock(row, publish_clock.PUBLISHED)
+    elif outcome.kind == SUBMITTED:
+        _stamp_clock(row, publish_clock.SUBMITTED)
     try:
         if outcome.kind == PUBLISHED:
             updated = await svc.transition_post(

@@ -292,7 +292,10 @@ async def test_build_themes_non_finite_quote_is_dropped():
 # ── 4. Theme DETAIL (drill-down) — schema parity ──────────────────────
 
 _DETAIL_KEYS = {"slug", "title", "subtitle", "image_url", "accent_hex", "constituents",
-                "updated_on", "changes", "performance", "insight", "news"}
+                "updated_on", "changes", "performance", "insight", "news",
+                # The plan gate (2026-10-04) — tests/test_theme_detail_entitlement.py.
+                "is_locked", "tier_required", "locked_constituents_count",
+                "locked_changes_count"}
 _CONSTITUENT_KEYS = {"ticker", "company_name", "price", "change_percent", "market_cap",
                      "role", "is_new"}
 

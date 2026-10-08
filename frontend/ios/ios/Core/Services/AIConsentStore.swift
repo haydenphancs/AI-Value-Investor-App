@@ -26,27 +26,44 @@ final class AIConsentStore: ObservableObject {
     private enum Keys {
         static let granted = "ai_processing_consent_granted"
         static let grantedAt = "ai_processing_consent_granted_at"
+        /// Which version of the consent TEXT the user accepted (`currentVersion`).
+        static let version = "ai_processing_consent_version"
     }
 
-    /// True once the user has explicitly allowed sending chat content for AI processing.
+    /// The version of the consent sheet's text (`AIDataConsentView`). Bump it whenever the
+    /// sheet starts disclosing a NEW flow, so everyone who accepted the older text is asked once
+    /// more before that flow can run for them — a consent covers only what it said.
+    ///   1 — the original sheet. No version key was stored, so every pre-1.1 grant reads as 1.
+    ///   2 — 1.1: adds report chat's web search (Brave), whose query is derived from the message.
+    ///       Without this, everyone who tapped Allow on 1.0 would reach the search on 1.1
+    ///       having never seen the row that discloses it.
+    static let currentVersion = 2
+
+    /// True once the user has explicitly allowed sending chat content for AI processing,
+    /// under the CURRENT consent text.
     @Published private(set) var hasConsented: Bool
 
-    /// When consent was granted, for the audit trail shown in Settings.
+    /// When the current consent was granted, for the audit trail shown in Settings. Nil while
+    /// no current consent is held, so Settings never shows "Allowed <date>" for an older text.
     @Published private(set) var grantedAt: Date?
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.hasConsented = defaults.bool(forKey: Keys.granted)
+        let granted = defaults.bool(forKey: Keys.granted)
+        let accepted = (defaults.object(forKey: Keys.version) as? Int) ?? 1
+        let current = granted && accepted >= Self.currentVersion
+        self.hasConsented = current
         let ts = defaults.double(forKey: Keys.grantedAt)
-        self.grantedAt = ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+        self.grantedAt = (current && ts > 0) ? Date(timeIntervalSince1970: ts) : nil
     }
 
     func grant() {
         let now = Date()
         defaults.set(true, forKey: Keys.granted)
         defaults.set(now.timeIntervalSince1970, forKey: Keys.grantedAt)
+        defaults.set(Self.currentVersion, forKey: Keys.version)
         hasConsented = true
         grantedAt = now
     }
@@ -57,6 +74,7 @@ final class AIConsentStore: ObservableObject {
     func withdraw() {
         defaults.set(false, forKey: Keys.granted)
         defaults.removeObject(forKey: Keys.grantedAt)
+        defaults.removeObject(forKey: Keys.version)
         hasConsented = false
         grantedAt = nil
     }
@@ -74,6 +92,7 @@ final class AIConsentStore: ObservableObject {
     func resetForEndedSession() {
         defaults.removeObject(forKey: Keys.granted)
         defaults.removeObject(forKey: Keys.grantedAt)
+        defaults.removeObject(forKey: Keys.version)
         hasConsented = false
         grantedAt = nil
     }

@@ -5,23 +5,33 @@ The public smart link `GET /go/{campaign}` and the landing page's App Store slot
 Every public post's call to action points at `caydexinvest.com/go/<platform>` (`post_copy.py`).
 This module decides where that link goes and counts who followed it, and nothing else:
 
-* **Destination.** Pre-launch there is no App Store page (the app id 404s until approval), so
-  the link lands on the static landing page at `/` — a RELATIVE `Location`, so no host is ever
-  built from request data. Post-launch it is `MARKETING_APP_STORE_URL`, accepted only as
+* **Destination.** With no valid store URL (before the 2026-10-05 release there was no App Store
+  page; since, only an unset or mistyped variable) the link lands on the static landing page at
+  `/` — a RELATIVE `Location`, so no host is ever built from request data — whose label then makes
+  no availability claim. Otherwise it is `MARKETING_APP_STORE_URL`, accepted only as
   `https://apps.apple.com/...`; with `MARKETING_APP_STORE_PROVIDER_TOKEN` set it carries App
   Analytics campaign parameters (`pt`, `ct`, `mt=8`). A misconfigured URL logs ERROR once and
   falls back to `/` — a typo in a Railway variable must never turn the brand's link into an
-  open redirect or a 500.
+  open redirect or a 500. `store_state()` names the same decision for the words: prelaunch
+  (no valid URL), preorder (MARKETING_APP_STORE_PREORDER on: the landing button says
+  "Pre-order") or live — it is what every new caption's value line says about the app, and it
+  never changes where the link goes.
 * **Campaign.** Only a member of `POST_PLATFORMS` survives; everything else is `"other"`.
   `ct` is always one of those CONSTANTS, never request text, so nothing the caller typed is
   ever reflected into a header, a query string or a log line.
 * **Counting.** Link-preview crawlers (every platform fetches the link once per post), native
   HTTP stacks, HEAD probes, browser prefetches, anything the browser itself labels as NOT a
   top-level navigation (an `<img>`, a `fetch`, an iframe — `Sec-Fetch-Mode`/`Sec-Fetch-Dest`),
-  bursts from one address and anything past its CAMPAIGN's per-minute ceiling are not counted.
-  They all still get the 302 — only the count skips them. The count is an in-process dict
-  flushed by a lifespan loop through `increment_marketing_link_hits` (migration 173), so the
-  request path does no I/O.
+  bursts from one address, requests from a platform's fetcher network (Meta's 57.141.0.0/16)
+  and anything past its CAMPAIGN's per-minute ceiling are not counted. Crawlers are denied by
+  their OWN product tokens (FlipboardProxy, LinkRing, SkyWatch, trendictionbot, … — production
+  2026-10), never by a bare platform name. They all still get the 302 — only the count skips
+  them. A tap that passes every filter inside its campaign's EARLY window — the first minutes
+  after that campaign's post went out, stamped by the publisher into `publish_clock` — is
+  counted APART under the server constant `<campaign>_early` (`EARLY_KEYS`): link scanners
+  with ordinary browser user agents arrive then, and the digest shows both numbers. The count
+  is an in-process dict flushed by a lifespan loop through `increment_marketing_link_hits`
+  (migration 173), so the request path does no I/O.
 * **The number is INDICATIVE, not exact.** A lost minute on a crash under-counts (a clean
   shutdown logs what its final flush could not send as "LOST at shutdown"). A flush whose RPC
   committed but whose response was lost (a read timeout, a gateway 502/503/504/520/524) cannot
@@ -37,7 +47,7 @@ This module decides where that link goes and counts who followed it, and nothing
 
 FMP-free by construction: public marketing surfaces may never touch licensed market data
 (rules marketing.md §1). Imports are limited to config, the Supabase client, the in-memory
-rate limiter class and small utilities.
+rate limiter class, the stdlib-only `publish_clock` and small utilities.
 """
 
 from __future__ import annotations
@@ -58,6 +68,7 @@ from app.config import settings
 from app.core.security import RateLimiter, trusted_client_ip
 from app.database import get_supabase
 from app.schemas.marketing import POST_PLATFORMS
+from app.services.marketing import publish_clock
 from app.utils.market_hours import ET
 from app.utils.supabase_async import sb_exec
 from app.utils.supabase_errors import _status_from_code
@@ -85,6 +96,15 @@ def normalize_campaign(raw: Any) -> str:
     if not _CAMPAIGN_RE.fullmatch(slug) or slug not in KNOWN_CAMPAIGNS:
         return OTHER
     return slug
+
+
+#: The server-constant keys a campaign's taps are counted under while its EARLY window is open — the
+#: first minutes after its post went out, when link scanners with browser user agents arrive
+#: (`publish_clock`). Never typeable (a `/go/bluesky_early` path normalises to "other"), never in
+#: KNOWN_CAMPAIGNS, never in `ct`; the digest reports them apart from the taps.
+EARLY_SUFFIX = "_early"
+EARLY_KEYS: Dict[str, str] = {c: c + EARLY_SUFFIX for c in sorted(KNOWN_CAMPAIGNS)}
+EARLY_BASE: Dict[str, str] = {v: k for k, v in EARLY_KEYS.items()}
 
 
 # ── destination ───────────────────────────────────────────────────────────────
@@ -145,6 +165,28 @@ def store_app_id() -> Optional[str]:
     return m.group(1) if m else None
 
 
+#: What the app's App Store presence lets public copy say — the same three names as
+#: `post_copy.STORE_STATES` (a test pins them equal; literal here so the request path does not import
+#: the copy module and its validators).
+STORE_PRELAUNCH = "prelaunch"
+STORE_PREORDER = "preorder"
+STORE_LIVE = "live"
+
+
+def store_state() -> str:
+    """PRELAUNCH while `store_url()` is None — unset, or misconfigured, which is exactly when /go still
+    lands on the landing page with no store link, so a caption can never say "on the App Store" while
+    its link lands there (its value line, and the page's label, then make no availability claim at all:
+    since the 2026-10-05 release this state means a mistyped or deleted URL, never an app still to
+    come); PREORDER while the URL is valid
+    and MARKETING_APP_STORE_PREORDER is on; LIVE otherwise. The flag alone never claims anything, and
+    it never changes where /go points. Read at WRITE time by `script_service` (an accepted caption
+    keeps its words) and by the landing page."""
+    if store_url() is None:
+        return STORE_PRELAUNCH
+    return STORE_PREORDER if bool(settings.MARKETING_APP_STORE_PREORDER) else STORE_LIVE
+
+
 def destination(campaign: str) -> str:
     """Where `/go/<campaign>` sends the caller. `"/"` pre-launch or on misconfiguration."""
     url = store_url()
@@ -167,16 +209,24 @@ def destination(campaign: str) -> str:
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(APP_STORE_CTA|SMART_BANNER)\}\}")
 
-_PRELAUNCH_CTA = '<p class="cta cta-soon">Coming soon to the App Store</p>'
+#: No valid store URL: a label with no link and no availability claim. It said "Coming soon to the App
+#: Store" before the release; since 2026-10-05 the app is on sale, so this state means an unset or
+#: mistyped MARKETING_APP_STORE_URL and "coming soon" would be false (review 2026-10-07, the same
+#: reason the captions' prelaunch value line makes no claim). The digest warns about the state.
+_PRELAUNCH_CTA = '<p class="cta cta-soon">Caydex for iPhone</p>'
+_LIVE_CTA_LABEL = "Get Caydex for iPhone"
+_PREORDER_CTA_LABEL = "Pre-order Caydex for iPhone"
 
 
 def landing_slots() -> Dict[str, str]:
-    """HTML fragments for the landing page's two placeholders. Every dynamic value is escaped."""
+    """HTML fragments for the landing page's two placeholders. Every dynamic value is escaped. The
+    button says "Pre-order" while `store_state()` is PREORDER; the link is the same store URL."""
     url = store_url()
     if url is None:
         return {"APP_STORE_CTA": _PRELAUNCH_CTA, "SMART_BANNER": ""}
+    label = _PREORDER_CTA_LABEL if store_state() == STORE_PREORDER else _LIVE_CTA_LABEL
     cta = (
-        f'<a class="cta" href="{html.escape(url, quote=True)}">Get Caydex for iPhone</a>'
+        f'<a class="cta" href="{html.escape(url, quote=True)}">{label}</a>'
         '<p class="cta-note">Opens the App Store</p>'
     )
     app_id = store_app_id()
@@ -205,7 +255,14 @@ _UA_CAP = 512
 #: [Pinterest/iOS]`), and those are people who tapped the link. `mastodon` and `whatsapp` stay
 #: bare on purpose — their preview fetchers ("http.rb/5.1.1 (Mastodon/4.2; ...)",
 #: "WhatsApp/2.23.20.0 A") carry no "bot", and neither app tags its in-app browser.
+#:
+#: Production 2026-10-03/05 (`railway logs --http`): these crawlers fetched /go within minutes of a
+#: post and each is denied by ITS OWN token — FlipboardProxy and LinkRing and SkyWatch carry no bot
+#: word at all; trendiction's token "trendictionbot0.5.0" defeats `bot\b` (a digit follows), so only
+#: its info URL "/bot;" happened to catch it; KeenableBot and ShapBot were caught only by the generic
+#: marker. The Flipboard app's in-app browser says "Flipboard/" — people — and keeps counting.
 _BOT_UA_RE = re.compile(
+    r"flipboardproxy|linkring|skywatch|trendictionbot|keenablebot|shapbot|google-safety|"
     r"facebookexternalhit|facebookcatalog|meta-externalagent|twitterbot|slackbot|"
     r"slack-imgproxy|linkedinbot|discordbot|telegrambot|whatsapp|applebot|googlebot|"
     r"google-inspectiontool|bingbot|bingpreview|pinterestbot|pinterest/0\.|redditbot|"
@@ -265,18 +322,50 @@ def is_non_navigation(headers: Mapping[str, str]) -> bool:
     return dest is not None and dest[:_FETCH_META_CAP].strip().lower() != "document"
 
 
+#: Networks whose requests are never a person's tap. 57.141.0.0/16 is Meta's fetcher range (AS32934,
+#: Meta Platforms Ireland): in production it fetched /go/facebook and /go/threads with a plain desktop
+#: "Chrome/139" user agent seconds after each post went out. A person's tap — even inside Facebook's
+#: or Instagram's in-app browser — comes from their own device and ISP, never from here.
+_NEVER_COUNTED_NETWORKS = (ipaddress.ip_network("57.141.0.0/16"),)
+
+_Addr = Any   # ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _parse_addr(ip: Optional[str]) -> Optional[_Addr]:
+    """A client address (an IPv4-mapped IPv6 unwrapped to its IPv4), or None for garbage."""
+    if not isinstance(ip, str):
+        return None
+    try:
+        addr = ipaddress.ip_address(ip.strip()[:64])
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _addr_key(addr: Optional[_Addr]) -> str:
+    if addr is None:
+        return "unknown"
+    if isinstance(addr, ipaddress.IPv6Address):
+        return str(ipaddress.IPv6Network((int(addr), 64), strict=False))
+    return str(addr)
+
+
+def _in_never_counted_network(addr: Optional[_Addr]) -> bool:
+    return addr is not None and any(addr.version == net.version and addr in net
+                                    for net in _NEVER_COUNTED_NETWORKS)
+
+
+def is_platform_fetcher_ip(ip: Optional[str]) -> bool:
+    """Does the (trusted, rightmost-proxy) client address belong to a platform's fetcher network?"""
+    return _in_never_counted_network(_parse_addr(ip))
+
+
 def rate_key(ip: Optional[str]) -> str:
     """Limiter key for a client address: IPv4 as-is, IPv6 by its /64 (one subscriber usually
     holds a whole /64, so per-address keys would be free to rotate), garbage → "unknown"."""
-    try:
-        addr = ipaddress.ip_address((ip or "").strip()[:64])
-    except ValueError:
-        return "unknown"
-    if isinstance(addr, ipaddress.IPv6Address):
-        if addr.ipv4_mapped is not None:
-            return str(addr.ipv4_mapped)
-        return str(ipaddress.IPv6Network((int(addr), 64), strict=False))
-    return str(addr)
+    return _addr_key(_parse_addr(ip))
 
 
 #: Per-address budget for COUNTED hits. Over it the caller is still redirected.
@@ -321,8 +410,9 @@ _CAMPAIGN_RATE_MAX = 600
 _OTHER_RATE_MAX = 60
 _CEILING_WINDOW_SECONDS = 60.0
 #: Hard bound on distinct (campaign, day) keys held in memory, fresh and re-send tiers together.
-#: Campaigns are a closed set, so this is ~125 days of a flush outage — reaching it means the
-#: RPC has been failing unnoticed.
+#: Campaigns are a closed set (14 platforms, their 14 `_early` twins and "other": at most 29 keys a
+#: day), so this is ~68 days of a flush outage — reaching it means the RPC has been failing
+#: unnoticed.
 _MAX_PENDING_KEYS = 2000
 #: `increment_marketing_link_hits` rejects p_count outside [1, 1e6].
 _MAX_RPC_COUNT = 1_000_000
@@ -474,10 +564,15 @@ def record_hit(request: Any, campaign: str) -> bool:
         if is_non_navigation(headers):
             return False
         slug = campaign if campaign in KNOWN_CAMPAIGNS else OTHER
+        addr = _parse_addr(trusted_client_ip(request))
+        # A platform's fetcher network is never a person — refused before the limiter, so it spends
+        # no address budget and never reaches a campaign's ceiling.
+        if _in_never_counted_network(addr):
+            return False
         # Per-address FIRST (the link's private pool), the campaign's ceiling second: a hit its
         # address is not entitled to never spends or reaches the ceiling, so what the ceiling
         # refuses is exactly what raising it would count.
-        key = f"go:ip:{rate_key(trusted_client_ip(request))}"
+        key = f"go:ip:{_addr_key(addr)}"
         if not _link_limiter.is_allowed(key, _RATE_MAX, _RATE_WINDOW_SECONDS):
             return False
         window = _campaign_window(slug)
@@ -493,7 +588,12 @@ def record_hit(request: Any, campaign: str) -> bool:
             window.refused += 1
             return False
         window.counted += 1
-        return _add((slug, _today_et()), 1)
+        # Inside the campaign's early window (the first minutes after its post went out — the
+        # publisher stamps `publish_clock`) the tap is counted APART, under the server constant
+        # `<campaign>_early`: link scanners with browser user agents arrive then. Same ceiling,
+        # same flush; nothing is discarded.
+        bucket = EARLY_KEYS[slug] if slug in EARLY_KEYS and publish_clock.is_early(slug, _wall_clock()) else slug
+        return _add((bucket, _today_et()), 1)
     except Exception as e:
         # The redirect must never fail because of the counter.
         logger.warning("marketing link hit not recorded (%s: %s)", type(e).__name__, e,

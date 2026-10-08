@@ -117,10 +117,71 @@ struct ProfitPowerSectionData {
         self.peerGroupLevel = peerGroupLevel
     }
 
+    /// The backend's `peer_group_levels`. "annual" / "quarterly": the peer group of the
+    /// NET-margin line that tab draws (the only peer line this card draws). Each chart line is
+    /// ONE peer group — the industry when it is mature at the line's newest period, else the
+    /// sector — picked separately per period type, so the two tabs can differ; a period that is
+    /// not fully reported is hidden, and no period borrows another's value. The map also holds
+    /// "<period>.<metric>" keys, one per margin line, which the report drill-down reads
+    /// (`toMarginSeries`). A key exists only for a line that DRAWS a peer point
+    /// (`hasPerLineLevels`). Empty for a payload that predates the field; `peerWord(for:)` then
+    /// falls back to `peerGroupLevel`.
+    /// A `var` with a default so every existing init still compiles; the DTO mapper assigns it.
+    var peerGroupLevels: [String: String] = [:]
+
     /// Display word for the benchmark peer group — "Industry" when the backend
     /// says the medians came from the company's industry peers, else "Sector".
     var peerWord: String {
         peerGroupLevel == "industry" ? "Industry" : "Sector"
+    }
+
+    /// Backend key for `peer_group_levels` (`ProfitPowerResponse` in schemas/profit_power.py).
+    static func peerLevelKey(for period: ProfitPowerPeriodType) -> String {
+        switch period {
+        case .annual: return "annual"
+        case .quarterly: return "quarterly"
+        }
+    }
+
+    /// True when `levels` is a PER-LINE map (profit_power v7, 2026-10-08): it holds
+    /// "<period>.<metric>" keys, and the backend writes a key only for a line that draws a
+    /// peer point. In such a map a missing key means that line is NOT on screen, so it gets
+    /// no level at all — never the tab's or the payload's, which name ANOTHER line
+    /// (PP4-LVL-FALLBACK). Only an older map (tab keys only, or empty) may fall back.
+    /// Mirrors `GrowthSectionData.peerWord`'s "map present → its own key only".
+    static func hasPerLineLevels(_ levels: [String: String]) -> Bool {
+        levels.keys.contains(where: { $0.contains(".") })
+    }
+
+    /// The peer group of ONE margin line (`metric` = the backend name, e.g. "fcf_margin") on
+    /// `period`'s tab. A per-line map answers only with that line's own key (nil = the line is
+    /// not drawn); an older map answers with the tab's level, then `legacyLevel`.
+    static func lineLevel(
+        in levels: [String: String],
+        period: ProfitPowerPeriodType,
+        metric: String,
+        legacyLevel: String?
+    ) -> String? {
+        let tab: String = peerLevelKey(for: period)
+        if hasPerLineLevels(levels) {
+            let own: String = tab + "." + metric
+            return levels[own]
+        }
+        return levels[tab] ?? legacyLevel
+    }
+
+    /// The legend / tooltip word for `period`'s dashed line, which is the NET-margin line.
+    /// A per-line map (v7) writes the tab key exactly when that net line draws a peer point
+    /// on the tab, so a missing key means no dashed line there: no level, neutral "Sector",
+    /// never the other tab's word through `peerGroupLevel`. An older payload keeps the tab's
+    /// level, else the response-wide `peerGroupLevel`, else "Sector" — today's wording.
+    func peerWord(for period: ProfitPowerPeriodType) -> String {
+        if Self.hasPerLineLevels(peerGroupLevels) {
+            let own: String? = peerGroupLevels[Self.peerLevelKey(for: period)]
+            return own == "industry" ? "Industry" : "Sector"
+        }
+        let level = peerGroupLevels[Self.peerLevelKey(for: period)] ?? peerGroupLevel
+        return level == "industry" ? "Industry" : "Sector"
     }
 
     func dataPoints(for period: ProfitPowerPeriodType) -> [ProfitPowerDataPoint] {

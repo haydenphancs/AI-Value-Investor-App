@@ -259,18 +259,23 @@ struct FundamentalsHistorySheet: View {
     private func undefinedCurrentText(_ m: DeepDiveMetric) -> String {
         let state = currentValueText(m.value)
         guard let ind = currentIndustry(m) else { return "Current: \(state)" }
-        return "Current: \(state) · \(peerWord) \(Self.format(ind, unit: m.historyUnit)) · N/A vs \(peerWord.lowercased())"
+        let peer = peerWord(m)
+        return "Current: \(state) · \(peer) \(Self.format(ind, unit: m.historyUnit)) · N/A vs \(peer.lowercased())"
     }
 
-    /// "Industry" when the card's benchmark comparison is industry-level, else "Sector".
-    private var peerWord: String {
-        card.peerGroupLevel == "industry" ? "Industry" : "Sector"
+    /// "Industry" or "Sector": the group THIS metric's line (for the selected period) is
+    /// drawn from — a line is one population and can differ from the card-wide word —
+    /// falling back to the card's level on reports generated before 2026-10-07.
+    private func peerWord(_ m: DeepDiveMetric) -> String {
+        let own = period == .annual ? m.sectorAnnualLevel : m.sectorQuarterlyLevel
+        return (own ?? card.peerGroupLevel) == "industry" ? "Industry" : "Sector"
     }
 
-    private func deltaText(prefix: String, company: Double, sector: Double, unit: String?) -> String {
+    private func deltaText(
+        prefix: String, company: Double, sector: Double, unit: String?, peer: String
+    ) -> String {
         let c = Self.format(company, unit: unit)
         let s = Self.format(sector, unit: unit)
-        let peer = peerWord
         if sector > 0 && company > 0 {
             return "\(prefix) \(c) · \(peer) \(s) · \(String(format: "%.2f×", company / sector)) vs \(peer.lowercased())"
         }
@@ -308,7 +313,7 @@ struct FundamentalsHistorySheet: View {
                                 Capsule().fill(AppColors.textSecondary).frame(width: 4, height: 2)
                             }
                         }
-                        Text("\(peerWord) Average")
+                        Text("\(peerWord(m)) Average")
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
                     }
@@ -338,7 +343,8 @@ struct FundamentalsHistorySheet: View {
                     .multilineTextAlignment(.center)
             } else if let pair {
                 Text(deltaText(prefix: periodPrefix(pair.period, m),
-                               company: pair.company, sector: pair.sector, unit: m.historyUnit))
+                               company: pair.company, sector: pair.sector, unit: m.historyUnit,
+                               peer: peerWord(m)))
                     .font(AppTypography.bodySmall)
                     .foregroundColor(deltaColor(m))
                     .multilineTextAlignment(.center)

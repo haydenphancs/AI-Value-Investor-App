@@ -37,6 +37,9 @@ class _StubLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return {m: None for m in metrics}
 
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return {m: None for m in metrics}
+
 
 class _FakeFMP:
     """Per-method answers; a value that is an Exception is RAISED, like a failed leg."""

@@ -32,9 +32,14 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import (
+    MATURE_SAMPLE_FLOOR,
+    get_sector_benchmark_lookup,
+    lookup_failed,
+)
+from app.utils.period_labels import annual_benchmark_key
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +72,15 @@ _CONFIDENCE_HIGH = "high"      # 3+ metrics resolved
 _CONFIDENCE_MEDIUM = "medium"  # 2 metrics resolved
 _CONFIDENCE_LOW = "low"        # <2 — service returns None instead
 
-# Sample-size thresholds for year selection. The recompute pipeline
-# already drops sectors below MIN_SAMPLE_SIZE=5 at compute time, so all
-# stored rows have n>=5. Within the stored set we still prefer fuller
-# samples to avoid partial-year noise (e.g., FY2026 with n=12 for
-# Technology vs. FY2025 with n=85). Walks years latest→oldest:
-#   - first year with n >= _N_PREFERRED → use it (high statistical confidence)
-#   - else first year with n >= _N_ACCEPTABLE → use it (fallback)
-#   - else return None for this metric
-_N_PREFERRED = 20
-_N_ACCEPTABLE = 10
+# Year selection (2026-10-07). A focal value is compared with the sector median of the
+# SAME year: the company's latest annual record, keyed with the benchmark join key
+# (`period_labels.annual_benchmark_key`), against the stored row of that year. When that
+# year has no servable mature median, the newest OLDER year with one is used — never a
+# newer year (a company whose latest filing is FY2024 was scored against FY2025 medians),
+# and never a cell from fewer than MATURE_SAMPLE_FLOOR (20) companies. The old rule took
+# the newest year with n >= 20, else n >= 10, whatever the company's own year.
+# Incomplete years never arrive here: the lookup hides an annual row computed less than
+# 75 days after its year ended (`sector_benchmark_lookup.servable_benchmark_rows`).
 
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
@@ -182,48 +186,77 @@ def _lifecycle_to_score(phase: Optional[str]) -> Optional[float]:
     }.get(phase)
 
 
-def _pick_year_by_sample_size(
+def _year_of(label: Any) -> Optional[int]:
+    """A 4-digit annual label ("2025") as an int; None for anything else."""
+    text = label.strip() if isinstance(label, str) else ""
+    return int(text) if len(text) == 4 and text.isdigit() else None
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _pick_year_at_or_before(
     year_to_payload: Dict[str, Dict[str, Any]],
+    target_year: Any,
+    floor: int = MATURE_SAMPLE_FLOOR,
 ) -> Optional[Dict[str, Any]]:
-    """Walk years latest → oldest and return the first one whose
-    sample_size clears the preferred threshold. If none clear preferred,
-    fall back to the latest one that clears the acceptable threshold.
-    Returns None when nothing meets the acceptable floor.
+    """The sector median a focal value from `target_year` is compared with: that year's
+    when it holds at least `floor` companies, else the newest OLDER year that does.
+    Never a newer year, never a thinner cell. None when `target_year` is not a year
+    (the company's record has no usable date) or no year qualifies.
 
     Returned shape: {"median": float, "period": str, "n": int}.
     """
-    if not year_to_payload:
+    target = _year_of(target_year)
+    if target is None or not isinstance(year_to_payload, dict):
         return None
-    # Sort years descending. Year labels are strings like "2025"; rely
-    # on numeric sort where possible, fall back to lexical for safety.
-    def _year_key(label: str) -> int:
-        try:
-            return int(label)
-        except (TypeError, ValueError):
-            return -1
-    years_desc = sorted(year_to_payload.keys(), key=_year_key, reverse=True)
-
-    # Pass 1: preferred threshold.
-    for year in years_desc:
-        payload = year_to_payload.get(year) or {}
-        median = payload.get("median")
-        n = payload.get("n") or 0
-        if median is None or not isinstance(n, (int, float)):
+    candidates = sorted(
+        (
+            (year, label)
+            for label in year_to_payload
+            if (year := _year_of(label)) is not None and year <= target
+        ),
+        reverse=True,
+    )
+    for _year, label in candidates:
+        payload = year_to_payload.get(label)
+        if not isinstance(payload, dict):
             continue
-        if n >= _N_PREFERRED:
-            return {"median": float(median), "period": year, "n": int(n)}
-
-    # Pass 2: acceptable fallback.
-    for year in years_desc:
-        payload = year_to_payload.get(year) or {}
-        median = payload.get("median")
-        n = payload.get("n") or 0
-        if median is None or not isinstance(n, (int, float)):
+        median = _finite_number(payload.get("median"))
+        n = _finite_number(payload.get("n"))
+        if median is None or n is None:
             continue
-        if n >= _N_ACCEPTABLE:
-            return {"median": float(median), "period": year, "n": int(n)}
-
+        if n >= floor:
+            return {"median": median, "period": label, "n": int(n)}
     return None
+
+
+def _older_key(*keys: str) -> str:
+    """The oldest of the usable year keys ("" when none is usable) — a ratio built from
+    two statements is compared with no year newer than either of them."""
+    years = [k for k in keys if _year_of(k) is not None]
+    return min(years, key=int) if years else ""
+
+
+def _canonical_sector(sector: Any) -> str:
+    """The canonical sector name the benchmark table is keyed by (the same
+    `_normalize_sector` the snapshot cards and the drill-down use). A GICS-style spelling
+    ("Information Technology", "Financials", "Health Care") read no rows when passed raw,
+    so every median-anchored driver silently went unscored."""
+    raw = sector.strip() if isinstance(sector, str) else ""
+    if not raw:
+        return ""
+    # Local import: sector_benchmark_service pulls in the FMP client at import time.
+    from app.services.sector_benchmark_service import _normalize_sector
+
+    return (_normalize_sector(raw) or "").strip()
 
 
 def _compute_yoy_pct(
@@ -288,6 +321,19 @@ class PillarResult:
         }
 
 
+class MoatScores(dict):
+    """``{pillar name: PillarResult}`` from `MoatScoringService.score`.
+
+    ``lookup_failed`` is True when the sector-median read FAILED (a Supabase error or a
+    raising lookup — not "this sector has no rows"). The median-anchored drivers then
+    resolved without a median, so pillars fall to the AI dimension for a reason that is
+    an outage, not the company's shape: the report collector records it on the report's
+    degraded sections so the result is delivered to its caller but never shared-cached.
+    `sector_benchmark_lookup.lookup_failed(result)` reads the flag, as for every lookup."""
+
+    lookup_failed = False
+
+
 # ── Service ────────────────────────────────────────────────────────────
 
 
@@ -308,8 +354,9 @@ class MoatScoringService:
         industry_tam: Optional[Any] = None,   # IndustryDossier or None
         transcript: Optional[str] = None,     # Phase 3B — earnings-call text for NRR / user-count extraction
         ip_intel: Optional[Dict[str, Any]] = None,  # Phase 3C — USPTO patents + FDA approvals
-    ) -> Dict[str, PillarResult]:
-        """Score all five pillars. Returns a dict keyed by pillar name.
+    ) -> MoatScores:
+        """Score all five pillars. Returns a `MoatScores` dict keyed by pillar name
+        (its ``lookup_failed`` flag says whether the sector-median read failed).
 
         Each PillarResult has either a valid score + drivers + confidence
         ("high"/"medium"), or score=None + confidence="low" indicating
@@ -317,25 +364,35 @@ class MoatScoringService:
 
         No upstream FMP calls. All inputs are already-fetched.
         """
-        # Latest period records (annual). For percentile rank, we compare
-        # latest focal value vs latest sector median.
+        # Latest period records (annual). Each focal value is compared with the sector
+        # median of ITS record's year (see `_pick_year_at_or_before`).
         latest_inc = _latest(income)
         latest_bs = _latest(balance)
         latest_ratios = _latest(ratios)
 
+        inc_year = annual_benchmark_key(latest_inc) if latest_inc else ""
+        bs_year = annual_benchmark_key(latest_bs) if latest_bs else ""
+        ratios_year = annual_benchmark_key(latest_ratios) if latest_ratios else ""
+        # metric → the benchmark year of the record its focal value is read from.
+        target_years: Dict[str, str] = {
+            "gross_margin": ratios_year,
+            "operating_margin": ratios_year,
+            "ps_ratio": ratios_year,
+            "asset_turnover": ratios_year,
+            # `_compute_yoy_pct` reads the newest income record — the same as `_latest`.
+            "revenue_yoy": inc_year,
+            "rd_to_revenue": inc_year,
+            "sga_to_revenue": inc_year,
+            "intangibles_to_assets": bs_year,
+            # balance-sheet deferred revenue ÷ income-statement revenue
+            "deferred_revenue_to_revenue": _older_key(bs_year, inc_year),
+        }
+
         # Resolve sector medians for every metric in one Supabase call.
-        # `_fetch_sector_medians` returns a dict of
-        # {metric → (median, period_used, sample_size) | None} using the
-        # tiered year-selection rule (prefer n>=20, fall back to n>=10,
-        # else None).
-        sector_medians = self._fetch_sector_medians(
+        sector_medians, medians_failed = self._fetch_sector_medians(
             sector=sector,
-            metrics=[
-                "gross_margin", "operating_margin", "ps_ratio",
-                "asset_turnover", "revenue_yoy",
-                "rd_to_revenue", "sga_to_revenue",
-                "intangibles_to_assets", "deferred_revenue_to_revenue",
-            ],
+            metrics=list(target_years),
+            target_years=target_years,
         )
 
         # Phase 3B — extract NRR + user-count from the earnings transcript
@@ -352,7 +409,9 @@ class MoatScoringService:
                     "moat_scoring: transcript signal extraction failed: %s", exc,
                 )
 
-        results: Dict[str, PillarResult] = {}
+        results = MoatScores()
+        if medians_failed:
+            results.lookup_failed = True
         results[PILLAR_SWITCHING] = self._score_switching_costs(
             latest_inc, latest_bs, sector_medians, transcript_sig,
         )
@@ -373,39 +432,55 @@ class MoatScoringService:
     # ── Sector benchmark lookup ──────────────────────────────────────
 
     def _fetch_sector_medians(
-        self, sector: Optional[str], metrics: List[str],
-    ) -> Dict[str, Optional[Dict[str, Any]]]:
-        """For each metric, pick the latest annual median that has
-        adequate sample size and return it along with its period label
-        and n.
+        self,
+        sector: Optional[str],
+        metrics: List[str],
+        target_years: Dict[str, str],
+    ) -> Tuple[Dict[str, Optional[Dict[str, Any]]], bool]:
+        """For each metric, the sector median its focal value is compared with
+        (`_pick_year_at_or_before` on ``target_years[metric]``: the same year, else the
+        newest older year with a mature median), plus whether the read FAILED.
 
-        Year-selection rule (walks years latest → oldest):
-            1. First year with n >= _N_PREFERRED (20) → use.
-            2. Else first year with n >= _N_ACCEPTABLE (10) → use as fallback.
-            3. Else None — metric won't resolve in scoring.
-
-        Returns a dict {metric: {"median": float, "period": str, "n": int}
-        | None}. None means "skip this metric in scoring."
+        Returns ``({metric: {"median": float, "period": str, "n": int} | None}, failed)``.
+        None means "skip this metric in scoring". ``failed`` is True for a raising lookup
+        or a `BenchmarkLookupFailed` answer — never for a sector with no rows.
         """
         out: Dict[str, Optional[Dict[str, Any]]] = {m: None for m in metrics}
-        if not sector:
-            return out
+        canonical = _canonical_sector(sector)
+        if not canonical:
+            return out, False
         try:
             benchmarks = self._lookup.get_sector_benchmarks_with_n(
-                sector, metrics, period_type="annual",
+                canonical, metrics, period_type="annual",
             )
         except Exception as exc:
             logger.warning(
-                "moat_scoring: sector benchmark lookup failed for %s: %s",
-                sector, exc,
+                "moat_scoring: sector benchmark lookup raised for sector=%r (raw %r): "
+                "%s: %s — every median-anchored driver is unscored; flagged so the "
+                "report is not shared-cached",
+                canonical, sector, type(exc).__name__, exc,
             )
-            return out
+            return out, True
+        if not isinstance(benchmarks, dict):
+            logger.warning(
+                "moat_scoring: sector benchmark lookup for sector=%r answered %s, not a "
+                "mapping — treated as a failed read", canonical, type(benchmarks).__name__,
+            )
+            return out, True
+        failed = lookup_failed(benchmarks)
+        if failed:
+            logger.warning(
+                "moat_scoring: sector benchmark read FAILED for sector=%r — scored with "
+                "what loaded; flagged so the report is not shared-cached", canonical,
+            )
         for metric in metrics:
             year_to_payload = benchmarks.get(metric) or {}
-            if not year_to_payload:
+            if not isinstance(year_to_payload, dict) or not year_to_payload:
                 continue
-            out[metric] = _pick_year_by_sample_size(year_to_payload)
-        return out
+            out[metric] = _pick_year_at_or_before(
+                year_to_payload, target_years.get(metric) or "",
+            )
+        return out, failed
 
     # ── Per-pillar scorers ───────────────────────────────────────────
 
@@ -800,8 +875,9 @@ def score_moat_dimensions(
     industry_tam: Optional[Any] = None,
     transcript: Optional[str] = None,
     ip_intel: Optional[Dict[str, Any]] = None,
-) -> Dict[str, PillarResult]:
-    """Module-level convenience for the data collector."""
+) -> MoatScores:
+    """Module-level convenience for the data collector (``lookup_failed(result)`` tells
+    a failed sector-median read from a sector with no rows)."""
     return get_moat_scoring_service().score(
         sector=sector, industry=industry, profile=profile,
         income=income, balance=balance, ratios=ratios,

@@ -299,9 +299,12 @@ async def test_the_real_terminal_write_never_exceeds_its_worst_case_and_reaches_
 def _worst_writer(clock: _Clock, calls: List[str]):
     """Makes MODEL_CALLS_PER_GENERATION calls, each behind `before_call`, each at the worst
     case — and ignores a False from `before_call` (the contract allows the call when nothing
-    publishable is in hand), so every refresh and every call happens."""
+    publishable is in hand), so every refresh and every call happens. It takes every keyword the
+    real `generate_package` is called with (`store_state` since 2026-10-05): an unknown keyword
+    would be a TypeError, recorded as a writer FAILURE, and the call sequence below would break."""
 
-    async def writer(item, template, run_date, *, generation_id, allow_x_url, judge_mode, before_call):
+    async def writer(item, template, run_date, *, generation_id, allow_x_url, judge_mode, before_call,
+                     store_state=None):
         for _ in range(gb.MODEL_CALLS_PER_GENERATION):
             calls.append("before_call")
             await before_call()

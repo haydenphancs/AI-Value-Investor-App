@@ -106,7 +106,8 @@ struct ValuationMeterSection: View {
         VStack(spacing: AppSpacing.sm) {
             ForEach(Array(snapshot.metrics.enumerated()), id: \.offset) { _, metric in
                 HStack(alignment: .firstTextBaseline) {
-                    Text(metric.name)
+                    // "industry avg" for an industry median; the wire name says "sector avg".
+                    Text(metric.displayName)
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -184,8 +185,9 @@ struct ValuationMeterSection: View {
                         category: .price,
                         rating: .weak,
                         metrics: [
-                            SnapshotMetric(name: "P/E 1.35x sector avg 25", value: "33.80"),
-                            SnapshotMetric(name: "EV/EBITDA 1.10x sector avg 18", value: "27.59"),
+                            // Industry median → shown as "industry avg"; sector median as sent.
+                            SnapshotMetric(name: "P/E 1.35x sector avg 25", value: "33.80", peerLevel: "industry"),
+                            SnapshotMetric(name: "EV/EBITDA 1.10x sector avg 18", value: "27.59", peerLevel: "sector"),
                         ],
                         dcf: DcfEstimate(status: .ok, value: 135.83, asOf: "2026-09-17")
                     ),

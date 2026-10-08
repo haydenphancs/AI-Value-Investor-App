@@ -164,10 +164,8 @@ async def test_cadence_jan_q4_joins_the_q4_25_cell_and_december_q4_still_joins(m
         # is 30.0; the interim rule drew None. Final rule: Oct-Dec 2025 peers = 6.0.
         assert jan_q4.sector_average_yoy == 6.0, (name, jan_q4.sector_average_yoy)
         assert jan_q4.sector_average_yoy not in (9.0, 30.0), name
-        if name in ("eps_quarterly", "revenue_quarterly"):
-            assert jan_q4.sector_average_qoq == 6.0, name
-        else:
-            assert jan_q4.sector_average_qoq is None, f"{name} has no QoQ benchmark"
+        # No client reads a QoQ peer value; its read was dropped 2026-10-07.
+        assert jan_q4.sector_average_qoq is None, name
         assert by["Q4 '24"].sector_average_yoy == 5.0, f"{name}: a December Q4 still joins"
         for label, cell_key in _CDNS_JOIN.items():
             assert by[label].sector_average_yoy == cells[cell_key]["value"], (name, label)

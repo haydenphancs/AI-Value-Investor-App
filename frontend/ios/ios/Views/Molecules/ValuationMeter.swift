@@ -61,7 +61,9 @@ struct ValuationMeter: View {
                     .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
-                Text("Multiples vs sector peers")
+                // "peers", not "sector peers": each multiple's median is its industry's,
+                // or its sector's when the industry is too small (the rows say which).
+                Text("Multiples vs peers")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }

@@ -178,10 +178,12 @@ async def test_intangible_assets_gains_high_confidence_with_ip_data():
     )
 
     class _FakeLookup:
+        # "2024": the focal statements below end 2024-12-31, and since 2026-10-07 a
+        # focal value is compared with its OWN year's median, never a newer year's.
         def get_sector_benchmarks_with_n(self, sector, metrics, period_type):
             return {
-                "rd_to_revenue": {"2025": {"median": 8.0, "n": 60}},
-                "intangibles_to_assets": {"2025": {"median": 30.0, "n": 60}},
+                "rd_to_revenue": {"2024": {"median": 8.0, "n": 60}},
+                "intangibles_to_assets": {"2024": {"median": 30.0, "n": 60}},
             }
 
     svc = MoatScoringService()
@@ -226,10 +228,11 @@ async def test_intangible_assets_pharma_gains_fda_driver():
     )
 
     class _FakeLookup:
+        # "2024" — the focal year (see the test above).
         def get_sector_benchmarks_with_n(self, sector, metrics, period_type):
             return {
-                "rd_to_revenue": {"2025": {"median": 18.0, "n": 60}},
-                "intangibles_to_assets": {"2025": {"median": 40.0, "n": 60}},
+                "rd_to_revenue": {"2024": {"median": 18.0, "n": 60}},
+                "intangibles_to_assets": {"2024": {"median": 40.0, "n": 60}},
             }
 
     svc = MoatScoringService()

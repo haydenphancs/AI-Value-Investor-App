@@ -10,7 +10,10 @@ cohort reaches n>=20, so the readers' maturity hold-back passed it, and Growth /
 
 Fix (producer side): `IndustryBenchmarkService._rows_from_values` drops a calendar-quarter
 row whose quarter ended less than CALENDAR_QUARTER_MIN_AGE_DAYS (75) before the run and logs
-what it held back. Annual / TTM rows are untouched. Hermetic: inline values, no FMP/Supabase.
+what it held back. Since 2026-10-07 (owner decision: an incomplete period shows no peer value)
+ANNUAL rows get the same gate — "2026" is written only from 2027-03-16 — pinned here and in
+`test_benchmark_producer_2026_10_07.py`. TTM rows are untouched. Hermetic: inline values, no
+FMP/Supabase.
 """
 
 from __future__ import annotations
@@ -52,8 +55,10 @@ def test_the_2026_10_04_run_writes_q2_but_not_the_just_closed_q3():
     assert ("gross_margin", CQ, "Q3'26") not in written
     assert ("gross_margin", CQ, "Q2'26") in written
     assert ("gross_margin", CQ, "Q1'26") in written
-    # The gate is calendar-quarter only: annual rows (even the current year) still land.
-    assert {("gross_margin", "annual", "2026"), ("gross_margin", "annual", "2025")} <= written
+    # Annual rows get the same gate (2026-10-07): the current year, 2026, held only the
+    # early filers on 2026-10-04 and is NOT written; the complete 2025 year is.
+    assert ("gross_margin", "annual", "2026") not in written
+    assert ("gross_margin", "annual", "2025") in written
 
 
 def test_the_january_run_writes_the_now_complete_q3_and_holds_q4():
@@ -169,13 +174,14 @@ async def test_compute_sector_on_the_scheduled_run_never_upserts_the_just_closed
     svc = _svc()
     svc._calendar_quarter_blocked = False
     upserted = []
-    monkeypatch.setattr(svc, "_upsert", lambda rows: upserted.extend(rows) or len(rows))
+    monkeypatch.setattr(svc, "_upsert", lambda rows, **_k: upserted.extend(rows) or len(rows))
 
-    async def fake_values(_ticker_caps, _al, _ql):
+    async def fake_values(_ticker_caps, _al, _ql, **_k):
         return {
             ("gross_margin", CQ, "Q3'26"): list(_FIVE) * 5,
             ("gross_margin", CQ, "Q2'26"): list(_FIVE),
             ("gross_margin", "annual", "2026"): list(_FIVE),
+            ("gross_margin", "annual", "2025"): list(_FIVE),
         }
 
     monkeypatch.setattr(svc, "_industry_value_lists", fake_values)
@@ -184,8 +190,9 @@ async def test_compute_sector_on_the_scheduled_run_never_upserts_the_just_closed
         1, 1, dry_run=False,
     )
     labels = {(r["industry"], r["period_type"], r["period_label"]) for r in upserted}
-    assert n == len(upserted) == 6            # 3 groups × (Q2'26 + annual 2026)
+    assert n == len(upserted) == 6            # 3 groups × (Q2'26 + annual 2025)
     assert not any(pt == CQ and lab == "Q3'26" for (_i, pt, lab) in labels)
+    assert not any(pt == "annual" and lab == "2026" for (_i, pt, lab) in labels)
     for industry in ("Semiconductors", "Software", ""):
         assert (industry, CQ, "Q2'26") in labels
-        assert (industry, "annual", "2026") in labels
+        assert (industry, "annual", "2025") in labels

@@ -449,7 +449,16 @@ async def get_updates_feed(
     # A full page implies there may be another; a short page is provably the
     # end. Also stop at the `offset` ceiling so the client cannot chase a page
     # the query parameter would reject.
-    has_more = len(articles) >= limit and (offset + limit) <= 500
+    #
+    # The Market feed answers this itself: it hides single-company stories after the
+    # read, so its page length no longer says whether more exist — it scans until it
+    # knows (`NewsCacheService._get_cached_market_page`). Every other feed (and the
+    # Market's cold fetch) leaves the key out and keeps the page-length rule.
+    feed_has_more = feed.get("has_more")
+    if isinstance(feed_has_more, bool):
+        has_more = feed_has_more and (offset + limit) <= 500
+    else:
+        has_more = len(articles) >= limit and (offset + limit) <= 500
 
     logger.info(
         "Updates feed scope=%s articles=%d offset=%d has_more=%s cached=%s insight=%s",

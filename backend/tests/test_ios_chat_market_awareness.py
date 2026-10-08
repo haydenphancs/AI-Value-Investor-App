@@ -146,6 +146,7 @@ _LABELLED_TOOLS = (
     "get_market_snapshot",
     "explain_price_move",
     "web_search",
+    "check_ownership_filings",
 )
 
 

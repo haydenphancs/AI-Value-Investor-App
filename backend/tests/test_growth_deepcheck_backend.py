@@ -302,6 +302,10 @@ class _FakeLookup:
         self.quarterly = quarterly or {}
         self.calls: List[Tuple[str, Tuple[str, ...]]] = []
 
+    def get_benchmark_series(self, industry, sector, metrics, period_type):
+        # Growth / Profit Power read one-group-per-line cells; this fake's cells already are.
+        return self.get_benchmarks(industry, sector, metrics, period_type)
+
     def get_benchmarks(self, industry, sector, metrics, period_type):
         self.calls.append((period_type, tuple(metrics)))
         source = {
@@ -544,10 +548,8 @@ async def test_off_calendar_company_gets_its_same_calendar_quarter_peers_and_kee
         for p in series:
             expected = _CAL_VALUES[_MSFT_JOIN[p.period]]
             assert p.sector_average_yoy == expected, (name, p.period, p.sector_average_yoy)
-            if name in ("eps_quarterly", "revenue_quarterly"):
-                assert p.sector_average_qoq == expected * _QOQ_SCALE, (name, p.period)
-            else:
-                assert p.sector_average_qoq is None, f"{name} has no QoQ benchmark"
+            # No client reads a QoQ peer value; its read was dropped 2026-10-07.
+            assert p.sector_average_qoq is None, name
         assert response.peer_group_levels.get(name) == "industry", name
     by = {p.period: p for p in response.revenue_quarterly}
     assert by["Q1 '26"].sector_average_yoy != _CAL_VALUES["Q1'25"], "legacy-key mis-join"
@@ -599,9 +601,9 @@ async def test_off_calendar_cash_flow_quarters_still_join_when_the_income_leg_fa
 async def test_quarterly_benchmark_reads_use_the_calendar_quarter_period_type(
     monkeypatch, ticker, fmp,
 ):
-    """Both quarterly reads (YoY and QoQ) ask for ``calendar_quarter`` — never the legacy
-    fiscal-keyed ``quarterly`` rows — for a calendar filer AND an off-calendar one (the
-    read is no longer skipped for the latter)."""
+    """The quarterly read asks for ``calendar_quarter`` — never the legacy fiscal-keyed
+    ``quarterly`` rows — for a calendar filer AND an off-calendar one (the read is no
+    longer skipped for the latter). The unused QoQ read is gone (2026-10-07)."""
     assert CALENDAR_QUARTER_PERIOD_TYPE == "calendar_quarter"
     lookup = _calendar_distinct_lookup()
     svc = _service(monkeypatch, fmp, lookup)
@@ -610,7 +612,6 @@ async def test_quarterly_benchmark_reads_use_the_calendar_quarter_period_type(
     assert lookup.calls == [
         ("annual", yoy),
         ("calendar_quarter", yoy),
-        ("calendar_quarter", ("eps_qoq", "revenue_qoq")),
     ]
     assert "quarterly" not in {period_type for period_type, _ in lookup.calls}
 
@@ -642,24 +643,27 @@ async def test_peer_group_levels_are_voted_per_series(monkeypatch):
     assert "operating_profit_annual" not in levels
     assert "fcf_annual" not in levels
     assert set(levels.values()) <= {"industry", "sector"}
-    assert len(lookup.calls) == 3, "levels must come from the same three lookups"
+    assert len(lookup.calls) == 2, "levels must come from the same two lookups"
 
 
 @pytest.mark.asyncio
-async def test_peer_level_follows_the_hold_back_donor(monkeypatch):
-    """A THIN industry cell is drawn with the latest MATURE value at or before it — here
-    a SECTOR cell. The legend must name the group the plotted value came from."""
+async def test_each_point_draws_its_own_periods_cell_never_a_donor(monkeypatch):
+    """The lookup already chose each period's cell (industry when mature, else that
+    period's sector median — `merge_peer_cells`), so Growth draws every period's OWN
+    cell. Until 2026-10-07 a thin cell was painted with an earlier period's mature value
+    (often an old sector cell), freezing a small industry's line."""
     lookup = _FakeLookup(annual={
         "revenue_yoy": {
             "2024": _cell(5.0, "sector", n=60),
-            "2025": _cell(80.0, "industry", n=4),   # thin → shows 2024's sector 5.0
+            "2025": _cell(80.0, "industry", n=4),   # the lookup's own choice for 2025
         },
     })
     svc = _service(monkeypatch, _FakeFMP(), lookup)
     response, _ = await svc._build_growth("TEST")
     by = {p.period: p for p in response.revenue_annual}
-    assert by["2025"].sector_average_yoy == 5.0
-    assert response.peer_group_levels["revenue_annual"] == "sector"
+    assert by["2025"].sector_average_yoy == 80.0
+    assert by["2024"].sector_average_yoy == 5.0
+    assert response.peer_group_levels["revenue_annual"] == "industry"   # 1-1 tie → industry
 
 
 @pytest.mark.asyncio

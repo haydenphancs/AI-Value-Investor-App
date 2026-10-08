@@ -45,12 +45,14 @@ from app.services.marketing.grounding import check_grounding
 from app.services.marketing.post_copy import (
     CAPTION_FIELDS,
     PLATFORMS,
+    STORE_PRELAUNCH,
     ComposedPost,
     body_budget,
     check_composed,
     compose,
     disclaimer_card,
     measured_length,
+    normalize_store_state,
 )
 from app.services.marketing.selection import Template
 
@@ -273,8 +275,10 @@ _MYTH_TITLE_RE = re.compile(
 
 
 def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
-                     allow_x_url: bool = False) -> ValidationResult:
-    """Clean, cap, scan and ground every field; compose the per-platform posts. Pure."""
+                     allow_x_url: bool = False, store_state: str = STORE_PRELAUNCH) -> ValidationResult:
+    """Clean, cap, scan and ground every field; compose the per-platform posts. Pure. `store_state`
+    picks the code-owned value line every caption carries (`post_copy.value_line`), so it sizes the
+    caption budgets too: it must be the SAME state the prompt was built with."""
     shared: List[Violation] = []
 
     hook = _str(obj, "hook", shared)
@@ -301,12 +305,12 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
             shared.append(Violation(
                 "video_script", "length",
                 f"{words} words - the limit is {wp.SCRIPT_MAX_WORDS}; cut at least "
-                f"{words - wp.SCRIPT_MAX_WORDS} words (drop a line)"))
+                f"{words - wp.SCRIPT_MAX_WORDS} words (shorten the longest lines or drop one)"))
         elif words < wp.SCRIPT_MIN_WORDS:
             shared.append(Violation(
                 "video_script", "length",
                 f"{words} words - the minimum is {wp.SCRIPT_MIN_WORDS}; add at least "
-                f"{wp.SCRIPT_MIN_WORDS - words} words (add a whole line)"))
+                f"{wp.SCRIPT_MIN_WORDS - words} words (lengthen the shortest lines or add one)"))
         for i, line in enumerate(script):
             if not _has_words(line):
                 # A pause line ("…") would be narrated as silence and counted as a line.
@@ -360,7 +364,8 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
             vs: List[Violation] = []
             text = _str(caps_raw, f, vs)
             if _has_words(text):
-                budget = body_budget(f, item.category, run_date, allow_x_url=allow_x_url)
+                budget = body_budget(f, item.category, run_date, allow_x_url=allow_x_url,
+                                     store_state=store_state)
                 n = measured_length(f, text)
                 if n > budget:
                     vs.append(Violation(f, "too_long", _over_chars(n, budget)))
@@ -379,7 +384,7 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
         vs = [v for f in fields for v in field_violations.get(f, [])]
         if not vs and all(f in bodies for f in fields):
             post = compose(platform, bodies, category=item.category, run_date=run_date,
-                           allow_x_url=allow_x_url)
+                           allow_x_url=allow_x_url, store_state=store_state)
             vs = check_composed(post, run_date)
             if not vs:
                 posts[platform] = post
@@ -397,6 +402,8 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
         "disclaimer_card": disclaimer_card(run_date),
         "source_ref": item.key,
         "run_date": run_date.isoformat(),
+        # What the captions' code-owned value line says about the app (prelaunch / preorder / live).
+        "store_state": normalize_store_state(store_state),
     }
     return ValidationResult(package=package, shared=shared, outlets=outlets, posts=posts)
 
@@ -487,6 +494,7 @@ async def generate_package(
     judge_mode: str,
     client: Any = None,
     allow_x_url: bool = False,
+    store_state: str = STORE_PRELAUNCH,
     before_call: Optional[Callable[[], Awaitable[Optional[bool]]]] = None,
 ) -> WriterResult:
     """One generation: a draft and, if it has any violation, ONE repair — each graded by the
@@ -504,6 +512,9 @@ async def generate_package(
       (`TOKENS_ATTR`); an unusable judge answer raises `judge.MarketingJudgeUnavailable` the same
       way. Either is a writer FAILURE, never a pass — unless an earlier candidate of this same
       generation already passed both gates, which is then kept (loudly).
+    * `store_state` (default: prelaunch, the line that claims least) is the code-owned value line's
+      state, read once by the caller at write time; the prompts and the validator both use it, so
+      the caption budget asked for is the one enforced.
     * `before_call` runs before EACH model call, judge calls included; whatever it raises
       propagates (the script service refreshes its lease there). If it returns False (the lease
       can no longer cover a call), an acceptable candidate in hand is kept and the call skipped;
@@ -542,11 +553,13 @@ async def generate_package(
         for round_no, kind in ((1, "draft"), (2, "repair")):
             if kind == "draft":
                 prompt = wp.draft_prompt(item, template, run_date, generation_id=generation_id,
-                                         round_no=round_no, allow_x_url=allow_x_url)
+                                         round_no=round_no, allow_x_url=allow_x_url,
+                                         store_state=store_state)
             else:
                 prompt = wp.repair_prompt(item, template, run_date, generation_id=generation_id,
                                           round_no=round_no, previous=previous,
-                                          violations=last_violations, allow_x_url=allow_x_url)
+                                          violations=last_violations, allow_x_url=allow_x_url,
+                                          store_state=store_state)
             if not await _may_call(kind, round_no):
                 break
             try:
@@ -579,7 +592,7 @@ async def generate_package(
             judge_record: Optional[Dict[str, Any]] = None
             stop = False
             if obj is not None:
-                vr = validate_package(obj, item, run_date, allow_x_url=allow_x_url)
+                vr = validate_package(obj, item, run_date, allow_x_url=allow_x_url, store_state=store_state)
                 vr.judge_required = mode == jd.MODE_ENFORCE
                 previous = obj
                 if mode == jd.MODE_OFF:

@@ -176,7 +176,9 @@ def test_apple_december_quarter_sits_with_peers_oct_dec():
 
 
 def test_annual_rows_are_untouched():
-    # Only the QUARTERLY key moved; annual stays the end-date year.
+    # Only the QUARTERLY key moved to the calendar quarter; annual is keyed by
+    # `period_labels.annual_benchmark_key` (end-date year, a Jan 1-7 end counting as the
+    # year before — test_benchmark_producer_2026_10_07.py).
     data = [{"ratios_annual": [{"date": "2025-06-30", "grossProfitMargin": 0.69},
                                {"date": "2024-06-30", "grossProfitMargin": 0.70}],
              "ratios_quarterly": []}]
@@ -291,7 +293,7 @@ async def test_industry_rows_are_stored_under_the_calendar_quarter_period_type(m
             "income_annual": [], "ratios_annual": [],
         })
 
-    async def fake_fetch(_tickers, _al, _ql):
+    async def fake_fetch(_tickers, _al, _ql, **_k):        # counts= (the fetch tally)
         return companies + companies[:1]   # 5 companies → clears MIN_SAMPLE_SIZE somewhere
 
     monkeypatch.setattr(svc, "_fetch_batched", fake_fetch)

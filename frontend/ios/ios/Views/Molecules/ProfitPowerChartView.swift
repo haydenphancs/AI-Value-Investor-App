@@ -588,11 +588,15 @@ struct ProfitPowerTooltipView: View {
                 color: AppColors.profitNetMargin
             )
 
-            tooltipRow(
-                title: "\(peerWord) Avg",
-                value: dataPoint.sectorAverageNetMargin,
-                color: AppColors.profitSectorAverage
-            )
+            // No peer value at this point → no peer row (2026-10-08): a "Sector Avg —" row
+            // named a peer line the tab does not draw.
+            if dataPoint.sectorAverageNetMargin != nil {
+                tooltipRow(
+                    title: "\(peerWord) Avg",
+                    value: dataPoint.sectorAverageNetMargin,
+                    color: AppColors.profitSectorAverage
+                )
+            }
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.sm)

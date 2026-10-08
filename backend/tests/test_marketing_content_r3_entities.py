@@ -730,18 +730,26 @@ def test_x_counts_only_what_it_autolinks_as_a_url(text, expected):
     assert pc.x_weighted_length(text) == expected, text
 
 
-def test_a_glued_abbreviation_no_longer_drops_the_x_post():
+@pytest.mark.parametrize("store_state", pc.STORE_STATES)
+def test_a_glued_abbreviation_no_longer_drops_the_x_post(store_state):
+    """In every store state: the code-owned value line (2026-10-05) shrank X's body budget for this
+    lesson's category to 133 (pre-order) / 143 (live) / 162 (the claim-free prelaunch line), so the sentence is short
+    enough to repeat in any of them — the body must be FULL (another sentence would not fit) and
+    carry the glue at least twice, or the URL-weight assertion below proves nothing."""
     item, pkg = _baseline("journey:compound_interest")
-    budget = pc.body_budget("x", item.category, RUN_DATE)
-    sentence = "Compounding rewards time, i.e.the habit matters."
+    budget = pc.body_budget("x", item.category, RUN_DATE, store_state=store_state)
+    sentence = "Time, i.e.the habit, matters."
     body = sentence
     while len(body) + 1 + len(sentence) <= budget:
         body += " " + sentence
+    assert body.count("i.e.the") >= 2 and len(body) + 1 + len(sentence) > budget
     # Glued, the body fits by X's own count; weighed as URLs it would not.
     assert pc.x_weighted_length(body) == len(body) <= budget
     assert len(body) + body.count("i.e.the") * (23 - len("i.e.the")) > budget
-    res = ws.validate_package(_with(pkg, "x", body), item, RUN_DATE)
+    res = ws.validate_package(_with(pkg, "x", body), item, RUN_DATE, store_state=store_state)
     assert "x" in res.posts, [(v.code, v.detail) for v in res.outlets.get("x", [])]
+    assert res.posts["x"].caption.startswith(body + "\n\n")
+    assert pc.value_line(store_state) in res.posts["x"].caption
 
 
 # ── 14. the prompt and the repair hints state what the entity rules enforce ──────────────────

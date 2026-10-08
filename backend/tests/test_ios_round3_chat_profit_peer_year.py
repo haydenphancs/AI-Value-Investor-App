@@ -1,15 +1,15 @@
-"""Round-3 regression (finding P18): Cay AI's Profit Power grounding line must not put a
-held-back peer median under the company's latest fiscal year.
+"""Cay AI's Profit Power grounding line names the peer figure honestly (findings P18,
+2026-09-30, and the 2026-10-07 benchmark rework).
 
-Profit Power flattens a THIN latest-year peer cell (n below the mature floor: the newest
-fiscal year early in every reporting season, always for an off-calendar filer) to the
-latest MATURE median at or before it (`hold_back_thin_benchmarks`). The response carries
-only that value, not its year, yet `ChatService._format_profit_summary` labelled it
-"(peer group, same year)" — and, for a revenue-gap latest year, "for FY{latest}" — so
-Cay AI told users FY2025's median was "the industry's FY2026 average".
+History: "(peer group, same year)" put a held-back FY2025 median under FY2026 (P18), so
+the line then said "latest available peer reading; it may be from a year before FY2026".
+Since 2026-10-07 each period carries its OWN peer median and a period that is not fully
+reported carries none (`sector_benchmark_lookup.merge_peer_cells` /
+`servable_benchmark_rows`), so the figure is the peers' median for the same period, and
+the line says so. It is still never written as "the industry's FY2026 average" — the
+company's fiscal-year label and the peers' period are matched by period end, not by name.
 
-Both assertions on the old wording FAIL on the pre-fix code. Hermetic: pure formatting
-over schema objects, no service, no network.
+Hermetic: pure formatting over schema objects, no service, no network.
 """
 from __future__ import annotations
 
@@ -17,21 +17,6 @@ import re
 
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
 from app.services.chat_service import ChatService
-from app.services.sector_benchmark_lookup import MATURE_SAMPLE_FLOOR, hold_back_thin_benchmarks
-
-
-def _held_back_latest_peer_pct() -> float:
-    """The FY2026 peer value Profit Power actually serves when FY2026 is thin: FY2025's
-    mature median, as a percentage (the chart's scale)."""
-    flat = hold_back_thin_benchmarks({
-        "net_margin": {
-            "2025": {"value": 0.10, "n": MATURE_SAMPLE_FLOOR + 20},
-            "2026": {"value": 0.30, "n": MATURE_SAMPLE_FLOOR - 14},
-        }
-    })
-    value = flat["net_margin"]["2026"]
-    assert value == 0.10, "fixture precondition: FY2026 must carry FY2025's median"
-    return round(value * 100, 1)
 
 
 def _claims_the_peer_figure_for(text: str, year: str) -> bool:
@@ -41,8 +26,8 @@ def _claims_the_peer_figure_for(text: str, year: str) -> bool:
     )
 
 
-def test_a_held_back_peer_median_is_not_called_the_latest_years():
-    peer = _held_back_latest_peer_pct()
+def test_the_peer_median_is_named_as_the_same_periods_peer_figure():
+    peer = 10.0
     data = ProfitPowerResponse(
         symbol="MSFT", quarterly=[], peer_group_level="industry",
         annual=[
@@ -58,13 +43,13 @@ def test_a_held_back_peer_median_is_not_called_the_latest_years():
     assert not _claims_the_peer_figure_for(text, "2026"), text
     assert text == (
         "Latest annual margins for MSFT (FY2026): Gross 69.5%, Operating 45.5%, Net 36.1%, "
-        "FCF 31.0%; Industry peer-group median net margin 10.0% (latest available peer "
-        "reading; it may be from a year before FY2026)."
+        "FCF 31.0%; Industry peer-group median net margin 10.0% (peers' median for the "
+        "same period)."
     )
 
 
 def test_a_gap_latest_year_does_not_date_the_peer_figure_either():
-    peer = _held_back_latest_peer_pct()
+    peer = 10.0
     data = ProfitPowerResponse(
         symbol="XBIO", quarterly=[], peer_group_level="industry",
         annual=[
@@ -79,8 +64,8 @@ def test_a_gap_latest_year_does_not_date_the_peer_figure_either():
     assert "Most recent year with margins: FY2025: Gross 60.0%, Operating 25.0%, Net 20.0%" in text
     # Still named as a PEER figure, never bare, never the company's.
     assert text.endswith(
-        " Industry peer-group median net margin: 10.0% (peers, not XBIO; latest available "
-        "peer reading; it may be from a year before FY2026)."
+        " Industry peer-group median net margin: 10.0% (peers, not XBIO; peers' median for "
+        "the FY2026 period)."
     ), text
     assert "Industry avg net margin 10.0%" not in text
 

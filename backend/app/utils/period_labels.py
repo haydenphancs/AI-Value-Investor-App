@@ -20,7 +20,7 @@ display strings.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -171,6 +171,58 @@ def calendar_quarter_label(record: Any) -> str:
         return ""
     key = calendar_quarter_key(record.get("date"))
     return format_calendar_quarter(key) if key is not None else ""
+
+
+# ── Reporting completeness of a stored benchmark period ──────────────────────────
+#
+# A peer median is only a fair comparison once (nearly) every company in the group has
+# reported the period. Benchmark rows are keyed by the period a company's statement ENDS
+# in, so right after a period closes its cell holds only the early, off-calendar filers:
+# on 2026-10-04 the "2026" annual cells held 6-27% of each group (Software-Infrastructure
+# EPS growth 85% from 21 of 77 companies, against 18.8% for the full 2025 cohort). 75 days
+# clears the 40/45-day 10-Q and the 60/75-day large-filer 10-K deadlines. The producer
+# does not write a period before this (industry_benchmark_service) and the readers do not
+# serve a row computed before it (sector_benchmark_lookup), so a row written early by any
+# path never reaches a screen. Owner decision 2026-10-07: an incomplete period shows no
+# peer value at all, never an earlier period's median.
+BENCHMARK_REPORTING_LAG_DAYS = 75
+
+_CALENDAR_QUARTER_LABEL_RE = re.compile(r"^Q([1-4])'(\d{2})$")
+_ANNUAL_LABEL_RE = re.compile(r"^(\d{4})$")
+
+
+def benchmark_period_end(period_type: str, label: Any) -> Optional[date]:
+    """Last day of the period a stored benchmark row names, or None when the label is
+    not a key of that period type.
+
+    ``annual`` "2026" → 2026-12-31 (rows are keyed by ``annual_benchmark_key``, so a
+    52/53-week year ending Jan 1-7 2027 is in "2026" too). ``calendar_quarter`` "Q3'26"
+    → 2026-09-30. Two-digit quarter years are 2000s: the producer never stores a quarter
+    that ended before 2000 (its label would be ambiguous)."""
+    if not isinstance(label, str):
+        return None
+    text = label.strip()
+    if period_type == "annual":
+        m = _ANNUAL_LABEL_RE.match(text)
+        return date(int(m.group(1)), 12, 31) if m else None
+    if period_type == "calendar_quarter":
+        m = _CALENDAR_QUARTER_LABEL_RE.match(text)
+        if m is None:
+            return None
+        month, day = _QUARTER_END_DAY[int(m.group(1))]
+        return date(2000 + int(m.group(2)), month, day)
+    return None
+
+
+def benchmark_period_complete(period_type: str, label: Any, as_of: date) -> Optional[bool]:
+    """True when the period a benchmark row names had ended at least
+    ``BENCHMARK_REPORTING_LAG_DAYS`` before ``as_of`` (a run day, or the day a stored
+    row was computed); False when it had not; None for a label that names no period of
+    that type (the caller decides — never guess)."""
+    end = benchmark_period_end(period_type, label)
+    if end is None:
+        return None
+    return (as_of - end).days >= BENCHMARK_REPORTING_LAG_DAYS
 
 
 # ── 13F filing-lag-aware calendar quarter ─────────────────────────────────────

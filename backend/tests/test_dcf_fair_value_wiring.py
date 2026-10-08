@@ -67,6 +67,9 @@ class _Lookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return {}
 
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return {}
+
 
 class _StubDcfService:
     def __init__(self, result: Any) -> None:

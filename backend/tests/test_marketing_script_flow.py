@@ -192,10 +192,17 @@ def _package(item_key: str) -> Dict[str, Any]:
     }
 
 
+#: What a FakeWriter records when the service does NOT pass `store_state` — never a real state, so a
+#: service that stopped stating it cannot pass for one that passed the default ("prelaunch").
+STORE_STATE_NOT_PASSED = "<not passed>"
+
+
 class FakeWriter:
     """Stands in for writer_service.generate_package; records calls, answers from a script.
     `calls` is recorded on entry; `model_calls` only once `before_call` let the model call
-    through — the difference is what proves a lost lease stopped the SPEND, not just the write."""
+    through — the difference is what proves a lost lease stopped the SPEND, not just the write.
+    `store_state` (the captions' value line, 2026-10-05) defaults to a sentinel the real writer
+    never sees, so the state tests below prove the service STATES it on every call."""
 
     def __init__(self, outcomes: List[Any], *, rounds: int = 1, honor_skip: bool = False):
         self.outcomes = list(outcomes)
@@ -210,9 +217,10 @@ class FakeWriter:
         self.between_rounds = None  # optional callable(generation_id), run after a round's call
 
     async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, judge_mode,
-                       before_call=None):
+                       before_call=None, store_state=STORE_STATE_NOT_PASSED):
         self.calls.append({"item": item.key, "template": template.id, "generation_id": generation_id,
-                           "run_date": run_date, "judge_mode": judge_mode})
+                           "run_date": run_date, "judge_mode": judge_mode,
+                           "store_state": store_state})
         for i in range(self.rounds):
             if before_call is not None:
                 ok = await before_call()
@@ -685,11 +693,11 @@ async def test_losing_the_lease_mid_generation_stops_the_spend_not_just_the_writ
 
     class Thief(FakeWriter):
         async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, judge_mode,
-                           before_call=None):
+                           before_call=None, store_state=STORE_STATE_NOT_PASSED):
             _script_row(sb, rid)["generation_id"] = "someone-else"  # a takeover happened
             return await super().__call__(item, template, run_date, generation_id=generation_id,
                                           allow_x_url=allow_x_url, judge_mode=judge_mode,
-                                          before_call=before_call)
+                                          before_call=before_call, store_state=store_state)
 
     thief = Thief(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=thief)
@@ -2220,3 +2228,99 @@ async def test_the_service_passes_the_configured_judge_mode_to_the_writer(world,
     await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert [c["judge_mode"] for c in writer.calls] == ["shadow"]
+
+
+# ── the captions' value line: the store state is read at WRITE time (2026-10-05) ─────────────
+
+_STORE_URL = "https://apps.apple.com/us/app/caydex/id6759525689"
+
+
+def _store_settings(monkeypatch, url: str, preorder: bool) -> None:
+    """The two settings `smart_link.store_state()` decides from, and its one-time misconfig flag
+    (restored after the test, so an ERROR logged here never silences another test's)."""
+    from app.config import settings
+    from app.services.marketing import smart_link
+
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", url)
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", preorder)
+    monkeypatch.setattr(smart_link, "_misconfig_logged", False)
+
+
+@pytest.mark.parametrize("url, preorder, expected", [
+    ("", False, "prelaunch"),                                    # pre-launch: no URL
+    ("", True, "prelaunch"),                                     # the flag alone claims nothing
+    ("https://evil.com/app/id6759525689", True, "prelaunch"),    # an invalid URL is pre-launch
+    (_STORE_URL, False, "live"),
+    (_STORE_URL, True, "preorder"),
+], ids=["no-url", "flag-without-url", "invalid-url-with-flag", "live", "preorder"])
+@pytest.mark.asyncio
+async def test_the_service_passes_the_configured_store_state_to_the_writer(world, monkeypatch, url,
+                                                                           preorder, expected):
+    """The captions' code-owned value line (the claim-free prelaunch line / "pre-order on the App
+    Store" / "on the App Store") is decided by `smart_link.store_state()` from the two settings, and the
+    service STATES it on every writer call: the FakeWriter's default is a sentinel, so even the
+    prelaunch rows prove it was passed, not defaulted. An invalid URL is prelaunch — exactly when
+    /go still lands on the landing page with no store link — so a caption can never say "on the App
+    Store" while its link lands there."""
+    from app.services.marketing import post_copy
+
+    sb, runs = world
+    _store_settings(monkeypatch, url, preorder)
+    rid = _run(sb, POSTING_DAY)
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert [c["store_state"] for c in writer.calls] == [expected]
+    assert expected in post_copy.STORE_STATES
+    assert _script_row(sb, rid)["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_the_store_state_is_read_per_generation_never_cached(world, monkeypatch):
+    """Read at WRITE time, once per generation: a setting changed between two generations of one
+    day (a redeploy at approval: URL + pre-order flag in one change) reaches the next prompt and
+    validator. Caching it on the service (or at import) would keep writing the prelaunch line."""
+    sb, runs = world
+    _store_settings(monkeypatch, "", False)
+    rid = _run(sb, POSTING_DAY)
+    writer = FakeWriter(["rejected", "accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert _script_row(sb, rid)["status"] == "selected", "sentinel: one content round, below the cap"
+    _script_row(sb, rid)["retry_not_before"] = None   # the next hourly tick
+    _store_settings(monkeypatch, _STORE_URL, True)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert [c["store_state"] for c in writer.calls] == ["prelaunch", "preorder"]
+    assert _script_row(sb, rid)["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_store_state_is_a_recorded_writer_failure_never_a_crash(world, monkeypatch,
+                                                                                    caplog):
+    """The read sits INSIDE the writer call's try: a raise is a writer failure (counted against
+    MAX_WRITER_FAILURES, never the content cap, with a back-off), logged at ERROR — not a
+    "generation CRASHED" hand-back, and no model call is made with a state nobody decided."""
+    sb, runs = world
+
+    def unreadable() -> str:
+        raise RuntimeError("store state unreadable")
+
+    monkeypatch.setattr(ss.smart_link, "store_state", unreadable)
+    rid = _run(sb, POSTING_DAY)
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    assert writer.calls == []
+    row = _script_row(sb, rid)
+    assert row["status"] == "selected" and row["content_rejections"] == 0
+    assert row["last_error"] == "RuntimeError: store state unreadable"
+    assert row["retry_not_before"] is not None and row["generations"] == 1
+    msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert any(lvl == logging.ERROR and "writer FAILED" in m and "store state unreadable" in m
+               for lvl, m in msgs), msgs
+    assert not any("generation CRASHED" in m for _lvl, m in msgs), msgs

@@ -29,6 +29,13 @@ What is pinned:
   model error carries the tokens already spent (`marketing_tokens_used`) without changing type;
   a rejection records EVERY round's violations; YouTube's refused characters drop only YouTube;
   and the dead per-writer generation cap stays deleted.
+* **Shorter videos + the value line** (2026-10-05): the shape cases carry totals derived from the
+  enforced window; the longest accepted script (hook + SCRIPT_MAX_WORDS) narrates inside the
+  worker's budget at the measured pace; the prompt-only HOOK AND TITLES rules and rule 5's hook
+  clause are pinned phrase by phrase in the paragraph that owns them; and for every store state,
+  every composed post but the YouTube title carries that state's code-owned value line exactly
+  once, the package records the state, X stays link-free, and the draft AND repair prompts ask for
+  that state's own X budget — an unknown state (or none) is the prelaunch line that claims least.
 
 The fake drafts are built from a REAL eligible item's fact sheet (`journey:mr_market`), so the
 grounding validator passes on their own merits — a precondition test proves the base package is
@@ -146,10 +153,11 @@ class FakeClient:
 JUDGE_OFF = "off"
 
 
-async def _run(client: FakeClient, *, generation_id: str = "gen-0001", allow_x_url: bool = False):
+async def _run(client: FakeClient, *, generation_id: str = "gen-0001", allow_x_url: bool = False,
+               store_state: Any = post_copy.STORE_PRELAUNCH):
     return await ws.generate_package(
         _item(), TEMPLATE, RUN_DATE, generation_id=generation_id, client=client,
-        allow_x_url=allow_x_url, judge_mode=JUDGE_OFF,
+        allow_x_url=allow_x_url, store_state=store_state, judge_mode=JUDGE_OFF,
     )
 
 
@@ -285,6 +293,53 @@ def test_the_system_body_carries_the_class_b_and_brand_rules(token):
     """Deleting rule 3 or rule 7 would raise the rejection rate (and the Gemini bill) with no
     test signal: the validators would still catch the output, one paid repair later."""
     assert token in wp.SYSTEM_BODY.lower(), token
+
+
+def _system_body_part(start: str, end: str) -> str:
+    """The lower-cased span of SYSTEM_BODY from `start` up to (not including) `end` — so a phrase
+    is checked in the rule that owns it, never matched somewhere else in the prompt."""
+    body = wp.SYSTEM_BODY
+    assert body.count(start) == 1, f"{start!r} must open exactly one part of SYSTEM_BODY"
+    i = body.index(start)
+    j = body.find(end, i + len(start))
+    assert j > i, f"{end!r} must follow {start!r}"
+    return body[i:j].lower()
+
+
+#: The hook rules (2026-10-05, shorter videos). They are PROMPT-ONLY by design — no validator
+#: refuses a study-verb, yes/no, "who will win" or company-free case-study hook (the regex passes
+#: "Who will win the streaming wars?") — so deleting a clause here would change the hooks the model
+#: writes with no other test signal. Each phrase is read inside the paragraph that owns it.
+_HOOK_PARAGRAPH = ("HOOK AND TITLES:", "\n\n")
+_RULE_5 = ("\n5. ", "\n6. ")
+_HOOK_RULES = [
+    (_HOOK_PARAGRAPH, "hook and titles: the hook is the first line a viewer hears"),
+    (_HOOK_PARAGRAPH, "one concrete tension, contrast or surprising fact"),
+    (_HOOK_PARAGRAPH, "never a summary of the topic or a promise of what the viewer will learn"),
+    (_HOOK_PARAGRAPH, "a business case study's hook names the company its title names"),
+    (_HOOK_PARAGRAPH, "an investing lesson's hook names no company"),
+    (_HOOK_PARAGRAPH, "not understand, learn, discover, master, explore or find"),
+    (_HOOK_PARAGRAPH, "if the hook is a question, ask how, why or what"),
+    (_HOOK_PARAGRAPH, "never a yes/no question"),
+    (_HOOK_PARAGRAPH, "opens with is, are, do, does, did, can, will or should"),
+    (_HOOK_PARAGRAPH, "rule 9's yes/no myth question belongs in the script, never in the hook"),
+    (_HOOK_PARAGRAPH, "never who will win"),
+    (_HOOK_PARAGRAPH, "never whether anyone should buy, sell or own anything"),
+    (_HOOK_PARAGRAPH, "keeps rule 3 to the letter"),
+    (_HOOK_PARAGRAPH, "never how cheap, dominant, successful or valuable it or its stock is"),
+    (_HOOK_PARAGRAPH, "what the business did - never what it will do next"),          # 2026-10-07.1
+    (_HOOK_PARAGRAPH, "good or bad, a problem or an opportunity, for investors or shareholders"),
+    (_HOOK_PARAGRAPH, "the youtube title follows the same rules"),
+    (_HOOK_PARAGRAPH, "it names the company or the lesson's idea"),
+    (_HOOK_PARAGRAPH, "may ask how, why or what, and is never a yes/no question"),
+    # Rule 5 (no numbers or years) now covers the hook, not only titles and headings.
+    (_RULE_5, "keep numbers and years out of the hook, titles and headings"),
+]
+
+
+@pytest.mark.parametrize("where, phrase", _HOOK_RULES, ids=[p[:40] for _w, p in _HOOK_RULES])
+def test_the_system_body_states_the_hook_rules(where, phrase):
+    assert phrase in _system_body_part(*where), phrase
 
 
 # ── parse_response ────────────────────────────────────────────────────────────
@@ -519,14 +574,144 @@ async def test_composed_posts_end_with_their_disclaimer_exactly_once():
     assert posts["youtube"]["title"] == res.package["captions"]["youtube_title"]
 
 
+@pytest.mark.parametrize("state", post_copy.STORE_STATES)
 @pytest.mark.asyncio
-async def test_allow_x_url_puts_the_smart_link_on_x_and_still_ends_with_the_disclaimer():
-    res = await _run(FakeClient(_result(_clean_package())), allow_x_url=True)
+async def test_allow_x_url_puts_the_smart_link_on_x_and_still_ends_with_the_disclaimer(state):
+    client = FakeClient(_result(_clean_package()))
+    res = await _run(client, allow_x_url=True, store_state=state)
     x = res.package["posts"]["x"]["caption"]
-    assert f"{post_copy.LINK_BASE_URL}/x" in x
+    # Exactly one link, our own (an X post with a URL costs $0.20), after the value line.
+    assert post_copy.x_link_tokens(x) == [f"{post_copy.LINK_BASE_URL}/x"]
+    assert x.index(post_copy.value_line(state)) < x.index(f"{post_copy.LINK_BASE_URL}/x")
     assert x.endswith(post_copy.disclaimer_short())
-    res = await _run(FakeClient(_result(_clean_package())), allow_x_url=False)
+    # The URL's weight is in the ask too: the prompt and the validator use the same budget.
+    assert _x_ask(state, allow_x_url=True) in client.prompts[0]
+    assert _x_ask(state, allow_x_url=False) not in client.prompts[0]
+    res = await _run(FakeClient(_result(_clean_package())), allow_x_url=False, store_state=state)
     assert "caydexinvest.com" not in res.package["posts"]["x"]["caption"]
+
+
+# ── the code-owned value line ("what Caydex is") on every caption but the YouTube title ──
+#
+# Nothing scans code-owned copy at runtime (compliance, grounding and the judge read only model
+# text), so what a post says about the app is decided by the store state alone, threaded through
+# generate_package into BOTH the prompts (the caption asks shrink with the line) and
+# validate_package → compose. These pin that wiring end to end; the line's wording and its scan
+# are pinned in tests/test_marketing_post_copy.py.
+
+
+def _x_ask(store_state: Any, *, allow_x_url: bool = False) -> str:
+    """The X line the prompt must carry: the ask sized from THIS state's enforced budget."""
+    budget = post_copy.body_budget("x", _item().category, RUN_DATE, allow_x_url=allow_x_url,
+                                   store_state=store_state)
+    words, chars = wp.caption_target("x", budget)
+    return f"  - x: about {words} words (never more than {chars} characters"
+
+
+def test_precondition_each_store_state_asks_for_its_own_x_budget():
+    """Without three different asks the prompt checks below could not tell the states apart."""
+    asks = [_x_ask(s) for s in post_copy.STORE_STATES]
+    assert len(set(asks)) == len(post_copy.STORE_STATES), asks
+
+
+def _assert_value_line_on_every_post(pkg: Dict[str, Any], state: str) -> None:
+    line = post_copy.value_line(state)
+    posts = pkg["posts"]
+    assert set(posts) == set(post_copy.PLATFORMS), sorted(posts)   # all eight: none goes unchecked
+    for platform, post in posts.items():
+        field = "youtube_description" if platform == "youtube" else platform
+        caption = post["caption"]
+        # Exactly once, and no OTHER state's line (every line opens with VALUE_PRODUCT).
+        assert caption.count(line) == 1, (platform, caption)
+        assert caption.count(post_copy.VALUE_PRODUCT) == 1, (platform, caption)
+        # After the model's body, before the disclaimer, which stays last and single.
+        body, disc = pkg["captions"][field], post_copy.disclaimer_for(field, RUN_DATE)
+        assert caption.startswith(body), platform
+        assert len(body) <= caption.index(line) < caption.index(disc), platform
+        assert caption.endswith(disc) and caption.count(disc) == 1, platform
+    title = posts["youtube"]["title"]
+    assert title == pkg["captions"]["youtube_title"] and "Caydex" not in title
+
+
+@pytest.mark.parametrize("state", post_copy.STORE_STATES)
+@pytest.mark.asyncio
+async def test_every_composed_post_carries_the_runs_value_line(state):
+    client = FakeClient(_result(_clean_package()))
+    res = await _run(client, store_state=state)
+    assert res.status == "accepted" and len(client.calls) == 1
+    assert res.package["store_state"] == state      # what the captions claim, on the record
+    _assert_value_line_on_every_post(res.package, state)
+    x = res.package["posts"]["x"]["caption"]
+    assert post_copy.x_link_tokens(x) == [] and "caydexinvest" not in x   # X stays link-free
+    assert _x_ask(state) in client.prompts[0]
+
+
+@pytest.mark.parametrize("state", post_copy.STORE_STATES)
+@pytest.mark.asyncio
+async def test_the_draft_and_the_repair_ask_for_the_same_states_budget(state):
+    """The state is read once per generation: a repair asking for another state's X budget would
+    ask for more (or fewer) characters than the validator then enforces."""
+    client = FakeClient(_result(_with(_clean_package(), x=BAD_CAPTION)), _result(_clean_package()))
+    res = await _run(client, store_state=state)
+    assert len(client.prompts) == 2 and res.status == "accepted"
+    others = [_x_ask(s) for s in post_copy.STORE_STATES if s != state]
+    for prompt in client.prompts:
+        assert _x_ask(state) in prompt
+        assert not [o for o in others if o in prompt]
+    assert res.package["store_state"] == state
+    _assert_value_line_on_every_post(res.package, state)
+
+
+@pytest.mark.asyncio
+async def test_a_generation_given_no_store_state_claims_the_least():
+    """generate_package's DEFAULT is the prelaunch line (no availability claim at all), the one that
+    claims least — the caller (script_service) passes the real state it read at write time."""
+    client = FakeClient(_result(_clean_package()))
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-default",
+                                    client=client, judge_mode=JUDGE_OFF)
+    assert res.package["store_state"] == post_copy.STORE_PRELAUNCH
+    _assert_value_line_on_every_post(res.package, post_copy.STORE_PRELAUNCH)
+    assert _x_ask(post_copy.STORE_PRELAUNCH) in client.prompts[0]
+
+
+@pytest.mark.parametrize("junk", [None, "", "LIVE", " live", "preorder\n", "invalid", 1, ["live"]],
+                         ids=repr)
+@pytest.mark.asyncio
+async def test_an_unknown_store_state_is_recorded_and_worded_as_prelaunch(junk):
+    """Never echoed as given, never a crash (a non-string is checked before any lookup): the
+    package, the captions and the prompt all use the prelaunch line."""
+    client = FakeClient(_result(_clean_package()))
+    res = await _run(client, store_state=junk)
+    assert res.status == "accepted"
+    assert res.package["store_state"] == post_copy.STORE_PRELAUNCH
+    _assert_value_line_on_every_post(res.package, post_copy.STORE_PRELAUNCH)
+    assert _x_ask(post_copy.STORE_PRELAUNCH) in client.prompts[0]
+
+
+@pytest.mark.parametrize("state", post_copy.STORE_STATES)
+def test_a_model_body_that_copies_the_value_line_drops_its_outlet(state):
+    """The line is code-owned and appears once; a model that writes it into its own body (it
+    names Caydex) is refused on the body, so the composed post can never carry it twice."""
+    body = f"{post_copy.value_line(state)} {_clean_package()['captions']['linkedin']}"
+    vr = ws.validate_package(_with(_clean_package(), linkedin=body), _item(), RUN_DATE, store_state=state)
+    assert vr.ok and "linkedin" not in vr.posts
+    assert "brand_mention" in {v.code for v in vr.outlets["linkedin"]}
+
+
+#: The value line's own claim about the app, in a model's words, with no brand name in it.
+_MODEL_APP_CLAIMS = ("You can pre-order it on the App Store.", "It is coming soon to the App Store.")
+
+
+@pytest.mark.parametrize("state", post_copy.STORE_STATES)
+@pytest.mark.parametrize("claim", _MODEL_APP_CLAIMS)
+def test_a_model_body_making_the_value_lines_app_claim_drops_its_outlet(claim, state):
+    """Fixed 2026-10-07 (was a strict xfail): `compliance._APP_STORE_CTA_RE` gained the coming-soon and
+    pre-order shapes, so a model body making the value line's claim is refused on the body
+    (brand_mention) in every store state — the code-owned line is the only one that may say it."""
+    body = f"{_clean_package()['captions']['linkedin']} {claim}"
+    vr = ws.validate_package(_with(_clean_package(), linkedin=body), _item(), RUN_DATE, store_state=state)
+    assert vr.ok and "linkedin" not in vr.posts, [(v.field, v.code) for v in vr.violations]
+    assert "brand_mention" in {v.code for v in vr.outlets["linkedin"]}
 
 
 @pytest.mark.asyncio
@@ -748,6 +933,26 @@ def _with_shared(**fields: Any) -> Dict[str, Any]:
     return pkg
 
 
+#: The script total the line-count and line-length cases carry: the middle of the ENFORCED word
+#: window, derived rather than written down, so that only the guard a case is about can fire (a
+#: hard-coded 150 fell outside the window when the ceiling dropped to 120 for shorter videos).
+_MID = (wp.SCRIPT_MIN_WORDS + wp.SCRIPT_MAX_WORDS) // 2
+
+
+def test_precondition_the_shape_tables_script_total_sits_inside_every_other_limit():
+    """The arithmetic the `_MID` cases rely on, so a future window change fails HERE, legibly,
+    instead of as a second violation in a case about something else."""
+    assert wp.SCRIPT_MIN_WORDS < _MID < wp.SCRIPT_MAX_WORDS
+    # Fewest lines → the longest line still fits the per-line cap.
+    assert -(-_MID // (wp.SCRIPT_MIN_LINES - 1)) <= wp.SCRIPT_LINE_MAX_WORDS
+    # Most lines → every line still has a word.
+    assert _MID >= wp.SCRIPT_MAX_LINES + 1
+    # One over-long line, then six ordinary ones that each fit.
+    rest = _MID - wp.SCRIPT_LINE_MAX_WORDS - 1
+    assert rest >= 6 and -(-rest // 6) <= wp.SCRIPT_LINE_MAX_WORDS
+    assert wp.SCRIPT_MIN_LINES <= 7 <= wp.SCRIPT_MAX_LINES
+
+
 _SHAPE_CASES = [
     # (id, package, (field, code) that must fire — None for the accepted boundary)
     ("script_words_over", lambda: _with_shared(video_script=_script(wp.SCRIPT_MAX_WORDS + 1, 12)),
@@ -756,17 +961,19 @@ _SHAPE_CASES = [
     ("script_words_under", lambda: _with_shared(video_script=_script(wp.SCRIPT_MIN_WORDS - 1, 6)),
      ("video_script", "length")),
     ("script_words_at_min", lambda: _with_shared(video_script=_script(wp.SCRIPT_MIN_WORDS, 6)), None),
-    ("script_lines_under", lambda: _with_shared(video_script=_script(90, wp.SCRIPT_MIN_LINES - 1)),
+    ("script_lines_under", lambda: _with_shared(video_script=_script(_MID, wp.SCRIPT_MIN_LINES - 1)),
      ("video_script", "count")),
-    ("script_lines_at_min", lambda: _with_shared(video_script=_script(90, wp.SCRIPT_MIN_LINES)), None),
-    ("script_lines_over", lambda: _with_shared(video_script=_script(150, wp.SCRIPT_MAX_LINES + 1)),
+    ("script_lines_at_min", lambda: _with_shared(video_script=_script(_MID, wp.SCRIPT_MIN_LINES)), None),
+    ("script_lines_over", lambda: _with_shared(video_script=_script(_MID, wp.SCRIPT_MAX_LINES + 1)),
      ("video_script", "count")),
-    ("script_lines_at_max", lambda: _with_shared(video_script=_script(150, wp.SCRIPT_MAX_LINES)), None),
+    ("script_lines_at_max", lambda: _with_shared(video_script=_script(_MID, wp.SCRIPT_MAX_LINES)), None),
     ("script_line_too_long", lambda: _with_shared(
-        video_script=[_n_words(wp.SCRIPT_LINE_MAX_WORDS + 1)] + _script(90, 6)),
+        video_script=[_n_words(wp.SCRIPT_LINE_MAX_WORDS + 1)]
+        + _script(_MID - wp.SCRIPT_LINE_MAX_WORDS - 1, 6)),
      ("video_script[0]", "too_long")),
     ("script_line_at_max", lambda: _with_shared(
-        video_script=[_n_words(wp.SCRIPT_LINE_MAX_WORDS)] + _script(90, 6)), None),
+        video_script=[_n_words(wp.SCRIPT_LINE_MAX_WORDS)] + _script(_MID - wp.SCRIPT_LINE_MAX_WORDS, 6)),
+     None),
     ("hook_too_long", lambda: _with_shared(hook=_n_words(wp.HOOK_MAX_WORDS + 1)), ("hook", "too_long")),
     ("hook_at_max", lambda: _with_shared(hook=_n_words(wp.HOOK_MAX_WORDS)), None),
     ("cards_under", lambda: _with_shared(cards=_pairs_of("cards", wp.CARDS_MIN - 1)), ("cards", "count")),
@@ -852,16 +1059,30 @@ def test_a_caption_over_its_editorial_cap_but_under_the_platform_limit_is_too_lo
     assert "tiktok" in vr.posts, [(v.field, v.code) for v in vr.violations]
 
 
-#: A conservative narration pace for the Phase-3 voice (150 words a minute).
-_NARRATION_WORDS_PER_SECOND = 2.5
+#: The Kokoro narration pace, rounded DOWN (slower is the safe side of this check): the first
+#: production run (2026-10-03) spoke 108 words in 50.6 s ≈ 2.13 words/s, line pauses included, and
+#: digits expand into more spoken words than they count as ("2019" → "twenty nineteen").
+_NARRATION_WORDS_PER_SECOND = 2.0
+_MEASURED_WORDS_PER_SECOND = 108 / 50.6
 
 
 def test_the_script_word_ceiling_fits_the_video_cap():
-    """SCRIPT_MAX_WORDS is today the ONLY thing tying the script to MARKETING_MAX_VIDEO_SECONDS
-    (nothing reads the setting yet): raising one without the other fails here."""
+    """The longest script the validator ACCEPTS — a maximal hook plus SCRIPT_MAX_WORDS — must
+    narrate inside the worker's narration budget (MARKETING_MAX_VIDEO_SECONDS minus the disclaimer
+    card that plays after it, `marketing/voice.py`) at the measured pace. Otherwise an accepted
+    script can be skipped as `narration_too_long` after synthesis, a lost posting day:
+    (14 + 120) / 2.0 = 67 s ≤ 75 − 4 = 71 s, where the old 165-word ceiling gave 89.5 s."""
     from app.config import settings
+    from marketing import voice
 
-    assert wp.SCRIPT_MAX_WORDS / _NARRATION_WORDS_PER_SECOND <= settings.MARKETING_MAX_VIDEO_SECONDS
+    # Never flatter the pace to get a longer ceiling through.
+    assert _NARRATION_WORDS_PER_SECOND <= _MEASURED_WORDS_PER_SECOND
+    # The web setting and the worker's own default are pinned equal elsewhere
+    # (tests/test_marketing_voice.py); the tighter of the two is the one that bites.
+    cap = min(settings.MARKETING_MAX_VIDEO_SECONDS, voice.DEFAULT_MAX_VIDEO_SECONDS)
+    narration_budget = cap - voice.DISCLAIMER_CARD_SECONDS
+    longest = (wp.HOOK_MAX_WORDS + wp.SCRIPT_MAX_WORDS) / _NARRATION_WORDS_PER_SECOND
+    assert longest <= narration_budget, (longest, narration_budget)
 
 
 # ── a VS16 after a letter cannot split a name (lower case is the sole guard) ──

@@ -7,11 +7,20 @@ Pinned promises (module docstring, rules/marketing.md §1, Phase 2 plan §6):
   short on X/Threads/Bluesky; publisher is "Caydex" (the developer is an Apple Individual
   account and terms.html says "operated by Caydex") — never "Caydex Inc.", never "financial
   advisor";
-* CTA per platform: TikTok/Instagram "Link in bio."; X link-free unless allowed; everything
-  else its own https://caydexinvest.com/go/<platform> smart link;
+* CTA per platform, opened by ONE code-owned VALUE LINE saying what Caydex is, worded by the
+  store state threaded in (prelaunch the claim-free "Caydex: AI research on public companies.",
+  preorder "… — pre-order on the App Store.", live "… — on the App Store."; anything unknown words
+  as prelaunch, the line that claims least): TikTok/Instagram the line + "Link in bio."; X the line alone, link-free
+  unless allowed; everything else the line + its own https://caydexinvest.com/go/<platform>
+  smart link; the YouTube title carries none. Nothing scans the value line at runtime
+  (compliance, grounding and the judge read only model text), so it is pinned verbatim here and
+  run through the public-copy scan — those tests are its ONLY guard;
+* `carries_go_link` is exactly the set of captions that carry their own /go link (the publisher
+  opens a campaign's early /go window only for those);
 * hashtags only from the curated constants (a model-written tag is how names and tickers get in);
-* the X/Threads/Bluesky body budget is the platform limit minus the code-owned suffix, measured
-  the way the platform counts (X: URL = 23, CJK/emoji = 2), and nothing is ever sliced.
+* the X/Threads/Bluesky body budget is the platform limit minus the code-owned suffix (value line
+  included, so it depends on the store state), measured the way the platform counts (X: URL = 23,
+  CJK/emoji = 2), and nothing is ever sliced.
 
 A test marked `# BUG:` asserts the promised behaviour and fails today.
 
@@ -23,6 +32,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import string
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -37,6 +47,7 @@ BACKEND = Path(__file__).resolve().parents[1]
 TERMS_HTML = BACKEND / "app" / "templates" / "legal" / "terms.html"
 
 DATE = date(2026, 9, 23)
+STATES = pc.STORE_STATES
 COMPUTED = ("x", "threads", "bluesky")
 VIDEO_FIELDS = ("tiktok", "youtube_description", "instagram")
 CATEGORIES = ("blueprints", "battles", "valueTraps", "foundation", "analysis", "strategies",
@@ -94,8 +105,10 @@ def test_every_body_cap_leaves_room_under_the_limit():
 @pytest.mark.parametrize("platform", pc.PLATFORMS)
 @pytest.mark.parametrize("category", ["blueprints", "foundation", "unknown-category"])
 @pytest.mark.parametrize("allow_x_url", [False, True])
-def test_disclaimer_is_present_exactly_once_and_last(platform, category, allow_x_url):
-    post = pc.compose(platform, BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url)
+@pytest.mark.parametrize("state", STATES)
+def test_disclaimer_is_present_exactly_once_and_last(platform, category, allow_x_url, state):
+    post = pc.compose(platform, BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state)
     disc = pc.disclaimer_for(_field(platform), DATE)
     assert disc
     assert post.caption.endswith(disc)
@@ -194,6 +207,11 @@ def test_no_caydex_inc_anywhere():
     texts = list(_all_disclaimers(DATE).values()) + [pc.PUBLISHER]
     texts += [pc.compose(p, BODIES, category="blueprints", run_date=DATE).caption
               for p in pc.PLATFORMS]
+    # The value line names the publisher too ("Caydex: AI research …"), in every store state.
+    texts += [pc.value_line(s) for s in STATES]
+    texts += [pc.compose(p, BODIES, category="blueprints", run_date=DATE, allow_x_url=a,
+                         store_state=s).caption
+              for p in pc.PLATFORMS for s in STATES for a in (False, True)]
     for t in texts:
         assert not pattern.search(t), t
 
@@ -201,32 +219,50 @@ def test_no_caydex_inc_anywhere():
 # ── call to action ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("state", STATES)
 @pytest.mark.parametrize("field", ["tiktok", "instagram"])
-def test_non_clickable_platforms_say_link_in_bio(field):
-    assert pc.cta_for(field) == "Link in bio."
-    assert pc.cta_for(field, allow_x_url=True) == "Link in bio."
+def test_non_clickable_platforms_say_link_in_bio(field, state):
+    expected = f"{pc.value_line(state)} Link in bio."
+    assert pc.cta_for(field, store_state=state) == expected
+    assert pc.cta_for(field, allow_x_url=True, store_state=state) == expected
+    assert "http" not in expected and "/go/" not in expected and pc.x_link_tokens(expected) == []
 
 
-def test_x_is_link_free_unless_allowed():
-    assert pc.cta_for("x") is None
-    caption = pc.compose("x", BODIES, category="blueprints", run_date=DATE).caption
+@pytest.mark.parametrize("field", ["tiktok", "instagram"])
+def test_the_default_cta_is_the_prelaunch_line(field):
+    """No state passed = prelaunch: the line that claims least (`cta_for`'s default)."""
+    assert pc.cta_for(field) == "Caydex: AI research on public companies. Link in bio."
+    assert pc.cta_for("x") == "Caydex: AI research on public companies."
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_x_is_link_free_unless_allowed(state):
+    assert pc.cta_for("x", store_state=state) == pc.value_line(state)
+    caption = pc.compose("x", BODIES, category="blueprints", run_date=DATE, store_state=state).caption
     assert "http" not in caption and "caydexinvest" not in caption
-    assert pc.cta_for("x", allow_x_url=True) == "https://caydexinvest.com/go/x"
-    caption = pc.compose("x", BODIES, category="blueprints", run_date=DATE, allow_x_url=True).caption
-    assert "https://caydexinvest.com/go/x" in caption
+    assert pc.x_link_tokens(caption) == []
+    assert pc.cta_for("x", allow_x_url=True, store_state=state) == (
+        f"{pc.value_line(state)} https://caydexinvest.com/go/x")
+    caption = pc.compose("x", BODIES, category="blueprints", run_date=DATE, allow_x_url=True,
+                         store_state=state).caption
+    assert pc.x_link_tokens(caption) == ["https://caydexinvest.com/go/x"]
 
 
-def test_youtube_title_has_no_cta_and_description_uses_the_youtube_campaign():
-    assert pc.cta_for("youtube_title") is None
-    assert pc.cta_for("youtube_description").endswith("https://caydexinvest.com/go/youtube")
+@pytest.mark.parametrize("state", STATES)
+def test_youtube_title_has_no_cta_and_description_uses_the_youtube_campaign(state):
+    assert pc.cta_for("youtube_title", store_state=state) is None
+    assert pc.cta_for("youtube_title", allow_x_url=True, store_state=state) is None
+    assert pc.cta_for("youtube_description", store_state=state) == (
+        f"{pc.value_line(state)} Learn more: https://caydexinvest.com/go/youtube")
 
 
 @pytest.mark.parametrize("field, campaign", [
     ("youtube_description", "youtube"), ("facebook", "facebook"), ("threads", "threads"),
     ("bluesky", "bluesky"), ("linkedin", "linkedin"), ("x", "x"),
 ])
-def test_smart_link_cta_shape(field, campaign):
-    cta = pc.cta_for(field, allow_x_url=True)
+@pytest.mark.parametrize("state", STATES)
+def test_smart_link_cta_shape(field, campaign, state):
+    cta = pc.cta_for(field, allow_x_url=True, store_state=state)
     (url,) = re.findall(r"https?://\S+", cta)
     u = urlparse(url)
     assert u.scheme == "https"
@@ -235,19 +271,330 @@ def test_smart_link_cta_shape(field, campaign):
     assert not u.query and not u.fragment
     assert re.fullmatch(r"[a-z0-9_-]{1,40}", campaign)
     assert campaign in POST_PLATFORMS
+    # The link is the CTA's LAST token (nothing glued after it) and the value line opens it.
+    assert cta.endswith(url) and cta.startswith(pc.value_line(state))
+    assert url == pc.go_link(campaign)
 
 
 @pytest.mark.parametrize("field", [f for f in pc.CAPTION_FIELDS if f != "x"])
-def test_allow_x_url_changes_only_x(field):
-    assert pc.cta_for(field) == pc.cta_for(field, allow_x_url=True)
+@pytest.mark.parametrize("state", STATES)
+def test_allow_x_url_changes_only_x(field, state):
+    assert pc.cta_for(field, store_state=state) == pc.cta_for(field, allow_x_url=True, store_state=state)
 
 
 @pytest.mark.parametrize("platform", pc.PLATFORMS)
-def test_the_cta_is_in_the_composed_caption(platform):
-    caption = pc.compose(platform, BODIES, category="blueprints", run_date=DATE).caption
-    cta = pc.cta_for(_field(platform))
-    if cta:
-        assert cta in caption
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("allow_x_url", [False, True])
+def test_the_cta_is_in_the_composed_caption(platform, state, allow_x_url):
+    caption = pc.compose(platform, BODIES, category="blueprints", run_date=DATE,
+                         allow_x_url=allow_x_url, store_state=state).caption
+    cta = pc.cta_for(_field(platform), allow_x_url=allow_x_url, store_state=state)
+    assert cta, platform   # every platform's caption field has a CTA (only the YouTube TITLE has none)
+    assert caption.count(cta) == 1
+
+
+# ── the value line: what Caydex is, worded by the store state ─────────────────
+#
+# Code-owned copy that NO runtime check scans: writer_service scans each model BODY before it is
+# composed, check_composed checks only the disclaimer / length / refused characters, the judge reads
+# only model text and create_posts copies the composed captions word for word. These tests are the
+# line's only compliance guard — keep them strict (exact scan result, exact wording).
+
+#: Owner wording (2026-10-05). Changing a line must be a deliberate edit HERE, and the new line must
+#: pass test_every_value_line_passes_the_public_copy_scan unchanged. The prelaunch line lost its
+#: "— coming soon to iPhone." on 2026-10-07 (review): the app is live, so prelaunch now means an unset
+#: or mistyped store URL, and a caption must never call a released app "coming soon".
+_VALUE_GOLDEN = {
+    "prelaunch": "Caydex: AI research on public companies.",
+    "preorder": "Caydex: AI research on public companies — pre-order on the App Store.",
+    "live": "Caydex: AI research on public companies — on the App Store.",
+}
+
+
+def test_the_store_state_names_are_pinned():
+    assert (pc.STORE_PRELAUNCH, pc.STORE_PREORDER, pc.STORE_LIVE) == ("prelaunch", "preorder", "live")
+    assert pc.STORE_STATES == ("prelaunch", "preorder", "live")
+    assert pc.VALUE_PRODUCT == "Caydex: AI research on public companies"
+
+
+def test_smart_link_decides_with_the_same_three_names():
+    """smart_link spells the names as its OWN literals (the request path never imports this module);
+    a drift there (say "pre-order") would make every caption silently claim the prelaunch line."""
+    from app.services.marketing import smart_link
+
+    assert (smart_link.STORE_PRELAUNCH, smart_link.STORE_PREORDER, smart_link.STORE_LIVE) == (
+        pc.STORE_PRELAUNCH, pc.STORE_PREORDER, pc.STORE_LIVE)
+    assert {smart_link.STORE_PRELAUNCH, smart_link.STORE_PREORDER, smart_link.STORE_LIVE} == set(pc.STORE_STATES)
+
+
+@pytest.mark.parametrize("state", sorted(_VALUE_GOLDEN))
+def test_the_value_line_is_pinned_verbatim(state):
+    assert set(_VALUE_GOLDEN) == set(pc.STORE_STATES)
+    assert pc.value_line(state) == _VALUE_GOLDEN[state]
+    if state == pc.STORE_PRELAUNCH:
+        assert pc.value_line(state) == pc.VALUE_PRODUCT + "."
+    else:
+        assert pc.value_line(state).startswith(pc.VALUE_PRODUCT + " — ")
+
+
+def test_the_prelaunch_line_makes_no_availability_claim():
+    """Review 2026-10-07: prelaunch is reached after the release only through an unset or mistyped
+    MARKETING_APP_STORE_URL, so its line may say what Caydex is and nothing about where or when."""
+    low = pc.value_line(pc.STORE_PRELAUNCH).lower()
+    for word in ("soon", "store", "iphone", "order", "launch", "coming", "app", "ios", "release"):
+        assert not re.search(rf"(?<![a-z]){word}(?![a-z])", low), word
+
+
+def test_the_default_value_line_is_prelaunch():
+    assert pc.value_line() == _VALUE_GOLDEN["prelaunch"]
+    assert pc.normalize_store_state(pc.STORE_PRELAUNCH) == "prelaunch"
+
+
+#: What follows the value line in each caption field's CTA (design WORDING, 2026-10-05), as
+#: (allow_x_url off, allow_x_url on): TikTok and Instagram " Link in bio."; X the line ALONE, or the
+#: line + " " + its /go link only with allow_x_url; every other field " Learn more: " + its own /go
+#: link (the YouTube description's campaign is "youtube"). The YouTube title has no CTA at all.
+_CTA_TAILS = {
+    "tiktok": (" Link in bio.", " Link in bio."),
+    "instagram": (" Link in bio.", " Link in bio."),
+    "x": ("", " https://caydexinvest.com/go/x"),
+    "youtube_description": (" Learn more: https://caydexinvest.com/go/youtube",) * 2,
+    "facebook": (" Learn more: https://caydexinvest.com/go/facebook",) * 2,
+    "threads": (" Learn more: https://caydexinvest.com/go/threads",) * 2,
+    "bluesky": (" Learn more: https://caydexinvest.com/go/bluesky",) * 2,
+    "linkedin": (" Learn more: https://caydexinvest.com/go/linkedin",) * 2,
+}
+
+
+@pytest.mark.parametrize("allow_x_url", [False, True])
+@pytest.mark.parametrize("state", STATES)
+def test_every_cta_is_pinned_verbatim(state, allow_x_url):
+    """Every field's whole CTA, character for character, in every state. The computed budgets pin
+    only the X / Threads / Bluesky CTA LENGTHS; this pins the words of the Facebook, LinkedIn and
+    YouTube-description CTAs too — code-owned copy nothing scans at runtime."""
+    assert set(_CTA_TAILS) | {"youtube_title"} == set(pc.CAPTION_FIELDS)
+    for field, tails in _CTA_TAILS.items():
+        assert pc.cta_for(field, allow_x_url=allow_x_url, store_state=state) == (
+            _VALUE_GOLDEN[state] + tails[allow_x_url]), field
+    assert pc.cta_for("youtube_title", allow_x_url=allow_x_url, store_state=state) is None
+
+
+#: Words a line about the app must never carry: a recommendation / performance / data-vendor word,
+#: an availability claim the store page may not back ("now", "available", "download", "get it",
+#: "free" — the live line must stay true on a pre-order page), or AI hype ("AI-powered picks").
+_VALUE_DENYLIST = ("pick", "signal", "guarantee", "return", "profit", "beat", "advice", "recommend",
+                   "fmp", "financial modeling prep", "download", "free", "now", "available", "get",
+                   "powered", "invest", "buy", "sell", "stock", "price")
+
+
+#: What the public-copy scan may find in each code-owned value line: the brand, and — on the PRE-ORDER
+#: line only — its own App Store call to action. `compliance._APP_STORE_CTA_RE`'s availability shapes
+#: (2026-10-07) exist to keep that claim out of MODEL text; this code-owned line is the one place
+#: allowed to make it. Anything else (a pick, a return, a person) is a finding.
+_VALUE_SCAN = {
+    "prelaunch": [("brand_mention", "caydex")],
+    "live": [("brand_mention", "caydex")],
+    "preorder": [("brand_mention", "caydex"), ("brand_mention", " - pre-order on the app store")],
+}
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_every_value_line_passes_the_public_copy_scan(state):
+    line = pc.value_line(state)
+    # Strict: the brand (and the pre-order line's own store CTA) is all the scan finds, in every mode.
+    assert [(v.code, v.detail) for v in scan_text("f", clean(line), allow_emoji=True)] == _VALUE_SCAN[state]
+    assert [(v.code, v.detail) for v in scan_text("f", clean(line), allow_emoji=False,
+                                                  strict_instruments=True)] == _VALUE_SCAN[state]
+    assert [(v.code, v.detail) for v in scan_text("f", clean(line), allow_emoji=False,
+                                                  strict_instruments=False)] == _VALUE_SCAN[state]
+    assert clean(line) == line                       # what is stored is what was pinned
+    assert not re.search(r"[0-9%$]", line)           # no number, no price, no percentage
+    assert pc.x_link_tokens(line) == []              # no link X would weigh or bill
+    assert not any(c in line for c in pc.FORBIDDEN_CHARS["youtube_title"])
+    assert line.count("\n") == 0
+    low = line.lower()
+    for word in _VALUE_DENYLIST:
+        assert not re.search(rf"(?<![a-z]){re.escape(word)}", low), (state, word)
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_every_value_line_scans_clean_under_every_items_own_settings(state):
+    """The line rides on EVERY item's captions, so it must pass the scan exactly as a body of that
+    item would be scanned (`writer_service._scan`: the item's strict-instrument mode, its company
+    terms and its fact-sheet words). The bare scan is not enough: a tier-2 word beside a name only
+    an item's OWN terms know ("… on Kirkland, a discount brand …") scans clean there and is a
+    class_b_evaluative verdict on the Costco, Apple and NVIDIA case studies' posts."""
+    from app.services.marketing import content_pool
+
+    line = clean(pc.value_line(state))
+    items = [content_pool.get_item(k) for k in content_pool.eligible_keys()]
+    # Anti-vacuity: both kinds, with their different strict modes, are really scanned.
+    assert len(items) >= 30
+    assert {i.kind for i in items} == {content_pool.MONEY_MOVES, content_pool.JOURNEY}
+    assert any(i.company_terms for i in items)
+    for item in items:
+        got = scan_text("x", line, allow_emoji=True,
+                        strict_instruments=content_pool.strict_instruments(item.kind),
+                        company_terms=item.company_terms, sheet_words=item.grounding.tokens)
+        assert [(v.code, v.detail) for v in got] == _VALUE_SCAN[state], (state, item.key)
+
+
+def _parts(caption: str, body: str, state: str, disclaimer: str):
+    line = pc.value_line(state)
+    assert caption.startswith(body)
+    return caption.index(line), len(body), caption.rindex(disclaimer)
+
+
+@pytest.mark.parametrize("platform", pc.PLATFORMS)
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("allow_x_url", [False, True])
+def test_every_caption_but_the_youtube_title_carries_the_value_line_once(platform, state, allow_x_url):
+    post = pc.compose(platform, BODIES, category="blueprints", run_date=DATE,
+                      allow_x_url=allow_x_url, store_state=state)
+    field = _field(platform)
+    disc = pc.disclaimer_for(field, DATE)
+    assert post.caption.count(pc.VALUE_PRODUCT) == 1
+    assert post.caption.count(pc.value_line(state)) == 1
+    for other in STATES:   # the run's state is the one worded — never another state's claim
+        if other != state:
+            assert pc.value_line(other) not in post.caption, (state, other)
+    at, body_end, disc_at = _parts(post.caption, BODIES[field], state, disc)
+    assert body_end <= at < disc_at                  # after the body, before the disclaimer
+    for tag in re.finditer(r"#\w+", post.caption):   # hashtags come before it
+        assert tag.start() < at
+    assert post.caption.endswith(disc) and post.caption.count(disc) == 1
+    assert pc.check_composed(post, DATE) == []
+    if platform == "youtube":
+        assert pc.VALUE_PRODUCT not in (post.title or "")
+        assert post.title == BODIES["youtube_title"]
+
+
+@pytest.mark.parametrize("junk", [None, "", "invalid", "LIVE", " live", "preorder\n", "Preorder",
+                                  "pre-order", 1, True, 0, b"live", ["live"], {"live": 1}, 1.5])
+def test_an_unknown_store_state_words_as_prelaunch(junk):
+    """Anything but the three exact names — wrong case, padding, a typo, a non-string, an
+    unhashable value — is the PRELAUNCH line and the PRELAUNCH budget: the line that claims least.
+    Never a raise (a list or dict must not reach a dict lookup)."""
+    assert pc.normalize_store_state(junk) == pc.STORE_PRELAUNCH
+    assert pc.value_line(junk) == _VALUE_GOLDEN["prelaunch"]
+    for field in pc.CAPTION_FIELDS:
+        for allow in (False, True):
+            assert pc.cta_for(field, allow_x_url=allow, store_state=junk) == pc.cta_for(
+                field, allow_x_url=allow, store_state=pc.STORE_PRELAUNCH), field
+    for field in COMPUTED:
+        assert pc.body_budget(field, "blueprints", DATE, store_state=junk) == pc.body_budget(
+            field, "blueprints", DATE, store_state=pc.STORE_PRELAUNCH), field
+    for platform in pc.PLATFORMS:
+        assert pc.compose(platform, BODIES, category="blueprints", run_date=DATE, store_state=junk) == \
+            pc.compose(platform, BODIES, category="blueprints", run_date=DATE)
+
+
+#: body_budget(field, "blueprints", DATE) per state, computed by hand from the suffix:
+#: X 280 − ("\n\n#businessstrategy" 19 + "\n\n" + line + "\n\n" + 60-char short disclaimer); the
+#: em dash weighs 1 on X. Threads 500 − (19 + 2 + line + " Learn more: " 13 + 35-char link + 62).
+#: Bluesky 300 − (2 + line + 13 + 35 + 62) — no hashtag. Lines: prelaunch 40, preorder 69, live 59.
+#: (prelaunch: X 280 − 123 = 157; Threads 500 − 171 = 329; Bluesky 300 − 152 = 148.)
+_BUDGET_GOLDEN = {
+    "x": {"prelaunch": 157, "preorder": 128, "live": 138},
+    "threads": {"prelaunch": 329, "preorder": 300, "live": 310},
+    "bluesky": {"prelaunch": 148, "preorder": 119, "live": 129},
+}
+
+
+@pytest.mark.parametrize("field", sorted(_BUDGET_GOLDEN))
+@pytest.mark.parametrize("state", STATES)
+def test_the_value_line_costs_the_computed_budgets(field, state):
+    """Any wording change that eats a computed budget has to be a deliberate edit here."""
+    assert len(_VALUE_GOLDEN[state]) == {"prelaunch": 40, "preorder": 69, "live": 59}[state]
+    # Every character of the line weighs 1 on X — the em dash (U+2014) of the store lines included —
+    # so X spends exactly its length (a CJK character or an emoji would weigh 2 and shrink the budget).
+    assert ("—" in _VALUE_GOLDEN[state]) is (state != pc.STORE_PRELAUNCH) and pc._x_char_weight("—") == 1
+    assert pc.x_weighted_length(_VALUE_GOLDEN[state]) == len(_VALUE_GOLDEN[state])
+    assert pc.body_budget(field, "blueprints", DATE, store_state=state) == _BUDGET_GOLDEN[field][state]
+    with_url = pc.body_budget(field, "blueprints", DATE, allow_x_url=True, store_state=state)
+    # The X link adds " " + a 23-weight URL; nothing else changes, on X or anywhere else.
+    assert with_url == _BUDGET_GOLDEN[field][state] - (24 if field == "x" else 0)
+
+
+# ── carries_go_link: the captions that carry their OWN /go link ───────────────
+
+
+@pytest.mark.parametrize("allow_x_url", [False, True])
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("category", ["blueprints", "foundation", "unknown-category"])
+def test_the_link_bearing_platforms_are_exactly_those_whose_caption_carries_its_go_link(
+        allow_x_url, state, category):
+    got = {p for p in pc.PLATFORMS
+           if pc.carries_go_link(p, pc.compose(p, BODIES, category=category, run_date=DATE,
+                                               allow_x_url=allow_x_url, store_state=state).caption)}
+    assert got == {"bluesky", "facebook", "linkedin", "threads", "youtube"} | ({"x"} if allow_x_url else set())
+
+
+@pytest.mark.parametrize("platform", [p for p in pc.PLATFORMS if p not in ("tiktok", "instagram")])
+def test_go_link_is_the_tail_of_its_cta(platform):
+    cta = pc.cta_for(_field(platform), allow_x_url=True)
+    assert pc.go_link(platform) == f"https://caydexinvest.com/go/{platform}"
+    assert cta.endswith(" " + pc.go_link(platform))
+
+
+_X = "https://caydexinvest.com/go/x"
+
+
+@pytest.mark.parametrize("platform, caption, expected", [
+    ("x", f"Body.\n\n{_X}", True),                      # at the very end
+    ("x", f"{_X}.", True),                              # a sentence's full stop
+    ("x", f"{_X}\nmore", True),                         # a line break
+    ("x", f"{_X} more", True),                          # a space
+    ("x", f"see {_X}yz", False),                        # /go/xyz is another slug
+    ("x", f"{_X}_early", False),                        # /go/x_early is another slug
+    ("x", f"{_X}-2", False),
+    ("x", f"{_X}9", False),
+    ("x", f"{_X}Y", False),
+    ("x", f"{_X}yz then {_X}.", True),                  # a later exact link still counts
+    ("x", "http://caydexinvest.com/go/x", False),       # not the spelling cta_for writes
+    ("x", "https://caydexinvest.com/go/X", False),      # another (case-different) slug
+    ("x", "https://caydexinvest.com/go/bluesky", False),  # another platform's link
+    ("threads", "Learn more: https://caydexinvest.com/go/bluesky", False),
+    ("bluesky", "Learn more: https://caydexinvest.com/go/bluesky", True),
+    ("youtube", "Learn more: https://caydexinvest.com/go/youtube", True),
+    ("tiktok", f"{_VALUE_GOLDEN['live']} Link in bio.", False),
+    ("x", "", False),
+    ("x", None, False),
+    ("x", 123, False),
+    ("x", [_X], False),
+    ("", _X, False),
+    # An empty platform is never a campaign, even where an empty slug WOULD match: the bare /go/
+    # prefix followed by nothing, a query or a space (go_link('') is exactly that prefix).
+    ("", "https://caydexinvest.com/go/", False),
+    ("", "Learn more: https://caydexinvest.com/go/?ct=x", False),
+    ("", "https://caydexinvest.com/go/ then text", False),
+    (None, _X, False),
+    (5, _X, False),
+])
+def test_carries_go_link_reads_only_the_platforms_own_link(platform, caption, expected):
+    assert pc.carries_go_link(platform, caption) is expected
+
+
+#: The characters that continue a /go slug, as the /go design states the rule: the caption carries
+#: go_link(platform) NOT followed by an ASCII letter, digit, '_' or '-'.
+_SLUG_CONTINUES = frozenset(string.ascii_letters + string.digits + "_-")
+
+
+@pytest.mark.parametrize("platform", ["x", "bluesky", "youtube"])
+def test_carries_go_link_ends_the_slug_at_every_ascii_character_a_slug_cannot_hold(platform):
+    """Every one of the 128 ASCII characters, glued after the link at the end of a caption and in
+    the middle of one: exactly the slug characters make it another slug ('/go/xyz', '/go/x_early',
+    '/go/x-2', '/go/X9'); everything else — '.', ',', ')', '?', '/', '#', a space, a line break, a
+    control character — ends the slug, so the link counts."""
+    link = pc.go_link(platform)
+    assert len(_SLUG_CONTINUES) == 64      # 52 letters, 10 digits, '_' and '-'
+    for code in range(128):
+        ch = chr(code)
+        expected = ch not in _SLUG_CONTINUES
+        assert pc.carries_go_link(platform, link + ch) is expected, (platform, repr(ch))
+        assert pc.carries_go_link(platform, f"Body.\n\n{link}{ch} tail") is expected, (platform, repr(ch))
+        # A glued slug character does not hide an exact link later in the same caption.
+        assert pc.carries_go_link(platform, f"{link}{ch} then {link}") is True, (platform, repr(ch))
 
 
 # ── hashtags ─────────────────────────────────────────────────────────────────
@@ -301,34 +648,55 @@ def test_a_hostile_category_is_never_echoed(platform, category):
 @pytest.mark.parametrize("field", COMPUTED)
 @pytest.mark.parametrize("category", CATEGORIES)
 @pytest.mark.parametrize("allow_x_url", [False, True])
-def test_a_body_of_exactly_the_budget_fits(field, category, allow_x_url):
-    budget = pc.body_budget(field, category, DATE, allow_x_url=allow_x_url)
+@pytest.mark.parametrize("state", STATES)
+def test_a_body_of_exactly_the_budget_fits(field, category, allow_x_url, state):
+    budget = pc.body_budget(field, category, DATE, allow_x_url=allow_x_url, store_state=state)
     assert budget >= pc._MIN_BODY
     bodies = dict(BODIES, **{field: _body_of_length(field, budget)})
-    post = pc.compose(field, bodies, category=category, run_date=DATE, allow_x_url=allow_x_url)
+    post = pc.compose(field, bodies, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state)
     assert pc.measured_length(field, post.caption) <= pc.LIMITS[field]
     assert pc.check_composed(post, DATE) == []
 
 
 @pytest.mark.parametrize("field", COMPUTED)
-def test_budget_is_tight(field):
-    budget = pc.body_budget(field, "blueprints", DATE)
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("allow_x_url", [False, True])
+def test_budget_is_tight(field, state, allow_x_url):
+    budget = pc.body_budget(field, "blueprints", DATE, allow_x_url=allow_x_url, store_state=state)
     bodies = dict(BODIES, **{field: _body_of_length(field, budget + 1)})
-    post = pc.compose(field, bodies, category="blueprints", run_date=DATE)
-    assert pc.measured_length(field, post.caption) > pc.LIMITS[field]
+    post = pc.compose(field, bodies, category="blueprints", run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state)
+    assert pc.measured_length(field, post.caption) == pc.LIMITS[field] + 1
+
+
+@pytest.mark.parametrize("field", COMPUTED)
+def test_the_budget_is_the_one_for_the_state_the_caption_is_composed_with(field):
+    """A body sized to one state's budget fits exactly the states whose line is no longer — it
+    overflows when composed with a longer line, so the prompt and the validator must use the run's
+    own state, never a default. Since 2026-10-07 the claim-free prelaunch line is the shortest."""
+    budgets = {s: pc.body_budget(field, "blueprints", DATE, store_state=s) for s in STATES}
+    assert budgets[pc.STORE_PREORDER] < budgets[pc.STORE_LIVE] < budgets[pc.STORE_PRELAUNCH], budgets
+    for sized in STATES:
+        body = _body_of_length(field, budgets[sized])
+        for state in STATES:
+            post = pc.compose(field, dict(BODIES, **{field: body}), category="blueprints", run_date=DATE,
+                              store_state=state)
+            assert (pc.check_composed(post, DATE) == []) is (budgets[state] >= budgets[sized]), (field, sized, state)
 
 
 @pytest.mark.parametrize("unit", ["\u65e5", "\U0001F680", "\u00e9"])
 @pytest.mark.parametrize("allow_x_url", [False, True])
-def test_x_budget_holds_with_weighted_characters(unit, allow_x_url):
-    budget = pc.body_budget("x", "blueprints", DATE, allow_x_url=allow_x_url)
+@pytest.mark.parametrize("state", STATES)
+def test_x_budget_holds_with_weighted_characters(unit, allow_x_url, state):
+    budget = pc.body_budget("x", "blueprints", DATE, allow_x_url=allow_x_url, store_state=state)
     body = _body_of_length("x", budget, unit)
     post = pc.compose("x", dict(BODIES, x=body), category="blueprints", run_date=DATE,
-                      allow_x_url=allow_x_url)
+                      allow_x_url=allow_x_url, store_state=state)
     assert pc.x_weighted_length(post.caption) <= 280
     assert pc.check_composed(post, DATE) == []
     over = pc.compose("x", dict(BODIES, x=body + "\u65e5" * 10), category="blueprints",
-                      run_date=DATE, allow_x_url=allow_x_url)
+                      run_date=DATE, allow_x_url=allow_x_url, store_state=state)
     assert "over_platform_limit" in [v.code for v in pc.check_composed(over, DATE)]
 
 
@@ -511,11 +879,15 @@ def test_a_bracket_is_not_refused_on_other_outlets(platform):
 
 @pytest.mark.parametrize("category", CATEGORIES)
 @pytest.mark.parametrize("allow_x_url", [False, True])
-def test_the_code_owned_suffix_never_contains_a_refused_character(category, allow_x_url):
+@pytest.mark.parametrize("state", STATES)
+def test_the_code_owned_suffix_never_contains_a_refused_character(category, allow_x_url, state):
     for field, bad in pc.FORBIDDEN_CHARS.items():
-        suffix = pc._suffix(field, category, DATE, allow_x_url)
+        suffix = pc._suffix(field, category, DATE, allow_x_url, state)
         assert not any(c in suffix for c in bad), (field, suffix)
     assert _forbidden(_yt()) == []
+    post = pc.compose("youtube", BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state)
+    assert _forbidden(post) == []
 
 
 def test_the_refused_character_table_covers_every_line_separator_for_the_title():
@@ -536,17 +908,30 @@ def _eligible_categories():
 
 
 @pytest.mark.parametrize("allow_x_url", [False, True])
-def test_every_budget_plus_its_suffix_fits_the_platform_and_never_hits_the_floor(allow_x_url):
+@pytest.mark.parametrize("state", STATES)
+def test_every_budget_plus_its_suffix_fits_the_platform_and_never_hits_the_floor(allow_x_url, state):
     """A body at its budget always composes within the platform limit, and no computed budget is
     clamped up to _MIN_BODY (a clamp would make check_composed's length arm load-bearing — and
-    silently drop that outlet every day). Fails the moment a suffix grows too long."""
-    for category in _eligible_categories():
+    silently drop that outlet every day). Fails the moment a suffix grows too long — the value line
+    made it longer in every state (worst: preorder + X URLs on, 102 for mastery, 22 above the floor),
+    and the hostile / unknown categories carry their own fallback hashtag."""
+    categories = list(dict.fromkeys(list(_eligible_categories()) + list(CATEGORIES) + list(HOSTILE_CATEGORIES)))
+    for category in categories:
         for field in pc.CAPTION_FIELDS:
-            suffix = pc._suffix(field, category, DATE, allow_x_url)
-            budget = pc.body_budget(field, category, DATE, allow_x_url=allow_x_url)
+            suffix = pc._suffix(field, category, DATE, allow_x_url, state)
+            budget = pc.body_budget(field, category, DATE, allow_x_url=allow_x_url, store_state=state)
             assert budget + pc.measured_length(field, suffix) <= pc.LIMITS[field], (field, category)
             if field in COMPUTED:
                 assert pc.LIMITS[field] - pc.measured_length(field, suffix) > pc._MIN_BODY, (field, category)
+
+
+def test_the_tightest_computed_budget_is_the_measured_one():
+    """Pins the worst margin the design measured: preorder (the longest line) with X URLs on, in the
+    category with the longest hashtag (mastery) — 102, still 22 above _MIN_BODY."""
+    worst = min(pc.body_budget(f, c, DATE, allow_x_url=a, store_state=s)
+                for f in COMPUTED for c in _eligible_categories() for a in (False, True) for s in STATES)
+    assert worst == 102 == pc.body_budget("x", "mastery", DATE, allow_x_url=True, store_state=pc.STORE_PREORDER)
+    assert worst - pc._MIN_BODY == 22
 
 
 # ── X counts a bare domain as a URL (defence in depth; content-A handoff) ─────
@@ -633,8 +1018,9 @@ def test_x_link_tokens_agrees_with_the_counter_on_every_real_draft_and_composed_
     assert len(texts) > 1000   # anti-vacuity: the corpus is really read
     for allow in (False, True):
         for platform in COMPUTED:
-            texts.append(pc.compose(platform, BODIES, category="mastery", run_date=DATE,
-                                    allow_x_url=allow).caption)
+            for state in STATES:
+                texts.append(pc.compose(platform, BODIES, category="mastery", run_date=DATE,
+                                        allow_x_url=allow, store_state=state).caption)
     for text in texts:
         links = pc.x_link_tokens(text)
         expected = _weight(text) - sum(_weight(t) for t in links) + pc._X_URL_WEIGHT * len(links)
@@ -649,19 +1035,24 @@ def _real_bodies(field: str):
 
 
 @pytest.mark.parametrize("category", CATEGORIES)
-def test_the_composed_x_caption_carries_no_link(category):
+@pytest.mark.parametrize("state", STATES)
+def test_the_composed_x_caption_carries_no_link(category, state):
     """allow_x_url=False is the shipped setting: no CTA link, so nothing the publisher's URL guard
-    would refuse comes from the code-owned suffix, and no real body adds one."""
+    would refuse comes from the code-owned suffix (value line included), and no real body adds one."""
     for body in _real_bodies("x"):
-        post = pc.compose("x", {**BODIES, "x": body}, category=category, run_date=DATE)
+        post = pc.compose("x", {**BODIES, "x": body}, category=category, run_date=DATE, store_state=state)
         assert pc.x_link_tokens(post.caption) == [], post.caption
         assert "caydexinvest.com" not in post.caption
+        assert not pc.carries_go_link("x", post.caption)
 
 
 @pytest.mark.parametrize("category", CATEGORIES)
-def test_the_composed_bluesky_caption_has_exactly_one_go_link_and_no_hashtag(category):
+@pytest.mark.parametrize("state", STATES)
+def test_the_composed_bluesky_caption_has_exactly_one_go_link_and_no_hashtag(category, state):
     for body in _real_bodies("bluesky"):
-        post = pc.compose("bluesky", {**BODIES, "bluesky": body}, category=category, run_date=DATE)
+        post = pc.compose("bluesky", {**BODIES, "bluesky": body}, category=category, run_date=DATE,
+                          store_state=state)
         assert pc.x_link_tokens(post.caption) == [f"{pc.LINK_BASE_URL}/bluesky"], post.caption
         assert post.caption.count("https://") == 1 and post.caption.count("/go/") == 1
         assert not re.search(r"(?<!\S)#\w", post.caption), post.caption
+        assert pc.carries_go_link("bluesky", post.caption)

@@ -105,7 +105,9 @@ struct SignalOfConfidenceSectionCard: View {
                     buybackStatus: signalData.summary.buybackStatus,
                     buybackYield: signalData.summary.buybackYield,
                     shareCountChange: signalData.summary.shareCountChange,
-                    shareCountChangeKnown: signalData.summary.shareCountChangeKnown
+                    shareCountChangeKnown: signalData.summary.shareCountChangeKnown,
+                    // "+36.3% since Q4 '24" — the span the change is measured over.
+                    shareCountWindowStart: signalData.shareCountWindowStart
                 )
                     .padding(.top, AppSpacing.md)
             }
@@ -189,6 +191,13 @@ private extension SignalOfConfidenceViewType {
                 // one-line key for that dash.
                 SignalOfConfidenceSectionCard(
                     signalData: SignalOfConfidenceSectionData.sampleInteriorCashFlowGap,
+                    onDetailTapped: {}
+                )
+
+                // Returns no capital and dilutes: an empty bar band with its note, no left
+                // axis, "$0" cells, and "+37.5% since Q4 '24" in the buyback card.
+                SignalOfConfidenceSectionCard(
+                    signalData: SignalOfConfidenceSectionData.sampleNoCapitalReturnDiluting,
                     onDetailTapped: {}
                 )
             }

@@ -255,6 +255,76 @@ def test_share_classes_stay_apart():
     assert len(supersede_form4_amendments(rows)) == 2
 
 
+# ── "Series" names a security too (2026-10-07) ─────────────────────────────────────────
+#
+# Liberty-style trackers (FWONA/FWONK, LBRDA/LBRDK, BATRA/BATRK, QRTEA) file "Series A" and
+# "Series B/C Common Stock": separate securities. `_share_class_token` knew only "Class", so
+# every series fell into ONE amendment group and a 4/A on one series could consume another
+# series' original line.
+
+def _series(shares, price, *, form="4", filed_days_ago=7, series="A", url="acc-1"):
+    return _row(_CFO, shares, price, _day(8), _day(filed_days_ago), tx="S-Sale", form=form,
+                url=url, security=f"Series {series} Common Stock")
+
+
+def _kept(rows):
+    return sorted((r["securityName"], r["securitiesTransacted"], r["price"], r["formType"])
+                  for r in supersede_form4_amendments(rows))
+
+
+def test_a_series_a_correction_supersedes_only_the_series_a_original():
+    """The 4/A corrects the Series A sale's price to $10.40. The Series B line's price
+    ($10.50) is nearer than Series A's own ($10.00), so with the series merged the
+    correction consumed the SERIES B original: Series A counted twice, Series B gone."""
+    rows = [_series(1000, 10.40, form="4/A", filed_days_ago=2, url="acc-2"),
+            _series(1000, 10.00),
+            _series(1000, 10.50, series="B")]
+    assert _kept(rows) == [("Series A Common Stock", 1000, 10.40, "4/A"),
+                           ("Series B Common Stock", 1000, 10.50, "4")]
+
+
+def test_a_full_series_a_restatement_never_wipes_the_series_b_line():
+    """A 4/A restating the Series A sale as two fills has as many lines as the group's two
+    originals — the full-restatement rule then replaced the whole merged group, Series B
+    line included."""
+    rows = [_series(600, 10.0, form="4/A", filed_days_ago=2, url="acc-2"),
+            _series(400, 10.1, form="4/A", filed_days_ago=2, url="acc-2"),
+            _series(1000, 10.0),
+            _series(2000, 10.2, series="B")]
+    assert _kept(rows) == [("Series A Common Stock", 400, 10.1, "4/A"),
+                           ("Series A Common Stock", 600, 10.0, "4/A"),
+                           ("Series B Common Stock", 2000, 10.2, "4")]
+
+
+def test_class_a_and_series_a_are_different_securities():
+    """The word is part of the token: "class-a" is not "series-a". Same reporter, day, code,
+    size and price — only the label differs, so the token alone keeps them apart."""
+    rows = [_row(_CFO, 10, 30.0, _day(8), _day(2), tx="S-Sale", form="4/A", url="acc-2",
+                 security="Class A Common Stock"),
+            _series(10, 30.0)]
+    assert _kept(rows) == [("Class A Common Stock", 10, 30.0, "4/A"),
+                           ("Series A Common Stock", 10, 30.0, "4")]
+
+
+def test_a_plain_common_stock_amendment_still_supersedes_its_original():
+    """The twin: an unclassed line's 4/A replaces its original exactly as before."""
+    day = _day(8)
+    rows = [_row(_CFO, 1000, 10.40, day, _day(2), tx="S-Sale", form="4/A", url="acc-2",
+                 security="Common Stock"),
+            _row(_CFO, 1000, 10.00, day, _day(7), tx="S-Sale", url="acc-1",
+                 security="Common Stock")]
+    assert [(r["price"], r["formType"]) for r in supersede_form4_amendments(rows)] == [(10.40, "4/A")]
+
+
+def test_a_reworded_class_label_still_supersedes():
+    """…and a class line's 4/A that rewords the label keeps superseding (same class)."""
+    day = _day(8)
+    rows = [_row(_CFO, 90, 20.0, day, _day(2), form="4/A", url="acc-2",
+                 security="CLASS A ordinary shares"),
+            _row(_CFO, 99, 20.0, day, _day(7), url="acc-1", security="Class A Common Stock")]
+    assert [r["securitiesTransacted"] for r in supersede_form4_amendments(rows)] == [90]
+
+
 def test_rows_it_cannot_judge_pass_through_untouched():
     day = _day(3)
     no_reporter = {"transactionType": "P-Purchase", "securitiesTransacted": 10, "price": 1.0,
@@ -594,7 +664,9 @@ async def test_holders_counts_nyax_through_the_real_build_and_persists_it():
     names = {a.name for a in resp.recent_activities.insider_activities.activities}
     assert "Yair Nechmad" in names
     await _drain()
-    assert svc.supabase.upserts and svc.supabase.upserts[0]["response_json"]["payload_version"] == 2
+    # v3 (2026-10-05): the row also carries the chat-only `ownership_detail`; v4 and v5
+    # (2026-10-07) compute it by the final and round-5 reviews' rules.
+    assert svc.supabase.upserts and svc.supabase.upserts[0]["response_json"]["payload_version"] == 5
     # a 5-minute hit reports the same (clean) status
     assert (await svc.get_holders_with_status("NYAX"))[1] == []
 

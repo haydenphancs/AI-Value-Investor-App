@@ -203,7 +203,7 @@ async def test_recompute_ttm_partial_failure_does_not_write_sector_aggregate(mon
         ("Technology", [("IndA", [("AAA", 1.0)]), ("IndB", [("BBB", 1.0)])]),
     ])
 
-    async def fake_ttm_vals(ticker_caps, sem):
+    async def fake_ttm_vals(ticker_caps, sem, **_k):       # counts= (the fetch tally)
         return {"pe_ratio": [10.0, 11.0, 12.0, 13.0, 14.0]}   # >= MIN_SAMPLE_SIZE
 
     monkeypatch.setattr(svc, "_industry_ttm_values", fake_ttm_vals)

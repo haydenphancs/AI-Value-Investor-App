@@ -1,14 +1,17 @@
-"""`UPDATES_SCOPE` — "Ask Cay AI" opened from the Updates tab (card, detail, trend chart).
+"""`UPDATES_SCOPE` — "Ask Cay AI" opened from the Updates tab (the Insights card, its detail).
 
 The resolver grounds the chat on what that tab actually served: the stored Insight card,
-the newest in-window headlines and the news-tone trend for the window the chart showed. Hermetic — every service it
-reads is stubbed at the module the resolver imports it from.
+the newest in-window headlines and the News Tone card — every window it offers, cut from ONE
+90-day read, plus the day-level detail of the window the chart showed. Hermetic — every
+service it reads is stubbed at the module the resolver imports it from.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -25,10 +28,24 @@ from app.services.chat_context_resolver import (
 from app.services.chat_service import ChatService
 from app.services.news_cache_service import MARKET_SCOPE
 from app.services.news_insight_service import NewsInsightService
+from app.utils.market_hours import ET
 
 
 def _iso(delta: timedelta) -> str:
     return (datetime.now(timezone.utc) - delta).isoformat()
+
+
+def _et_today() -> date:
+    """The ET day the resolver counts windows from. Trend rows are dated RELATIVE to it: the
+    resolver cuts the series by window, so a fixed date would age out of the test."""
+    return datetime.now(timezone.utc).astimezone(ET).date()
+
+
+def _day(days_ago: int, bull: int, bear: int, neut: int, *, partial: bool = False) -> dict:
+    total = bull + bear + neut
+    return {"date": (_et_today() - timedelta(days=days_ago)).isoformat(), "bullish": bull,
+            "bearish": bear, "neutral": neut, "total": total,
+            "net_score": trend_mod.net_score(bull, bear, total), "is_partial": partial}
 
 
 class _Insights:
@@ -129,6 +146,7 @@ def test_updates_scope_accepts_only_the_feed_shapes(ref, expected):
 
 @pytest.mark.asyncio
 async def test_a_ticker_feed_grounds_on_card_headlines_and_trend(monkeypatch):
+    since = _et_today() - timedelta(days=15)
     insights, news, trend = _install(
         monkeypatch,
         insights=_Insights(CARD),
@@ -136,15 +154,14 @@ async def test_a_ticker_feed_grounds_on_card_headlines_and_trend(monkeypatch):
             _row("Oracle beats on cloud"),
             _row("Oracle guidance preview", hours=2, processed=False),
         ]),
-        trend=_Trend({"scope": "ORCL", "days": 30, "tracking_since": "2026-09-20", "series": [
-            {"date": "2026-09-25", "bullish": 3, "bearish": 1, "neutral": 0, "total": 4,
-             "net_score": 50, "is_partial": False},
-        ]}),
+        trend=_Trend({"scope": "ORCL", "days": 90, "tracking_since": since.isoformat(),
+                      "series": [_day(10, 3, 1, 0)]}),
     )
     block = await ChatContextResolver().resolve("UPDATES_SCOPE", "orcl")
     assert insights.asked == [["ORCL"]]
     assert news.asked == [(["ORCL"], 25)]
-    assert trend.asked == [("ORCL", 30)]
+    # ONE read, of the widest window: every window of the card is cut from it.
+    assert trend.asked == [("ORCL", 90)]
 
     assert block.startswith("The user is on the Updates tab, looking at the news feed for ORCL.")
     assert "Cay AI Insights card on screen, written " in block and "3 h ago" in block
@@ -157,7 +174,9 @@ async def test_a_ticker_feed_grounds_on_card_headlines_and_trend(monkeypatch):
     assert "Oracle beats on cloud (bullish)" in block
     # An unscored row carries no label — never a default "neutral".
     assert "Oracle guidance preview" in block and "Oracle guidance preview (" not in block
-    assert "News tone over the last 30 days" in block and "tracked since Sun Sep 20" in block
+    assert "News tone over the last 30 days" in block
+    assert f"oldest scored headline on file: {trend_mod._fmt_day(since)}" in block
+    assert "7D: no scored headlines; 30D: 4 headlines (3 positive, 1 negative, 0 neutral)" in block
     assert block.rstrip().endswith("that are not here or in a tool result.")
 
 
@@ -169,7 +188,7 @@ async def test_the_market_feed_is_described_as_the_market(monkeypatch):
     # No stored card, but the feed has news: the screen shows the plain headline list.
     assert 'the card on screen is the plain "Latest headlines" list' in block
     assert "Fed holds (bullish)" in block
-    assert trend.asked == [(MARKET_SCOPE, 30)]
+    assert trend.asked == [(MARKET_SCOPE, 90)]
 
 
 @pytest.mark.asyncio
@@ -316,7 +335,7 @@ def test_a_declared_fund_chats_as_an_etf_not_an_operating_company():
 async def test_a_declared_fund_is_grounded_on_its_own_feed(monkeypatch):
     insights, news, trend = _install(monkeypatch, news=_News([_row("SPY inflows", tickers=("SPY",))]))
     block = await ChatContextResolver().resolve("UPDATES_SCOPE", "SPY|ETF")
-    assert insights.asked == [["SPY"]] and news.asked == [(["SPY"], 25)] and trend.asked == [("SPY", 30)]
+    assert insights.asked == [["SPY"]] and news.asked == [(["SPY"], 25)] and trend.asked == [("SPY", 90)]
     assert "news feed for SPY." in block
 
 
@@ -336,9 +355,7 @@ def test_the_trend_window_is_parsed_strictly(ctx, days):
 
 @pytest.mark.asyncio
 async def test_ask_about_this_on_90d_is_grounded_on_90_days(monkeypatch):
-    day = datetime.now(timezone.utc).date() - timedelta(days=60)
-    series = [{"date": day.isoformat(), "bullish": 1, "bearish": 5, "neutral": 0, "total": 6,
-               "net_score": -67, "is_partial": False}]
+    series = [_day(60, 1, 5, 0)]
     _, _, trend = _install(monkeypatch, news=_News([_row("Story")]),
                            trend=_Trend({"scope": "ORCL", "days": 90, "series": series,
                                          "tracking_since": None}))
@@ -350,15 +367,13 @@ async def test_ask_about_this_on_90d_is_grounded_on_90_days(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_building_history_is_never_called_final(monkeypatch):
-    today = datetime.now(timezone.utc).date()
-    series = [{"date": (today - timedelta(days=k)).isoformat(), "bullish": 2, "bearish": 1,
-               "neutral": 0, "total": 3, "net_score": 33, "is_partial": k < 2} for k in range(5)]
+    series = [_day(k, 2, 1, 0, partial=k < 2) for k in range(5)]
     _install(monkeypatch, news=_News([_row("Story")]), trend=_Trend({
-        "scope": "ORCL", "days": 30, "series": series, "tracking_since": None,
+        "scope": "ORCL", "days": 90, "series": series, "tracking_since": None,
         "history_status": "building"}))
     block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
     assert "earlier days are final" not in block
-    assert "still being built" in block
+    assert block.count("still being built") == 1, "the caveat is said once, not per part"
 
 
 def test_a_ready_history_keeps_its_final_wording():
@@ -367,3 +382,178 @@ def test_a_ready_history_keeps_its_final_wording():
                "net_score": 100, "is_partial": True}]
     text = trend_mod.summarize_trend(series, days=30, today=today, history_status="ready")
     assert "earlier days are final" in text and "still being built" not in text
+
+
+# ── 2026-10-05 (TestFlight 1.0 (11)): the tone card lost its own "Ask about this"; its data ──
+# ── rides in the Insights card's chat — every window, from ONE 90-day read ──────────────────
+
+
+_SWIFT_CHART = (Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios" / "Views"
+                / "Molecules" / "NewsSentimentTrendChart.swift")
+
+
+def _swift_func(name: str) -> str:
+    """The brace-bound body of one Swift static func, comments stripped."""
+    src = "\n".join(
+        re.sub(r"\s//.*$", "", line) for line in _SWIFT_CHART.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("//")
+    )
+    header = f"static func {name}("
+    assert src.count(header) == 1, f"{header!r} drifted — this parity scan would read nothing"
+    open_at = src.index("{", src.index(header))
+    depth = 0
+    for i in range(open_at, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        if depth == 0:
+            return src[open_at:i + 1]
+    pytest.fail(f"unbalanced braces after {header!r}")
+
+
+@pytest.mark.asyncio
+async def test_every_window_of_the_tone_card_is_grounded_from_one_read(monkeypatch):
+    since = _et_today() - timedelta(days=80)
+    series = [
+        _day(2, 5, 1, 2, partial=True),   # in 7D, 30D and 90D
+        _day(20, 1, 6, 0),                # in 30D and 90D
+        _day(60, 9, 0, 1),                # in 90D only
+    ]
+    _, _, trend = _install(monkeypatch, insights=_Insights(CARD), news=_News([_row("Story")]),
+                           trend=_Trend({"scope": "ORCL", "days": 90, "series": series,
+                                         "tracking_since": since.isoformat(),
+                                         "history_status": "ready"}))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL", client_context="window=7")
+    assert trend.asked == [("ORCL", 90)], "one read, never one per window"
+    tone = next(line for line in block.splitlines() if line.startswith("News tone for this feed"))
+    assert f"oldest scored headline on file: {trend_mod._fmt_day(since)}" in tone
+    assert "Positive / Negative / Neutral are Cay AI's bullish / bearish / neutral labels" in tone
+    assert ("7D: 8 headlines (5 positive, 1 negative, 2 neutral), net +50 (Mostly positive); "
+            "30D: 15 headlines (6 positive, 7 negative, 2 neutral), net -7 (Mixed); "
+            "90D: 25 headlines (15 positive, 7 negative, 3 neutral), net +32 (Mostly positive).") in tone
+    # The window the chart showed gets the day-level detail, after the windows.
+    assert block.index("News tone for this feed") < block.index("News tone over the last 7 days")
+    assert "over the last 30 days" not in block and "over the last 90 days" not in block
+
+
+@pytest.mark.asyncio
+async def test_a_window_with_no_scored_headline_says_so(monkeypatch):
+    _install(monkeypatch, news=_News([_row("Story")]),
+             trend=_Trend({"scope": "ORCL", "days": 90, "series": [_day(45, 2, 2, 0)],
+                           "tracking_since": None}))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
+    assert ("7D: no scored headlines; 30D: no scored headlines; "
+            "90D: 4 headlines (2 positive, 2 negative, 0 neutral), net 0 (Mixed).") in block
+    assert "on file" not in block and "scored for at least" not in block, (
+        "no date is invented when none was served")
+    # The 30D detail has nothing to describe; it is left out rather than said as zeros.
+    assert "News tone over the last" not in block
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [
+    {"scope": "ORCL", "days": 90, "series": [], "tracking_since": "2026-07-01"},
+    {"scope": "ORCL", "days": 90, "series": None, "tracking_since": None},
+    {"scope": "ORCL", "days": 90, "tracking_since": None},   # no series key at all
+    # Only days outside the 90-day window (malformed: the service never sends these).
+    {"scope": "ORCL", "days": 90, "series": [_day(95, 3, 0, 0), _day(-3, 3, 0, 0)]},
+], ids=["empty", "null-series", "no-series", "out-of-window"])
+async def test_an_empty_trend_adds_no_tone_text(monkeypatch, data):
+    _install(monkeypatch, insights=_Insights(CARD), news=_News([_row("Story")]), trend=_Trend(data))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
+    assert "News tone for this feed" not in block and "News tone over" not in block
+    assert "Oracle reports results" in block and "Story" in block, "the rest still grounds"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_trend_alone_is_not_grounding(monkeypatch):
+    """No card, no headline and a trend with nothing scored: nothing was read, so no block and
+    no "Updates feed" pill — the same as before the windows were added."""
+    _install(monkeypatch, insights=_Insights(None), news=_News([]),
+             trend=_Trend({"scope": "ORCL", "days": 90, "series": [], "tracking_since": "2026-07-01"}))
+    assert await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL") is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_trend_read_leaves_the_rest_and_says_why(monkeypatch, caplog):
+    _install(monkeypatch, insights=_Insights(CARD), news=_News([_row("Story")]),
+             trend=_Trend(exc=trend_mod.SentimentTrendUnavailable("PGRST202 news_sentiment_daily")))
+    with caplog.at_level(logging.WARNING):
+        block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
+    assert "News tone for this feed" not in block and "Oracle reports results" in block
+    assert "UPDATES_SCOPE trend read failed for ORCL: SentimentTrendUnavailable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_malformed_rows_cost_only_themselves(monkeypatch, caplog):
+    good = _day(1, 2, 1, 0)
+    series = [
+        None, "junk", 7, [],
+        {"date": "not-a-day", "bullish": 9},
+        {"bullish": 9},                                              # undated
+        {"date": datetime.now(timezone.utc), "bullish": 9},          # an instant, not a day
+        {**_day(3, 0, 0, 0)},                                        # all zero: absent
+        {"date": _day(4, 0, 0, 0)["date"], "bullish": -5, "bearish": True, "neutral": "x"},
+        good,
+        {**good, "bullish": 50},                                     # the same day again: first wins
+        {"date": _day(5, 0, 0, 0)["date"], "bullish": "3", "total": 999, "is_partial": "yes"},
+    ]
+    _install(monkeypatch, news=_News([_row("Story")]),
+             trend=_Trend({"scope": "ORCL", "days": 90, "series": series,
+                           "tracking_since": "garbage", "history_status": {"not": "a status"}}))
+    with caplog.at_level(logging.WARNING):
+        block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
+    assert "trend read failed" not in caplog.text, "a bad row must not drop the whole tone block"
+    # Counted: `good` once (2/1/0) and the string "3" bullish (its `total` is recomputed).
+    assert "7D: 6 headlines (5 positive, 1 negative, 0 neutral), net +67 (Mostly positive)" in block
+    assert "on file" not in block and "scored for at least" not in block
+    assert "still filling in" not in block, "only a literal true marks a day partial"
+
+
+@pytest.mark.asyncio
+async def test_a_building_history_with_an_empty_focus_window_still_says_so(monkeypatch):
+    _install(monkeypatch, news=_News([_row("Story")]),
+             trend=_Trend({"scope": "ORCL", "days": 90, "series": [_day(40, 1, 0, 0)],
+                           "tracking_since": None, "history_status": "building"}))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL", client_context="window=7")
+    assert "7D: no scored headlines" in block
+    assert block.count("still being built") == 1
+    assert "do not read a trend from them yet" in block
+
+
+def test_the_tone_word_and_sign_match_the_card():
+    """The chat must name the card's verdict in the card's words: `toneWord` and `signed` in
+    NewsSentimentTrendChart.swift are the source; the backend mirrors them."""
+    word = _swift_func("toneWord")
+    thresholds = re.findall(r"net (>=|<=) (-?\d+)", word)
+    assert thresholds == [(">=", str(trend_mod.TONE_WORD_THRESHOLD)),
+                          ("<=", str(-trend_mod.TONE_WORD_THRESHOLD))], thresholds
+    assert re.findall(r'return "([^"]+)"', word) == ["Mostly positive", "Mostly negative", "Mixed"]
+    t = trend_mod.TONE_WORD_THRESHOLD
+    assert [trend_mod.tone_word(n) for n in (t, t - 1, 0, -(t - 1), -t)] == [
+        "Mostly positive", "Mixed", "Mixed", "Mixed", "Mostly negative"]
+    sign = _swift_func("signed")
+    assert 'value > 0 ? "+\\(value)" : "\\(value)"' in sign
+    assert [trend_mod._signed(n) for n in (21, 0, -7)] == ["+21", "0", "-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("days_ago,edge", [(120, True), (119, False)])
+async def test_the_chat_never_presents_a_trimmed_date_as_the_start(monkeypatch, days_ago, edge):
+    """Review 2026-10-06: `tracking_since` is the oldest label still ON FILE (the log keeps
+    120 days). At the retention edge it moves forward daily, so the chat is told "at least 120
+    days" instead; before it, the date is worded as the oldest on file — never "tracked since"."""
+    since = _et_today() - timedelta(days=days_ago)
+    _install(monkeypatch, news=_News([_row("Story")]),
+             trend=_Trend({"scope": "ORCL", "days": 90, "series": [_day(3, 2, 1, 0)],
+                           "tracking_since": since.isoformat(), "history_status": "ready"}))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
+    assert "tracked since" not in block
+    assert ("scored for at least 120 days" in block) is edge
+    assert (trend_mod._fmt_day(since) in block) is not edge, "a trimmed date never reaches the model"
+
+
+def test_the_windows_the_chat_cuts_are_the_cards_windows():
+    """`summarize_tone_windows` walks TREND_DAYS, the toggle's options (pinned to the Swift
+    enum by test_updates_sentiment_trend_ios_contract), so a fourth window cannot be missed."""
+    series = [_day(k, 1, 0, 0) for k in range(0, 90, 3)]
+    text = trend_mod.summarize_tone_windows(series, today=_et_today())
+    assert [int(n) for n in re.findall(r"(\d+)D: ", text)] == sorted(trend_mod.TREND_DAYS)

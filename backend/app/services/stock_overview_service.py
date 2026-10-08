@@ -26,7 +26,6 @@ from app.services.valuation_snapshot_service import (
     _fmt_ratio,
     build_price_snapshot,
 )
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
     KeyStatisticItem,
@@ -43,6 +42,7 @@ from app.schemas.stock_overview import (
     SnapshotMetricResponse,
     StockOverviewCoreResponse,
     StockOverviewResponse,
+    snapshot_build_time,
 )
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
 from app.utils.market_hours import (
@@ -98,10 +98,6 @@ _ANSWERED_LISTS_KEY = "_answered_lists"
 # quote reaches the "no usable price" FMPUnavailableException instead. Only the request
 # that fetched the bundle (profile seconds old) still falls back to them.
 _LIVE_PROFILE_PRICE_FIELDS = ("price", "change", "changePercentage", "changesPercentage")
-# The six sector medians the degraded Price card scores against (`build_price_snapshot`).
-_VALUATION_BENCH_METRICS = (
-    "pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield",
-)
 _CACHE_TTL = _VOLATILE_TTL     # default TTL for general cache
 # Hard cap on live entries. Expired rows are only swept lazily on read of the
 # same key, so without a cap this dict grows unbounded in the long-lived Railway
@@ -223,11 +219,11 @@ def _fundamentals_mem_get(key: str) -> Optional[Dict[str, Any]]:
 
 # The four hardcoded _SECTOR_*_AVG tables that used to live here were DELETED.
 # Their only consumer was `_build_valuation_snapshot`, the degraded fallback for
-# the Price card, which now shares `valuation_snapshot_service`'s real
-# `sector_benchmarks` medians. Made-up averages are worse than no average: the
-# star rating they produced was a confident wrong verdict on a card the user
-# cannot tell apart from the real one (Technology 30.0 where the live benchmark
-# reads 22).
+# the Price card, which now renders its multiples with NO peer comparison at all
+# (2026-10-07: they are annual, the medians are not — see that method). Made-up
+# averages are worse than no average: the star rating they produced was a
+# confident wrong verdict on a card the user cannot tell apart from the real one
+# (Technology 30.0 where the live benchmark reads 22).
 
 # ── Number formatting helpers ────────────────────────────────────
 
@@ -681,15 +677,6 @@ class StockOverviewService:
         if isinstance(val_snapshot, Exception):
             logger.warning(f"Valuation snapshot failed for {ticker}: {val_snapshot}")
             val_snapshot = None
-        # The degraded Price card (built when the valuation snapshot is missing) scores
-        # against sector medians. That read is the SYNC supabase-py client, and
-        # `_build_full_response` is synchronous — so it is fetched HERE, off the loop, and
-        # handed in, rather than read inline on the single uvicorn worker.
-        valuation_bench: Optional[Dict[str, Optional[float]]] = None
-        if val_snapshot is None:
-            valuation_bench = await self._fetch_valuation_bench(
-                ticker, fundamentals.get("profile")
-            )
         if isinstance(health_snapshot, Exception):
             logger.warning(f"Health snapshot failed for {ticker}: {health_snapshot}")
             health_snapshot = None
@@ -743,7 +730,6 @@ class StockOverviewService:
             health_snapshot=health_snapshot,
             ownership_snapshot=ownership_snapshot,
             ipo_price_data=ipo_price_data,
-            valuation_bench=valuation_bench,
         )
 
         # Cache the formatted profile for chat AI context. Same write, same best-effort
@@ -773,38 +759,6 @@ class StockOverviewService:
         # Cache full response for 120s (volatile freshness)
         _cache_set(overview_key, response)
         return response
-
-    async def _fetch_valuation_bench(
-        self, ticker: str, profile: Any,
-    ) -> Dict[str, Optional[float]]:
-        """Sector medians for the DEGRADED Price card, read on a worker thread.
-
-        `SectorBenchmarkLookup` drives the synchronous Supabase client (a cold key is one or
-        two paginated reads, plus a blocking retry sleep on a blip), so it must never run
-        from `_build_full_response`, which is a plain `def` on the event loop. Never
-        raises: this is already the degraded path, and an empty result degrades each label
-        to a bare metric name, which is honest. A profile with no sector reads nothing.
-        """
-        profile = profile if isinstance(profile, dict) else {}
-        sector = profile.get("sector") or ""
-        if not sector:
-            return {}
-        industry = profile.get("industry") or ""
-        normalized = _normalize_sector(sector)
-        try:
-            lookup = get_sector_benchmark_lookup()
-            bench = await asyncio.to_thread(
-                lookup.get_current_benchmark_values,
-                industry, normalized, list(_VALUATION_BENCH_METRICS),
-            )
-        except Exception as e:
-            logger.warning(
-                "Sector benchmark lookup failed on the fallback Price card for %s "
-                "(sector=%s, industry=%s): %s: %s",
-                ticker, normalized, industry, type(e).__name__, e,
-            )
-            return {}
-        return bench if isinstance(bench, dict) else {}
 
     # ── Fundamentals: 24h Supabase + 1h in-memory ─────────────────
 
@@ -1307,12 +1261,11 @@ class StockOverviewService:
         profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
         ipo_price_data=None,
-        valuation_bench: Optional[Dict[str, Optional[float]]] = None,
     ) -> StockOverviewResponse:
         """Combine fundamentals + volatile into one response.
 
-        Synchronous, so it must do no I/O: `valuation_bench` is the degraded Price card's
-        sector medians, prefetched off the loop by `get_overview`."""
+        Synchronous, so it must do no I/O. (The degraded Price card used to need sector
+        medians prefetched for it; it shows no peer comparison since 2026-10-07.)"""
         profile = fund.get("profile", {})
         quote = vol.get("quote", {})
         key_metrics = fund.get("key_metrics", [])
@@ -1405,7 +1358,6 @@ class StockOverviewService:
             valuation_snapshot=valuation_snapshot,
             health_snapshot=health_snapshot,
             ownership_snapshot=ownership_snapshot,
-            valuation_bench=valuation_bench,
         )
 
         # Sector & Industry
@@ -1792,7 +1744,6 @@ class StockOverviewService:
         sector: str, profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
         profile: Optional[Dict] = None, industry: str = "",
-        valuation_bench: Optional[Dict[str, Optional[float]]] = None,
     ) -> List[SnapshotItemResponse]:
         snapshots = []
 
@@ -1809,7 +1760,7 @@ class StockOverviewService:
         if profitability_snapshot is not None:
             snapshots.append(profitability_snapshot)
         else:
-            snapshots.append(self._build_profitability_snapshot(km, fr, inc0))
+            snapshots.append(self._build_profitability_snapshot(km, fr, inc0, bs=bs))
 
         # 2. Growth (use cached sector-relative snapshot if available)
         if growth_snapshot is not None:
@@ -1821,13 +1772,10 @@ class StockOverviewService:
         if valuation_snapshot is not None:
             snapshots.append(valuation_snapshot)
         else:
-            # NOTE: the fallback normalizes `sector` itself (the primary does
-            # too) — the raw FMP string keyed the old hardcoded tables, but
-            # `sector_benchmarks` rows are stored normalized.
+            # Degraded fallback: the multiples only, no peer comparison or score (its
+            # ratios are ANNUAL — see `_build_valuation_snapshot`).
             snapshots.append(self._build_valuation_snapshot(
                 fr, km, cf0, inc0, bs, profile or {},
-                _normalize_sector(sector) if sector else "", industry,
-                bench=valuation_bench,
             ))
 
         # 4. Financial Health (use cached sector-relative snapshot if available)
@@ -1847,46 +1795,81 @@ class StockOverviewService:
         return snapshots
 
     def _build_profitability_snapshot(
-        self, km: Dict, fr: Dict, inc: Dict
+        self, km: Dict, fr: Dict, inc: Dict, bs: Optional[Dict] = None,
     ) -> SnapshotItemResponse:
+        """DEGRADED fallback for the Profitability card: the values, with NO verdict.
+
+        Reached ONLY when `get_profitability_snapshot` raised (see `_build_snapshots`).
+        Like the Price fallback (`_build_valuation_snapshot`) it rates nothing: its inputs
+        are the overview's ANNUAL payloads, and the primary card's verdict is TTM against
+        TTM peer medians — so `rating=0` (iOS: unavailable, "—"), every `score` None, no
+        `weighted_score` (2026-10-07, review round 2).
+
+        Until then it rated on fixed ROE / margin bands and read ROE from ``km["roe"]``,
+        a v3 name /stable key-metrics never sends (it sends ``returnOnEquity``): ROE was
+        always absent, so every fallback card rated 1/5 "Low". ROE on negative or zero
+        shareholder equity is "N/M", exactly as the primary card and the Health Check
+        show it (the same `_equity_state` test, on the annual D/E and the annual balance
+        sheet ``bs`` when the caller has one): FMP's ROE is net income / equity, so a
+        negative denominator flips its sign (McDonald's-shaped: -216% on a profitable
+        company)."""
+        from app.services.profitability_snapshot_service import _equity_state
+
         op_margin = _safe_float(fr, "operatingProfitMargin") or _safe_float(km, "operatingProfitMargin")
         # Fall back to a real MARGIN field only. netIncomePerShare is EPS in dollars,
         # NOT a margin — using it rendered per-share earnings (e.g. $6.13) as a
         # "Net Margin" of 6.13% (or 50% for a $0.50 EPS via the <1 *100 heuristic).
         net_margin = _safe_float(fr, "netProfitMargin") or _safe_float(km, "netProfitMargin")
-        roe = _safe_float(fr, "returnOnEquity") or _safe_float(km, "roe")
-        roa = _safe_float(fr, "returnOnAssets") or _safe_float(km, "returnOnTangibleAssets")
+
+        def _first_finite(*pairs: Tuple[Dict, str]) -> Optional[float]:
+            """First finite value among (record, key) — None, never a 0.0 default, so an
+            absent ROE / ROA prints "—" rather than a fabricated "0.00%". A bool is junk,
+            not 1.0 / 0.0."""
+            for record, key in pairs:
+                raw = record.get(key) if isinstance(record, dict) else None
+                val = None if isinstance(raw, bool) else _finite(raw)
+                if val is not None:
+                    return val
+            return None
+
+        # /stable key-metrics: `returnOnEquity` / `returnOnAssets`, DECIMALS (1.54 = 154%:
+        # scaled unconditionally, as the primary card's `_to_pct` does). ratios and the
+        # v3 `roe` stay as fallbacks; `returnOnTangibleAssets` is the last resort for ROA.
+        roe_dec = _first_finite((km, "returnOnEquity"), (fr, "returnOnEquity"), (km, "roe"))
+        roa_dec = _first_finite(
+            (km, "returnOnAssets"), (fr, "returnOnAssets"), (km, "returnOnTangibleAssets"),
+        )
+        roe = round(roe_dec * 100, 2) if roe_dec is not None else None
+        roa = round(roa_dec * 100, 2) if roa_dec is not None else None
 
         # If margins are in decimal form (0.25 = 25%), convert
         if op_margin and abs(op_margin) < 1:
             op_margin *= 100
         if net_margin and abs(net_margin) < 1:
             net_margin *= 100
-        if roe and abs(roe) < 5:  # likely decimal
-            roe *= 100
-        if roa and abs(roa) < 5:
-            roa *= 100
 
-        # Rating
-        if roe and roe > 20 and net_margin and net_margin > 15:
-            rating = 5
-        elif roe and roe > 10 and net_margin and net_margin > 8:
-            rating = 4
-        elif roe and roe > 5:
-            rating = 3
-        elif roe and roe > 0:
-            rating = 2
-        else:
-            rating = 1
+        roe_value = _pct(roe)
+        if roe is not None:
+            de_ratio = _first_finite((fr, "debtToEquityRatio"), (km, "debtToEquity"))
+            bs_equity = _first_finite((bs or {}, "totalStockholdersEquity"))
+            equity_state = _equity_state(de_ratio, bs_equity)
+            if equity_state is not None:
+                logger.info(
+                    "Overview fallback profitability: ROE %s%% is not meaningful — "
+                    "shareholder equity %s (annual D/E=%r, equity=%r) — shown as N/M",
+                    roe, equity_state, de_ratio, bs_equity,
+                )
+                roe_value = "N/M"
 
         metrics = [
             SnapshotMetricResponse(name="Operating Margin", value=_pct(op_margin)),
             SnapshotMetricResponse(name="Net Margin", value=_pct(net_margin)),
-            SnapshotMetricResponse(name="Return on Equity (ROE)", value=_pct(roe)),
+            SnapshotMetricResponse(name="Return on Equity (ROE)", value=roe_value),
             SnapshotMetricResponse(name="Return on Assets (ROA)", value=_pct(roa)),
         ]
         return SnapshotItemResponse(
-            category="Profitability", rating=rating, metrics=metrics
+            category="Profitability", rating=0, metrics=metrics, weighted_score=None,
+            computed_at=snapshot_build_time(),
         )
 
     def _build_growth_snapshot(
@@ -1940,58 +1923,43 @@ class StockOverviewService:
             SnapshotMetricResponse(name="Operating Income Growth", value=_fmt_growth(op_growth)),
         ]
         return SnapshotItemResponse(
-            category="Growth", rating=rating, metrics=metrics
+            category="Growth", rating=rating, metrics=metrics,
+            computed_at=snapshot_build_time(),
         )
 
     def _build_valuation_snapshot(
-        self, fr: Dict, km: Dict, cf: Dict, inc: Dict, bs: Dict,
-        profile: Dict, sector: str, industry: str,
-        bench: Optional[Dict[str, Optional[float]]] = None,
+        self, fr: Dict, km: Dict, cf: Dict, inc: Dict, bs: Dict, profile: Dict,
     ) -> SnapshotItemResponse:
-        """DEGRADED fallback for the Price card.
+        """DEGRADED fallback for the Price card: the multiples, with NO peer comparison
+        and NO score.
 
         Reached ONLY when `get_valuation_snapshot` raised (see `_build_snapshots`);
-        the primary is `valuation_snapshot_service.get_valuation_snapshot`.
+        the primary is `valuation_snapshot_service.get_valuation_snapshot`. It goes
+        through the SAME builder (`build_price_snapshot`), so the values follow the
+        primary's rules — six metrics, "Neg." for a loss-maker's multiple, never a
+        hardcoded sector-average table. (It used to be a private second implementation
+        whose every divergence was a silently wrong number; a TestFlight tester
+        photographed one.)
 
-        This used to be a private second implementation, and every one of its
-        divergences was a silently WRONG number on a card indistinguishable from
-        the real one: ANNUAL ratios instead of TTM (up to 24 months stale), a
-        hardcoded sector-average table instead of `sector_benchmarks`, four
-        metrics instead of six, and `pe > 0` guards that rendered "—" for a
-        loss-maker — re-introducing on this path the exact bug the "Neg." fix
-        removed, which a TestFlight tester had photographed.
-
-        It now calls the SAME builder as the primary, so the two cannot drift
-        again. The only remaining difference is freshness: no Supabase snapshot
-        row, computed inline from the overview's own already-fetched payloads.
-
-        `bench` is the sector medians, PREFETCHED off the event loop by `get_overview`
-        (`_fetch_valuation_bench`) — pass it, even when empty. `None` keeps the old inline
-        read for a direct caller only: that read is the synchronous Supabase client, and
-        this method runs on the loop.
+        🔴 No comparison since 2026-10-07. This card's inputs are the overview's own
+        ANNUAL payloads (`_fetch_fundamentals` reads ratios and key metrics with
+        `period="annual"`): fiscal-year-end multiples, up to ~15 months old. Every peer
+        median is a TTM (or complete-year) median of CURRENT multiples, so "P/E (1.63x
+        sector avg 22)" and the 1-5 rating it fed compared two different clocks — a
+        confident verdict on a card the user cannot tell from the real one. Fetching
+        /ratios-ttm here would add an FMP call to a path that runs only while the
+        valuation service is already failing; the honest option is also the cheaper one:
+        bare names ("P/E"), `score=None` on every row, `rating=0` (iOS renders it as
+        unavailable, "—"), no `weighted_score`, and no benchmark read at all.
         """
-        if bench is not None:
-            return build_price_snapshot(
-                fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile, bench=bench,
-            )
-        bench = {}
-        if sector:
-            try:
-                bench = get_sector_benchmark_lookup().get_current_benchmark_values(
-                    industry, sector, list(_VALUATION_BENCH_METRICS),
-                )
-            except Exception as e:
-                # Non-fatal by design: an empty `bench` degrades each label to a
-                # bare metric name, which is honest. This is already the degraded
-                # path — it must not be able to fail the whole overview.
-                logger.warning(
-                    f"Sector benchmark lookup failed on the fallback Price card: "
-                    f"{type(e).__name__}: {e}"
-                )
-
-        return build_price_snapshot(
-            fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile, bench=bench,
+        card = build_price_snapshot(
+            fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile, bench={},
         )
+        return card.model_copy(update={
+            "rating": 0,
+            "weighted_score": None,
+            "metrics": [m.model_copy(update={"score": None}) for m in card.metrics],
+        })
 
     def _build_health_snapshot(
         self, bs: Dict, inc: Dict, cf: Dict, fr: Dict, km: Dict,
@@ -2018,7 +1986,8 @@ class StockOverviewService:
         #
         # Imported inside the method: module-scope would couple two large services at
         # import time for one helper, and this mirrors how the rest of the file defers.
-        from app.services.health_check_service import _compute_z_score
+        from app.services.financials_metric_gate import interest_coverage_applicable
+        from app.services.health_check_service import _compute_z_score, altman_z_applicable
 
         # `_compute_z_score` reads the raw dicts with its OWN Optional-returning
         # `_safe_float`, so "absent" survives the trip; passing this module's 0.0-defaulted
@@ -2064,17 +2033,27 @@ class StockOverviewService:
         else:
             rating = 0  # unavailable if can't compute
 
-        metrics = [
-            # `is not None`, not truthiness: a genuine Z of exactly 0.0 is a MEASURED
-            # deep-distress reading and must not render as "no data".
-            SnapshotMetricResponse(
+        metrics: List[SnapshotMetricResponse] = []
+        # The Z row is OMITTED where the model does not apply (banks, insurers, REITs — the
+        # rest of Financial Services / Real Estate), as the Health Check omits it; it used to
+        # print a bare "Altman Z-Score —" on every such card (review 2026-10-07, HC-5).
+        if altman_z_applicable(sector, industry):
+            metrics.append(SnapshotMetricResponse(
                 name="Altman Z-Score",
+                # `is not None`, not truthiness: a genuine Z of exactly 0.0 is a MEASURED
+                # deep-distress reading and must not render as "no data".
                 value=f"{z_score}" if z_score is not None else "—",
-            ),
-            SnapshotMetricResponse(
+            ))
+        # Interest coverage means nothing for a bank, insurer, capital-markets firm, asset
+        # manager or lender (interest IS its cost of goods): the Health Check omits the row
+        # for them (`financials_metric_gate.interest_coverage_applicable` — an insurance
+        # broker keeps it: a fee business whose lenders watch it), and so does this card.
+        if interest_coverage_applicable(industry):
+            metrics.append(SnapshotMetricResponse(
                 name="Interest Coverage",
                 value=f"{interest_coverage:.1f}x" if interest_coverage else "—"
-            ),
+            ))
+        metrics += [
             SnapshotMetricResponse(name="Cash to Debt", value=f"{cash_to_debt}" if cash_to_debt else "—"),
             SnapshotMetricResponse(name="Free Cash Flow Margin", value=_pct(fcf_margin, 1)),
             SnapshotMetricResponse(
@@ -2083,7 +2062,8 @@ class StockOverviewService:
             ),
         ]
         return SnapshotItemResponse(
-            category="Financial Health", rating=rating, metrics=metrics
+            category="Financial Health", rating=rating, metrics=metrics,
+            computed_at=snapshot_build_time(),
         )
 
     def _build_ownership_snapshot(self, km: Dict) -> SnapshotItemResponse:
@@ -2117,7 +2097,8 @@ class StockOverviewService:
             SnapshotMetricResponse(name="Institutional Activity", value="—"),
         ]
         return SnapshotItemResponse(
-            category="Insiders & Ownership", rating=rating, metrics=metrics
+            category="Insiders & Ownership", rating=rating, metrics=metrics,
+            computed_at=snapshot_build_time(),
         )
 
     # ── Sector & Industry ─────────────────────────────────────────

@@ -256,15 +256,20 @@ class _FakeLookup:
     `get_sector_benchmarks_with_n` shape Phase 3A uses.
 
     Constructed from a simple {metric: median_value} dict; defaults to
-    one row per metric at period="2025" with n=50 (well above the
-    preferred sample-size threshold). Use `_FakeLookupMultiYear` when
-    you need to test year-selection edge cases.
+    one row per metric at period="2024" with n=50 (well above the
+    mature sample floor). Use `_FakeLookupMultiYear` when you need to
+    test year-selection edge cases.
+
+    ⚠️ "2024" because every focal record in these tests ends 2024-12-31: since
+    2026-10-07 a focal value is compared with the median of ITS OWN year (or an older
+    mature one), never a newer year. This fake used "2025", which only ever scored
+    because the old picker took the newest year whatever the company's own year.
     """
 
     def __init__(self, medians: Dict[str, float]):
         # Single year, healthy sample size — covers the common test path.
         self._data = {
-            m: {"2025": {"median": v, "n": 50}} for m, v in medians.items()
+            m: {"2024": {"median": v, "n": 50}} for m, v in medians.items()
         }
 
     def get_sector_benchmarks(
@@ -513,7 +518,11 @@ def test_pillar_result_serializes_to_dict():
 def test_year_selection_prefers_year_with_n_gte_20():
     """When 2026 is partial (n=12) and 2025 is full (n=85), the scorer
     must pick 2025 to avoid noisy partial-year medians. This is the
-    Technology deferred_revenue_to_revenue scenario from production."""
+    Technology deferred_revenue_to_revenue scenario from production.
+
+    The focal record is the company's FY2026 (ends 2026-06-30) so 2026 is its own
+    year: the thin same-year cell is skipped for the newest OLDER mature year. (With a
+    2024 focal record, as before 2026-10-07, neither year may be used any more.)"""
     svc = _make_service_with_multi_year({
         "gross_margin": {
             "2025": {"median": 0.40, "n": 85},   # preferred — n high enough
@@ -529,7 +538,7 @@ def test_year_selection_prefers_year_with_n_gte_20():
         profile={"sector": "Technology"},
         income=[], balance=[],
         ratios=[{
-            "date": "2024-12-31",
+            "date": "2026-06-30",
             "grossProfitMargin": 0.80,        # 80% (2× the real 2025 median)
             "priceToSalesRatio": 8.0,         # 2× the real 2025 median
         }],
@@ -547,9 +556,15 @@ def test_year_selection_prefers_year_with_n_gte_20():
     assert drivers["ps_ratio"].period_used == "2025"
 
 
-def test_year_selection_falls_back_to_n_gte_10_when_no_preferred():
-    """If no year has n>=20 but a year has n>=10, use that (accept some
-    noise but better than dropping the metric entirely)."""
+def test_year_selection_never_uses_a_thin_year():
+    """A year with fewer than MATURE_SAMPLE_FLOOR (20) companies is never used, even
+    when nothing better exists: the metric goes unscored instead.
+
+    Flipped 2026-10-07 (was `..._falls_back_to_n_gte_10_when_no_preferred`, which
+    accepted n >= 10 "for some noise"). The lookup's own single-value picker
+    (`pick_mature_benchmark`) stopped returning thin cells the same day — a 10-15 company
+    median is not a sector benchmark, and the pillar falls to the AI dimension instead
+    of being scored against one."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
             "2024": {"median": 0.40, "n": 15},   # acceptable fallback
@@ -571,14 +586,14 @@ def test_year_selection_falls_back_to_n_gte_10_when_no_preferred():
         industry_tam=None,
     )
     brand = results[PILLAR_BRAND]
-    assert brand.score == 7.5  # 2024 median used
+    assert brand.score is None and brand.confidence == "low"
     drivers = {d.metric: d for d in brand.drivers}
-    assert drivers["gross_margin"].period_used == "2024"
-    assert drivers["gross_margin"].sample_size == 15
+    assert drivers["gross_margin"].sector_median is None
+    assert drivers["gross_margin"].period_used is None
 
 
 def test_year_selection_returns_none_when_all_below_acceptable():
-    """If every year has n<10, the metric is skipped — sector median
+    """If every year is below the mature floor, the metric is skipped — sector median
     is too unstable to score against."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
@@ -612,8 +627,8 @@ def test_year_selection_returns_none_when_all_below_acceptable():
 
 
 def test_year_selection_picks_latest_among_preferred():
-    """When multiple years clear the preferred threshold, take the
-    latest one (most recent fundamentals)."""
+    """When multiple years clear the mature floor, take the latest one that is not
+    newer than the company's own year — here the focal FY2025, so 2025 itself."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
             # Decimal scale, like the rest of this file — this test only asserts WHICH
@@ -632,7 +647,7 @@ def test_year_selection_picks_latest_among_preferred():
         profile={"sector": "Technology"},
         income=[], balance=[],
         ratios=[{
-            "date": "2024-12-31",
+            "date": "2025-12-31",             # FY2025 — compared with 2025 (2026-10-07)
             "grossProfitMargin": 0.80,
             "priceToSalesRatio": 8.0,
         }],
@@ -657,7 +672,7 @@ def test_pillar_drivers_to_dict_includes_period_and_sample_size():
         profile={"sector": "Technology"},
         income=[], balance=[],
         ratios=[{
-            "date": "2024-12-31",
+            "date": "2025-12-31",             # FY2025, the year of the fake's rows
             "grossProfitMargin": 0.50,
             "priceToSalesRatio": 5.0,
         }],

@@ -49,27 +49,18 @@ def _service() -> StockOverviewService:
     return StockOverviewService()
 
 
-class _StubBenchmarkLookup:
-    """`get_sector_benchmark_lookup()` is a module SINGLETON that builds a real Supabase
-    client in __init__, and `_build_snapshots` calls it on the fallback Price card."""
-
-    def get_current_benchmark_values(self, industry, sector, metrics):
-        return {}
-
-
 def _neutralise_upstreams(monkeypatch, svc):
     """Stub everything the build path would otherwise reach over the network.
 
-    `stock_overview_service` imports `get_sector_benchmark_lookup` and `get_short_interest`
-    at MODULE level, but `get_overview` re-imports `get_short_interest` inside the function
-    body — a function-scoped import resolves from the SOURCE module on every call. So the
-    same function needs BOTH bindings patched; patching one leaves live calls behind
+    `stock_overview_service` imports `get_short_interest` at MODULE level, but
+    `get_overview` re-imports it inside the function body — a function-scoped import
+    resolves from the SOURCE module on every call. So the same function needs BOTH
+    bindings patched; patching one leaves live calls behind
     (`.claude/rules/testing.md`, "Patch the binding the caller actually uses").
     """
     async def _no_short_interest(ticker):
         return {}
 
-    monkeypatch.setattr(sos, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup())
     monkeypatch.setattr(sos, "get_short_interest", _no_short_interest)
     monkeypatch.setattr(
         "app.integrations.finra_short_interest.get_short_interest", _no_short_interest

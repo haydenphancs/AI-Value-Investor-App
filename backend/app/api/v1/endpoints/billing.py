@@ -40,6 +40,9 @@ from app.services.iap_service import (
 )
 from app.services.subscription_service import SubscriptionService
 from app.core.security import trusted_client_ip
+from app.core.client_app_version import capture_client_app_version, client_is_older_than
+from app.services.entitlements import THEME_LOCK_MIN_APP_VERSION
+from app.services.plan_features import KEY_THEME_COMPANIES
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +50,11 @@ router = APIRouter()
 
 
 @router.get("/plans", response_model=PlanCatalogResponse)
-async def get_plans():
+async def get_plans(
+    # Records X-App-Version: build 1.0 is not sent the theme-company row (below). Not an auth
+    # dependency — this route stays one of the ten `.public` ones.
+    _app_version: None = Depends(capture_client_app_version),
+):
     """Public tier catalog (Free / Pro / Max) with live pricing + per-action
     credit costs. No auth — the paywall must render for guests."""
     # OFF THE LOOP. This is one of the ten `.public` routes — no credential, no rate
@@ -56,6 +63,15 @@ async def get_plans():
     # anonymous GETs were an event-loop denial primitive. The service memoises a
     # SUCCESSFUL read for two minutes, so the thread hop is also rare.
     plans = await asyncio.to_thread(SubscriptionService().get_plan_catalog)
+    if client_is_older_than(THEME_LOCK_MIN_APP_VERSION):
+        # Build 1.0 still gets the FULL theme list (`home.get_theme_detail`), so its paywall must
+        # not advertise the 5-company limit or sell "every company" as a paid benefit. A
+        # per-request COPY: `plans` is the service's memoised catalogue, shared by every caller.
+        plans = [
+            {**p, "features": [f for f in (p.get("features") or [])
+                               if f.get("key") != KEY_THEME_COMPANIES]}
+            for p in plans
+        ]
     return PlanCatalogResponse(
         plans=[PlanResponse(**p) for p in plans],
         report_cost=settings.REPORT_CREDIT_COST,

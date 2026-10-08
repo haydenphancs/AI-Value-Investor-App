@@ -1123,8 +1123,16 @@ class Settings(BaseSettings):
     # Post-launch target of the public smart link `/go/{campaign}` and the landing page's App
     # Store button (e.g. https://apps.apple.com/app/id6759525689). Empty = PRE-LAUNCH: both
     # point at the landing page at `/`. Only an https apps.apple.com URL is accepted; anything
-    # else logs ERROR once and falls back (services/marketing/smart_link.py).
+    # else logs ERROR once and falls back (services/marketing/smart_link.py). A VALID URL also
+    # switches every new caption's code-owned value line from the claim-free "Caydex: AI research on
+    # public companies." to "… — on the App Store." (post_copy.value_line, read at WRITE time).
     MARKETING_APP_STORE_URL: str = ""
+    # True while the App Store page is a PRE-ORDER: the landing button reads "Pre-order Caydex for
+    # iPhone" and new captions say "pre-order on the App Store". Honoured ONLY while
+    # MARKETING_APP_STORE_URL is valid (smart_link.store_state); it never changes where /go points.
+    # Read at WRITE time — an accepted caption keeps its words until its post expires (run day + 1,
+    # ET). Set it False on release day. Fail-closed. Web only (the worker never composes captions).
+    MARKETING_APP_STORE_PREORDER: bool = False
     # App Analytics provider token (`pt`). When set, `/go` appends pt=<token>&ct=<campaign>&mt=8
     # so App Store Connect attributes installs per platform; empty = no campaign parameters.
     MARKETING_APP_STORE_PROVIDER_TOKEN: str = ""
@@ -1214,6 +1222,14 @@ class Settings(BaseSettings):
     # switch: it runs whenever the bot is configured, like the publish feed's alerts — a nightly check
     # on a posting day and a final word the next day, both timed from MARKETING_RUN_HOUR_ET (above).
     MARKETING_DIGEST_ENABLED: bool = False
+    # The digest's weekly COST line (digest_service.weekly_cost). The Upload-Post plan's MONTHLY price
+    # in USD — 0 = the Free plan; Basic billed annually = 16, monthly = 24. Each digest week is charged
+    # 7/30.4375 of it (the plan fee is fixed, so it is shown apart from the usage parts).
+    MARKETING_UPLOAD_POST_MONTHLY_USD: float = Field(0.0, ge=0, le=10_000, allow_inf_nan=False)
+    # The alert line for last week's USAGE cost — X (our ledger) + Gemini + the worker, never the plan
+    # fee: above it the digest adds a ⚠️ line. 0 = no alert. A negative, non-finite or absurd value
+    # (either setting) fails the deploy at boot — Railway keeps the previous deployment running.
+    MARKETING_WEEKLY_COST_WARN_USD: float = Field(1.0, ge=0, le=10_000, allow_inf_nan=False)
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

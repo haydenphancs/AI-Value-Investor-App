@@ -60,6 +60,7 @@ GROUP_ALWAYS = "always"
 KEY_CREDITS = "credits"
 KEY_UPDATES_TICKERS = "updates_tickers"
 KEY_SIGNALS = "signals"
+KEY_THEME_COMPANIES = "theme_companies"
 KEY_WHALE_TRACKING = "whale_tracking"
 KEY_WHALE_DETAIL = "whale_detail"
 KEY_LEARN_AUDIO = "learn_audio"
@@ -204,6 +205,39 @@ def _signals_row(tier: str) -> Dict[str, Any]:
         "antenna.radiowaves.left.and.right",
         ACCENT_SIGNALS,
         included=unlocked,
+    )
+
+
+def _theme_companies_row(tier: str) -> Dict[str, Any]:
+    """How much of each Emerging Frontiers theme's company list a plan shows.
+
+    A QUANTITY, like the Updates row — `included` stays True on Free, because Free really
+    does get the first companies of every list; a strikethrough would misdescribe the gate.
+    The number is READ from `entitlements.theme_company_limit`, the function the theme
+    endpoint enforces, and ``None`` (the whole list) is branched on, never formatted.
+    """
+    limit = entitlements.theme_company_limit(tier)
+    if limit is None:
+        title = "Every company in every theme"
+        detail = "The full company list behind each Emerging Frontiers theme on Home."
+    elif limit <= 0:
+        title = "Theme company lists"
+        detail = "Each Emerging Frontiers theme's company list is part of a plan."
+    else:
+        noun = "company" if limit == 1 else "companies"
+        title = f"Top {limit} {noun} in each theme"
+        detail = (
+            "Each Emerging Frontiers theme on Home shows its largest companies first. "
+            "A plan shows the full list."
+        )
+    return _row(
+        KEY_THEME_COMPANIES,
+        title,
+        detail,
+        "square.stack.3d.up.fill",
+        ACCENT_UPDATES,
+        # A limit of 0 would leave Free nothing to show — then, and only then, it is a lock.
+        included=limit is None or limit > 0,
     )
 
 
@@ -368,6 +402,7 @@ def features_for_tier(
         _credits_row(credits, report_cost, chat_cost),
         _updates_row(key),
         _signals_row(key),
+        _theme_companies_row(key),
         _whale_tracking_row(key),
         _whale_detail_row(key),
         _learn_audio_row(key),

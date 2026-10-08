@@ -10,8 +10,16 @@ Why each group exists:
   configured and only for a KNOWN campaign.
 * **Hostile campaigns.** The path segment is attacker-typed. Nothing of it may reach `Location`
   (open redirect / header injection) — `ct` is always a constant.
+* **Store state.** `store_state()` (prelaunch / preorder / live) picks what every new caption's
+  value line and the landing button say about the app. It follows the VALIDATED store URL, so the
+  pre-order flag alone claims nothing, and it never moves where /go points.
 * **Counting.** Every platform's link-preview crawler fetches a post's link, so an uncounted
-  crawler is the difference between a real number and noise. They still get the 302.
+  crawler is the difference between a real number and noise. They still get the 302. Crawlers are
+  refused by their OWN product tokens (each one's must-count in-app twin keeps counting), and
+  Meta's fetcher network (57.141.0.0/16, the rightmost X-Forwarded-For) never counts at all.
+* **Early bucket.** Inside a campaign's window after its post went out (`publish_clock`, stamped
+  by the publisher) a tap that passed every filter is counted apart as `<campaign>_early`: a
+  server constant, never typeable, never in `ct`, on the campaign's own ceiling and flush.
 * **Flush.** The counter is in memory; a failed RPC must keep its counts, and a database without
   migration 173 must say so ONCE instead of every minute.
 * **Landing page.** Public, unauthenticated, on the passkey domain: no script, no external
@@ -27,9 +35,12 @@ patched at the binding `smart_link` uses, and the process-wide rate limiter clea
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import html
+import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -49,7 +60,7 @@ from postgrest.exceptions import APIError
 from app.config import settings
 from app.core.security import rate_limiter
 from app.schemas.marketing import POST_PLATFORMS
-from app.services.marketing import compliance, smart_link
+from app.services.marketing import compliance, post_copy, publish_clock, smart_link
 from app.services.notification_kinds import NOTIFICATION_KINDS
 from app.utils.market_hours import ET
 
@@ -74,7 +85,13 @@ _DISCLAIMER = (
 
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
-    """Every piece of module state this file touches starts clean and is restored."""
+    """Every piece of module state this file touches starts clean and is restored.
+
+    The publish clock too: the `clock` fixture below pins the wall clock to _WALL (2026-09-21),
+    so a window stamped at REAL time by another test file (the publisher's tests stamp it) would
+    still read as open here and silently relabel this file's taps `<campaign>_early`. The
+    pre-order flag is pinned off, so a developer `.env` can never turn the landing page or
+    `store_state()` into "preorder" behind a test's back."""
     monkeypatch.setattr(smart_link, "_pending", {})
     monkeypatch.setattr(smart_link, "_retry", {})
     monkeypatch.setattr(smart_link, "_windows", {})
@@ -83,9 +100,12 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(smart_link, "_misconfig_logged", False)
     monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", "")
     monkeypatch.setattr(settings, "MARKETING_APP_STORE_PROVIDER_TOKEN", "")
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", False)
+    publish_clock.clear()
     rate_limiter.clear()
     smart_link._link_limiter.clear()
     yield
+    publish_clock.clear()
     rate_limiter.clear()
     smart_link._link_limiter.clear()
 
@@ -106,6 +126,12 @@ def launched(monkeypatch):
 @pytest.fixture
 def token(monkeypatch):
     monkeypatch.setattr(settings, "MARKETING_APP_STORE_PROVIDER_TOKEN", _TOKEN)
+
+
+@pytest.fixture
+def preorder(monkeypatch):
+    """The App Store page is a PRE-ORDER (owner sets it with the URL at approval)."""
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", True)
 
 
 @pytest.fixture
@@ -217,10 +243,11 @@ _HOSTILE = [
 ]
 
 
-#: Every state the smart link can be in. PRE-LAUNCH is the one live in production today (both
-#: settings default to ""), so the hostile table must run there too — a change that reflected
-#: an unknown campaign only when the destination is `/` (`/?c=<raw>`) would otherwise ship on
-#: the passkey domain with every test green. MISCONFIGURED also lands on `/`, by a different road.
+#: Every state the smart link can be in. Production has been LAUNCHED since 2026-10-05, but
+#: PRE-LAUNCH is the default (both settings default to ""), so the hostile table must run there too
+#: — a change that reflected an unknown campaign only when the destination is `/` (`/?c=<raw>`)
+#: would otherwise ship on the passkey domain with every test green. MISCONFIGURED also lands on
+#: `/`, by a different road.
 _LINK_CONFIGS = ("prelaunch", "launched", "launched_token", "misconfigured")
 
 
@@ -276,12 +303,38 @@ def test_normalize_campaign_table(raw, expected):
     assert smart_link.normalize_campaign(raw) == expected
 
 
+#: The live schema's CHECK on marketing_link_hits.campaign (migration 173), as pg_dump wrote it.
+_CAMPAIGN_CHECK_RE = re.compile(
+    r"CONSTRAINT marketing_link_hits_campaign_check CHECK \(\(campaign ~ '([^']+)'::text\)\)")
+
+
 def test_known_campaigns_are_exactly_the_post_platforms_and_fit_the_db_check():
     assert smart_link.KNOWN_CAMPAIGNS == frozenset(POST_PLATFORMS)
     # marketing_link_hits.campaign CHECK '^[a-z0-9_-]{1,40}$' — "other" included.
     for c in smart_link.KNOWN_CAMPAIGNS | {smart_link.OTHER}:
         assert re.fullmatch(r"[a-z0-9_-]{1,40}", c), c
     assert smart_link.OTHER not in smart_link.KNOWN_CAMPAIGNS
+
+    # The early twins (`<campaign>_early`, the first minutes after a post): one per campaign, read
+    # against the LIVE schema's CHECK, so a key the database would refuse cannot ship and fail every
+    # flush (the RPC re-sends a refused key forever).
+    snapshot = (_BACKEND / "database" / "schema_snapshot.sql").read_text(encoding="utf-8")
+    # Full-line SQL comments dropped: a commented-out CHECK must never satisfy the scan.
+    checks = _CAMPAIGN_CHECK_RE.findall(
+        "\n".join(ln for ln in snapshot.splitlines() if not ln.lstrip().startswith("--")))
+    assert checks == ["^[a-z0-9_-]{1,40}$"], f"sentinel: the CHECK moved or changed: {checks}"
+    assert smart_link.EARLY_SUFFIX == "_early"
+    assert set(smart_link.EARLY_KEYS) == smart_link.KNOWN_CAMPAIGNS
+    for campaign, early in smart_link.EARLY_KEYS.items():
+        assert early == f"{campaign}_early", (campaign, early)
+        # fullmatch as well: Python's `$` also matches before a trailing newline, Postgres's does not.
+        assert re.search(checks[0], early) and re.fullmatch(r"[a-z0-9_-]{1,40}", early), early
+        # Never typeable: a /go path spelling one is "other", so `ct` can never carry it either.
+        assert smart_link.normalize_campaign(early) == smart_link.OTHER, early
+    early_keys = set(smart_link.EARLY_KEYS.values())
+    assert len(early_keys) == len(smart_link.EARLY_KEYS)
+    assert not early_keys & (smart_link.KNOWN_CAMPAIGNS | {smart_link.OTHER})
+    assert smart_link.EARLY_BASE == {e: c for c, e in smart_link.EARLY_KEYS.items()}
 
 
 # ── 3. misconfigured store URL ────────────────────────────────────────────────
@@ -312,7 +365,7 @@ def test_a_misconfigured_store_url_falls_back_and_logs_error_once(
         assert r.headers["location"] == "/"
     page = client.get("/")
     assert page.status_code == 200
-    assert "Coming soon to the App Store" in page.text
+    assert "Caydex for iPhone" in page.text and "Coming soon" not in page.text   # no availability claim
     assert "apple-itunes-app" not in page.text
     errors = [rec for rec in caplog.records
               if rec.name == _LOGGER and rec.levelno == logging.ERROR
@@ -340,6 +393,102 @@ def test_store_app_id_parses_the_numeric_id_only(monkeypatch):
         assert smart_link.store_app_id() == want, url
 
 
+# ── 3b. the store state: what public copy may say about the app ──────────────
+#
+# `store_state()` is read at WRITE time by script_service (it picks every new caption's value line,
+# `post_copy.value_line`) and by the landing page. It follows `store_url()` — never the raw setting —
+# so a caption can never say "on the App Store" while its own link still lands on the landing page with
+# no store link, and the pre-order flag alone claims nothing. It changes words, never where /go points.
+
+_MISCONFIGURED = "https://evil.com/app/id6759525689"
+
+
+@pytest.mark.parametrize("url,preorder,state", [
+    ("", False, "prelaunch"),
+    ("", True, "prelaunch"),                                  # the flag alone claims nothing
+    ("   ", True, "prelaunch"),
+    (_MISCONFIGURED, False, "prelaunch"),                     # /go still lands on "/"
+    (_MISCONFIGURED, True, "prelaunch"),
+    ("http://apps.apple.com/app/id6759525689", True, "prelaunch"),
+    (_STORE, False, "live"),
+    (_STORE, True, "preorder"),
+    ("https://apps.apple.com/app/caydex", False, "live"),     # valid without an id: still the store
+    ("https://apps.apple.com/app/caydex", True, "preorder"),
+])
+def test_store_state_table(monkeypatch, url, preorder, state):
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", url)
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", preorder)
+    assert smart_link.store_state() == state
+
+
+def test_the_store_states_are_exactly_post_copys_names(monkeypatch):
+    """smart_link spells the three names as literals (the request path must not import the copy
+    module and its validators), so this pins them to post_copy's. A drifted name would not fail
+    loudly anywhere: `post_copy.normalize_store_state` would quietly word it as prelaunch."""
+    assert smart_link.STORE_PRELAUNCH == post_copy.STORE_PRELAUNCH == "prelaunch"
+    assert smart_link.STORE_PREORDER == post_copy.STORE_PREORDER == "preorder"
+    assert smart_link.STORE_LIVE == post_copy.STORE_LIVE == "live"
+    assert set(post_copy.STORE_STATES) == {smart_link.STORE_PRELAUNCH, smart_link.STORE_PREORDER,
+                                           smart_link.STORE_LIVE}
+    got = set()
+    for url in ("", _MISCONFIGURED, _STORE):
+        for flag in (False, True):
+            monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", url)
+            monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", flag)
+            got.add(smart_link.store_state())
+    assert got == set(post_copy.STORE_STATES)
+    # Every state smart_link can return words a value line of its own — none falls back.
+    assert {s: post_copy.normalize_store_state(s) for s in got} == {s: s for s in got}
+    assert len({post_copy.value_line(s) for s in got}) == len(got)
+
+
+@pytest.mark.parametrize("url", ["", _MISCONFIGURED])
+def test_the_preorder_flag_alone_claims_nothing(client, preorder, monkeypatch, caplog, url):
+    caplog.set_level(logging.ERROR, logger=_LOGGER)
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", url)
+    assert smart_link.store_state() == "prelaunch"
+    page = client.get("/").text
+    assert "Caydex for iPhone" in page and "Coming soon" not in page
+    assert "Pre-order" not in page and "Get Caydex" not in page
+    assert "apple-itunes-app" not in page
+    r = _go(client, "/go/tiktok")
+    _assert_plain_302(r)
+    assert r.headers["location"] == "/"
+    # The flag changes nothing about the misconfiguration ERROR: still exactly once for a bad URL
+    # (store_state, the page and /go all read it), and an unset URL is not an error at all.
+    errors = [rec.getMessage() for rec in caplog.records
+              if rec.name == _LOGGER and rec.levelno >= logging.ERROR]
+    assert len(errors) == (1 if url else 0), errors
+    assert all("MARKETING_APP_STORE_URL is misconfigured" in e for e in errors), errors
+
+
+def test_the_preorder_switch_is_declared_fail_closed():
+    """marketing.md §3: every switch fails closed. With nothing set the state is prelaunch, the
+    least claim; the pre-order wording takes the owner setting BOTH the URL and the flag."""
+    from app.config import Settings
+
+    flag = Settings.model_fields["MARKETING_APP_STORE_PREORDER"]
+    assert flag.annotation is bool and flag.default is False
+    assert Settings.model_fields["MARKETING_APP_STORE_URL"].default == ""
+
+
+@pytest.mark.parametrize("with_token", [False, True], ids=["no-token", "token"])
+@pytest.mark.parametrize("segment", ["tiktok", "bluesky", "", "wp-login"])
+def test_the_preorder_flag_never_moves_the_link(client, launched, monkeypatch, with_token,
+                                                segment):
+    if with_token:
+        monkeypatch.setattr(settings, "MARKETING_APP_STORE_PROVIDER_TOKEN", _TOKEN)
+    campaign = smart_link.normalize_campaign(segment)
+    want = _expected_location("launched_token" if with_token else "launched",
+                              None if campaign == smart_link.OTHER else campaign)
+    path = f"/go/{segment}" if segment else "/go"
+    for flag in (False, True):
+        monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", flag)
+        r = _go(client, path)
+        _assert_plain_302(r)
+        assert r.headers["location"] == want, (flag, r.headers["location"])
+
+
 # ── 4. what is counted ────────────────────────────────────────────────────────
 
 
@@ -359,7 +508,39 @@ def test_today_et_is_the_eastern_calendar_day():
     assert got in (before, after)
 
 
+#: The desktop UA Meta's fetchers sent from 57.141.0.0/16 seconds after a post went out
+#: (production 2026-10-04). From any other address it is a person.
+_CHROME_139 = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/139.0.0.0 Safari/537.36")
+#: trendiction WITHOUT its info URL: its own token "trendictionbot0.5.0" defeats `bot\b` (a digit
+#: follows "bot"), so before its own deny token nothing refused this one.
+_TRENDICTION_NO_URL = (
+    "Mozilla/5.0 (Windows; U; Windows NT 6.0; en-GB; rv:1.0; trendictionbot0.5.0; trendiction "
+    "search; please let us know of any problems; web at trendiction.com) Gecko/20071127 "
+    "Firefox/3.0.0.11"
+)
+#: Production 2026-10-03/05 (`railway logs --http`): crawlers that fetched /go within minutes of a
+#: post. Each is MOZILLA-prefixed, so the browser-prefix rule passes it and only a deny token can
+#: refuse it — `(UA, its own product token)`.
+_OWN_TOKEN_CRAWLERS = [
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0 "
+     "(FlipboardProxy/1.2; +http://flipboard.com/browserproxy)", "flipboardproxy"),
+    ("Mozilla/5.0 (compatible; LinkRing/1.0)", "linkring"),
+    ("Mozilla/5.0 (compatible; SkyWatch/1.0)", "skywatch"),
+    ("Mozilla/5.0 (Windows; U; Windows NT 6.0; en-GB; rv:1.0; trendictionbot0.5.0; trendiction "
+     "search; http://www.trendiction.de/bot; please let us know of any problems; web at "
+     "trendiction.com) Gecko/20071127 Firefox/3.0.0.11", "trendictionbot"),
+    (_TRENDICTION_NO_URL, "trendictionbot"),
+    ("Mozilla/5.0 (compatible; KeenableBot/1.0; +https://keenable.ai/bot)", "keenablebot"),
+    ("Mozilla/5.0 (compatible; ShapBot/0.1.0)", "shapbot"),
+    ("Mozilla/5.0 (compatible; Google-Safety)", "google-safety"),
+]
+
 _BOT_UAS = [
+    *(ua for ua, _token in _OWN_TOKEN_CRAWLERS),
+    # The same week's crawlers that never open with a browser prefix: the prefix rule refuses them.
+    "LivelapBot/0.2 (+https://livelap.com/bot)", "SkytabBot/1.0", "Google-Safety",
+    "facebookexternalhit/1.1",
     "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
     "Twitterbot/1.0",
     "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
@@ -426,6 +607,15 @@ _HUMAN_UAS = [
     "Gecko) Mobile/15E148 Snapchat/13.0.0.33 (like Safari/8618.1.15.10.15, panda)",
     # The one mainstream browser whose UA does not open with "Mozilla/".
     "Opera/9.80 (Android; Opera Mini/36.2.2254/119.132; U; id) Presto/2.12.423 Version/12.16",
+    # The must-count twins of the 2026-10 deny tokens. The Flipboard app's IN-APP browser says
+    # "Flipboard/" — people who tapped the link; its crawler is FlipboardProxy (iOS, Android).
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like "
+    "Gecko) Mobile/15E148 Flipboard/4.3.24",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP1A.240405.002; wv) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Version/4.0 Chrome/124.0.6367.82 Mobile Safari/537.36 "
+    "Flipboard/5.3.1/5551,5.3.1.5551",
+    # Meta's fetchers used this plain desktop UA — refused by their NETWORK, never by the UA.
+    _CHROME_139,
 ]
 
 
@@ -449,6 +639,22 @@ def test_browsers_and_in_app_browsers_are_people(client, fixed_day, ua):
 def test_native_http_stacks_are_caught_by_the_browser_prefix_not_the_deny_list(ua):
     # Anti-vacuity for the prefix rule: the deny-list alone does NOT catch these.
     assert smart_link._BOT_UA_RE.search(ua) is None
+    assert smart_link.is_bot(ua)
+
+
+@pytest.mark.parametrize("ua,own_token", _OWN_TOKEN_CRAWLERS,
+                         ids=[f"{t}-no-url" if ua == _TRENDICTION_NO_URL else t
+                              for ua, t in _OWN_TOKEN_CRAWLERS])
+def test_each_confirmed_crawler_is_denied_by_its_own_token(ua, own_token):
+    """Production 2026-10-03/05: each of these fetched /go within minutes of a post. Each opens with
+    "Mozilla/", so the browser-prefix rule passes it and only the deny list can refuse it — and it
+    must be refused by ITS OWN product token (the leftmost match), never by the generic `bot\\b`
+    marker or a word inside an info URL the crawler may drop: trendiction without its "/bot;" URL
+    was counted, because its own token "trendictionbot0.5.0" defeats `bot\\b`."""
+    assert ua.lower().startswith("mozilla/"), "sentinel: only the deny list can refuse this UA"
+    m = smart_link._BOT_UA_RE.search(ua)
+    assert m is not None, f"counted as a person: {ua}"
+    assert m.group(0).lower() == own_token, (m.group(0), ua)
     assert smart_link.is_bot(ua)
 
 
@@ -843,6 +1049,64 @@ def test_rate_key_table(ip, key):
     assert smart_link.rate_key(ip) == key
 
 
+# ── 4d. a platform's fetcher network is never a person ────────────────────────
+
+#: Production 2026-10-04: Meta fetched /go/facebook and /go/threads from 57.141.2.70 and .76
+#: (57.141.0.0/16, AS32934) with the plain desktop `_CHROME_139` UA seconds after each post — a UA no
+#: deny list can tell from a person's. As `X-Forwarded-For` arrives: only the RIGHTMOST entry (our
+#: edge appended it) is read, and an IPv4-mapped IPv6 form is the same address.
+_META_FETCHERS = ["57.141.2.70", "57.141.2.76", "57.141.0.0", "57.141.255.255",
+                  "::ffff:57.141.2.70", "203.0.113.9, 57.141.2.70"]
+
+
+@pytest.mark.parametrize("ip", _META_FETCHERS)
+def test_metas_fetcher_network_is_redirected_but_never_counted(client, fixed_day, ip):
+    """Refused BEFORE the per-address limiter: a fetch spends no address budget (no `go:ip:` key is
+    created) and never reaches a campaign's ceiling (no window opens)."""
+    assert not smart_link.is_bot(_CHROME_139), "sentinel: only the network can refuse this tap"
+    for campaign in ("facebook", "threads"):
+        r = _go(client, f"/go/{campaign}", ua=_CHROME_139, ip=ip)
+        _assert_plain_302(r)
+        assert r.headers["location"] == "/"
+    assert smart_link._pending == {}
+    assert not smart_link._link_limiter._requests, dict(smart_link._link_limiter._requests)
+    assert smart_link._windows == {}
+
+
+def test_a_fetcher_address_with_no_forwarded_header_is_refused_too(fixed_day):
+    """`trusted_client_ip` falls back to the socket peer when no proxy header arrives."""
+    req = SimpleNamespace(method="GET", headers={"user-agent": _CHROME_139},
+                          client=SimpleNamespace(host="57.141.2.76"))
+    assert smart_link.record_hit(req, "facebook") is False
+    assert smart_link._pending == {} and smart_link._windows == {}
+    assert not smart_link._link_limiter._requests
+
+
+@pytest.mark.parametrize("ip,key", [
+    ("57.140.255.255", "57.140.255.255"),         # one address below the network
+    ("57.142.0.0", "57.142.0.0"),                 # one above
+    ("::ffff:57.142.0.1", "57.142.0.1"),
+    # A FORGED leftmost entry naming Meta: the edge's own (rightmost) entry is a person, and a
+    # caller cannot hide their tap — nor anyone else's — by claiming to be Meta.
+    ("57.141.2.70, 203.0.113.9", "203.0.113.9"),
+])
+def test_addresses_outside_metas_network_still_count(client, fixed_day, ip, key):
+    _assert_plain_302(_go(client, "/go/facebook", ua=_CHROME_139, ip=ip))
+    assert smart_link._pending == {("facebook", _DAY): 1}
+    assert list(smart_link._link_limiter._requests) == [f"go:ip:{key}"]
+
+
+@pytest.mark.parametrize("ip,fetcher", [
+    ("57.141.2.70", True), (" 57.141.2.70 ", True), ("::ffff:57.141.2.70", True),
+    ("::FFFF:57.141.2.76", True), ("57.141.0.0", True), ("57.141.255.255", True),
+    ("57.140.255.255", False), ("57.142.0.0", False),
+    (None, False), ("", False), ("garbage", False), ("unknown", False), ("testclient", False),
+    ("1" * 10_000, False), ("2001:db8::1", False), ("::ffff:203.0.113.9", False), (57, False),
+])
+def test_is_platform_fetcher_ip_table(ip, fetcher):
+    assert smart_link.is_platform_fetcher_ip(ip) is fetcher
+
+
 def test_record_hit_never_raises(caplog):
     class _Broken:
         method = "GET"
@@ -876,6 +1140,351 @@ def test_the_pending_dict_is_hard_capped(client, monkeypatch, caplog):
                                    ("tiktok", "2026-01-03"): 2}
     warnings = [r for r in caplog.records if r.name == _LOGGER and "is full" in r.getMessage()]
     assert len(warnings) == 1
+
+
+# ── 4e. the early bucket: the first minutes after a post ──────────────────────
+#
+# Link scanners fetch a post's /go link within seconds to minutes of it going out, many with an
+# ordinary browser UA. The publisher stamps `publish_clock` when a post carrying its own /go link
+# goes out (PUBLISHED or AMBIGUOUS: 240 s; SUBMITTED to Upload-Post: 300 s); a tap that passed every
+# filter inside that window is counted APART under the server constant `<campaign>_early`. The
+# `clock` fixture moves smart_link's wall clock; stamps here pass `now=_WALL` so both clocks agree.
+
+_P, _S = publish_clock.PUBLISHED, publish_clock.SUBMITTED
+
+
+def _at(seconds_after_wall: float, clock) -> None:
+    """Set smart_link's wall clock to `_WALL + seconds_after_wall` (set, never accumulated)."""
+    clock["t"] = 1_000.0 + seconds_after_wall
+
+
+def test_a_tap_inside_the_early_window_counts_under_the_early_key(fixed_day, clock):
+    assert publish_clock.stamp("bluesky", _P, now=_WALL) is True
+    assert smart_link.record_hit(_req("198.51.100.1"), "bluesky") is True
+    assert smart_link._pending == {("bluesky_early", _DAY): 1}
+    _at(239.9, clock)                       # still inside: [stamp, stamp + 240 s)
+    assert smart_link.record_hit(_req("198.51.100.2"), "bluesky") is True
+    assert smart_link._pending == {("bluesky_early", _DAY): 2}
+    _at(240.0, clock)                       # at its end exactly, a tap is ordinary again
+    assert smart_link.record_hit(_req("198.51.100.3"), "bluesky") is True
+    assert smart_link._pending == {("bluesky_early", _DAY): 2, ("bluesky", _DAY): 1}
+
+
+def test_the_submitted_window_outlasts_the_published_one(fixed_day, clock):
+    """Upload-Post goes live 2-41 s AFTER it accepts the job (production 2026-10-05), so its stamp
+    opens the longer window."""
+    assert publish_clock.stamp("linkedin", _S, now=_WALL) is True
+    assert publish_clock.stamp("threads", _P, now=_WALL) is True
+    for i, (t, want) in enumerate([
+        (239.9, {"linkedin": "linkedin_early", "threads": "threads_early"}),
+        (240.0, {"linkedin": "linkedin_early", "threads": "threads"}),
+        (299.9, {"linkedin": "linkedin_early", "threads": "threads"}),
+        (300.0, {"linkedin": "linkedin", "threads": "threads"}),
+    ]):
+        _at(t, clock)
+        smart_link._pending.clear()
+        for campaign in ("linkedin", "threads"):
+            assert smart_link.record_hit(_req(f"198.51.100.{i + 1}"), campaign) is True
+        assert smart_link._pending == {(key, _DAY): 1 for key in want.values()}, t
+
+
+def test_a_later_stamp_extends_the_window_and_an_older_one_never_shortens_it(fixed_day, clock):
+    assert publish_clock.stamp("x", _P, now=_WALL) is True
+    # A second X post (or a resend) 100 s later: the window runs from ITS stamp.
+    assert publish_clock.stamp("x", _P, now=_WALL + 100) is True
+    assert publish_clock.open_until("x") == _WALL + 340
+    # An outcome anchored at the first send, landing late, never pulls the end back.
+    assert publish_clock.stamp("x", _P, at=_WALL, now=_WALL + 100) is False
+    assert publish_clock.open_until("x") == _WALL + 340
+    _at(339.9, clock)
+    assert smart_link.record_hit(_req("198.51.100.1"), "x") is True
+    _at(340.0, clock)
+    assert smart_link.record_hit(_req("198.51.100.2"), "x") is True
+    assert smart_link._pending == {("x_early", _DAY): 1, ("x", _DAY): 1}
+
+
+def test_early_never_counts_a_hit_the_filters_refuse(client, fixed_day, clock):
+    """The early bucket only RELABELS a tap that passed every filter: it never adds a count."""
+    assert publish_clock.stamp("bluesky", _P, now=_WALL) is True
+    refused = [
+        {"ua": "Mozilla/5.0 (compatible; LinkRing/1.0)"},                        # a crawler
+        {"method": "HEAD"},
+        {"headers": {"Sec-Purpose": "prefetch"}},
+        {"headers": {"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "iframe"}},
+        {"ua": _CHROME_139, "ip": "57.141.2.70"},                                  # Meta's network
+    ]
+    for i, kw in enumerate(refused):
+        kw.setdefault("ip", f"198.51.100.{i + 1}")
+        _assert_plain_302(_go(client, "/go/bluesky", **kw))
+    assert smart_link._pending == {}
+    # The per-address budget: the 21st tap from one address within the minute is not counted.
+    for _ in range(smart_link._RATE_MAX + 1):
+        _assert_plain_302(_go(client, "/go/bluesky", ip="203.0.113.21"))
+    assert smart_link._pending == {("bluesky_early", _DAY): smart_link._RATE_MAX}
+    assert smart_link._windows["bluesky"].counted == smart_link._RATE_MAX
+
+
+def test_only_a_stamped_campaign_counts_early(client, fixed_day):
+    """Stamped exactly as the publisher calls it (no clock argument: both sides read the real wall
+    clock). Other campaigns — and "other", which no post links to — are never early."""
+    assert publish_clock.stamp("bluesky", _P) is True
+    for i, path in enumerate(("/go/bluesky", "/go/tiktok", "/go/linkedin", "/go", "/go/wp-login")):
+        _assert_plain_302(_go(client, path, ip=f"198.51.100.{i + 1}"))
+    assert smart_link._pending == {("bluesky_early", _DAY): 1, ("tiktok", _DAY): 1,
+                                   ("linkedin", _DAY): 1, ("other", _DAY): 2}
+
+
+def test_only_a_campaigns_own_stamp_opens_its_early_window(client, fixed_day, caplog):
+    """Only a post platform has an early twin, and the clock is read for the NORMALISED campaign.
+    A stamp the publisher never writes — "other" (no post links there), a junk slug, an early key
+    itself — relabels nothing: bare /go and junk stay "other", a typed early key stays "other", and
+    /go/bluesky stays "bluesky" because bluesky itself was never stamped. Nothing raises on the way
+    (a raise would drop the tap with a "not recorded" WARNING)."""
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    for name in ("other", "wp-login", "bluesky_early"):
+        assert publish_clock.stamp(name, _P) is True, name
+    for i, path in enumerate(("/go", "/go/wp-login", "/go/bluesky_early", "/go/bluesky")):
+        _assert_plain_302(_go(client, path, ip=f"198.51.100.{i + 1}"))
+    assert smart_link._pending == {("other", _DAY): 3, ("bluesky", _DAY): 1}
+    assert [rec.getMessage() for rec in caplog.records if rec.name == _LOGGER] == []
+
+
+def test_early_taps_land_on_the_eastern_day_they_arrive(monkeypatch, clock):
+    """A window open across ET midnight: like every tap, an early one is keyed by the ET day it
+    arrived on (`_today_et`), never by the day its window opened."""
+    days = iter(["2026-10-05", "2026-10-06"])
+    monkeypatch.setattr(smart_link, "_today_et", lambda: next(days))
+    assert publish_clock.stamp("threads", _P, now=_WALL) is True
+    assert smart_link.record_hit(_req("198.51.100.1"), "threads") is True
+    _at(30.0, clock)                        # still inside the window, past midnight
+    assert smart_link.record_hit(_req("198.51.100.2"), "threads") is True
+    assert smart_link._pending == {("threads_early", "2026-10-05"): 1,
+                                   ("threads_early", "2026-10-06"): 1}
+
+
+@pytest.mark.parametrize("raw", ["bluesky_early", "BLUESKY_EARLY", "x_early", "other_early"])
+def test_a_typed_early_slug_is_other(client, fixed_day, launched, token, raw):
+    """A caller typing an early key gets "other" — counted there, no campaign parameters — even while
+    that campaign's window is open."""
+    assert publish_clock.stamp("bluesky", _P) is True
+    assert publish_clock.stamp("x", _P) is True
+    r = _go(client, f"/go/{raw}")
+    _assert_plain_302(r)
+    assert r.headers["location"] == _STORE
+    assert smart_link._pending == {("other", _DAY): 1}
+    # A future caller handing record_hit the raw text gets the same: "other" has no early twin.
+    assert smart_link.record_hit(_req("198.51.100.77"), raw) is True
+    assert smart_link._pending == {("other", _DAY): 2}
+
+
+def test_ct_never_carries_the_early_key(client, fixed_day, launched, token):
+    """`ct` is built from the normalised campaign, never from the counting bucket: inside every
+    campaign's open window each tap is counted early AND its Location names the campaign itself."""
+    for campaign in smart_link.KNOWN_CAMPAIGNS:
+        assert publish_clock.stamp(campaign, _P) is True
+    for i, campaign in enumerate(sorted(smart_link.KNOWN_CAMPAIGNS)):
+        r = _go(client, f"/go/{campaign}", ip=f"198.51.100.{i + 1}")
+        _assert_plain_302(r)
+        assert r.headers["location"] == f"{_STORE}?pt={_TOKEN}&ct={campaign}&mt=8"
+        assert "early" not in r.headers["location"]
+    assert smart_link._pending == {(smart_link.EARLY_KEYS[c], _DAY): 1
+                                   for c in smart_link.KNOWN_CAMPAIGNS}
+
+
+def test_early_hits_share_their_campaigns_ceiling(fixed_day, monkeypatch, caplog, clock):
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    monkeypatch.setattr(smart_link, "_CAMPAIGN_RATE_MAX", 5)
+    assert publish_clock.stamp("bluesky", _P, now=_WALL) is True
+    got = [smart_link.record_hit(_req(f"198.51.100.{i + 1}"), "bluesky") for i in range(8)]
+    assert got == [True] * 5 + [False] * 3
+    assert smart_link._pending == {("bluesky_early", _DAY): 5}
+    assert set(smart_link._windows) == {"bluesky"}, "an early key never gets a ceiling of its own"
+    assert smart_link._windows["bluesky"].refused == 3
+    engaged = _engaged(caplog)
+    assert len(engaged) == 1 and "campaign=bluesky reached" in engaged[0], engaged
+    clock["t"] += smart_link._CEILING_WINDOW_SECONDS
+    smart_link.report_ended_windows()
+    summary = _summaries(caplog)
+    assert len(summary) == 1 and "campaign=bluesky window" in summary[0], summary
+    assert " 3 hit(s)" in summary[0] and "_early" not in summary[0], summary
+
+
+def test_one_ceiling_spans_the_end_of_the_early_window(fixed_day, monkeypatch, clock):
+    """The early window closing mid-minute does not hand its campaign a second budget."""
+    monkeypatch.setattr(smart_link, "_CAMPAIGN_RATE_MAX", 5)
+    # Stamped 230 s ago: 10 s of the window are left.
+    assert publish_clock.stamp("bluesky", _P, at=_WALL - 230, now=_WALL) is True
+    for i in range(3):
+        assert smart_link.record_hit(_req(f"198.51.100.{i + 1}"), "bluesky") is True
+    _at(20.0, clock)                        # the window has closed; the same ceiling minute
+    got = [smart_link.record_hit(_req(f"198.51.100.{i + 10}"), "bluesky") for i in range(4)]
+    assert got == [True, True, False, False]
+    assert smart_link._pending == {("bluesky_early", _DAY): 3, ("bluesky", _DAY): 2}
+    assert smart_link._windows["bluesky"].refused == 2
+
+
+@pytest.mark.asyncio
+async def test_early_keys_flush_through_the_same_rpc(monkeypatch, fixed_day, clock):
+    fake = _FakeSupabase()
+    monkeypatch.setattr(smart_link, "get_supabase", lambda: fake)
+    assert publish_clock.stamp("bluesky", _P, now=_WALL) is True
+    for i in range(3):
+        assert smart_link.record_hit(_req(f"198.51.100.{i + 1}"), "bluesky") is True
+    _at(240.0, clock)
+    assert smart_link.record_hit(_req("198.51.100.9"), "bluesky") is True
+    assert await smart_link.flush_hits() == 4
+    assert fake.calls == [_rpc("bluesky", _DAY, 1), _rpc("bluesky_early", _DAY, 3)]
+    assert smart_link._pending == {} and smart_link._retry == {}
+
+
+def test_a_raising_publish_clock_never_breaks_the_redirect(client, fixed_day, launched, token,
+                                                           monkeypatch, caplog):
+    """The early check sits inside record_hit's never-raise guard: /go answers its 302 even if it
+    fails, and the failure is logged."""
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("clock broke")
+
+    monkeypatch.setattr(publish_clock, "is_early", _broken)
+    r = _go(client, "/go/bluesky")
+    _assert_plain_302(r)
+    assert r.headers["location"] == f"{_STORE}?pt={_TOKEN}&ct=bluesky&mt=8"
+    assert any("not recorded" in rec.getMessage() and "clock broke" in rec.getMessage()
+               for rec in caplog.records if rec.name == _LOGGER)
+
+
+def test_the_early_windows_cover_the_measured_scanner_tails():
+    """Production 2026-10-03/05: X and Bluesky crawlers arrived within ~210 s of a post, browser-UA
+    scanners 1-200 s after it; Upload-Post platforms went live up to 41 s after the submit and were
+    scanned within ~200 s of going live. Each window covers its tail with a margin (PUBLISHED
+    >= 210 + 30, SUBMITTED >= 41 + 200), and neither may grow toward most of a post's life
+    (10 minutes), where it would hide the people the count exists for."""
+    w = publish_clock.WINDOW_SECONDS
+    assert set(w) == {_P, _S} and _P != _S
+    assert w[_P] >= 210 + 30
+    assert w[_S] >= 41 + 200
+    assert w[_S] > w[_P]
+    assert all(math.isfinite(v) and 0 < v <= 600 for v in w.values()), w
+    assert publish_clock.MAX_SKEW_SECONDS == 60.0
+    # Every real campaign fits under the module's bound on tracked windows.
+    assert publish_clock._MAX_CAMPAIGNS >= len(smart_link.KNOWN_CAMPAIGNS)
+
+
+def test_the_key_cap_still_holds_a_month_of_every_campaign_and_its_early_twin():
+    """The early twins double the keys a day (today 29: 14 campaigns, 14 twins, "other"): the
+    in-memory cap must still outlast a month of a failing flush before it drops new keys."""
+    per_day = len(smart_link.KNOWN_CAMPAIGNS) + len(smart_link.EARLY_KEYS) + 1
+    assert smart_link._MAX_PENDING_KEYS >= 30 * per_day, (smart_link._MAX_PENDING_KEYS, per_day)
+
+
+# ── 4f. publish_clock: the rules of a stamp ───────────────────────────────────
+
+_T = 1_800_000_000.0
+
+
+@pytest.mark.parametrize("campaign,kind,at", [
+    ("bluesky", "posted", None),                     # an unknown kind
+    ("bluesky", None, None),
+    ("bluesky", "PUBLISHED", None),                  # kinds are the exact constants
+    ("", _P, None),                                  # no campaign
+    (None, _P, None),
+    (7, _P, None),
+    ("x" * 41, _P, None),                            # longer than the database accepts
+    ("bluesky", _P, math.nan),
+    ("bluesky", _P, math.inf),
+    ("bluesky", _P, -math.inf),
+    ("bluesky", _P, "2026-10-05T20:15:00+00:00"),   # not an epoch second
+    ("bluesky", _P, _T + 60.5),                      # more than MAX_SKEW in the future
+    ("bluesky", _P, _T + 86_400),                    # a hand-edited future time
+    ("bluesky", _P, _T - 240),                       # its window already closed at `now`
+    ("bluesky", _S, _T - 300),
+    ("bluesky", _P, -62_135_596_800.0),              # year 1
+])
+def test_a_stamp_that_cannot_open_a_window_changes_nothing(campaign, kind, at):
+    assert publish_clock.stamp(campaign, kind, at=at, now=_T) is False
+    assert publish_clock._until == {}
+    assert not publish_clock.is_early("bluesky", _T)
+
+
+def test_publish_clock_stamp_rules():
+    # Opens from `now` (the default anchor) for the kind's window.
+    assert publish_clock.stamp("bluesky", _P, now=_T) is True
+    assert publish_clock.open_until("bluesky") == _T + 240
+    # The same end again extends nothing.
+    assert publish_clock.stamp("bluesky", _P, now=_T) is False
+    # A later stamp extends; an older one never shortens.
+    assert publish_clock.stamp("bluesky", _P, now=_T + 30) is True
+    assert publish_clock.open_until("bluesky") == _T + 270
+    assert publish_clock.stamp("bluesky", _P, at=_T, now=_T + 30) is False
+    assert publish_clock.open_until("bluesky") == _T + 270
+    # A SUBMITTED stamp at the same instant reaches further, so it extends.
+    assert publish_clock.stamp("bluesky", _S, now=_T + 30) is True
+    assert publish_clock.open_until("bluesky") == _T + 330
+    # Up to MAX_SKEW ahead is accepted (clock skew between hosts) ...
+    assert publish_clock.stamp("x", _P, at=_T + 60, now=_T) is True
+    assert publish_clock.open_until("x") == _T + 300
+    # ... and a window with a second left still opens, half-open at its end.
+    assert publish_clock.stamp("threads", _P, at=_T - 239, now=_T) is True
+    assert publish_clock.open_until("threads") == _T + 1
+    assert publish_clock.is_early("threads", _T + 0.999)
+    assert not publish_clock.is_early("threads", _T + 1)
+    assert not publish_clock.is_early("linkedin", _T) and publish_clock.open_until("linkedin") is None
+    # A non-finite clock decides nothing.
+    assert publish_clock.stamp("linkedin", _P, now=math.nan) is False
+    assert publish_clock.stamp("linkedin", _P, at=_T, now=math.inf) is False
+    assert publish_clock.open_until("linkedin") is None
+    # A campaign as long as the database accepts (40 characters) opens; 41 is refused (table above).
+    assert publish_clock.stamp("c" * 40, _P, now=_T) is True
+    assert publish_clock.open_until("c" * 40) == _T + 240
+    publish_clock.clear()
+    assert publish_clock._until == {}
+
+
+def test_without_a_clock_argument_both_sides_read_the_wall_clock(monkeypatch):
+    wall = {"t": _T}
+    monkeypatch.setattr(publish_clock, "_wall", lambda: wall["t"])
+    assert publish_clock.stamp("bluesky", _P) is True
+    assert publish_clock.open_until("bluesky") == _T + 240
+    wall["t"] = _T + 239.5
+    assert publish_clock.is_early("bluesky")
+    wall["t"] = _T + 240
+    assert not publish_clock.is_early("bluesky")
+
+
+def test_the_campaign_cap_prunes_only_closed_windows():
+    cap = publish_clock._MAX_CAMPAIGNS
+    for i in range(cap):                             # c0 closes first, c{cap-1} last
+        assert publish_clock.stamp(f"c{i}", _P, now=_T + i) is True
+    # Full, every window still open: a NEW campaign is refused and nothing is evicted ...
+    assert publish_clock.stamp("late", _P, now=_T + cap) is False
+    assert len(publish_clock._until) == cap and "late" not in publish_clock._until
+    # ... while an EXISTING campaign can still be extended at the cap.
+    assert publish_clock.stamp("c5", _P, now=_T + cap) is True
+    # Once c0..c2 have closed, a new campaign drops exactly those and opens.
+    now = _T + 240 + 2.5
+    assert publish_clock.stamp("late", _P, now=now) is True
+    assert set(publish_clock._until) == {f"c{i}" for i in range(3, cap)} | {"late"}
+
+
+def test_the_publish_clock_is_stdlib_only():
+    """smart_link imports it on the /go request path, so it may import nothing beyond these — at
+    module level or lazily, statically or dynamically (AST: a comment or docstring can neither
+    satisfy nor trip it)."""
+    tree = ast.parse(Path(publish_clock.__file__).read_text(encoding="utf-8"))
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, f"line {node.lineno}: a relative import"
+            roots.add((node.module or "").split(".")[0])
+        elif isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            assert name not in ("import_module", "__import__"), f"line {node.lineno}"
+    assert {"math", "time"} <= roots, f"sentinel: the module's own imports were not found: {roots}"
+    assert roots <= {"__future__", "math", "time", "typing"}, sorted(roots)
 
 
 # ── 5. flush ──────────────────────────────────────────────────────────────────
@@ -1874,7 +2483,9 @@ def test_the_prelaunch_page_content(client):
     for link in ('href="/privacy"', 'href="/terms"', 'href="/support"'):
         assert link in page
     assert _DISCLAIMER in page
-    assert "Coming soon to the App Store" in page
+    # No availability claim with no store URL (the app is live since 2026-10-05: this state is a
+    # mistyped or deleted URL) — a label, no link.
+    assert re.search(r'<p class="cta cta-soon">\s*Caydex for iPhone\s*</p>', page) and "Coming soon" not in page
     assert "apple-itunes-app" not in page
     assert "{{" not in page and "}}" not in page
     assert "<script" not in page.lower()
@@ -1955,10 +2566,32 @@ def test_the_post_launch_page_carries_the_store_button_and_smart_banner(client, 
     assert "<script" not in page.lower()
 
 
-def test_the_store_url_is_escaped_into_the_href(client, monkeypatch):
-    monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", f"{_STORE}?l=en&mt=8")
+def test_the_live_page_says_get_and_never_pre_order(client, launched):
     page = client.get("/").text
-    assert f'href="{_STORE}?l=en&amp;mt=8"' in page
+    assert f'<a class="cta" href="{_STORE}">Get Caydex for iPhone</a>' in page
+    assert "pre-order" not in page.lower()
+
+
+def test_the_preorder_page_says_pre_order(client, launched, preorder):
+    """At approval the owner publishes a PRE-ORDER page and sets the URL with the flag: the button
+    says so. Same store link, same note, same banner — the flag changes words only."""
+    page = client.get("/").text
+    assert (f'<a class="cta" href="{_STORE}">Pre-order Caydex for iPhone</a>'
+            '<p class="cta-note">Opens the App Store</p>') in page
+    assert "Get Caydex" not in page and "Coming soon" not in page
+    assert page.count('<meta name="apple-itunes-app" content="app-id=6759525689">') == 1
+    assert page.count("apple-itunes-app") == 1
+    assert _ABS_URL_ATTR_RE.findall(page) == [_STORE]
+    assert "<script" not in page.lower()
+
+
+@pytest.mark.parametrize("state", ["live", "preorder"])
+def test_the_store_url_is_escaped_into_the_href(client, monkeypatch, state):
+    """In either store state: the pre-order label changes the words, never the escaping."""
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", f"{_STORE}?l=en&mt=8")
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", state == "preorder")
+    page = client.get("/").text
+    assert f'<a class="cta" href="{_STORE}?l=en&amp;mt=8">{_STATE_CTA[state]}</a>' in page
 
 
 def test_substitution_is_single_pass(client, monkeypatch):
@@ -1969,18 +2602,32 @@ def test_substitution_is_single_pass(client, monkeypatch):
     assert page.count("apple-itunes-app") == 1
 
 
-def test_a_store_url_without_an_id_gets_the_button_but_no_banner(client, monkeypatch):
+@pytest.mark.parametrize("state", ["live", "preorder"])
+def test_a_store_url_without_an_id_gets_the_button_but_no_banner(client, monkeypatch, state):
     monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", "https://apps.apple.com/app/caydex")
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", state == "preorder")
     page = client.get("/").text
-    assert 'href="https://apps.apple.com/app/caydex"' in page
+    assert f'<a class="cta" href="https://apps.apple.com/app/caydex">{_STATE_CTA[state]}</a>' in page
     assert "apple-itunes-app" not in page
 
 
-@pytest.mark.parametrize("post_launch", [False, True])
-def test_the_visible_copy_passes_the_marketing_compliance_lists(client, monkeypatch, post_launch):
-    if post_launch:
+#: Each store state's call to action, as a visitor reads it.
+_STATE_CTA = {"prelaunch": "Caydex for iPhone", "preorder": "Pre-order Caydex for iPhone",
+              "live": "Get Caydex for iPhone"}
+
+
+@pytest.mark.parametrize("state", ["prelaunch", "preorder", "live"])
+def test_the_visible_copy_passes_the_marketing_compliance_lists(client, monkeypatch, state):
+    if state != "prelaunch":
         monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", _STORE)
-    text, violations = _compliance_violations(client.get("/").text)
+    monkeypatch.setattr(settings, "MARKETING_APP_STORE_PREORDER", state == "preorder")
+    assert smart_link.store_state() == state, "sentinel: the page renders the state under test"
+    page = client.get("/").text
+    text, violations = _compliance_violations(page)
+    # Anti-vacuity: the page carries this state's call to action and no other's — matched as a WHOLE
+    # text node, since the prelaunch label "Caydex for iPhone" is the tail of the other two.
+    assert [s for s, cta in _STATE_CTA.items() if re.search(rf">\s*{re.escape(cta)}\s*<", page)] == [state], page
+    assert _STATE_CTA[state] in text
     assert not violations, violations
     # No number of any kind in public copy: no price, no percentage, no return, no ticker count.
     assert not re.search(r"[0-9%$]", text), text
@@ -2096,17 +2743,27 @@ def test_the_smart_link_and_landing_routes_take_get_and_head_only():
 
 def test_smart_link_never_loads_fmp_or_the_agents_package():
     """Public surfaces may never touch licensed market data (rules marketing.md §1). Checked in
-    a fresh interpreter, because this process has long since imported everything."""
+    a fresh interpreter, because this process has long since imported everything.
+
+    The /go request path also loads EXACTLY these marketing modules: the package, the stdlib-only
+    publish clock and smart_link itself — no publisher, ledger or `post_copy` (whose compliance
+    validators would come with it; smart_link spells the store-state names itself for that)."""
     code = (
-        "import sys, app.services.marketing.smart_link\n"
-        "print(sorted(m for m in sys.modules if m.startswith(('app.integrations', "
-        "'app.services.agents'))))\n"
-        "print('app.services.marketing.smart_link' in sys.modules)\n"
+        "import json, sys, app.services.marketing.smart_link\n"
+        "print(json.dumps({\n"
+        "    'fmp_or_agents': sorted(m for m in sys.modules\n"
+        "                            if m.startswith(('app.integrations', 'app.services.agents'))),\n"
+        "    'marketing': sorted(m for m in sys.modules if m == 'app.services.marketing'\n"
+        "                        or m.startswith('app.services.marketing.')),\n"
+        "    'loaded': 'app.services.marketing.smart_link' in sys.modules,\n"
+        "}))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "SENTRY_DSN": ""}
     out = subprocess.run([sys.executable, "-c", code], cwd=_BACKEND, env=env,
                          capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
-    lines = out.stdout.strip().splitlines()
-    assert lines[-1] == "True", "sentinel: the probe did not import the module"
-    assert lines[-2] == "[]", lines[-2]
+    probe = json.loads(out.stdout.strip().splitlines()[-1])
+    assert probe["loaded"] is True, "sentinel: the probe did not import the module"
+    assert probe["fmp_or_agents"] == [], probe["fmp_or_agents"]
+    assert probe["marketing"] == ["app.services.marketing", "app.services.marketing.publish_clock",
+                                  "app.services.marketing.smart_link"], probe["marketing"]

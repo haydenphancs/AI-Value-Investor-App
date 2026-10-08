@@ -36,11 +36,16 @@ from app.api.error_response import (
 )
 from app.services.entitlements import (
     TIER_PRO,
+    required_tier_for_theme_companies,
     required_tier_for_trillion_club_detail,
     required_tier_for_whales,
+    theme_company_limit,
     trillion_club_detail_unlocked,
     whale_detail_unlocked,
 )
+from app.services.theme_detail_redaction import redact_theme_detail
+from app.services.entitlements import THEME_LOCK_MIN_APP_VERSION as THEME_LOCK_MIN_APP_VERSION_ENT
+from app.core.client_app_version import capture_client_app_version, client_is_older_than
 
 # The signal cards that have a per-ticker drill-down. Earnings Shockers has none (its leaders
 # open the ticker screen). iOS mirrors this set as `ExclusiveSignal.drillDownKinds`, pinned
@@ -181,14 +186,33 @@ async def get_signal_ticker_detail(
         return error_response_from_exception(e, ticker=ticker, step="signal_detail")
 
 
+# Build 1.0 cannot draw a locked theme list, so a caller older than this keeps the full list
+# (`entitlements.THEME_LOCK_MIN_APP_VERSION`, shared with the paywall row in `billing.get_plans`).
+THEME_LOCK_MIN_APP_VERSION = THEME_LOCK_MIN_APP_VERSION_ENT
+
+
 @router.get("/themes/{slug}", response_model=ThemeDetailResponse)
-async def get_theme_detail(slug: str):
+async def get_theme_detail(
+    slug: str,
+    # The users-row identity (like /dashboard and /trillion-club): it carries `tier`, which
+    # decides how much of the list this caller is sent — a token carries no tier, so a
+    # token-only read would lock every Pro caller out. Sign-in itself is the ROUTER's
+    # dependency (the list is FMP market data — auth.md §1a).
+    user: dict = Depends(get_watchlist_identity),
+    # Records X-App-Version for THEME_LOCK_MIN_APP_VERSION (app.core.client_app_version).
+    _app_version: None = Depends(capture_client_app_version),
+):
     """Emerging Frontiers theme drill-down — the theme's hero (title / subtitle /
-    image) + its live constituent companies (price, daily %, market cap). Public
-    (no auth). Reads the `trending_themes` row (editable in Supabase → no app
-    release) and resolves its tickers to live quotes; the constituent list
-    degrades to empty on an FMP hiccup rather than failing the screen. A slug that
-    isn't an active theme → 404 THEME_NOT_FOUND.
+    image) + its live constituent companies (price, daily %, market cap). Reads the
+    `trending_themes` row (editable in Supabase → no app release) and resolves its
+    tickers to live quotes; the constituent list degrades to empty on an FMP hiccup
+    rather than failing the screen. A slug that isn't an active theme → 404
+    THEME_NOT_FOUND.
+
+    Free sees the first `THEME_FREE_COMPANY_LIMIT` companies plus COUNTS of what was
+    withheld (`is_locked`, `locked_constituents_count`, `locked_changes_count`); Pro/Max
+    see everything. The redaction is a per-request COPY of the shared cached detail
+    (`services/theme_detail_redaction.py`).
     """
     if not slug or len(slug) > 100:
         return make_error_response(
@@ -211,7 +235,29 @@ async def get_theme_detail(slug: str):
             message=f"No active theme with slug {slug!r}",
             details={"slug": slug},
         )
-    return detail
+    tier = user.get("tier")
+    limit = theme_company_limit(tier)
+    if limit is None:
+        return detail
+    if client_is_older_than(THEME_LOCK_MIN_APP_VERSION):
+        logger.info("Theme detail: full list for an app older than 1.1 (slug=%s user=%s)", slug, user.get("id"))
+        return detail
+    try:
+        return redact_theme_detail(
+            detail,
+            limit=limit,
+            tier_required=required_tier_for_theme_companies(tier) or TIER_PRO,
+        )
+    except Exception as e:
+        # Fails CLOSED: a redaction that broke must never fall through to the unredacted
+        # detail (the paid list), so this answers a structured error instead.
+        logger.error(
+            "Theme detail redaction failed (slug=%s user=%s tier=%r): %s: %s",
+            slug, user.get("id"), tier, type(e).__name__, e, exc_info=True,
+        )
+        return error_response_from_exception(
+            e, step="theme_detail_redaction", extra_details={"slug": slug}
+        )
 
 
 @router.get("/trillion-club/{slug}", response_model=TrillionClubDetailResponse)

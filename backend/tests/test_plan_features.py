@@ -109,10 +109,36 @@ def test_included_matches_the_enforcing_gate(tier, key, gate):
 
 @pytest.mark.parametrize("tier", entitlements.TIER_ORDER)
 def test_quantity_rows_are_never_rendered_as_locked(tier):
-    """Free genuinely gets 1 Updates ticker and 1 tracked investor. Marking these
-    `included=False` would draw them struck through and misdescribe the gate."""
-    for key in (pf.KEY_CREDITS, pf.KEY_UPDATES_TICKERS, pf.KEY_WHALE_TRACKING):
+    """Free genuinely gets 1 Updates ticker, 1 tracked investor and the first companies of
+    every theme. Marking these `included=False` would draw them struck through and
+    misdescribe the gate."""
+    for key in (pf.KEY_CREDITS, pf.KEY_UPDATES_TICKERS, pf.KEY_WHALE_TRACKING,
+                pf.KEY_THEME_COMPANIES):
         assert row(tier, key)["included"] is True
+
+
+@pytest.mark.parametrize("tier", entitlements.TIER_ORDER)
+def test_theme_companies_row_states_the_limit_the_server_enforces(tier):
+    """The number is READ from `theme_company_limit` — the function the theme endpoint
+    enforces (`GET /home/themes/{slug}`) — and None (the whole list) is never formatted."""
+    limit = entitlements.theme_company_limit(tier)
+    r = row(tier, pf.KEY_THEME_COMPANIES)
+    if limit is None:
+        assert r["title"] == "Every company in every theme"
+    else:
+        assert r["title"] == f"Top {limit} {'company' if limit == 1 else 'companies'} in each theme"
+        assert "A plan shows the full list." in r["detail"]
+    assert "None" not in r["title"] + r["detail"]
+
+
+def test_a_zero_theme_limit_never_prints_top_0(monkeypatch):
+    """A limit of 0 would be a product decision to gate the whole list; the copy must not
+    read "Top 0 companies"."""
+    monkeypatch.setattr(entitlements, "THEME_FREE_COMPANY_LIMIT", 0)
+    r = row(entitlements.TIER_FREE, pf.KEY_THEME_COMPANIES)
+    assert "Top 0" not in r["title"] and r["title"] and r["detail"]
+    assert r["included"] is False                  # nothing left on Free: then it IS a lock
+    assert row(entitlements.TIER_PRO, pf.KEY_THEME_COMPANIES)["included"] is True
 
 
 # ── The Investor Journey exception ───────────────────────────────────────────────────

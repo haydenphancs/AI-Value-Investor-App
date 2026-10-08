@@ -225,6 +225,85 @@ class RecentActivitiesSchema(BaseModel):
     congress_activities: CongressActivitiesDataSchema = CongressActivitiesDataSchema()
 
 
+# ── Chat-only ownership detail (never on the wire) ──────────────
+#
+# Ask Cay AI's `check_ownership_filings` tool (2026-10-05) reads these from the Holders build:
+# what each insider HOLDS after their latest Form 4 transactions (`_insider_holdings`), and
+# which 13F quarter the institutional figures describe. iOS decodes none of it — the field
+# that carries it is excluded from serialization (see `HoldersResponse.ownership_detail`).
+
+
+class InsiderHoldingSchema(BaseModel):
+    """One reported balance: the shares held right AFTER a Form 4 transaction."""
+    security: str = "Shares"                      # the filing's line, e.g. "Class A Common Stock"
+    held: str = "direct"                          # "direct" | "indirect" (a trust, family, entity)
+    shares: Optional[float] = None                # None ⇔ ambiguous: see `possible_shares`
+    possible_shares: Optional[List[float]] = None  # the same-day balances the day may have ended on
+    as_of: str = ""                               # the transaction date that produced the balance
+    filed: Optional[str] = None
+    # A balance last reported before the line's newest indirect transaction: a separate
+    # holding that has not traded since, OR an older figure for a listed one. Never summed.
+    reported_earlier: bool = False
+    # A later transaction (this date) on the line reported no usable balance.
+    changed_after: Optional[str] = None
+    # Set (≥ 2) when that many lines that day ended on exactly this balance and nothing shows
+    # they are separate holdings: one entry, which may stand for more than one holding of
+    # this size (review F2, 2026-10-07).
+    same_balance_lines: Optional[int] = None
+
+
+class InsiderTradeSchema(BaseModel):
+    """The person's newest day of transactions, one entry per (code, direction)."""
+    transaction_type: str = ""                    # FMP code, e.g. "S-Sale", "M-Exempt"
+    acquired: Optional[bool] = None
+    shares: Optional[float] = None
+    average_price: Optional[float] = None
+
+
+class InsiderOwnerSchema(BaseModel):
+    name: str
+    role: str = "Insider"
+    latest_transaction_date: str = ""
+    latest_filing_date: Optional[str] = None
+    latest_trades: List[InsiderTradeSchema] = []
+    holdings: List[InsiderHoldingSchema] = []
+    # Entries a line's cap left out: indirect holdings, direct lots, earlier direct figures.
+    holdings_not_shown: int = 0
+
+
+class InsiderHoldingsSchema(BaseModel):
+    # False when the insider fetch lost pages: the balances shown are the newest in what
+    # arrived (a person's newest rows come first), but people may be missing.
+    complete: bool = True
+    # The oldest filing date among the rows read: a holding with no reported transaction
+    # since then is not visible here.
+    covers_filings_since: Optional[str] = None
+    insiders: List[InsiderOwnerSchema] = []
+    insiders_not_shown: int = 0
+    # Everyone left out is NAMED, so a question about them is answered "not loaded", never
+    # "no filing of theirs was found" (review finding 7, 2026-10-07).
+    insiders_not_shown_names: List[str] = []
+    # People whose newest filing (on any of their rows) is over two years older than the
+    # newest filing anyone made (most likely no longer insiders) — left out, counted, named.
+    inactive_not_shown: int = 0
+    inactive_not_shown_names: List[str] = []
+
+
+class OwnershipDetailSchema(BaseModel):
+    # None when the insider rows could not be read (or attributed to this issuer): the chat
+    # tool says "unavailable", never "no insider holds anything".
+    insider_holdings: Optional[InsiderHoldingsSchema] = None
+    institutions_quarter: Optional[str] = None    # e.g. "Q2 2026" — the 13F data quarter
+    # When the build read the filings (ISO-8601 UTC). The Holders row is cached up to 24 h,
+    # so the chat tool states it, and re-reads when a newer filing exists (finding 3).
+    built_at: Optional[str] = None
+    # The newest filing date among the insider rows read, and the identities of the rows
+    # filed on it (`holders_service._insider_row_identity`; empty when there were too many):
+    # what `HoldersService.newer_insider_filing` compares a one-page probe against.
+    newest_filed: Optional[str] = None
+    newest_filed_ids: List[str] = []
+
+
 # ── Top-level response ───────────────────────────────────────────
 
 class HoldersResponse(BaseModel):
@@ -247,3 +326,8 @@ class HoldersResponse(BaseModel):
     # Scoped names, not a bare `is_locked`: only one segment is withheld.
     congress_locked: bool = False
     congress_tier_required: Optional[str] = None
+    # Chat-only (`check_ownership_filings`, 2026-10-05). EXCLUDED from serialization: the
+    # Holders endpoint's JSON is unchanged for every app build, and `model_dump()` (the
+    # report's collection cache) drops it too. `holders_service` writes it into the 24h
+    # `holders_cache` row explicitly and reads it back through validation.
+    ownership_detail: Optional[OwnershipDetailSchema] = Field(default=None, exclude=True)

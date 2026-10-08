@@ -120,8 +120,10 @@ def test_the_plot_is_clipped():
     assert ".clipped()" in style
 
 
-# Python port of SignalOfConfidenceChartView's right-axis geometry.
-_BAND_LOW, _BAND_HIGH, _MIN_SEP, _HEIGHT = 0.15, 0.85, 14.0, 280.0
+# Python port of SignalOfConfidenceChartView's right-axis geometry. `_MIN_SEP` is the
+# default-size value of `axisLabelMinSeparation` (20pt since TestFlight 1.0 (11): the old 14pt
+# let CRWV's "566M" axis top sit 16pt above the bold "551M", touching).
+_BAND_LOW, _BAND_HIGH, _MIN_SEP, _HEIGHT = 0.15, 0.85, 20.0, 280.0
 
 
 def _shares_range(shares: List[Optional[float]]):
@@ -178,6 +180,34 @@ def test_port_no_reported_counts_draws_no_labels():
     assert _right_axis([float("nan"), None]) == []
 
 
+# CRWV as served after the 2026-10-05 fix (Q3 '24 and Q4 '25 counts refused as vendor
+# artifacts): the screenshot's crowded pair — the "566M" axis top and the bold "551M".
+_CRWV_SHARES = [None, 404.41, 404.41, 486.59, 497.89, None, 527.0, 551.0]
+
+
+def test_port_crwv_axis_top_is_hidden_beside_the_newest_count():
+    labels = _right_axis(_CRWV_SHARES)
+    bold = [l for l in labels if l[2]]
+    assert [round(l[0]) for l in bold] == [551]
+    statics = sorted(round(l[0]) for l in labels if not l[2])
+    assert 566 not in statics, "the '566M' top tick still prints 16pt from the bold '551M'"
+    assert statics == [390, 478], statics          # mid and min stay
+    # The regression this pins: at the old 14pt the top tick was drawn, 16pt away.
+    lo, hi = _shares_range(_CRWV_SHARES)
+    gap = abs(_frac_from_top(hi, (lo, hi)) - _frac_from_top(551.0, (lo, hi))) * _HEIGHT
+    assert 14.0 <= gap < _MIN_SEP, gap
+
+
+def test_axis_label_separation_scales_from_twenty_points():
+    code = _code(_CHART)
+    sep = _body(code, "private var axisLabelMinSeparation: CGFloat")
+    m = re.search(r"AppTypography\.scaledSize\(\s*(\d+(?:\.\d+)?)\s*,\s*\.caption2\s*,"
+                  r"\s*maxScale:\s*AppTypography\.readingCap\s*\)", sep)
+    assert m, f"the separation no longer scales with the caption it separates: {sep!r}"
+    assert float(m.group(1)) == _MIN_SEP, "the port's _MIN_SEP drifted from the Swift value"
+    assert "private let axisLabelMinSeparation" not in code, "a fixed separation is back"
+
+
 # ── #89: one money format for both charts ────────────────────────────────────
 
 
@@ -187,6 +217,12 @@ def _money(millions: float) -> str:
         return "—"
     sign = "-" if millions < 0 else ""
     m = abs(millions)
+    if m == 0:
+        return "$0"
+    if m < 0.05:
+        return f"{sign}<$0.1M"
+    if m < 9.95:
+        return f"{sign}${m:.1f}M"
     if m >= 1_000_000 or round(m / 1_000) >= 1_000:
         return f"{sign}${m / 1_000_000:.1f}T"
     if m >= 10_000:
@@ -200,10 +236,31 @@ def _money(millions: float) -> str:
     (1_499, "$1.5B"), (1_500, "$1.5B"),            # was "$1B" / "$2B" on the Financials tab
     (2_300 * 0.9, "$2.1B"), (2_300 * 0.6, "$1.4B"), (2_300 * 0.3, "$690M"),  # axis ticks distinct
     (12_300, "$12B"), (999.6, "$1.0B"), (999_600, "$1.0T"), (1_500_000, "$1.5T"),
-    (0, "$0M"), (-1_499, "-$1.5B"), (float("nan"), "—"),
+    (-1_499, "-$1.5B"), (float("nan"), "—"),
+    # TestFlight 1.0 (11), CRWV: a measured zero printed "$0M" in every cell. It reads "$0"
+    # (the axis baseline's text, and the report header's), and a real amount under $10M
+    # keeps a decimal instead of rounding to zero — or to a duplicate axis tick.
+    (0, "$0"), (-0.0, "$0"),
+    (0.3, "$0.3M"), (0.04, "<$0.1M"), (0.05, "$0.1M"), (0.949, "$0.9M"), (0.95, "$0.9M"),
+    (0.96, "$1.0M"), (1.47, "$1.5M"), (2.59, "$2.6M"), (-0.3, "-$0.3M"),
+    (9.94, "$9.9M"), (9.95, "$10M"), (10.4, "$10M"), (999.4, "$999M"),
+    (1.69 * 0.9, "$1.5M"), (1.69 * 0.6, "$1.0M"), (1.69 * 0.3, "$0.5M"),  # was "$1M" twice
+    (1.6 * 0.9, "$1.4M"), (1.6 * 0.6, "$1.0M"),                          # was "$1M" twice
 ])
 def test_port_money_format(millions, text):
     assert _money(millions) == text
+
+
+def test_money_bottom_of_scale_is_pinned_in_the_swift():
+    """The "$0" / sub-$1M branches, in order, in the REAL formatter (comments stripped)."""
+    money = _body(_code(_MODELS), "static func money(millions: Double) -> String")
+    zero = re.search(r'if m == 0 \{\s*return "\$0"\s*\}', money)
+    tiny = re.search(r'if m < 0\.05 \{\s*return sign \+ "<\$0\.1M"\s*\}', money)
+    sub = re.search(r'if m < 9\.95 \{\s*return sign \+ String\(format: "\$%\.1fM", m\)\s*\}', money)
+    assert zero and tiny and sub, money
+    assert zero.start() < tiny.start() < sub.start() < money.index('"$%.1fT"'), \
+        "the small-amount branches must run before the tier rules"
+    assert '"$0M"' not in money
 
 
 def test_both_charts_use_the_one_money_format():

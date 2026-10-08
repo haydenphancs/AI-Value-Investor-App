@@ -2950,17 +2950,49 @@ BRAND_TERMS = (
 #: "Available on the App Store". Apple's own App Store is the subject of a case study ("Apple
 #: focused on the App Store, iCloud, and various subscriptions", "revenue streams from the App
 #: Store") and is not a brand mention. "download" is a brand term on its own.
-_APP_STORE = r"(?:app store|apple app store|play store|google play store)"
+_APP_STORE = r"(?:(?:apple|ios|iphone) app store|app store|(?:google )?play store)"
+#: "pre-order", "preorder" or "pre order" as a VERB — "pre-orders" (the noun, "Developers can take
+#: pre-orders on the App Store") is Apple's case study.
+_PRE_ORDER = r"pre[- ]?order"
+#: The app's own pre-order status ("available for pre-order", "open to pre-orders").
+_PRE_ORDER_STATUS = r"(?:available|open|up) (?:for|to) " + _PRE_ORDER + r"s?"
+#: The app as COMING, with or without "soon" ("It's coming to the App Store soon").
+_COMING = r"(?:coming|launching|arriving)(?: soon)?|available soon"
+#: Where the sentence-opening shape may start in the FOLDED text: the text's start, after end
+#: punctuation or a colon/semicolon, an opening bracket or quote, or a dash between words ("Lessons on
+#: Mr. Market — coming soon to the App Store": `fold` makes every dash "-"). `fold` also makes a line
+#: break a space, so `scan_text` reads this regex once more on a copy whose breaks end sentences.
+_SENTENCE_START = r"(?:^|[.!?:;]\s+|[(\[\"]\s*|\s-+\s*)"
 _APP_STORE_CTA_RE = re.compile(
     # Getting THIS app: the object is it / us / the app — "Developers get 70% of sales on the App
     # Store" and "users install apps from the App Store" are Apple's case study.
-    r"\b(?:get|grab|find|search for|look for|look up|install|try)\s+(?:it|us|the app|our app|this "
-    r"app|caydex)\b[^.!?]{0,20}?\b(?:on|in|from) the " + _APP_STORE + r"\b"
-    r"|\b(?:it's|it is|we're|we are|now|our app is|the app is|this app is)\s+(?:(?:now|also)\s+)?"
-    r"(?:(?:available|live|out)\s+)?(?:on|in) the " + _APP_STORE + r"\b"
-    r"|(?:^|[.!?]\s+)(?:now\s+)?(?:available|live|out now)\s+(?:on|in) the " + _APP_STORE + r"\b"
+    r"\b(?:get|grab|find|search for|look for|look up|install|try|" + _PRE_ORDER + r")\s+(?:it|us|the app|"
+    r"our app|this app|caydex)\b[^.!?]{0,20}?\b(?:on|in|from) the " + _APP_STORE + r"\b"
+    r"|\b(?:it's|it is|it'll be|it will be|we're|we are|we'll be|now|our app is|the app is|this app is)\s+"
+    r"(?:(?:now|also)\s+)?"
+    r"(?:(?:available|live|out|" + _PRE_ORDER_STATUS + r")\s+)?(?:on|in) the " + _APP_STORE + r"\b"
+    # The app as COMING (review 2026-10-07: the value line's own claim in a model's words, "It is
+    # coming soon to the App Store.", passed every validator; the re-review found "It's coming to the
+    # App Store soon." and a claim alone on its own line) — positional like the shape above: led by
+    # the app as the subject, or opening its sentence. "New games are coming soon to the App Store"
+    # is Apple's case study.
+    r"|\b(?:it's|it is|it'll be|it will be|we're|we are|we'll be|our app is|the app is|this app is)\s+"
+    r"(?:(?:now|also|finally)\s+)?(?:" + _COMING + r")\s+(?:on|in|to) the " + _APP_STORE + r"\b"
+    # The READER told they can pre-order — no object, or the app as the object ("Apple lets you
+    # pre-order games on the App Store" is Apple's case study).
+    r"|\byou(?: can| could|'ll be able to| will be able to)?\s+(?:now\s+|also\s+)?" + _PRE_ORDER
+    + r"(?:\s+(?:it|us|the app|our app|this app|caydex))?(?:\s+(?:now|today))?\s+(?:on|in|from) the "
+    + _APP_STORE + r"\b"
+    r"|" + _SENTENCE_START + r"(?:now\s+)?(?:available|live|out now|" + _COMING + r"|"
+    + _PRE_ORDER + r"(?:\s+(?:it|now|today))?|" + _PRE_ORDER_STATUS + r"|"
+    + _PRE_ORDER + r"s\s+(?:are\s+|is\s+)?(?:now\s+)?open)\s+(?:on|in|to) the " + _APP_STORE + r"\b"
     r"|\b(?:app store|play store) (?:link|listing|page)\b"
     r"|\brated\s+(?:[0-9]|five|four)[^.!?]{0,15}?\b(?:on|in) the " + _APP_STORE + r"\b")
+#: Where a new clause opens without a sentence end the fold can see: a line break (`sentences` treats it
+#: as a sentence end) or an en/em dash, spaced or not ("Lessons on patience—coming soon to the App
+#: Store"; `fold` turns the dash into a hyphen glued to the words). The App Store scan's second reading
+#: makes each one a sentence end. A hyphen is never one ("pre-order", "long-term").
+_CLAUSE_BREAKS_RE = re.compile(r"\n+|\s*[\u2013\u2014]\s*")
 #: "signals" as the THING a product sells ("trading signals", "buy signals", "our signals",
 #: "signals to buy") — the App Store "Also avoid" word. The verb ("Growth in revenue and
 #: earnings signals expansion", "This transition signals a maturation of the market" — real
@@ -4353,6 +4385,11 @@ def scan_text(field: str, text: str, *, allow_emoji: bool = False,
     if m:
         v("banned_phrase", m.group(0))
     m = _APP_STORE_CTA_RE.search(folded)
+    if m is None and _CLAUSE_BREAKS_RE.search(text):
+        # `fold` made each line break a space and each dash a glued hyphen; a claim alone on its own
+        # line ("…\n\nComing soon to the App Store") or after a dash ("Lessons—coming soon to the
+        # App Store") opens a clause, as `sentences` reads a line break.
+        m = _APP_STORE_CTA_RE.search(fold(_CLAUSE_BREAKS_RE.sub(". ", text)))
     if m:
         v("brand_mention", m.group(0))
     if _ranking_claim(folded):

@@ -145,12 +145,13 @@ def test_pick_mature_uses_latest_when_it_meets_floor():
     assert held_back is False
 
 
-def test_pick_mature_falls_back_to_latest_when_none_meet_floor():
-    # A very thin industry where even the best year is below the floor:
-    # still surface the latest (not "held back" — there's no mature year).
+def test_pick_mature_returns_none_when_none_meet_floor():
+    # A very thin industry where even the best year is below the floor: no single
+    # value decides a comparison (2026-10-07 — it used to surface the latest thin cell,
+    # a 5-12 company median shown as "the" peer value).
     cells = {"2026": _cell(50.0, n=8), "2025": _cell(40.0, n=12)}
     cell, held_back = sbl.pick_mature_benchmark(cells, floor=20)
-    assert cell["value"] == 50.0
+    assert cell is None
     assert held_back is False
 
 
@@ -327,13 +328,14 @@ def test_ttm_industry_rejected_just_below_floor_n19():
     assert cur["pe_ratio"]["value"] == 22.0       # falls through
 
 
-def test_thin_ttm_kept_when_no_annual_fallback():
-    # A noisy benchmark still beats an empty comparison when there's no mature annual.
+def test_thin_ttm_alone_gives_no_comparison():
+    # A 6-company TTM median with no mature sector TTM and no mature annual year is not
+    # shown as the peer value (2026-10-07): the card shows no comparison instead.
     lk = _make_lookup_by_pt({
         ("ttm", True): [_row("pe_ratio", "TTM", 88.0, 6)],
     })
     cur = lk.get_current_benchmarks("Foo", "Tech", ["pe_ratio"])
-    assert cur["pe_ratio"]["value"] == 88.0
+    assert cur["pe_ratio"] is None
 
 
 def test_large_sector_ttm_accepted_when_industry_absent():

@@ -78,15 +78,21 @@ def _answers(*, profile=None, ratios=None, key_metrics=None, bs=None, income=Non
 
 
 def _service(monkeypatch, answers: Dict[str, Any], *, bench: Optional[Dict] = None,
-             bench_error: Optional[BaseException] = None):
+             bench_error: Optional[BaseException] = None, level: str = "sector"):
     from app.services import health_check_service as hc
 
     class _Lookup:
-        def get_current_benchmark_values(self, industry, sector, metrics):
+        # The health check reads the RICH cells since 2026-10-07 (it reports the level).
+        def get_current_benchmarks(self, industry, sector, metrics):
             if bench_error is not None:
                 raise bench_error
             table = _BENCH if bench is None else bench
-            return {m: table.get(m) for m in metrics}
+            return {
+                m: (None if table.get(m) is None
+                    else {"value": table[m], "level": level, "peer_group_name": "Peers",
+                          "n": 50})
+                for m in metrics
+            }
 
     # Module-level `from … import get_sector_benchmark_lookup`: patch the CALLER's binding.
     monkeypatch.setattr(hc, "get_sector_benchmark_lookup", lambda: _Lookup())

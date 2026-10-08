@@ -202,21 +202,27 @@ final class UpdatesViewModel: ObservableObject {
 
     // MARK: - News-tone trend (GET /updates/sentiment-trend)
 
-    /// The chart under the Insights card, for the SELECTED scope. nil hides it — not loaded
-    /// yet, failed, or signed out. Never a placeholder series: a fabricated trend line on a
-    /// finance screen is exactly what this screen was rebuilt to stop showing.
+    /// The chart under the Insights card, for the SELECTED scope: its 90-day answer cut to
+    /// `trendWindow`. nil hides it — not loaded yet, failed, or signed out. Never a placeholder
+    /// series: a fabricated trend line on a finance screen is exactly what this screen was
+    /// rebuilt to stop showing.
     @Published private(set) var sentimentTrend: SentimentTrend?
-    /// The window the toggle shows. The chart keeps the previous window's bars (dimmed)
-    /// until the new one lands, so switching never collapses the card.
+    /// The window the toggle shows. Always drawn from `trendSource`, so a switch redraws at
+    /// once — no request, no spinner, no previous window's numbers (TestFlight 1.0 (11)).
     @Published private(set) var trendWindow: SentimentTrendWindow = .month
-    /// Per (scope, window). Short-lived: the backend's own memory tier is 5 minutes and a
-    /// new day's bar appears as articles are scored. A "building" answer is never cached.
+    /// The SELECTED scope's newest 90-day answer (`SentimentTrendWindow.widest`): the one
+    /// series every window is cut from. Kept apart from the TTL'd cache below, so a window
+    /// switch never waits on the network even when that entry has gone stale — the request a
+    /// stale entry starts only refreshes what is already on screen.
+    private var trendSource: SentimentTrend?
+    /// The 90-day answer per scope. Short-lived: the backend's own memory tier is 5 minutes and
+    /// a new day's bar appears as articles are scored. A "building" answer is never cached.
     private var trendCache: [String: (fetchedAt: Date, trend: SentimentTrend)] = [:]
     private var trendTask: Task<Void, Never>?
     private let trendCacheTTL: TimeInterval = 300
     /// False until the user taps the toggle. Until then the window is chosen per scope from
-    /// its history — 7D while it has under a week, else 30D — and the request is always 30D,
-    /// so the 7D view is a free cut of it.
+    /// its history — 7D while it has under a week, else 30D. Either way the request is the
+    /// 90-day answer, and every window is a free cut of it.
     ///
     /// A tap is SAVED on this device (`SentimentTrendWindow.savedPickKey`) and restored as a
     /// pick by `restoreTrendWindowPreference()` — in `init` and again on identity change — so
@@ -336,6 +342,7 @@ final class UpdatesViewModel: ObservableObject {
         trendPollTask?.cancel()
         trendPollTask = nil
         trendCache.removeAll()
+        trendSource = nil
         sentimentTrend = nil
         // Back to the DEVICE's saved window (or auto mode when there is none). The pick is a
         // display preference of this phone, not the previous account's data, so it carries
@@ -718,12 +725,14 @@ final class UpdatesViewModel: ObservableObject {
         // another window — the "it changed back" of TestFlight 1.0 (9).
         guard window != trendWindow || !userPickedWindow else { return }
         // The user's choice wins on every scope, and is saved so it survives a relaunch. Saved
-        // HERE only — the auto pick in `present` and the failure snap-back in `loadTrend` assign
+        // HERE only — the auto pick in `show` and the failure snap-back in `loadTrend` assign
         // `trendWindow` too, and storing either would overwrite the user's real choice.
         userPickedWindow = true
         trendWindow = window
         window.saveAsPick()
         guard let scope = selectedTab?.scope else { return }
+        // Redraws at once from the scope's 90-day answer (`startTrendLoad` → `show`); a
+        // request goes out only when that answer is stale, and only to refresh it.
         startTrendLoad(scope: scope, force: false)
     }
 
@@ -738,50 +747,54 @@ final class UpdatesViewModel: ObservableObject {
         }
         let isNewScope = sentimentTrend?.scope != scope
         // Auto mode opens a NEW scope on 30D; the answer then decides whether to show 7D.
-        // Never set from a fetched response: `loadTrend`'s stale-response guard compares
-        // against the window captured here.
         if !userPickedWindow && isNewScope { trendWindow = .month }
-        let window = trendWindow
-        let fetchWindow: SentimentTrendWindow = userPickedWindow ? window : .month
-        let key = "\(scope)|\(fetchWindow.rawValue)"
-        if !force, let hit = trendCache[key], Date().timeIntervalSince(hit.fetchedAt) < trendCacheTTL {
+        if !force, let hit = trendCache[scope], Date().timeIntervalSince(hit.fetchedAt) < trendCacheTTL {
             present(hit.trend)
             trendTask = nil
             return
         }
-        // Another scope's chart must never sit under this scope's card while the request
-        // is in flight. The SAME scope keeps its bars (the view dims them) so a window
-        // switch does not make the card jump.
-        if sentimentTrend?.scope != scope { sentimentTrend = nil }
+        // The SAME scope redraws at once from the 90-day answer it already holds — any window,
+        // no spinner, no previous window's numbers — and the request below only refreshes it.
+        // Another scope's chart must never sit under this scope's card while it is in flight.
+        if let source = trendSource, source.scope == scope {
+            show(source)
+        } else {
+            sentimentTrend = nil
+            trendSource = nil
+        }
         trendTask = Task { [weak self] in
-            await self?.loadTrend(scope: scope, window: window, fetchWindow: fetchWindow, key: key)
+            await self?.loadTrend(scope: scope)
         }
     }
 
-    private func loadTrend(
-        scope: String, window: SentimentTrendWindow, fetchWindow: SentimentTrendWindow, key: String
-    ) async {
+    /// Fetch the scope's 90-day answer — the one series every window is cut from.
+    private func loadTrend(scope: String) async {
+        let fetchWindow = SentimentTrendWindow.widest
         do {
             let response: SentimentTrendResponse = try await apiClient.request(
                 endpoint: .getSentimentTrend(scope: scope, days: fetchWindow.days),
                 responseType: SentimentTrendResponse.self
             )
-            guard !Task.isCancelled, selectedTab?.scope == scope, trendWindow == window else { return }
+            // The SCOPE is checked, never the window: this answer serves every window, so a
+            // toggle tapped while it was in flight must not throw it away (dropping it, and
+            // re-fetching per window, was the lag of TestFlight 1.0 (11)).
+            guard !Task.isCancelled, selectedTab?.scope == scope else { return }
             let trend = SentimentTrend(dto: response, window: fetchWindow)
             // A building answer is never cached: the next re-check must see the next state.
-            if !trend.isBuildingHistory { trendCache[key] = (Date(), trend) }
+            if !trend.isBuildingHistory { trendCache[scope] = (Date(), trend) }
             present(trend)
-            print("✅ UpdatesVM: news-tone trend \(scope) \(fetchWindow.rawValue): \(trend.days.count) day(s), history=\(trend.historyStatus?.rawValue ?? "n/a")")
+            print("✅ UpdatesVM: news-tone trend \(scope) \(fetchWindow.rawValue) (showing \(trendWindow.rawValue)): \(trend.days.count) day(s), history=\(trend.historyStatus?.rawValue ?? "n/a")")
         } catch {
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
-            guard !Task.isCancelled, selectedTab?.scope == scope, trendWindow == window else { return }
+            guard !Task.isCancelled, selectedTab?.scope == scope else { return }
             // Not an error state: the chart is secondary to the feed, and a 503
             // SENTIMENT_TREND_UNAVAILABLE (a blip, or migration 180 not yet applied) must not
             // put an error banner over a feed that loaded fine. Logged so it is not silent.
             //
-            // A failed WINDOW switch keeps this scope's chart and snaps the toggle back to
-            // the window it still draws — nil-ing it removed the card and the only toggle
-            // that could switch back. Only with nothing of this scope on screen is it hidden.
+            // A failed REFRESH keeps this scope's chart (every window is still cut from the
+            // answer it holds) and the toggle on the window it draws — nil-ing it removed the
+            // card and the only toggle that could switch back. Only with nothing of this scope
+            // on screen is it hidden.
             if let shown = sentimentTrend, shown.scope == scope {
                 trendWindow = shown.window
                 // A failed re-check of a history still being built must not end the
@@ -790,24 +803,27 @@ final class UpdatesViewModel: ObservableObject {
                 if shown.isBuildingHistory { scheduleTrendPollIfBuilding(scope: scope) }
             } else {
                 sentimentTrend = nil
+                trendSource = nil
             }
             print("⚠️ UpdatesVM: news-tone trend unavailable for \(scope) \(fetchWindow.rawValue): \(AppError.from(error).message)")
         }
     }
 
-    /// Show a fetched or cached trend. In auto mode a scope with under a week of history
-    /// opens on 7D (cut from the 30D answer — a mostly empty month reads as broken), and on
-    /// 30D once it has more. A window the user picked is shown as fetched.
-    private func present(_ trend: SentimentTrend) {
+    /// Show a fetched or cached 90-day answer, and keep re-checking one still being built.
+    private func present(_ source: SentimentTrend) {
+        show(source)
+        scheduleTrendPollIfBuilding(scope: source.scope)
+    }
+
+    /// Draw `trendWindow` cut from the scope's 90-day answer — never a request. In auto mode a
+    /// scope with under a week of history opens on 7D (a mostly empty month reads as broken),
+    /// and on 30D once it has more. A window the user picked is shown as picked.
+    private func show(_ source: SentimentTrend) {
+        trendSource = source
         if !userPickedWindow {
-            let display: SentimentTrendWindow =
-                trend.trackedDays() < SentimentTrend.shortHistoryDays ? .week : .month
-            trendWindow = display
-            sentimentTrend = trend.trimmed(to: display)
-        } else {
-            sentimentTrend = trend
+            trendWindow = source.trackedDays() < SentimentTrend.shortHistoryDays ? .week : .month
         }
-        scheduleTrendPollIfBuilding(scope: trend.scope)
+        sentimentTrend = source.trimmed(to: trendWindow)
     }
 
     /// While a scope's 90-day history is being built, re-check with a backoff so the

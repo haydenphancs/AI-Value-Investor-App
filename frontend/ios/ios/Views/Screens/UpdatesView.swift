@@ -24,9 +24,10 @@ struct UpdatesView: View {
     @State private var browserLink: BrowserLink?
     /// Set when the Insights card is tapped → presents the sources screen.
     @State private var insightSources: NewsInsightSummary?
-    /// "Ask Cay AI" from this tab — the Insights card, its detail sheet and the news-tone
-    /// chart share ONE grounded chat, owned here so it never overwrites the general
-    /// conversation `ContentView` owns.
+    /// "Ask Cay AI" from this tab — the Insights card and its detail sheet share ONE grounded
+    /// chat, owned here so it never overwrites the general conversation `ContentView` owns.
+    /// The news-tone chart has no Ask button of its own (owner, TestFlight 1.0 (11)): this chat
+    /// is grounded on every window of it, so a tone question is asked here.
     @StateObject private var updatesChat = ChatViewModel()
     @State private var showUpdatesChat = false
     /// Set by the detail sheet's "Ask Cay AI". A full-screen cover cannot present over the
@@ -118,7 +119,6 @@ struct UpdatesView: View {
                                         get: { viewModel.trendWindow },
                                         set: { viewModel.setTrendWindow($0) }
                                     ),
-                                    onAskCay: { openUpdatesChat(focus: .trend) },
                                     buildingStalled: viewModel.trendPollExhausted
                                 )
                                 .padding(.horizontal, AppSpacing.lg)
@@ -343,19 +343,20 @@ struct UpdatesView: View {
 
     // MARK: - Ask Cay AI
 
-    /// Every "Ask Cay AI" on this tab — the Insights card, its detail sheet and the news-tone
-    /// chart — OPENS one chat grounded on the selected feed, empty. `prepareGroundedConversation`
-    /// makes no request and spends no credit; the user's first send does. The backend reads the
-    /// feed's card, headlines and tone trend itself (`UPDATES_SCOPE`), so nothing on screen is
-    /// shipped as context text — only the chart's window, as a `window=N` token.
+    /// Every "Ask Cay AI" on this tab — the Insights card and its detail sheet — OPENS one chat
+    /// grounded on the selected feed, empty. `prepareGroundedConversation` makes no request and
+    /// spends no credit; the user's first send does. The backend reads the feed's card,
+    /// headlines and News Tone card (every window) itself (`UPDATES_SCOPE`), so nothing on
+    /// screen is shipped as context text — only the chart's window, as a `window=N` token.
     private func openUpdatesChat(focus: UpdatesChatFocus) {
         guard let tab = viewModel.selectedTab else { return }
         updatesChat.prepareGroundedConversation(
             stockId: tab.isMarketTab ? nil : tab.scope,
-            // The window the chart is DRAWING (not a toggle still loading), as a control token
-            // the backend parses — so "Ask about this" on 90D quotes the 90-day numbers on
-            // screen. In `context`, not `referenceId`: the reference is the chat's resume key,
-            // and switching windows must not wipe an open conversation.
+            // The window the chart is DRAWING, as a control token the backend parses: that
+            // window gets the day-level detail (the busiest days, the latest week against the
+            // one before), on top of the totals for every window. In `context`, not
+            // `referenceId`: the reference is the chat's resume key, and switching windows must
+            // not wipe an open conversation.
             context: visibleTrend.map { "window=\($0.window.days)" },
             contextType: .updatesScope,
             referenceId: tab.chatReferenceId,

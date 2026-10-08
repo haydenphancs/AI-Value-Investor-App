@@ -888,6 +888,11 @@ _TOOL_TIMEOUTS: Dict[str, float] = {
     "explain_price_move": 30.0,
     "get_market_snapshot": 30.0,
     "get_market_overview": 20.0,
+    # Ask Cay AI's ownership tool (`chat_ownership_tool`): a warm Holders build is a cache read,
+    # a cold one is the Holders tab's full fan-out (~a dozen calls in one gather, plus the 13F
+    # quarter history). The handler is shielded, so a timeout still finishes and warms the
+    # build for the next question. (Literal name, as above: `chat_tools.OWNERSHIP_TOOL`.)
+    "check_ownership_filings": 20.0,
     # Report chat's web search (`chat_web_search_service`): two budget-claim RPCs off the loop
     # plus Brave's hard bound (BRAVE_SEARCH_TIMEOUT_SECONDS + 2 s), with slack. The handler is
     # shielded, and a model re-issue after a `timed_out` joins the same per-turn search, so

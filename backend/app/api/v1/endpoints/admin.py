@@ -7,7 +7,7 @@ import logging
 import math
 import secrets
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
@@ -185,26 +185,26 @@ async def refresh_sector_benchmarks(
     `recompute_all` writes the industry rows AND the `industry = ''` sector aggregate in one
     pass from `benchmark_universe.json` — see the retirement note in `main.py`.
 
+    Runs under the quarterly chain's `JOB_INDUSTRY_BENCHMARK_QUARTERLY` claim, exactly like
+    `POST /refresh-industry-benchmarks` (see `_start_claimed_benchmark_refresh`).
+
     Args:
         backfill: If True, recompute every period regardless of freshness.
                   If False (default), skip rows refreshed in the last 24h.
     """
     _authorize_admin(user, x_admin_token)
-    try:
-        from app.services.industry_benchmark_service import get_industry_benchmark_service
+    from app.services.industry_benchmark_service import get_industry_benchmark_service
 
-        service = get_industry_benchmark_service()
-        # `force` has no analogue here; freshness is expressed as a window.
-        skip_hours = None if backfill else 24
-        _spawn_admin_task(
-            service.recompute_all(skip_if_fresh_hours=skip_hours),
-            "admin_refresh_sector_benchmarks",
-        )
-        mode = "backfill (ignore freshness)" if backfill else "daily (skip rows fresher than 24h)"
-        return {"status": "started", "message": f"Sector + industry benchmark computation started in background — mode: {mode}"}
-    except Exception as e:
-        logger.error(f"Manual benchmark refresh failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start benchmark refresh")
+    # `force` has no analogue here; freshness is expressed as a window.
+    skip_hours = None if backfill else 24
+    mode = "backfill (ignore freshness)" if backfill else "daily (skip rows fresher than 24h)"
+    return await _start_claimed_benchmark_refresh(
+        lambda: get_industry_benchmark_service().recompute_all(skip_if_fresh_hours=skip_hours),
+        skip_hours=skip_hours,
+        task_name="admin_refresh_sector_benchmarks",
+        step="refresh_sector_benchmarks",
+        message=f"Sector + industry benchmark computation started in background — mode: {mode}",
+    )
 
 
 @router.post("/refresh-industry-benchmarks")
@@ -219,28 +219,191 @@ async def refresh_industry_benchmarks(
     Resumable: re-trigger to resume — sectors with a '' aggregate row newer than
     `skip_recent_hours` are skipped (pass 0 to force a full recompute).
 
+    Runs under the quarterly chain's `JOB_INDUSTRY_BENCHMARK_QUARTERLY` claim (see
+    `_start_claimed_benchmark_refresh`): 409 `SYSTEM_BUSY` while the scheduled phase or an
+    earlier manual run holds it, after a run already settled the UTC day, or when the job
+    is switched off; 503 when the ledger is unreadable. A run that crashed with the process
+    holds the claim until its stale window (3 h) passes.
+
     Auth: `X-Admin-Token: <settings.ADMIN_TOKEN>` OR sign in with an admin email.
     """
     _authorize_admin(user, x_admin_token)
+    from app.services.industry_benchmark_service import get_industry_benchmark_service
+
+    skip = skip_recent_hours if skip_recent_hours and skip_recent_hours > 0 else None
+    return await _start_claimed_benchmark_refresh(
+        lambda: get_industry_benchmark_service().recompute_all(skip_if_fresh_hours=skip),
+        skip_hours=skip,
+        task_name="admin_refresh_industry_benchmarks",
+        step="refresh_industry_benchmarks",
+        message="Industry benchmark recompute started in background — ~1-3 hrs; re-trigger to resume.",
+    )
+
+
+# Operator copy for a refused benchmark claim, keyed like `_DOSSIER_REFUSAL_COPY` (the reason
+# comes from the same ledger read, `_dossier_claim_refusal`). Admin-facing, never in the app.
+_BENCHMARK_REFUSAL_COPY: dict[str, str] = {
+    "held": (
+        "A sector/industry benchmark recompute is already running (the quarterly chain or an "
+        "earlier manual refresh), or one crashed less than 3 h ago and still holds the claim. "
+        "Nothing new was started — wait for it to finish (or for the claim to go stale)."
+    ),
+    "already_ran_today": (
+        "The sector/industry benchmark recompute already completed a run today (UTC). Nothing "
+        "was started. Retry after 00:00 UTC, or clear run_day for this job in "
+        "notification_job_state if a re-run is truly needed."
+    ),
+    "disabled": (
+        "The sector/industry benchmark job is switched off (notification_job_state.enabled = "
+        "false). Nothing was started."
+    ),
+    "claim_failed": (
+        "Could not take the sector/industry benchmark job claim (the ledger RPC failed). "
+        "Nothing was started — retry shortly."
+    ),
+    "ledger_unreadable": (
+        "Could not take or read the sector/industry benchmark job claim. Nothing was "
+        "started — retry shortly."
+    ),
+}
+
+
+async def _run_claimed_benchmark_refresh(
+    job: str, claimed_at: datetime, run: Callable[[], Awaitable[Any]],
+) -> dict:
+    """Body of a manual benchmark refresh: run `recompute_all` while holding `job`'s claim,
+    then release it with the outcome — `_run_claimed_dossier_refresh`'s contract, and the
+    same success rule as the scheduled phase (`main._run_claimed_phase`): a RETURNED summary
+    settles the day; a typed refusal (`...RecomputeSkipped`: empty universe / nothing
+    written) or a partial run (`...RecomputeIncomplete`: a sector raised) leaves it open, so
+    a re-POST — or the scheduled phase — retries, skipping the sectors already fresh."""
+    from app.services import notification_jobs
+    from app.services.industry_benchmark_service import (
+        IndustryBenchmarkRecomputeIncomplete,
+        IndustryBenchmarkRecomputeSkipped,
+    )
+
+    success, items, error = False, 0, None
     try:
-        from app.services.industry_benchmark_service import (
-            get_industry_benchmark_service,
+        summary = await run()
+        upserted = summary.get("rows_upserted") if isinstance(summary, dict) else None
+        items = upserted if isinstance(upserted, int) and not isinstance(upserted, bool) else 0
+        success = isinstance(summary, dict)
+        if not success:
+            error = f"manual refresh returned {type(summary).__name__}, not a summary"
+            logger.warning(
+                "Manual benchmark refresh did not settle the %s claim: %s", job, error,
+            )
+        return summary
+    except (IndustryBenchmarkRecomputeSkipped, IndustryBenchmarkRecomputeIncomplete) as exc:
+        # The service already logged the cause at ERROR; this ties it to the trigger. Not
+        # re-raised: the done-callback would log the same refusal a second time at ERROR.
+        error = str(exc)
+        logger.warning(
+            "Manual benchmark refresh did not settle the %s claim (%s): %s",
+            job, exc.reason, exc,
+        )
+        status = "incomplete" if isinstance(exc, IndustryBenchmarkRecomputeIncomplete) else "skipped"
+        return {"status": status, "reason": exc.reason, "detail": error}
+    except asyncio.CancelledError:
+        error = "cancelled (shutdown)"
+        raise
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise  # logged with its stack by `_on_admin_task_done`
+    finally:
+        # SHIELDED, as in `_run_claimed_dossier_refresh`: a cancelled release would park the
+        # claim for the whole stale window, which the quarterly chain then waits out.
+        await asyncio.shield(
+            asyncio.to_thread(
+                notification_jobs.finish_scheduled,
+                job,
+                success=success,
+                items=items,
+                error=error,
+                now=claimed_at,
+            )
         )
 
-        service = get_industry_benchmark_service()
-        skip = skip_recent_hours if skip_recent_hours and skip_recent_hours > 0 else None
-        _spawn_admin_task(
-            service.recompute_all(skip_if_fresh_hours=skip),
-            "admin_refresh_industry_benchmarks",
+
+async def _start_claimed_benchmark_refresh(
+    run: Callable[[], Awaitable[Any]], *, skip_hours: Optional[int],
+    task_name: str, step: str, message: str,
+):
+    """Take the quarterly benchmark phase's claim IN the request, then run `run()` (the
+    route's `recompute_all` call) in the background under it.
+
+    Both manual triggers used to start `recompute_all` with no claim, so one could run on top
+    of the chain's own medians phase (first Sunday of Jan/Apr/Jul/Oct from 04:00 UTC) — two
+    ~47k-call FMP bursts racing on the same rows. Mirrors `POST /refresh-industry-dossier`:
+    a refusal answers `SYSTEM_BUSY` (409, or 503 when the ledger is unreadable) and starts
+    nothing; a scheduled phase that finds the claim held waits, and skips when this run
+    settled the day."""
+    try:
+        from app.main import _CHAIN_PHASE_STALE_SECONDS, JOB_INDUSTRY_BENCHMARK_QUARTERLY
+        from app.services import notification_jobs
+        # Imported BEFORE the claim, though only the task uses it: an import that failed
+        # inside the task, outside its try/finally, would leave the claim unreleased for the
+        # whole stale window. Here it fails as an error response with nothing held.
+        from app.services.industry_benchmark_service import (  # noqa: F401
+            IndustryBenchmarkRecomputeIncomplete,
+            IndustryBenchmarkRecomputeSkipped,
         )
+
+        job = JOB_INDUSTRY_BENCHMARK_QUARTERLY
+        claimed_at = datetime.now(timezone.utc)
+        granted = await asyncio.to_thread(
+            notification_jobs.claim_scheduled,
+            job,
+            now=claimed_at,
+            stale_seconds=_CHAIN_PHASE_STALE_SECONDS,
+        )
+        if not granted:
+            state = await asyncio.to_thread(notification_jobs.scheduled_job_state, job)
+            reason = _dossier_claim_refusal(state, claimed_at.date().isoformat())
+            details: dict[str, Any] = {"job": job, "reason": reason}
+            # `details` values must be flat scalars (auth.md §3) — omit the absent ones.
+            for key in ("claim_at", "run_day"):
+                if state and state.get(key):
+                    details[key] = str(state[key])
+            logger.warning(
+                "Manual benchmark refresh REFUSED (%s): job=%s reason=%s claim_at=%s run_day=%s",
+                step, job, reason, details.get("claim_at"), details.get("run_day"),
+            )
+            return make_error_response(
+                ErrorCode.SYSTEM_BUSY,
+                status_code=503 if reason == "ledger_unreadable" else 409,
+                message=f"sector/industry benchmark claim refused: {reason}",
+                user_message=_BENCHMARK_REFUSAL_COPY[reason],
+                details=details,
+            )
+
+        try:
+            _spawn_admin_task(
+                _run_claimed_benchmark_refresh(job, claimed_at, run), task_name,
+            )
+        except BaseException:
+            # The claim is ours and nothing will release it — do it now, or the quarterly
+            # chain waits out the whole stale window.
+            await asyncio.to_thread(
+                notification_jobs.finish_scheduled,
+                job, success=False, error="manual refresh failed to start", now=claimed_at,
+            )
+            raise
+        logger.info("Manual benchmark refresh (%s) started under claim %s", step, job)
         return {
             "status": "started",
-            "message": "Industry benchmark recompute started in background — ~1-3 hrs; re-trigger to resume.",
-            "skip_if_fresh_hours": skip,
+            "job": job,
+            "claimed_at": claimed_at.isoformat(),
+            "message": message,
+            "skip_if_fresh_hours": skip_hours,
         }
     except Exception as e:
-        logger.error(f"Manual industry benchmark refresh failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start industry benchmark refresh")
+        logger.error(
+            "Manual benchmark refresh (%s) failed to start (%s: %s)",
+            step, type(e).__name__, e, exc_info=True,
+        )
+        return error_response_from_exception(e, step=step)
 
 
 @router.get("/industry-benchmarks-status")

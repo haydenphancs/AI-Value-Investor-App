@@ -412,6 +412,27 @@ struct SnapshotMetric: Identifiable {
     var id: String { name }
     let name: String
     let value: String
+    /// "industry" | "sector": the peer group whose median `name` prints, e.g.
+    /// "P/E (1.30x sector avg 22.4)". nil = no peer comparison, or a backend that predates
+    /// the field — the name is then shown exactly as sent.
+    var peerLevel: String? = nil
+
+    /// The name as shown. The wire keeps the words "sector avg" whatever the level, because
+    /// shipped builds strip "(… sector …)" from report labels by that word; an INDUSTRY
+    /// median is renamed here, at display time, so the card never calls it a sector's.
+    var displayName: String { Self.peerWording(name, peerLevel: peerLevel) }
+
+    /// "sector avg" / "sector average" / "vs sector" → the industry wording, only when
+    /// `peerLevel` is "industry". Any other level (sector, nil, an unknown future value)
+    /// keeps the name byte-identical.
+    static func peerWording(_ name: String, peerLevel: String?) -> String {
+        guard peerLevel == "industry" else { return name }
+        return name
+            .replacingOccurrences(of: #"\bsector (avg|average)\b"#, with: "industry $1",
+                                  options: .regularExpression)
+            .replacingOccurrences(of: #"\bvs sector\b"#, with: "vs industry",
+                                  options: .regularExpression)
+    }
 }
 
 // MARK: - Snapshot Item
@@ -425,15 +446,43 @@ struct SnapshotItem: Identifiable {
     var dcf: DcfEstimate? = nil
     /// The Caydex Fair Value Estimate — when present it replaces FMP's `dcf` row.
     var caydexEstimate: CaydexFairValue? = nil
+    /// When the backend BUILT this snapshot (`computed_at`). nil = not sent (an older
+    /// backend) or unreadable: the Snapshots header then shows no date rather than today's.
+    var computedAt: Date? = nil
 
-    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil) {
+    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil, computedAt: Date? = nil) {
         self.category = category
         self.rating = rating
         self.metrics = metrics
         self.fullReportAvailable = fullReportAvailable
         self.dcf = dcf
         self.caydexEstimate = caydexEstimate
+        self.computedAt = computedAt
     }
+
+    /// Before this, a stamp is a placeholder (an epoch-0 default), not a build time.
+    static let earliestPlausibleComputedAt = Date(timeIntervalSince1970: 1_577_836_800)  // 2020-01-01Z
+
+    /// The backend's `computed_at`. Python's `isoformat()` carries up to six fractional
+    /// digits and `.withFractionalSeconds` parses them (measured, see `CreditHistoryModels`);
+    /// a whole-second stamp needs the plain formatter. Empty, unparseable or implausible → nil.
+    static func parseComputedAt(_ raw: String?) -> Date? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        guard let date = isoFractional.date(from: raw) ?? isoPlain.date(from: raw) else { return nil }
+        return date >= earliestPlausibleComputedAt ? date : nil
+    }
+
+    private static let isoFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 }
 
 // MARK: - DCF estimate (Valuation Meter)

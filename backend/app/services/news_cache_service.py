@@ -9,10 +9,13 @@ Architecture:
   3. Background pre-warmer keeps popular watchlist tickers warm (raw cache only).
 """
 
+import copy
 import hashlib
 import json
 import logging
 import asyncio
+import time
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 from app.utils.market_hours import to_utc_instant
@@ -37,6 +40,15 @@ from app.services.news_llm import (
     news_model_name,
 )
 from app.services.market_news_quality import filter_market_articles
+from app.services.market_news_relevance import (
+    MIN_MARKET_STORIES,
+    MODEL_SCOPES,
+    is_market_story,
+    model_scope,
+    normalize_model_scope,
+    select_market_stories,
+    stamp_model_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +134,13 @@ def build_enrichment_prompt(articles: List[Dict[str, Any]], ticker: str = "") ->
         )
 
     sentiment_subject, scope_line = sentiment_scope(ticker)
+    # MARKET ONLY: what each article is ABOUT, so the Market feed can hide one company's
+    # story no ticker names (`market_news_relevance`; TestFlight 2026-10-03). Empty for
+    # every other scope, so the ticker prompt — and the 90-day backfill, which never
+    # labels the Market — stays byte-identical (the golden test pins all three cases).
+    is_market = ticker == MARKET_SCOPE
+    scope_item = f"\n{MARKET_SCOPE_RULE}" if is_market else ""
+    scope_field = f"\n{MARKET_SCOPE_FIELD}" if is_market else ""
 
     return f"""Analyze the following {len(articles)} financial news articles.
 
@@ -137,7 +156,7 @@ For EACH article, provide:
 2. Sentiment classification — the NET directional lean for {sentiment_subject}, one of these three exact values:
 {SENTIMENT_RUBRIC}
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
-4. Related tickers: Extract ALL US-listed stock ticker symbols (e.g., AAPL, MSFT, GOOGL) explicitly mentioned or clearly referenced in the article. Only include real ticker symbols — no crypto, indices, ETFs, or made-up symbols. Maximum 8 tickers.
+4. Related tickers: Extract ALL US-listed stock ticker symbols (e.g., AAPL, MSFT, GOOGL) explicitly mentioned or clearly referenced in the article. Only include real ticker symbols — no crypto, indices, ETFs, or made-up symbols. Maximum 8 tickers.{scope_item}
 
 {scope_line}
 
@@ -146,13 +165,39 @@ Return a JSON array with one object per article in order. Each object must have:
 - "bullets": array of 2-5 strings (the last one is the conclusion — stated directly, with NO lead-in and no people-subject)
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral"
 - "confidence": integer 0-100
-- "related_tickers": array of uppercase ticker symbol strings (max 8)
+- "related_tickers": array of uppercase ticker symbol strings (max 8){scope_field}
 
 {chr(10).join(articles_text)}"""
 
 
+#: Item 5 of the MARKET enrichment prompt (`build_enrichment_prompt`): what the article is
+#: about, read by `market_news_relevance.model_scope`. The owner's example sits exactly on
+#: the "company" side of the line ("Fire, smoke seen near Aramco facility in Riyadh": the
+#: incident at one company's site IS the news), and an oil move after attacks on a
+#: country's facilities on the "market" side — written as principles, not as that
+#: headline, so the rule generalises instead of matching one story.
+MARKET_SCOPE_RULE = """5. Scope: what the article is ABOUT, exactly one of these values:
+   - "company": one specific company: its results, products, people, legal or regulatory matters, a deal it is part of, or an incident at its own facility, plant, site or asset. An incident at one company's site is "company" even when it touches oil, energy, commodities or geopolitics, unless the article is about the market's reaction to it.
+   - "market": the market or the economy as a whole: stock indexes, interest rates, inflation, central banks, economic data, currencies, commodity prices, trade or fiscal policy, or a geopolitical event or price move not centred on one company. Companies may appear only as examples or causes.
+   - "sector": one industry, or a group of companies moving together.
+   - "unclear": the article does not say enough to tell."""
+
+#: The matching line of the MARKET prompt's output contract.
+MARKET_SCOPE_FIELD = '- "scope": exactly one of "market" | "sector" | "company" | "unclear"'
+
+
 #: Article sets a provider's moderation refused, logged at ERROR once per process.
 _REFUSED_BATCHES: set = set()
+
+
+class _MarketCacheUnreadable(Exception):
+    """A Market cache READ failed — distinct from a cache that is empty.
+
+    Internal to this service (never reaches an endpoint). A failed read used to come back
+    as ``[]``, which page 0 took for an empty cache: it fell into the cold fetch, which
+    re-judged and re-wrote rows clients were already holding (final review 2026-10-07,
+    F1). Now a failed read is retried once and then degrades to a page that writes
+    nothing (`NewsCacheService.get_market_news`)."""
 
 
 def article_external_id(raw: Dict[str, Any], index: int) -> str:
@@ -180,12 +225,17 @@ def sentiment_scope(ticker: str) -> Tuple[str, str]:
     each article's lean "for the stock" — there is no stock. Its labels also feed the
     Market line of the news-sentiment timeline, so they must be read for the market as a
     whole.
+
+    The Market line no longer ASSERTS "not about one company": the same prompt now asks
+    what each article is about (`MARKET_SCOPE_RULE`), and telling the model the answer
+    in advance would bias it toward "market" — the one-company stories the Market feed
+    exists to drop are exactly the ones that sentence mislabelled.
     """
     if ticker == MARKET_SCOPE:
         return (
             "the overall US stock market",
-            "These are general market news articles, not about one company. Judge "
-            "each article's sentiment for the overall US stock market, and list in "
+            "These articles come from a general market news feed. Judge each "
+            "article's sentiment for the overall US stock market, and list in "
             "related_tickers only real ticker symbols the article itself names.",
         )
     if ticker:
@@ -559,32 +609,140 @@ class NewsCacheService:
         triggers an FMP fetch: a cold miss on page 3 means the history simply
         ends there, and refetching page 1 from upstream to satisfy it would burn
         quota to return rows the client already has.
+
+        MARKET-WIDE STORIES ONLY (`market_news_relevance`): single-company rows are
+        hidden on the way out, so ``offset`` counts MARKET STORIES — exactly what the
+        client sends, since iOS pages by the number of rows each response carried — and
+        the envelope's ``has_more`` says whether another one exists past this page.
+        See :meth:`_get_cached_market_page`.
+
+        A FAILED READ IS NOT AN EMPTY CACHE (final review 2026-10-07, F1): the rows may
+        well be there, and the cold fetch would re-judge rows clients are holding. A
+        failed read is retried once; if it fails again, page 0 is served read-only
+        straight from FMP (`_market_read_only_page` — nothing written, nothing judged)
+        and a deeper page ends the paging. Only a page 0 that READ an empty cache takes
+        the cold fetch.
         """
         # Sync SDK — keep it off the event loop. This is the Updates screen's
         # default tab, so it is the hottest read in the feature.
-        cached_articles = await asyncio.to_thread(
-            self._get_cached, MARKET_SCOPE, limit, offset
-        )
+        page: Optional[List[Dict[str, Any]]] = None
+        has_more = False
+        for attempt in (1, 2):
+            try:
+                page, has_more = await asyncio.to_thread(
+                    self._get_cached_market_page, limit, offset
+                )
+                break
+            except _MarketCacheUnreadable as e:
+                logger.warning(
+                    "Market feed read failed (offset=%d, attempt %d/2): %s", offset,
+                    attempt, e,
+                )
+        if page is None:
+            if offset > 0:
+                logger.warning(
+                    "Market feed: page at offset %d unreadable — paging ends here, nothing "
+                    "written (the client's next refresh starts again from page 0)", offset,
+                )
+                return {
+                    "articles": [], "ticker": MARKET_SCOPE, "cached": False,
+                    "cache_age_seconds": None, "has_more": False,
+                }
+            return await self._deduped(
+                f"{MARKET_SCOPE}#read-only", lambda: self._market_read_only_page(limit)
+            )
         if offset > 0:
             return {
-                "articles": self._format_response(cached_articles),
+                "articles": self._format_response(page),
                 "ticker": MARKET_SCOPE,
                 "cached": True,
-                "cache_age_seconds": self._cache_age_seconds(cached_articles),
+                "cache_age_seconds": self._cache_age_seconds(page),
+                "has_more": has_more,
             }
-        if cached_articles:
-            logger.info(
-                f"Market news cache HIT: {len(cached_articles)} articles"
-            )
+        if page:
+            logger.info(f"Market news cache HIT: {len(page)} articles")
             return {
-                "articles": self._format_response(cached_articles),
+                "articles": self._format_response(page),
                 "ticker": MARKET_SCOPE,
                 "cached": True,
-                "cache_age_seconds": self._cache_age_seconds(cached_articles),
+                "cache_age_seconds": self._cache_age_seconds(page),
+                "has_more": has_more,
             }
 
         # Dedup concurrent misses: one FMP fetch, N awaiters.
         return await self._deduped(MARKET_SCOPE, lambda: self._fetch_market_news(limit))
+
+    #: Cache rows read per round trip when paging the Market feed, as a multiple of the
+    #: market stories still needed: hidden single-company rows mean N market stories span
+    #: more than N cache rows. 2x usually settles a page in ONE query.
+    _MARKET_PAGE_OVERREAD = 2
+    #: Runaway guard on cache rows scanned for one Market page, and the largest single
+    #: read (PostgREST clamps a range near 1000 rows, and a clamped read would look like
+    #: the end of the cache). The endpoint caps `offset` at 500 and the scope holds a few
+    #: hundred unexpired rows, so reaching this means something is wrong.
+    _MARKET_MAX_SCAN_ROWS = 1000
+
+    def _get_cached_market_page(
+        self, limit: int, offset: int
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """One page of the cached Market feed in MARKET-STORY space: ``(page, has_more)``.
+
+        Blocking — call via ``asyncio.to_thread``.
+
+        WHY NOT A PLAIN ``.range(offset, …)``: rows are filtered after the read, and
+        the client's next ``offset`` is the number of rows it RECEIVED (iOS
+        `loadedOffset += dtos.count`, build 10 included). Paging cache rows by that
+        number re-reads rows already served, and a page whose rows were ALL hidden
+        returns nothing while `has_more` stays true — the client would ask for the same
+        offset forever. So the scan always starts at the newest row and walks forward
+        in chunks until it holds ``offset + limit + 1`` market stories (the +1 answers
+        `has_more`) or the cache runs out. The `.range` ordering (``published_at``
+        DESC, ``id`` DESC) is stable, so chunk boundaries neither skip nor repeat a row.
+
+        Each chunk is classified as it arrives, so the loop stops as soon as it has
+        enough; `select_market_stories` then makes the final pass over everything read,
+        including the floor (`MIN_MARKET_STORIES`) — which can only engage once the
+        cache is exhausted, because ``want`` is never below the floor.
+
+        ⚠️ SOUND ONLY BECAUSE A VERDICT NEVER CHANGES. Offsets count market stories, so
+        a row a client already holds must stay on the same side of the filter for good:
+        hiding it later moves every older story one place left and the next page skips
+        one (adversarial review 2026-10-06 — the client's own scroll-time summaries did
+        exactly that). Hence the verdict reads only the headline and the scope stamp
+        written at INSERT (`_first_write_columns`), and no later summary may add or
+        change a stamp (`_enrich_articles_uncached`). New rows arriving at the top
+        between two pages still shift the list RIGHT — repeats, which the client drops
+        by id — never left.
+
+        A failed read RAISES `_MarketCacheUnreadable` (a strict `_get_cached`) — never an
+        empty answer, which page 0 would take for a cold cache and write over rows that
+        are still there (final review 2026-10-07, F1). `get_market_news` retries it once
+        and then degrades without writing.
+        """
+        want = max(offset + limit + 1, MIN_MARKET_STORIES)
+        # Sized from the TARGET, not the page: a deep page re-scans from the newest row,
+        # and a page-sized chunk turned page 4 into four round trips.
+        chunk = min(
+            max(want * self._MARKET_PAGE_OVERREAD, 50), self._MARKET_MAX_SCAN_ROWS
+        )
+        rows: List[Dict[str, Any]] = []
+        market = 0
+        raw_offset = 0
+        while raw_offset < self._MARKET_MAX_SCAN_ROWS:
+            batch = self._get_cached(MARKET_SCOPE, chunk, raw_offset, strict=True)
+            rows.extend(batch)
+            market += sum(1 for r in batch if is_market_story(r))
+            if len(batch) < chunk or market >= want:
+                break
+            raw_offset += chunk
+        else:
+            logger.warning(
+                "Market feed page (offset=%d, limit=%d) scanned %d cache rows and found "
+                "only %d market stories — stopping at the scan guard", offset, limit,
+                len(rows), market,
+            )
+        stories = select_market_stories(rows, label="market feed")
+        return stories[offset: offset + limit], len(stories) > offset + limit
 
     async def _market_trending_tickers(self) -> frozenset:
         """Top Reddit-mentioned symbols (best-effort) for the market news quality
@@ -672,17 +830,46 @@ class NewsCacheService:
             filtered = merged
         dropped = len(merged) - len(filtered)
 
+        # Relevance — MARKET ONLY, after quality: hide single-company stories
+        # (`market_news_relevance`; TestFlight 2026-10-03, "Should only be for
+        # market!"). A raw row has no model verdict yet, so only the headline rule can
+        # act here (an exchange-qualified single-company citation); the model's scope is
+        # recorded by the writer, before the row is readable (`_classify_market_ingest`).
+        # Before the `[:limit]` slice, so the cache still receives up to `limit` rows.
+        # Same best-effort contract as the quality filter.
+        try:
+            relevant = select_market_stories(filtered, label="market ingest")
+        except Exception as e:
+            logger.warning(
+                "Market relevance filter failed (%s: %s) — serving the quality-filtered "
+                "corpus", type(e).__name__, e, exc_info=True,
+            )
+            relevant = filtered
+
         logger.info(
-            "Market corpus: %d unique → %d after quality filter (dropped %d) "
-            "(general=%s, index=%s, buzz=%d)",
-            len(merged), len(filtered), dropped,
+            "Market corpus: %d unique → %d after quality filter (dropped %d) → %d "
+            "market-wide (hid %d single-company) (general=%s, index=%s, buzz=%d)",
+            len(merged), len(filtered), dropped, len(relevant),
+            len(filtered) - len(relevant),
             "ok" if not isinstance(general, BaseException) else "failed",
             "ok" if not isinstance(index, BaseException) else "failed",
             len(trending),
         )
-        return filtered[:limit]
+        return relevant[:limit]
 
     async def _fetch_market_news(self, limit: int) -> Dict[str, Any]:
+        """The cold path: page 0 READ an empty Market cache (never a failed read — see
+        `get_market_news`).
+
+        CREATE-ONLY, exactly like the refresh (final review 2026-10-07, F1). "Empty" is
+        a moment, not a guarantee: rows past their TTL are still in the table, and a
+        refresh can insert the same articles while this fetch's model is working. So
+        only rows NOT yet in the table are judged (`_classify_new_market_rows`), the
+        write is the create-only pre-pass plus the non-AI renewal (``ingest_only``), and
+        a row that already exists keeps its verdict and its summary — the property the
+        offset pager depends on. Page 0 is then read back from the cache, so it carries
+        the verdicts the cache holds and lives in the same story space as page 1.
+        """
         logger.info("Market news cache MISS: fetching general + index news from FMP")
         try:
             raw_articles = await self._fetch_market_raw(limit)
@@ -692,17 +879,57 @@ class NewsCacheService:
                     "articles": [], "ticker": MARKET_SCOPE,
                     "cached": False, "cache_age_seconds": 0,
                 }
-            articles = await asyncio.to_thread(
+            # Every NEW row is judged before it is written (its verdict may never change
+            # afterwards — `market_news_relevance`). This path can be a person waiting,
+            # so smaller batches under a short budget; a batch that misses it leaves its
+            # rows without a verdict (kept), never a guess, and never costs the batches
+            # that answered (F2).
+            enrichments, existing = await self._classify_new_market_rows(
+                raw_articles, limit,
+                budget_seconds=self._MARKET_CLASSIFY_BUDGET_COLD_SECONDS,
+                batch_size=self._MARKET_INGEST_BATCH_COLD,
+            )
+            written = await asyncio.to_thread(
                 self._build_and_cache_rows,
                 MARKET_SCOPE, raw_articles, limit,
                 # No fallback ticker: a general market story with no FMP `symbol`
                 # genuinely relates to nothing in particular. Stamping it with
                 # "__MARKET__" would surface a fake ticker chip in the iOS UI.
-                fallback_ticker=None, label="market",
+                fallback_ticker=None, label="market", ingest_only=True,
+                enrichments=enrichments, existing=existing,
             )
+            page, has_more = [], False
+            for attempt in (1, 2):           # retried once, like page 0's own read (R5-2)
+                try:
+                    page, has_more = await asyncio.to_thread(
+                        self._get_cached_market_page, limit, 0
+                    )
+                    break
+                except _MarketCacheUnreadable as e:
+                    logger.warning(
+                        "Market cold fetch: read-back attempt %d/2 failed (%s)", attempt, e,
+                    )
+            if page:
+                return {
+                    "articles": self._format_response(page), "ticker": MARKET_SCOPE,
+                    "cached": False, "cache_age_seconds": 0, "has_more": has_more,
+                }
+            # Nothing could be read back. Serve EVERY row of this write through the same
+            # filter — fail-open, like the read-only page: a row that already existed
+            # carries no verdict in memory, so only the headline rule judges it. Never
+            # empty because the rows already existed (review round 5, R5-2). `has_more`
+            # is false: there is no readable cache to page.
+            logger.warning(
+                "Market cold fetch: nothing read back — serving the %d row(s) of this "
+                "write (fail-open, no paging)", len(written),
+            )
+            articles = [
+                {k: v for k, v in a.items() if k != "ai_model"}
+                for a in select_market_stories(written, label="market cold fetch")
+            ]
             return {
                 "articles": articles, "ticker": MARKET_SCOPE,
-                "cached": False, "cache_age_seconds": 0,
+                "cached": False, "cache_age_seconds": 0, "has_more": False,
             }
         except (FMPRateLimitException, FMPAuthException):
             # Propagate so the endpoint maps it to a structured error instead of
@@ -718,6 +945,293 @@ class NewsCacheService:
                 "cached": False, "cache_age_seconds": None,
             }
 
+    async def _market_read_only_page(self, limit: int) -> Dict[str, Any]:
+        """Page 0 while the Market cache cannot be READ: straight from FMP, through the
+        same ingest filter, with NOTHING written and NOTHING judged.
+
+        A read error says nothing about what the table holds, so this path may not
+        write: a write here is how a blip re-judged rows clients were holding (final
+        review 2026-10-07, F1). The rows carry ``raw_`` ids (never enrichable, the
+        ticker fallback's convention), no model verdict (kept — fail-open; the headline
+        rule still applies), and ``has_more`` false, so no client pages into a cache it
+        cannot read. The next load reads the cache again.
+        """
+        try:
+            raw_articles = await self._fetch_market_raw(limit)
+        except (FMPRateLimitException, FMPAuthException):
+            raise  # structured errors, as on the cold path
+        except Exception as e:
+            logger.error(
+                "Market read-only page failed: %s: %s", type(e).__name__, e, exc_info=True,
+            )
+            raw_articles = []
+        articles = [
+            {
+                "id": f"raw_{i}",
+                "headline": raw.get("title") or "",
+                "summary": raw.get("text") or "",
+                "summary_bullets": [],
+                "sentiment": None,
+                "sentiment_confidence": 0,
+                "source_name": raw.get("publisher") or raw.get("site") or "",
+                "source_logo_url": None,
+                "published_at": _sanitize_published_at(raw.get("publishedDate")),
+                "thumbnail_url": raw.get("image"),
+                "article_url": raw.get("url"),
+                "related_tickers": self._parse_tickers(raw, None),
+                "ai_processed": False,
+            }
+            for i, raw in enumerate(raw_articles[:limit]) if isinstance(raw, dict)
+        ]
+        # The headline rule again, as every Market response gets it (the ingest step
+        # applied it already unless it failed open).
+        articles = select_market_stories(articles, label="market read-only page")
+        logger.warning(
+            "Market cache unreadable — served %d row(s) read-only from FMP (nothing written, "
+            "nothing judged)", len(articles),
+        )
+        return {
+            "articles": articles, "ticker": MARKET_SCOPE, "cached": False,
+            "cache_age_seconds": None, "has_more": False,
+        }
+
+    # ── Private: the Market verdict, recorded once at ingest ───────────
+
+    #: Rows judged per write: one iOS page of 50.
+    _MARKET_INGEST_CLASSIFY_CAP = 50
+    #: Rows per model call. The refresh is the sweeper's background pass: two calls of 25
+    #: at most. The cold path can be a person waiting, so it sends smaller calls (each
+    #: answers sooner, ≤4 run together), and a batch that misses the budget costs only
+    #: its own rows (F2).
+    _MARKET_INGEST_BATCH_REFRESH = 25
+    _MARKET_INGEST_BATCH_COLD = 13
+    #: How long the model may hold up a Market write. The cold path can be a person
+    #: waiting on the Updates tab; the refresh is the sweeper's background pass (the
+    #: same order of time its own enrichment step already spends).
+    _MARKET_CLASSIFY_BUDGET_COLD_SECONDS = 10.0
+    _MARKET_CLASSIFY_BUDGET_REFRESH_SECONDS = 60.0
+    #: External ids per existence lookup — URLs, so kept short enough for a GET line.
+    _EXISTING_LOOKUP_CHUNK = 10
+
+    async def _classify_market_ingest(
+        self, raw_rows: List[Dict[str, Any]], *, budget_seconds: float,
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Summarise up to `_MARKET_INGEST_CLASSIFY_CAP` raw Market rows BEFORE they are
+        written: ``{external_id: enrichment}`` for every row the model answered usably.
+
+        The same summary call the feed always made (bullets, sentiment, tickers) — it now
+        happens before the write instead of after it, and its `scope` answer becomes the
+        row's one and only Market verdict (`market_news_relevance`). Batches of
+        ``batch_size`` run together under ``budget_seconds``. EACH BATCH STANDS ALONE
+        (final review 2026-10-07, F2): one wrapped `wait_for(gather(...))` threw away
+        batches that had already answered when another missed the budget, so every row of
+        the write went unjudged for its life. Now a batch that answers in time is kept, a
+        batch that misses the budget is cancelled and only ITS rows get no verdict (kept,
+        never a guess), and every batch logs its time. The labels are logged here like
+        every other enrichment path (`record_labels` feeds the news-tone chart), BEFORE the
+        write, for the same reason `_enrich_articles_uncached` does it first.
+
+        ``external_id`` is computed exactly as `_build_and_cache_rows` will compute it (same
+        list, same positions), so the writer finds each answer. Never raises (a caller's
+        own cancellation still propagates, after cancelling the batches).
+        """
+        picked: List[Tuple[str, Dict[str, Any]]] = []
+        seen: set = set()
+        for i, raw in enumerate(raw_rows):
+            if not isinstance(raw, dict):
+                continue
+            ext = article_external_id(raw, i)
+            if ext in seen:
+                continue
+            seen.add(ext)
+            picked.append((ext, raw))
+            if len(picked) >= self._MARKET_INGEST_CLASSIFY_CAP:
+                break
+        if not picked:
+            return {}
+        size = max(1, int(batch_size or self._MARKET_INGEST_BATCH_REFRESH))
+        batches = [picked[s: s + size] for s in range(0, len(picked), size)]
+        total = len(batches)
+
+        async def _one(n: int, batch: List[Tuple[str, Dict[str, Any]]]):
+            started = time.monotonic()
+            result = await self._batch_enrich_articles(
+                [{"title": raw.get("title") or "", "text": raw.get("text") or ""}
+                 for _, raw in batch],
+                ticker=MARKET_SCOPE,
+            )
+            logger.info(
+                "Market ingest: batch %d/%d (%d row(s)) answered in %.1fs", n, total,
+                len(batch), time.monotonic() - started,
+            )
+            return result
+
+        tasks = [asyncio.create_task(_one(n, b)) for n, b in enumerate(batches, 1)]
+        try:
+            _, pending = await asyncio.wait(tasks, timeout=budget_seconds)
+        finally:
+            # Also on our own cancellation: never leave a paid call running unowned.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        out: Dict[str, Dict[str, Any]] = {}
+        labelled: List[Dict[str, Any]] = []
+        for n, (task, batch) in enumerate(zip(tasks, batches), 1):
+            if task in pending or task.cancelled():
+                logger.warning(
+                    "Market ingest: batch %d/%d (%d row(s)) did not answer within %.0fs — "
+                    "those rows are written without a verdict (kept for their life)",
+                    n, total, len(batch), budget_seconds,
+                )
+                continue
+            error = task.exception()
+            result = task.result() if error is None else None
+            if error is not None or not isinstance(result, dict):
+                logger.warning(
+                    "Market ingest: batch %d/%d (%d row(s)) failed (%s) — written without "
+                    "a verdict", n, total, len(batch),
+                    f"{type(error).__name__}: {error}" if error is not None else "no answer",
+                )
+                continue
+            for pos, (ext, raw) in enumerate(batch):
+                enrichment = result.get(pos)
+                if not self._enrichment_is_usable(enrichment):
+                    continue
+                out[ext] = enrichment
+                if enrichment.get("sentiment_valid", True):
+                    labelled.append({
+                        "external_id": ext,
+                        "sentiment": enrichment.get("sentiment"),
+                        "published_at": _sanitize_published_at(raw.get("publishedDate")),
+                    })
+        if labelled:
+            from app.services.news_sentiment_trend_service import record_labels
+
+            await record_labels(
+                getattr(self, "supabase", None), MARKET_SCOPE, labelled,
+                model=news_model_name(),
+            )
+        verdicts = Counter(
+            normalize_model_scope(e.get("scope")) or "none" for e in out.values()
+        )
+        logger.info(
+            "Market ingest: judged %d/%d new row(s) before writing (%s)",
+            len(out), len(picked), dict(verdicts),
+        )
+        return out
+
+    def _existing_external_ids(self, scope: str, ext_ids: List[str]) -> Optional[set]:
+        """Which of ``ext_ids`` already have a row under ``scope`` (expired ones included —
+        the refresh re-stamps those rather than inserting them). None when unreadable.
+
+        Blocking — call via ``asyncio.to_thread``."""
+        found: set = set()
+        try:
+            for s in range(0, len(ext_ids), self._EXISTING_LOOKUP_CHUNK):
+                chunk = ext_ids[s: s + self._EXISTING_LOOKUP_CHUNK]
+                result = (
+                    self.supabase.table("ticker_news_cache")
+                    .select("external_id")
+                    .eq("ticker", scope)
+                    .in_("external_id", chunk)
+                    .execute()
+                )
+                found.update(
+                    r.get("external_id") for r in (result.data or [])
+                    if isinstance(r, dict) and r.get("external_id")
+                )
+        except Exception as e:
+            logger.warning(
+                "Market ingest: existing-row lookup failed for %d id(s) (%s: %s) — judging "
+                "them all", len(ext_ids), type(e).__name__, e,
+            )
+            return None
+        return found
+
+    async def _classify_new_market_rows(
+        self, raw_rows: List[Dict[str, Any]], limit: int, *,
+        budget_seconds: Optional[float] = None, batch_size: Optional[int] = None,
+    ) -> Tuple[Dict[str, Dict[str, Any]], Optional[set]]:
+        """`_classify_market_ingest` for the rows NOT yet in the table — the share of
+        BOTH Market writers, the refresh and the cold fetch. Returns ``(enrichments,
+        existing_external_ids)``; the ids are None when the lookup failed.
+
+        An existing row keeps the verdict it was first served with — both writers are
+        create-only, so judging it again would only spend a call. If the lookup fails
+        every row is judged (still bounded); the create-only pre-pass still writes only
+        the new ones. Defaults (refresh budget and batch) are read at call time."""
+        candidates = [
+            (article_external_id(raw, i), raw)
+            for i, raw in enumerate(raw_rows[:limit]) if isinstance(raw, dict)
+        ]
+        if not candidates:
+            return {}, set()
+        existing = await asyncio.to_thread(
+            self._existing_external_ids, MARKET_SCOPE, [e for e, _ in candidates]
+        )
+        if existing is None:
+            fresh = raw_rows[:limit]
+        else:
+            # Keep positions: `article_external_id` falls back to the index for a row
+            # with no url and no title, so the writer must see the same list order.
+            fresh = [raw if ext not in existing else None for ext, raw in candidates]
+        if not any(isinstance(r, dict) for r in fresh):
+            logger.info(
+                "Market ingest: all %d fetched row(s) already cached — nothing to judge",
+                len(candidates),
+            )
+            return {}, existing
+        enrichments = await self._classify_market_ingest(
+            fresh,
+            budget_seconds=(
+                self._MARKET_CLASSIFY_BUDGET_REFRESH_SECONDS
+                if budget_seconds is None else budget_seconds
+            ),
+            batch_size=batch_size or self._MARKET_INGEST_BATCH_REFRESH,
+        )
+        return enrichments, existing
+
+    @staticmethod
+    def _first_write_columns(
+        cache_key: str,
+        related: List[str],
+        now: datetime,
+        enrichment: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """The columns only a FIRST write may set: empty AI columns, or — for a Market row
+        judged at ingest — its summary and the `ai_model` scope stamp."""
+        if not enrichment:
+            return {
+                "related_tickers": related,
+                "cached_at": now.isoformat(),
+                "summary_bullets": json.dumps([]),
+                "sentiment": None,
+                "sentiment_confidence": 0,
+                "ai_processed": False,
+                "ai_model": None,
+            }
+        model_name = news_model_name()
+        return {
+            "related_tickers": list(
+                dict.fromkeys(related + list(enrichment.get("related_tickers") or []))
+            )[:8],
+            "cached_at": now.isoformat(),
+            "summary_bullets": json.dumps(enrichment.get("bullets") or []),
+            "sentiment": NewsCacheService._normalize_sentiment(
+                enrichment.get("sentiment", "")
+            ),
+            "sentiment_confidence": enrichment.get("confidence", 0),
+            "ai_processed": True,
+            "ai_model": (
+                stamp_model_scope(model_name, enrichment.get("scope"))
+                if cache_key == MARKET_SCOPE else model_name
+            ),
+        }
+
     # ── Private: shared row build + upsert ─────────────────────────────
 
     def _build_and_cache_rows(
@@ -728,8 +1242,25 @@ class NewsCacheService:
         fallback_ticker: Optional[str],
         label: str,
         ingest_only: bool = False,
+        enrichments: Optional[Dict[str, Dict[str, Any]]] = None,
+        existing: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         """Turn raw FMP articles into cache rows + API response, and upsert them.
+
+        ``enrichments`` (MARKET writers only): ``{external_id: enrichment}`` produced
+        BEFORE the write by `_classify_market_ingest`. A row that has one is written
+        already summarised — bullets, sentiment, the model's tickers and the
+        ``ai_model`` scope stamp — in the same write that makes it readable, so its Market
+        verdict exists from the moment it can be served and never changes afterwards
+        (`market_news_relevance`). It only ever reaches the create-only pre-pass: BOTH
+        Market writers (the refresh and the cold fetch) write ``ingest_only``, and a
+        Market write is forced to it here, because a full write would rewrite the
+        verdict and summary of a row that already exists — clients holding it would skip
+        a story (final review 2026-10-07, F1).
+
+        ``existing`` (MARKET writers only): the external ids `_classify_new_market_rows`
+        found already cached, or None when that lookup failed. Read only when the
+        pre-pass fails twice — see the comment there (review round 5, R5-1).
 
         Shared by the ticker, index, and market fetch paths — these were three
         byte-identical copies that had already drifted (the index copy used
@@ -751,6 +1282,13 @@ class NewsCacheService:
         enrichment that users already paid Gemini for, on a cache SHARED with
         the ticker/crypto/index/commodity detail screens.
         """
+        if cache_key == MARKET_SCOPE and not ingest_only:
+            logger.error(
+                "Market write requested as a full write (%s) — forced create-only: a full "
+                "write would rewrite the verdict of rows clients already hold", label,
+            )
+            ingest_only = True
+
         now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=CACHE_TTL_HOURS)
 
@@ -781,6 +1319,9 @@ class NewsCacheService:
             ext_ids.append(external_id)
 
             related = self._parse_tickers(raw, fallback_ticker)
+            first_write = self._first_write_columns(
+                cache_key, related, now, (enrichments or {}).get(external_id)
+            )
 
             row = {
                 "ticker": cache_key,
@@ -810,15 +1351,7 @@ class NewsCacheService:
                 #    check from max(cached_at). Re-stamping it every 15 minutes
                 #    means that check never trips and the 14-day sentiment corpus
                 #    is never rebuilt.
-                row.update({
-                    "related_tickers": related,
-                    "cached_at": now.isoformat(),
-                    "summary_bullets": json.dumps([]),
-                    "sentiment": None,
-                    "sentiment_confidence": 0,
-                    "ai_processed": False,
-                    "ai_model": None,
-                })
+                row.update(first_write)
             else:
                 # On the ingest/refresh path the block above is deliberately skipped so a
                 # refresh cannot clobber enrichment. But "don't overwrite" is only correct
@@ -830,33 +1363,29 @@ class NewsCacheService:
                 #
                 # Carry a complete row alongside, inserted with ON CONFLICT DO NOTHING
                 # below so it can only ever create, never overwrite.
-                insert_only_rows.append({
-                    **row,
-                    "related_tickers": related,
-                    "cached_at": now.isoformat(),
-                    "summary_bullets": json.dumps([]),
-                    "sentiment": None,
-                    "sentiment_confidence": 0,
-                    "ai_processed": False,
-                    "ai_model": None,
-                })
+                insert_only_rows.append({**row, **first_write})
             cache_rows.append(row)
 
-            response_articles.append({
+            article = {
                 "id": "",
                 "headline": row["headline"],
                 "summary": row["summary"],
-                "summary_bullets": [],
-                "sentiment": None,
-                "sentiment_confidence": 0,
+                "summary_bullets": json.loads(first_write["summary_bullets"]),
+                "sentiment": first_write["sentiment"],
+                "sentiment_confidence": first_write["sentiment_confidence"],
                 "source_name": row["source_name"],
                 "source_logo_url": None,
                 "published_at": row["published_at"],
                 "thumbnail_url": row["thumbnail_url"],
                 "article_url": row["article_url"],
-                "related_tickers": related,
-                "ai_processed": False,
-            })
+                "related_tickers": first_write["related_tickers"],
+                "ai_processed": first_write["ai_processed"],
+            }
+            if first_write["ai_processed"]:
+                # Internal: the Market cold path judges the response with the same stamp
+                # the cache holds, then strips the key (`_fetch_market_news`).
+                article["ai_model"] = first_write["ai_model"]
+            response_articles.append(article)
 
         if not cache_rows:
             logger.info("No usable FMP news rows for %s", label)
@@ -865,57 +1394,95 @@ class NewsCacheService:
         # Create-only pre-pass: gives a NEW row its `related_tickers` (and the other
         # first-write columns) at INSERT time. `ignore_duplicates=True` is
         # ON CONFLICT DO NOTHING, so an existing row is untouched and the enrichment
-        # -preservation contract above is intact. Best-effort: the merge upsert below is
-        # what the caller depends on, so a failure here is logged, never fatal.
+        # -preservation contract above is intact. Best-effort for a ticker scope: the merge
+        # upsert below is what the caller depends on, so a failure here is logged, never
+        # fatal. A MARKET row's verdict travels ONLY in this pre-pass, so there it is
+        # retried once (review round 5, R5-1).
+        prepass_failed = False
         if insert_only_rows:
-            try:
-                (
-                    self.supabase.table("ticker_news_cache")
-                    .upsert(
-                        insert_only_rows,
-                        on_conflict="ticker,external_id",
-                        ignore_duplicates=True,
-                        # Nothing reads this result, and postgrest-py defaults to
-                        # returning=representation — so this pre-pass was shipping every
-                        # inserted row back in full, `summary` (the article body) included.
-                        returning="minimal",
+            attempts = 2 if cache_key == MARKET_SCOPE else 1
+            for attempt in range(1, attempts + 1):
+                try:
+                    (
+                        self.supabase.table("ticker_news_cache")
+                        .upsert(
+                            insert_only_rows,
+                            on_conflict="ticker,external_id",
+                            ignore_duplicates=True,
+                            # Nothing reads this result, and postgrest-py defaults to
+                            # returning=representation — so this pre-pass was shipping every
+                            # inserted row back in full, `summary` (the article body) included.
+                            returning="minimal",
+                        )
+                        .execute()
                     )
+                    prepass_failed = False
+                    break
+                except Exception as e:
+                    prepass_failed = True
+                    logger.warning(
+                        "Create-only news pre-pass failed for %s (attempt %d/%d): %s: %s "
+                        "— new rows may have empty related_tickers",
+                        label, attempt, attempts, type(e).__name__, e,
+                    )
+
+        if prepass_failed and cache_key == MARKET_SCOPE:
+            # The merge below carries no AI columns, so a Market row it CREATED would be
+            # readable with no verdict for life (nothing re-judges a Market row). Merge
+            # only rows known to exist — that just renews them; the new ones are left
+            # for the next write, which creates and judges them. Which rows exist is
+            # unknown → no merge at all this time.
+            kept = (
+                [] if existing is None
+                else [r for r in cache_rows if r["external_id"] in existing]
+            )
+            kept_ids = {r["external_id"] for r in kept}
+            left_out = [r["external_id"] for r in cache_rows if r["external_id"] not in kept_ids]
+            lost = sum(1 for ext in left_out if (enrichments or {}).get(ext))
+            if existing is None:
+                logger.error(
+                    "Market write %s: the create-only pre-pass failed twice and which rows "
+                    "already exist is unknown — merge skipped, %d row(s) not written (%d "
+                    "judged verdict(s) lost; the next write retries them)",
+                    label, len(left_out), lost,
+                )
+            else:
+                logger.error(
+                    "Market write %s: the create-only pre-pass failed twice — %d new "
+                    "row(s) left out so none becomes readable without its verdict (%d "
+                    "judged verdict(s) lost; the next write creates and judges them)",
+                    label, len(left_out), lost,
+                )
+            cache_rows = kept
+
+        if cache_rows:
+            try:
+                # ⚠️ This one KEEPS returning=representation, unlike every other write in this
+                # service. The echo is consumed below to map external_id → the DB id, and
+                # replacing it with a follow-up SELECT would re-open the misattribution hazard
+                # the comment below describes for a measured saving of only ~65 KB per refresh
+                # (50 rows x ~1.5 KB, against a 417-row table and a 15-ticker sweeper universe).
+                # Not worth it here; it is worth it everywhere the result is discarded.
+                result = (
+                    self.supabase.table("ticker_news_cache")
+                    .upsert(cache_rows, on_conflict="ticker,external_id")
                     .execute()
                 )
+                # Assign the DB id by external_id match. Postgres does NOT guarantee that
+                # the RETURNING rows come back in VALUES order, so a positional zip could
+                # attach the wrong id — and thus the wrong enrichment — to an article.
+                id_by_ext = {
+                    r.get("external_id"): r.get("id", "")
+                    for r in (result.data or [])
+                    if r.get("external_id")
+                }
+                for art, ext in zip(response_articles, ext_ids):
+                    art["id"] = id_by_ext.get(ext, "")
+                logger.info("Cached %d raw articles for %s", len(cache_rows), label)
             except Exception as e:
-                logger.warning(
-                    "Create-only news pre-pass failed for %s: %s: %s — new rows may "
-                    "have empty related_tickers",
-                    label, type(e).__name__, e,
+                logger.error(
+                    "Cache insert failed for %s: %s: %s", label, type(e).__name__, e
                 )
-
-        try:
-            # ⚠️ This one KEEPS returning=representation, unlike every other write in this
-            # service. The echo is consumed below to map external_id → the DB id, and
-            # replacing it with a follow-up SELECT would re-open the misattribution hazard
-            # the comment below describes for a measured saving of only ~65 KB per refresh
-            # (50 rows x ~1.5 KB, against a 417-row table and a 15-ticker sweeper universe).
-            # Not worth it here; it is worth it everywhere the result is discarded.
-            result = (
-                self.supabase.table("ticker_news_cache")
-                .upsert(cache_rows, on_conflict="ticker,external_id")
-                .execute()
-            )
-            # Assign the DB id by external_id match. Postgres does NOT guarantee that
-            # the RETURNING rows come back in VALUES order, so a positional zip could
-            # attach the wrong id — and thus the wrong enrichment — to an article.
-            id_by_ext = {
-                r.get("external_id"): r.get("id", "")
-                for r in (result.data or [])
-                if r.get("external_id")
-            }
-            for art, ext in zip(response_articles, ext_ids):
-                art["id"] = id_by_ext.get(ext, "")
-            logger.info("Cached %d raw articles for %s", len(cache_rows), label)
-        except Exception as e:
-            logger.error(
-                "Cache insert failed for %s: %s: %s", label, type(e).__name__, e
-            )
 
         # Any article the upsert didn't yield an id for → temp fallback (still renders,
         # just not enrichable until the next cache cycle).
@@ -1101,13 +1668,22 @@ class NewsCacheService:
                 dict.fromkeys(existing_tickers + gemini_tickers)
             )[:8]
 
+            ai_model = news_model_name()
+            if ticker == MARKET_SCOPE:
+                # NEVER this answer's scope. A Market verdict is recorded once, at insert
+                # (`_first_write_columns`), because this row may already be on someone's
+                # screen: hiding it now would shift every later story one place left in
+                # the client's offset space and the next page would skip one (review
+                # 2026-10-06). Only a stamp the row already carries is kept.
+                ai_model = stamp_model_scope(ai_model, model_scope(row))
+
             update_data = {
                 "summary_bullets": json.dumps(enrichment.get("bullets", [])),
                 "sentiment": self._normalize_sentiment(enrichment.get("sentiment", "")),
                 "sentiment_confidence": enrichment.get("confidence", 0),
                 "related_tickers": merged_tickers,
                 "ai_processed": True,
-                "ai_model": news_model_name(),
+                "ai_model": ai_model,
             }
 
             # Merge enrichment into row for response
@@ -1268,6 +1844,21 @@ class NewsCacheService:
         },
     }
 
+    # The MARKET feed's schema: the shared one plus `scope` (`MARKET_SCOPE_RULE`), in the
+    # same single call. A separate object, so the ticker call and the 90-day backfill
+    # (both `_ENRICHMENT_SCHEMA`) keep their exact schema and golden.
+    _MARKET_ENRICHMENT_SCHEMA = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                **copy.deepcopy(_ENRICHMENT_SCHEMA["items"]["properties"]),
+                "scope": {"type": "STRING", "enum": list(MODEL_SCOPES)},
+            },
+            "required": ["index", "bullets", "sentiment", "confidence", "scope"],
+        },
+    }
+
     @staticmethod
     def _normalize_sentiment(raw: str) -> str:
         """Normalize any sentiment string to DB-compatible bullish/bearish/neutral."""
@@ -1352,6 +1943,9 @@ class NewsCacheService:
                 "sentiment_valid": strict_sentiment(raw_sentiment) is not None,
                 "confidence": _clamp_confidence(item.get("confidence", 0)),
                 "related_tickers": cleaned_tickers,
+                # Market prompt only; None when absent or off-list, which the Market
+                # feed reads as "no verdict" (its ticker rule decides), never "company".
+                "scope": normalize_model_scope(item.get("scope")),
             }
         return result
 
@@ -1378,7 +1972,12 @@ class NewsCacheService:
                 # "Cay AI" in the Updates UI exactly like the guarded report/chat surfaces,
                 # but built its own bare instruction and inherited neither guard.
                 system_instruction=neutral_system_instruction(ENRICHMENT_SYSTEM_BASE),
-                response_schema=self._ENRICHMENT_SCHEMA,
+                # The Market prompt also asks for `scope`; every other scope keeps the
+                # shared schema byte for byte.
+                response_schema=(
+                    self._MARKET_ENRICHMENT_SCHEMA if ticker == MARKET_SCOPE
+                    else self._ENRICHMENT_SCHEMA
+                ),
                 gemini_client=getattr(self, "gemini", None),
             )
 
@@ -1459,9 +2058,14 @@ class NewsCacheService:
     # ── Private: Cache lookup ─────────────────────────────────────────
 
     def _get_cached(
-        self, ticker: str, limit: int, offset: int = 0
+        self, ticker: str, limit: int, offset: int = 0, *, strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """Query ticker_news_cache for fresh (non-expired) rows.
+
+        ``strict=True`` (the Market pager) raises `_MarketCacheUnreadable` on a failed
+        read instead of returning ``[]``: there, an empty answer means "cold, go and
+        write", and a read error must never take that path. The ticker and index callers
+        keep the old non-strict contract.
 
         ``offset`` pages deeper into the retained history. The sweeper refreshes
         on a 96h lookback, so a busy scope holds several days of rows while a
@@ -1493,6 +2097,10 @@ class NewsCacheService:
             return result.data or []
         except Exception as e:
             logger.warning(f"Cache lookup failed for {ticker}: {e}")
+            if strict:
+                raise _MarketCacheUnreadable(
+                    f"{ticker} read at offset {offset}: {type(e).__name__}: {e}"
+                ) from e
             return []
 
     def get_cached_bulk(
@@ -1524,11 +2132,22 @@ class NewsCacheService:
         # coin (whose pair symbol never does) could only qualify by NAME. The
         # endpoint's `_get_cached` is `select("*")`, so the two readers disagreed
         # about the same rows. Pinned by tests/test_news_cache_bulk_projection.py.
+        # `ai_model` carries the Market rows' scope verdict (`market_news_relevance.
+        # model_scope`); without it here the card corpus would ignore the model's read
+        # that the feed (`select("*")`) applies.
         columns = (
             "id, ticker, external_id, headline, summary, sentiment, "
-            "ai_processed, published_at, article_url, source_name, related_tickers"
+            "ai_processed, published_at, article_url, source_name, related_tickers, "
+            "ai_model"
         )
         grouped: Dict[str, List[Dict[str, Any]]] = {}
+        # MARKET rows pass through `market_news_relevance` exactly as the feed's do
+        # (`_get_cached_market_page`), so the Insights card is written from — and the
+        # Updates-scope chat grounded on — the stories the Market tab actually shows.
+        # Filtered BEFORE the per-scope cap, so the card still sees `per_scope_limit`
+        # market stories rather than 25 rows minus the hidden ones. Every market row
+        # is also kept in order for the floor (applied after the scan).
+        market_rows: List[Dict[str, Any]] = []
 
         # PAGED, not a single `.limit(per_scope_limit * len(scopes))`.
         # A global LIMIT over a global ORDER BY has no per-group semantics: the
@@ -1577,6 +2196,10 @@ class NewsCacheService:
                 key = row.get("ticker")
                 if not key:
                     continue
+                if key == MARKET_SCOPE:
+                    market_rows.append(row)
+                    if not is_market_story(row):
+                        continue
                 bucket = grouped.setdefault(key, [])
                 if len(bucket) < per_scope_limit:
                     bucket.append(row)
@@ -1590,6 +2213,13 @@ class NewsCacheService:
                 break
             offset += page_size
 
+        if market_rows:
+            # The final pass applies the floor: a market cache that holds fewer than
+            # MIN_MARKET_STORIES market-wide rows gets its newest hidden ones back
+            # rather than an empty corpus (logged by the selector).
+            grouped[MARKET_SCOPE] = select_market_stories(
+                market_rows, label="market corpus"
+            )[:per_scope_limit]
         return grouped
 
     async def refresh_scope_news(
@@ -1661,6 +2291,12 @@ class NewsCacheService:
 
         if not raw:
             return 0
+        # MARKET: judge the rows this refresh is about to CREATE before they become
+        # readable (`_classify_new_market_rows`) — a Market verdict is fixed at insert
+        # and never changed afterwards. Rows already cached keep theirs.
+        enrichments, existing = None, None
+        if scope == MARKET_SCOPE:
+            enrichments, existing = await self._classify_new_market_rows(raw, limit)
         # ingest_only: this is a REFRESH of a scope whose rows are very likely
         # already cached and already enriched. Writing the AI columns here would
         # reset every one of them (see _build_and_cache_rows).
@@ -1669,7 +2305,8 @@ class NewsCacheService:
         # stalls every other in-flight request on this instance.
         written = await asyncio.to_thread(
             self._build_and_cache_rows,
-            scope, raw, limit, fallback, f"{scope} (refresh)", True,
+            scope, raw, limit, fallback, f"{scope} (refresh)", True, enrichments,
+            existing,
         )
         return len(written)
 
@@ -1814,6 +2451,18 @@ class NewsCacheService:
         """
         # The general market feed backs the Updates screen's default tab, so it is
         # warmed FIRST and unconditionally — even when nobody has a watchlist yet.
+        #
+        # Through the REFRESH first: this is background work, so new Market rows are
+        # judged under the refresh's budget (create-only, like every Market write) and the
+        # current ones renewed. Off-hours the sweeper does not refresh the Market, so
+        # without this the rows expired and the pre-warmer led a cold miss under the
+        # 10-second budget meant for a person waiting (final review 2026-10-07, F2).
+        try:
+            await self.refresh_scope_news(MARKET_SCOPE)
+        except Exception as e:
+            logger.warning(
+                "Pre-warm refresh failed for %s: %s: %s", MARKET_SCOPE, type(e).__name__, e
+            )
         try:
             market = await self.get_market_news(limit=50)
             enriched = await self.enrich_window(

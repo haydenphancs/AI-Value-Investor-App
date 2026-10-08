@@ -434,7 +434,10 @@ struct TickerDetailView: View {
                 onRevenueBreakdownDetailTap: viewModel.handleRevenueBreakdownDetail,
                 onHealthCheckDetailTap: viewModel.handleHealthCheckDetail,
                 growthIsDegraded: viewModel.growthIsDegraded,
-                profitPowerIsDegraded: viewModel.profitPowerIsDegraded
+                profitPowerIsDegraded: viewModel.profitPowerIsDegraded,
+                growthPeerUnavailable: viewModel.growthPeerUnavailable,
+                profitPowerPeerUnavailable: viewModel.profitPowerPeerUnavailable,
+                healthCheckPeerUnavailable: viewModel.healthCheckPeerUnavailable
             )
         case .holders:
             if let holdersData = viewModel.holdersData {

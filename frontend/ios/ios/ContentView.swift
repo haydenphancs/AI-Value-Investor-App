@@ -10,7 +10,7 @@ import SwiftUI
 struct ContentView: View {
     // Needed to observe a notification tap (`pendingPushNotification`) and present its detail.
     @Environment(AppState.self) private var appState
-    @State private var selectedTab: HomeTab = .home
+    @State private var selectedTab: HomeTab = ContentView.initialTab
     @State private var researchTickerSymbol: String? = nil
     /// Bumped (never reset) on EVERY "AI Deep Research" handoff. The Research tab observes it
     /// together with the ticker, so a handoff of the ticker it already holds still lands on the
@@ -69,7 +69,7 @@ struct ContentView: View {
             // previews-only). All four sections fetch `GET /home/dashboard`.
             // (The legacy `HomeViewWithBinding` that used to sit below has been deleted —
             // see the header of Views/Screens/HomeView.swift for why.)
-            HomeDashboardView(selectedTab: $selectedTab)
+            homeDashboard
             .opacity(selectedTab == .home ? 1 : 0)
             .allowsHitTesting(selectedTab == .home)
             .environment(\.isActiveTab, selectedTab == .home)
@@ -202,6 +202,37 @@ struct ContentView: View {
                 researchTickerSymbol = nil
             }
         }
+        #if DEBUG
+        .onAppear { StoreScreenshotMode.showLabelIfEnabled() }
+        #endif
+    }
+
+    /// The tab the shell opens on. `.home`, except a DEBUG App Store screenshot run may pick
+    /// another (`StoreScreenshotMode`, `CAYDEX_STORE_SHOT_TAB`).
+    private static var initialTab: HomeTab {
+        #if DEBUG
+        return StoreScreenshotMode.startTab ?? .home
+        #else
+        return .home
+        #endif
+    }
+
+    /// The Home tab. A DEBUG App Store screenshot run swaps in sample data through an
+    /// in-memory snapshot store, so the device's saved dashboard is neither shown nor replaced.
+    @ViewBuilder private var homeDashboard: some View {
+        #if DEBUG
+        if StoreScreenshotMode.isOn {
+            HomeDashboardView(
+                selectedTab: $selectedTab,
+                repository: StoreShotHomeRepository(),
+                snapshotStore: .inMemory()
+            )
+        } else {
+            HomeDashboardView(selectedTab: $selectedTab)
+        }
+        #else
+        HomeDashboardView(selectedTab: $selectedTab)
+        #endif
     }
 
     /// Present a tapped push — its DETAIL, or for a report the REPORT itself — taking down

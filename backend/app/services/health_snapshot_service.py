@@ -25,9 +25,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
-from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.schemas.stock_overview import (
+    SnapshotItemResponse,
+    SnapshotMetricResponse,
+    snapshot_build_time,
+    with_cached_build_time,
+)
+from app.services.financials_metric_gate import (
+    interest_coverage_applicable,
+    liquidity_ratios_applicable,
+)
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
+from app.services.valuation_snapshot_service import split_peer_cells
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +50,19 @@ _CACHE_TTL = 300  # 5 minutes
 # rows written under the old rules rebuild on their next read instead of serving 24h.
 # 2 (2026-09-30): neutral sector metrics earn half credit in pass_rating (they counted as
 #     misses), and Altman Z is omitted for banks / insurers / REITs (it read as distress).
-_SNAPSHOT_PAYLOAD_VERSION = 3  # 3: health-check status rules changed (2026-09-30 deep check)
+# 3 (2026-09-30 deep check): health-check status rules changed.
+# 4 (2026-10-07): each compared metric carries `peer_level` (the Health Check's own on the
+#     main path, the lookup cell's on the local fallback) and the card `computed_at`; the
+#     fallback reads the 2026-10-07 lookup (a mature same-period peer cell, never a partial
+#     year). Also re-reads every row built over the pre-2026-10-07 Health Check, whose
+#     metrics this card copies (its own rows carry a separate version).
+# 5 (2026-10-07, review round 2): insurance brokers get their Interest Coverage row back
+#     (`financials_metric_gate`; the Health Check is v6); a current / quick ratio /
+#     interest-coverage median that is the Financial Services SECTOR's (bank-dominated) is
+#     no comparison on either path; and a card with fewer than two SCORED rows is rated 0
+#     (unavailable) with no `weighted_score` — a bank's card rested on D/E alone (see
+#     `_MIN_SCORED_FOR_RATING`).
+_SNAPSHOT_PAYLOAD_VERSION = 5
 _VERSION_KEY = "_schema_v"
 
 
@@ -151,6 +173,27 @@ _SECTOR_RATING_TYPES = {
     "quick_ratio",
 }
 
+# A card is RATED (1-5 + `weighted_score`) only when at least this many of its rows carry a
+# score (decided 2026-10-07, review round 2, HC-3 / F1). For a bank, insurer, broker-dealer,
+# asset manager or lender the Health Check omits Altman Z and the three liquidity rows, and
+# this card hides P/E and ROE, so ONE row was left — Debt-to-Equity — and the card read
+# Solid / Moderate / Soft (4.2 / 3.0 / 1.8 against the neutral Z anchor) on that ratio
+# alone, persisted 24h, shown as the report's Health stars and fed into the persona
+# health factor. One comparison is not a financial-health verdict. With fewer than two
+# scored rows the card is rated 0 and carries no `weighted_score`. On the Overview, rating 0
+# reads as unavailable ("--") on every iOS build, as the degraded Price card already does. In
+# the paid report the card says "Not Rated" (card_verdict) — grey from 1.01 on, but RED on the
+# shipped build 10, whose report card colours any 0-star label with its bearish arm (known
+# cosmetic issue until 1.01 is adopted; no backend value avoids it without inventing a rating).
+# The report's health vital is then unmeasured for these gated financials (no absolute D/E
+# bands on a bank's balance sheet) instead of voting on one ratio. The rows keep
+# their own scores: the D/E comparison is real, only the card-level verdict is withheld.
+# It is a company state, not an outage, so the build is still persisted. (Alternatives
+# rejected: folding in the Health Check's P/E and ROE would let a valuation multiple decide
+# "health" and duplicate the Price / Profitability cards; a constant neutral 3 is a made-up
+# verdict.) Same rule on the local fallback path.
+_MIN_SCORED_FOR_RATING = 2
+
 # Metrics where the value is a percentage (ROE)
 _PCT_METRICS = {"roe"}
 
@@ -165,11 +208,27 @@ def _fmt_value(metric_type: str, value: Optional[float]) -> str:
 
 
 def _metric_name(metric_type: str, value: Optional[float], comparison_value: Optional[float]) -> str:
-    """Build metric name with optional sector context."""
+    """Build metric name with optional sector context.
+
+    The words stay "vs sector" whatever the peer level: shipped iOS builds strip the
+    suffix by the word "sector", and newer builds swap the wording by `peer_level`."""
     label = _DISPLAY_NAMES.get(metric_type, metric_type)
-    if value is not None and comparison_value is not None:
+    if _compared(value, comparison_value):
         return f"{label} (vs sector {comparison_value:.2f})"
     return label
+
+
+def _compared(value: Optional[float], comparison_value: Optional[float]) -> bool:
+    """True when `_metric_name` prints a peer median — the one condition under which a
+    metric carries a `peer_level`."""
+    return value is not None and comparison_value is not None
+
+
+def _peer_level(level: Any, value: Optional[float], comparison_value: Optional[float]) -> Optional[str]:
+    """`peer_level` for a metric: the level of the median its name prints, else None."""
+    if not _compared(value, comparison_value):
+        return None
+    return level if level in ("industry", "sector") else None
 
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
@@ -465,7 +524,7 @@ class HealthSnapshotService:
                     version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
                 )
                 return None
-            return SnapshotItemResponse(**json_data)
+            return SnapshotItemResponse(**with_cached_build_time(json_data, cached_at))
 
         except Exception as e:
             logger.warning(
@@ -593,6 +652,11 @@ class HealthSnapshotService:
                     name=name, value=value,
                     metric_key=_VERDICT_KEY.get(m.type),
                     score=_health_metric_score(m),
+                    # The Health Check's own level for its `comparison_value` (absent on a
+                    # build that predates the field → None, generic wording on iOS).
+                    peer_level=_peer_level(
+                        getattr(m, "peer_level", None), m.value, m.comparison_value,
+                    ),
                 ))
 
             # Z-Score for the rating blend
@@ -605,37 +669,67 @@ class HealthSnapshotService:
             logger.warning(
                 f"HealthCheckService returned None for {ticker} — using local fallback"
             )
+            from app.services.health_check_service import (
+                _bank_pooled_sector_cell,
+                altman_z_applicable,
+            )
+
             raw_sector = profile.get("sector", "")
             sector = _normalize_sector(raw_sector) if raw_sector else ""
             # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
             industry = profile.get("industry", "") if isinstance(profile, dict) else ""
             sector_ic = sector_qr = sector_de = sector_cr = None
+            fb_levels: Dict[str, Optional[str]] = {}
             if sector:
                 try:
-                    # CURRENT benchmark per metric: TTM row if present, else latest
-                    # mature annual value (fallback).
+                    # CURRENT benchmark per metric (`get_current_benchmarks`: mature
+                    # industry TTM → mature sector TTM → newest complete mature annual →
+                    # none), with the level of each cell for `peer_level`.
                     # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
-                    cur = await asyncio.to_thread(
-                        get_sector_benchmark_lookup().get_current_benchmark_values,
+                    cells = await asyncio.to_thread(
+                        get_sector_benchmark_lookup().get_current_benchmarks,
                         industry,
                         sector,
                         ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
                     )
+                    cur, fb_levels = split_peer_cells(cells)
                     # A FAILED lookup (swallowed DB error) answers the same all-None
                     # shape as "this peer group has no rows" — but it is a transient
                     # hole, not an answer: every ratio falls back to absolute heuristics.
                     # Serve it; never persist it (same rule as the health check's own).
-                    if lookup_failed(cur):
+                    if lookup_failed(cells):
                         logger.warning(
                             "Health snapshot fallback: benchmark lookup FAILED for %s "
                             "(industry=%r, sector=%r) — scoring on absolute heuristics, "
                             "build marked degraded", ticker, industry, sector,
                         )
                         degraded.append("benchmarks")
-                    sector_ic = cur.get("interest_coverage")
-                    sector_qr = cur.get("quick_ratio")
-                    sector_de = cur.get("debt_to_equity")
-                    sector_cr = cur.get("current_ratio")
+                    # The Financial Services SECTOR median of a liquidity / coverage
+                    # ratio is never a peer group — bank and insurer values, or, once the
+                    # producer leaves those out, shells, exchanges and developers: no
+                    # comparison (the Health Check's PERMANENT rule,
+                    # `_bank_pooled_sector_cell`).
+                    for metric in ("interest_coverage", "quick_ratio", "current_ratio"):
+                        if cur.get(metric) is not None and _bank_pooled_sector_cell(
+                            metric, fb_levels.get(metric), sector,
+                        ):
+                            logger.info(
+                                "Health snapshot fallback %s: %s median %r is the Financial "
+                                "Services SECTOR's (industry=%r) — not a peer group, no "
+                                "comparison",
+                                ticker, metric, cur.get(metric), industry,
+                            )
+                            cur = {**cur, metric: None}
+                    # A non-positive median is no benchmark — `_fallback_sector_score`
+                    # already refused to score on one, but the label printed it
+                    # ("vs sector -0.50").
+                    sector_ic, sector_qr, sector_de, sector_cr = (
+                        v if v is not None and v > 0 else None
+                        for v in (
+                            cur.get("interest_coverage"), cur.get("quick_ratio"),
+                            cur.get("debt_to_equity"), cur.get("current_ratio"),
+                        )
+                    )
                 except Exception as e:
                     logger.warning(
                         "Health snapshot fallback: benchmark lookup raised for %s: %s: %s "
@@ -647,14 +741,15 @@ class HealthSnapshotService:
             # Z-Score from balance sheet + TTM income + market cap. Omitted outright for a
             # bank / insurer / REIT, exactly as the health check omits it, so the two
             # paths of this card show the same rows for the same company.
-            from app.services.health_check_service import altman_z_applicable
-
             z_score = _compute_z_score(bs, inc, mcap, sector=raw_sector, industry=industry)
             if altman_z_applicable(raw_sector, industry):
                 z_value = f"{z_score}" if z_score is not None else "—"
                 metrics.append(SnapshotMetricResponse(
                     name="Altman Z-Score", value=z_value,
-                    metric_key="altman_z", score=_zscore_rating(z_score),
+                    metric_key="altman_z",
+                    # An "—" row scores nothing (`_zscore_rating(None)` is the neutral
+                    # blend anchor, not a reading of this company).
+                    score=_zscore_rating(z_score) if z_score is not None else None,
                 ))
             z_rating = _zscore_rating(z_score)
 
@@ -671,50 +766,81 @@ class HealthSnapshotService:
                 name=_metric_name("debt_to_equity", de, sector_de),
                 value=_fmt_value("debt_to_equity", de),
                 metric_key="debt_to_equity",
+                peer_level=_peer_level(fb_levels.get("debt_to_equity"), de, sector_de),
                 score=_fallback_sector_score(de, sector_de, lower_is_better=True),
             ))
+
+            # Current ratio, interest coverage and quick ratio are omitted for a bank /
+            # insurer / capital-markets firm, and current + quick ratio only for an
+            # insurance broker, exactly as the health check omits them
+            # (`financials_metric_gate`), so the two paths of this card show the same rows.
+            # Their values stay None, so they are not scored in pass_rating below either.
+            liquidity_ok = liquidity_ratios_applicable(industry)
+            coverage_ok = interest_coverage_applicable(industry)
+            if not (liquidity_ok and coverage_ok):
+                logger.info(
+                    "Health snapshot fallback %s: %s omitted — not meaningful for "
+                    "industry=%r", ticker,
+                    ", ".join(name for name, ok in (
+                        ("current ratio", liquidity_ok), ("interest coverage", coverage_ok),
+                        ("quick ratio", liquidity_ok),
+                    ) if not ok),
+                    industry,
+                )
 
             # Current Ratio = total current assets / total current liabilities
             curr_assets = _safe_float(bs, "totalCurrentAssets")
             curr_liab = _safe_float(bs, "totalCurrentLiabilities")
             cr = None
-            if curr_assets is not None and curr_liab is not None and curr_liab > 0:
+            if (
+                liquidity_ok and curr_assets is not None and curr_liab is not None
+                and curr_liab > 0
+            ):
                 cr = round(curr_assets / curr_liab, 2)
-            metrics.append(SnapshotMetricResponse(
-                name=_metric_name("current_ratio", cr, sector_cr),
-                value=_fmt_value("current_ratio", cr),
-                metric_key="current_ratio",
-                score=_fallback_sector_score(cr, sector_cr, lower_is_better=False),
-            ))
+            if liquidity_ok:
+                metrics.append(SnapshotMetricResponse(
+                    name=_metric_name("current_ratio", cr, sector_cr),
+                    value=_fmt_value("current_ratio", cr),
+                    metric_key="current_ratio",
+                    peer_level=_peer_level(fb_levels.get("current_ratio"), cr, sector_cr),
+                    score=_fallback_sector_score(cr, sector_cr, lower_is_better=False),
+                ))
 
             # Interest Coverage = EBIT / |Interest Expense|. interestExpense
             # is reported as a positive number on the income statement.
             op_income = _safe_float(inc, "operatingIncome")
             int_expense = _safe_float(inc, "interestExpense")
             ic = None
-            if op_income is not None and int_expense is not None and abs(int_expense) > 0:
+            if (
+                coverage_ok and op_income is not None and int_expense is not None
+                and abs(int_expense) > 0
+            ):
                 ic = round(op_income / abs(int_expense), 2)
-            metrics.append(SnapshotMetricResponse(
-                name=_metric_name("interest_coverage", ic, sector_ic),
-                value=_fmt_value("interest_coverage", ic),
-                metric_key="interest_coverage",
-                score=_fallback_sector_score(ic, sector_ic, lower_is_better=False),
-            ))
+            if coverage_ok:
+                metrics.append(SnapshotMetricResponse(
+                    name=_metric_name("interest_coverage", ic, sector_ic),
+                    value=_fmt_value("interest_coverage", ic),
+                    metric_key="interest_coverage",
+                    peer_level=_peer_level(fb_levels.get("interest_coverage"), ic, sector_ic),
+                    score=_fallback_sector_score(ic, sector_ic, lower_is_better=False),
+                ))
 
             # Quick Ratio = (cash + receivables) / current liabilities
             cash = _safe_float(bs, "cashAndCashEquivalents")
             receivables = _safe_float(bs, "netReceivables")
             qr = None
-            if curr_liab is not None and curr_liab > 0:
+            if liquidity_ok and curr_liab is not None and curr_liab > 0:
                 qr_numerator = (cash or 0) + (receivables or 0)
                 if qr_numerator > 0:
                     qr = round(qr_numerator / curr_liab, 2)
-            metrics.append(SnapshotMetricResponse(
-                name=_metric_name("quick_ratio", qr, sector_qr),
-                value=_fmt_value("quick_ratio", qr),
-                metric_key="quick_ratio",
-                score=_fallback_sector_score(qr, sector_qr, lower_is_better=False),
-            ))
+            if liquidity_ok:
+                metrics.append(SnapshotMetricResponse(
+                    name=_metric_name("quick_ratio", qr, sector_qr),
+                    value=_fmt_value("quick_ratio", qr),
+                    metric_key="quick_ratio",
+                    peer_level=_peer_level(fb_levels.get("quick_ratio"), qr, sector_qr),
+                    score=_fallback_sector_score(qr, sector_qr, lower_is_better=False),
+                ))
 
         # ── Rating blend: 40% Altman Z + 60% pass-rate over the 4 sector-
         # comparable metrics (D/E, Current Ratio, Interest Coverage, Quick
@@ -764,8 +890,22 @@ class HealthSnapshotService:
             if _fb:
                 pass_rating = round(sum(_fb) / len(_fb))
 
-        weighted = 0.4 * z_rating + 0.6 * pass_rating
+        weighted: Optional[float] = 0.4 * z_rating + 0.6 * pass_rating
         rating = max(1, min(5, round(weighted)))
+        # Fewer than two scored rows: no card-level verdict (`_MIN_SCORED_FOR_RATING`).
+        scored_rows = [
+            m for m in metrics
+            if m.score is not None and m.value not in (None, "", "—", "N/M")
+        ]
+        if len(scored_rows) < _MIN_SCORED_FOR_RATING:
+            logger.info(
+                "Health snapshot %s: %d scored row(s) (%s) — card rated 0 (unavailable), "
+                "no weighted_score; one comparison is not a health verdict",
+                ticker, len(scored_rows),
+                ", ".join(m.metric_key or m.name for m in scored_rows) or "none",
+            )
+            weighted = None
+            rating = 0
 
         # Also covers a health check that returned NO metrics, the case HealthCheckService
         # itself refuses to persist: the card then has nothing but the placeholder below.
@@ -779,7 +919,8 @@ class HealthSnapshotService:
             rating=rating,
             metrics=metrics,
             full_report_available=True,
-            weighted_score=round(weighted, 3),
+            weighted_score=round(weighted, 3) if weighted is not None else None,
+            computed_at=snapshot_build_time(),
         )
         return snapshot, degraded
 

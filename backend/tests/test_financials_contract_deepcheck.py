@@ -43,7 +43,7 @@ from app.integrations.fmp import (
 )
 from app.schemas.earnings import EarningsQuarterSchema, EarningsResponse
 from app.schemas.growth import GrowthResponse
-from app.schemas.health_check import HealthCheckResponse
+from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
 from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import (
@@ -285,6 +285,13 @@ _NEW_FIELDS = [
     # P19: False = no cash-flow row for the quarter (0.0 placeholders, not a measured $0).
     (SignalOfConfidenceDataPointSchema, "cash_flow_reported", "SignalOfConfidenceDataPointDTO",
      "cashFlowReported", "Bool"),
+    # 2026-10-05: the yields' denominator (USD millions); the Capital view's scale floor.
+    (SignalOfConfidenceDataPointSchema, "market_cap", "SignalOfConfidenceDataPointDTO",
+     "marketCap", "Double"),
+    # 2026-10-07: the peer group each comparison / drawn peer line comes from.
+    (HealthCheckMetricSchema, "peer_level", "HealthCheckMetricDTO", "peerLevel", "String"),
+    (ProfitPowerResponse, "peer_group_levels", "ProfitPowerResponseDTO", "peerGroupLevels",
+     "[String: String]"),
 ]
 
 

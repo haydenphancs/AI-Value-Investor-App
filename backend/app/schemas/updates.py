@@ -235,8 +235,10 @@ class SentimentTrendResponse(BaseModel):
     days: int
     # Oldest first.
     series: List[SentimentTrendDayResponse] = Field(default_factory=list)
-    # The first ET day this scope has any label, "YYYY-MM-DD" — the chart's
-    # "tracking since" footer. None before the first label.
+    # The OLDEST ET day this scope has a label still in the log, "YYYY-MM-DD" (the log keeps
+    # RETENTION_DAYS = 120): the day scoring began until the history reaches that edge, then
+    # just the oldest day on file. The app's "since <date>" ("120+ days" at the edge). None
+    # before the first label.
     tracking_since: Optional[str] = None
     # The scope's 90-day backfill: "building" (the app shows "Building 90-day history…" and
     # re-checks), "ready", or None (Market feed, unsupported symbol, backfill switched off).

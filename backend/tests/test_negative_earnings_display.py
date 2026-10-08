@@ -367,6 +367,14 @@ class _StubLookup:
     def get_current_benchmark_values(self, industry, sector, metrics):
         return dict(self._bench)
 
+    def get_current_benchmarks(self, industry, sector, metrics):
+        # The snapshot services read the RICH cells since 2026-10-07 (`peer_level`).
+        return {
+            m: ({"value": self._bench[m], "level": "sector", "peer_group_name": sector,
+                 "n": 50} if self._bench.get(m) is not None else None)
+            for m in metrics
+        }
+
 
 async def _compute_with(ratios_ttm, monkeypatch, bench=None, fmp=None):
     """Drive the REAL `_compute` with no network of any kind.
@@ -721,22 +729,17 @@ async def test_the_persisted_payload_carries_no_absolute_price(monkeypatch):
 # `stock_overview_service._build_valuation_snapshot` renders the SAME card when
 # `get_valuation_snapshot` raised. It had its own copy of everything and had
 # zero test coverage — which is exactly how the "Neg." fix missed it.
+#
+# Since 2026-10-07 it shows the multiples with NO peer comparison and NO score: its
+# ratios are the overview's ANNUAL payloads, and every peer median is a TTM median of
+# current multiples — "P/E (1.63x sector avg 22)" compared two different clocks.
 
 
-def _fallback(fr, km=None, bench=None, sector="Technology"):
+def _fallback(fr, km=None, sector="Technology"):
     from app.services.stock_overview_service import StockOverviewService
-    import app.services.stock_overview_service as sos
 
     svc = StockOverviewService.__new__(StockOverviewService)
-    lookup = _StubLookup(bench)
-    original = sos.get_sector_benchmark_lookup
-    sos.get_sector_benchmark_lookup = lambda: lookup
-    try:
-        return svc._build_valuation_snapshot(
-            fr, km or {}, {}, {}, {}, {"sector": sector}, sector, "Software",
-        )
-    finally:
-        sos.get_sector_benchmark_lookup = original
+    return svc._build_valuation_snapshot(fr, km or {}, {}, {}, {}, {"sector": sector})
 
 
 def _pe_of(snapshot):
@@ -744,6 +747,16 @@ def _pe_of(snapshot):
     with no parentheses when the benchmark is missing — a `startswith("P/E (")`
     helper raises StopIteration on precisely the degraded case under test."""
     return next(m.value for m in snapshot.metrics if m.metric_key == "pe")
+
+
+def _assert_no_peer_claim(snapshot):
+    """No median, no multiple of one, no score, no rating: nothing on the card compares."""
+    for m in snapshot.metrics:
+        assert "avg" not in m.name and "sector" not in m.name.lower(), m.name
+        assert "(" not in m.name, f"a comparison suffix survived: {m.name!r}"
+        assert m.score is None, f"{m.metric_key} still scored {m.score}"
+    assert snapshot.rating == 0, "the degraded card still carries a 1-5 verdict"
+    assert snapshot.weighted_score is None
 
 
 def test_the_fallback_card_says_neg_for_a_loss_maker_not_dash():
@@ -754,65 +767,65 @@ def test_the_fallback_card_says_neg_for_a_loss_maker_not_dash():
     assert _pe_of(snap) == "Neg."
 
 
-def test_the_fallback_card_uses_real_sector_benchmarks():
-    """It scored against a hardcoded table (Technology 30.0) while the primary
-    used `sector_benchmarks`. A wrong median is a wrong star rating on a card the
-    user cannot tell apart from the real one."""
-    snap = _fallback({"priceToEarningsRatioTTM": 35.54}, bench={"pe_ratio": 22.0})
-    name = next(m.name for m in snap.metrics if m.metric_key == "pe")
-    assert "sector avg 22" in name
-    assert "sector avg 30" not in name
-
-
-def test_the_fallback_card_degrades_honestly_with_no_benchmark():
-    """No benchmark must mean NO sector claim — not a fabricated average."""
-    snap = _fallback({"priceToEarningsRatioTTM": 35.54}, bench={})
-    name = next(m.name for m in snap.metrics if m.metric_key == "pe")
-    assert "sector avg" not in name
+def test_the_fallback_card_makes_no_peer_claim():
+    """It scored ANNUAL multiples against TTM medians (and before that, against a
+    hardcoded table: Technology 30.0). Now it claims nothing about peers."""
+    snap = _fallback({"priceToEarningsRatio": 35.54, "priceToSalesRatio": 7.5,
+                      "priceToBookRatio": 12.0, "enterpriseValueMultiple": 20.0},
+                     {"earningsYield": 0.03})
     assert _pe_of(snap) == "35.54"
+    _assert_no_peer_claim(snap)
 
 
-def test_the_fallback_card_survives_a_benchmark_lookup_failure():
-    """This is already the degraded path; it must not be able to fail the
-    whole overview."""
-    from app.services.stock_overview_service import StockOverviewService
-    import app.services.stock_overview_service as sos
+@pytest.mark.parametrize("fr", [
+    {},                                                   # nothing at all
+    {"priceToEarningsRatio": float("nan")},               # junk upstream value
+    {"priceToEarningsRatio": -3.0, "priceToSalesRatio": 0.0},  # loss-maker, zero sales multiple
+    {"priceToEarningsRatio": 1e12},                       # absurd magnitude
+])
+def test_the_fallback_card_stays_unscored_for_outlier_inputs(fr):
+    """Whatever the inputs, the degraded card never grows a verdict back: the score
+    `build_price_snapshot` gives an absent / non-positive / absurd multiple (3 = neutral,
+    or an absolute band) must not leak through."""
+    snap = _fallback(fr)
+    assert len(snap.metrics) == 6
+    _assert_no_peer_claim(snap)
+
+
+def test_the_fallback_card_reads_no_benchmark(monkeypatch):
+    """No comparison means no lookup: an exploding lookup singleton is never touched."""
+    from app.services import sector_benchmark_lookup as sbl
+
+    touched = []
 
     class _Exploding:
-        def get_current_benchmark_values(self, *a, **k):
+        def __getattr__(self, name):
+            touched.append(name)
             raise RuntimeError("supabase down")
 
-    svc = StockOverviewService.__new__(StockOverviewService)
-    original = sos.get_sector_benchmark_lookup
-    sos.get_sector_benchmark_lookup = lambda: _Exploding()
-    try:
-        snap = svc._build_valuation_snapshot(
-            {"priceToEarningsRatioTTM": 35.54}, {}, {}, {}, {},
-            {"sector": "Technology"}, "Technology", "Software",
-        )
-    finally:
-        sos.get_sector_benchmark_lookup = original
-
+    monkeypatch.setattr(sbl, "_lookup", _Exploding())
+    snap = _fallback({"priceToEarningsRatioTTM": 35.54})
     assert _pe_of(snap) == "35.54"
+    assert touched == []
 
 
 def test_both_price_card_paths_are_the_same_code():
     """Parity by construction, not by convention: the fallback must go through
     the primary's builder. Two implementations is what let them drift into four
-    divergences, three of which were wrong numbers rather than missing ones."""
+    divergences, three of which were wrong numbers rather than missing ones. Only the
+    verdict differs: the fallback has none."""
     from app.services.valuation_snapshot_service import build_price_snapshot
 
-    fr = {"priceToEarningsRatioTTM": -18.75}
-    bench = {"pe_ratio": 22.0}
+    fr = {"priceToEarningsRatioTTM": -18.75, "priceToSalesRatioTTM": 4.2}
     direct = build_price_snapshot(
-        fr=fr, km={}, cf={}, inc={}, bs={}, profile={"sector": "Technology"},
-        bench=bench,
+        fr=fr, km={}, cf={}, inc={}, bs={}, profile={"sector": "Technology"}, bench={},
     )
-    via_fallback = _fallback(fr, bench=bench)
+    via_fallback = _fallback(fr)
 
     assert [m.value for m in direct.metrics] == [m.value for m in via_fallback.metrics]
     assert [m.name for m in direct.metrics] == [m.name for m in via_fallback.metrics]
-    assert direct.rating == via_fallback.rating
+    assert [m.metric_key for m in direct.metrics] == [m.metric_key for m in via_fallback.metrics]
+    _assert_no_peer_claim(via_fallback)
 
 
 def test_the_fallback_is_wired_into_build_snapshots():
@@ -822,29 +835,18 @@ def test_the_fallback_is_wired_into_build_snapshots():
     A wrong argument here is a 500 on the whole overview, not a wrong number.
     """
     from app.services.stock_overview_service import StockOverviewService
-    import app.services.stock_overview_service as sos
-
-    class _Stub:
-        def get_current_benchmark_values(self, industry, sector, metrics):
-            return {"pe_ratio": 22.0}
 
     svc = StockOverviewService.__new__(StockOverviewService)
-    original = sos.get_sector_benchmark_lookup
-    sos.get_sector_benchmark_lookup = lambda: _Stub()
-    try:
-        snapshots = svc._build_snapshots(
-            key_metrics=[{}],
-            fin_ratios=[{"priceToEarningsRatioTTM": -18.75}],
-            income_annual=[{}], balance_annual=[{}], cashflow_annual=[{}],
-            price=100.0, market_cap=1e12, sector="Technology",
-            profile={"sector": "Technology", "industry": "Software"},
-            industry="Software",
-        )
-    finally:
-        sos.get_sector_benchmark_lookup = original
+    snapshots = svc._build_snapshots(
+        key_metrics=[{}],
+        fin_ratios=[{"priceToEarningsRatioTTM": -18.75}],
+        income_annual=[{}], balance_annual=[{}], cashflow_annual=[{}],
+        price=100.0, market_cap=1e12, sector="Technology",
+        profile={"sector": "Technology", "industry": "Software"},
+        industry="Software",
+    )
 
     price = next(s for s in snapshots if s.category == "Price")
     assert _pe_of(price) == "Neg."                       # not the old "—"
-    assert "sector avg 22" in next(
-        m.name for m in price.metrics if m.metric_key == "pe")   # not the old 30
     assert len(price.metrics) == 6                       # was 4: no P/B, no yield
+    _assert_no_peer_claim(price)                         # annual multiples: no verdict

@@ -56,8 +56,16 @@ def _peer_word(peer_level: Optional[str]) -> str:
     return "Industry" if peer_level == "industry" else "Sector"
 
 
+_NOT_RATED: Tuple[str, str] = ("Not Rated", "neutral")
+
+
 def _rating_fallback(star_rating: int, peer: str) -> Tuple[str, str]:
-    """No usable per-metric scores → a generic, peer-aware label from the rating."""
+    """No usable per-metric scores → a generic, peer-aware label from the rating.
+
+    A card rated 0 never reaches here: `generate_card_verdict` answers "Not Rated" first
+    (kept as a backstop for a direct caller)."""
+    if star_rating <= 0:
+        return _NOT_RATED
     if star_rating >= 4:
         return f"Beats {peer} Average", "positive"
     if 1 <= star_rating <= 2:
@@ -82,7 +90,17 @@ def generate_card_verdict(
     Sentiment is grounded in the drivers, NOT keyword-matched: a strength with no
     drag is positive; a drag (even on a high-starred card) is negative; a mix is
     neutral (iOS then falls back to the star color).
+
+    A card rated 0 is NOT rated, and gets no verdict whatever its rows score
+    (2026-10-08). The real shape is a bank's / insurer's / lender's Financial Health
+    card: its liquidity and coverage rows are omitted, Altman Z does not apply, and the
+    one row left — D/E, scored 2/3/4 against its peers — is too little for a card rating
+    (`health_snapshot_service._MIN_SCORED_FOR_RATING`). Composing from that one row gave
+    0 stars beside "Light Debt Load" / "Heavy Debt Load" / "In Line With Industry": a
+    card-level verdict on a card the design declared unrated.
     """
+    if star_rating is None or star_rating <= 0:
+        return _NOT_RATED
     peer = _peer_word(peer_level)
     weights = _WEIGHTS.get(title, {})
 

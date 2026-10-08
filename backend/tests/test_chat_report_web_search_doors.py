@@ -187,6 +187,47 @@ async def test_no_key_or_switch_off_means_no_tool(web_env, monkeypatch, setting,
     assert svc.gemini.kw["force_first_tool"] is None
 
 
+@pytest.mark.asyncio
+async def test_a_1_0_caller_gets_no_tool_on_either_door_and_is_told_none_ran(web_env, monkeypatch):
+    """Build 1.0's in-app Privacy Policy and consent sheet predate the search
+    (`chat_web_search_service.WEB_SEARCH_MIN_APP_VERSION`): through the REAL doors, a caller
+    sending X-App-Version 1.0 who asks for a search gets no tool, nothing forced, and the rule
+    that forbids claiming a search."""
+    from app.core import client_app_version as cav
+
+    token = cav._client_app_version.set("1.0")
+    try:
+        svc = _svc(monkeypatch)
+        svc.gemini = _Gem()
+        out = await _gen(svc)
+        assert chat_tools.WEB_SEARCH_TOOL not in svc.gemini.kw["tool_handlers"]
+        assert svc.gemini.kw["force_first_tool"] is None
+        assert out["web_search_used"] is False and out["web_sources"] == []
+
+        prep = await svc.prepare_stream_generation(
+            "sess-1", WEB_MSG, session_type="REPORT", stock_id="AAPL", context_type="TICKER_REPORT",
+            reference_id="AAPL", user_id=UID)
+        assert prep["web_search_granted"] is False and prep["web_turn"] is None
+        assert "No web search is available on this turn" in prep["system_instruction"]
+        assert not re.search(r"\bweb_search\b", prep["system_instruction"])
+    finally:
+        cav._client_app_version.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_a_1_1_caller_still_gets_the_tool(web_env, monkeypatch):
+    from app.core import client_app_version as cav
+
+    token = cav._client_app_version.set("1.1")
+    try:
+        svc = _svc(monkeypatch)
+        svc.gemini = _Gem()
+        await _gen(svc)
+        assert chat_tools.WEB_SEARCH_TOOL in svc.gemini.kw["tool_handlers"]
+    finally:
+        cav._client_app_version.reset(token)
+
+
 # ── generate_response: web_search_used ────────────────────────────────────────
 
 

@@ -132,7 +132,7 @@ _LIVE_SHAPE = (
 )
 
 
-def test_apply_replacements_rewrites_all_four_and_keeps_the_rest():
+def test_apply_replacements_rewrites_every_paragraph_and_keeps_the_rest():
     out = mod.apply_replacements(_LIVE_SHAPE, mod.REPLACEMENTS)
     for _, paragraph in mod.REPLACEMENTS:
         assert out.count(paragraph) == 1
@@ -147,10 +147,105 @@ def test_apply_replacements_checks_the_limit_once_on_the_result():
         mod.apply_replacements(_LIVE_SHAPE, mod.REPLACEMENTS, limit=50)
 
 
-def test_live_sized_notes_stay_under_the_cap():
-    """The live notes were 3,076 chars with these four paragraphs at ~1,500 of them."""
-    grown = sum(len(p) for _, p in mod.REPLACEMENTS)
-    assert 3076 - 1500 + grown <= mod.NOTES_LIMIT, grown
+# The live 1.0 review notes exactly as App Review APPROVED them (read from ASC 2026-10-05, no
+# credentials in them). ASC copies them into 1.1, so this is what the script will rewrite.
+_LIVE_NOTES = (_REPO / "backend" / "tests" / "data" / "asc_review_notes_1_0_2026_10_05.txt").read_text(encoding="utf-8")
+
+
+def test_the_fixture_is_the_approved_live_text():
+    assert len(_LIVE_NOTES) == 3561
+    assert mod.AI_PARAGRAPH_APPROVED in _LIVE_NOTES.split("\n"), (
+        "AI_PARAGRAPH_APPROVED is no longer the approved line verbatim — the start-marker swap "
+        "would silently overwrite a drifted wording"
+    )
+
+
+def test_the_rewrite_of_the_live_notes_changes_only_the_ai_line_and_fits():
+    out = mod.apply_replacements(_LIVE_NOTES, mod.REPLACEMENTS)
+    before, after = _LIVE_NOTES.split("\n"), out.split("\n")
+    assert len(before) == len(after)
+    changed = [(b, a) for b, a in zip(before, after) if b != a]
+    assert changed == [(mod.AI_PARAGRAPH_APPROVED, mod.AI_PARAGRAPH)], (
+        "the 1.1 rewrite touches more than the AI paragraph — every other paragraph was approved"
+    )
+    # Keep a margin: ASC refuses the save outright at 4,000, and a later one-line fix needs room.
+    assert len(out) <= mod.NOTES_LIMIT - 50, f"{len(out)} chars"
+    assert mod.apply_replacements(out, mod.REPLACEMENTS) == out  # idempotent
+
+
+# ── step 2: the one App Review attachment slot ───────────────────────────────
+
+_ORDER_FORM = "DocuSign_FMP_-_Quote_-_Caydex_-_0003.pdf"
+
+
+def test_an_empty_slot_is_reported_because_the_notes_promise_the_order_form():
+    action, problems = mod.attachment_plan([], None)
+    assert action == "skip_no_video"
+    assert any("Order Form is attached" in p for p in problems)
+
+
+def test_the_order_form_in_place_and_no_video_is_clean():
+    assert mod.attachment_plan([_ORDER_FORM], None) == ("skip_no_video", [])
+
+
+def test_a_video_never_takes_the_empty_slot_reserved_for_the_order_form():
+    action, problems = mod.attachment_plan([], "bg-audio.mov")
+    assert action == "refuse"
+    assert any("reserved for the signed Order Form" in p for p in problems)
+
+
+def test_a_video_never_replaces_the_order_form():
+    action, problems = mod.attachment_plan([_ORDER_FORM], "bg-audio.mov")
+    assert action == "refuse"
+    assert any("not replacing" in p for p in problems)
+
+
+def test_the_override_uploads_into_an_empty_slot_but_still_reports_the_missing_order_form():
+    action, problems = mod.attachment_plan([], "bg-audio.mov", allow_video_in_empty_slot=True)
+    assert action == "upload"
+    assert any("Order Form is attached" in p for p in problems)
+
+
+def test_an_already_attached_video_is_skipped():
+    assert mod.attachment_plan(["bg-audio.mov"], "bg-audio.mov")[0] == "skip_already_attached"
+
+
+_SWIFT = _REPO / "frontend" / "ios" / "ios"
+
+
+def test_every_claim_in_the_web_search_sentence_is_backed_by_code():
+    added = mod.AI_PARAGRAPH[len(mod.AI_PARAGRAPH_APPROVED):]
+    backing = [
+        ("one web search per question",
+         _REPO / "backend" / "app" / "services" / "chat_web_search_service.py", "ONE SEARCH PER TURN"),
+        ("Brave Search API", _REPO / "backend" / "app" / "config.py", '"https://api.search.brave.com/'),
+        ('tap "Web search"', _SWIFT / "Views" / "Molecules" / "ThinkingProcessCard.swift", 'text: "Web search"'),
+        ("in-app Safari view", _SWIFT / "Views" / "Screens" / "AIChatScreen.swift", ".inAppBrowser(link: $browserLink"),
+        ("AI consent sheet", _SWIFT / "Views" / "Screens" / "AIDataConsentView.swift", "search the web in a report chat"),
+        ("Privacy Policy", _SWIFT / "Views" / "Screens" / "PrivacyPolicyView.swift", "Brave"),
+        ('"Chat with the report"', _SWIFT / "Views" / "Screens" / "TickerReportView.swift", 'placeholder: "Chat with the report'),
+    ]
+    for claim, path, token in backing:
+        assert claim in added, f"the notes no longer say {claim!r} — update this table"
+        assert token in path.read_text(encoding="utf-8"), f"{claim!r} is no longer true: {token!r} not in {path.name}"
+
+
+def test_the_version_under_review_actually_gets_the_web_search_the_notes_describe():
+    """The notes tell App Review to try web search, which is gated on the app version
+    (`WEB_SEARCH_MIN_APP_VERSION`). If the gate ever moved above the version submitted, the
+    reviewer could not find the feature — a 2.5.4-style 'cannot locate' rejection."""
+    import re as _re
+    from app.services.chat_web_search_service import WEB_SEARCH_MIN_APP_VERSION
+    from app.core.client_app_version import parse_app_version
+
+    pbx = (_REPO / "frontend" / "ios" / "ios.xcodeproj" / "project.pbxproj").read_text()
+    versions = set(_re.findall(r"MARKETING_VERSION = ([0-9.]+);", pbx))
+    assert len(versions) == 1, versions
+    marketing_version = versions.pop()
+    shipped = parse_app_version(marketing_version)
+    assert shipped is not None and shipped >= WEB_SEARCH_MIN_APP_VERSION, (shipped, WEB_SEARCH_MIN_APP_VERSION)
+    # EXACT string: ASC's filter[versionString] matches text, so "1.1.0" would find 0 versions.
+    assert mod._VERSION == marketing_version, (mod._VERSION, marketing_version)
 
 
 _IOS = _REPO / "frontend" / "ios" / "ios"
@@ -168,6 +263,8 @@ _IOS = _REPO / "frontend" / "ios" / "ios"
         ('"Money Moves"', "Views/Organisms/MoneyMovesSection.swift"),
         ('"Listen Now"', "Views/Atoms/PlayAudioButton.swift"),
         ('"Wiser"', "Models/HomeModels.swift"),
+        ('"About & Legal"', "Views/Screens/ProfileView.swift"),
+        ('"Disclaimers"', "Views/Screens/ProfileView.swift"),
     ],
 )
 def test_every_ui_label_the_notes_cite_exists(label, swift_file):

@@ -17,6 +17,9 @@ struct ProfitPowerSectionCard: View {
     /// a tab it emptied reads "temporarily unavailable", not "isn't available for this
     /// company". Defaults to false, so a caller that does not pass it keeps today's wording.
     var isDegraded: Bool = false
+    /// The PEER lookup failed upstream (`degraded` holds "benchmarks"): the margins are
+    /// complete but the dashed median is missing, so a muted line says so. Defaults to false.
+    var peerComparisonUnavailable: Bool = false
 
     // MARK: - State
 
@@ -76,6 +79,21 @@ struct ProfitPowerSectionCard: View {
         profitPowerData.dataPoints(for: displayedPeriod)
     }
 
+    /// "Industry" / "Sector" for the net-margin line ON SCREEN: the backend picks the annual
+    /// and the quarterly line's peer group separately, so Annual can be an industry line
+    /// while Quarterly is the sector's.
+    private var peerWord: String {
+        profitPowerData.peerWord(for: displayedPeriod)
+    }
+
+    /// Whether the period ON SCREEN draws any dashed peer median. The backend flags a failed
+    /// peer lookup ("benchmarks") when EITHER period's read failed and still draws the one
+    /// that succeeded, so the "temporarily unavailable" note is shown only over a tab that
+    /// really has no peer line — never right under a drawn median and its legend entry.
+    private var drawsPeerLine: Bool {
+        currentDataPoints.contains(where: { $0.sectorAverageNetMargin != nil })
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -101,18 +119,23 @@ struct ProfitPowerSectionCard: View {
             ProfitPowerChartView(
                 dataPoints: currentDataPoints,
                 selectedDataPoint: $selectedDataPoint,
-                peerWord: profitPowerData.peerWord,
+                peerWord: peerWord,
                 isDegraded: isDegraded
             )
             .padding(.top, AppSpacing.sm)
 
             // Legend
             ProfitPowerLegendView(
-                peerWord: profitPowerData.peerWord,
+                peerWord: peerWord,
                 showsPeerLine: currentDataPoints.contains { $0.sectorAverageNetMargin != nil }
             )
                 .frame(maxWidth: .infinity)
                 .padding(.top, AppSpacing.md)
+
+            // The peer lookup failed AND this tab draws no median: say why it is missing.
+            if peerComparisonUnavailable && !drawsPeerLine {
+                PeerComparisonUnavailableNote()
+            }
         }
         .padding(AppSpacing.lg)
         .background(
@@ -205,6 +228,52 @@ private extension ProfitPowerPeriodType {
 
         ScrollView {
             ProfitPowerSectionCard(profitPowerData: data, onDetailTapped: {}, isDegraded: true)
+                .padding()
+        }
+    }
+}
+
+#Preview("Per-period peer level") {
+    // Annual draws an INDUSTRY median, Quarterly the sector's: the legend follows the tab.
+    let data: ProfitPowerSectionData = {
+        var d = ProfitPowerSectionData.sampleData
+        d.peerGroupLevels = ["annual": "industry", "quarterly": "sector"]
+        return d
+    }()
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        ScrollView {
+            ProfitPowerSectionCard(profitPowerData: data, onDetailTapped: {})
+                .padding()
+        }
+    }
+}
+
+#Preview("Peer lookup failed") {
+    // `degraded: ["benchmarks"]`: the margins are complete, no peer line, one muted note.
+    // Illustrative margins with the medians removed.
+    let data: ProfitPowerSectionData = {
+        func withoutPeer(_ points: [ProfitPowerDataPoint]) -> [ProfitPowerDataPoint] {
+            points.map {
+                ProfitPowerDataPoint(period: $0.period, grossMargin: $0.grossMargin,
+                                     operatingMargin: $0.operatingMargin, fcfMargin: $0.fcfMargin,
+                                     netMargin: $0.netMargin, sectorAverageNetMargin: nil)
+            }
+        }
+        return ProfitPowerSectionData(
+            annualData: withoutPeer(ProfitPowerSectionData.sampleData.annualData),
+            quarterlyData: withoutPeer(ProfitPowerSectionData.sampleData.quarterlyData)
+        )
+    }()
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        ScrollView {
+            ProfitPowerSectionCard(profitPowerData: data, onDetailTapped: {},
+                                   peerComparisonUnavailable: true)
                 .padding()
         }
     }

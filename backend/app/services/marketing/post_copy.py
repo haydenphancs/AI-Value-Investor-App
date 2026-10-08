@@ -8,9 +8,13 @@ weight is appended here, by code, from constants a test can pin — never truste
   the card burned into the end of every video. Publisher is `Caydex` — the developer is an Apple
   Individual account and `app/templates/legal/terms.html` says "operated by Caydex"; there is no
   "Caydex Inc.", so writing one would be a false statement of identity.
-* **Call to action** per platform: TikTok/Instagram captions are not clickable ("Link in bio");
-  X is link-free unless `allow_x_url` (a URL makes an X post cost $0.20 instead of $0.015);
-  everything else carries its own `/go/<platform>` smart link so arrivals are attributable.
+* **Call to action** per platform, opened by ONE code-owned VALUE LINE saying what Caydex is
+  ("Caydex: AI research on public companies — on the App Store.", "… — pre-order on the App
+  Store." during a pre-order, and the claim-free "Caydex: AI research on public companies." while
+  the store URL is unset or invalid — by the store state threaded in from `smart_link`): TikTok/
+  Instagram captions are not clickable ("Link in bio"); X is link-free unless `allow_x_url` (a URL
+  makes an X post cost $0.20 instead of $0.015); everything else carries its own `/go/<platform>`
+  smart link so arrivals are attributable. Nothing scans this copy at runtime, so tests pin it.
 * **Hashtags** from a curated list (a model-written hashtag is how tickers and names get in).
 
 Order is fixed: body → hashtags → CTA → disclaimer, and `check_composed` asserts the result ENDS
@@ -25,7 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.marketing.compliance import Violation
 # Every domain shape the link validator reads — a lower-case bare domain, the cased-gTLD form
@@ -136,23 +140,94 @@ def hashtags_for(field: str, category: str) -> List[str]:
     return out[:n]
 
 
-def cta_for(field: str, *, allow_x_url: bool = False) -> Optional[str]:
-    if field in ("tiktok", "instagram"):
-        return "Link in bio."
-    if field == "x":
-        return f"{LINK_BASE_URL}/x" if allow_x_url else None
+#: What the caption's code-owned VALUE LINE may say about the app: decided at WRITE time
+#: (`smart_link.store_state()`, read once per generation by `script_service`) and threaded in here —
+#: never read here, so this module stays pure. Prelaunch while MARKETING_APP_STORE_URL is unset or
+#: invalid; preorder while it is valid and MARKETING_APP_STORE_PREORDER is on; live otherwise.
+STORE_PRELAUNCH = "prelaunch"
+STORE_PREORDER = "preorder"
+STORE_LIVE = "live"
+STORE_STATES: Tuple[str, ...] = (STORE_PRELAUNCH, STORE_PREORDER, STORE_LIVE)
+#: The one sentence every caption but the YouTube title carries about what Caydex is (owner wording,
+#: 2026-10-05). Nothing scans code-owned copy at runtime — compliance, grounding and the judge read
+#: only model text — so tests/test_marketing_post_copy.py pins every line verbatim and runs it through
+#: the public-copy scan. "on the App Store" stays true on a pre-order page too, so a forgotten flag
+#: never makes a false claim; it never says "now", "available", "download" or "free". The PRELAUNCH
+#: line makes no availability claim at all (2026-10-07): the app has been on the App Store since
+#: 2026-10-05, so prelaunch is now reached only by an unset or mistyped URL — and "coming soon" would
+#: then be false.
+VALUE_PRODUCT = "Caydex: AI research on public companies"
+_VALUE_LINES: Dict[str, str] = {
+    STORE_PRELAUNCH: f"{VALUE_PRODUCT}.",
+    STORE_PREORDER: f"{VALUE_PRODUCT} — pre-order on the App Store.",
+    STORE_LIVE: f"{VALUE_PRODUCT} — on the App Store.",
+}
+
+
+def normalize_store_state(state: Any) -> str:
+    """A member of STORE_STATES; anything else (None, a typo, wrong case, a non-string) is the
+    PRELAUNCH state — the line that claims least."""
+    return state if isinstance(state, str) and state in _VALUE_LINES else STORE_PRELAUNCH
+
+
+def value_line(store_state: Any = STORE_PRELAUNCH) -> str:
+    """The value line for a store state (an unknown state reads as prelaunch)."""
+    return _VALUE_LINES[normalize_store_state(store_state)]
+
+
+def cta_for(field: str, *, allow_x_url: bool = False, store_state: Any = STORE_PRELAUNCH) -> Optional[str]:
+    """The code-owned call to action of a caption field: the value line, then where to go. TikTok and
+    Instagram captions are not clickable ("Link in bio."); X is link-free unless `allow_x_url` (a URL
+    makes an X post cost $0.20 instead of $0.015); everything else carries its own `/go/<platform>`
+    smart link. The YouTube title carries none (the description does)."""
     if field == "youtube_title":
         return None
+    line = value_line(store_state)
+    if field in ("tiktok", "instagram"):
+        return f"{line} Link in bio."
+    if field == "x":
+        return f"{line} {go_link('x')}" if allow_x_url else line
     platform = "youtube" if field == "youtube_description" else field
-    return f"Learn more: {LINK_BASE_URL}/{platform}"
+    return f"{line} Learn more: {go_link(platform)}"
 
 
-def _suffix(field: str, category: str, run_date: date, allow_x_url: bool) -> str:
+def go_link(platform: str) -> str:
+    """A platform's smart link — the ONE spelling `cta_for` writes and `carries_go_link` reads."""
+    return f"{LINK_BASE_URL}/{platform}"
+
+
+#: A character that would make `.../go/x` the start of a LONGER slug (`.../go/xyz`, `.../go/x_early`).
+_SLUG_TAIL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def carries_go_link(platform: Any, caption: Any) -> bool:
+    """Does `caption` carry `platform`'s OWN smart link — `go_link(platform)` not followed by another
+    slug character, so `/go/x` is never `/go/xyz`? Pure; False for a non-string caption or an empty or
+    non-string platform. Link-bearing today: bluesky, facebook, linkedin, threads and the YouTube
+    description (campaign `youtube`); X only when its caption was composed with `allow_x_url`;
+    TikTok and Instagram say "Link in bio.". The publisher opens a campaign's /go early window
+    (`publish_clock`) only for such a post."""
+    if not isinstance(platform, str) or not platform or not isinstance(caption, str):
+        return False
+    link = go_link(platform)
+    start = 0
+    while True:
+        i = caption.find(link, start)
+        if i < 0:
+            return False
+        end = i + len(link)
+        if end >= len(caption) or caption[end] not in _SLUG_TAIL_CHARS:
+            return True
+        start = i + 1
+
+
+def _suffix(field: str, category: str, run_date: date, allow_x_url: bool,
+            store_state: Any = STORE_PRELAUNCH) -> str:
     parts: List[str] = []
     tags = hashtags_for(field, category)
     if tags:
         parts.append(" ".join(tags))
-    cta = cta_for(field, allow_x_url=allow_x_url)
+    cta = cta_for(field, allow_x_url=allow_x_url, store_state=store_state)
     if cta:
         parts.append(cta)
     disc = disclaimer_for(field, run_date)
@@ -257,12 +332,14 @@ def measured_length(field: str, text: str) -> int:
     return len(text or "")
 
 
-def body_budget(field: str, category: str, run_date: date, *, allow_x_url: bool = False) -> int:
-    """Maximum model-written body length for `field`, after the code-owned suffix."""
+def body_budget(field: str, category: str, run_date: date, *, allow_x_url: bool = False,
+                store_state: Any = STORE_PRELAUNCH) -> int:
+    """Maximum model-written body length for `field`, after the code-owned suffix (which carries the
+    run's value line, so the budget depends on `store_state` too)."""
     if field in _COMPUTED_BUDGET:
         # The suffix already starts with its own "\n\n" separator and its length is additive
         # (it is whitespace-separated from the body), so the budget is exactly what is left.
-        suffix = _suffix(field, category, run_date, allow_x_url)
+        suffix = _suffix(field, category, run_date, allow_x_url, store_state)
         return max(_MIN_BODY, LIMITS[field] - measured_length(field, suffix))
     return _BODY_CAPS[field]
 
@@ -281,13 +358,13 @@ class ComposedPost:
 
 
 def compose(platform: str, bodies: Dict[str, str], *, category: str, run_date: date,
-            allow_x_url: bool = False) -> ComposedPost:
+            allow_x_url: bool = False, store_state: Any = STORE_PRELAUNCH) -> ComposedPost:
     if platform == "youtube":
         desc = bodies["youtube_description"] + _suffix(
-            "youtube_description", category, run_date, allow_x_url)
+            "youtube_description", category, run_date, allow_x_url, store_state)
         return ComposedPost("youtube", bodies["youtube_title"], desc)
     return ComposedPost(
-        platform, None, bodies[platform] + _suffix(platform, category, run_date, allow_x_url),
+        platform, None, bodies[platform] + _suffix(platform, category, run_date, allow_x_url, store_state),
     )
 
 

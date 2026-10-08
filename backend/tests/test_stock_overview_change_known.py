@@ -113,15 +113,9 @@ async def test_core_marks_an_unknown_day_change(quote, profile, known):
 
 # ── _build_full_response ──────────────────────────────────────────────────────
 
-class _StubBenchmarkLookup:
-    def get_current_benchmark_values(self, industry, sector, metrics):
-        return {}
-
-
 def _full(monkeypatch, quote, profile):
     _cache.clear()
     svc = StockOverviewService()
-    monkeypatch.setattr(sos, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup())
     return svc._build_full_response(
         "XYZ",
         {"profile": {"companyName": "Xyz Corp", "sector": "Technology", **profile}},
@@ -183,7 +177,6 @@ def test_full_overview_names_both_empty_legs_for_an_unservable_symbol(monkeypatc
     `quote=empty, profile=empty`."""
     _cache.clear()
     svc = StockOverviewService()
-    monkeypatch.setattr(sos, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup())
     with pytest.raises(FMPUnavailableException) as exc:
         svc._build_full_response("DOGE", {"profile": {}}, {"quote": {}, "chart_data": []},
                                  "1D", "5min", False)

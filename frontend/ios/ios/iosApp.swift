@@ -61,6 +61,12 @@ struct iosApp: App {
         // undo this.
         configureImageCache()
 
+        #if DEBUG
+        // App Store screenshot captures only (`CAYDEX_STORE_SHOT=1`): labelled sample market
+        // data. Registering a URLProtocol class does not touch `URLSession.shared`'s cache.
+        StoreScreenshotMode.installIfEnabled()
+        #endif
+
         // Start error monitoring early so startup crashes are still captured.
         // No-op until the Sentry package is added and a DSN is set (see
         // Core/Monitoring/MonitoringConfig.swift).

@@ -185,6 +185,11 @@ struct DeepDiveMetricDTO: Codable {
     // Sector-average overlay (the "*" metrics) — aligned to the same periods.
     let sectorAnnualHistory: [MetricHistoryPointDTO]?
     let sectorQuarterlyHistory: [MetricHistoryPointDTO]?
+    // "industry" | "sector": the peer group each overlay line above is drawn from (one
+    // population per line). Optional — reports generated before 2026-10-07 have none and
+    // the drill-down keeps the card-wide word.
+    let sectorAnnualLevel: String?
+    let sectorQuarterlyLevel: String?
 
     enum CodingKeys: String, CodingKey {
         case label, value, trend
@@ -194,6 +199,8 @@ struct DeepDiveMetricDTO: Codable {
         case quarterlyHistory = "quarterly_history"
         case sectorAnnualHistory = "sector_annual_history"
         case sectorQuarterlyHistory = "sector_quarterly_history"
+        case sectorAnnualLevel = "sector_annual_level"
+        case sectorQuarterlyLevel = "sector_quarterly_level"
     }
 }
 
@@ -829,7 +836,9 @@ extension TickerReportAPIResponse {
                         annualHistory: mapPoints(m.annualHistory),
                         quarterlyHistory: mapPoints(m.quarterlyHistory),
                         sectorAnnualHistory: mapPoints(m.sectorAnnualHistory),
-                        sectorQuarterlyHistory: mapPoints(m.sectorQuarterlyHistory)
+                        sectorQuarterlyHistory: mapPoints(m.sectorQuarterlyHistory),
+                        sectorAnnualLevel: m.sectorAnnualLevel,
+                        sectorQuarterlyLevel: m.sectorQuarterlyLevel
                     )
                 },
                 qualityLabel: card.qualityLabel,

@@ -36,6 +36,7 @@ import pytest
 
 from app.services.marketing import content_pool
 from app.services.marketing import judge as jd
+from app.services.marketing import post_copy
 from app.services.marketing import writer_service as ws
 
 FIXTURE = Path(__file__).resolve().parent / "data" / "marketing_judge_packages_2026_09_26.json"
@@ -104,14 +105,89 @@ def test_every_item_in_the_fixture_is_still_in_the_pool():
     assert missing == [], missing
 
 
-@pytest.mark.parametrize("pkg", _accepted(), ids=lambda p: p["id"])
-def test_an_accepted_package_still_passes_the_validators_unchanged(pkg):
-    """The over-block gate for the 09-26 run: a validator change that starts rejecting what the
-    writer really produced (or rewrites it in cleaning) fails here, not in production."""
+#: The captions whose body budget the code-owned suffix sizes. Since 2026-10-05 that suffix carries
+#: the VALUE LINE ("Caydex: AI research on public companies — …"), which took 60-71 characters (the
+#: 59-69-character line plus its separator) from the budgets the 09-26 captions were written to — so
+#: these, and only these, may now be dropped.
+_VALUE_LINE_SIZED = ("x", "threads", "bluesky")
+
+
+def _value_line_drops(pkg: Dict[str, Any], store_state: str) -> List[str]:
+    """Validate a kept 09-26 package under `store_state`; return the platforms whose caption it
+    lost. Everything else is the over-block gate, asserted here: the package still passes, every
+    field it keeps is byte-identical and in order, and a lost caption was dropped ONLY as `too_long`,
+    ONLY on an x/threads/bluesky caption, and ONLY by what the value line costs (the caption fit
+    the run's own budget, which had no value line)."""
     item = content_pool.get_item(pkg["item"])
-    vr = ws.validate_package(_rebuild(pkg["fields"]), item, _RUN_DATE)
-    assert vr.regex_ok, [(v.field, v.code, v.detail) for v in vr.violations]
-    assert [list(x) for x in jd.package_fields(vr.package or {})] == pkg["fields"]
+    vr = ws.validate_package(_rebuild(pkg["fields"]), item, _RUN_DATE, store_state=store_state)
+    where = (pkg["id"], store_state)
+    assert vr.regex_ok, (where, [(v.field, v.code, v.detail) for v in vr.violations])
+    dropped = sorted(vr.outlets)
+    captions = _rebuild(pkg["fields"])["captions"]
+    for platform in dropped:
+        assert platform in _VALUE_LINE_SIZED, (where, platform, vr.outlets[platform])
+        assert [(v.field, v.code) for v in vr.outlets[platform]] == [(platform, "too_long")], (
+            where, [(v.field, v.code, v.detail) for v in vr.outlets[platform]])
+        # What the line takes from this platform's budget: itself plus its separator — on X it is
+        # the whole CTA, a "\n\n"-separated part of its own (+2); elsewhere it opens "Learn more:"
+        # after one space (+1). Every character of it weighs 1, on X too (the em dash included).
+        line_cost = len(post_copy.value_line(store_state)) + (2 if platform == "x" else 1)
+        n = post_copy.measured_length(platform, captions[platform])
+        budget = post_copy.body_budget(platform, item.category, _RUN_DATE, store_state=store_state)
+        assert budget < n <= budget + line_cost, (where, platform, n, budget, line_cost)
+    assert sorted(vr.package["dropped_outlets"]) == dropped, where
+    assert all([d["code"] for d in vr.package["dropped_outlets"][p]] == ["too_long"] for p in dropped)
+    gone = {f"captions.{p}" for p in dropped}
+    kept = [f for f in pkg["fields"] if f[0] not in gone]
+    assert len(kept) == len(pkg["fields"]) - len(dropped), where   # each lost caption was there
+    assert [list(x) for x in jd.package_fields(vr.package or {})] == kept, where
+    return dropped
+
+
+@pytest.mark.parametrize("store_state", post_copy.STORE_STATES)
+@pytest.mark.parametrize("pkg", _accepted(), ids=lambda p: p["id"])
+def test_an_accepted_package_still_passes_the_validators_unchanged(pkg, store_state):
+    """The over-block gate for the 09-26 run: a validator change that starts rejecting what the
+    writer really produced (or rewrites it in cleaning) fails here, not in production. Since the
+    value line (2026-10-05) an x/threads/bluesky caption written to the OLD budget may be dropped
+    as too_long — nothing else may change (`_value_line_drops`); how many is pinned below. In every
+    store state: production writes `live` since the App Store release (2026-10-05), and a
+    pre-order or a URL misconfiguration (prelaunch) must not reach a different over-block."""
+    _value_line_drops(pkg, store_state)
+
+
+#: How many of the 32 kept captions per platform the value line's budget no longer fits, per store
+#: state (measured 2026-10-05; the line is 40 / 69 / 59 characters — prelaunch re-measured 2026-10-07,
+#: when it lost "— coming soon to iPhone." and went from 64 characters and 18 X + 8 Bluesky drops to
+#: 3 X). They were written to the OLD asks; the new prompt asks for the new budget. A further budget
+#: change moves these numbers: make it a deliberate edit here, never a silent drift (the preview run
+#: measures the new drafts).
+_VALUE_LINE_DROPS = {
+    "prelaunch": {"x": 3},
+    "preorder": {"x": 21, "bluesky": 9},
+    "live": {"x": 14, "bluesky": 4},
+}
+
+
+@pytest.mark.parametrize("store_state", sorted(_VALUE_LINE_DROPS))
+def test_the_value_line_drops_exactly_the_pinned_09_26_captions(store_state):
+    assert set(_VALUE_LINE_DROPS) == set(post_copy.STORE_STATES)
+    got: Counter = Counter()
+    for pkg in _accepted():
+        got.update(_value_line_drops(pkg, store_state))
+    assert dict(got) == _VALUE_LINE_DROPS[store_state]
+
+
+def test_a_longer_value_line_never_keeps_a_caption_a_shorter_one_drops():
+    """Budgets shrink as the line grows (prelaunch 40 < live 59 < pre-order 69 characters), so per
+    package the drops nest: prelaunch ⊆ live ⊆ pre-order. A caption kept under a LONGER line but
+    dropped under a shorter one would mean a budget not driven by the line alone."""
+    lines = {s: len(post_copy.value_line(s)) for s in post_copy.STORE_STATES}
+    assert lines[post_copy.STORE_PRELAUNCH] < lines[post_copy.STORE_LIVE] < lines[post_copy.STORE_PREORDER]
+    for pkg in _accepted():
+        pre, live, order = (set(_value_line_drops(pkg, s)) for s in (
+            post_copy.STORE_PRELAUNCH, post_copy.STORE_LIVE, post_copy.STORE_PREORDER))
+        assert pre <= live <= order, (pkg["id"], pre, live, order)
 
 
 def test_the_judge_true_positives_point_at_real_fields_of_kept_packages():
@@ -359,17 +435,31 @@ def test_a_byte_identical_repair_marks_only_the_first_round_accepted(tmp_path):
     assert doc["judge_mode"] == "shadow" and doc["allow_x_url"] is False
 
 
-def test_the_dump_validates_with_the_runs_own_x_budget(tmp_path):
-    from app.services.marketing import post_copy
+_MM_X_WORDS = ("Every day he names a new price for the same business. " * 20).split()
 
+
+def _x_body_just_over(budget: int) -> str:
+    """The shortest body of whole words from `_MM_X_WORDS` (closed with a full stop) that X measures
+    OVER `budget`: it overshoots by at most one word (≤ 10 characters with its space)."""
+    body = ""
+    for word in _MM_X_WORDS:
+        body = f"{body} {word}".strip()
+        if post_copy.measured_length("x", body.rstrip(".") + ".") > budget:
+            return body.rstrip(".") + "."
+    raise AssertionError(f"the words never exceed {budget}")
+
+
+def test_the_dump_validates_with_the_runs_own_x_budget(tmp_path):
     prev = _preview_module()
     raw = _mm_raw()
     item = content_pool.get_item(_MM)
     with_url = post_copy.body_budget("x", item.category, _RUN_DATE, allow_x_url=True)
     without = post_copy.body_budget("x", item.category, _RUN_DATE, allow_x_url=False)
     assert with_url < without
-    words = "Every day he names a new price for the same business. "
-    body = (words * 20)[: with_url + 3].rsplit(" ", 1)[0].rstrip(".") + "."
+    # Built word by word, not sliced: the gap (24, the URL's weight + its space) is wider than any
+    # word, so the body lands inside it whatever the budgets are (a slice landed ON with_url once
+    # the value line moved both).
+    body = _x_body_just_over(with_url)
     assert with_url < post_copy.measured_length("x", body) <= without, len(body)
     raw["captions"]["x"] = body
     out = tmp_path / "d.json"
@@ -378,6 +468,30 @@ def test_the_dump_validates_with_the_runs_own_x_budget(tmp_path):
                             judge_mode="shadow", allow_x_url=allow)
         labels = [lab for lab, _t in json.loads(out.read_text(encoding="utf-8"))["packages"][0]["fields"]]
         assert ("captions.x" in labels) is present, (allow, labels)
+
+
+def test_the_dump_validates_with_the_runs_own_store_state(tmp_path):
+    """`--store-state` reaches the dump's validation and is recorded in it: the value line sizes the
+    X budget, so an X body that fits under the live line but not under the (longer) pre-order line
+    is a must-pass line only in the state whose budget kept it — a dump validated with another
+    state would hand calibration a caption the run dropped, or hide one it kept."""
+    prev = _preview_module()
+    raw = _mm_raw()
+    item = content_pool.get_item(_MM)
+    preorder = post_copy.body_budget("x", item.category, _RUN_DATE, store_state=post_copy.STORE_PREORDER)
+    live = post_copy.body_budget("x", item.category, _RUN_DATE, store_state=post_copy.STORE_LIVE)
+    assert preorder < live
+    body = _x_body_just_over(preorder)
+    assert preorder < post_copy.measured_length("x", body) <= live, (len(body), preorder, live)
+    raw["captions"]["x"] = body
+    out = tmp_path / "d.json"
+    for state, present in ((post_copy.STORE_PREORDER, False), (post_copy.STORE_LIVE, True)):
+        prev._dump_packages(out, [(_MM, "question_hook", _RUN_DATE)], [_Res([raw], raw)],
+                            judge_mode="shadow", allow_x_url=False, store_state=state)
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        assert doc["store_state"] == state
+        labels = [lab for lab, _t in doc["packages"][0]["fields"]]
+        assert ("captions.x" in labels) is present, (state, labels)
 
 
 def test_the_preview_refuses_to_dump_under_an_enforcing_judge(monkeypatch, tmp_path):
@@ -419,3 +533,303 @@ def test_the_preview_refuses_to_dump_an_item_twice(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as e:
         asyncio.run(prev.main())
     assert e.value.code == 2
+
+
+# ── shape stats: what a prompt change is accepted on (2026-10-05, shorter videos) ──────────────
+
+
+def test_shape_stats_on_the_0926_fixture():
+    """The BASELINE the 2026-10-05 prompt is measured against, from the 09-26 run (asked: 7-9 lines
+    of 10-16 words, hence line_floor=10). Every value was computed offline AND re-derived by an
+    independent count before it was pinned; a counter or estimate that moves must be a deliberate
+    edit. `number_hooks` counts a digit OR a number word (one…ten): the two hooks are "Risk and
+    uncertainty: two kinds of unknown." and "How one app changed the game…" — no hook has a digit."""
+    prev = _preview_module()
+    assert prev.shape_stats(_packages(), line_floor=10) == {
+        "accepted": 32,
+        "script_words": {"median": 83.5, "min": 61, "max": 108},
+        "lines": {8: 14, 9: 18},
+        "exactly_6_share": 0.0,
+        "mean_words_per_line": 9.81,
+        "lines_under_floor": "118/274",
+        "hook_words": {"median": 7, "max": 12},
+        "est_video_s": {"median": 47.2, "min": 35.8, "max": 57.6, "over_40": 30},
+        "mm_hooks_naming_title_company": "4/15",
+        "study_openers": 6,
+        "yes_no_hooks": 1,
+        "who_wins_hooks": 2,
+        "number_hooks": 2,
+        "example_copies": 0,
+        "mm_youtube_titles_naming_company": "11/15",
+        "yes_no_youtube_titles": 0,
+        "mm_investor_framed_hooks": 0,
+        "mm_investor_framed_youtube_titles": 0,
+        "rounds_outside_enforced_window": 0,
+    }
+    assert not any(ch.isdigit() for p in _accepted() for ch in _fields(p)["hook"])
+
+
+def test_shape_stats_measures_lines_under_the_asked_floor_by_default():
+    prev = _preview_module()
+    from app.services.marketing import writer_prompts as wp
+
+    default = prev.shape_stats(_packages())["lines_under_floor"]
+    assert default == prev.shape_stats(_packages(), line_floor=wp._ASK_SCRIPT_LINE_WORDS_MIN)["lines_under_floor"]
+    per_line = [len(t.split()) for p in _accepted() for lab, t in p["fields"]
+                if re.fullmatch(r"video_script\[\d+\]", lab)]
+    assert default == f"{sum(1 for n in per_line if n < wp._ASK_SCRIPT_LINE_WORDS_MIN)}/{len(per_line)}"
+
+
+def test_estimated_video_seconds_for_a_six_line_script():
+    """An 8-word hook and 6 lines of 11 words: 74 words / 2.23 words/s = 33.18 s, + 6 line pauses
+    × 0.28 s = 1.68 s, + the 4 s disclaimer card = 38.86 s."""
+    prev = _preview_module()
+    hook = " ".join(["word"] * 8)
+    lines = [" ".join(["word"] * 11)] * 6
+    assert round(prev.estimated_video_seconds(hook, lines), 1) == 38.9
+    # The hook is narrated but adds no pause of its own; an empty hook is no words.
+    assert prev.estimated_video_seconds("", []) == pytest.approx(4.0)
+    assert prev.estimated_video_seconds("a b", ["c"]) == pytest.approx(3 / 2.23 + 0.28 + 4.0)
+
+
+def test_the_previews_pause_and_card_copies_equal_the_workers():
+    """The preview copies the worker's narration timings instead of importing the worker; the copies
+    must not drift from what the video really does."""
+    from marketing import timings, voice
+
+    prev = _preview_module()
+    assert prev._LINE_PAUSE_SECONDS == timings.LINE_PAUSE_SECONDS
+    assert prev._DISCLAIMER_CARD_SECONDS == voice.DISCLAIMER_CARD_SECONDS
+
+
+@pytest.mark.parametrize("counter, text, hit", [
+    # A study verb OPENS the hook (leading punctuation allowed), as a whole word.
+    ("_STUDY_OPENER_RE", "Understand a company's financial snapshot.", True),
+    ("_STUDY_OPENER_RE", "“Find businesses with lasting advantages.", True),
+    ("_STUDY_OPENER_RE", "Master key numbers for any company.", True),
+    ("_STUDY_OPENER_RE", "Findings surprised the market.", False),
+    ("_STUDY_OPENER_RE", "Why learn the balance sheet?", False),
+    # A yes/no question opens on an auxiliary and ends on "?".
+    ("_YES_NO_RE", "Can discipline help you become a better investor?", True),
+    ("_YES_NO_RE", "Is a stock the same as a business?", True),
+    ("_YES_NO_RE", "Island economies grew fast?", False),
+    ("_YES_NO_RE", "Who is Mr. Market and what does he want?", False),
+    ("_YES_NO_RE", "How does AI affect investing?", False),
+    ("_YES_NO_RE", "Is this the end.", False),
+    # "Who wins / will win" anywhere in the hook.
+    ("_WHO_WINS_RE", "Who wins the streaming wars?", True),
+    ("_WHO_WINS_RE", "Software or steel: who wins the car race?", True),
+    ("_WHO_WINS_RE", "Who will win the chip race?", True),
+    ("_WHO_WINS_RE", "Who is Mr. Market?", False),
+    # A digit or a number word, as a word.
+    ("_NUMBER_RE", "Risk and uncertainty: two kinds of unknown.", True),
+    ("_NUMBER_RE", "3 lessons from a duopoly.", True),
+    ("_NUMBER_RE", "Someone gave money to a tone-deaf idea.", False),
+    ("_NUMBER_RE", "No one saw the shift coming.", False),       # nobody, not a number (2026-10-07)
+    ("_NUMBER_RE", "No-one saw it coming.", False),
+    ("_NUMBER_RE", "Anyone can read a balance sheet.", False),
+    ("_NUMBER_RE", "No company sold more than one product.", True),
+])
+def test_each_hook_counter_reads_the_shape_it_names(counter, text, hit):
+    """The acceptance gates ("0 study-verb / yes-no / who-wins / number hooks") are only as good as
+    these counters: each has a must-count and a must-not-count twin."""
+    prev = _preview_module()
+    assert bool(getattr(prev, counter).search(text)) is hit, (counter, text)
+
+
+@pytest.mark.parametrize("text, hit", [
+    # opens on an auxiliary, with or without one leading label
+    ("Can discipline help you become a better investor?", True),
+    ("Netflix: can it keep growing?", True),
+    # a question with no wh-word before its "?" — verbless or declarative (review 2026-10-07: the first
+    # two were accepted hooks of the 10-05 preview that the opener-only counter missed)
+    ("Apple's Services: a hidden problem for investors?", True),
+    ("The Home Depot vs. Lowe's: the same paint?", True),
+    ("Profitable yet broke?", True),
+    ("Island economies grew fast?", True),
+    ("Netflix lost subscribers in 2022. Can it recover?", True),
+    # a wh-word anywhere before the "?" asks how, why, what, who, which, when or where
+    ("Why can a profitable company still run out of cash?", False),
+    ("Software or steel: who wins the car race?", False),
+    ('Beyond the obvious: ask "and then what?"', False),
+    ("Netflix vs. Disney+: The Streaming Wars", False),         # no question at all
+    ("Is this the end.", False), ("", False), ("?", False),
+    # re-review 2026-10-07: the label is read past (an auxiliary after it, a "when" later on)…
+    ("Netflix: can it grow when TV shrinks?", True),
+    ("Myth: does a buyback always help when prices fall?", True),
+    # …but a label that opens on a wh-word is the question's own stem
+    ("What matters more: subscribers or profit?", False),
+    ("How did NVIDIA win: chips or software?", False),
+    ("Who wins the car race: software or steel?", False),
+    # every question is read with only its own sentence; a comma clause opening on an auxiliary counts
+    ("When Netflix raised prices, did subscribers leave?", True),
+    ("If Apple's margins fell, did its moat break?", True),
+    ("Netflix lost subscribers when prices rose. Can it recover?", True),
+    ("Who is Mr. Market and what does he want?", False),
+    ("Why did Apple win? It sold services.", False),
+    # final round (2026-10-08): a wh-word then a comma opens a wh-question with an insert, not a
+    # subordinate clause; a contracted negative auxiliary opens a yes/no question too
+    ("Why, after years of growth, did Netflix stall?", False),
+    ("How, if at all, did Apple adapt?", False),
+    ("Isn't profit the same as cash?", True),
+    ("Don't stocks always recover?", True),
+    ("Won't a moat last forever?", True),
+    # …and only the contracted opener tells these from a wh-question (a later wh-word would veto them)
+    ("Isn't that why Netflix stalled?", True),
+    ("Don't investors know what they own?", True),
+])
+def test_a_yes_no_question_is_read_through_a_label_and_without_an_auxiliary(text, hit):
+    """The gate "0 yes/no hooks" counted only a hook OPENING on an auxiliary, so a labelled or
+    verbless yes/no question passed it unseen (review 2026-10-07)."""
+    prev = _preview_module()
+    assert prev.is_yes_no_question(text) is hit, text
+
+
+@pytest.mark.parametrize("text, hit", [
+    ("Apple's Services: a hidden problem for investors?", True),     # the 10-05 preview's accepted hook
+    ("Is Netflix's ad tier an opportunity for shareholders?", True),
+    ("Good news for Costco?", True),
+    ("Tesla's price cuts: good or bad?", True),
+    ("A good sign for owners?", True),
+    # re-review 2026-10-07: words between "for"/"to" and the audience, a singular, other news adjectives
+    ("Great News for Shareholders?", True),
+    ("Is the deal good for its shareholders?", True),
+    ("An opportunity for long-term investors?", True),
+    ("A Problem for Apple Investors?", True),
+    ("A threat to shareholders?", True),
+    ("Hidden problems for investors?", True),                       # plural verdict nouns (2026-10-08)
+    ("Two opportunities for shareholders", True),
+    ("Threats to owners?", True),
+    ("What problem did Netflix solve?", False),
+    ("A simple rule for investors", False),
+    ("Why does bad news move prices more than good news?", False),
+    ("Opportunity cost, explained", False),
+    ("Why diversification lowers risk for investors", False),
+])
+def test_the_investor_framed_counter_reads_a_verdict_for_investors(text, hit):
+    """HOOK AND TITLES bans "whether it is good or bad, a problem or an opportunity, for investors or
+    shareholders"; no validator or judge rule enforces it yet (the planned judge round), so the preview
+    counts it for the person reading the run."""
+    prev = _preview_module()
+    assert bool(prev._INVESTOR_FRAMED_RE.search(text)) is hit, text
+
+
+def test_shape_stats_counts_through_the_new_readers():
+    """The 09-26 pins cannot tell the new readers from the old ones (no labelled, verbless or
+    investor-framed hook there): rows built to differ prove `shape_stats` itself uses them."""
+    prev = _preview_module()
+    line = " ".join(["word"] * 11)
+
+    def row(hook: str, title: str, item: str = "money_moves:apples-services-revolution") -> Dict[str, Any]:
+        return {"accepted": True, "item": item,
+                "fields": [["hook", hook], ["captions.youtube_title", title]]
+                + [[f"video_script[{i}]", line] for i in range(6)]}
+
+    stats = prev.shape_stats([
+        row("Apple's Services: a hidden problem for investors?", "Netflix: can it keep growing?"),
+        row("Apple: Understand its moat.", "Good news for Costco?"),
+        row("No  one saw the shift coming.", "Why the shift mattered", "journey:mr_market"),   # two spaces
+        # an investor-framed line in a LESSON is no verdict on a business: not counted
+        row("Why patience is good for investors", "A good sign for owners?", "journey:mr_market"),
+    ])
+    assert (stats["yes_no_hooks"], stats["yes_no_youtube_titles"]) == (1, 3)
+    assert (stats["mm_investor_framed_hooks"], stats["mm_investor_framed_youtube_titles"]) == (1, 1)
+    assert (stats["study_openers"], stats["number_hooks"]) == (1, 0)
+
+
+@pytest.mark.parametrize("text, rest", [
+    ("Apple: Understand its moat.", "Understand its moat."),
+    ("Myth: stocks always go up.", "stocks always go up."),
+    ("Why? Because: reasons", "Why? Because: reasons"),            # a "?" before the colon: no label
+    ("A" * 61 + ": then", "A" * 61 + ": then"),                     # longer than 60: no label
+    ("No label here.", "No label here."), ("", ""),
+])
+def test_one_leading_label_is_read_past(text, rest):
+    prev = _preview_module()
+    assert prev._unlabelled(text) == rest
+    assert bool(prev._STUDY_OPENER_RE.search(prev._unlabelled("Apple: Understand its moat.")))
+
+
+def _prompt_list(pattern: str) -> List[str]:
+    """A comma list SYSTEM_BODY's HOOK AND TITLES paragraph spells out ("A, B, C or D")."""
+    from app.services.marketing import writer_prompts as wp
+
+    m = re.search(pattern, wp.SYSTEM_BODY)
+    assert m, f"HOOK AND TITLES no longer reads {pattern!r}: re-point this parity test"
+    return [w.strip() for w in m.group(1).split(",")] + [m.group(2)]
+
+
+def test_every_opener_the_prompt_bans_is_one_the_preview_counts():
+    """The acceptance gates read the preview's counters, the model reads the prompt: a verb the
+    prompt adds to its ban but the counter does not know would pass the gate unseen. Each opener the
+    prompt names, starting a hook, must be counted (and the lists are pinned whole, so a reworded
+    sentence fails here instead of matching nothing)."""
+    prev = _preview_module()
+    study = _prompt_list(r"instruction to study - not ([A-Za-z, ]+?) or ([A-Za-z]+)\.")
+    yes_no = _prompt_list(r"one that opens with ([A-Za-z, ]+?) or ([A-Za-z]+) \(")
+    assert study == ["Understand", "Learn", "Discover", "Master", "Explore", "Find"]
+    assert yes_no == ["Is", "Are", "Do", "Does", "Did", "Can", "Will", "Should"]
+    for verb in study:
+        assert prev._STUDY_OPENER_RE.search(f"{verb} the balance sheet."), verb
+    for aux in yes_no:
+        assert prev._YES_NO_RE.search(f"{aux} the market ever stay calm?"), aux
+    assert prev._WHO_WINS_RE.search("Who will win the chip race?")   # "never who will win"
+
+
+def test_the_previews_example_hook_is_the_one_the_prompt_quotes():
+    """`example_copies` counts copies of the prompt's example hook by its own literal: if the prompt's
+    example changed and the preview's did not, every copy would go uncounted (gate: ≤ 1)."""
+    from app.services.marketing import writer_prompts as wp
+
+    prev = _preview_module()
+    assert wp.SYSTEM_BODY.count(f'"{prev._EXAMPLE_HOOK}"') == 1
+    line = " ".join(["word"] * 11)
+    row = {"accepted": True, "item": "journey:mr_market",
+           "fields": [["hook", prev._EXAMPLE_HOOK]] + [[f"video_script[{i}]", line] for i in range(6)]}
+    assert prev.shape_stats([row])["example_copies"] == 1
+
+
+@pytest.mark.parametrize("text, name, hit", [
+    ("Meta's metaverse bet", "Meta", True),           # a following apostrophe still names it
+    ("The metaverse bet", "Meta", False),             # a longer word does not
+    ("Myth: Home Depot and Lowe's are the same.", "Lowe", True),
+    ("Netflix vs. Disney+: The Streaming Wars", "Disney", True),
+    ("Nvidia's AI lead began with gaming chips.", "NVIDIA", True),   # any case
+    ("Visas and passports", "Visa", False),
+])
+def test_a_title_company_is_matched_as_a_word(text, name, hit):
+    prev = _preview_module()
+    assert prev._names(text, name) is hit
+
+
+def test_shape_stats_degrades_on_an_empty_or_odd_dump(tmp_path):
+    """An empty dump has no shape (no medians of nothing); a non-object row is skipped; a round with
+    no script counts as outside the enforced window, never as a pass."""
+    prev = _preview_module()
+    assert prev.shape_stats([]) == {"accepted": 0, "rounds_outside_enforced_window": 0}
+    assert prev.shape_stats(["junk", None, 7, {"accepted": False, "fields": []}]) == {
+        "accepted": 0, "rounds_outside_enforced_window": 1}
+    for doc, rows in (([], []), ({"no": "packages"}, []), ({"packages": None}, []),
+                      ({"packages": ["x", {"id": "a"}]}, [{"id": "a"}])):
+        path = tmp_path / "d.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        assert prev._rows_of(path) == rows, doc
+
+
+def test_stats_from_needs_no_model_call(monkeypatch, capsys):
+    """`--stats-from` reads a dump and prints its shape — before any job is planned, so it never
+    reaches the writer (which would spend Gemini tokens)."""
+    import asyncio
+
+    prev = _preview_module()
+
+    async def no_model_call(*_a, **_k):
+        raise AssertionError("--stats-from reached the writer")
+
+    monkeypatch.setattr(prev, "generate_package", no_model_call)
+    monkeypatch.setattr(sys, "argv", ["marketing_preview.py", "--stats-from", str(FIXTURE)])
+    assert asyncio.run(prev.main()) == 0
+    out = capsys.readouterr().out
+    assert "## Shape (accepted packages)" in out
+    assert '- mm_hooks_naming_title_company: "4/15"' in out
+    assert "# Marketing writer preview" not in out   # returned before planning any job

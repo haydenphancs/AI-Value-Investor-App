@@ -194,6 +194,16 @@ struct StockKeyStatisticsGroupDTO: Decodable {
 struct SnapshotMetricDTO: Decodable {
     let name: String
     let value: String
+    /// "industry" | "sector": the peer group whose median `name` prints. The name itself
+    /// keeps the words "sector avg" on the wire (shipped builds strip "(… sector …)" by that
+    /// word), so the display swaps them by this field. Optional: an older backend, and a
+    /// metric with no peer comparison, send none.
+    let peerLevel: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, value
+        case peerLevel = "peer_level"
+    }
 }
 
 /// FMP's discounted-cash-flow value, carried on the valuation ("Price") snapshot only.
@@ -219,11 +229,15 @@ struct SnapshotItemDTO: Decodable {
     /// The Caydex Fair Value Estimate (valuation snapshot only, when the backend enables
     /// it — FMP's `dcf` is then absent). Optional: older backends never send it.
     let caydexEstimate: CaydexFairValueDTO?
+    /// ISO-8601 UTC instant the backend BUILT this snapshot (a cached item keeps its build
+    /// time). Optional: an older backend never sends it, and the header then shows no date.
+    let computedAt: String?
 
     enum CodingKeys: String, CodingKey {
         case category, rating, metrics, dcf
         case fullReportAvailable = "full_report_available"
         case caydexEstimate = "caydex_estimate"
+        case computedAt = "computed_at"
     }
 }
 
@@ -325,14 +339,22 @@ extension StockOverviewResponseDTO {
         let snapshotItems = snapshots.map { dto in
             let category = SnapshotCategory(rawValue: dto.category) ?? .profitability
             let rating = SnapshotRatingLevel(rawValue: dto.rating) ?? .unavailable
-            let metrics = dto.metrics.map { SnapshotMetric(name: $0.name, value: $0.value) }
+            let metrics = dto.metrics.map {
+                SnapshotMetric(name: $0.name, value: $0.value, peerLevel: $0.peerLevel)
+            }
+            // An unreadable stamp is NO date (the header then hides its line), never "now".
+            let computedAt = SnapshotItem.parseComputedAt(dto.computedAt)
+            if computedAt == nil, let raw = dto.computedAt {
+                print("⚠️ StockOverviewDTO: \(symbol) \(dto.category) snapshot computed_at unreadable: \(raw)")
+            }
             return SnapshotItem(
                 category: category,
                 rating: rating,
                 metrics: metrics,
                 fullReportAvailable: dto.fullReportAvailable,
                 dcf: dto.dcf.flatMap { DcfEstimate(dto: $0) },
-                caydexEstimate: dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) }
+                caydexEstimate: dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) },
+                computedAt: computedAt
             )
         }
 

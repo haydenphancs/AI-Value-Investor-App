@@ -1,7 +1,7 @@
 """
 Health Check service — fetches financial ratios from FMP, compares them
-to pre-computed sector median benchmarks, computes gauge positions,
-status colors, and dynamic insight text.
+to pre-computed peer median benchmarks (the industry's, else the sector's),
+computes gauge positions, status colors, and dynamic insight text.
 
 Uses a two-tier cache-aside pattern:
   Tier 1 — in-memory dict (5-minute TTL)
@@ -30,6 +30,17 @@ from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
 from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
 from app.services.asset_class import profile_is_fund
+# The financials gate lives in ONE module shared with the snapshot cards and the benchmark
+# producer. `_industry_key`, `_LIQUIDITY_NA_INDUSTRIES` and `liquidity_ratios_applicable`
+# stay importable from here under their old names (tests and older callers use them).
+from app.services.financials_metric_gate import (  # noqa: F401  (re-exported names)
+    GATED_METRICS,
+    _NO_LIQUIDITY_INDUSTRIES as _LIQUIDITY_NA_INDUSTRIES,
+    industry_key as _industry_key,
+    interest_coverage_applicable,
+    liquidity_ratios_applicable,
+    peer_metric_applicable,
+)
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
 
@@ -52,7 +63,21 @@ _CACHE_TTL = 300  # 5 minutes
 #     failed fetch is never persisted, so a NULL `next_earnings_date` now means "no
 #     pending announcement". An older row's NULL may be a swallowed calendar 429 (no
 #     report-day bound for up to 24h), so those rows are rebuilt.
-_HC_PAYLOAD_VERSION = 4
+# 5 (2026-10-07): banks, insurers and capital-markets firms no longer get interest
+#     coverage, current ratio or quick ratio (`liquidity_ratios_applicable` — C showed all
+#     three red, BAC a 0.54 current ratio as "positive"); every compared metric carries
+#     `peer_level`, and its text names that level ("industry average" when the median is
+#     the industry's — it always said "sector"); the median itself comes from the lookup's
+#     new current-benchmark picker (never a thin or incomplete-period cell).
+# 6 (2026-10-07, review round 2): the gate moved to `financials_metric_gate`, and insurance
+#     brokers (MMC, AON, AJG) get interest coverage BACK — a fee business whose lenders
+#     watch that ratio (only current / quick ratio are distorted by fiduciary funds). A
+#     current / quick ratio / interest-coverage median that is the Financial Services
+#     SECTOR's is no comparison (`_bank_pooled_sector_cell`, permanent): that aggregate
+#     pools bank and insurer values, and once the producer leaves those out it is shells,
+#     exchanges and developers — never a peer group. A v5 row (a local run may have
+#     written one) is rebuilt.
+_HC_PAYLOAD_VERSION = 6
 _HC_VERSION_KEY = "payload_version"
 
 # ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────
@@ -162,6 +187,9 @@ def _clamp(val: float, lo: float, hi: float) -> float:
 # FMP field name, sector_benchmarks metric name, lower_is_better flag
 # Note: FMP stable API field names match sector_benchmark_service.py
 # ROE comes from key-metrics endpoint, not ratios.
+# The peer median is the INDUSTRY's when that group is mature, else the sector's
+# (`sector_benchmark_lookup.get_current_benchmarks`); each metric reports which as
+# `peer_level`, and the insight text names the same level.
 METRIC_DEFS = [
     {
         "type": "debt_to_equity",
@@ -327,63 +355,68 @@ def _format_diff_label(pct_diff: float) -> str:
 
 
 def _generate_de_insight(
-    pct_diff: float, value: float, sector: float,
+    pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Debt-to-Equity.
 
     Returns (main_text, highlighted_value, highlighted_label) where the
     frontend renders: ``{value} {label} {main_text}``
     e.g.  **43%** **below** sector average. Conservative leverage.
+
+    ``peer`` is the level of the median compared against, "industry" or "sector"
+    (`_peer_noun`), and every generator below takes it: the text said "sector average"
+    even when the median was the INDUSTRY's. iOS renders these strings verbatim and
+    parses none of them (verified 2026-10-07), so the word can follow the level.
     """
     label = _format_diff_label(pct_diff)
 
     if pct_diff < -50:
         return (
-            "sector average. Very conservative leverage.",
+            f"{peer} average. Very conservative leverage.",
             label,
             "below",
         )
     elif pct_diff < -25:
         return (
-            "sector average. Conservative leverage.",
+            f"{peer} average. Conservative leverage.",
             label,
             "below",
         )
     elif pct_diff < -10:
         return (
-            "sector average. Healthy debt position.",
+            f"{peer} average. Healthy debt position.",
             label,
             "below",
         )
     elif pct_diff <= 15:
         direction = "above" if pct_diff > 0 else "below"
         return (
-            "sector average. Leverage in line with peers.",
+            f"{peer} average. Leverage in line with peers.",
             label,
             direction,
         )
     elif pct_diff <= 50:
         return (
-            "sector average. Moderately higher leverage.",
+            f"{peer} average. Moderately higher leverage.",
             label,
             "above",
         )
     elif pct_diff <= 100:
         return (
-            "sector average. Elevated leverage.",
+            f"{peer} average. Elevated leverage.",
             label,
             "above",
         )
     else:
         return (
-            "sector average. Significantly leveraged vs peers.",
+            f"{peer} average. Significantly leveraged vs peers.",
             label,
             "well above",
         )
 
 
 def _generate_pe_insight(
-    pct_diff: float, value: float, sector: float,
+    pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for P/E Ratio.
 
@@ -395,51 +428,51 @@ def _generate_pe_insight(
 
     if pct_diff < -30:
         return (
-            "sector average. Deep value opportunity.",
+            f"{peer} average. Deep value opportunity.",
             label,
             "below",
         )
     elif pct_diff < -15:
         return (
-            "sector average. Fair value opportunity.",
+            f"{peer} average. Fair value opportunity.",
             label,
             "below",
         )
     elif pct_diff < -5:
         return (
-            "sector average. Slight valuation edge.",
+            f"{peer} average. Slight valuation edge.",
             label,
             "below",
         )
     elif pct_diff <= 10:
         direction = "above" if pct_diff > 0 else "below"
         return (
-            "sector average. Valued in line with peers.",
+            f"{peer} average. Valued in line with peers.",
             label,
             direction,
         )
     elif pct_diff <= 35:
         return (
-            "sector average. Premium valuation.",
+            f"{peer} average. Premium valuation.",
             label,
             "above",
         )
     elif pct_diff <= 75:
         return (
-            "sector average. Priced for high growth.",
+            f"{peer} average. Priced for high growth.",
             label,
             "well above",
         )
     else:
         return (
-            "sector average. Richly valued vs peers.",
+            f"{peer} average. Richly valued vs peers.",
             label,
             "well above",
         )
 
 
 def _generate_roe_insight(
-    pct_diff: float, value: float, sector: float,
+    pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Return on Equity.
 
@@ -451,184 +484,184 @@ def _generate_roe_insight(
 
     if pct_diff > 100:
         return (
-            "sector average. Exceptional capital efficiency.",
+            f"{peer} average. Exceptional capital efficiency.",
             label,
             "well above",
         )
     elif pct_diff > 40:
         return (
-            "sector average. Strong capital efficiency.",
+            f"{peer} average. Strong capital efficiency.",
             label,
             "above",
         )
     elif pct_diff > 10:
         return (
-            "sector average. Solid returns on equity.",
+            f"{peer} average. Solid returns on equity.",
             label,
             "above",
         )
     elif pct_diff >= -10:
         direction = "above" if pct_diff >= 0 else "below"
         return (
-            "sector average. Average capital efficiency.",
+            f"{peer} average. Average capital efficiency.",
             label,
             direction,
         )
     elif pct_diff >= -30:
         return (
-            "sector average. Below-average capital efficiency.",
+            f"{peer} average. Below-average capital efficiency.",
             label,
             "below",
         )
     elif pct_diff >= -50:
         return (
-            "sector average. Low capital efficiency.",
+            f"{peer} average. Low capital efficiency.",
             label,
             "below",
         )
     else:
         return (
-            "sector average. Significantly underperforming.",
+            f"{peer} average. Significantly underperforming.",
             label,
             "well below",
         )
 
 
 def _generate_cr_insight(
-    pct_diff: float, value: float, sector: float,
+    pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Current Ratio."""
     label = _format_diff_label(pct_diff)
 
     if pct_diff > 75:
         return (
-            "sector average. Ample liquidity cushion.",
+            f"{peer} average. Ample liquidity cushion.",
             label,
             "well above",
         )
     elif pct_diff > 30:
         return (
-            "sector average. Healthy short-term liquidity position.",
+            f"{peer} average. Healthy short-term liquidity position.",
             label,
             "above",
         )
     elif pct_diff > 10:
         return (
-            "sector average, normal short-term liquidity position.",
+            f"{peer} average, normal short-term liquidity position.",
             label,
             "above",
         )
     elif pct_diff >= -10:
         return (
-            "Liquidity roughly in line with sector peers.",
+            f"Liquidity roughly in line with {peer} peers.",
             label,
-            "near sector average.",
+            f"near {peer} average.",
         )
     elif pct_diff >= -25:
         return (
-            "sector average. Adequate but tight liquidity.",
+            f"{peer} average. Adequate but tight liquidity.",
             label,
             "a little below",
         )
     elif pct_diff >= -40:
         return (
-            "sector average. Tight but manageable liquidity.",
+            f"{peer} average. Tight but manageable liquidity.",
             label,
             "below",
         )
     else:
         return (
-            "sector average. Constrained liquidity position.",
+            f"{peer} average. Constrained liquidity position.",
             label,
             "well below",
         )
 
 
 def _generate_ic_insight(
-    pct_diff: float, value: float, sector: float,
+    pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Interest Coverage (higher is better)."""
     label = _format_diff_label(pct_diff)
 
     if pct_diff > 100:
         return (
-            "sector average. Outsized capacity to service debt.",
+            f"{peer} average. Outsized capacity to service debt.",
             label,
             "well above",
         )
     elif pct_diff > 50:
         return (
-            "sector average. Strong debt service coverage.",
+            f"{peer} average. Strong debt service coverage.",
             label,
             "above",
         )
     elif pct_diff > 10:
         return (
-            "sector average. Comfortable interest coverage.",
+            f"{peer} average. Comfortable interest coverage.",
             label,
             "above",
         )
     elif pct_diff >= -25:
         direction = "above" if pct_diff >= 0 else "below"
         return (
-            "sector average. Adequate coverage of interest expense.",
+            f"{peer} average. Adequate coverage of interest expense.",
             label,
             direction,
         )
     elif pct_diff >= -50:
         return (
-            "sector average. Thin coverage of interest expense.",
+            f"{peer} average. Thin coverage of interest expense.",
             label,
             "below",
         )
     else:
         return (
-            "sector average. Vulnerable to interest expense pressure.",
+            f"{peer} average. Vulnerable to interest expense pressure.",
             label,
             "well below",
         )
 
 
 def _generate_qr_insight(
-    pct_diff: float, value: float, sector: float,
+    pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate insight text for Quick Ratio (higher is better)."""
     label = _format_diff_label(pct_diff)
 
     if pct_diff > 50:
         return (
-            "sector average. Strong cash-equivalent liquidity.",
+            f"{peer} average. Strong cash-equivalent liquidity.",
             label,
             "well above",
         )
     elif pct_diff > 20:
         return (
-            "sector average. Healthy near-cash coverage.",
+            f"{peer} average. Healthy near-cash coverage.",
             label,
             "above",
         )
     elif pct_diff > 5:
         return (
-            "sector average. Solid quick-asset cushion.",
+            f"{peer} average. Solid quick-asset cushion.",
             label,
             "above",
         )
     elif pct_diff >= -10:
         direction = "above" if pct_diff >= 0 else "below"
         return (
-            "sector average. Quick-asset coverage in line with peers.",
+            f"{peer} average. Quick-asset coverage in line with peers.",
             label,
             direction,
         )
     elif pct_diff >= -25:
         return (
-            "sector average. Thin near-cash cushion.",
+            f"{peer} average. Thin near-cash cushion.",
             label,
             "below",
         )
     else:
         return (
-            "sector average. Limited quick-asset coverage.",
+            f"{peer} average. Limited quick-asset coverage.",
             label,
             "well below",
         )
@@ -1039,22 +1072,145 @@ _CROSSES_ZERO_TYPES = frozenset({"roe", "interest_coverage"})
 
 
 def _crossed_zero_insight(
-    metric_type: str, value: float,
+    metric_type: str, value: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Insight for a company value <= 0 against a POSITIVE peer median.
 
     A percent gap is meaningless here: ROE -25% vs a 12% median is pct -308, which the
     generators rendered "4.1x well below sector average", and IC -3 vs 20 rendered
     "115% well below". Say what the number means instead; the status stays "negative".
+    ``peer`` names the median's level, as in the generators.
     """
     word = "Negative" if value < 0 else "Zero"
     if metric_type == "roe":
         text = ("The company is losing money on its equity." if value < 0
                 else "No return on shareholder equity.")
-        return (text, word, "ROE vs a positive sector average.")
+        return (text, word, f"ROE vs a positive {peer} average.")
     text = ("Operating losses leave interest expense uncovered." if value < 0
             else "Operating earnings do not cover interest expense.")
-    return (text, word, "interest coverage vs a positive sector average.")
+    return (text, word, f"interest coverage vs a positive {peer} average.")
+
+
+# ── Peer cells (2026-10-07) ──────────────────────────────────────────────────────────
+# `get_current_benchmarks` answers {metric: cell | None}, a cell carrying value / level /
+# peer_group_name / n. The flat `get_current_benchmark_values` dropped the level, so the
+# card could not say whose median it compared against and always said "sector".
+_PEER_LEVELS = frozenset({"industry", "sector"})
+
+
+def _peer_cell_value(metric: str, cell: Any) -> Optional[float]:
+    """The cell's median as a finite float, else None (no benchmark). A NaN / inf / bool /
+    non-numeric value is refused with a WARNING: NaN slips every `<=` floor check below
+    and turned the whole response into a JSON encode failure."""
+    if cell is None:
+        return None
+    if not isinstance(cell, dict):
+        logger.warning(
+            "Health check peer cell for %s is a %s, not a dict — treated as no benchmark",
+            metric, type(cell).__name__,
+        )
+        return None
+    raw = cell.get("value")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        logger.warning("Health check peer median for %s is a bool (%r) — no benchmark",
+                       metric, raw)
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Health check peer median for %s is not a number (%r) — no benchmark",
+                       metric, raw)
+        return None
+    if not math.isfinite(val):
+        logger.warning("Health check peer median for %s is not finite (%r) — no benchmark",
+                       metric, raw)
+        return None
+    return val
+
+
+def _peer_cell_level(metric: str, cell: Any) -> Optional[str]:
+    """"industry" | "sector" for a cell that has one, else None (logged: every cell the
+    lookup builds carries its level, so a missing one is a contract drift)."""
+    if not isinstance(cell, dict):
+        return None
+    level = cell.get("level")
+    if level in _PEER_LEVELS:
+        return level
+    logger.warning(
+        "Health check peer cell for %s has level %r (want industry/sector) — the comparison "
+        "is kept, its level is reported as unknown", metric, level,
+    )
+    return None
+
+
+def _peer_noun(level: Optional[str]) -> str:
+    """The word the insight text uses for the median's level. An unknown level keeps the
+    pre-2026-10-07 wording ("sector"), which is also what iOS falls back to."""
+    return "industry" if level == "industry" else "sector"
+
+
+# ── Liquidity / coverage ratios on a financial balance sheet (2026-10-07) ───────────
+# Interest coverage, current ratio and quick ratio assume an OPERATING company. A bank,
+# insurer, broker-dealer, asset manager or lender has no current/non-current split on its
+# balance sheet (FMP's "current" figures for it are a classification artefact), and its
+# interest expense is the cost of the money it lends or invests — not a debt-service
+# burden on operating earnings. Production rows showed it: C read all three red, BAC a
+# 0.54 current ratio as "positive". Those rows are OMITTED (not shown, not scored), the
+# way `altman_z_applicable` omits Altman Z — for a NARROWER set, named industry by
+# industry, in `app/services/financials_metric_gate.py` (shared with the snapshot cards
+# and the benchmark producer): Financial Services also holds the data vendors and
+# exchanges ("Financial - Data & Stock Exchanges": SPGI, MCO, MSCI) and shell companies,
+# and an equity REIT's interest coverage is the number its lenders watch. Those keep the
+# three rows, deliberately. Insurance brokers keep interest coverage and lose only the
+# current / quick ratio (review round 2: their fiduciary funds distort only those two).
+# `tests/test_health_check_2026_10_07*.py` walks every Financial Services and Real Estate
+# industry in the universe files, so a new FMP industry name fails the build until someone
+# decides which side it is on.
+# Kept importable from this module under their pre-gate names (imported above; nothing
+# here calls them any more).
+_GATE_REEXPORTS = (
+    _LIQUIDITY_NA_INDUSTRIES, _industry_key, interest_coverage_applicable,
+    liquidity_ratios_applicable,
+)
+
+# PERMANENT rule (owner decision 2026-10-08, review round 3, R3-CARDS-5): the Financial
+# Services SECTOR median of current ratio, quick ratio and interest coverage is never a
+# peer group, so a financial company is never compared with it. Before the gated producer
+# rebuilt it, that aggregate was ~95% banks, insurers, asset managers, lenders and
+# capital-markets firms — the values the gate above calls meaningless (review 2026-10-07,
+# HC-2): SPGI's interest coverage of ~20x read "well above sector average" against banks'
+# funding-cost coverage of ~1. AFTER the rebuild (`industry_benchmark_service` pools only
+# the industries where these metrics mean something) it is still no peer group: what is
+# left of Financial Services for these three metrics is shell companies, exchanges and
+# data vendors, real-estate developers (and insurance brokers, for interest coverage) —
+# a few dozen unrelated businesses, mostly shells and developers. So this guard does NOT
+# go away once the producer has rebuilt the rows. Such a cell is no comparison: absolute
+# heuristics, `peer_level` None. An INDUSTRY cell is the company's own peers and is kept
+# (an exchange is compared with exchanges once its industry has a mature cell); every
+# other sector is unaffected. The producer keeps pooling these industries into the FS
+# sector rows (no new exclusions there): the refusal lives here, at the reader.
+_BANK_POOLED_SECTORS = frozenset({"financial services"})
+
+
+def _bank_pooled_sector_cell(metric: str, level: Optional[str], sector: Any) -> bool:
+    """True when ``metric``'s peer cell is the Financial Services SECTOR median of a gated
+    metric (current ratio, quick ratio, interest coverage): never a comparison (see the
+    comment above — permanent, not a stop-gap until a producer rebuild; the name is kept
+    because other modules import it). ``sector`` is the company's sector, raw or
+    normalised; a non-string is unknown."""
+    if metric not in GATED_METRICS or level != "sector" or not isinstance(sector, str):
+        return False
+    return (_normalize_sector(sector.strip()) or "").lower() in _BANK_POOLED_SECTORS
+
+
+def omitted_financial_rows(industry: Optional[str]) -> frozenset:
+    """The Health Check metric types omitted for ``industry`` (`financials_metric_gate`):
+    current + quick ratio and interest coverage for banks, insurers, capital-markets firms,
+    asset managers and lenders; current + quick ratio only for insurance brokers; none for
+    every other industry, and for an unknown or empty one."""
+    return frozenset(m for m in GATED_METRICS if not peer_metric_applicable(m, industry))
 
 
 def _overall_rating(passed: int, total: int) -> str:
@@ -1394,25 +1550,34 @@ class HealthCheckService:
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
         logger.info(f"Health check {ticker}: raw_sector={raw_sector!r}, normalized={sector!r}, industry={industry!r}")
 
-        # CURRENT benchmark per metric: TTM row if present, else latest mature annual
-        # value (fallback). Flat {metric: value | None}.
+        # Banks, insurers, capital-markets firms, asset managers, lenders: no interest
+        # coverage, current or quick ratio; insurance brokers: no current or quick ratio
+        # (`omitted_financial_rows`, from `financials_metric_gate`). Decided once, logged once.
+        omitted_rows = omitted_financial_rows(industry)
+        if omitted_rows:
+            logger.info(
+                "Health check %s: %s omitted — not meaningful for industry=%r (a financial "
+                "balance sheet has no current/non-current split, and a lender's interest "
+                "expense is a funding cost)",
+                ticker, ", ".join(sorted(omitted_rows)), industry,
+            )
+        bench_metrics = [
+            mdef["benchmark_name"] for mdef in METRIC_DEFS
+            if mdef["benchmark_name"] and mdef["type"] not in omitted_rows
+        ]
+
+        # CURRENT peer cell per metric (`get_current_benchmarks`): the industry TTM median
+        # when mature, else the sector TTM, else the newest complete mature annual year,
+        # else None. Its value is compared; its level is reported (`peer_level`) and named
+        # in the text.
         cur_bench: Dict[str, Optional[float]] = {}
+        cur_levels: Dict[str, Optional[str]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
             try:
                 # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
-                cur_bench = await asyncio.to_thread(
-                    lookup.get_current_benchmark_values,
-                    industry,
-                    sector,
-                    [
-                        "debt_to_equity",
-                        "pe_ratio",
-                        "roe",
-                        "current_ratio",
-                        "interest_coverage",
-                        "quick_ratio",
-                    ],
+                cur_cells = await asyncio.to_thread(
+                    lookup.get_current_benchmarks, industry, sector, bench_metrics,
                 )
             except Exception as e:
                 # A lookup FAILURE is not the same answer as "this peer group has no
@@ -1422,18 +1587,44 @@ class HealthCheckService:
                     "Health check %s: benchmark lookup failed (%s: %s) — absolute "
                     "heuristics, build marked degraded", ticker, type(e).__name__, e,
                 )
-                cur_bench = {}
+                cur_cells = {}
                 degraded.append("benchmarks")
             else:
                 # The lookup SWALLOWS a DB error into the empty shape; it flags that
                 # shape so a transient failure is not persisted as "no peer group".
-                if lookup_failed(cur_bench):
+                if lookup_failed(cur_cells):
                     logger.warning(
                         "Health check %s: benchmark lookup returned a FAILED shape — "
                         "absolute heuristics, build marked degraded", ticker,
                     )
                     degraded.append("benchmarks")
-            logger.info(f"Health check {ticker}: current benchmarks={cur_bench}")
+            if not isinstance(cur_cells, dict):
+                logger.warning(
+                    "Health check %s: benchmark lookup answered a %s, not a dict — "
+                    "absolute heuristics", ticker, type(cur_cells).__name__,
+                )
+                cur_cells = {}
+            for bm_name in bench_metrics:
+                cell = cur_cells.get(bm_name)
+                cur_bench[bm_name] = _peer_cell_value(bm_name, cell)
+                cur_levels[bm_name] = (
+                    _peer_cell_level(bm_name, cell) if cur_bench[bm_name] is not None else None
+                )
+                if cur_bench[bm_name] is not None and _bank_pooled_sector_cell(
+                    bm_name, cur_levels[bm_name], sector,
+                ):
+                    logger.info(
+                        "Health check %s: %s peer median %r is the Financial Services "
+                        "SECTOR's (industry=%r has no mature cell) — that aggregate is no "
+                        "peer group for this ratio (banks/insurers, or shells, exchanges "
+                        "and developers once they are excluded): absolute heuristics",
+                        ticker, bm_name, cur_bench[bm_name], industry,
+                    )
+                    cur_bench[bm_name] = None
+                    cur_levels[bm_name] = None
+            logger.info(
+                f"Health check {ticker}: current benchmarks={cur_bench} levels={cur_levels}"
+            )
             for bm_name, bm_val in cur_bench.items():
                 if bm_val is None:
                     logger.warning(f"Health check {ticker}: NO benchmark data for {bm_name}")
@@ -1519,6 +1710,11 @@ class HealthCheckService:
                         highlighted_label=highlighted_label,
                     )
                 )
+                continue
+
+            # Bank / insurer / capital-markets / broker row: omitted, not judged (logged
+            # once above).
+            if mdef["type"] in omitted_rows:
                 continue
 
             source = ratios if mdef["source"] == "ratios" else key_metrics
@@ -1625,6 +1821,11 @@ class HealthCheckService:
                     f"no benchmark"
                 )
                 sector_val = None
+            # The level of the median actually compared against; None with no comparison.
+            peer_level = (
+                cur_levels.get(mdef["benchmark_name"]) if sector_val is not None else None
+            )
+            peer = _peer_noun(peer_level)
             sector_display = None
             if sector_val is not None:
                 if mdef["is_percentage"]:
@@ -1655,7 +1856,7 @@ class HealthCheckService:
                 # real context — but drop the percentage.
                 status = "negative"
                 insight_text, highlighted_value, highlighted_label = _crossed_zero_insight(
-                    mdef["type"], display_val,
+                    mdef["type"], display_val, peer=peer,
                 )
                 pct_diff = None
             elif pct_diff is not None:
@@ -1664,7 +1865,7 @@ class HealthCheckService:
                 )
                 gen = _INSIGHT_GENERATORS[mdef["type"]]
                 insight_text, highlighted_value, highlighted_label = gen(
-                    pct_diff, display_val, sector_display or 0,
+                    pct_diff, display_val, sector_display or 0, peer=peer,
                 )
             else:
                 # No sector benchmark — absolute-value heuristic and its fallback text
@@ -1684,6 +1885,7 @@ class HealthCheckService:
                     insight_text=insight_text,
                     highlighted_value=highlighted_value,
                     highlighted_label=highlighted_label,
+                    peer_level=peer_level,
                 )
             )
 

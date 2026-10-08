@@ -328,6 +328,20 @@ def test_an_unversioned_ownership_snapshot_row_is_refused_and_a_current_one_serv
     assert svc.supabase.upserts[0]["response_json"][oss._VERSION_KEY] == oss._SNAPSHOT_PAYLOAD_VERSION
 
 
+
+def test_a_v3_ownership_snapshot_row_is_refused_after_the_series_token_change():
+    """Integration review 2026-10-08: the Form 4/A supersession now keeps share series apart, and
+    the Holders payload moved to v5 for it. The Overview ownership card summarises the same
+    insider flow, so a row built before the change (v3) must be recomputed, not served for 24 h."""
+    from datetime import datetime, timezone
+    from app.schemas.stock_overview import SnapshotItemResponse
+    assert oss._SNAPSHOT_PAYLOAD_VERSION >= 4
+    base = SnapshotItemResponse(category="Insiders & Ownership", rating=3, metrics=[]).model_dump()
+    svc = object.__new__(oss.OwnershipSnapshotService)
+    svc.supabase = _FakeSupabase(row={"response_json": {**base, oss._VERSION_KEY: 3},
+                                      "cached_at": datetime.now(timezone.utc).isoformat()})
+    assert svc._check_supabase_cache("FWONA") is None
+
 @pytest.mark.asyncio
 async def test_ownership_snapshot_renders_unknown_as_a_dash_and_scores_it_neutral(monkeypatch):
     from app.schemas.holders import ShareholderBreakdownSchema

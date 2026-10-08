@@ -13,12 +13,13 @@ from fastapi.exceptions import RequestValidationError
 # unmatched route.
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
+import os
 import re
 import time
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from app.config import settings
 from app.database import check_supabase_health, close_health_client, get_supabase
@@ -216,6 +217,42 @@ _ONE_SHOT_TASKS = frozenset({
 })
 
 
+#: The variables uvicorn takes its worker count from when its command has no `--workers`, in its own
+#: order: its click CLI reads UVICORN_WORKERS (`auto_envvar_prefix="UVICORN"`; an empty value is
+#: ignored) and passes it as an explicit count, which wins; `Config` reads WEB_CONCURRENCY only when no
+#: count was given.
+_WORKER_COUNT_VARIABLES = ("UVICORN_WORKERS", "WEB_CONCURRENCY")
+
+
+def _web_concurrency_problem(environ: Mapping[str, str]) -> Optional[str]:
+    """Why UVICORN_WORKERS and WEB_CONCURRENCY must stay unset (or 1) on the web service, or None when
+    they do.
+
+    uvicorn starts that many worker processes when its command has no `--workers`
+    (tests/test_deploy_command_parity.py forbids the flag, not the variables): UVICORN_WORKERS when it
+    is set and not blank, else WEB_CONCURRENCY (`_WORKER_COUNT_VARIABLES`) — the line names the one
+    that decided. Every lifespan loop here runs UNCLAIMED in each worker, and the in-process state the
+    marketing /go counter keeps — its per-address limiter, its per-campaign ceilings, its pending
+    counts and the publisher's early-window clock — would split across them. Non-fatal (the boot goes
+    on), like the universe file check: the ERROR line is what makes it visible."""
+    name = next((n for n in _WORKER_COUNT_VARIABLES if (environ.get(n) or "").strip()), None)
+    if name is None:
+        return None
+    raw = environ[name]
+    try:
+        workers = int(raw.strip())
+    except ValueError:
+        return (f"{name}={raw[:12]!r} is not a number — unset it on the Railway web service "
+                f"(this app must run ONE uvicorn worker)")
+    if workers <= 1:
+        return None
+    shown = str(workers)
+    shown = shown if len(shown) <= 12 else shown[:12] + "…"   # a 400-digit typo stays one short line
+    return (f"{name}={shown} asks uvicorn for more than one worker — every lifespan loop runs "
+            f"unclaimed in each, and the /go counters, ceilings and publish clock split across them; "
+            f"unset it on the Railway web service (this app must run ONE uvicorn worker)")
+
+
 @dataclass
 class _WarmGate:
     """The Home first-paint warm's hold on Railway's deploy gate (`/health/pdf`).
@@ -240,6 +277,9 @@ async def lifespan(app: FastAPI):
     global _HOME_WARM_GATE
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
+    problem = _web_concurrency_problem(os.environ)
+    if problem:
+        logger.error("STARTUP: %s", problem)
 
     # The two FMP-derived universe files. They are read by four services plus three
     # scheduled jobs, and every one of those degrades to `[]` on a miss — so an absent file
@@ -2551,8 +2591,8 @@ def _render_landing() -> HTMLResponse:
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["Root"], include_in_schema=False)
 async def landing_page():
-    """Public landing page. Pre-launch: "Coming soon"; post-launch (MARKETING_APP_STORE_URL
-    set): an App Store button plus the Smart App Banner meta tag."""
+    """Public landing page. No valid MARKETING_APP_STORE_URL: a "Caydex for iPhone" label with no
+    link (no availability claim); a valid one: an App Store button plus the Smart App Banner tag."""
     return _render_landing()
 
 

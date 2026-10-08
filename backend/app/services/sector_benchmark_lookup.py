@@ -5,9 +5,12 @@ stored in Supabase, with 1-hour in-memory cache.
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.period_labels import benchmark_period_complete
 from app.utils.supabase_errors import (
     is_transient_supabase_error,
     retry_idempotent_sync,
@@ -90,13 +93,126 @@ def _is_transient(exc: BaseException) -> bool:
     return is_transient_supabase_error(exc)
 
 
-# ── Phase 3: mature-period picker (sample-size floor + hold-last-mature) ──
+# ── Which stored rows may be SERVED ──────────────────────────────────────
+#
+# Two gates, both on the row's own `computed_at`, applied to every read in
+# `_fetch_rows` so no caller can skip them:
+#
+# 1. An ANNUAL or CALENDAR-QUARTER row is served only when it was computed at least
+#    BENCHMARK_REPORTING_LAG_DAYS (75) after its period ended. Before that its cell holds
+#    only the early, off-calendar filers (on 2026-10-04 the "2026" annual cells held 6-27%
+#    of each group). The producer does not write such a period any more, but rows it
+#    wrote earlier stay in the table until a later run rewrites them; this gate hides
+#    them meanwhile. Owner decision 2026-10-07: an incomplete period shows NO peer value —
+#    never an earlier period's median standing in for it.
+# 2. A TTM row is the CURRENT snapshot, rewritten every Sunday for every peer group with
+#    at least MIN_SAMPLE_SIZE companies. A row older than TTM_MAX_AGE_DAYS belongs to a
+#    group that later fell below that size (or the weekly job has stopped) and is no
+#    longer anyone's current median. Historical annual / quarterly rows have no age limit:
+#    the producer fetches only 16 annual records, so the oldest years legitimately stop
+#    being rewritten and remain correct history.
+TTM_MAX_AGE_DAYS = 21
+_SERVE_LOG_EVERY_SECONDS = 6 * 3600
+_serve_log_last: Dict[Tuple[str, str, str], float] = {}
 
-#: A just-closed fiscal period is only partially reported (e.g. annual 2026 has
-#: ~16 of ~76 names), so its median swings wildly. A benchmark period must carry
-#: at least this many companies to be allowed to "decide" a single-value
-#: comparison; otherwise we hold the most recent period that does.
+
+def _parse_computed_at(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    # In UTC, like the producer's run day (`industry_benchmark_service._run_day`): a stamp
+    # serialised with another offset ("2027-03-15T20:00:00-05:00") must judge the same
+    # calendar day the producer did, or the 75-day gate splits between writer and reader.
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def servable_benchmark_rows(
+    rows: Iterable[Dict[str, Any]],
+    period_type: str,
+    now: Optional[datetime] = None,
+) -> Tuple[List[Dict[str, Any]], Counter]:
+    """Split stored benchmark rows into the ones a screen may show and a count of the
+    ones held back, by reason (``incomplete_period`` / ``stale_ttm``).
+
+    A row with no readable ``computed_at`` is judged as if computed NOW: an incomplete
+    period stays hidden, and a TTM row is kept (its age is unknown, not known to be old).
+    A label that names no period of its type is kept — the producer already refuses
+    unkeyable labels, and guessing would hide real rows."""
+    now = now or datetime.now(timezone.utc)
+    kept: List[Dict[str, Any]] = []
+    dropped: Counter = Counter()
+    for row in rows:
+        computed = _parse_computed_at(row.get("computed_at"))
+        if period_type == TTM_PERIOD_TYPE:
+            if computed is not None and now - computed > timedelta(days=TTM_MAX_AGE_DAYS):
+                dropped["stale_ttm"] += 1
+                continue
+        elif period_type in ("annual", CALENDAR_QUARTER_PERIOD_TYPE):
+            as_of = (computed or now).date()
+            if benchmark_period_complete(period_type, row.get("period_label"), as_of) is False:
+                dropped["incomplete_period"] += 1
+                continue
+        kept.append(row)
+    return kept, dropped
+
+
+def _log_held_back_rows(group: str, period_type: str, dropped: Counter) -> None:
+    """At most one line per (peer group, period type, reason) per 6 h. An incomplete
+    period is expected for months every year (INFO); a stale TTM row means a peer group
+    shrank below MIN_SAMPLE_SIZE or the weekly TTM job stopped (WARNING)."""
+    now = time.monotonic()
+    for reason, count in dropped.items():
+        key = (group, period_type, reason)
+        last = _serve_log_last.get(key)
+        if last is not None and now - last < _SERVE_LOG_EVERY_SECONDS:
+            continue
+        _serve_log_last[key] = now
+        log = logger.warning if reason == "stale_ttm" else logger.info
+        log("sector_benchmarks: held back %d %s row(s) for %s (%s)",
+            count, period_type, group, reason)
+
+
+# ── Peer-cell maturity: one period's industry vs sector choice ───────────
+
+#: A median from fewer companies than this does not decide a comparison when a larger
+#: group's median for the SAME period exists. Industry rows are written from
+#: MIN_SAMPLE_SIZE (5) companies, so 80 of the 153 industries (5-19 members) never reach
+#: it; their companies are compared with their sector's median for that period instead.
 MATURE_SAMPLE_FLOOR = 20
+
+
+def _is_mature(cell: Optional[Dict[str, Any]]) -> bool:
+    return (
+        cell is not None
+        and cell.get("value") is not None
+        and (cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR
+    )
+
+
+def merge_peer_cells(
+    industry_cell: Optional[Dict[str, Any]],
+    sector_cell: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """The peer cell ONE period shows: the industry median when it is mature, else the
+    SAME period's sector median when that is mature, else whichever exists (industry
+    first). Never another period's value.
+
+    Replaces the old cross-period hold-back, which painted a thin cell with the latest
+    mature cell at or before it — usually an older period, and often the SECTOR's when an
+    early period had no industry row — so a small industry's peer line froze for years at
+    one old sector median (verified 2026-10-07). The partial-period problem that hold-back
+    was built for is now handled by never serving an incomplete period at all
+    (`servable_benchmark_rows`)."""
+    if _is_mature(industry_cell):
+        return industry_cell
+    if _is_mature(sector_cell):
+        return sector_cell
+    return industry_cell if industry_cell is not None else sector_cell
 
 
 def _period_sort_key(label: str) -> Tuple[int, int]:
@@ -109,7 +225,8 @@ def _period_sort_key(label: str) -> Tuple[int, int]:
     A plain lexical sort is WRONG for quarterly labels ("Q4'25" > "Q1'26"
     lexically, but Q1'26 is later). Unrecognized labels collapse to (0, 0) so
     they sort oldest and never crash the picker. Two-digit quarterly years are
-    in the 2000s for this dataset (Q1'06 … Q4'26).
+    2000s: the producer never stores a quarter that ended before 2000, whose
+    two-digit label ("Q4'95") would read as 2095.
     """
     s = label.strip()
     if s.startswith("Q") and "'" in s:
@@ -124,47 +241,73 @@ def _period_sort_key(label: str) -> Tuple[int, int]:
         return (0, 0)
 
 
-def hold_back_thin_benchmarks(
+def flatten_benchmark_values(
     rich: Dict[str, Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, float]]:
-    """Flatten rich benchmark cells to ``{metric: {period: value}}``, replacing any
-    THIN period's value (sample_size < MATURE_SAMPLE_FLOOR) with the latest mature
-    value AT OR BEFORE that period.
+    """``{metric: {period: value}}`` from ``get_benchmarks``' rich cells. Each period
+    keeps its OWN cell's value: ``get_benchmarks`` already chose that period's peer
+    level (`merge_peer_cells`) and hid incomplete periods (`servable_benchmark_rows`),
+    so nothing is substituted from another period. A cell without a value is left out."""
+    return {
+        metric: {
+            period: cell["value"]
+            for period, cell in cells.items()
+            if cell.get("value") is not None
+        }
+        for metric, cells in rich.items()
+    }
 
-    The just-completed fiscal period is only partially reported — e.g. the
-    Semiconductors FY2026 EPS-growth median is +79% from n=9 early reporters
-    (mostly hypergrowth names) vs a credible +4.9% from n=77 in FY2025. Without the
-    hold-back a genuine 65%-grower is scored "below sector" against a contaminated
-    benchmark (see the persona-scoring validation). Mirrors the mature-sample-floor
-    hold-back the current-snapshot pickers already apply (sector_benchmark_lookup).
 
-    CRITICAL: hold back to the latest mature value that is NOT chronologically LATER
-    than the thin period — never the global-latest. An OLDER thin period (e.g. an
-    early year frozen at n<20 while later years grew past 20) must NOT be painted
-    with a FUTURE year's median (a lookahead that corrupts that year's chart point).
-    If no mature period exists at-or-before a thin period, keep its own value.
-    """
-    out: Dict[str, Dict[str, float]] = {}
-    for metric, cells in rich.items():
-        # Mature cells (n >= floor, non-null value) as (sort_key, value), oldest→newest.
-        mature_sorted = sorted(
-            (
-                (_period_sort_key(lab), c["value"])
-                for lab, c in cells.items()
-                if (c.get("n") or 0) >= MATURE_SAMPLE_FLOOR and c.get("value") is not None
-            ),
-            key=lambda t: t[0],
-        )
-        flat: Dict[str, float] = {}
-        for period, cell in cells.items():
-            if (cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
-                flat[period] = cell["value"]
-                continue
-            pk = _period_sort_key(period)
-            prior = [v for (sk, v) in mature_sorted if sk <= pk]
-            flat[period] = prior[-1] if prior else cell["value"]
-        out[metric] = flat
-    return out
+def benchmark_levels(
+    rich: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Optional[str]]]:
+    """``{metric: {period: "industry" | "sector" | None}}`` — the peer level of the cell
+    each period shows, for legend wording. Same cells as `flatten_benchmark_values`."""
+    return {
+        metric: {
+            period: cell.get("level")
+            for period, cell in cells.items()
+            if cell.get("value") is not None
+        }
+        for metric, cells in rich.items()
+    }
+
+
+def peer_level_votes(
+    points: List[Dict[str, Any]],
+    metric_benchmarks: Dict[str, Any],
+    metric_levels: Dict[str, Optional[str]],
+) -> List[str]:
+    """The peer level of every point in a chart series that actually DRAWS a benchmark
+    value (joined on ``_match_period``, falling back to ``period``; "" = no peer value)
+    and whose cell declares one."""
+    votes: List[str] = []
+    for p in points:
+        key = p.get("_match_period", p.get("period"))
+        if not key or metric_benchmarks.get(key) is None:
+            continue
+        level = metric_levels.get(key)
+        if level in ("industry", "sector"):
+            votes.append(level)
+    return votes
+
+
+def majority_peer_level(votes: List[str]) -> Optional[str]:
+    """"industry" or "sector" by majority (a tie goes to "industry"); None with no
+    votes, so the client keeps its neutral wording instead of naming a line that is
+    not drawn."""
+    if not votes:
+        return None
+    return "industry" if votes.count("industry") >= votes.count("sector") else "sector"
+
+
+def series_peer_level(
+    points: List[Dict[str, Any]],
+    metric_benchmarks: Dict[str, Any],
+    metric_levels: Dict[str, Optional[str]],
+) -> Optional[str]:
+    """Peer group one series' dashed line comes from (Growth and Profit Power legends)."""
+    return majority_peer_level(peer_level_votes(points, metric_benchmarks, metric_levels))
 
 
 class BenchmarkLookupFailed(dict):
@@ -192,24 +335,26 @@ def pick_mature_benchmark(
     """From a metric's {period_label: cell} map (cell carries value/level/
     peer_group_name/n, as returned by ``get_benchmarks``), return
     ``(cell, held_back)`` for the LATEST period whose sample_size >= `floor` —
-    the last *mature* period. Falls back to the latest period overall when none
-    meet the floor (a very thin metric still shows something, just not held back).
+    the last *mature* period — or ``(None, False)`` when no period meets the floor.
 
-    ``held_back`` is True when a newer-but-thinner period was skipped, so the
-    caller can footnote that the latest period was excluded.
+    It never falls back to a thin cell: that fallback returned a 5-company median
+    (or a partial year) as "the" peer value for a single-value comparison, which is
+    worse than showing none (audit 2026-10-07). ``held_back`` is True when a newer
+    but thinner period was skipped.
 
     Periods are ordered chronologically via ``_period_sort_key`` (correct for
     BOTH annual "YYYY" and quarterly "Q#'YY" — a lexical sort silently mis-orders
-    quarters). Returns ``(None, False)`` for an empty map.
+    quarters).
     """
     if not cells:
         return None, False
     labels_desc = sorted(cells.keys(), key=_period_sort_key, reverse=True)
     latest = labels_desc[0]
     for label in labels_desc:
-        if (cells[label].get("n") or 0) >= floor:
-            return cells[label], (label != latest)
-    return cells[latest], False
+        cell = cells[label]
+        if cell.get("value") is not None and (cell.get("n") or 0) >= floor:
+            return cell, (label != latest)
+    return None, False
 
 
 def mature_benchmark_value(
@@ -264,7 +409,7 @@ class SectorBenchmarkLookup:
             _log = logger.warning if _is_transient(e) else logger.error
             _log("Sector benchmark lookup failed for %s/%s: %s: %s",
                  sector, period_type, type(e).__name__, e)
-            return {m: {} for m in metrics}
+            return BenchmarkLookupFailed({m: {} for m in metrics})
 
         _cache_set(cache_key, result)
         return result
@@ -288,7 +433,14 @@ class SectorBenchmarkLookup:
         re-checked, so a ticker whose profile.sector drifts from the industry's
         recorded parent (a modal-sector straddler) still gets its industry row
         rather than silently dropping to the sector fallback.
+
+        Every read goes through `servable_benchmark_rows` (an incomplete period, or a
+        TTM row older than TTM_MAX_AGE_DAYS, is never returned), so `computed_at` is
+        always selected.
         """
+        if "computed_at" not in [c.strip() for c in columns.split(",")]:
+            columns = f"{columns},computed_at"
+
         def _page_all() -> List[Dict[str, Any]]:
             rows: List[Dict[str, Any]] = []
             start = 0
@@ -317,13 +469,17 @@ class SectorBenchmarkLookup:
 
         # Idempotent: a pure paginated READ, and the retry restarts from start=0 so
         # a mid-pagination blip cannot yield a half-built list.
-        return retry_idempotent_sync(
+        rows = retry_idempotent_sync(
             _page_all,
             what=f"sector_benchmarks fetch sector={sector!r} industry={industry!r}",
             attempts=_MAX_FETCH_ATTEMPTS,
             backoff_seconds=_RETRY_BACKOFF_SECONDS,
             logger=logger,
         )
+        kept, dropped = servable_benchmark_rows(rows, period_type)
+        if dropped:
+            _log_held_back_rows(industry or f"{sector} (sector)", period_type, dropped)
+        return kept
 
     def _query(
         self,
@@ -400,7 +556,7 @@ class SectorBenchmarkLookup:
             _log = logger.warning if _is_transient(e) else logger.error
             _log("Sector benchmark with_n lookup failed for %s/%s: %s: %s",
                  sector, period_type, type(e).__name__, e)
-            return {m: {} for m in metrics}
+            return BenchmarkLookupFailed({m: {} for m in metrics})
 
     # ── Phase 2: industry-first lookup with per-cell sector fallback ─────
 
@@ -416,11 +572,12 @@ class SectorBenchmarkLookup:
         """Industry-relative benchmark lookup with per-(metric, period) sector
         fallback.
 
-        For each (metric, period_label) returns the INDUSTRY-aggregate row when
-        one exists (industry=<name>), else the SECTOR-aggregate row
-        (industry=''). The fallback is PER CELL — a thin industry that carries
-        only some metrics/periods still gets the industry value where present and
-        the sector value everywhere else.
+        For each (metric, period_label) both layers are read and `merge_peer_cells`
+        picks one: the INDUSTRY-aggregate row (industry=<name>) when it carries at
+        least MATURE_SAMPLE_FLOOR companies, else the SAME period's SECTOR-aggregate
+        row (industry='') when that one does, else whichever exists. Until 2026-10-07
+        any industry row overwrote the sector row, so a 6-company industry median
+        displaced a 400-company sector median for the same period.
 
         Returns:
             {metric: {period_label: {"value": float,
@@ -439,35 +596,101 @@ class SectorBenchmarkLookup:
         if cached is not None:
             return cached
 
-        result: Dict[str, Dict[str, Dict[str, Any]]] = {m: {} for m in metrics}
         try:
-            # 1. Fallback layer first — the sector aggregate.
-            if sector:
-                for row in self._fetch_rows(
-                    self._RICH_COLS, sector, metrics, period_type, industry="",
-                ):
-                    result.setdefault(row["metric_name"], {})[row["period_label"]] = {
-                        "value": row["median_value"],
-                        "level": "sector",
-                        "peer_group_name": sector,
-                        "n": row.get("sample_size") or 0,
-                    }
-            # 2. Preferred layer — industry rows overwrite the matching cells.
-            if industry:
-                for row in self._fetch_rows(
-                    self._RICH_COLS, sector, metrics, period_type, industry=industry,
-                ):
-                    result.setdefault(row["metric_name"], {})[row["period_label"]] = {
-                        "value": row["median_value"],
-                        "level": "industry",
-                        "peer_group_name": industry,
-                        "n": row.get("sample_size") or 0,
-                    }
+            sector_cells, industry_cells = self._read_layers(industry, sector, metrics, period_type)
         except Exception as e:
             _log = logger.warning if _is_transient(e) else logger.error
             _log("Industry benchmark lookup failed for %r/%r/%s: %s: %s",
                  industry, sector, period_type, type(e).__name__, e)
             return BenchmarkLookupFailed({m: {} for m in metrics})
+
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {m: {} for m in metrics}
+        for metric in set(sector_cells) | set(industry_cells):
+            s_map = sector_cells.get(metric, {})
+            i_map = industry_cells.get(metric, {})
+            for label in set(s_map) | set(i_map):
+                cell = merge_peer_cells(i_map.get(label), s_map.get(label))
+                if cell is not None:
+                    result.setdefault(metric, {})[label] = cell
+
+        _cache_set(cache_key, result)
+        return result
+
+    def _read_layers(
+        self, industry: str, sector: str, metrics: List[str], period_type: str,
+    ) -> Tuple[Dict[str, Dict[str, Dict[str, Any]]], Dict[str, Dict[str, Dict[str, Any]]]]:
+        """(sector cells, industry cells), each {metric: {period_label: cell}}, from the
+        servable rows of each layer. RAISES on a DB error (callers flag the failure)."""
+        sector_cells: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        industry_cells: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        if sector:
+            for row in self._fetch_rows(
+                self._RICH_COLS, sector, metrics, period_type, industry="",
+            ):
+                sector_cells.setdefault(row["metric_name"], {})[row["period_label"]] = {
+                    "value": row["median_value"],
+                    "level": "sector",
+                    "peer_group_name": sector,
+                    "n": row.get("sample_size") or 0,
+                }
+        if industry:
+            for row in self._fetch_rows(
+                self._RICH_COLS, sector, metrics, period_type, industry=industry,
+            ):
+                industry_cells.setdefault(row["metric_name"], {})[row["period_label"]] = {
+                    "value": row["median_value"],
+                    "level": "industry",
+                    "peer_group_name": industry,
+                    "n": row.get("sample_size") or 0,
+                }
+        return sector_cells, industry_cells
+
+    def get_benchmark_series(
+        self,
+        industry: str,
+        sector: str,
+        metrics: List[str],
+        period_type: str,
+    ) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Peer cells for a CHART LINE: same shape as `get_benchmarks`, but every period
+        of a metric comes from ONE peer group, so the dashed line, its legend, its tooltip
+        and Cay AI's peer sentence all name the population every point belongs to.
+
+        Per metric: the INDUSTRY's cells when the industry has a mature cell
+        (n >= MATURE_SAMPLE_FLOOR) at the NEWEST period either layer holds — its older,
+        thinner periods included, each still that industry's own median — else the
+        SECTOR's cells (or the industry's, when the sector has none). A period with no
+        cell in the chosen group draws nothing; no period borrows another's value.
+
+        The per-period merge (`get_benchmarks`) is right for picking ONE value, but on a
+        line it switched population wherever n crossed 20 (review 2026-10-07): a step that
+        reads as the peers' margins jumping, under a single "Industry/Sector Avg" label.
+        Degrades to `BenchmarkLookupFailed` on a DB error, like `get_benchmarks`."""
+        cache_key = (
+            f"gs:{industry}:{sector}:{period_type}:{','.join(sorted(metrics))}"
+        )
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            sector_cells, industry_cells = self._read_layers(industry, sector, metrics, period_type)
+        except Exception as e:
+            _log = logger.warning if _is_transient(e) else logger.error
+            _log("Industry benchmark series lookup failed for %r/%r/%s: %s: %s",
+                 industry, sector, period_type, type(e).__name__, e)
+            return BenchmarkLookupFailed({m: {} for m in metrics})
+
+        result: Dict[str, Dict[str, Dict[str, Any]]] = {m: {} for m in metrics}
+        for metric in set(sector_cells) | set(industry_cells):
+            s_map = sector_cells.get(metric, {})
+            i_map = industry_cells.get(metric, {})
+            labels = set(s_map) | set(i_map)
+            newest = max(labels, key=_period_sort_key) if labels else None
+            use_industry = bool(i_map) and (_is_mature(i_map.get(newest)) or not s_map)
+            chosen = i_map if use_industry else s_map
+            result[metric] = {
+                label: cell for label, cell in chosen.items() if cell.get("value") is not None
+            }
 
         _cache_set(cache_key, result)
         return result
@@ -479,16 +702,10 @@ class SectorBenchmarkLookup:
         metrics: List[str],
         period_type: str,
     ) -> Dict[str, Dict[str, float]]:
-        """Flat {metric: {period_label: median_value}} view of get_benchmarks —
-        industry-preferred with sector fallback. Drop-in replacement for
-        get_sector_benchmarks for callers that only need the VALUE (the
-        peer-group label still reads "sector" until Phase 3 plumbs level/name
-        into the DTOs)."""
+        """Flat {metric: {period_label: median_value}} view of get_benchmarks (each
+        period's merged industry/sector cell). For callers that only need the VALUE."""
         rich = self.get_benchmarks(industry, sector, metrics, period_type)
-        flat = {
-            metric: {label: cell["value"] for label, cell in periods.items()}
-            for metric, periods in rich.items()
-        }
+        flat = flatten_benchmark_values(rich)
         # Keep a failed DB call distinguishable from "no rows" through the flatten.
         return BenchmarkLookupFailed(flat) if lookup_failed(rich) else flat
 
@@ -501,33 +718,36 @@ class SectorBenchmarkLookup:
         metrics: List[str],
     ) -> Dict[str, Optional[Dict[str, Any]]]:
         """The CURRENT single-value benchmark per metric for the "vs industry/sector
-        avg" comparisons. Prefers the TTM row (a complete trailing-12-months median —
-        no partial-fiscal-year spike); falls back PER METRIC to the latest *mature*
-        annual value when no TTM row exists yet (a thin/uncovered industry, or before
-        the TTM recompute has run). Returns {metric: cell | None} where cell carries
-        value / level / peer_group_name / n."""
+        avg" comparisons. Returns {metric: cell | None} where cell carries value /
+        level / peer_group_name / n. Per metric, the first that exists:
+
+        1. the industry TTM median, when at least MATURE_SAMPLE_FLOOR companies;
+        2. the sector TTM median, when at least MATURE_SAMPLE_FLOOR companies
+           (both via `merge_peer_cells` on the one "TTM" cell);
+        3. the newest COMPLETE annual year with a mature median, industry before
+           sector for that same year (only before the weekly TTM job has covered the
+           group, or for a metric it does not compute);
+        4. None — the card shows no peer comparison.
+
+        Until 2026-10-07 a thin industry TTM (KO: Beverages, n=13) discarded the
+        complete sector TTM and fell to the annual map, where it picked a partial
+        2026 cohort (Consumer Defensive, n=39 of ~140) or a years-old sector median,
+        and with no mature year it returned a 5-company cell."""
         ttm = self.get_benchmarks(industry, sector, metrics, TTM_PERIOD_TYPE)
         annual: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
         result: Dict[str, Optional[Dict[str, Any]]] = {}
         for metric in metrics:
             cells = ttm.get(metric) or {}
-            # exactly one TTM cell (period_label == "TTM"), or None
-            ttm_cell = next(iter(cells.values())) if cells else None
-            # Accept the TTM cell ONLY if it clears the SAME maturity floor the annual
-            # path enforces (MATURE_SAMPLE_FLOOR). TTM rows are written at just
-            # MIN_SAMPLE_SIZE (=5), so a thin industry's TTM median (n in 5..19) is as
-            # noisy as a partial fiscal year — without this gate it would silently
-            # decide the "vs avg" comparison while the annual path holds such a sample
-            # back. Below the floor → fall through to the mature-annual pick.
-            if ttm_cell is not None and (ttm_cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
+            # exactly one TTM cell (period_label == "TTM"), already the mature level
+            # when either layer is mature
+            ttm_cell = cells.get("TTM") or (next(iter(cells.values())) if cells else None)
+            if _is_mature(ttm_cell):
                 result[metric] = ttm_cell
                 continue
             if annual is None:  # lazy — only fetch the fallback layer if needed
                 annual = self.get_benchmarks(industry, sector, metrics, "annual")
             cell, _held_back = pick_mature_benchmark(annual.get(metric) or {})
-            # Prefer a mature annual value; if none exists, a thin TTM value still
-            # beats an empty comparison (better a noisy benchmark than no benchmark).
-            result[metric] = cell if cell is not None else ttm_cell
+            result[metric] = cell
         # Carry a failed DB call through (the TTM layer, or the annual fallback layer).
         if lookup_failed(ttm) or lookup_failed(annual):
             return BenchmarkLookupFailed(result)

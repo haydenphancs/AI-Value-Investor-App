@@ -353,7 +353,9 @@ async def test_a_clean_empty_read_is_not_a_failure(monkeypatch):
         coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
         hist = await coll._fetch_sector_benchmark_history(_R3_INDUSTRY, "Technology")
         assert not lookup_failed(hist), "an empty peer group is the company's shape"
-        assert set(hist) == {"annual", "quarterly"}
+        # `levels` (2026-10-07): each metric line's peer group, for the drill-down legend.
+        assert set(hist) == {"annual", "quarterly", "levels"}
+        assert set(hist["levels"]) == {"annual", "quarterly"}
     finally:
         _clear_lookup_cache(sbl)
 
@@ -604,7 +606,7 @@ def test_a_pre_deploy_v4_valuation_row_is_rebuilt():
     from app.config import settings
     import app.services.valuation_snapshot_service as vss
 
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 5
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 6
     svc = vss.ValuationSnapshotService.__new__(vss.ValuationSnapshotService)
     row = {"category": "Price", "rating": 3, "full_report_available": True, "metrics": [],
            vss._DCF_SOURCE_KEY: bool(settings.DCF_ENABLED)}

@@ -59,6 +59,9 @@ def test_chat_tool_handler_set_is_exactly_the_readonly_allowlist():
         "get_ticker_news",
         "explain_price_move",
         "get_market_snapshot",
+        # Ask Cay AI's ownership tool (2026-10-05). A read of the Holders build (its own
+        # caches; nothing persisted by the tool), keyed by a symbol only — like the rest.
+        "check_ownership_filings",
     }
 
 

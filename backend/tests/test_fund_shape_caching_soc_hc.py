@@ -492,6 +492,11 @@ class _Lookup:
     def __init__(self, error: Optional[BaseException] = None) -> None:
         self.error = error
 
+    # The health check reads the rich cells (2026-10-07); the health / profitability
+    # snapshots' local fallbacks still read the flat values.
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return self.get_current_benchmark_values(industry, sector, metrics)
+
     def get_current_benchmark_values(self, industry, sector, metrics):
         if self.error is not None:
             raise self.error

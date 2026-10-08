@@ -448,7 +448,8 @@ def test_summarize_trend_states_the_charted_numbers():
     text = summarize_trend(series, days=30, today=TODAY, tracking_since=date(2026, 9, 1))
     assert "26 scored — 13 bullish, 11 bearish, 2 neutral" in text
     assert "Last 7 days net -5 vs the 7 days before +50." in text
-    assert "tracked since Tue Sep 1" in text
+    assert "oldest scored headline on file: Tue Sep 1 (the log keeps 120 days)" in text
+    assert "tracked since" not in text, "never a start the 120-day log cannot vouch for"
     assert "Most bearish day: Tue Sep 22 (9 bearish vs 2 bullish)." in text
     assert "Most bullish day: Fri Sep 25 (6 bullish vs 1 bearish)." in text
     assert "Last 7 days net" in text and "the 7 days before +50" in text
@@ -857,6 +858,244 @@ class _StatusAndReadClient(_ReadClient):
                 raise RuntimeError("stale connection on the status read")
             return _Result([self.status_row] if self.status_row else [])
         return super().execute()
+
+
+class _SinceClient(_ReadClient):
+    """`news_sentiment_daily` as Postgres runs it: only days on or after `p_since`."""
+
+    def execute(self):
+        if self.fail:
+            raise RuntimeError("PGRST202 function news_sentiment_daily not found")
+        if getattr(self, "_mode", None) == "first":
+            self._mode = None
+            return _Result([{"et_day": self.first}] if self.first else [])
+        since = self.rpc_calls[-1][1]["p_since"]
+        return _Result([r for r in self.daily if str(r["day"]) >= since])
+
+
+@pytest.mark.asyncio
+async def test_every_window_is_an_exact_cut_of_the_90_day_answer(monkeypatch):
+    """TestFlight 1.0 (11): the first tap on each window waited on that window's own request.
+    The app now asks for 90 days ONCE and cuts 7D / 30D from it (`SentimentTrend.trimmed`),
+    and the chat does the same (`summarize_tone`). That is exact only while a window's answer
+    IS the 90-day answer restricted to [today − (N − 1), today] with the same tracking start,
+    history status and partial days — pinned here against the real `_fetch`."""
+    raw = [_raw((TODAY - timedelta(days=k)).isoformat(), k % 3, k % 2, 1) for k in range(0, 100, 2)]
+    raw.append(_raw((TODAY - timedelta(days=29)).isoformat(), 4, 0, 0))   # the 30D edge day
+    raw.append(_raw((TODAY - timedelta(days=30)).isoformat(), 0, 4, 0))   # one day past it
+    client = _SinceClient(raw, first="2026-06-01")
+    svc = NewsSentimentTrendService(client)
+    monkeypatch.setattr(svc, "_history_status", lambda scope, today: "building")
+    wide = await svc.get_trend("ORCL", 90, now=NOW)
+    assert len(wide["series"]) > 40 and wide["series"][0]["date"] >= (TODAY - timedelta(days=89)).isoformat()
+    for n in trend.TREND_DAYS:
+        narrow = await svc.get_trend("ORCL", n, now=NOW)
+        assert narrow["series"] == trend.window_slice(wide["series"], days=n, today=TODAY), n
+        assert {k: v for k, v in narrow.items() if k not in ("series", "days")} == \
+            {k: v for k, v in wide.items() if k not in ("series", "days")}, n
+    month = await svc.get_trend("ORCL", 30, now=NOW)
+    assert month["series"][0]["date"] == (TODAY - timedelta(days=29)).isoformat()
+
+
+def test_coerce_series_mirrors_the_app_decoder():
+    rows = [
+        {"date": "2026-09-26", "bullish": 2, "bearish": 1, "neutral": 0, "total": 99,
+         "net_score": -100, "is_partial": "true"},
+        {"date": "2026-09-26", "bullish": 9},                       # duplicate day: first wins
+        {"date": "2026-09-20T13:00:00+00:00", "bullish": "1"},       # prefix(10), like iOS
+        {"date": date(2026, 9, 21), "bearish": 2, "is_partial": True},
+        {"date": datetime(2026, 9, 22, 12, tzinfo=timezone.utc), "bullish": 3},   # an instant
+        {"date": "2026-09-23", "bullish": -4, "bearish": None, "neutral": False},  # all zero
+        {"date": "2026-9-24", "bullish": 1}, {"date": None, "bullish": 1}, {"bullish": 1},
+        None, "junk", 3,
+        # int(inf) raises OverflowError, not ValueError: it must cost the count, not the call.
+        {"date": "2026-09-19", "bullish": float("inf"), "bearish": float("nan"), "neutral": 1},
+    ]
+    out = trend.coerce_series(rows)
+    assert [d["date"] for d in out] == ["2026-09-19", "2026-09-20", "2026-09-21", "2026-09-26"]
+    assert out[0]["bullish"] == 0 and out[0]["bearish"] == 0 and out[0]["total"] == 1
+    out = out[1:]
+    assert out[-1] == {"date": "2026-09-26", "bullish": 2, "bearish": 1, "neutral": 0,
+                       "total": 3, "net_score": 33, "is_partial": False}
+    assert out[1]["is_partial"] is True and out[1]["net_score"] == -100
+    for junk in (None, "x", 5, {"series": []}):
+        assert trend.coerce_series(junk) == []
+
+
+def test_window_slice_is_today_and_the_n_minus_one_days_before():
+    series = trend.coerce_series([
+        {"date": (TODAY - timedelta(days=k)).isoformat(), "bullish": 1} for k in (-1, 0, 6, 7, 29, 30, 89, 90)
+    ])
+    assert [d["date"] for d in trend.window_slice(series, days=7, today=TODAY)] == [
+        (TODAY - timedelta(days=6)).isoformat(), TODAY.isoformat()]
+    assert len(trend.window_slice(series, days=30, today=TODAY)) == 4     # 0, 6, 7, 29
+    assert len(trend.window_slice(series, days=90, today=TODAY)) == 6     # never tomorrow, never day 90
+
+
+def test_summarize_tone_windows_edges():
+    one = [{"date": TODAY.isoformat(), "bullish": 0, "bearish": 1, "neutral": 0}]
+    text = trend.summarize_tone_windows(one, today=TODAY)
+    assert "7D: 1 headline (0 positive, 1 negative, 0 neutral), net -100 (Mostly negative)" in text
+    assert "on file" not in text and "at least" not in text, "no date clause without a date"
+    assert trend.summarize_tone_windows([], today=TODAY) is None
+    stale = [{"date": (TODAY - timedelta(days=90)).isoformat(), "bullish": 5}]
+    assert trend.summarize_tone_windows(stale, today=TODAY) is None, "nothing inside 90 days"
+
+
+def test_summarize_tone_refuses_what_is_not_a_trend_answer():
+    assert trend.summarize_tone(None, focus_days=30, today=TODAY) is None
+    assert trend.summarize_tone(["x"], focus_days=30, today=TODAY) is None
+    data = {"series": [{"date": TODAY.isoformat(), "bullish": 1, "is_partial": True}]}
+    # A focus window the card does not offer gets no detail — never a guessed one.
+    text = trend.summarize_tone(data, focus_days=14, today=TODAY)
+    assert text.startswith("News tone for this feed") and "\n" not in text
+    assert "News tone over the last 7 days" in trend.summarize_tone(data, focus_days=7, today=TODAY)
+
+
+# ── review 2026-10-06: `tracking_since` is the oldest label ON FILE, not a stored first day ──
+# The sweep keeps RETENTION_DAYS and nothing records a scope's start beyond it, so the chat
+# (and the app's legend) may only say what the log supports: the oldest headline on file, and
+# — once the history reaches the retention edge — "at least RETENTION_DAYS days", never a date
+# that moves forward daily while reading like the day scoring began.
+
+
+class _MemLog:
+    """`news_sentiment_log` in memory, with Postgres's semantics for the three statements the
+    service runs: the daily RPC (GROUP BY day, `et_day >= p_since`), the oldest-day read
+    (ORDER BY et_day LIMIT 1) and the sweep (DELETE … WHERE et_day < cutoff)."""
+
+    def __init__(self, rows):
+        self.rows = [dict(r) for r in rows]
+
+    def rpc(self, name, params):
+        assert name == trend.DAILY_RPC
+        return _MemQuery(self, rpc=params)
+
+    def table(self, name):
+        assert name == trend.TABLE
+        return _MemQuery(self)
+
+
+class _MemQuery:
+    def __init__(self, log, rpc=None):
+        self.log, self.rpc_params = log, rpc
+        self.filters, self.deleting, self.max_rows = [], False, None
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, col, val):
+        self.filters.append(lambda r: r[col] == val)
+        return self
+
+    def lt(self, col, val):
+        self.filters.append(lambda r: r[col] < val)
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, n):
+        self.max_rows = n
+        return self
+
+    def delete(self):
+        self.deleting = True
+        return self
+
+    def execute(self):
+        if self.rpc_params is not None:
+            p, by_day = self.rpc_params, {}
+            for r in self.log.rows:
+                if r["scope"] == p["p_scope"] and r["et_day"] >= p["p_since"]:
+                    counts = by_day.setdefault(r["et_day"], {s: 0 for s in trend.SENTIMENTS})
+                    counts[r["sentiment"]] += 1
+            return _Result([{"day": d, **c} for d, c in sorted(by_day.items())])
+        hit = [r for r in self.log.rows if all(f(r) for f in self.filters)]
+        if self.deleting:
+            self.log.rows = [r for r in self.log.rows if r not in hit]
+            return _Result(hit)
+        hit.sort(key=lambda r: r["et_day"])
+        return _Result([{"et_day": r["et_day"]} for r in hit[: self.max_rows or len(hit)]])
+
+
+def _labels(scope, days_ago, sentiment="bullish", today=TODAY):
+    return [{"scope": scope, "et_day": (today - timedelta(days=k)).isoformat(),
+             "sentiment": sentiment} for k in days_ago]
+
+
+async def _tone_after_sweep(log, *, today, scope="ORCL", focus=30):
+    """Sweep as production does on `today`, then read and ground the way the chat does."""
+    svc = NewsSentimentTrendService(log)
+    svc._history_status = lambda _scope, _today: None
+    svc.sweep_expired(today=today)
+    now = datetime(today.year, today.month, today.day, 15, 0, tzinfo=timezone.utc)
+    data = await svc.get_trend(scope, max(trend.TREND_DAYS), now=now)
+    return data, trend.summarize_tone(data, focus_days=focus, today=today)
+
+
+@pytest.mark.parametrize("days_ago,edge", [(121, True), (120, True), (119, False), (0, False)])
+def test_the_retention_edge_is_the_sweeps_own_cutoff(days_ago, edge):
+    """`sweep_expired` deletes days before `today − RETENTION_DAYS`; a scope whose oldest kept
+    day is that old has lost (or loses next) its first days."""
+    since = TODAY - timedelta(days=days_ago)
+    assert trend.at_retention_edge(since, TODAY) is edge
+    phrase = trend.since_phrase(since, TODAY)
+    if edge:
+        assert phrase == ("; scored for at least 120 days (the log keeps only the last 120 days "
+                          "and records no start date)")
+        # Exactly 120 days back that day is still ON FILE (the sweep deletes only older days),
+        # so the clause must never claim the first scored day is gone (review 2026-10-07).
+        assert "no longer on file" not in phrase
+    else:
+        assert phrase == (f"; oldest scored headline on file: {trend._fmt_day(since)} "
+                          "(the log keeps 120 days)")
+    assert trend.since_phrase(None, TODAY) == ""
+    assert trend.RETENTION_DAYS == 120, "the phrases above (and the app's '120+ days') say 120"
+
+
+@pytest.mark.asyncio
+async def test_retention_trimming_the_oldest_days_says_at_least_never_a_drifting_date():
+    log = _MemLog(_labels("ORCL", range(0, 131)))          # scored every day for 131 days
+    data, text = await _tone_after_sweep(log, today=TODAY)
+    assert data["tracking_since"] == (TODAY - timedelta(days=120)).isoformat(), "the sweep trimmed"
+    assert "scored for at least 120 days" in text
+    assert "oldest scored headline on file" not in text and trend._fmt_day(TODAY - timedelta(days=120)) not in text
+    assert "90D: 90 headlines" in text, "trimming past the widest window changes no count"
+    # A day later the oldest kept day has moved forward one day; the text has not.
+    later = TODAY + timedelta(days=1)
+    log.rows += _labels("ORCL", [0], today=later)
+    data2, text2 = await _tone_after_sweep(log, today=later)
+    assert data2["tracking_since"] == (later - timedelta(days=120)).isoformat()
+    assert text2.splitlines()[0] == text.splitlines()[0], "no daily drift in what the chat is told"
+
+
+@pytest.mark.asyncio
+async def test_a_gap_at_the_start_is_described_as_the_oldest_on_file():
+    # Never trimmed: the oldest label is also the first one.
+    data, text = await _tone_after_sweep(_MemLog(_labels("ORCL", [50, 10, 3])), today=TODAY)
+    assert data["tracking_since"] == (TODAY - timedelta(days=50)).isoformat()
+    assert f"oldest scored headline on file: {trend._fmt_day(TODAY - timedelta(days=50))}" in text
+    assert "30D: 2 headlines" in text and "90D: 3 headlines" in text
+    # Trimmed BEHIND a gap: the first label (130 days ago) is swept and the next one is 100
+    # days old — inside the edge. The log cannot tell this from a feed that started then, so
+    # the date stays worded as the oldest ON FILE, never as the day scoring began.
+    data, text = await _tone_after_sweep(_MemLog(_labels("ORCL", [130, 100, 5])), today=TODAY)
+    assert data["tracking_since"] == (TODAY - timedelta(days=100)).isoformat()
+    assert f"oldest scored headline on file: {trend._fmt_day(TODAY - timedelta(days=100))}" in text
+    assert "tracked since" not in text and "first scored" not in text
+    assert "90D: 1 headline (1 positive" in text, "the 100-day-old label is outside every window"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_scope_with_one_day():
+    data, text = await _tone_after_sweep(_MemLog(_labels("NEWCO", [0])), today=TODAY, scope="NEWCO", focus=7)
+    assert data["tracking_since"] == TODAY.isoformat()
+    assert [d["date"] for d in data["series"]] == [TODAY.isoformat()]
+    assert ("7D: 1 headline (1 positive, 0 negative, 0 neutral), net +100 (Mostly positive); "
+            "30D: 1 headline") in text
+    assert f"oldest scored headline on file: {trend._fmt_day(TODAY)}" in text
+    assert "News tone over the last 7 days" in text
 
 
 @pytest.mark.asyncio

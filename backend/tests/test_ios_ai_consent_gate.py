@@ -218,6 +218,7 @@ def test_the_consent_keys_are_still_the_two_this_guard_knows_about():
     keys = _decl_block(_code(_CONSENT_STORE), "private enum Keys")
     assert 'static let granted = "ai_processing_consent_granted"' in keys
     assert 'static let grantedAt = "ai_processing_consent_granted_at"' in keys
+    assert 'static let version = "ai_processing_consent_version"' in keys
 
 
 @pytest.mark.parametrize("header", ["func withdraw()", "func resetForEndedSession()"])
@@ -244,6 +245,10 @@ def test_dropping_consent_clears_both_keys_and_both_published_values(header):
         f"reading a stale true and the gate never re-arms this session"
     )
     assert "grantedAt = nil" in body, f"{header} leaves the published timestamp set"
+    assert "defaults.removeObject(forKey: Keys.version)" in body, (
+        f"{header} leaves the accepted consent VERSION behind, so a later grant check could "
+        f"read a version this person never accepted"
+    )
 
 
 def test_grant_writes_the_same_two_keys():
@@ -251,7 +256,45 @@ def test_grant_writes_the_same_two_keys():
     body = _decl_block(_code(_CONSENT_STORE), "func grant()")
     assert "defaults.set(true, forKey: Keys.granted)" in body
     assert "Keys.grantedAt" in body
+    assert "defaults.set(Self.currentVersion, forKey: Keys.version)" in body, (
+        "grant() no longer records WHICH consent text was accepted"
+    )
     assert "hasConsented = true" in body
+
+
+# ── 2b. Consent covers only the text it was given for (versioned, 2026-10-05) ──
+#
+# 1.0 users tapped Allow on a sheet with no web-search row. 1.1 adds report chat's web search
+# (Brave) and the row that discloses it. An unversioned boolean let every 1.0 consent carry over,
+# so the search could run for people who never saw that row (App Review 5.1.2(i)).
+
+def _consent_view_source() -> str:
+    for path in (_CONSENT_STORE.parents[2] / "Views").rglob("AIDataConsentView.swift"):
+        return path.read_text(encoding="utf-8")
+    raise AssertionError("AIDataConsentView.swift not found — this scan has drifted")
+
+
+def test_startup_requires_the_current_consent_version():
+    init = _decl_block(_code(_CONSENT_STORE), "init(defaults: UserDefaults")
+    assert "Keys.version" in init, "init no longer reads the accepted consent version"
+    assert "Self.currentVersion" in init, (
+        "init no longer compares the accepted version with the current one, so an older "
+        "consent counts again"
+    )
+    assert "?? 1" in init, "a grant with no stored version must read as the original text (1)"
+    assert re.search(r"hasConsented\s*=\s*current\b", init), "hasConsented is not the versioned verdict"
+
+
+def test_the_consent_version_was_bumped_with_the_web_search_row():
+    store = _code(_CONSENT_STORE)
+    match = re.search(r"static let currentVersion\s*=\s*(\d+)", store)
+    assert match, "AIConsentStore.currentVersion is gone"
+    view = _strip_comments(_consent_view_source())
+    if "Brave" in view or "web search" in view.lower():
+        assert int(match.group(1)) >= 2, (
+            "the consent sheet discloses web search but currentVersion was not bumped past the "
+            "1.0 text, so 1.0 consents still count"
+        )
 
 
 def test_consent_is_dropped_when_a_session_ends():

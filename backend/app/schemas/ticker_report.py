@@ -66,6 +66,16 @@ class DeepDiveMetricResponse(BaseModel):
     # labels as annual_history/quarterly_history so iOS overlays a sector line.
     sector_annual_history: Optional[List[MetricHistoryPointResponse]] = None
     sector_quarterly_history: Optional[List[MetricHistoryPointResponse]] = None
+    # The peer group each line above is drawn from ("industry" | "sector"). A metric's
+    # line is ONE population (2026-10-07, `get_benchmark_series`) and can be a different
+    # group from the card-wide `peer_group_level`, so the drill-down legend reads these
+    # first. Optional: older reports and app builds ignore them.
+    sector_annual_level: Optional[str] = None
+    sector_quarterly_level: Optional[str] = None
+    # Whose median the "sector avg" in `label` is ("industry" | "sector"; the wire label
+    # keeps the word "sector" for shipped iOS builds). Lets the report's model prompts name
+    # an industry median as the industry's (2026-10-08). Optional; iOS ignores it.
+    peer_level: Optional[str] = None
 
 
 class DeepDiveMetricCardResponse(BaseModel):

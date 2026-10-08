@@ -2239,6 +2239,10 @@ struct ProfitPowerResponseDTO: Codable, FinancialsCacheable {
     // "industry" / "sector" — which peer group the benchmark lines represent.
     // Optional → old payloads decode as nil and the UI keeps the "Sector" wording.
     let peerGroupLevel: String?
+    /// Per series ("annual" / "quarterly"): the peer level of the points that series draws;
+    /// only a series with a drawn peer line carries a key. Optional — an older backend, a
+    /// device-cached DTO and a stored report have none, and the legend keeps `peerGroupLevel`.
+    let peerGroupLevels: [String: String]?
     /// Why this build is partial; never cached when non-empty. Optional — the report reuses
     /// this DTO and legacy reports never carry it.
     let degraded: [String]?
@@ -2246,6 +2250,7 @@ struct ProfitPowerResponseDTO: Codable, FinancialsCacheable {
     enum CodingKeys: String, CodingKey {
         case symbol, annual, quarterly
         case peerGroupLevel = "peer_group_level"
+        case peerGroupLevels = "peer_group_levels"
         case degraded
     }
 
@@ -2271,7 +2276,7 @@ struct ProfitPowerResponseDTO: Codable, FinancialsCacheable {
                 )
             }
         }
-        return ProfitPowerSectionData(
+        var section = ProfitPowerSectionData(
             annualData: convert(annual),
             quarterlyData: convert(quarterly),
             // Was decoded and then dropped — the legend could never say
@@ -2279,6 +2284,9 @@ struct ProfitPowerResponseDTO: Codable, FinancialsCacheable {
             // industry-level.
             peerGroupLevel: peerGroupLevel
         )
+        // Assigned after construction so the memberwise init (and every preview) is unchanged.
+        section.peerGroupLevels = peerGroupLevels ?? [:]
+        return section
     }
 }
 
@@ -2294,6 +2302,10 @@ struct HealthCheckMetricDTO: Codable {
     let insightText: String
     let highlightedValue: String?
     let highlightedLabel: String?
+    /// "industry" | "sector": the peer group `comparisonValue` is the median of. Optional —
+    /// an older backend, a cached DTO and a row with no peer comparison (Altman Z, a thin
+    /// group) send none, and the label then keeps its plain "vs X".
+    let peerLevel: String?
 
     enum CodingKeys: String, CodingKey {
         case type, value, status
@@ -2303,6 +2315,7 @@ struct HealthCheckMetricDTO: Codable {
         case insightText = "insight_text"
         case highlightedValue = "highlighted_value"
         case highlightedLabel = "highlighted_label"
+        case peerLevel = "peer_level"
     }
 }
 
@@ -2379,7 +2392,8 @@ struct HealthCheckResponseDTO: Codable, FinancialsCacheable {
                 status: metricStatus,
                 insightText: dto.insightText,
                 highlightedValue: dto.highlightedValue,
-                highlightedLabel: dto.highlightedLabel
+                highlightedLabel: dto.highlightedLabel,
+                peerLevel: dto.peerLevel
             )
         }
 
@@ -2556,6 +2570,10 @@ struct SignalOfConfidenceDataPointDTO: Codable {
     /// keep decoding), not measurements. Optional: an older backend, a device-cached DTO or
     /// a stored report has no key, and nil means reported — today's behaviour.
     let cashFlowReported: Bool?
+    /// The market cap (USD millions) the yields were divided by — the Capital view's scale
+    /// floor. Optional: an older backend, a cached DTO or a stored report has no key, and
+    /// nil means "no floor" (the chart scales to its data, as before).
+    let marketCap: Double?
 
     enum CodingKeys: String, CodingKey {
         case period
@@ -2565,6 +2583,7 @@ struct SignalOfConfidenceDataPointDTO: Codable {
         case buybackAmount = "buyback_amount"
         case sharesOutstanding = "shares_outstanding"
         case cashFlowReported = "cash_flow_reported"
+        case marketCap = "market_cap"
     }
 
     /// The ONE DTO → display mapping, shared by the Financials-tab card
@@ -2578,6 +2597,7 @@ struct SignalOfConfidenceDataPointDTO: Codable {
             dividendAmount: dividendAmount,
             buybackAmount: buybackAmount,
             sharesOutstanding: sharesOutstanding,
+            marketCap: marketCap,
             cashFlowReported: cashFlowReported ?? true
         )
     }

@@ -8,19 +8,32 @@ on every request.
 """
 
 import asyncio
+import contextlib
+import contextvars
+import email.utils
 import logging
 import math
+import random
 import statistics
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
+
+import httpx
 
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
+from app.integrations.fmp import (
+    get_fmp_client,
+    FMPAuthException,
+    FMPClient,
+    FMPNotEntitledException,
+    FMPRateLimitException,
+    FMPUnavailableException,
+)
 from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE
 from app.utils.period_labels import (
+    annual_benchmark_key,
     calendar_quarter_key,
-    calendar_quarter_label,
     format_calendar_quarter,
     previous_calendar_quarter,
 )
@@ -54,6 +67,413 @@ STORED_PERIOD_TYPE: Dict[str, str] = {
     "annual": "annual",
     "quarterly": CALENDAR_QUARTER_PERIOD_TYPE,
 }
+
+# A calendar-quarter key is stored as "Q<n>'<yy>", and every parser of it (the producer's
+# completeness gate, `period_labels.benchmark_period_end`, the readers' sort keys) reads the
+# two-digit year as 20yy. A quarter that ended before 2000 ("Q4'93", from a long FMP history)
+# would be filed — and served — as 2093. Such quarters are never keyed (`_by_calendar_quarter`).
+MIN_CALENDAR_QUARTER_YEAR = 2000
+
+# An ANNUAL YoY compares a company's fiscal year with the one before it, so the two period
+# ends must be about a year apart: 52/53-week years are 364/371 days, calendar years 365/366.
+# A fiscal-year-end change (a Sep year followed by a Dec year, 458 days) or a short transition
+# period would otherwise be filed as one year's growth.
+ANNUAL_YOY_MIN_GAP_DAYS = 300
+ANNUAL_YOY_MAX_GAP_DAYS = 430
+# The same floor names a SHORT annual row: one whose period end is fewer than this many days
+# after the company's previous (distinct) annual period end — a fiscal-year-end change's
+# transition stub (a 10-KT: Jun-2024 FY, then a Jul-Dec 2024 stub, then Dec-2025 FY). It
+# never displaces a full year that shares its storage key, and no YoY is computed against
+# or for it (`_by_annual_key`, `_compute_yoy_for_records`). FMP carries no period START, so
+# the span is measured end to end; the oldest row (no previous end) and undated rows have no
+# known span and are never called short.
+ANNUAL_SHORT_PERIOD_DAYS = ANNUAL_YOY_MIN_GAP_DAYS
+
+# ── FMP 429 back-off for the benchmark fetch path ────────────────────────────────────────
+#
+# The benchmark recompute is the app's heaviest FMP burst (~47k fiscal calls, ~11k TTM), and
+# FMP answers a burst over its per-minute quota with 429. `FMPClient` retries only 5xx and
+# network errors and raises `FMPRateLimitException` on the FIRST 429, and the fetch layers
+# here turned that into an empty list — so a 429 storm silently dropped companies from every
+# median it touched. A 429 is now retried a bounded number of times, honouring FMP's
+# Retry-After when it sends one (it often does not), and what still fails is COUNTED per
+# industry by the recompute (`industry_benchmark_service._FetchTally`) and reported in its
+# summary. The back-off sleeps inside the caller's concurrency slot on purpose: a rate-limited
+# burst should slow down, not keep the other slots firing.
+#
+# Two stages, then a breaker (2026-10-07, review round 3 P3-2):
+#   1. BURST — RATE_LIMIT_MAX_RETRIES retries on a short exponential back-off (Retry-After
+#      clamped to RATE_LIMIT_MAX_DELAY_SECONDS). A burst over the quota clears in seconds.
+#   2. SHARED WINDOW — a 429 that outlived its burst retries (~14-17.5 s) means the MINUTE's
+#      quota is spent, and on its own that budget is shorter than FMP's per-minute window: the
+#      calls still inside the window used to fail together, and the companies they fetched
+#      were dropped. Such a call now opens ONE shared window instead (or joins the one already
+#      open): every caller — a new one too, before it spends a request FMP would refuse —
+#      waits until one shared instant RATE_LIMIT_WINDOW_SECONDS ahead (FMP's Retry-After
+#      honoured up to that), then retries. One window per spent minute, not one per caller.
+#      A call waits out at most RATE_LIMIT_LOCKOUT_WINDOWS windows itself, so none loops.
+#   3. BREAKER — a quota LOCKOUT is not a per-minute window. When RATE_LIMIT_LOCKOUT_WINDOWS
+#      windows in a row passed with no successful call in between AND at least
+#      RATE_LIMIT_BREAKER_THRESHOLD calls ran out of their burst retries (so one stuck ticker
+#      cannot open it for everyone), or the run has spent its RATE_LIMIT_RUN_WAIT_BUDGET_SECONDS
+#      of window waits (`rate_limit_run`, logged at the end of the run), a 429 is no longer
+#      retried at all until a call succeeds: each fails at once and is counted. Otherwise
+#      retrying ~47k calls would stretch a run that should fail in minutes (and be retried by
+#      the scheduler) past its claim's 3 h stale window.
+# State is process-wide (the quota is the account's) and touched on the event loop only. A
+# window or lockout counts only while `_exhausted_in_a_row` > 0: a successful call zeroes it
+# and closes both.
+RATE_LIMIT_MAX_RETRIES = 3            # 4 attempts in all before the shared window
+RATE_LIMIT_BASE_DELAY_SECONDS = 2.0   # 2 s, 4 s, 8 s (+ up to 25% jitter) without Retry-After
+RATE_LIMIT_MAX_DELAY_SECONDS = 30.0   # a longer Retry-After (or a hostile one) is clamped
+RATE_LIMIT_WINDOW_SECONDS = 60.0      # FMP's quota is per minute: one window covers it
+RATE_LIMIT_LOCKOUT_WINDOWS = 3        # windows in a row with no success (and ...
+RATE_LIMIT_BREAKER_THRESHOLD = 20     # ... this many calls past their retries) = a lockout
+RATE_LIMIT_RUN_WAIT_BUDGET_SECONDS = 20 * 60.0   # window waits one run may spend (claim: 3 h)
+# Calls since the last successful call whose 429 outlived their burst retries.
+_exhausted_in_a_row = 0
+# The clock the shared window is measured on (a test substitutes a fake one).
+_rate_limit_clock: Callable[[], float] = time.monotonic
+
+
+class _SharedWindow:
+    """The one shared 429 window (process-wide; see the stages above)."""
+
+    def __init__(self) -> None:
+        self.seq = 0            # id of the newest window
+        self.retry_at = 0.0     # the `_rate_limit_clock()` instant it ends
+        self.in_a_row = 0       # windows opened since the last successful call
+        self.lockout = False    # the breaker: a 429 fails at once until a call succeeds
+
+
+_window = _SharedWindow()
+
+
+class RateLimitRun:
+    """One recompute run's window-wait budget and totals (`rate_limit_run`)."""
+
+    def __init__(self, label: str, budget_seconds: Optional[float] = None) -> None:
+        self.label = label
+        self.budget_seconds = (
+            RATE_LIMIT_RUN_WAIT_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+        )
+        self.windows = 0          # shared windows this run opened
+        self.wait_seconds = 0.0   # their total length (concurrent waiters overlap: wall time)
+        self.lockouts = 0         # times the breaker opened during this run
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "rate_limit_windows": self.windows,
+            "rate_limit_wait_seconds": round(self.wait_seconds, 1),
+            "rate_limit_lockouts": self.lockouts,
+        }
+
+
+# A ContextVar, not a global: the quarterly and the weekly sweeps can overlap on a quarter-
+# start Sunday, and each keeps its own budget (`asyncio.gather` tasks inherit the context).
+_RATE_LIMIT_RUN: contextvars.ContextVar[Optional[RateLimitRun]] = contextvars.ContextVar(
+    "benchmark_rate_limit_run", default=None,
+)
+
+
+@contextlib.contextmanager
+def rate_limit_run(label: str) -> Iterator[RateLimitRun]:
+    """Scope one recompute run: its shared-window waits are charged to (and bounded by) one
+    RATE_LIMIT_RUN_WAIT_BUDGET_SECONDS budget, and the run's waits are logged when it ends.
+    A call outside any run has no run budget (its own window cap and the breaker still bound
+    it)."""
+    run = RateLimitRun(label)
+    token = _RATE_LIMIT_RUN.set(run)
+    try:
+        yield run
+    finally:
+        _RATE_LIMIT_RUN.reset(token)
+        if run.windows or run.lockouts:
+            logger.warning(
+                "benchmark fetch [%s run]: FMP's per-minute quota ran out — %d shared 429 "
+                "window(s), %.0f s of waiting (budget %.0f s), the breaker opened %d time(s)",
+                run.label, run.windows, run.wait_seconds, run.budget_seconds, run.lockouts,
+            )
+
+
+def current_rate_limit_run() -> Optional[RateLimitRun]:
+    """The `rate_limit_run` the caller is inside, or None."""
+    return _RATE_LIMIT_RUN.get()
+
+
+# Key of the per-company fetch-failure list inside a `_fetch_company_data` dict: the failure
+# kind (`classify_fetch_failure`) of every call that raised after its retries, or answered
+# something other than a list. Every reader of that dict looks up its own statement keys, so
+# this extra key is invisible to the medians.
+FETCH_ERRORS_KEY = "_fetch_errors"
+# The same failures by statement key ({"income_annual": "unavailable", ...}), so the recompute
+# can tell a company that lost its core statements from one that lost a side call
+# (`industry_benchmark_service._FISCAL_LINE_CALLS`). Not a list, so no reader takes it for one.
+FETCH_FAILED_CALLS_KEY = "_fetch_failed_calls"
+
+# Every kind `classify_fetch_failure` returns, and the TRANSIENT ones: those a same-day retry
+# can change. Only a transient failure counts toward the recompute's INCOMPLETE line
+# (`industry_benchmark_service._FetchTally.sector_loss`; review round 5, P4-2): a refusal FMP
+# repeats on every attempt (a 4xx, a 401, a 402, a 200 whose body is not a statement list)
+# used to hold the run — and the sector's aggregate — unsettled for ever, three retries a day.
+FETCH_FAILURE_KINDS: Tuple[str, ...] = ("rate_limited", "unavailable", "error", "refused")
+TRANSIENT_FETCH_FAILURES = frozenset({"rate_limited", "unavailable"})
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """The HTTP status an `httpx.HTTPStatusError` carries, or None when unreadable."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
+def classify_fetch_failure(exc: BaseException) -> str:
+    """The kind of one failed benchmark fetch call:
+
+      * 'rate_limited' — a 429 that outlived `call_with_rate_limit_retry`. Transient.
+      * 'unavailable'  — 5xx / network after the client's own retries
+        (`FMPUnavailableException`), or a raw `httpx.HTTPStatusError` of 500 or above: a 5xx
+        the client does not retry (it retries 500/502/503/504 only, so Cloudflare's 520-527
+        reach here raw). Transient.
+      * 'refused'      — FMP answered and will answer the same again: an `HTTPStatusError`
+        4xx, a 401 (`FMPAuthException`), a 402 / an unlicensed path
+        (`FMPNotEntitledException`). The fetch layers also file a 200 whose body is not a
+        statement list here (`_fetch_company_data`, `industry_benchmark_service._fetch_ttm`).
+      * 'error'        — anything else: a malformed or undecodable body, a bug.
+
+    Only the transient kinds (`TRANSIENT_FETCH_FAILURES`) count toward the INCOMPLETE line;
+    every kind is counted and reported."""
+    if isinstance(exc, FMPRateLimitException):
+        return "rate_limited"
+    if isinstance(exc, FMPUnavailableException):
+        return "unavailable"
+    if isinstance(exc, (FMPAuthException, FMPNotEntitledException)):
+        return "refused"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = _http_status(exc)
+        if status is not None and status >= 500:
+            return "unavailable"
+        if status is not None and 400 <= status < 500:
+            return "refused"
+    return "error"
+
+
+def _retry_after_seconds(
+    value: Any, ceiling: float = RATE_LIMIT_MAX_DELAY_SECONDS,
+) -> Optional[float]:
+    """Seconds to wait from a Retry-After header value (delta-seconds or an HTTP date),
+    clamped to [0, ceiling] (a burst retry: RATE_LIMIT_MAX_DELAY_SECONDS; a shared window:
+    RATE_LIMIT_WINDOW_SECONDS); None when absent or unreadable."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when is None:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return min(max(seconds, 0.0), ceiling)
+
+
+def _window_length(exc: BaseException) -> float:
+    """How long a new shared window lasts: FMP's Retry-After up to RATE_LIMIT_WINDOW_SECONDS
+    (never below one base delay, so a 'Retry-After: 0' cannot burn the window budget in a
+    tight loop), else a whole RATE_LIMIT_WINDOW_SECONDS."""
+    after = _retry_after_seconds(getattr(exc, "retry_after", None), RATE_LIMIT_WINDOW_SECONDS)
+    if after is None:
+        return RATE_LIMIT_WINDOW_SECONDS
+    return max(after, RATE_LIMIT_BASE_DELAY_SECONDS)
+
+
+def _pending_window() -> Optional[Tuple[int, float]]:
+    """(id, end instant) of the shared window while it is open, else None. Never during a
+    lockout (a 429 then fails at once), and only while a call is exhausted since the last
+    success (a success closes the window)."""
+    if _exhausted_in_a_row <= 0 or _window.lockout:
+        return None
+    if _rate_limit_clock() < _window.retry_at:
+        return _window.seq, _window.retry_at
+    return None
+
+
+def _open_breaker(why: str) -> None:
+    """The lockout: every 429 now fails at once (counted) until a call succeeds."""
+    if _window.lockout:
+        return
+    _window.lockout = True
+    run = current_rate_limit_run()
+    if run is not None:
+        run.lockouts += 1
+    # WARNING for the first few per run, DEBUG after: a quota that keeps relapsing would
+    # otherwise log once per recovery. The run's end line carries the count.
+    level = logging.WARNING if run is None or run.lockouts <= 3 else logging.DEBUG
+    logger.log(
+        level,
+        "benchmark fetch%s: %s — a quota lockout, not a per-minute window: 429s are no longer "
+        "retried until a call succeeds (each fails at once and is counted)",
+        f" [{run.label} run]" if run is not None else "", why,
+    )
+
+
+def _lockout_reached() -> bool:
+    """Open the breaker (and say True) once RATE_LIMIT_LOCKOUT_WINDOWS windows in a row passed
+    with no success and RATE_LIMIT_BREAKER_THRESHOLD calls ran out of their burst retries.
+    Asked by a call that needs a new window AND by one that gave up after its own windows —
+    when every call in flight gives up together, nobody asks for a new window, and the next
+    caller would otherwise spend a whole burst before failing."""
+    if _window.lockout:
+        return True
+    if (
+        _window.in_a_row >= RATE_LIMIT_LOCKOUT_WINDOWS
+        and _exhausted_in_a_row >= RATE_LIMIT_BREAKER_THRESHOLD
+    ):
+        _open_breaker(
+            f"{_window.in_a_row} shared windows in a row passed with no successful call, and "
+            f"{_exhausted_in_a_row} calls were rate-limited past their retries"
+        )
+        return True
+    return False
+
+
+def _join_or_open_window(
+    exc: BaseException, waited: Optional[int],
+) -> Optional[Tuple[int, float]]:
+    """For a call whose 429 outlived its burst retries (or came back after a window): the
+    shared window to wait out before retrying — the open one this call has not waited out
+    yet, else a new one — or None when the breaker is open (give up)."""
+    now = _rate_limit_clock()
+    if _window.seq != waited and now < _window.retry_at:
+        return _window.seq, _window.retry_at   # still open, not waited out yet: join it
+    if _lockout_reached():
+        return None
+    length = _window_length(exc)
+    run = current_rate_limit_run()
+    if run is not None and run.wait_seconds + length > run.budget_seconds:
+        _open_breaker(
+            f"this run has spent its {run.budget_seconds:.0f} s window-wait budget "
+            f"({run.windows} windows)"
+        )
+        return None
+    _window.seq += 1
+    _window.in_a_row += 1
+    _window.retry_at = now + length
+    if run is not None:
+        run.windows += 1
+        run.wait_seconds += length
+    logger.warning(
+        "benchmark fetch%s: FMP still answers 429 after %d retries — the minute's quota is "
+        "spent; every call waits for one shared window of %.0f s (Retry-After %s) and then "
+        "retries. Window %d in a row%s",
+        f" [{run.label} run]" if run is not None else "", RATE_LIMIT_MAX_RETRIES, length,
+        getattr(exc, "retry_after", None) or "not sent", _window.in_a_row,
+        "" if run is None else
+        f"; {run.wait_seconds:.0f} of this run's {run.budget_seconds:.0f} s wait budget used",
+    )
+    return _window.seq, _window.retry_at
+
+
+async def _wait_out(window: Tuple[int, float]) -> int:
+    """Sleep until the shared window ends; returns its id. Waking at its end closes it (a
+    no-op on a real clock; it keeps a stopped test clock from parking every later caller)."""
+    seq, retry_at = window
+    await asyncio.sleep(max(0.0, retry_at - _rate_limit_clock()))
+    if _window.seq == seq:
+        _window.retry_at = min(_window.retry_at, _rate_limit_clock())
+    return seq
+
+
+def _reset_window() -> None:
+    """No window open, none in a row, no lockout."""
+    _window.in_a_row = 0
+    _window.lockout = False
+    _window.retry_at = min(_window.retry_at, _rate_limit_clock())
+
+
+def _rate_limit_succeeded() -> None:
+    """A call answered: the quota is back — close the window and the breaker."""
+    global _exhausted_in_a_row
+    if _exhausted_in_a_row and (_window.in_a_row or _window.lockout):
+        logger.info(
+            "benchmark fetch: FMP answers again after %d shared window(s)%s — 429s are "
+            "retried again", _window.in_a_row, " and a lockout" if _window.lockout else "",
+        )
+    _exhausted_in_a_row = 0
+    _reset_window()
+
+
+async def call_with_rate_limit_retry(
+    fn: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any,
+) -> Any:
+    """Await `fn(*args, **kwargs)`, retrying an `FMPRateLimitException` through the stages
+    above: RATE_LIMIT_MAX_RETRIES burst retries, then the shared window (at most
+    RATE_LIMIT_LOCKOUT_WINDOWS of them for this call); none while the breaker is open. The
+    last 429 is re-raised for the caller to count; every other exception propagates on the
+    first attempt (5xx / network were already retried by `FMPClient`, and a 4xx never
+    succeeds on retry)."""
+    global _exhausted_in_a_row
+    attempt = 0                    # burst retries used
+    waited: Optional[int] = None   # id of the last shared window this call waited out
+    windows_waited = 0
+    counted = False                # this call is in `_exhausted_in_a_row`
+    while True:
+        # A window is open (another caller's 429 outlived its burst): wait it out BEFORE
+        # spending a request FMP would refuse.
+        pending = _pending_window()
+        if pending is not None and pending[0] != waited:
+            waited = await _wait_out(pending)
+            windows_waited += 1
+        try:
+            result = await fn(*args, **kwargs)
+        except FMPRateLimitException as exc:
+            if _exhausted_in_a_row > 0 and _window.lockout:
+                if not counted:
+                    _exhausted_in_a_row += 1
+                raise
+            if waited is None and attempt < RATE_LIMIT_MAX_RETRIES:
+                delay = _retry_after_seconds(getattr(exc, "retry_after", None))
+                if delay is None:
+                    base = RATE_LIMIT_BASE_DELAY_SECONDS * (2 ** attempt)
+                    delay = min(
+                        base + random.uniform(0.0, base * 0.25), RATE_LIMIT_MAX_DELAY_SECONDS,
+                    )
+                attempt += 1
+                # FMPClient already logged this 429 at WARNING; one DEBUG line per retry.
+                logger.debug(
+                    "benchmark fetch %s%s: FMP 429 — retry %d/%d in %.1fs",
+                    getattr(fn, "__name__", "call"), args[:1], attempt,
+                    RATE_LIMIT_MAX_RETRIES, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            if not counted:
+                counted = True
+                if _exhausted_in_a_row <= 0:
+                    _reset_window()   # the first since a success: no window, no lockout yet
+                _exhausted_in_a_row += 1
+            if windows_waited >= RATE_LIMIT_LOCKOUT_WINDOWS:
+                _lockout_reached()   # opens the breaker when the quota is out for everyone
+                raise    # this call has waited out its share of windows
+            window = _join_or_open_window(exc, waited)
+            if window is None:
+                raise
+            # Waited HERE, not left to the loop's top: every pass after the burst waits out
+            # one window, so `windows_waited` bounds the loop by construction.
+            waited = await _wait_out(window)
+            windows_waited += 1
+            continue
+        _rate_limit_succeeded()
+        return result
+
 
 # FMP sector names → canonical app sector names
 _FMP_SECTOR_MAP: Dict[str, str] = {
@@ -227,6 +647,9 @@ def _extract_year(record: Dict[str, Any]) -> str:
     Prefers FMP's ``calendarYear`` field which correctly maps fiscal quarters
     to their reporting calendar year (e.g., Apple's fiscal Q1 ending Dec 2020
     is reported as calendar year 2021).  Falls back to the date field.
+
+    No longer the ANNUAL storage key (2026-10-07): that is `_annual_period_label`
+    (`period_labels.annual_benchmark_key`), the key the readers join on.
     """
     cal_year = record.get("calendarYear")
     if cal_year:
@@ -248,21 +671,41 @@ def _extract_year(record: Dict[str, Any]) -> str:
 
 
 def _annual_period_label(record: Dict[str, Any]) -> str:
-    """Annual period label like '2024'."""
-    return _extract_year(record)
+    """Storage key of an ANNUAL row, e.g. '2024': `period_labels.annual_benchmark_key`, the
+    SAME helper every reader joins on (the year of the period end minus 7 days, so a 52/53-
+    week year closing on Jan 1-7 counts as the year before).
+
+    It used to be `calendarYear`, else ``date[:4]``. /stable no longer ships calendarYear, so
+    a Cadence-shaped FY2025 ending 2026-01-03 was stored as "2026" while the company's own
+    card joined it to "2025": its peer line came from the wrong year, and the year it was
+    pooled into counted it twice (FY2025 and FY2026 both keyed 2026)."""
+    return annual_benchmark_key(record)
+
+
+def _storable_quarter_key(date_value: Any) -> Optional[Tuple[int, int]]:
+    """`calendar_quarter_key`, or None for a quarter that ended before
+    MIN_CALENDAR_QUARTER_YEAR (its two-digit label would read as the 2090s)."""
+    key = calendar_quarter_key(date_value)
+    if key is None or key[0] < MIN_CALENDAR_QUARTER_YEAR:
+        return None
+    return key
 
 
 def _quarterly_period_label(record: Dict[str, Any]) -> str:
     """Storage key of a QUARTERLY row: the CALENDAR quarter its period ends in, e.g.
     \"Q3'25\" for any quarter ending Jul-Sep 2025 (an end on day 1-7 counts as the
-    previous month, for 52/53-week filers). ``""`` when the row has no usable date.
+    previous month, for 52/53-week filers). ``""`` when the row has no usable date, or
+    ended before MIN_CALENDAR_QUARTER_YEAR (never keyed — see that constant).
 
     It used to be FMP's FISCAL ``period`` + the calendar year of the end date, which
     pooled Microsoft's Jul-Sep quarter (fiscal Q1) with everyone else's Jan-Mar and
     Nvidia's Nov-Jan quarter (fiscal Q4) with Oct-Dec of the FOLLOWING year. Consumers
     join on the same helper (`period_labels.calendar_quarter_label`).
     """
-    return calendar_quarter_label(record)
+    if not isinstance(record, dict):
+        return ""
+    key = _storable_quarter_key(record.get("date"))
+    return format_calendar_quarter(key) if key is not None else ""
 
 
 def _by_calendar_quarter(
@@ -273,15 +716,102 @@ def _by_calendar_quarter(
     When two of a company's rows land in the same calendar quarter (a fiscal-year-end
     change leaves a short stub period; FMP occasionally repeats a row) the NEWEST period
     end wins, so a company is counted once per quarter — a duplicate used to enter the
-    median twice. Non-dict rows and rows without a usable date are skipped.
+    median twice. Non-dict rows, rows without a usable date and quarters that ended before
+    MIN_CALENDAR_QUARTER_YEAR are skipped (the last quietly: a DEBUG count, since a long
+    FMP history routinely reaches back that far).
     """
     out: Dict[Tuple[int, int], Dict[str, Any]] = {}
     rows = [r for r in (records or []) if isinstance(r, dict)]
+    too_old = 0
     for rec in sorted(rows, key=lambda r: str(r.get("date") or "")):
         key = calendar_quarter_key(rec.get("date"))
-        if key is not None:
-            out[key] = rec
+        if key is None:
+            continue
+        if key[0] < MIN_CALENDAR_QUARTER_YEAR:
+            too_old += 1
+            continue
+        out[key] = rec
+    if too_old:
+        logger.debug(
+            "sector_benchmark: skipped %d quarterly row(s) that ended before %d "
+            "(a two-digit quarter label cannot name them)", too_old, MIN_CALENDAR_QUARTER_YEAR,
+        )
     return out
+
+
+def _annual_spans(rows: List[Dict[str, Any]]) -> Dict[datetime, Optional[int]]:
+    """Each distinct annual period END → days since the company's previous distinct end
+    (None for the oldest). The span of a row is a property of its end date, so repeated
+    rows share it. Undated rows have no entry."""
+    ends = sorted({end for end in (_period_end(r) for r in rows) if end is not None})
+    return {
+        end: ((end - ends[i - 1]).days if i else None) for i, end in enumerate(ends)
+    }
+
+
+def _is_short_annual(rec: Dict[str, Any], spans: Dict[datetime, Optional[int]]) -> bool:
+    """True for a row KNOWN to cover less than ~a year (see ANNUAL_SHORT_PERIOD_DAYS)."""
+    end = _period_end(rec)
+    span = spans.get(end) if end is not None else None
+    return span is not None and span < ANNUAL_SHORT_PERIOD_DAYS
+
+
+def _by_annual_key_with_spans(
+    records: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[datetime, Optional[int]]]:
+    """`_by_annual_key` plus the spans it chose by (for the YoY's own stub check)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    rows = [r for r in (records or []) if isinstance(r, dict)]
+    spans = _annual_spans(rows)
+    for rec in sorted(rows, key=lambda r: _period_end(r) or datetime.min):
+        label = _annual_period_label(rec)
+        if not label:
+            continue
+        held = out.get(label)
+        if (
+            held is not None
+            and _is_short_annual(rec, spans)
+            and not _is_short_annual(held, spans)
+        ):
+            continue   # a transition stub never displaces a full year with the same key
+        out[label] = rec
+    return out, spans
+
+
+def _by_annual_key(records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """One ANNUAL record per storage key (`_annual_period_label`).
+
+    The annual twin of `_by_calendar_quarter`. Two of a company's annual rows can share a
+    key — a fiscal-year-end change (a Jun year and a Dec year both keyed 2024), a 52/53-week
+    year closing on Jan 1-7 next to a December one, or a row FMP repeats — and each used to
+    vote in the median. Non-dict rows and rows with no usable year are skipped.
+
+    Which row wins a shared key: a row KNOWN to be short (`_is_short_annual`: a transition
+    stub, its end under ANNUAL_SHORT_PERIOD_DAYS after the previous one) never displaces a
+    row that is not; otherwise the newest period end wins. So a Jun → Dec switch filed as
+    Jun-2024 (FY), Dec-2024 (6-month stub), Dec-2025 keeps the FULL Jun-2024 year under
+    2024 — its margins and multiples vote, not a half year's (2026-10-07; newest-wins used
+    to keep the stub, whose half-year P/E then voted for 2024). Every statement resolves a
+    collision the same way, so the income / balance / cash-flow / key-metrics rows of a
+    period still meet. A row without a usable date (keyed by `calendarYear`) sorts first, so
+    a dated row with the same key replaces it unless that row is a known stub."""
+    return _by_annual_key_with_spans(records)[0]
+
+
+def _period_end(rec: Dict[str, Any]) -> Optional[datetime]:
+    """A row's period-end date, or None when `date` is missing or not an ISO date."""
+    try:
+        return datetime.strptime(str(rec.get("date") or "")[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _period_end_gap_days(rec: Dict[str, Any], prev_rec: Dict[str, Any]) -> Optional[int]:
+    """Days between two rows' period ends, or None when either date is unusable."""
+    cur, prev = _period_end(rec), _period_end(prev_rec)
+    if cur is None or prev is None:
+        return None
+    return (cur - prev).days
 
 
 def _compute_yoy_for_records(
@@ -316,26 +846,29 @@ def _compute_yoy_for_records(
                     (current_val - prev_val) / abs(prev_val) * 100, 2,
                 )
     else:
-        sorted_recs = sorted(records, key=lambda r: r.get("date") or "")
-        # Annual: compare consecutive sorted records (only if exactly 1 year apart)
-        for i in range(1, len(sorted_recs)):
-            rec = sorted_recs[i]
-            prev_rec = sorted_recs[i - 1]
-            # Validate year gap is exactly 1
-            try:
-                cur_year = int(_extract_year(rec))
-                prv_year = int(_extract_year(prev_rec))
-                if cur_year - prv_year != 1:
-                    continue
-            except (ValueError, TypeError):
+        # Annual: the year keyed Y against the year keyed Y-1, one record per key
+        # (`_by_annual_key`: a full year over a stub, else newest end) — the same keys the
+        # rows are stored under. This used to walk consecutive records sorted by date and
+        # require their `calendarYear`/`date[:4]` years to differ by exactly 1, which
+        # mis-keyed a Jan 1-7 year end and let a duplicated year silently break the chain.
+        by_year, spans = _by_annual_key_with_spans(records)
+        for label, rec in by_year.items():
+            prev_rec = by_year.get(str(int(label) - 1))
+            if prev_rec is None:
+                continue
+            gap = _period_end_gap_days(rec, prev_rec)
+            if gap is not None and not (ANNUAL_YOY_MIN_GAP_DAYS <= gap <= ANNUAL_YOY_MAX_GAP_DAYS):
+                # Not a one-year comparison (a fiscal-year-end change): no growth figure.
+                continue
+            if _is_short_annual(rec, spans) or _is_short_annual(prev_rec, spans):
+                # A transition stub on either side: a Dec → Jun switch filed as Dec-2023
+                # (FY), Jun-2024 (6-month stub, alone under 2024), Jun-2025 passes the gap
+                # test (365 days) but would file a full year over a half year (~+100%).
                 continue
             current_val = _safe_float(rec, field)
             prev_val = _safe_float(prev_rec, field)
             if current_val is not None and prev_val is not None and prev_val != 0:
-                yoy = round((current_val - prev_val) / abs(prev_val) * 100, 2)
-                label = _annual_period_label(rec)
-                if label:
-                    result[label] = yoy
+                result[label] = round((current_val - prev_val) / abs(prev_val) * 100, 2)
 
     return result
 
@@ -452,20 +985,19 @@ def _index_by_period(
 ) -> Dict[str, Dict[str, Any]]:
     """Key each record by its period label so we can join across endpoints.
 
-    Quarterly rows key on the calendar quarter (newest period end wins a collision),
-    so the income / balance / cash-flow / key-metrics rows of one quarter still meet.
+    Quarterly rows key on the calendar quarter, annual rows on `_annual_period_label`;
+    a collision keeps the newest period end (annual: unless it is a transition stub and the
+    other row a full year — `_by_annual_key`), so the income / balance / cash-flow /
+    key-metrics rows of one period still meet (each statement resolves the same tie the
+    same way). Annual collisions used to keep whichever row came LAST in FMP's newest-first
+    list, i.e. the OLDEST.
     """
     if period_type == "quarterly":
         return {
             format_calendar_quarter(key): rec
             for key, rec in _by_calendar_quarter(records).items()
         }
-    out: Dict[str, Dict[str, Any]] = {}
-    for rec in records:
-        label = _annual_period_label(rec)
-        if label:
-            out[label] = rec
-    return out
+    return _by_annual_key(records)
 
 
 def _ratio_pct_from_income(
@@ -951,41 +1483,67 @@ class SectorBenchmarkService:
 
         return upserted
 
+    async def _fmp_call_retrying(self, fn: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> Any:
+        """`_fmp_call` for a CALLABLE, so a 429 can be retried (a coroutine object can be
+        awaited only once): holds the global semaphore and backs off inside it."""
+        async with self._fmp_semaphore:
+            return await call_with_rate_limit_retry(fn, *args, **kwargs)
+
     async def _fetch_company_data(self, ticker: str, annual_limit: int, quarterly_limit: int) -> Dict[str, List]:
         """Fetch income, cash flow, balance sheet, ratios, and key metrics for one company (annual + quarterly).
 
         Balance sheet was added in Phase 3A for moat-scoring metrics
         (intangibles_to_assets, deferred_revenue_to_revenue).
+
+        A failed call still yields an empty list for its key (the medians simply lack that
+        company there), but it is no longer invisible: a 429 is retried first
+        (`call_with_rate_limit_retry`), and the kind of every call that still failed — or
+        answered something other than a list ('refused') — is listed under FETCH_ERRORS_KEY,
+        and by statement key under FETCH_FAILED_CALLS_KEY, for the recompute to count
+        (`industry_benchmark_service._FetchTally`).
         """
+        calls = (
+            ("income_annual", self.fmp.get_income_statement, "annual", annual_limit),
+            ("income_quarterly", self.fmp.get_income_statement, "quarter", quarterly_limit),
+            ("cashflow_annual", self.fmp.get_cash_flow_statement, "annual", annual_limit),
+            ("cashflow_quarterly", self.fmp.get_cash_flow_statement, "quarter", quarterly_limit),
+            ("ratios_annual", self.fmp.get_financial_ratios, "annual", annual_limit),
+            ("ratios_quarterly", self.fmp.get_financial_ratios, "quarter", quarterly_limit),
+            ("key_metrics_annual", self.fmp.get_key_metrics, "annual", annual_limit),
+            ("key_metrics_quarterly", self.fmp.get_key_metrics, "quarter", quarterly_limit),
+            ("balance_annual", self.fmp.get_balance_sheet, "annual", annual_limit),
+            ("balance_quarterly", self.fmp.get_balance_sheet, "quarter", quarterly_limit),
+        )
         results = await asyncio.gather(
-            self._fmp_call(self.fmp.get_income_statement(ticker, period="annual", limit=annual_limit)),
-            self._fmp_call(self.fmp.get_income_statement(ticker, period="quarter", limit=quarterly_limit)),
-            self._fmp_call(self.fmp.get_cash_flow_statement(ticker, period="annual", limit=annual_limit)),
-            self._fmp_call(self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=quarterly_limit)),
-            self._fmp_call(self.fmp.get_financial_ratios(ticker, period="annual", limit=annual_limit)),
-            self._fmp_call(self.fmp.get_financial_ratios(ticker, period="quarter", limit=quarterly_limit)),
-            self._fmp_call(self.fmp.get_key_metrics(ticker, period="annual", limit=annual_limit)),
-            self._fmp_call(self.fmp.get_key_metrics(ticker, period="quarter", limit=quarterly_limit)),
-            self._fmp_call(self.fmp.get_balance_sheet(ticker, period="annual", limit=annual_limit)),
-            self._fmp_call(self.fmp.get_balance_sheet(ticker, period="quarter", limit=quarterly_limit)),
+            *[
+                self._fmp_call_retrying(fn, ticker, period=period, limit=limit)
+                for _key, fn, period, limit in calls
+            ],
             return_exceptions=True,
         )
 
-        def _safe_list(r: Any) -> List:
-            return r if isinstance(r, list) else []
-
-        return {
-            "income_annual": _safe_list(results[0]),
-            "income_quarterly": _safe_list(results[1]),
-            "cashflow_annual": _safe_list(results[2]),
-            "cashflow_quarterly": _safe_list(results[3]),
-            "ratios_annual": _safe_list(results[4]),
-            "ratios_quarterly": _safe_list(results[5]),
-            "key_metrics_annual": _safe_list(results[6]),
-            "key_metrics_quarterly": _safe_list(results[7]),
-            "balance_annual": _safe_list(results[8]),
-            "balance_quarterly": _safe_list(results[9]),
-        }
+        out: Dict[str, Any] = {}
+        errors: List[str] = []
+        failed_calls: Dict[str, str] = {}
+        for (key, _fn, _period, _limit), result in zip(calls, results):
+            if isinstance(result, list):
+                out[key] = result
+                continue
+            out[key] = []
+            if isinstance(result, BaseException):
+                kind = classify_fetch_failure(result)
+            elif result is not None:
+                # FMP answered 200 with something that is not a statement list (an error
+                # object): the company is missing from this key exactly as if it had failed,
+                # and a retry gets the same answer — 'refused', never transient.
+                kind = "refused"
+            else:
+                continue
+            errors.append(kind)
+            failed_calls[key] = kind
+        out[FETCH_ERRORS_KEY] = errors
+        out[FETCH_FAILED_CALLS_KEY] = failed_calls
+        return out
 
     def _collect_metric_values(
         self,
@@ -1039,15 +1597,15 @@ class SectorBenchmarkService:
                 # a negative multiple is "Neg."/undefined (the company side hides it)
                 # and would drag the median below the comparable profitable-peer level.
                 positive_only = metric_config.get("positive_only", False)
-                # Quarterly: one row per calendar quarter per company (see
-                # `_by_calendar_quarter`), so a duplicate row can't vote twice.
+                # One row per period per company (`_by_calendar_quarter` /
+                # `_by_annual_key`), so a duplicate row can't vote twice.
                 labelled = (
                     [
                         (format_calendar_quarter(key), rec)
                         for key, rec in _by_calendar_quarter(records).items()
                     ]
                     if is_quarterly
-                    else [(_annual_period_label(rec), rec) for rec in records]
+                    else list(_by_annual_key(records).items())
                 )
                 for label, rec in labelled:
                     val = _safe_float(rec, field)

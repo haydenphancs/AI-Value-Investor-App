@@ -76,6 +76,16 @@ _MARKET_TOOL = "get_market_snapshot"
 # see `chat_market_tools`).
 _NEWS_TOOLS = frozenset({"get_ticker_news", "explain_price_move"})
 
+# Who holds a stock, from filings (`chat_ownership_tool`, 2026-10-05): each insider's shares
+# after their latest Form 4 transaction, and 13F institutional ownership. TestFlight 1.0 (11):
+# in an Updates chat on CRWV, "how many shares does he own now?" (a director who had just
+# sold) got "Caydex does not have information on his current total ownership" — no tool or
+# grounding carried the post-trade balance every Form 4 line reports. Equity classes only: a
+# fund, a coin, an index or a futures contract has no Form 4 filers. The name reads as a
+# progress line on its own ("Check ownership filings"): an app build without a label for it
+# renders an unknown tool by de-snake-casing its name.
+OWNERSHIP_TOOL = "check_ownership_filings"
+
 # Report chat's live web search (`chat_web_search_service`). The ONE name both files share:
 # defined HERE and imported by the service, never the reverse — this module must not pull the
 # budget / database code in at import (`tests/test_chat_tool_boundary.py`). It is in NO asset
@@ -87,9 +97,11 @@ WEB_SEARCH_TOOL = "web_search"
 
 _STOCK_TOOLSET = frozenset({
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
-}) | _NEWS_TOOLS | {_MARKET_TOOL}
+}) | _NEWS_TOOLS | {_MARKET_TOOL, OWNERSHIP_TOOL}
 
 _TOOLS_BY_ASSET_TYPE: Dict[str, frozenset] = {
+    # Every chat about a company — its ticker screen, its report and its Updates feed all
+    # resolve to STOCK (`ChatService._detect_asset_type`) — gets the ownership tool.
     "STOCK": _STOCK_TOOLSET,
     # No screen context: the user may ask about any stock, so keep the full equity set.
     "NORMAL": _STOCK_TOOLSET,
@@ -190,6 +202,16 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "recent headlines. ALWAYS call this for any 'why is X up/down' question rather than "
         "answering from the price alone."
     ),
+    OWNERSHIP_TOOL: (
+        "Look up who owns a company's stock, from its SEC filings: for each insider (officer, "
+        "director or 10% owner) the shares they reported holding right AFTER their most "
+        "recent transaction — held directly and through trusts or entities, each with its "
+        "as-of date — plus their latest purchase or sale, and the share held by institutions "
+        "with the largest institutional holders from the latest quarterly 13F filings. Call it "
+        "for any question about how many shares someone owns or holds, what an insider has "
+        "left after selling or buying, how much insiders or institutions own, or who the "
+        "biggest holders are. The figures are as of each filing, not live."
+    ),
     _MARKET_TOOL: (
         "Fetch how the market is doing TODAY: every sector's daily move, the "
         "leading and lagging industries, the biggest gaining and losing stocks, "
@@ -233,6 +255,11 @@ TOOL_CAPABILITIES: Dict[str, str] = {
         "explain_price_move for why a specific ticker moved TODAY — it returns the actual "
         "cause, how unusual the move is for that ticker, how its industry and the market did, "
         "and recent headlines"
+    ),
+    OWNERSHIP_TOOL: (
+        "check_ownership_filings for who owns a company's stock — each insider's shares held "
+        "after their latest reported transaction, as of that filing, and the institutional "
+        "ownership with the largest holders"
     ),
     _MARKET_TOOL: (
         "get_market_snapshot for how the market itself is doing today — every sector's move, "
@@ -312,8 +339,8 @@ def _declaration(name: str) -> types.FunctionDeclaration:
 # order, but say so rather than rely on it).
 _TOOL_ORDER = (
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
-    "get_ticker_news", "explain_price_move", _MARKET_TOOL, "get_market_overview",
-    WEB_SEARCH_TOOL,
+    "get_ticker_news", "explain_price_move", OWNERSHIP_TOOL, _MARKET_TOOL,
+    "get_market_overview", WEB_SEARCH_TOOL,
 )
 
 
@@ -413,6 +440,18 @@ def capability_block(allowed: frozenset) -> str:
         "Never invent a CAUSE for a price move that a tool did not give you, and never pad "
         "an answer with a guess — but never stop at 'I don't know' either. "
     )
+    if OWNERSHIP_TOOL in allowed:
+        # The TestFlight 1.0 (11) dead end: "how many shares does he own now?" was answered
+        # "Caydex does not have information on his current total ownership" — with no tool
+        # that could have said otherwise.
+        text += (
+            "OWNERSHIP QUESTIONS — how many shares an insider owns or has left after a sale or "
+            "purchase, how much insiders or institutions own, who the biggest holders are — "
+            "mean call check_ownership_filings before answering; never say Caydex has no "
+            "ownership information without calling it. Give every holding with its as-of "
+            "filing date, never as a live count, and keep shares held directly and through "
+            "trusts or entities as separate figures. "
+        )
     return text
 
 
@@ -430,6 +469,7 @@ _CHIP_SCOPE_BY_TOOL: Dict[str, str] = {
     "get_stock_chart_data": "the live price, today's change, volume and market cap",
     "get_ticker_news": "recent news",
     "explain_price_move": "why the price moved",
+    OWNERSHIP_TOOL: "who owns it — insiders' reported share holdings and institutional ownership",
     "get_market_snapshot": "how the market and its sectors are doing",
     "get_market_overview": "how the market and its sectors are doing, the index's level, valuation and breadth",
     "get_sentiment_analysis": "the mood in news and social chatter",
@@ -667,6 +707,14 @@ def build_chat_tool_handlers(
     async def _snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
         return await svc._fetch_market_snapshot_data()
 
+    async def _ownership(args: Dict[str, Any]) -> Dict[str, Any]:
+        # The screen exemption matters here too: on LTC Properties' screen "LTC" is the REIT,
+        # never canonicalised to Litecoin's pair (which the tool would then refuse).
+        sym, _ = _resolve(args)
+        if sym is None:
+            return _invalid(args)
+        return await svc._fetch_ownership_data(sym)
+
     handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {
         "get_stock_chart_data": _stock,
         "get_analyst_analysis": _analyst,
@@ -674,6 +722,7 @@ def build_chat_tool_handlers(
         "get_market_overview": _market,
         "get_ticker_news": _news,
         "explain_price_move": _why,
+        OWNERSHIP_TOOL: _ownership,
         _MARKET_TOOL: _snapshot,
     }
     if web_turn is not None:

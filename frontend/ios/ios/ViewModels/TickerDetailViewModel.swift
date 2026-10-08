@@ -39,6 +39,13 @@ class TickerDetailViewModel: ObservableObject {
     /// about the company. A peer-only gap ("benchmarks", "profile") never sets it.
     @Published private(set) var growthIsDegraded: Bool = false
     @Published private(set) var profitPowerIsDegraded: Bool = false
+    /// True while the shown Growth / Profit Power / Health Check build lost only its PEER
+    /// lookup (`degraded` holds "benchmarks", `peerLookupFailed`): the company's figures are
+    /// complete, the medians are missing, and the card says so in one muted line. Never a
+    /// retry notice (a peer-only gap is in `nonDataLegReasons`). Cleared on a failed fetch.
+    @Published private(set) var growthPeerUnavailable: Bool = false
+    @Published private(set) var profitPowerPeerUnavailable: Bool = false
+    @Published private(set) var healthCheckPeerUnavailable: Bool = false
     @Published var signalOfConfidenceData: SignalOfConfidenceSectionData?
     @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var healthCheckData: HealthCheckSectionData?
@@ -697,6 +704,16 @@ class TickerDetailViewModel: ObservableObject {
         (degraded ?? []).filter { !nonDataLegReasons.contains($0) }
     }
 
+    /// The `degraded` reason a section answers with when its industry/sector median lookup
+    /// raised (`growth_service`, `profit_power_service`, `health_check_service`).
+    private static let peerLookupReason = "benchmarks"
+
+    /// True when the build lost its PEER lookup — the cards' muted "Peer comparison
+    /// temporarily unavailable." line. Independent of `failedDataLegs`: both can be true.
+    private static func peerLookupFailed(_ degraded: [String]?) -> Bool {
+        (degraded ?? []).contains(peerLookupReason)
+    }
+
     /// The six Financials fetches, in their OWN group, settling `isFinancialsLoaded` the
     /// moment the six are done — independent of holders / news / analyst in the outer
     /// Phase-2 group, which used to hold the tab's skeleton up for a minute after all six
@@ -844,6 +861,7 @@ class TickerDetailViewModel: ObservableObject {
             self.growthData = dto.toDisplayModel()
             let failedLegs = Self.failedDataLegs(dto.degraded)
             self.growthIsDegraded = !failedLegs.isEmpty
+            self.growthPeerUnavailable = Self.peerLookupFailed(dto.degraded)
             print("✅ TickerDetailVM: Got growth for \(ticker)")
             // A 200 that lost a DATA leg and has no series at all: an outage, not "this
             // company has no growth history". The card hides itself (no metric has data),
@@ -860,6 +878,7 @@ class TickerDetailViewModel: ObservableObject {
             // must never masquerade as this ticker's data or feed financialsContext.
             self.growthData = nil
             self.growthIsDegraded = false
+            self.growthPeerUnavailable = false
             return failure
         }
     }
@@ -870,6 +889,7 @@ class TickerDetailViewModel: ObservableObject {
             guard isCurrentFinancialsRun(generation, ticker: ticker, step: "profit power") else { return nil }
             let failedLegs = Self.failedDataLegs(dto.degraded)
             self.profitPowerIsDegraded = !failedLegs.isEmpty
+            self.profitPowerPeerUnavailable = Self.peerLookupFailed(dto.degraded)
             // A 200 that lost a DATA leg and has no point in either period: an outage. The
             // only thing that card could draw is "Margin data isn't available for this
             // company" — the outage stated as a company fact — so no card (as Growth,
@@ -889,6 +909,7 @@ class TickerDetailViewModel: ObservableObject {
             // No .sampleData fallback — see fetchEarnings.
             self.profitPowerData = nil
             self.profitPowerIsDegraded = false
+            self.profitPowerPeerUnavailable = false
             return failure
         }
     }
@@ -903,6 +924,7 @@ class TickerDetailViewModel: ObservableObject {
             // metric types this build can't draw and leaves the not-meaningful row (ROE over
             // negative equity) out of `totalCount`, so a lone N/M row is no card either.
             self.healthCheckData = model.totalCount == 0 ? nil : model
+            self.healthCheckPeerUnavailable = Self.peerLookupFailed(dto.degraded)
             print("✅ TickerDetailVM: Got health check for \(ticker) — \(model.metrics.count) metrics, badge \(model.ratingBadgeText)")
             // Nothing scored BECAUSE a data leg failed (ratios, key metrics, balance sheet,
             // income): an outage, not the company's record. "no_metrics" alone is the
@@ -918,6 +940,7 @@ class TickerDetailViewModel: ObservableObject {
             guard isCurrentFinancialsRun(generation, ticker: ticker, step: "health check") else { return nil }
             // No .sampleData fallback — see fetchEarnings.
             self.healthCheckData = nil
+            self.healthCheckPeerUnavailable = false
             return failure
         }
     }
@@ -2091,7 +2114,9 @@ class TickerDetailViewModel: ObservableObject {
 
         // Snapshot ratings
         for snap in td.snapshots {
-            let metricsStr = snap.metrics.map { "\($0.name): \($0.value)" }.joined(separator: ", ")
+            // `displayName`, as the card shows it: an industry median is "industry avg" here
+            // too, or Cay AI would call it a sector's beside a card that does not.
+            let metricsStr = snap.metrics.map { "\($0.displayName): \($0.value)" }.joined(separator: ", ")
             parts.append("\(snap.category.rawValue): \(snap.rating.displayName) (\(metricsStr))")
         }
 
@@ -2152,13 +2177,15 @@ class TickerDetailViewModel: ObservableObject {
         if let snapshot = valuationSnapshot {
             // Only measured values: an unavailable rating (0) and "—" / "N/A" multiples
             // would otherwise ground the model on placeholder glyphs.
+            // `displayName` + "peers": each multiple names its own median's group ("industry
+            // avg" / "sector avg"), and the rating spans both, so the line says neither.
             let multiples = snapshot.metrics
                 .filter { !["—", "N/A", "--", ""].contains($0.value) }
-                .map { "\($0.name): \($0.value)" }
+                .map { "\($0.displayName): \($0.value)" }
             if snapshot.rating != .unavailable || !multiples.isEmpty {
                 var line = snapshot.rating != .unavailable
-                    ? "Valuation vs sector peers: \(ValuationMeter.label(for: snapshot.rating))"
-                    : "Valuation vs sector peers: rating unavailable"
+                    ? "Valuation vs peers: \(ValuationMeter.label(for: snapshot.rating))"
+                    : "Valuation vs peers: rating unavailable"
                 if !multiples.isEmpty {
                     line += " (" + multiples.joined(separator: "; ") + ")"
                 }
@@ -2251,8 +2278,14 @@ class TickerDetailViewModel: ObservableObject {
                 // Said, not omitted: silence let the model fall back on an older year.
                 parts.append("Margins (\(periodLabel)): not available")
             }
-            if let sectorAvg = latest.sectorAverageNetMargin {
-                parts.append("\(pp.peerWord) Avg Net Margin (\(periodLabel)): \(String(format: "%.1f", sectorAvg))%")
+            // The peer value is the median for the SAME period as `latest` (since 2026-10-07
+            // each period shows its own peer cell, and a period not yet fully reported carries
+            // none). It is never labelled with the company's fiscal year: "Industry Avg Net
+            // Margin (FY2026)" read as a full-year 2026 peer figure. Worded exactly as the
+            // backend's grounding line (`chat_service._format_profit_summary`), at the level the
+            // ANNUAL series actually draws.
+            if let peerNet = latest.sectorAverageNetMargin, peerNet.isFinite {
+                parts.append("\(pp.peerWord(for: .annual)) peer-group median net margin \(String(format: "%.1f", peerNet))% (peers' median for the same period)")
             }
         }
 

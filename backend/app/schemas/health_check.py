@@ -2,9 +2,14 @@
 Health Check response schemas — matches the iOS HealthCheckSectionData struct.
 
 Seven metrics: Debt-to-Equity, P/E Ratio, ROE, Current Ratio, Altman Z-Score,
-Interest Coverage, Quick Ratio. Each metric includes the company value, sector
-median comparison, gauge position (0.0–1.0), status, and dynamic insight text.
-Altman Z-Score uses absolute thresholds (no sector benchmark).
+Interest Coverage, Quick Ratio. Each metric includes the company value, the peer
+median comparison (the industry's median, or the sector's when the industry group is
+too thin — `peer_level` says which), gauge position (0.0–1.0), status, and dynamic
+insight text. Altman Z-Score uses absolute thresholds (no peer benchmark). Banks,
+insurers, capital-markets firms, asset managers and lenders get no Current Ratio, Quick
+Ratio or Interest Coverage row (`financials_metric_gate`; insurance brokers keep Interest
+Coverage), and no Altman Z for the Financial Services / Real Estate sectors
+(`altman_z_applicable`) — the models assume an operating company's balance sheet.
 """
 
 from typing import List, Optional
@@ -22,6 +27,13 @@ class HealthCheckMetricSchema(BaseModel):
     insight_text: str
     highlighted_value: Optional[str] = None
     highlighted_label: Optional[str] = None
+    # The level of the median in `comparison_value`: "industry" | "sector". None when
+    # there is no peer comparison (`comparison_value` is None — Altman Z, the
+    # negative-equity D/E row, ROE "N/M", a missing or unusable median), and for a cell
+    # that carried no level (logged; the text then keeps the old "sector" wording). The
+    # insight text names the same level ("industry average" / "sector average").
+    # Additive (2026-10-07): shipped iOS builds ignore it; older cached rows decode to None.
+    peer_level: Optional[str] = None
 
 
 class HealthCheckResponse(BaseModel):

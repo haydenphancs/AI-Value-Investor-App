@@ -11,6 +11,8 @@ THE GATE (`open_web_search_turn`) — the tool is declared only when ALL of thes
   * a REPORT session on a TICKER_REPORT screen (a per-message ETF context on a REPORT session must
     not open it: an ETF/CRYPTO deep-dive answer can land in the shared 24 h cache — review #1);
   * `CHAT_REPORT_WEB_SEARCH_ENABLED` and a non-blank `BRAVE_SEARCH_API_KEY`;
+  * an app that discloses it: a caller sending `X-App-Version` below `WEB_SEARCH_MIN_APP_VERSION`
+    (1.0 — its in-app Privacy Policy and AI consent sheet predate Brave) never gets a search;
   * a signed-in `user_id` — so the starter-warm job and the eval scripts can never search;
   * `chat_intent.is_web_search_intent` fires: an EXPLICIT ask to search, look up or verify.
 
@@ -60,6 +62,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from app.config import settings
+from app.core.client_app_version import AppVersion, client_app_version, client_is_older_than
 from app.integrations import brave_search
 from app.services import chat_market_tools as cmt
 from app.services.agents.chat_tools import WEB_SEARCH_TOOL
@@ -340,9 +343,40 @@ class WebSearchTurn:
         self._served_this_generation = False
 
 
+# The first app version whose OWN copy discloses the search: build 1.0 (10), the App Store build
+# until 1.1, ships an in-app Privacy Policy and AI data-consent sheet written before Brave. The
+# website's policy covers every build, but an old build's in-app text must not be contradicted,
+# so a caller saying it is older never gets a search (owner decision 2026-10-05). Fails open on
+# a missing or unreadable header (`app.core.client_app_version`).
+# The release after 1.0 ships as "1.01" (owner, 2026-10-08), which parses as (1, 1, 0): gated in.
+# tests/test_app_version_release_parity.py pins that the shipped version passes this gate.
+WEB_SEARCH_MIN_APP_VERSION: AppVersion = (1, 1, 0)
+
+
 def report_web_search_available() -> bool:
-    """The rollback switch is on and a key is set. Read per turn."""
-    return bool(settings.CHAT_REPORT_WEB_SEARCH_ENABLED) and brave_search.is_configured()
+    """The rollback switch is on, a key is set, and the caller's app discloses the search. Read
+    per turn — all three gates (`open_web_search_turn`, `web_search_intent_unserved`,
+    `web_search_offered_on_request`) go through here, so an old build is told consistently that
+    no search is available and is never offered one."""
+    if not (bool(settings.CHAT_REPORT_WEB_SEARCH_ENABLED) and brave_search.is_configured()):
+        return False
+    return not client_is_older_than(WEB_SEARCH_MIN_APP_VERSION)
+
+
+def _withheld_reason() -> str:
+    """Why `report_web_search_available()` said no, for the WITHHELD log line."""
+    if not settings.CHAT_REPORT_WEB_SEARCH_ENABLED:
+        return "switch_off"
+    if not brave_search.is_configured():
+        return "no_key"
+    if client_is_older_than(WEB_SEARCH_MIN_APP_VERSION):
+        return "app_version"
+    return "unknown"
+
+
+def _version_label() -> str:
+    version = client_app_version()
+    return ".".join(str(part) for part in version) if version else "none"
 
 
 def _report_chat(session_type: Optional[str], context_type: Optional[str]) -> bool:
@@ -377,6 +411,13 @@ def open_web_search_turn(
         if not _report_chat(session_type, context_type):
             return None
         if not report_web_search_available():
+            if is_web_search_intent(user_message):
+                # Greppable: tells a version-gated turn from a switch-off or no-key one. The
+                # reason and the parsed version only — never the message or a query.
+                logger.info(
+                    "REPORT_WEB_SEARCH_WITHHELD reason=%s app_version=%s",
+                    _withheld_reason(), _version_label(),
+                )
             return None
         uid = user_id.strip() if isinstance(user_id, str) else ""
         if not uid:

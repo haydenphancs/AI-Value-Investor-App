@@ -21,7 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
-from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.schemas.stock_overview import (
+    SnapshotItemResponse,
+    SnapshotMetricResponse,
+    snapshot_build_time,
+    with_cached_build_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +108,11 @@ _inflight: Dict[str, asyncio.Future] = {}
 # is a MISS and is rebuilt — the 24h tier must not outlive a change to the figures.
 # 2 (2026-09-30): the latest annual YoY only (no backward scan to an older year), the
 #     rating weighted over present metrics, and YoY paired by period-end date span.
-_SNAPSHOT_PAYLOAD_VERSION = 2
+# 3 (2026-10-07): scores read Growth's peer values, which now come from ONE peer group per
+#     chart line (the industry when it is mature at the line's newest period, else the
+#     sector), are absent for a period not yet fully reported, and never borrow another
+#     period's value — a v2 row could score against a held-back or partial-year median.
+_SNAPSHOT_PAYLOAD_VERSION = 3
 _VERSION_KEY = "_schema_v"
 
 # GrowthService legs this card does NOT read: it scores only the newest ANNUAL point of
@@ -323,7 +332,8 @@ class GrowthSnapshotService:
                     version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
                 )
                 return None
-            return SnapshotItemResponse(**json_data)
+            # A row from before `computed_at` existed: its build time is its cached_at.
+            return SnapshotItemResponse(**with_cached_build_time(json_data, cached_at))
 
         except Exception as e:
             logger.warning(f"Growth snapshot cache check failed for {ticker}: {e}")
@@ -445,6 +455,7 @@ class GrowthSnapshotService:
             metrics=metrics,
             full_report_available=True,
             weighted_score=round(weighted, 3),
+            computed_at=snapshot_build_time(),
         )
         return snapshot, degraded
 

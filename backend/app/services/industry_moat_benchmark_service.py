@@ -16,7 +16,10 @@ Lookup (online, per request):
   IndustryMoatBenchmarkLookup.get_pillar_benchmarks(industry)
   → {pillar_name: peer_average_score}, with 1h in-memory cache.
   Returns {} when the industry has no rows yet so callers can fall
-  back to the existing 5.0 baseline.
+  back to the existing 5.0 baseline. A FAILED read returns an empty
+  `BenchmarkLookupFailed` instead (same baseline, but `lookup_failed()`
+  is True), so the report collector can keep that report out of the
+  shared caches rather than freezing a flat 5.0 polygon into them.
 
 All five Pat Dorsey pillars are populated:
   * Brand Power, Cost Advantage, Intangible Assets — from FMP
@@ -39,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import statistics
 import time
 import uuid
@@ -53,6 +57,8 @@ from app.services.moat_scoring_service import (
     PillarResult,
     score_moat_dimensions,
 )
+from app.services.sector_benchmark_lookup import BenchmarkLookupFailed, lookup_failed
+from app.utils.supabase_errors import is_transient_supabase_error, retry_idempotent_sync
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +102,18 @@ TOP_TICKERS_PER_INDUSTRY = 200
 # retry, so dropped peers shrink the per-pillar sample size).
 PER_TICKER_FMP_CONCURRENCY = 3
 PER_INDUSTRY_CONCURRENCY = 1
-MODEL_VERSION = "moat_v1.2026-05"
+# Stamped on every row (migration 057: "bump on scorer logic changes so consumers can
+# detect drift"). 2026-10: the scorer compares a company with its sector's median of the
+# SAME year (`annual_benchmark_key`, complete years only, n >= 20) instead of the newest
+# year with n >= 20 / n >= 10. Rows written under "moat_v1.2026-05" were scored on the old
+# rule; `IndustryMoatBenchmarkLookup` serves each pillar's own row and names every pillar
+# still on an older vintage as pending (`_current_vintage_rows`), and the next recompute
+# (the January chain, or the owner's `/admin/refresh-industry-moat-benchmarks?
+# skip_recent_hours=0`) replaces them.
+MODEL_VERSION = "moat_v1.2026-10"
+# Every vintage the lookup knows, oldest first; a row stamped with anything else (or
+# nothing) ranks below all of them.
+_MODEL_VERSION_ORDER = ("moat_v1.2026-05", MODEL_VERSION)
 TABLE_NAME = "industry_moat_benchmarks"
 # Re-running the bootstrap with `skip_if_fresh_hours` set lets the
 # operator resume after a Ctrl-C / rate-limit-induced abort — any
@@ -143,6 +160,22 @@ def _percentile(sorted_values: List[float], pct: float) -> Optional[float]:
     return sorted_values[lo] * (1 - weight) + sorted_values[hi] * weight
 
 
+#: `_zero_write_failure` reasons. Each is also a key of the run's failure breakdown.
+_FAIL_UPSERTS = "every upsert failed"
+_FAIL_BENCHMARK_READ = "sector-median read failed"
+_FAIL_NO_PEER = "no peer could be scored"
+# What each reason points the operator at, for the run-level ERROR.
+_FAILURE_CAUSE = {
+    _FAIL_UPSERTS: "every industry_moat_benchmarks write failed (Supabase)",
+    _FAIL_BENCHMARK_READ: (
+        "the sector-median read failed (Supabase sector_benchmarks unreadable), so peers "
+        "were left out of the averages"
+    ),
+    _FAIL_NO_PEER: "FMP was unreachable or refusing (every profile fetch failed or was empty)",
+    "raised": "an industry's computation raised",
+}
+
+
 def _zero_write_failure(pillars_written: int, stats: Dict[str, int]) -> Optional[str]:
     """Why an attempted industry that wrote no pillar counts as FAILED, or None.
 
@@ -151,13 +184,23 @@ def _zero_write_failure(pillars_written: int, stats: Dict[str, int]) -> Optional
     fresh, and a same-day re-run attempts it again). Failed when its pillars met the floor
     but every upsert failed, or when no peer could be scored at all: `_score_one_ticker`
     turns an FMP failure on the profile into None, so an outage looks like an empty result.
+
+    "sector-median read failed" when `stats["benchmark_failed"]` peers were left out
+    because their sector-median read failed (`_score_one_ticker`) and that is why nothing
+    was written: no peer was scored at all, or the scored peers plus the dropped ones would
+    have reached MIN_SAMPLE_SIZE. Told apart from "no peer could be scored" so the
+    operator debugs Supabase, not FMP.
     """
     if pillars_written:
         return None
     if stats.get("eligible", 0):
-        return "every upsert failed"
-    if not stats.get("scored", 0):
-        return "no peer could be scored"
+        return _FAIL_UPSERTS
+    scored = stats.get("scored", 0)
+    benchmark_failed = stats.get("benchmark_failed", 0)
+    if benchmark_failed and (not scored or scored + benchmark_failed >= MIN_SAMPLE_SIZE):
+        return _FAIL_BENCHMARK_READ
+    if not scored:
+        return _FAIL_NO_PEER
     return None
 
 
@@ -199,16 +242,21 @@ class IndustryMoatBenchmarkService:
         sem: asyncio.Semaphore,
         *,
         industry_tam: Optional[Any] = None,
+        drops: Optional[Dict[str, int]] = None,
     ) -> Optional[Dict[str, Optional[float]]]:
         """Fetch the focal data for one peer + run the deterministic
         scorer. Returns {pillar_name: score | None}, or None if the
-        FMP profile lookup failed (ticker doesn't exist / FMP error).
+        FMP profile lookup failed (ticker doesn't exist / FMP error) or
+        the scorer's sector-median read failed.
 
         Fetches in parallel:
           profile, income(annual,2), balance(annual,2), ratios(annual,1),
           transcript (list+content under the hood).
         `industry_tam` is shared across all peers in the same industry
         — caller pre-fetches it once and threads it through.
+        `drops`, when given, counts a company left out for a failed
+        sector-median read under "benchmark_failed" — the one None the
+        caller must not read as an FMP failure (`_zero_write_failure`).
         """
         async with sem:
             try:
@@ -254,6 +302,19 @@ class IndustryMoatBenchmarkService:
                 "industry_moat_benchmark: scorer failed for %s: %s",
                 ticker, exc,
             )
+            return None
+
+        # A failed sector-median read leaves the benchmark-driven pillars unscored; folding
+        # this company into the industry's peer averages would quietly drag them toward the
+        # pillars that did not need a benchmark. Skip it for this run, loudly.
+        if lookup_failed(pillars):
+            logger.warning(
+                "industry_moat_benchmark: sector-median read FAILED while scoring %s "
+                "(sector=%r) — company left out of this run's peer averages",
+                ticker, profile.get("sector"),
+            )
+            if drops is not None:
+                drops["benchmark_failed"] = drops.get("benchmark_failed", 0) + 1
             return None
 
         return {p: pillars.get(p).score if pillars.get(p) else None for p in PILLAR_ORDER}
@@ -307,10 +368,13 @@ class IndustryMoatBenchmarkService:
         `stats`, when given, is filled with `peers` (tickers tried), `scored` (peers the
         scorer ran on) and `eligible` (pillars that met the sample floor, i.e. were sent
         to the upsert) — what `recompute_all` needs to tell an outage from a small
-        industry when nothing was written (`_zero_write_failure`).
+        industry when nothing was written (`_zero_write_failure`). `benchmark_failed`
+        (peers left out because their sector-median read failed) is set only when it is
+        non-zero, so a clean run's stats keep their three keys.
         """
         st: Dict[str, int] = stats if stats is not None else {}
         st.update(peers=0, scored=0, eligible=0)
+        st.pop("benchmark_failed", None)
         run_id = run_id or str(uuid.uuid4())
 
         if skip_if_fresh_hours:
@@ -356,13 +420,24 @@ class IndustryMoatBenchmarkService:
         industry_tam = await self._fetch_industry_tam(industry, tickers[0])
 
         sem = asyncio.Semaphore(PER_TICKER_FMP_CONCURRENCY)
+        # Shared by the gathered coroutines; each increments it on the event loop thread
+        # (after its `to_thread` scorer returns), so no lock is needed.
+        drops: Dict[str, int] = {}
         per_ticker_scores = await asyncio.gather(
-            *[self._score_one_ticker(t, sem, industry_tam=industry_tam)
+            *[self._score_one_ticker(t, sem, industry_tam=industry_tam, drops=drops)
               for t in tickers],
             return_exceptions=True,
         )
         st["peers"] = len(tickers)
         st["scored"] = sum(1 for row in per_ticker_scores if isinstance(row, dict))
+        if drops.get("benchmark_failed"):
+            st["benchmark_failed"] = drops["benchmark_failed"]
+            logger.warning(
+                "industry_moat_benchmark: %r — %d of %d peer(s) left out because their "
+                "sector-median read failed (Supabase sector_benchmarks unreadable); peer "
+                "averages from the %d scored", industry, drops["benchmark_failed"],
+                len(tickers), st["scored"],
+            )
 
         # Collect per-pillar score lists.
         pillar_scores: Dict[str, List[float]] = {p: [] for p in PILLAR_ORDER}
@@ -471,8 +546,9 @@ class IndustryMoatBenchmarkService:
         skipped_low_sample = 0
         skipped_fresh = 0
 
-        # (industry, pillars written, pillars short of the floor, fresh-skipped, failure)
-        async def _one(ind: str) -> Tuple[str, int, int, bool, Optional[str]]:
+        # (industry, pillars written, pillars short of the floor, fresh-skipped, failure,
+        #  peers left out for a failed sector-median read)
+        async def _one(ind: str) -> Tuple[str, int, int, bool, Optional[str], int]:
             stats: Dict[str, int] = {}
             async with sem:
                 try:
@@ -486,12 +562,14 @@ class IndustryMoatBenchmarkService:
                         "industry_moat_benchmark: compute_for_industry "
                         "failed for %r: %s: %s", ind, type(exc).__name__, exc,
                     )
-                    return ind, 0, len(PILLAR_ORDER), False, "raised"
+                    return (ind, 0, len(PILLAR_ORDER), False, "raised",
+                            stats.get("benchmark_failed", 0))
                 if written.get("_skipped") == "fresh":
-                    return ind, 0, 0, True, None
+                    return ind, 0, 0, True, None, 0
                 wp = len(written)
+                benchmark_failed = stats.get("benchmark_failed", 0)
                 failure = _zero_write_failure(wp, stats)
-                if failure == "no peer could be scored":
+                if failure == _FAIL_NO_PEER:
                     # The per-ticker failures are DEBUG-only (one line per peer would flood
                     # an outage); this is the line that names it. Upsert failures were
                     # already logged at ERROR per pillar.
@@ -501,12 +579,22 @@ class IndustryMoatBenchmarkService:
                         "unreachable or refusing?); no pillar written", ind,
                         stats.get("peers", 0),
                     )
-                return ind, wp, len(PILLAR_ORDER) - wp, False, failure
+                elif failure == _FAIL_BENCHMARK_READ:
+                    logger.warning(
+                        "industry_moat_benchmark: %r — no pillar written: the "
+                        "sector-median read failed for %d of its %d peers (Supabase "
+                        "sector_benchmarks unreadable?), %d scored; not an FMP outage",
+                        ind, benchmark_failed, stats.get("peers", 0),
+                        stats.get("scored", 0),
+                    )
+                return ind, wp, len(PILLAR_ORDER) - wp, False, failure, benchmark_failed
 
         results = await asyncio.gather(
             *[_one(ind) for ind in industries], return_exceptions=True,
         )
         failures: Dict[str, int] = {}
+        companies_benchmark_failed = 0
+        industries_benchmark_failed = 0
         for ind, r in zip(industries, results):
             if not isinstance(r, tuple):
                 # `_one` catches Exception, so this is a BaseException escaping it.
@@ -522,6 +610,9 @@ class IndustryMoatBenchmarkService:
                 skipped_fresh += 1
             if r[4]:
                 failures[r[4]] = failures.get(r[4], 0) + 1
+            if r[5]:
+                companies_benchmark_failed += r[5]
+                industries_benchmark_failed += 1
         failed = sum(failures.values())
 
         summary = {
@@ -531,22 +622,37 @@ class IndustryMoatBenchmarkService:
             "industries_failed": failed,
             "skipped_low_sample": skipped_low_sample,
             "skipped_fresh": skipped_fresh,
+            # Peers left out because their sector-median read failed (Supabase), and the
+            # industries that lost at least one — averages from fewer peers, or none.
+            "companies_benchmark_failed": companies_benchmark_failed,
+            "industries_benchmark_failed": industries_benchmark_failed,
             "elapsed_seconds": round(time.time() - started, 1),
         }
         if pillars_written == 0 and failed:
             attempted = len(industries) - skipped_fresh
             reason = "every industry failed" if failed >= attempted else "nothing written"
             breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(failures.items()))
+            causes = "; ".join(
+                _FAILURE_CAUSE.get(k, k) for k in sorted(failures)
+            )
             exc = IndustryMoatBenchmarkRecomputeSkipped(
                 reason,
                 f"{attempted} industr{'y' if attempted == 1 else 'ies'} attempted, 0 pillar "
                 f"rows written; {failed} failed ({breakdown}), {attempted - failed} short of "
-                f"{MIN_SAMPLE_SIZE} scorable peers. FMP was unreachable or refusing for the "
-                "whole run, or every write failed — the per-industry lines above name the "
-                "cause. No industry got a fresh row, so a retry recomputes them all.",
+                f"{MIN_SAMPLE_SIZE} scorable peers. Cause: {causes} — the per-industry "
+                "lines above name it. No industry got a fresh row, so a retry recomputes "
+                "them all.",
             )
             logger.error("%s", exc)
             raise exc
+        if companies_benchmark_failed:
+            logger.warning(
+                "industry_moat_benchmark recompute_all: %d peer(s) in %d industr%s left "
+                "out because their sector-median read failed (Supabase) — those "
+                "industries' averages come from fewer peers until the next recompute",
+                companies_benchmark_failed, industries_benchmark_failed,
+                "y" if industries_benchmark_failed == 1 else "ies",
+            )
         logger.info("industry_moat_benchmark recompute_all summary: %s", summary)
         return summary
 
@@ -569,7 +675,64 @@ _LOOKUP_CACHE_TTL_SECONDS = 3600  # 1h in-process cache
 _lookup_cache: Dict[str, Tuple[float, Dict[str, float]]] = {}
 
 
+def _vintage_rank(model_version: Any) -> int:
+    """Position of a row's `model_version` in `_MODEL_VERSION_ORDER`; -1 for an unknown or
+    missing stamp (ranks below every known vintage)."""
+    try:
+        return _MODEL_VERSION_ORDER.index(model_version)
+    except ValueError:
+        return -1
+
+
+def _current_vintage_rows(industry: str, rows: List[Any]) -> List[Dict[str, Any]]:
+    """Per pillar, the row of the newest scorer vintage the industry holds FOR THAT PILLAR.
+
+    Rows are upserted per (industry, pillar), so a recompute that brings only some pillars
+    over the sample floor (`MIN_SAMPLE_SIZE`; FMP failures and dropped benchmark reads
+    shrink each pillar's n) leaves the others on the previous vintage. Until 2026-10-08
+    any current-vintage row hid every older one (review F2: one year rule per radar), so
+    a partial recompute turned those pillars' real peer averages into the flat 5.0
+    placeholder until the next full run — the January chain, or April if that also
+    misses (round 3, RPT3-5). A real peer average under the old rule beats 5.0: each
+    pillar now keeps its own row, and every pillar still on an older vintage is named at
+    INFO as recompute-pending (at most once per cache window). A malformed row (no
+    string pillar name) is dropped here; the caller validates the score."""
+    newest_by_pillar: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("pillar_name")
+        if not isinstance(name, str) or not name:
+            continue
+        held = newest_by_pillar.get(name)
+        # The unique key is (industry, pillar_name), so a pillar has one row; a duplicate
+        # (a changed constraint, a test double) resolves to its newest vintage.
+        if held is None or _vintage_rank(r.get("model_version")) > _vintage_rank(
+            held.get("model_version")
+        ):
+            newest_by_pillar[name] = r
+    kept = list(newest_by_pillar.values())
+    current = _vintage_rank(MODEL_VERSION)
+    pending = sorted(
+        f"{name}={r.get('model_version')!r}"
+        for name, r in newest_by_pillar.items()
+        if _vintage_rank(r.get("model_version")) < current
+    )
+    if pending:
+        logger.info(
+            "industry_moat_benchmark lookup: %r — %d of %d pillar(s) served from a row "
+            "scored under an older vintage than %r (%s); recompute pending: January chain "
+            "or /admin/refresh-industry-moat-benchmarks", industry, len(pending),
+            len(kept), MODEL_VERSION, ", ".join(pending),
+        )
+    return kept
+
+
 class IndustryMoatBenchmarkLookup:
+    """SYNCHRONOUS (Supabase sync SDK, with a `time.sleep` retry on a transient error):
+    from async code call it through `asyncio.to_thread` (the report collector reaches it
+    from `assemble_report`, which both report doors run on a worker thread)."""
+
     def __init__(self) -> None:
         self.supabase = get_supabase()
 
@@ -577,35 +740,55 @@ class IndustryMoatBenchmarkLookup:
         """Return {pillar_name: peer_average_score} for `industry`.
         Empty dict means no benchmark rows yet — caller should fall
         back to the existing 5.0 baseline. Cached in-process for 1h.
+
+        A FAILED read (a Supabase error that outlasted the transient retry) returns an
+        empty `BenchmarkLookupFailed`: the same "no peer averages" to a caller that only
+        reads values, but `lookup_failed(result)` is True so the report collector keeps
+        that report out of the shared caches. Never cached. Each pillar is served from
+        its own newest row, an older-vintage one logged as pending (`_current_vintage_rows`).
         """
         if not industry:
             return {}
         cached = _lookup_cache.get(industry)
         if cached and time.time() - cached[0] < _LOOKUP_CACHE_TTL_SECONDS:
             return cached[1]
-        try:
+
+        def _read() -> List[Any]:
             resp = (
                 self.supabase.table(TABLE_NAME)
-                .select("pillar_name,peer_average_score")
+                .select("pillar_name,peer_average_score,model_version")
                 .eq("industry", industry)
                 .execute()
             )
-            rows = resp.data or []
-        except Exception as exc:
-            logger.warning(
-                "industry_moat_benchmark lookup failed for %r: %s",
-                industry, exc,
+            return list(resp.data or [])
+
+        try:
+            # Idempotent pure read: safe to replay on a transient blip.
+            rows = retry_idempotent_sync(
+                _read, what=f"{TABLE_NAME} read industry={industry!r}", logger=logger,
             )
-            return {}
+        except Exception as exc:
+            transient = is_transient_supabase_error(exc)
+            (logger.warning if transient else logger.error)(
+                "industry_moat_benchmark lookup FAILED for industry=%r: %s: %s — no peer "
+                "averages (5.0 baseline); flagged so the report is not shared-cached",
+                industry, type(exc).__name__, exc, exc_info=not transient,
+            )
+            return BenchmarkLookupFailed()
         out: Dict[str, float] = {}
-        for r in rows:
+        for r in _current_vintage_rows(industry, rows):
             name = r.get("pillar_name")
             score = r.get("peer_average_score")
-            if name and score is not None:
+            if (
+                isinstance(name, str) and name
+                and score is not None and not isinstance(score, bool)
+            ):
                 try:
-                    out[name] = float(score)
+                    value = float(score)
                 except (TypeError, ValueError):
                     continue
+                if math.isfinite(value):
+                    out[name] = value
         _lookup_cache[industry] = (time.time(), out)
         return out
 

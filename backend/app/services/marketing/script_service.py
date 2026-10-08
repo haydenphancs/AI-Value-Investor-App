@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from app.config import settings
 from app.schemas.marketing import SCRIPT_REJECT_REASONS
-from app.services.marketing import content_pool, selection
+from app.services.marketing import content_pool, selection, smart_link
 from app.services.marketing.generation_budget import (
     LEDGER_STATEMENT_SECONDS,
     MODEL_CALLS_PER_GENERATION,
@@ -1121,6 +1121,11 @@ class MarketingScriptService:
             result = await generate(
                 item, template, run_date, generation_id=gen_id,
                 allow_x_url=bool(settings.MARKETING_X_ALLOW_URLS),
+                # What the captions' code-owned value line may say about the app (nothing /
+                # pre-order / on the App Store), read at WRITE time like allow_x_url: the accepted
+                # package is immutable and create_posts copies its captions word for word. Inside
+                # the try, so an unexpected raise is a recorded writer failure, never a crash.
+                store_state=smart_link.store_state(),
                 # The semantic compliance judge (judge.py). No default in the writer: the mode is
                 # always stated here, and anything unrecognised means `enforce`.
                 judge_mode=settings.MARKETING_JUDGE_MODE,

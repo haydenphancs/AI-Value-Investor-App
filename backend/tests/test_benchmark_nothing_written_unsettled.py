@@ -14,9 +14,14 @@ returned a zero summary, because every fetch layer turns an FMP failure into an 
 
 Each now raises its typed `*RecomputeSkipped` (reason "nothing written" or "every sector /
 industry failed") after an ERROR log. Still returns: nothing attempted (every sector/industry
-fresh), a PARTIAL run (current policy — documents/OWNER_TASKS.md row 7), `dry_run`, and — moat
-only — industries that legitimately have too few scorable peers: they never write, so they are
-never fresh, and a same-day re-run attempts exactly those.
+fresh), a run whose every attempted sector WROTE, `dry_run`, and — moat only — industries that
+legitimately have too few scorable peers: they never write, so they are never fresh, and a
+same-day re-run attempts exactly those.
+
+Since 2026-10-07 a fiscal or TTM run in which some sector RAISED, or computed ZERO rows, while
+others wrote raises `IndustryBenchmarkRecomputeIncomplete` (it used to settle the quarter / the
+week — the old OWNER_TASKS row 7 and 8 policy); the same-day retry skips the sectors that
+finished (`test_benchmark_producer_2026_10_07.py`, `test_benchmark_producer_round2_2026_10_07.py`).
 
 The fetch paths are REAL: only the FMP client, Supabase and (moat) the scorer are faked.
 """
@@ -155,6 +160,10 @@ def _bench(monkeypatch, fmp: _FakeFMP, sb: _FakeSB) -> IndustryBenchmarkService:
     svc._fmp = fmp
     svc._calendar_quarter_blocked = False
     monkeypatch.setattr(ibs, "load_universe", lambda _f: list(_BENCH_RAW))
+    # No fresh Storage copy this run (and none from an earlier one): the universe comes from
+    # `load_universe` above, and the test never reaches the network.
+    monkeypatch.setattr(ibs, "_fetch_benchmark_universe", lambda: None)
+    monkeypatch.setattr(ibs, "_last_fetched_universe", None)
     monkeypatch.setattr(ibs, "_industry_benchmark_service", svc)
     return svc
 
@@ -237,13 +246,18 @@ async def test_fiscal_one_raised_one_empty_is_nothing_written(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fiscal_partial_run_still_returns(monkeypatch):
-    """Current policy (OWNER_TASKS row 7): one sector written settles the quarter."""
+async def test_fiscal_partial_run_raises_incomplete(monkeypatch):
+    """Policy since 2026-10-07: a partial run (one sector RAISED) no longer settles the
+    quarter — it raises `IndustryBenchmarkRecomputeIncomplete`, carrying the summary, and
+    the rows the healthy sector wrote stay written."""
     sb = _FakeSB(fail={"Energy"})
     svc = _bench(monkeypatch, _FakeFMP(), sb)
 
-    summary = await svc.recompute_all(skip_if_fresh_hours=24)
+    with pytest.raises(ibs.IndustryBenchmarkRecomputeIncomplete) as info:
+        await svc.recompute_all(skip_if_fresh_hours=24)
 
+    assert info.value.failed_sectors == ["Energy"]
+    summary = info.value.summary
     assert summary["sectors_done"] == 1 and summary["sectors_failed"] == 1
     assert summary["rows_upserted"] == 2            # Restaurants + its sector aggregate
     assert {r["sector"] for r in sb.upserts} == {"Consumer Cyclical"}
@@ -311,12 +325,18 @@ async def test_ttm_every_sector_failing_raises_every_sector_failed(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_ttm_partial_nothing_attempted_dry_run_and_healthy_still_return(monkeypatch, caplog):
+async def test_ttm_partial_is_incomplete_while_nothing_attempted_dry_run_and_healthy_return(
+    monkeypatch, caplog,
+):
     with caplog.at_level(logging.ERROR, logger=ibs.__name__):
-        # Partial: Energy's TTM fetches fail, Consumer Cyclical writes.
+        # Partial: Energy's TTM fetches fail (zero rows), Consumer Cyclical writes. Since
+        # 2026-10-07 that leaves the week's claim open so the same-day retry recomputes Energy;
+        # it used to settle with Energy stale for a week.
         svc = _bench(monkeypatch, _FakeFMP(down={f"E{i}" for i in range(5)}), _FakeSB())
-        summary = await svc.recompute_all_ttm(skip_if_fresh_hours=24)
-        assert summary["sectors_done"] == 2 and summary["rows_upserted"] == 2
+        with pytest.raises(ibs.IndustryBenchmarkRecomputeIncomplete) as info:
+            await svc.recompute_all_ttm(skip_if_fresh_hours=24)
+        assert info.value.empty_sectors == ["Energy"]
+        assert info.value.summary["rows_upserted"] == 2
 
         fmp = _FakeFMP(outage=True)
         svc = _bench(monkeypatch, fmp, _FakeSB(fresh=set(_SECTORS)))

@@ -28,41 +28,61 @@ from typing import Any, Dict, List, Sequence, Tuple
 from app.services.chat_security import neutralize_fences
 from app.services.marketing.compliance import Violation
 from app.services.marketing.content_pool import JOURNEY, MONEY_MOVES, ContentItem
-from app.services.marketing.post_copy import CAPTION_FIELDS, COMPUTED_BUDGET_FIELDS, body_budget
+from app.services.marketing.post_copy import CAPTION_FIELDS, COMPUTED_BUDGET_FIELDS, STORE_PRELAUNCH, body_budget
 from app.services.marketing.selection import Template
 
 #: Bump when the prompt or schema changes meaningfully; persisted with every accepted package.
 #: 2026-10-02.1: the shared IDENTITY_RULE (persona_config) that leads the writer's system
 #: instruction now discloses a third-party AI provider without naming it.
-PROMPT_VERSION = "2026-10-02.1"
+#: 2026-10-05.1: shorter videos (~35-40 s: hook ≤ 10 words, exactly 6 lines of 11-13 words, exactly
+#: 3 cards on line pairs); HOOK AND TITLES (a case study's hook names its title's company; no study
+#: verb opens it; how/why/what questions only) — prompt only, no new validator; rule 5 now covers the
+#: hook; the length repair works on lines; caption budgets follow the run's store state (the
+#: code-owned value line, `post_copy.value_line`).
+#: 2026-10-07.1 (review): HOOK AND TITLES also bans yes/no openers by name and an investor-framed
+#: verdict (a problem or an opportunity for investors) and what a company will do next; PHRASING
+#: names "buy when" / "sell when" even about what a company buys (the timed-trade row refuses it).
+PROMPT_VERSION = "2026-10-07.1"
 
 # ── editorial limits ──
 # ENFORCED ceilings (writer_service) sit above what the prompt ASKS for (`_ASK_*`): a model
 # asked for 30 words writes 33, and a one-word overshoot on a carousel slide must not throw
-# away an otherwise clean package. The script ceiling (165 words) is what fits a ≤75 s video at
-# ~2.5 words/s (MARKETING_MAX_VIDEO_SECONDS; test_marketing_writer.py pins the ratio). Asked for
-# "90 to 140 words" the model wrote up to 179 (2026-09-24: all three rejected generations were
-# over 165), so the script is asked for STRUCTURALLY instead — a line count and a per-line cap,
-# which a model obeys far better than a total — and its obeyed maximum (9 × 16 = 144) sits under
-# the ceiling by construction.
+# away an otherwise clean package. Asked for "90 to 140 words" the model wrote up to 179
+# (2026-09-24), so the script is asked for STRUCTURALLY — a line count and a per-line range, which a
+# model obeys far better than a total.
+# The script window (2026-10-05, shorter videos): the CEILING (120) is what fits the narration
+# budget of a MARKETING_MAX_VIDEO_SECONDS (75 s) video minus its 4 s disclaimer card at the measured
+# Kokoro pace — (14-word hook + 120) / 2.0 words/s = 67 s ≤ 71 s, so the worker never needs its
+# faster re-synthesis for an accepted script (production 2026-10-03: 108 words in 50.6 s ≈ 2.13
+# words/s with line pauses; the old 165 could reach ~84 s and be skipped as narration_too_long).
+# The FLOOR (42) is 6 lines × 7.0 words — the lowest per-line pace any real package showed
+# (tests/data/marketing_judge_packages_2026_09_26.json); at 6 lines the old floor of 60 would have
+# rejected over half of those drafts. Lower bounds the test baselines need: SCRIPT_MAX_WORDS ≥ 118,
+# HOOK_MAX_WORDS ≥ 13, SCRIPT_MAX_LINES ≥ 9, the line maximum ≥ 20.
 HOOK_MAX_WORDS = 14
 SCRIPT_MIN_LINES, SCRIPT_MAX_LINES = 4, 16
-SCRIPT_MIN_WORDS, SCRIPT_MAX_WORDS = 60, 165
+SCRIPT_MIN_WORDS, SCRIPT_MAX_WORDS = 42, 120
 SCRIPT_LINE_MAX_WORDS = 32
 CARDS_MIN, CARDS_MAX = 3, 4
 CARD_TITLE_MAX_WORDS, CARD_BODY_MAX_WORDS = 8, 28
 SLIDES_MIN, SLIDES_MAX = 5, 8
 SLIDE_TITLE_MAX_WORDS, SLIDE_BODY_MAX_WORDS = 10, 40
 
-_ASK_HOOK_WORDS = 12
-_ASK_SCRIPT_LINES = (7, 9)
-#: Per-line words asked for: a floor too, since the first structural ask (6-9 lines, ≤16
-#: words) overcorrected — 4 of 34 drafts came back at 49-59 words, under SCRIPT_MIN_WORDS (60),
-#: with short lines. The obeyed floor (7 × 10 = 70) and ceiling (9 × 16 = 144) both sit inside
-#: the enforced 60-165.
-_ASK_SCRIPT_LINE_WORDS_MIN = 10
-_ASK_SCRIPT_LINE_WORDS = 16
-_ASK_SCRIPT_TOTAL_WORDS = 110
+_ASK_HOOK_WORDS = 10
+#: Shorter videos (owner, 2026-10-05: ~35-40 s). EXACTLY 6 lines — the model obeys line counts (all
+#: 40 rounds of 2026-09-26 had 7-9 lines when asked for 7-9) — of 11-13 words: the per-line floor is
+#: one word above the 10 the 6-line arithmetic needs, because the 09-26 drafts averaged 9.81 words a
+#: line against an asked floor of 10. Measured basis: ~2.23 words/s of speech (108 words in 50.6 s
+#: minus 8 × 0.28 s of line pauses) + the 4 s disclaimer card → about 38 s. If a preview's median
+#: estimated video runs over 40 s, ask 10-12 (total 66) instead.
+_ASK_SCRIPT_LINES = 6
+_ASK_SCRIPT_LINE_WORDS_MIN = 11
+_ASK_SCRIPT_LINE_WORDS = 13
+_ASK_SCRIPT_TOTAL_WORDS = 72
+#: Exactly 3 cards, each on screen while one line pair is spoken: `marketing/video.timeline` splits
+#: 6 script lines over 3 text cards at lines 1, 3 and 5 (a test pins the two equal).
+_ASK_CARD_COUNT = 3
+_LINES_PER_CARD = _ASK_SCRIPT_LINES // _ASK_CARD_COUNT
 _ASK_CARD = (6, 20)
 _ASK_SLIDE = (8, 30)
 
@@ -160,8 +180,8 @@ SYSTEM_BODY = (
     "5. Write every number in digits (47, not forty-seven) and use only numbers the fact "
     "sheet states, in the same context it states them - keep the fact sheet's own words for "
     "what a number measures (\"paid for\", \"founded\", \"subscribers\"). Put dated figures "
-    "in the past tense. Keep numbers and years OUT of titles and headings - a title has no room "
-    "for those words; put the number in the body beside them.\n"
+    "in the past tense. Keep numbers and years OUT of the hook, titles and headings - they have no "
+    "room for those words; put the number in a script line or a body beside them.\n"
     "6. No links, web addresses, @handles, hashtags, markdown or HTML, no curly braces { } and "
     "no backslashes. Write US, UK and EU without dots (\"US markets\"; a dotted \"U.S.\" is "
     "refused), and always put a space after an abbreviation's final dot (\"e.g. banks\", "
@@ -203,6 +223,20 @@ SYSTEM_BODY = (
     "they are the historical example that makes the lesson concrete. Describe what the "
     "business did and why it worked or failed; never judge the stock. Name no other company, "
     "not even as an example - an investing lesson names none.\n\n"
+    "HOOK AND TITLES: the hook is the first line a viewer hears. Build it on ONE concrete tension, "
+    "contrast or surprising fact from the fact sheet - never a summary of the topic or a promise of "
+    "what the viewer will learn. A business case study's hook names the company its title names; an "
+    "investing lesson's hook names no company. Never open the hook with an instruction to study - "
+    "not Understand, Learn, Discover, Master, Explore or Find. If the hook is a question, ask how, "
+    "why or what - never a yes/no question, one that opens with Is, Are, Do, Does, Did, Can, Will or "
+    "Should (rule 9's yes/no myth question belongs in the script, never in the hook), never who will "
+    "win, and never whether anyone should buy, sell or own anything. A hook that names a company "
+    "keeps rule 3 to the letter: what the business did - never what it will do next, never how cheap, "
+    "dominant, successful or valuable it or its stock is, and never whether it is good or bad, a "
+    "problem or an opportunity, for investors or shareholders. The YouTube title follows the "
+    "same rules: it names the company or the lesson's idea, may ask how, why or what, and is never "
+    "a yes/no question. A lesson's hook might read \"Why can a profitable company still run out of "
+    "cash?\" - a shape to learn from, not a line to copy.\n\n"
     "PHRASING the checker refuses even when it is honest (write around it): business growth "
     "as a present-tense habit (\"revenue consistently climbs\", \"profits always grow\") - "
     "state it in the past tense with its span instead (\"revenue grew year after year\"); and "
@@ -211,7 +245,9 @@ SYSTEM_BODY = (
     "grow less\"); and the words \"no risk\", \"zero risk\" or \"no downside\" anywhere, "
     "even denied or in a warning (\"rewards with no risk are impossible\") - say it the "
     "other way round (\"higher rewards come with higher risk\", \"be wary of anyone who "
-    "promises big rewards with little risk\").\n\n"
+    "promises big rewards with little risk\"); and \"buy when\" or \"sell when\" anywhere, even "
+    "about what a company or its customers buy (\"What does the company buy when it expands?\") - ask "
+    "what it looks for or gets instead (\"What does the company look for when it buys a brand?\").\n\n"
     "STYLE: concrete, curious, calm. Short sentences. No hype, no hashtags, no clickbait. "
     "Write each platform's caption freshly - do not paste one caption into another. "
     "Explain the business idea or the investing principle; the company is only the example."
@@ -239,13 +275,22 @@ def caption_target(field_name: str, limit: int) -> Tuple[int, int]:
     return max(6, int(target / _CHARS_PER_WORD)), target
 
 
-def _field_budgets(item: ContentItem, run_date: date, allow_x_url: bool) -> List[str]:
+def _field_budgets(item: ContentItem, run_date: date, allow_x_url: bool,
+                   store_state: str = STORE_PRELAUNCH) -> List[str]:
+    """One ask per caption field, sized from the run's OWN enforced budget — which depends on the
+    code-owned suffix, so on `allow_x_url` and the store state (the value line) too: the prompt and
+    the validator must use the same one."""
     lines = []
     for f in CAPTION_FIELDS:
-        limit = body_budget(f, item.category, run_date, allow_x_url=allow_x_url)
+        limit = body_budget(f, item.category, run_date, allow_x_url=allow_x_url, store_state=store_state)
         words, target = caption_target(f, limit)
-        rule = ("; no < or > characters, one line" if f == "youtube_title"
-                else "; no < or > characters" if f == "youtube_description" else "")
+        if f == "youtube_title":
+            subject = ("name the company its title names" if item.kind == MONEY_MOVES
+                       else "name the lesson's idea, naming no company")
+            rule = (f"; no < or > characters, one line; {subject}; a how, why or what question is "
+                    "fine, never a yes/no question")
+        else:
+            rule = "; no < or > characters" if f == "youtube_description" else ""
         if f in _NO_EMOJI_CAPTIONS:
             rule += "; no emoji - each counts double"
         lines.append(f"  - {f}: about {words} words (never more than {target} characters{rule})")
@@ -278,20 +323,39 @@ def _fact_sheet_block(item: ContentItem) -> str:
     )
 
 
-def _output_spec(item: ContentItem, run_date: date, allow_x_url: bool) -> str:
+def _hook_subject(item: ContentItem) -> str:
+    """Whom the hook names: a case study's TITLE company (its fact sheet names others too — Tesla's
+    names Ford, GM, Toyota), an investing lesson none. Any other kind names none (fail-safe — the
+    opposite of `_KIND_NOTE`'s fallback, on purpose)."""
+    if item.kind == MONEY_MOVES:
+        return (f"naming the company its title names (\"{neutralize_fences(item.title)}\" - in a "
+                "head-to-head title, one or both)")
+    return "naming no company"
+
+
+def _card_line_spans() -> str:
+    """'1-2, 3-4 and 5-6': the script lines each card is on screen for."""
+    spans = [f"{i * _LINES_PER_CARD + 1}-{(i + 1) * _LINES_PER_CARD}" for i in range(_ASK_CARD_COUNT)]
+    return ", ".join(spans[:-1]) + " and " + spans[-1] if len(spans) > 1 else spans[0]
+
+
+def _output_spec(item: ContentItem, run_date: date, allow_x_url: bool,
+                 store_state: str = STORE_PRELAUNCH) -> str:
     return "\n".join([
         "OUTPUT (JSON matching the schema):",
-        f"- hook: one line, at most {_ASK_HOOK_WORDS} words.",
-        f"- video_script: {_ASK_SCRIPT_LINES[0]} to {_ASK_SCRIPT_LINES[1]} lines, each ONE "
-        f"sentence of {_ASK_SCRIPT_LINE_WORDS_MIN} to {_ASK_SCRIPT_LINE_WORDS} words (about "
+        f"- hook: one line of at most {_ASK_HOOK_WORDS} words, {_hook_subject(item)} (see HOOK AND "
+        "TITLES).",
+        f"- video_script: exactly {_ASK_SCRIPT_LINES} lines, each ONE sentence of "
+        f"{_ASK_SCRIPT_LINE_WORDS_MIN} to {_ASK_SCRIPT_LINE_WORDS} words (about "
         f"{_ASK_SCRIPT_TOTAL_WORDS} words in total), written to be spoken aloud.",
-        f"- cards: {CARDS_MIN} or {CARDS_MAX}; title at most {_ASK_CARD[0]} words, body at most "
-        f"{_ASK_CARD[1]} words.",
+        f"- cards: exactly {_ASK_CARD_COUNT}, in the script's order - each is on screen while its "
+        f"lines are spoken (lines {_card_line_spans()}), so it titles what those lines say; title at "
+        f"most {_ASK_CARD[0]} words, body at most {_ASK_CARD[1]} words.",
         f"- carousel_slides: {SLIDES_MIN} to {SLIDES_MAX}; title at most {_ASK_SLIDE[0]} words, "
         f"body at most {_ASK_SLIDE[1]} words.",
         "- captions: the post BODY only for each platform - no hashtags, links, calls to "
         "action or disclaimers. Vary the wording per platform. Character limits:",
-        *_field_budgets(item, run_date, allow_x_url),
+        *_field_budgets(item, run_date, allow_x_url, store_state),
     ])
 
 
@@ -302,11 +366,12 @@ def _request_line(generation_id: str, round_no: int, kind: str) -> str:
 
 
 def draft_prompt(item: ContentItem, template: Template, run_date: date, *,
-                 generation_id: str, round_no: int = 1, allow_x_url: bool = False) -> str:
+                 generation_id: str, round_no: int = 1, allow_x_url: bool = False,
+                 store_state: str = STORE_PRELAUNCH) -> str:
     return "\n\n".join([
         _request_line(generation_id, round_no, "draft"),
         f"TEMPLATE: {template.name}. {template.instructions}",
-        _output_spec(item, run_date, allow_x_url),
+        _output_spec(item, run_date, allow_x_url, store_state),
         _fact_sheet_block(item),
     ])
 
@@ -412,8 +477,8 @@ REPAIR_HINTS = {
                 "aim for the shorter length the OUTPUT section asks for",
     # The composed post (`post_copy.check_composed`) and the grounding backstop: a repair prompt
     # must say what to DO for every code a round can carry, not "fix it".
-    "over_platform_limit": "shorten that caption - with the hashtags, link and disclaimer "
-                           "added it no longer fits the platform",
+    "over_platform_limit": "shorten that caption - with the hashtags, the publisher's line about the "
+                           "app, the link and the disclaimer added it no longer fits the platform",
     "disclaimer_missing": "write no disclaimer of your own - the publisher appends it",
     "platform_forbidden_char": "remove the characters that platform does not allow (YouTube: "
                                "no < or >, and a one-line title) - rephrase in plain words",
@@ -422,9 +487,10 @@ REPAIR_HINTS = {
     # Direction-neutral on purpose: the detail says which way. The old "cut (or add) … drop a
     # whole line" read as CUT to a model holding an under-length script, and the 2026-09-26
     # preview's Amazon repair came back byte-identical at 58 words (minimum 60).
-    "length": "change the script's word count by at least the amount the detail states, in whole "
-              "lines: if it says cut, drop a line; if it says add, write one more one-sentence "
-              "line with a new point from the fact sheet",
+    "length": "change the script's word count by at least the amount the detail states, keeping "
+              "every line ONE sentence: if it says cut, shorten the longest lines or drop one; if it "
+              "says add, lengthen the shortest lines with a new detail from the fact sheet, or write "
+              "one more one-sentence line",
     "empty": "fill it in with words - no punctuation-only lines, titles or bodies",
     "schema": "follow the JSON schema exactly",
     "blocked": "write everything in your own words; do not copy source sentences verbatim",
@@ -454,7 +520,8 @@ REPAIR_HINTS = {
 
 def repair_prompt(item: ContentItem, template: Template, run_date: date, *,
                   generation_id: str, round_no: int, previous: Any,
-                  violations: Sequence[Violation], allow_x_url: bool = False) -> str:
+                  violations: Sequence[Violation], allow_x_url: bool = False,
+                  store_state: str = STORE_PRELAUNCH) -> str:
     """Ask for a corrected FULL package, listing every problem found in the previous one."""
     problems = "\n".join(
         f"- {v.field}: {v.code} \"{v.detail}\" -> {REPAIR_HINTS.get(v.code, 'fix it')}"
@@ -470,6 +537,6 @@ def repair_prompt(item: ContentItem, template: Template, run_date: date, *,
         "Your previous answer broke these rules. Rewrite the COMPLETE JSON, fixing every "
         "problem listed and keeping everything else that was fine:\n" + problems,
         "PREVIOUS ANSWER:\n" + neutralize_fences(prev),
-        _output_spec(item, run_date, allow_x_url),
+        _output_spec(item, run_date, allow_x_url, store_state),
         _fact_sheet_block(item),
     ])

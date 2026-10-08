@@ -16,9 +16,21 @@ Usage (from backend/):
     ./venv/bin/python scripts/marketing_preview.py --item journey:mr_market --template checklist
     ./venv/bin/python scripts/marketing_preview.py --all-items --judge shadow \
         --dump-packages /tmp/packages.json   # vendor real packages for the judge calibration
+    ./venv/bin/python scripts/marketing_preview.py --stats-from /tmp/packages.json   # no model call
 
 Cost: one or two `gemini-2.5-flash` writer calls per item plus up to two judge calls
-(`--judge`, default = MARKETING_JUDGE_MODE) — well under a cent each.
+(`--judge`, default = MARKETING_JUDGE_MODE) — well under a cent each; a 34-item `--all-items` run is
+about 0.36-0.44M tokens.
+
+Acceptance of a prompt change (rules/marketing.md §7): run `--all-items --judge shadow --raw
+--store-state live --dump-packages` on the OLD prompt and on the new one, then `--stats-from` each dump
+(production's store state has been `live` since the 2026-10-05 release). The SHAPE block
+(`shape_stats`) estimates each accepted package's video length at the measured narration pace and
+counts what the hook rules ask for: Money Moves hooks naming their title's company
+(`content_pool.title_companies`), study-verb openers, yes/no and "who wins" hooks, number hooks,
+copies of the prompt's example hook, YouTube titles, and investor-framed case-study hooks and titles.
+`--store-state` picks the captions' value line (default: what THIS process's MARKETING_APP_STORE_URL and
+MARKETING_APP_STORE_PREORDER give, `smart_link.store_state()` — usually `prelaunch` on a laptop).
 """
 
 from __future__ import annotations
@@ -26,18 +38,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
+import statistics
 import sys
 import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings  # noqa: E402
-from app.services.marketing import content_pool, selection  # noqa: E402
+from app.services.marketing import compliance, content_pool, post_copy, selection, smart_link  # noqa: E402
 from app.services.marketing import judge as jd  # noqa: E402
+from app.services.marketing import writer_prompts as wp  # noqa: E402
 from app.services.marketing.writer_service import WriterResult, generate_package  # noqa: E402
 from app.utils.market_hours import ET  # noqa: E402
 
@@ -91,15 +106,206 @@ def _md_result(title: str, item, template, run_date: date, res: WriterResult, sh
     return "\n".join(out)
 
 
+# ── shape stats (offline: a dump in, numbers out) ──────────────────────────────
+
+#: The narration pace measured in production (2026-10-03: 108 words in 50.6 s, minus 8 × 0.28 s of
+#: line pauses) — what `estimated_video_seconds` divides by.
+_SPEECH_WORDS_PER_SECOND = 2.23
+#: Copies of the worker's `marketing.timings.LINE_PAUSE_SECONDS` and `marketing.voice.
+#: DISCLAIMER_CARD_SECONDS` (a test pins them equal; the preview never imports the worker).
+_LINE_PAUSE_SECONDS = 0.28
+_DISCLAIMER_CARD_SECONDS = 4.0
+_STUDY_OPENER_RE = re.compile(r"^\W{0,5}(?:understand|learn|discover|master|explore|find)\b", re.IGNORECASE)
+_YES_NO_RE = re.compile(r"^\W{0,5}(?:(?:is|are|was|were|can|could|do|does|did|will|would|should|has|have|had)"
+                        r"(?:n['\u2019]t)?|won['\u2019]t)\b[^?]{0,200}\?", re.IGNORECASE)
+#: One leading label ("Apple's Services: …", "Myth: …") — the counters read what follows it too
+#: (review 2026-10-07: "Apple's Services: a hidden problem for investors?" was counted as no yes/no).
+_LABEL_RE = re.compile(r"^[^?:]{1,60}:\s*")
+#: A question holding a wh-word asks how, why or what (or who, which, when, where) — not yes/no.
+_WH_WORD_RE = re.compile(r"\b(?:how|why|what|who|whom|whose|which|when|where)\b", re.IGNORECASE)
+#: A label that opens on a wh-word is the question's own stem ("What matters more: subscribers or
+#: profit?" asks what), never a label to read past.
+_WH_OPENER_RE = re.compile(r"^\W{0,5}(?:how|why|what|who|whom|whose|which|when|where)\b", re.IGNORECASE)
+#: A yes/no question after a subordinate clause: a comma clause that opens on an auxiliary and runs to
+#: the "?" ("When Netflix raised prices, did subscribers leave?") — never after a wh-word that a comma
+#: follows, which opens a wh-question with an insert ("Why, after years of growth, did Netflix stall?").
+_WH_INSERT_RE = re.compile(r"^\W{0,5}(?:how|why|what|who|whom|whose|which|when|where)\s*,", re.IGNORECASE)
+_AUX_CLAUSE_RE = re.compile(r",\s+(?:and\s+|but\s+|so\s+)?(?:is|are|was|were|can|could|do|does|did|will|would|"
+                            r"should|has|have|had)\b[^,?]*\?", re.IGNORECASE)
+_WHO_WINS_RE = re.compile(r"\bwho\b[^?]{0,80}\b(?:win|wins|won|winning)\b", re.IGNORECASE)
+#: A digit or a number word — "no one" / "no-one" is nobody, not a number (review 2026-10-07; the hook's
+#: whitespace is collapsed first, `_package_shape`).
+_NUMBER_RE = re.compile(r"[0-9]|\b(?:(?<!\bno[\s\-\u2010])one|two|three|four|five|six|seven|eight|nine|ten)\b",
+                        re.IGNORECASE)
+#: An investor-framed verdict on a business — whether it is good or bad, a problem or an opportunity,
+#: for investors or shareholders (HOOK AND TITLES bans it; review 2026-10-07: "Apple's Services: a
+#: hidden problem for investors?" was accepted). Up to three words may stand between "for"/"to" and the
+#: audience ("good for its shareholders", "a problem for Apple investors"). Counted on case studies
+#: only — a lesson's "why patience is good for investors" is no verdict on a business. Prompt only: the
+#: judge's rubric has no rule for it yet (the planned judge round), so the preview counts it and a
+#: person reads it.
+_INVESTOR_FRAMED_RE = re.compile(
+    r"\b(?:problems?|opportunit(?:y|ies)|threats?|good|bad)\b[^.?!]{0,40}?\b(?:for|to)\s+(?:[\w'\u2019-]+\s+){0,3}"
+    r"(?:investors?|shareholders?|stockholders?|owners?)\b"
+    r"|\b(?:good|bad|great|terrible|grim|welcome|big)\s+news\s+for\b|\bgood or bad\b", re.IGNORECASE)
+#: The example hook the prompt quotes (HOOK AND TITLES): a copy is counted, never wanted.
+_EXAMPLE_HOOK = "Why can a profitable company still run out of cash?"
+_LINE_RE = re.compile(r"video_script\[(\d+)\]")
+
+
+def _unlabelled(text: str) -> str:
+    """`text` without one leading "Label:" (a label longer than 60 characters, or a "?" before the
+    colon, is no label)."""
+    return _LABEL_RE.sub("", text or "", count=1)
+
+
+def is_yes_no_question(text: str) -> bool:
+    """A yes/no question, as the prompt bans it from hooks and titles. One that opens on an auxiliary
+    (`_YES_NO_RE`, with or without one leading label) is one. A label that opens on a wh-word is the
+    question's own stem ("What matters more: subscribers or profit?" asks what). Otherwise EVERY
+    question is read with only its own sentence (`compliance.sentences`, which keeps "Mr." and "vs."
+    whole): it is yes/no when it opens on an auxiliary ("…when prices rose. Can it recover?"), when a
+    comma clause opening on one runs to its "?" ("When Netflix raised prices, did subscribers
+    leave?"), or when it holds no wh-word at all ("Profitable yet broke?", "Apple's Services: a hidden
+    problem for investors?"). A question that asks how, why, what, who, which, when or where ("Software
+    or steel: who wins the car race?", 'Beyond the obvious: ask "and then what?"') is not one; a
+    verbless one holding a subordinate "when" is a known miss."""
+    text = " ".join((text or "").split())
+    rest = _unlabelled(text)
+    label = text[: len(text) - len(rest)]
+    if _YES_NO_RE.search(text) or _YES_NO_RE.search(rest):
+        return True
+    if label and _WH_OPENER_RE.search(label):
+        return False
+    for sentence in compliance.sentences(rest):
+        if "?" not in sentence:
+            continue
+        asked = sentence[: sentence.rindex("?") + 1]
+        if _YES_NO_RE.search(asked) or (_AUX_CLAUSE_RE.search(asked) and not _WH_INSERT_RE.search(asked)):
+            return True
+        if re.search(r"[A-Za-z]", asked) and _WH_WORD_RE.search(asked) is None:
+            return True
+    return False
+
+
+def estimated_video_seconds(hook: str, lines: List[str]) -> float:
+    """A package's video length estimate: its spoken words at the measured pace, a pause after every
+    narrated line but the last (the hook is line 0) and the disclaimer card."""
+    words = len((hook or "").split()) + sum(len((line or "").split()) for line in lines)
+    return words / _SPEECH_WORDS_PER_SECOND + _LINE_PAUSE_SECONDS * len(lines) + _DISCLAIMER_CARD_SECONDS
+
+
+def _names(text: str, name: str) -> bool:
+    """Does `text` name `name` as a word ("Meta's" yes, "Metaverse" no)?"""
+    return re.search(r"(?<![A-Za-z])" + re.escape(name) + r"(?![A-Za-z])", text or "", re.IGNORECASE) is not None
+
+
+def _package_shape(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw_fields = row.get("fields")
+    # A malformed entry (not a [label, text] pair of strings) is skipped, never a crash in the tool.
+    fields = {entry[0]: entry[1] for entry in (raw_fields if isinstance(raw_fields, list) else [])
+              if isinstance(entry, (list, tuple)) and len(entry) == 2
+              and isinstance(entry[0], str) and isinstance(entry[1], str)}
+    numbered = []
+    for lab, text in fields.items():
+        m = _LINE_RE.fullmatch(lab)
+        if m:
+            numbered.append((int(m.group(1)), text))
+    lines = [text for _i, text in sorted(numbered)]
+    # Whitespace collapsed: a double space must not hide "no one" from `_NUMBER_RE`, or split a label.
+    return {"hook": " ".join((fields.get("hook") or "").split()), "lines": lines,
+            "title": " ".join((fields.get("captions.youtube_title") or "").split())}
+
+
+def shape_stats(rows: List[Dict[str, Any]], *, line_floor: int = wp._ASK_SCRIPT_LINE_WORDS_MIN) -> Dict[str, Any]:
+    """The shape of the ACCEPTED packages of a dump (`--dump-packages` rows), plus how many rounds of
+    any status fall outside the enforced script window — the numbers a prompt change is accepted on."""
+    out: Dict[str, Any] = {"accepted": 0}
+    outside = 0
+    words: List[int] = []
+    line_counts: Counter = Counter()
+    per_line: List[int] = []
+    hooks_words: List[int] = []
+    videos: List[float] = []
+    mm_total = mm_named = mm_titles_named = 0
+    study = yes_no = who_wins = numbers = copies = yes_no_titles = investor_hooks = investor_titles = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        shape = _package_shape(row)
+        n_words = sum(len(line.split()) for line in shape["lines"])
+        hook_words = len(shape["hook"].split())
+        if not (wp.SCRIPT_MIN_WORDS <= n_words <= wp.SCRIPT_MAX_WORDS
+                and wp.SCRIPT_MIN_LINES <= len(shape["lines"]) <= wp.SCRIPT_MAX_LINES
+                and hook_words <= wp.HOOK_MAX_WORDS):
+            outside += 1
+        if not row.get("accepted"):
+            continue
+        out["accepted"] += 1
+        words.append(n_words)
+        line_counts[len(shape["lines"])] += 1
+        per_line += [len(line.split()) for line in shape["lines"]]
+        hooks_words.append(hook_words)
+        videos.append(estimated_video_seconds(shape["hook"], shape["lines"]))
+        hook, title = shape["hook"], shape["title"]
+        study += bool(_STUDY_OPENER_RE.search(hook) or _STUDY_OPENER_RE.search(_unlabelled(hook)))
+        yes_no += is_yes_no_question(hook)
+        who_wins += bool(_WHO_WINS_RE.search(hook))
+        numbers += bool(_NUMBER_RE.search(hook))
+        copies += hook.strip().lower() == _EXAMPLE_HOOK.lower()
+        yes_no_titles += is_yes_no_question(title)
+        item = content_pool.get_item(str(row.get("item") or ""))
+        if item is not None and item.kind == content_pool.MONEY_MOVES:
+            mm_total += 1
+            investor_hooks += bool(_INVESTOR_FRAMED_RE.search(hook))
+            investor_titles += bool(_INVESTOR_FRAMED_RE.search(title))
+            names = content_pool.title_companies(item)
+            mm_named += any(_names(hook, n) for n in names)
+            mm_titles_named += any(_names(title, n) for n in names)
+    if words:
+        out.update({
+            "script_words": {"median": statistics.median(words), "min": min(words), "max": max(words)},
+            "lines": dict(sorted(line_counts.items())),
+            "exactly_6_share": line_counts.get(6, 0) / len(words),
+            "mean_words_per_line": round(statistics.mean(per_line), 2) if per_line else None,
+            "lines_under_floor": f"{sum(1 for n in per_line if n < line_floor)}/{len(per_line)}",
+            "hook_words": {"median": statistics.median(hooks_words), "max": max(hooks_words)},
+            "est_video_s": {"median": round(statistics.median(videos), 1), "min": round(min(videos), 1),
+                            "max": round(max(videos), 1), "over_40": sum(1 for v in videos if v > 40)},
+            "mm_hooks_naming_title_company": f"{mm_named}/{mm_total}",
+            "study_openers": study, "yes_no_hooks": yes_no, "who_wins_hooks": who_wins,
+            "number_hooks": numbers, "example_copies": copies,
+            "mm_youtube_titles_naming_company": f"{mm_titles_named}/{mm_total}",
+            "yes_no_youtube_titles": yes_no_titles,
+            "mm_investor_framed_hooks": investor_hooks, "mm_investor_framed_youtube_titles": investor_titles,
+        })
+    out["rounds_outside_enforced_window"] = outside
+    return out
+
+
+def _print_shape(stats: Dict[str, Any]) -> None:
+    print("\n## Shape (accepted packages)\n")
+    for key, value in stats.items():
+        print(f"- {key}: {json.dumps(value)}")
+
+
+def _rows_of(path: Path) -> List[Dict[str, Any]]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    rows = doc.get("packages") if isinstance(doc, dict) else None
+    return [r for r in rows or [] if isinstance(r, dict)]
+
+
 async def _run_one(item_key: str, template_id: str, run_date: date, show_facts: bool,
                    allow_x_url: bool, show_raw: bool = False,
-                   judge_mode: str = jd.MODE_ENFORCE) -> Optional[WriterResult]:
+                   judge_mode: str = jd.MODE_ENFORCE,
+                   store_state: str = post_copy.STORE_PRELAUNCH) -> Optional[WriterResult]:
     item = content_pool.get_item(item_key)
     template = selection.TEMPLATES_BY_ID[template_id]
     try:
         res = await generate_package(item, template, run_date,
                                      generation_id=f"preview-{uuid.uuid4().hex[:8]}",
-                                     allow_x_url=allow_x_url, judge_mode=judge_mode)
+                                     allow_x_url=allow_x_url, judge_mode=judge_mode,
+                                     store_state=store_state)
     except Exception as e:  # a preview reports and moves on; it never retries or spends more
         print(f"## {run_date} — {item_key}\n\n**ERROR** {type(e).__name__}: {e}\n", flush=True)
         return None
@@ -127,7 +333,16 @@ async def main() -> int:
     ap.add_argument("--dump-packages", type=Path,
                     help="write every package the run produced (judge-visible fields, every "
                          "round) as a calibration fixture to this path")
+    ap.add_argument("--stats-from", type=Path,
+                    help="print the shape stats of an existing --dump-packages file and exit (no model call)")
+    ap.add_argument("--store-state", choices=post_copy.STORE_STATES, default=smart_link.store_state(),
+                    help="the captions' value line (default: what THIS process's MARKETING_APP_STORE_URL / "
+                         "MARKETING_APP_STORE_PREORDER give; production has been 'live' since the app "
+                         "launched 2026-10-05, so pass --store-state live to measure its budgets)")
     args = ap.parse_args()
+    if args.stats_from:
+        _print_shape(shape_stats(_rows_of(args.stats_from)))
+        return 0
     if args.dump_packages and args.judge == jd.MODE_ENFORCE:
         # An enforcing judge picks WHICH round is kept and rejects items it flags twice, so the
         # dumped honest set would hold only packages the judge already passed — calibration
@@ -171,7 +386,7 @@ async def main() -> int:
     async def run(job):
         async with sem:
             return await _run_one(*job, show_facts=args.facts, allow_x_url=args.allow_x_url,
-                                  show_raw=args.raw, judge_mode=args.judge)
+                                  show_raw=args.raw, judge_mode=args.judge, store_state=args.store_state)
 
     results = await asyncio.gather(*(run(j) for j in jobs))
     done = [r for r in results if r is not None]
@@ -196,7 +411,8 @@ async def main() -> int:
         print(f"- dropped outlets on accepted packages: {json.dumps(dropped.most_common())}")
     if args.dump_packages:
         _dump_packages(args.dump_packages, jobs, results, judge_mode=args.judge,
-                       allow_x_url=args.allow_x_url)
+                       allow_x_url=args.allow_x_url, store_state=args.store_state)
+        _print_shape(shape_stats(_rows_of(args.dump_packages)))
     return 0 if done and len(accepted) == len(done) else 1
 
 
@@ -207,7 +423,8 @@ def _field_kind(name: str) -> str:
     return _re.sub(r"\[\d+\]", "", name)
 
 
-def _dump_packages(path: Path, jobs, results, *, judge_mode: str, allow_x_url: bool) -> None:
+def _dump_packages(path: Path, jobs, results, *, judge_mode: str, allow_x_url: bool,
+                   store_state: str = post_copy.STORE_PRELAUNCH) -> None:
     """The calibration fixture (scripts/marketing_judge_calibrate.py --packages): every parsed
     round of every job, as the judge sees it. `accepted` marks the package the writer kept."""
     out = []
@@ -223,7 +440,7 @@ def _dump_packages(path: Path, jobs, results, *, judge_mode: str, allow_x_url: b
 
             # The run's own X budget: without it a caption the run dropped (and the judge never
             # read) would be dumped as a must-pass line.
-            vr = validate_package(raw, item, run_date, allow_x_url=allow_x_url)
+            vr = validate_package(raw, item, run_date, allow_x_url=allow_x_url, store_state=store_state)
             fields = jd.package_fields(vr.package or {})
             # Every model-written key, not just hook + script: a repair that keeps both but
             # rewrites a caption must not mark the draft round accepted too. Not `posts` — in
@@ -248,6 +465,7 @@ def _dump_packages(path: Path, jobs, results, *, judge_mode: str, allow_x_url: b
                    "judge verdict; never edit a field."),
         "judge_mode": judge_mode,
         "allow_x_url": allow_x_url,
+        "store_state": store_state,
         "packages": out,
         "judge_true_positives": [],
     }

@@ -17,6 +17,9 @@ struct GrowthSectionCard: View {
     /// a series or period it emptied is an outage, so the card says the data is temporarily
     /// unavailable instead of silently dropping a chip or the Quarterly toggle.
     private(set) var isDegraded: Bool = false
+    /// The PEER lookup failed upstream (`degraded` holds "benchmarks"): the company's growth
+    /// is complete but no dashed median is drawn, so a muted line says so.
+    private(set) var peerComparisonUnavailable: Bool = false
 
     // MARK: - State
 
@@ -54,10 +57,13 @@ struct GrowthSectionCard: View {
         _showInfoSheet = State(initialValue: false)
     }
 
-    /// Same card, told whether its build is degraded (`isDegraded`).
-    init(growthData: GrowthSectionData, isDegraded: Bool, onDetailTapped: @escaping () -> Void) {
+    /// Same card, told whether its build is degraded (`isDegraded`) and whether only its peer
+    /// line is missing (`peerComparisonUnavailable`).
+    init(growthData: GrowthSectionData, isDegraded: Bool, peerComparisonUnavailable: Bool = false,
+         onDetailTapped: @escaping () -> Void) {
         self.init(growthData: growthData, onDetailTapped: onDetailTapped)
         self.isDegraded = isDegraded
+        self.peerComparisonUnavailable = peerComparisonUnavailable
     }
 
     // MARK: - Computed Properties
@@ -165,6 +171,13 @@ struct GrowthSectionCard: View {
             )
             .frame(maxWidth: .infinity)
             .padding(.top, AppSpacing.xs)
+
+            // The peer lookup failed AND the shown series draws no median: say why it is
+            // missing. The backend flags "benchmarks" when EITHER period's read failed and
+            // still draws the one that succeeded — never put the note under a drawn line.
+            if peerComparisonUnavailable && !showsPeerLine {
+                PeerComparisonUnavailableNote()
+            }
         }
         .padding(AppSpacing.lg)
         .background(
@@ -324,6 +337,39 @@ private extension GrowthPeriodType {
 
         ScrollView {
             GrowthSectionCard(growthData: data, isDegraded: true, onDetailTapped: {})
+                .padding()
+        }
+    }
+}
+
+#Preview("Peer lookup failed") {
+    // `degraded: ["benchmarks"]`: the company's growth is complete, no dashed median, one
+    // muted note. Illustrative series with the medians removed.
+    let data: GrowthSectionData = {
+        func withoutPeer(_ points: [GrowthDataPoint]) -> [GrowthDataPoint] {
+            points.map {
+                GrowthDataPoint(period: $0.period, value: $0.value,
+                                yoyChangePercent: $0.yoyChangePercent, sectorAverageYoY: nil)
+            }
+        }
+        let s = GrowthSectionData.sampleData
+        return GrowthSectionData(
+            epsAnnual: withoutPeer(s.epsAnnual), epsQuarterly: withoutPeer(s.epsQuarterly),
+            revenueAnnual: withoutPeer(s.revenueAnnual), revenueQuarterly: withoutPeer(s.revenueQuarterly),
+            netIncomeAnnual: withoutPeer(s.netIncomeAnnual), netIncomeQuarterly: withoutPeer(s.netIncomeQuarterly),
+            operatingProfitAnnual: withoutPeer(s.operatingProfitAnnual),
+            operatingProfitQuarterly: withoutPeer(s.operatingProfitQuarterly),
+            freeCashFlowAnnual: withoutPeer(s.freeCashFlowAnnual),
+            freeCashFlowQuarterly: withoutPeer(s.freeCashFlowQuarterly)
+        )
+    }()
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        ScrollView {
+            GrowthSectionCard(growthData: data, isDegraded: false, peerComparisonUnavailable: true,
+                              onDetailTapped: {})
                 .padding()
         }
     }

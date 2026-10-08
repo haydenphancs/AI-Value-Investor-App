@@ -390,6 +390,22 @@ CASE_STUDY_PROSE = (
     "Users install apps from the App Store.",
     "More than a million apps were available on the App Store.",
     "Apple made it easy to sell apps on the App Store.",
+    # Twins of the app-availability shapes (2026-10-07): the App Store as Apple's business, never as
+    # where THIS app is coming or open to pre-order.
+    "Apple said new games are coming soon to the App Store.",
+    "Developers can take pre-orders on the App Store.",
+    "Games coming soon to the App Store drew record pre-orders.",
+    # …and of the re-review's wider shapes (2026-10-07): another subject, the noun "pre-orders", a
+    # dash that is no sentence start, an object that is not the app.
+    "Apple lets you pre-order games on the App Store.",
+    "When a developer finishes an app, it lands on the App Store after review.",
+    "The App Store - coming of age quickly - changed how software was sold.",
+    "Developers said their apps are coming to the App Store soon.",
+    "Apple opened pre-orders on its website.\nThe App Store took a cut of every sale.",
+    # …and of the final round's dash reading (2026-10-08): an en/em dash opens a clause, a hyphen never
+    "The App Store—launched in 2008—changed how software was sold.",
+    "Apple's services—the App Store, iCloud and Music—grew fast.",
+    "Pre-order demand was high; the long-term plan stayed.",
     "Fans said the Marvel films felt tired.",
     "Decisions made by people, not AI, still matter.",
     "Buying high and selling low is the FOMO trap.",
@@ -431,6 +447,39 @@ def test_case_study_vocabulary_is_not_code_owned(text):
     ("Available on the App Store today.", "brand_mention"),
     ("Rated five stars on the App Store.", "brand_mention"),
     ("It's on the App Store now.", "brand_mention"),
+    # The value line's own claims in a model's words (review 2026-10-07) — code-owned copy only.
+    ("It is coming soon to the App Store.", "brand_mention"),
+    ("Coming soon to the App Store.", "brand_mention"),
+    ("You can pre-order it on the App Store.", "brand_mention"),
+    ("Pre-order now on the App Store.", "brand_mention"),
+    ("It's available for pre-order on the App Store.", "brand_mention"),
+    ("Available to pre-order in the App Store.", "brand_mention"),
+    # The re-review's rewordings (2026-10-07): no "soon", another verb, a reader told they can, a
+    # bracket / dash / colon / line break before the claim, the iOS store, "pre order", the noun "open".
+    ("It's coming to the App Store soon.", "brand_mention"),
+    ("Coming to the App Store soon.", "brand_mention"),
+    ("Big news: launching soon on the App Store.", "brand_mention"),
+    ("You can pre-order today on the App Store.", "brand_mention"),
+    ("Now you can pre-order on the App Store.", "brand_mention"),
+    ("(Coming soon to the App Store.)", "brand_mention"),
+    ("Lessons on patience — coming soon to the App Store.", "brand_mention"),
+    # only the line break separates the claim (no period before it: the punctuation anchor alone would
+    # catch a "lesson.\n\nComing soon…")
+    ("Read the full lesson\n\nComing soon to the App Store", "brand_mention"),
+    ("Coming soon to the iOS App Store.", "brand_mention"),
+    ("Pre order it on the App Store.", "brand_mention"),
+    ("Pre-orders are open on the App Store.", "brand_mention"),
+    # each caught ONLY by its own new branch (re-review 2026-10-07: "Pre-order now…" was already caught
+    # by the older "now on the App Store" subject, so it pinned nothing new)
+    ("Pre-order today on the App Store.", "brand_mention"),
+    ("Pre-order on the App Store.", "brand_mention"),
+    ("It will be available soon on the App Store.", "brand_mention"),
+    # the final round (2026-10-08): an UNSPACED em/en dash (the writer's usual style; the fold glues it
+    # to the words as a hyphen) and the future subjects on the plain availability shape
+    ("Lessons on patience—coming soon to the App Store.", "brand_mention"),
+    ("Value investing basics—available on the App Store.", "brand_mention"),
+    ("It will be available on the App Store.", "brand_mention"),
+    ("We'll be live on the App Store.", "brand_mention"),
     ("They sell buy signals.", "banned_phrase"),
     ("Get our signals every morning.", "banned_phrase"),
     ("NVIDIA stock is a compelling buy.", "class_b_evaluative"),

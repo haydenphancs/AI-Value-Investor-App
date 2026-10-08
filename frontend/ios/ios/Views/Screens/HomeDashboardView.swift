@@ -225,10 +225,15 @@ struct HomeDashboardView: View {
                 SignalTickerDetailView(kind: target.kind, ticker: target.symbol)
             }
         }
+        // BOTH spellings of AppState, like the Trillion Club cover below: the theme detail
+        // reads `AppState.self` (its plan gate reloads on a purchase) and presents
+        // PaywallView, which reads `\.appState`.
         .fullScreenCover(item: $themeDetailTarget) { target in
             NavigationStack {
                 ThemeDetailView(slug: target.slug)
             }
+            .environment(appState)
+            .environment(\.appState, appState)
         }
         // Trillion-Dollar Club: a company's stakes. BOTH spellings of AppState: the detail
         // reads `AppState.self` (and presents PaywallView/WhaleProfileView, which read

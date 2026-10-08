@@ -75,6 +75,10 @@ class _FakeLookup:
         self._failed = set(failed)
         self.calls: List[str] = []
 
+    def get_benchmark_series(self, industry, sector, metrics, period_type):
+        # Growth / Profit Power read one-group-per-line cells; this fake's cells already are.
+        return self.get_benchmarks(industry, sector, metrics, period_type)
+
     def get_benchmarks(self, industry, sector, metrics, period_type):
         self.calls.append(period_type)
         if period_type in self._failed:
@@ -344,7 +348,7 @@ async def test_a_trailing_gap_year_says_not_available_and_names_the_last_real_ye
     assert "XBIO (FY2025): not available" in text
     assert "Most recent year with margins: FY2023: Gross 60.0%, Operating 25.0%, Net 20.0%" in text
     # The peer figure is named as a PEER figure, under its own year, never bare.
-    assert "Industry peer-group median net margin: 12.0% (peers, not XBIO; latest available peer reading; it may be from a year before FY2025)." in text
+    assert "Industry peer-group median net margin: 12.0% (peers, not XBIO; peers' median for the FY2025 period)." in text
     assert "Sector avg net margin 12.0%" not in text
 
 
@@ -367,7 +371,7 @@ async def test_a_normal_latest_year_lists_its_margins_and_a_labelled_peer_figure
     ])
     text = await _summary(monkeypatch, data)
     assert text == ("Latest annual margins for XBIO (FY2025): Gross 60.0%, Operating 25.0%, "
-                    "Net -3.5%, FCF 12.0%; Sector peer-group median net margin 12.0% (latest available peer reading; it may be from a year before FY2025).")
+                    "Net -3.5%, FCF 12.0%; Sector peer-group median net margin 12.0% (peers' median for the same period).")
 
 
 @pytest.mark.asyncio

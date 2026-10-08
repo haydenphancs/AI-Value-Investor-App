@@ -1264,11 +1264,22 @@ out to compute peer medians per request:
 
 - **Dimensions:** `(sector, industry, metric_name, period_type, period_label)` — a 5-column
   UNIQUE key. `industry = ''` is the **SECTOR aggregate** (the fallback); `industry = <name>`
-  is an **INDUSTRY aggregate** whose `sector` is its parent. The lookup prefers the industry
-  row for a `(metric, period)` and falls back to the sector row **per cell**.
+  is an **INDUSTRY aggregate** whose `sector` is its parent. The lookup reads both and picks
+  **per `(metric, period)`** (`merge_peer_cells`): the industry row when it has at least
+  `MATURE_SAMPLE_FLOOR` (20) companies, else the **same period's** sector row when that one
+  does, else whichever exists. A period never borrows another period's median (2026-10-07: the
+  old "hold back to the last mature period" froze small industries' lines at one old sector value).
+  That per-period pick serves single values. CHART LINES (Growth, Profit Power, the report
+  drill-down — whose metrics carry their line's level, `sector_annual_level` /
+  `sector_quarterly_level`; Profit Power's `peer_group_levels` names the net-margin line per tab
+  plus one key per margin, e.g. `annual.fcf_margin`) read `get_benchmark_series` instead: every point of a metric's line comes from ONE
+  peer group — the industry when it has a mature cell at the newest period, else the sector — so
+  the line never steps between populations where n crosses 20, and its legend, tooltip and Cay
+  AI's peer sentence name the group every point belongs to.
 - **Three live `period_type` kinds:**
   - `annual` + `calendar_quarter` — **history** (the chart lines + the growth series). Annual rows
-    are keyed by the year of the period end. Quarterly rows are keyed by the **calendar quarter
+    are keyed by the year of the period end (`period_labels.annual_benchmark_key`: an end on
+    Jan 1-7 counts as the previous year). Quarterly rows are keyed by the **calendar quarter
     the period ends in** (`period_labels.calendar_quarter_label`, `"Q3'25"` = Jul-Sep 2025; an end
     on day 1-7 counts as the previous month, for 52/53-week filers), and every quarterly reader
     joins a company quarter with the same helper. So Microsoft's fiscal Q1 (Jul-Sep) sits next to
@@ -1279,11 +1290,19 @@ out to compute peer medians per request:
     (`period_label = 'TTM'`). This is what the single-value "vs avg" comparison reads, computed
     on the **same TTM basis as the company's own card** (apples-to-apples) so it never spikes
     on a partially-reported fiscal year.
+- **Only complete periods are served** (`servable_benchmark_rows`, applied to every read in
+  `_fetch_rows`). An `annual` / `calendar_quarter` row is served only when it was computed at least
+  75 days (`period_labels.BENCHMARK_REPORTING_LAG_DAYS`) after its period ended: right after a
+  period closes its cell holds only the early, off-calendar filers (on 2026-10-04 the "2026" annual
+  cells held 6-27% of each group). Owner decision 2026-10-07: an incomplete period shows **no** peer
+  value — never an earlier period's. The producer applies the same gate before writing. A `ttm` row
+  older than 21 days (`TTM_MAX_AGE_DAYS`: its group fell below 5 companies, or the weekly job
+  stopped) is not current and is not served; historical rows have no age limit (the producer
+  fetches 16 annual records, so the oldest years legitimately stop being rewritten).
 - **Read path** (`sector_benchmark_lookup.py`, 1-hour in-memory cache): `get_current_benchmarks()`
-  is **TTM-first with a mature-annual fallback**. A sample-size floor (`MATURE_SAMPLE_FLOOR = 20`)
-  applies to **both** paths — a period with fewer than 20 reporting companies is held back to the
-  last mature period rather than allowed to decide a comparison (a just-closed fiscal year is only
-  partially reported and swings wildly).
+  answers the single-value "vs avg" comparisons: the industry TTM median when it has ≥ 20
+  companies → the sector TTM median when it does → the newest complete annual year with a mature
+  median → **none** (no comparison is shown; a thin cell never decides one).
 - **Write path** (`industry_benchmark_service.py`): each recompute covers the **top 300** constituents
   per industry by market cap (`TOP_TICKERS_PER_INDUSTRY`) — medians stabilise well below that and it
   bounds the FMP budget; the **median** (not mean) protects against 1–2 outlier reporters. Values are
@@ -1482,9 +1501,33 @@ and TTM benchmark sweeps raise `IndustryBenchmarkRecomputeSkipped`, each before 
 The same exceptions are raised when a sweep ATTEMPTED work but wrote nothing (reason
 `nothing written`, or `every sector failed` / `every industry failed`): every fetch layer turns
 an FMP failure into an empty result, so an outage used to "complete" each sector or industry
-with zero rows and settle the claim. A partial run (at least one row written) still settles;
-the retry resumes only the unwritten sectors/industries, since only written ones count as
-fresh. Moat industries with too few scorable peers never write and are not failures, so a
+with zero rows and settle the claim. A partial MOAT run (at least one row written) still
+settles. A partial fiscal or TTM benchmark sweep does not (2026-10-07): when any sector raised,
+or computed zero rows while another wrote, or lost more than 10% of its companies (25% of an
+industry with ≥ 5) to TRANSIENT FMP failures (429, 5xx, network — never an empty answer, a 4xx
+or an error body, which are counted as `refused` and logged, so a structurally empty or refused
+industry cannot keep a run open; a fiscal ticker is lost only when its income-statement or ratios
+call failed), it raises `IndustryBenchmarkRecomputeIncomplete` after writing
+what it could (a lossy sector writes no aggregate; an industry that itself lost more than 25% is
+not rewritten and its previous rows stay), so the claim stays open and the same-day
+retry recomputes only those sectors (a sector's freshness marker, its `''` annual rows — its `''` ttm rows for the TTM sweep — is written last and in one statement,
+so a sector that failed part-way never looks fresh). Every Supabase write and median build runs
+off the event loop (`asyncio.to_thread`). The sweeps also retry an FMP 429 with backoff, then
+wait out FMP's per-minute window together (one shared 60 s window, at most 20 minutes per run;
+`call_with_rate_limit_retry`), with a breaker only after three windows in a row and 20 exhausted
+calls with no success, count fetch failures per
+industry into the run summary, and download the benchmark universe file from the
+`universe-data` bucket at the start of every run (an upload needs no redeploy; the operator
+script can name a local file instead, and an unreadable named file stops the run; any writing
+run from the script — a full sweep or one `--sector` — takes the same claim as the scheduled job
+and the admin routes, and only a full sweep settles the day). The SECTOR
+aggregate leaves out the industries `financials_metric_gate` marks meaningless for current
+ratio, quick ratio and interest coverage (banks, insurers, capital markets, asset managers,
+lenders). Readers go further, permanently: a financial company's current ratio, quick ratio and
+interest coverage are never compared with the Financial Services SECTOR median at all (what remains
+of it is shell companies, exchanges and developers) — only with a mature industry median, else
+judged on absolute bands (`health_check_service._bank_pooled_sector_cell`, also applied to the
+report drill-down lines). Moat industries with too few scorable peers never write and are not failures, so a
 same-day re-run that attempts only those settles. Fresh-skips, the industries-only validation
 path and `dry_run` still return. The owner-facing
 view of all of this — what runs itself and what must be done by hand — is
@@ -2906,7 +2949,11 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     `enforce` mode — the writer records the mode IN the package, and `shadow` accepts drafts the
     judge flagged — so a day run under `shadow`/`off` is voiced and rendered but never becomes a
     post; the worker closes it `skipped` (`judge_not_enforced`). That guard, not a second switch,
-    is what makes turning auto-publish on later safe.
+    is what makes turning auto-publish on later safe. The dispatch on the run's content class is
+    explicit (2026-10-05): class A goes to that judge check and EVERY other value — class C before
+    its own template gate exists, a NULL, an unknown or mis-cased letter — is refused with 422
+    `MARKETING_REQUEST_INVALID` before any asset read or INSERT (the worker fails the run). It used
+    to let every non-A value through with no gate at all.
   - a post leaves `pending_review` only through `review_post` (a human's decision): ONE
     conditional UPDATE on `status = pending_review` that records who decided (`approved_by`,
     `metadata.review`), so a double tap or two reviewers can never flip a decided post — or
@@ -3035,20 +3082,54 @@ on the prompt, and without that nonce a rejected draft came straight back on the
 package is hook, script, cards, carousel slides and a caption BODY per platform — no hashtags,
 links, CTAs or disclaimers, which are code-owned (`app/services/marketing/post_copy.py`:
 publisher `Caydex`, never "Caydex Inc.", which does not exist; long disclaimer where there is
-room, short on X/Threads/Bluesky, a card for the end of every video; CTA per platform — TikTok
-and Instagram "Link in bio", X link-free unless `MARKETING_X_ALLOW_URLS`, everything else its
-own smart link; the composed caption must END with its disclaimer, fit the platform and carry no
+room, short on X/Threads/Bluesky, a card for the end of every video; CTA per platform, opened by
+ONE code-owned VALUE LINE that says what Caydex is (2026-10-05, owner wording: "Caydex: AI research
+on public companies — on the App Store.", "… — pre-order on the App Store." during a pre-order, or
+the claim-free "Caydex: AI research on public companies." while the store URL is unset or invalid —
+since the 2026-10-05 release that state means a mistyped URL, so it never says "coming soon"
+(2026-10-07) — by `smart_link.store_state()`, read once per generation at WRITE time beside
+`MARKETING_X_ALLOW_URLS` and threaded through the prompts and the validator, so the caption budget
+asked for is the one enforced; nothing scans code-owned copy at runtime, so a test pins each line and
+runs it through the public-copy scan; a model body that makes the line's claim in its own words —
+"coming soon to", "you can pre-order on" the App Store and their common rewordings — is refused on
+the body, `brand_mention`, by a positional DENYLIST that a new rewording can still slip past to human
+review: the judge has no app-store rule yet) —
+TikTok and Instagram "Link in bio", X link-free unless
+`MARKETING_X_ALLOW_URLS`, everything else its own smart link; the YouTube title carries no line;
+the composed caption must END with its disclaimer, fit the platform and carry no
 character the outlet's API refuses — YouTube titles and descriptions refuse `<` and `>` and the
 title is one line — checked on the cleaned composed text and never stripped at publish time).
-Lengths are asked for so the model can meet them (2026-09-26): the script as 7-9 lines of 10-16
-words each (asked "90 to 140 words" it wrote up to 179, over the 165 ceiling; asked "6-9 lines of
-at most 16 words" it undershot, 4 of 34 scripts at 49-59 words against the 60 floor — so the ask
-carries a per-line floor, and its obeyed range, 70-144, sits inside the enforced 60-165), each
-caption at 70-75% of its exact budget in words at a measured 6.6 characters a word, and a length
-violation's detail names the hard limit and the cut ("216 characters … the hard limit is 199;
-cut at least 17"), once — the repair used to show two ceilings for one caption. The script's
-repair hint is direction-neutral ("if it says cut, drop a line; if it says add, write one more"):
-worded as a cut, it sent a 58-word script back byte-identical.
+Lengths are asked for so the model can meet them. Since 2026-10-05 (owner: shorter videos, ~35-40 s)
+the script is asked for as EXACTLY 6 one-sentence lines of 11-13 words (about 72), the hook as at
+most 10 words and the cards as exactly 3, each on screen while one line pair is spoken (lines 1-2,
+3-4, 5-6 — how `timeline` in `marketing/video.py` splits 6 lines over 3 cards; a test pins the two equal).
+The model obeys line counts (all 40 rounds of 2026-09-26 had 7-9 lines when asked for 7-9) but
+undershoots a per-line floor (9.81 words a line against an asked 10), so the floor is one word
+above what the arithmetic needs. The enforced window moved to 42-120 words: 120 is what fits the
+75 s cap minus the 4 s disclaimer card at the measured Kokoro pace ((14-word hook + 120) / 2.0
+words/s = 67 s; production 2026-10-03 spoke 108 words in 50.6 s), so an accepted script never needs
+the worker's faster re-synthesis — the old 165 could reach ~84 s and be skipped as
+`narration_too_long`; 42 is 6 lines at the slowest real per-line pace (7.0). The acceptance preview
+(`scripts/marketing_preview.py --all-items --judge shadow` before and after, `--stats-from` on each
+dump) measured: 34/34 accepted (32/34 before), every script exactly 6 lines, median estimated video
+37.7 s (47.1 s before). HOOK AND TITLES rules (prompt only — no new validator): one concrete tension,
+contrast or fact; a case study's hook names the company its TITLE names
+(`content_pool.title_companies`: 14/15 did, 3/14 before), a lesson's names none; no study-verb opener
+(Understand/Learn/…); questions only how/why/what — never yes/no, "who will win" or whether anyone
+should buy; never whether a company is good or bad, a problem or an opportunity for investors, and
+never what it will do next; rule 5 (no numbers or years in titles) covers the hook; the YouTube title
+names the company or the idea. PHRASING also warns that "buy when" / "sell when" is refused even about
+what a company buys (prompt 2026-10-07.1). Re-measured after the review fixes (2026-10-07, store state
+live): 34/34 accepted, 30 clean first drafts, every script 6 lines, median 37.3 s (max 45.1), 15/15
+case-study hooks and titles name their company, 1 yes/no hook. Dominance words about a named company
+("How NVIDIA Dominates AI") pass both the regex and the judge — a rubric rule for the planned judge
+round; human approval is the gate meanwhile.
+Each caption is asked at 70-75% of its exact budget in words at a measured 6.6 characters a word,
+and a length violation's detail names the hard limit and the cut ("216 characters … the hard limit
+is 199; cut at least 17"), once — the repair used to show two ceilings for one caption. The
+script's repair hint is direction-neutral and keeps the line structure ("if it says cut, shorten
+the longest lines or drop one; if it says add, lengthen the shortest lines … or write one more"):
+worded as a cut, it once sent a 58-word script back byte-identical.
 Validation is scoped: the shared parts must be clean; a failing caption drops only its outlet; a
 hook or caption with no word in it is `empty`. A rejected generation records EVERY round's
 violations, each tagged with its round. If the lease can no longer cover a call, a publishable
@@ -3246,7 +3327,32 @@ browser's Fetch Metadata marks as other than a top-level document navigation (ab
 still count), not past a per-address limit (20/min per IPv4 address or IPv6 /64, in the
 link's own limiter pool), and not past a PER-CAMPAIGN ceiling (600 counted hits/min per known
 campaign, 60 for `other`) — per campaign so a flood of junk `/go/<anything>` cannot suppress
-every real campaign's count. Delivery is at least once and at most twice per hit: a flush
+every real campaign's count. Two more filters since 2026-10-05, from the first live week's HTTP
+logs, where every counted "tap" was a crawler or scanner within 1-200 s of a post going out: the
+confirmed crawlers are denied by their own tokens (`flipboardproxy`, `linkring`, `skywatch`,
+`trendictionbot` — whose token defeats `bot\b` — `keenablebot`, `shapbot`, `google-safety`; the
+Flipboard app's in-app browser, "Flipboard/", still counts), and Meta's fetcher network
+57.141.0.0/16 (the rightmost-proxy address only) never counts — it fetched with a plain desktop
+"Chrome/139" user agent. Browser-like scanners from cloud addresses remain indistinguishable by
+header, so a tap that passes every filter inside its campaign's EARLY window — 240 s after the
+platform's post was published (or its send was ambiguous), 300 s after an Upload-Post submit — is
+counted APART under the server constant `<campaign>_early` (`smart_link.EARLY_KEYS`: never typeable,
+never in `ct`, accepted by the table's CHECK): nothing is discarded and the digest shows both. The
+publisher stamps the window into the stdlib-only, in-memory `publish_clock` from `record_outcome`,
+before its ledger write, and only for a live post whose caption carries its OWN /go link (not
+TikTok/Instagram "Link in bio", not an X post composed without a link); `record_hit` reads it with
+no I/O. An Upload-Post send's quota reads around the upload are cut off after 2 s
+(`outlet_upload_post.USAGE_READ_TIMEOUT_SECONDS`), so a slow quota endpoint delays the stamp by at most 2 s
+of a post that is already live. One process shares the clock: the lifespan logs `STARTUP:
+UVICORN_WORKERS=…` or `STARTUP: WEB_CONCURRENCY=…` at ERROR when either asks uvicorn for more workers
+(UVICORN_WORKERS decides first: uvicorn's CLI reads it and its explicit count wins over
+WEB_CONCURRENCY). A restart loses the open windows (a scan right after a
+deploy counts as people) — accuracy only. With no valid store URL the landing page shows a plain
+"Caydex for iPhone" label with no link — it said "Coming soon to the App Store" before the release,
+a false claim since (2026-10-07). The landing button says "Pre-order Caydex for iPhone"
+while `MARKETING_APP_STORE_PREORDER` is on and the store URL is valid (`smart_link.store_state()`,
+the same decision that words the captions' value line; the flag never changes where /go points).
+Delivery is at least once and at most twice per hit: a flush
 whose RPC may have committed (a read timeout, a gateway 5xx, SQLSTATE class 08) is re-sent
 once, and a second unknown outcome drops those hits with a log line; errors are classified by
 their structured code, never by message text. The table is therefore indicative — App Store
@@ -3641,15 +3747,46 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   rejections with their reasons; posts that expired unreviewed against those that expired after
   an approval (`metadata.expired_from`); engagement totals and the top post per platform (its
   link, never its caption); followers now and the change against a snapshot at least six days
-  older; smart-link taps per campaign (§12.6), noting that every tap lands on the "Coming soon"
-  page while `MARKETING_APP_STORE_URL` is unset; X spend this month by operation against the cap
+  older; smart-link taps per campaign (§12.6), with a ⚠️ line when `MARKETING_APP_STORE_PREORDER` is
+  still on (new captions would say "pre-order") or `MARKETING_APP_STORE_URL` is unset
+  or invalid (since the 2026-10-05 release either is a misconfiguration: every tap lands on the
+  landing page, which then has no store link); X spend this month by operation against the cap
   (with a zero budget it says X is OFF — no posts or reads, since X is then not an enabled
   platform); review latency (median and longest); the pool's runway (lessons not yet used and the
   date of the first repeat); posts still waiting for an "outcome unknown" answer (escalated posts
   only); and the metrics job's last state, its `last_error` shown as a note after a day that
   succeeded. It reads only our own database — spend from the journal, followers from stored
   snapshots — so it calls no platform and costs nothing. Delivery follows the publish feed: the
-  bot and its review chat, the shared Telegram back-off, the pacer.
+  bot and its review chat, the shared Telegram back-off, the pacer. The /go line is labelled
+  "(approximate)" and shows the `<campaign>_early` taps apart ("plus N in the first minutes after
+  posting (mostly link scanners)", §12.6).
+- **The weekly cost line** (2026-10-05, owner request) sits right under the digest's date line — the
+  row caps never touch it and the last-resort cut keeps the top — and is computed in integer
+  micro-dollars from our database only (`digest_service.weekly_cost`): "💵 Cost last week ≈ $T: X $x
+  (our ledger) · Gemini ≈ $g · worker ≈ $w · Upload-Post $u (plan fee · N uploads)", then "Usage (X +
+  Gemini + worker): last week ≈ $L · week before ≈ $B" — the week before is compared by USAGE alone
+  (2026-10-07): the plan in force a week earlier is not recorded, and today's fee would misprice it by
+  the whole fee the first Monday after a plan change — then "⚠️ Usage ≈ $V passed your $L alert line"
+  only when X + Gemini + worker passed
+  `MARKETING_WEEKLY_COST_WARN_USD` (default $1.00; 0 = off; the plan fee is never usage). X is exact to
+  our charges journal, every entry summed by its OWN time over posts touched since the week before
+  began (`list_charge_rows_since`: a metrics read on an old post or a back-dated correction lands in
+  the week it was billed; the read raises past its limit of 500 rows, never a partial sum — its
+  limit + 1 probe must fit inside PostgREST's ~1,000-row answer cap, so a larger limit is refused),
+  with undated entries
+  named and never counted into any week (`run_service.charges_between`; the X cap's own reader still
+  counts them — fail-closed). Gemini ≈ `marketing_scripts.tokens_used` × one blended $1.50 per 1M
+  (writer + judge; the judge model's price doubles on 2027-01-01 — revisit). Worker ≈ each run's
+  billed stage seconds × (its highest memory peak, clamped to 4 GB, at $10/GB-month + 4 vCPUs at
+  $20/vCPU-month) — upper-side, Railway meters actual use; the hourly no-op ticks and the web service
+  are not counted. Upload-Post = `MARKETING_UPLOAD_POST_MONTHLY_USD` × 7/30.4375 (0 = Free plan), with
+  the week's uploads — every post Upload-Post took: a recorded submit, job, poll or platform post id, a
+  post published or retracted, or one whose failure reconcile read from Upload-Post (an ambiguous send
+  that reconcile later found has no submit time); "≥ N" while a send's outcome is unknown or the post
+  read was capped. Each part fails alone to
+  "unreadable" and the total then reads "≥ $T (X unreadable)"; a part beyond ±$1,000,000 is
+  unreadable; never NaN, inf or a silent 0. Both settings are `Field(ge=0, le=10_000,
+  allow_inf_nan=False)`, so a bad value fails the deploy.
 - **The run-health alert** (`digest_service.health_cycle`; the decision is the pure
   `evaluate_run_health`) checks today's run once, at the first tick at or after the run hour plus
   `MARKETING_MAX_RUN_ATTEMPTS` on a posting day, capped at 23:00 ET (23:00 too when no attempts cap
@@ -3723,7 +3860,9 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   the platform does not hold — which is what separates "never reviewed" from "approved but never
   sent".
 - **Cost:** about $0.11 a month on top of posting — roughly 17 X posts × 4 reads × $0.001 ≈ $0.07,
-  plus the weekly $0.010 follower read ≈ $0.04. Bluesky, Telegram and the digest are free.
+  plus the weekly $0.010 follower read ≈ $0.04. Bluesky, Telegram and the digest are free. The
+  digest's weekly cost line (above) reports the engine's own weekly cost: X, Gemini, the worker's run
+  time and the Upload-Post plan — not the web service, Railway's base fee, Supabase, FMP or Apple.
 - **Accepted gaps** (review 2026-10-01; re-review 2026-10-02):
   - A claim that straddles ET midnight: `run_day_job` takes the day from the tick's time, but the
     claim stamps `run_day` from its own clock, so a claim in the ~100 ms around midnight could mark
@@ -3858,6 +3997,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-01 | The X account carries no "Automated" label (owner decision) | X staff said on 2026-09-15 that the label applies to this human-approved setup; the owner accepted the risk that X restricts the account for unlabelled automation, and turns the label on if X ever flags it | Turn the label on before the first post |
 | 2026-10-01 | Measurement and run health are the publisher tick's last three steps (§12.11): per-post metrics written only by `merge_post_metrics` (fenced on `metrics->>rev`, never touching `updated_at`); X read at 1/3/7/28-day checkpoints, charged up front with four posts kept free under the cap at the price a post would reserve now, and a definite refusal backed off for a week by a marker on the platform's newest post; a weekly Telegram digest built only from our own database; a nightly alert when a posting day failed, was skipped or never ran, with a final word the next day that reads when that check ran and whether it went out, both timed from a web mirror of the worker's run hour (`MARKETING_RUN_HOUR_ET`); a reason on every reject; the run close keeps `finished_at` and records why it closed | Nothing measured anything, and a failed posting day looked exactly like a quiet one. Only the publisher may call a platform; a metrics write that bumped `updated_at` would break the publisher's fence. A fixed $0.06 headroom left less than one $0.20 URL post, and a refusal with no back-off was paid for again every day. A back-off kept only on the refused post (usually the oldest) left the 30-day listing within days: 16 reserves in 28 days instead of four (re-review 2026-10-02). The nightly check runs at the first tick after its hour, so a final word that assumed 22:00 repeated verdicts, announced recoveries nobody had been warned of, and stayed silent after a night whose alert never went out | A weekly read of every post; daily X reads of every recent post (≈ $0.51/month, a quarter of the cap); metrics written through `transition_post`; follower counts read live by the digest; a fixed text-post headroom; the back-off on the refused post only; a fixed 22:00 check time for the final word |
 | 2026-10-02 | Report chat gets a live web search on explicit request only (§9b.10): a Brave Search API function tool, `web_search`, declared only on a turn whose gate opened (REPORT session, TICKER_REPORT screen, switch on, key set, signed in, an explicit "search / look up / verify" ask), one search per turn, its own fail-closed daily caps, chat still 1 credit; a code-authored caveat on every answer that used web results; web sources as tappable pills, shown live and NOT stored while `CHAT_WEB_SOURCES_PERSIST` is off; a "Searching the web…" status and a "Web search" badge | Owner, 2026-10-02: outside-the-report questions and "double-check this" got no live answer. Gemini grounding needs a Google-branded Search Suggestions chip and forbids modifying, mixing or caching results, and 2.5 cannot combine it with function tools. Brave's self-serve terms allow transient storage only and forbid evaluating or training an AI on results, hence no Supabase tier, no cross-user cache and live-only pills until Brave confirms storage | Gemini `google_search` grounding (per-user, with the chip); Exa; Tavily (its terms bar use in financial decisions); always-on or model-decided search; a "search the web" chip; persisting the pills by default |
+| 2026-10-05 | Marketing "launch-ready basics": a code-owned value line in every caption ("Caydex: AI research on public companies — coming soon to iPhone", then pre-order / App Store wording by `smart_link.store_state()`, read at write time); shorter videos (exactly 6 lines of 11-13 words, 3 cards, enforced 42-120 words) and HOOK AND TITLES prompt rules; honest /go counts (crawler own-tokens, Meta's 57.141.0.0/16 never counted, an in-memory early bucket `<campaign>_early` stamped by the publisher, a WEB_CONCURRENCY boot ERROR); a weekly cost line in the Monday digest; `create_posts` refuses every content class but A | The first live week (n = 1 per platform, ~0 followers): no post said what Caydex is, every video opened on a logo while the hook was only captions, 23 of 33 case-study hooks omitted their company, and every counted /go tap was a scanner within minutes of posting — several with browser user agents no deny list can see. The owner's launch rule judges traction 30 days after approval, so the engine had to name the product, open stronger and count honestly before growing; a cost line makes a runaway visible; a non-A run used to skip every post gate | Class C congressional counts now (unmeasured demand, monthly volume); the hook drawn on the first video card (needs a rule change; next phase); Facebook Reels and LinkedIn video (LinkedIn's one reach number unverified); an email waitlist (pre-order covers capture if approval comes within weeks); discarding early taps instead of counting them apart; a boot-seeded clock |
+| 2026-10-07 | Review fixes to the 2026-10-05 marketing pass (three review rounds — 14, then 11 findings in the fixes, then a final round on 2026-10-08; none critical): the prelaunch value line makes no availability claim; the digest compares the week before by usage, never at today's plan fee; the upload count includes every job Upload-Post took and reads "≥ N" while an outcome is unknown; the X journal read is capped at 500 so its probe fits PostgREST's answer cap; the boot check reads UVICORN_WORKERS before WEB_CONCURRENCY; Upload-Post's quota reads are cut off after 2 s; compliance refuses the value line's claims in a model's words (a positional denylist, rewordings added after the re-review); the landing page's no-URL label says "Caydex for iPhone", no longer "Coming soon", and the digest warns about an unset store URL or a pre-order flag left on; an en/em dash or a line break before the claim counts as a sentence start; prompt 2026-10-07.1 | The app went live 2026-10-05, so "coming soon" could only appear through a mistyped store URL — and then falsely; the other fixes each made a number in the owner's digest or the /go count quietly wrong (a plan change hid a ~20× cost jump; an ambiguous upload went uncounted; a 1,001-row read summed as complete) | Storing the fee each digest used (one more state row for a comparison usage already makes honestly); a US-only "on the US App Store" line (the owner's call); a dominance-word rule in the regex (the honest corpus uses "dominance" as history — it belongs in the judge round) |
 
 ---
 

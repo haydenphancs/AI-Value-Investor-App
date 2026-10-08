@@ -44,9 +44,17 @@ struct ProfitabilityMetricSeries: Identifiable {
     let metric: ProfitabilityMetricType
     let annual: [ProfitabilityChartPoint]
     let quarterly: [ProfitabilityChartPoint]
-    /// "industry" / "sector" / nil — which peer group the dashed line represents,
-    /// from the backend. Drives the "Industry Avg" vs "Sector Avg" label.
+    /// "industry" / "sector" / nil — the period-agnostic fallback level (an older report's
+    /// one word for every line). The sheet reads the per-period level below first. nil for a
+    /// margin of a per-line (v7) payload, whose per-tab levels are complete: a nil one there
+    /// is an undrawn line, which must not borrow this word.
     var peerLevel: String? = nil
+    /// "industry" / "sector" / nil — the peer group THIS metric's dashed line is drawn from
+    /// on the Annual / Quarterly tab. Each line is one population, chosen per metric AND per
+    /// period type by the backend, so the two tabs (and two metrics) can differ. `var`s with
+    /// a nil default, so every existing memberwise construction still compiles.
+    var annualPeerLevel: String? = nil
+    var quarterlyPeerLevel: String? = nil
 
     var id: String { metric.rawValue }
 
@@ -72,9 +80,23 @@ extension ProfitPowerResponseDTO {
     /// The 4 MARGIN series, built directly from the frozen Profit Power DTO so the
     /// report's Profitability drill-down shows the SAME margins (and per-margin
     /// sector medians) as the live detail Profit Power chart.
+    ///
+    /// Each margin names its OWN line's peer group per tab
+    /// (`ProfitPowerSectionData.lineLevel`). A per-line map (profit_power v7, 2026-10-08:
+    /// "annual.<metric>" / "quarterly.<metric>" keys) answers ONLY with that line's key: the
+    /// backend (and the report's narrowing) writes one exactly for a line that draws a peer
+    /// point, so a missing key is a line that is not on screen and gets no level — and no
+    /// period-agnostic `peerLevel` either, which the sheet would read in its place (and hand
+    /// to ROE/ROA) and which names the NET line. Only an older payload falls back: the tab's
+    /// level (a per-tab map), then the payload-wide `peerGroupLevel` (a pre-2026-10-07
+    /// report). `key` is the backend metric name (`_MARGIN_BENCHMARK_METRICS` in
+    /// profit_power_service.py).
     func toMarginSeries() -> [ProfitabilityMetricSeries] {
+        let levels: [String: String] = peerGroupLevels ?? [:]
+        let fallbackLevel: String? = ProfitPowerSectionData.hasPerLineLevels(levels) ? nil : peerGroupLevel
         func make(
             _ metric: ProfitabilityMetricType,
+            key: String,
             company: @escaping (ProfitPowerDataPointDTO) -> Double?,
             sector: @escaping (ProfitPowerDataPointDTO) -> Double?
         ) -> ProfitabilityMetricSeries {
@@ -85,19 +107,27 @@ extension ProfitPowerResponseDTO {
                     )
                 }
             }
+            let annualLevel: String? = ProfitPowerSectionData.lineLevel(
+                in: levels, period: .annual, metric: key, legacyLevel: peerGroupLevel
+            )
+            let quarterlyLevel: String? = ProfitPowerSectionData.lineLevel(
+                in: levels, period: .quarterly, metric: key, legacyLevel: peerGroupLevel
+            )
             return ProfitabilityMetricSeries(
                 metric: metric, annual: pts(annual), quarterly: pts(quarterly),
-                peerLevel: peerGroupLevel
+                peerLevel: fallbackLevel,
+                annualPeerLevel: annualLevel,
+                quarterlyPeerLevel: quarterlyLevel
             )
         }
         return [
-            make(.grossMargin,
+            make(.grossMargin, key: "gross_margin",
                  company: { $0.grossMargin }, sector: { $0.sectorAverageGrossMargin }),
-            make(.operatingMargin,
+            make(.operatingMargin, key: "operating_margin",
                  company: { $0.operatingMargin }, sector: { $0.sectorAverageOperatingMargin }),
-            make(.netMargin,
+            make(.netMargin, key: "net_margin",
                  company: { $0.netMargin }, sector: { $0.sectorAverageNetMargin }),
-            make(.fcfMargin,
+            make(.fcfMargin, key: "fcf_margin",
                  company: { $0.fcfMargin }, sector: { $0.sectorAverageFcfMargin }),
         ]
     }
@@ -106,7 +136,9 @@ extension ProfitPowerResponseDTO {
 extension DeepDiveMetric {
     /// Build a Profitability series from this metric's baked history (used for
     /// ROE/ROA, which aren't in profit_power). Sector points are joined to the
-    /// company periods by label (the backend already aligns them).
+    /// company periods by label (the backend already aligns them). Each tab names its own
+    /// line's group (`sectorAnnualLevel` / `sectorQuarterlyLevel`, chosen separately by the
+    /// backend); `peerLevel` is only the fallback for a report that predates them.
     func toProfitabilitySeries(
         _ metric: ProfitabilityMetricType, peerLevel: String? = nil
     ) -> ProfitabilityMetricSeries {
@@ -128,7 +160,9 @@ extension DeepDiveMetric {
             metric: metric,
             annual: pts(annualHistory, sectorAnnualHistory),
             quarterly: pts(quarterlyHistory, sectorQuarterlyHistory),
-            peerLevel: peerLevel
+            peerLevel: peerLevel,
+            annualPeerLevel: sectorAnnualLevel,
+            quarterlyPeerLevel: sectorQuarterlyLevel
         )
     }
 }

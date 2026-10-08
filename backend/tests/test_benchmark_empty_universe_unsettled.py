@@ -108,19 +108,23 @@ def _bench(monkeypatch, raw, *, fresh: bool = False) -> SimpleNamespace:
     computed: List[str] = []
     ttm_industries: List[str] = []
 
-    async def _compute_sector(sector, inds, al, ql, dry_run=False):
+    async def _compute_sector(sector, inds, al, ql, dry_run=False, **_k):   # tally=
         computed.append(sector)
         return 0 if dry_run else 7
 
-    async def _ttm_values(ticker_caps, sem):
+    async def _ttm_values(ticker_caps, sem, **_k):                           # counts=
         ttm_industries.append(ticker_caps[0][0])
         return {"pe_ratio": [10.0, 11.0, 12.0, 13.0, 14.0]}   # >= MIN_SAMPLE_SIZE
 
-    async def _industry_values(ticker_caps, al, ql):
+    async def _industry_values(ticker_caps, al, ql, **_k):
         return {}
 
-    # `_load_universe` reads the module-level `load_universe` binding.
+    # `_load_universe` reads the module-level `load_universe` binding — once the per-run
+    # Storage fetch (`_fetch_benchmark_universe`, stubbed to "no fresh copy" here, which
+    # also keeps the test off the network) has come back empty-handed.
     monkeypatch.setattr(ibs, "load_universe", lambda _f: list(raw))
+    monkeypatch.setattr(ibs, "_fetch_benchmark_universe", lambda: None)
+    monkeypatch.setattr(ibs, "_last_fetched_universe", None)
     monkeypatch.setattr(svc, "_compute_sector", _compute_sector)
     monkeypatch.setattr(svc, "_industry_value_lists", _industry_values)
     monkeypatch.setattr(svc, "_industry_ttm_values", _ttm_values)
@@ -370,21 +374,16 @@ async def test_a_non_empty_universe_still_settles_the_claim(
 # ── The admin triggers: a raise in the background task is retrieved and logged ──
 
 
+# The two sector/industry BENCHMARK triggers left this table on 2026-10-07: they now run
+# under the quarterly phase's claim, and a `RecomputeSkipped` there is caught, logged at
+# WARNING and released as an unsettled claim instead of failing the task. Their twin of this
+# test (an empty universe through the route, no unretrieved task) is in
+# `test_benchmark_producer_2026_10_07_admin.py`.
 _ADMIN_ROUTES = [
     pytest.param(
         admin.refresh_industry_moat_benchmarks, {"skip_recent_hours": 24}, _moat,
         "admin_refresh_industry_moat_benchmarks", "IndustryMoatBenchmarkRecomputeSkipped",
         id="moat",
-    ),
-    pytest.param(
-        admin.refresh_industry_benchmarks, {"skip_recent_hours": 24}, _bench,
-        "admin_refresh_industry_benchmarks", "IndustryBenchmarkRecomputeSkipped",
-        id="industry-benchmarks",
-    ),
-    pytest.param(
-        admin.refresh_sector_benchmarks, {"backfill": False}, _bench,
-        "admin_refresh_sector_benchmarks", "IndustryBenchmarkRecomputeSkipped",
-        id="sector-benchmarks",
     ),
 ]
 

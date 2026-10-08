@@ -180,8 +180,11 @@ async def _build(monkeypatch, *, ratios, roe, bs, income=None):
     from app.services import health_check_service as hc
 
     class _Lookup:
-        def get_current_benchmark_values(self, industry, sector, metrics):
-            return {m: _BENCH.get(m) for m in metrics}
+        # The health check reads the RICH cells since 2026-10-07 (it reports the level).
+        def get_current_benchmarks(self, industry, sector, metrics):
+            return {m: (None if _BENCH.get(m) is None
+                        else {"value": _BENCH[m], "level": "sector", "n": 50})
+                    for m in metrics}
 
     # Module-level `from … import get_sector_benchmark_lookup`: patch the CALLER's binding.
     monkeypatch.setattr(hc, "get_sector_benchmark_lookup", lambda: _Lookup())

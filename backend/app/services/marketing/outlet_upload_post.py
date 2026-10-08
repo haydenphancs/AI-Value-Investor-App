@@ -41,6 +41,7 @@ question — whether one upload costs one credit per platform.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -94,6 +95,10 @@ _IN_FLIGHT = frozenset({"pending", "queued", "processing", "in_progress"})
 _REAUTH_CODES = frozenset({"account_reauth_required", "account_checkpoint_required", "tiktok_reconnect_required"})
 #: A daily per-account cap without a reset time: try again in an hour (the post expires otherwise).
 DAILY_CAP_BACKOFF = timedelta(hours=1)
+#: The quota reads around an upload (`_usage`) are measurements taken while the send waits — and the
+#: /go early window opens only once the send returns (`publisher_service.record_outcome`), with the
+#: post already live — so each read is cut off after this long (one attempt, 30 s read timeout, before).
+USAGE_READ_TIMEOUT_SECONDS = 2.0
 
 
 def _failure_text(platform: str, item: Dict[str, Any]) -> str:
@@ -246,7 +251,10 @@ class UploadPostAdapter(Adapter):
 
     async def _usage(self) -> Optional[Dict[str, Any]]:
         try:
-            return await upload_post.get_usage()
+            return await asyncio.wait_for(upload_post.get_usage(), USAGE_READ_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.info("marketing upload-post: usage not read (no answer within %.1f s)", USAGE_READ_TIMEOUT_SECONDS)
+            return None
         except Exception as e:   # best effort — a measurement, never a reason to fail a post
             logger.info("marketing upload-post: usage not read (%s: %s)", type(e).__name__, scrub(e))
             return None

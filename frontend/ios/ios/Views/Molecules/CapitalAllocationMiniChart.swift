@@ -287,13 +287,18 @@ struct CapitalAllocationMiniChart: View {
 
     /// Top of the bar scale (yield % or capital $). Floored so the Y domain is
     /// always valid — when bars are ~0 (pure dilution) the floor keeps the
-    /// shares line on a readable band instead of collapsing to zero height.
+    /// shares line on a readable band instead of collapsing to zero height — and
+    /// never below the materiality floor the Financials chart uses
+    /// (`SignalOfConfidenceScale`): CRWV's lone $1.47M buyback filled 87% of this
+    /// chart's Capital view on a ~$48B company while the Financials tab drew it as
+    /// the 1% sliver it is (review 2026-10-07).
     private var maxBarValue: Double {
         let maxStacked = dataPoints.map {
             viewType == .yield ? ($0.dividendYield + $0.buybackYield)
                                : ($0.dividendAmount + $0.buybackAmount)
         }.max() ?? 0
-        return max(maxStacked * 1.15, viewType == .yield ? 0.5 : 1.0)
+        let materialFloor = SignalOfConfidenceScale.materialityFloor(for: dataPoints, viewType: viewType)
+        return max(maxStacked * 1.15, viewType == .yield ? 0.5 : 1.0, materialFloor)
     }
 
     /// Lightly padded shares range so the line doesn't touch the top/bottom

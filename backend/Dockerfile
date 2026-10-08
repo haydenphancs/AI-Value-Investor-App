@@ -49,4 +49,7 @@ ENV PYTHONUNBUFFERED=1
 # ran and a claim sat parked for its whole stale window (W2 B-1). 30 s is enough for a
 # normal drain and well inside Railway's stop grace; the SSE reader reconciles on a
 # drop (it never re-POSTs), so cutting a stream is safe.
+# ONE worker: with no --workers flag uvicorn takes its worker count from UVICORN_WORKERS (its CLI,
+# first) or WEB_CONCURRENCY, so both must stay unset (or 1) on the web service — app/main.py logs
+# "STARTUP: UVICORN_WORKERS=…" / "STARTUP: WEB_CONCURRENCY=…" at ERROR otherwise.
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30"]

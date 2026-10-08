@@ -229,7 +229,29 @@ TABLE_NAME = "ticker_report_cache"
 #     instant above. Set to a PAST instant just before the commit; deployed on a Saturday,
 #     inside the Fri 18:00 → Mon 18:00 ET close cycle, so it only re-bills the weekend's
 #     cached reports.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 3, 13, 30, 0, tzinfo=timezone.utc)
+# 2026-10-08 (17:35 UTC): bumped for the 1.01 release deploy — ONE entry for three sessions' work
+#     shipped as one commit (owner, 2026-10-08). This ONE bump supersedes every instant above.
+#     (a) Signal of Confidence payload v14 (preferred-dividend split from the annual cash flow,
+#     share-count artifacts refused only on their own signature, market_cap, a newest count
+#     never shipped null where an EPS figure is sound) and Holders payload v5 (insider rows:
+#     the Form 4/A class/series token, chained balances for the chat ownership tool; the
+#     ownership snapshot moved to v4 with it) — cached collections carry the old SoC record and
+#     the embedded holders_response, and `_lookup_shared_cache` would copy them to new users.
+#     (b) 2026-10-07 peer-benchmark corrections: cached collections/reports hold the old peer
+#     cells — drill-down sector/industry lines (each period now its own merged industry/sector
+#     median, incomplete periods hidden, TTM point only at n>=20), competitor scoring on
+#     get_current_benchmarks, moat pillars vs the same-year sector median, and snapshot cards
+#     rebuilt (Price v6: P/FCF from priceToFreeCashFlowRatioTTM, decimal medians;
+#     Profitability v3 TTM margins + negative-equity ROE N/M; Health v4). Reports also carry
+#     per-line peer levels (sector_annual_level / sector_quarterly_level), unrated cards and the
+#     "industry avg" wording in the model prompts.
+#     Deployed MID-SESSION (owner's choice), before the 16:00 ET marketing window: today's
+#     cached reports rebuild once now and again at the 18:00 ET close, and a row the OLD
+#     process writes during Railway's overlap reads fresh until that close (hours, not a day)
+#     unless purged (the cleanup SQL in the 1.01 OWNER_TASKS item). The full suite ran BEFORE
+#     this literal was written, then commit and push followed at once (integration review
+#     2026-10-08: keep the floor-to-push window minimal).
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 8, 17, 35, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

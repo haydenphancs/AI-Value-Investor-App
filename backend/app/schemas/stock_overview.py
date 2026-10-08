@@ -5,6 +5,8 @@ Reuses shared models from etf.py (KeyStatisticItem, etc.) and adds
 stock-specific snapshot / sector / profile models.
 """
 
+from datetime import datetime, timezone
+
 from pydantic import BaseModel
 
 from app.schemas.dcf_fair_value import DcfFairValueResponse
@@ -30,6 +32,38 @@ class SnapshotMetricResponse(BaseModel):
     # Financials-tab decoder and on legacy cached snapshots.
     metric_key: Optional[str] = None
     score: Optional[int] = None
+    # "industry" | "sector": the peer group whose median `name` prints (2026-10-07). The
+    # name keeps the literal words "sector avg" / "vs sector" whatever the level, because
+    # shipped iOS builds strip the suffix with \s*\([^)]*sector[^)]*\); a build that knows
+    # this field swaps in the industry wording when it says "industry". None whenever the
+    # name prints no peer median. Optional and additive: older builds ignore it.
+    peer_level: Optional[str] = None
+
+
+# Wire format of `SnapshotItemResponse.computed_at`: ISO-8601 UTC to the second with a
+# literal "Z" (what iOS's ISO8601DateFormatter parses by default).
+SNAPSHOT_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def snapshot_build_time(now: Optional[datetime] = None) -> str:
+    """`computed_at` for a snapshot built at ``now`` (default: this instant). A naive
+    ``now`` is taken as UTC."""
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime(SNAPSHOT_TIME_FORMAT)
+
+
+def with_cached_build_time(json_data: Dict[str, Any], cached_at: datetime) -> Dict[str, Any]:
+    """Give a `snapshot_cache` row written before `computed_at` existed a build time.
+
+    Such a row has no ``computed_at`` KEY at all; its build time is the row's own
+    ``cached_at`` (each service upserts right after the build). A row that carries the key
+    keeps its stored value — a cached card shows when it was BUILT, never when it was
+    read. Mutates and returns ``json_data`` (callers pass their own copy of the row)."""
+    if "computed_at" not in json_data:
+        json_data["computed_at"] = snapshot_build_time(cached_at)
+    return json_data
 
 
 class DcfEstimateResponse(BaseModel):
@@ -68,6 +102,11 @@ class SnapshotItemResponse(BaseModel):
     # builds label `dcf` "FMP discounted-cash-flow model", so our value must never travel in
     # that slot. Optional end to end: builds predating it ignore the key.
     caydex_estimate: Optional[DcfFairValueResponse] = None
+    # When this card was BUILT (`snapshot_build_time`, ISO-8601 UTC "…Z"), 2026-10-07. A
+    # cached card keeps its build time on every tier — the Snapshots header used to print
+    # today's date over a card up to 24 h old. None only on a card built by a path that
+    # does not stamp it; iOS then shows no date. Optional and additive.
+    computed_at: Optional[str] = None
 
 
 class SectorIndustryResponse(BaseModel):

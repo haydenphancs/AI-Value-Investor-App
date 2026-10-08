@@ -169,6 +169,10 @@ struct HealthCheckMetric: Identifiable {
     let insightText: String
     let highlightedValue: String?  // e.g., "43% lower" or "15% discount"
     let highlightedLabel: String?  // e.g., "debt" or "discount"
+    /// "industry" | "sector": whose median `comparisonValue` is (`peer_level`). nil = no
+    /// peer comparison, or a backend that predates the field. Last, with a default, so the
+    /// memberwise init (sample data, the DTO mapper) keeps compiling without it.
+    var peerLevel: String? = nil
 
     /// `highlighted_value` the backend sends for a row it shows but cannot judge
     /// (`health_check_service.NOT_MEANINGFUL`): ROE on negative shareholder equity, whose
@@ -227,14 +231,23 @@ struct HealthCheckMetric: Identifiable {
 
         switch type {
         case .debtToEquity, .currentRatio, .interestCoverage, .quickRatio:
-            return "vs \(String(format: "%.2f", comparison))"
+            return "\(comparisonPrefix) \(String(format: "%.2f", comparison))"
         case .peRatio:
-            return "vs \(String(format: "%.1f", comparison))"
+            return "\(comparisonPrefix) \(String(format: "%.1f", comparison))"
         case .returnOnEquity:
-            return "vs \(String(format: "%.1f%%", comparison))"
+            return "\(comparisonPrefix) \(String(format: "%.1f%%", comparison))"
         case .altmanZScore:
             return nil
         }
+    }
+
+    /// Names the peer group the comparison is the median of: "vs industry" / "vs sector" by
+    /// `peerLevel`. A payload without the field (older backend) or an unknown level keeps the
+    /// plain "vs" it always had — never a guessed group.
+    var comparisonPrefix: String {
+        if peerLevel == "industry" { return "vs industry" }
+        if peerLevel == "sector" { return "vs sector" }
+        return "vs"
     }
 
     /// Colour of the value and the highlighted insight words: the backend VERDICT.
@@ -281,7 +294,8 @@ extension HealthCheckSectionData {
                 status: .positive,
                 insightText: "Strong balance sheet with conservative leverage.",
                 highlightedValue: "43%",
-                highlightedLabel: "lower debt than sector average."
+                highlightedLabel: "lower debt than sector average.",
+                peerLevel: "sector"
             ),
             HealthCheckMetric(
                 type: .peRatio,
@@ -303,7 +317,9 @@ extension HealthCheckSectionData {
                 status: .negative,
                 insightText: "ROE than peers. Low capital efficiency with improving trend.",
                 highlightedValue: "22%",
-                highlightedLabel: "below"
+                highlightedLabel: "below",
+                // An industry median: the card's label reads "vs industry 28.5%".
+                peerLevel: "industry"
             ),
             HealthCheckMetric(
                 type: .currentRatio,

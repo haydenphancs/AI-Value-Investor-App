@@ -170,11 +170,14 @@ def test_the_page_states_the_real_specialist_cap_and_tool_count():
     block = _data_block()
     assert f"≤{settings.CHAT_MAX_SPECIALISTS} of 7 lenses" in block
     assert f"(≤{settings.CHAT_MAX_SPECIALISTS})" in block
-    assert len(TOOL_DESCRIPTIONS) == 8, (
-        "the page's tool table lists 7 per-class tools plus the gated 8th, web_search"
+    assert len(TOOL_DESCRIPTIONS) == 9, (
+        "the page's tool table lists 8 per-class tools (check_ownership_filings joined "
+        "2026-10-05) plus the gated 9th, web_search"
     )
-    for tool in ("explain_price_move", "get_market_overview", "web_search"):
+    for tool in ("explain_price_move", "get_market_overview", "web_search",
+                 "check_ownership_filings"):
         assert tool in block or tool.replace("get_", "") in block
+    assert "The 9th tool, <code>web_search</code>" in block
     # The gated tool is described as gated, not as one more per-class tool.
     assert "web_search=True" in block and "open_web_search_turn" in block
 

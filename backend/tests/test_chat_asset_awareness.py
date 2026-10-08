@@ -63,10 +63,13 @@ def unlicensed_analyst_data(monkeypatch):
 # path and belongs to every asset class, `NORMAL` (the global chat) most of all.
 _NEWS = {"get_ticker_news", "explain_price_move"}
 _MARKET = {"get_market_snapshot"}
+# Who holds the stock, from its filings (TestFlight 1.0 (11), 2026-10-05): equity chats only —
+# a fund, a coin, an index or a futures contract has no Form 4 filers.
+_OWNERSHIP = {"check_ownership_filings"}
 
 _EXPECTED = {
-    "STOCK":     {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET,
-    "NORMAL":    {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET,
+    "STOCK":     {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET | _OWNERSHIP,
+    "NORMAL":    {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET | _OWNERSHIP,
     "ETF":       {"get_stock_chart_data", "get_sentiment_analysis"} | _NEWS | _MARKET,
     "CRYPTO":    {"get_stock_chart_data", "get_sentiment_analysis"} | _NEWS | _MARKET,
     # An index has no per-symbol news feed, but market breadth is most of any index answer.
@@ -104,7 +107,7 @@ def test_analyst_ratings_are_never_offered_for_an_unrated_asset(asset_type):
 
 def test_stock_keeps_every_equity_tool(licensed_analyst_data):
     """Anti-vacuity: a filter that returned {} for everything would pass the assertions above."""
-    assert len(chat_tools.tools_for_asset_type("STOCK")) == 6
+    assert len(chat_tools.tools_for_asset_type("STOCK")) == 7
 
 
 def test_every_asset_class_can_reach_sector_and_market_data(licensed_analyst_data):
@@ -166,7 +169,7 @@ def test_the_licence_filter_removes_ONLY_the_analyst_tool(unlicensed_analyst_dat
     assert set(chat_tools.tools_for_asset_type("STOCK")) == {
         "get_stock_chart_data",
         "get_sentiment_analysis",
-    } | _NEWS | _MARKET
+    } | _NEWS | _MARKET | _OWNERSHIP
     assert set(chat_tools.tools_for_asset_type("INDEX")) == {"get_market_overview"} | _MARKET
 
 

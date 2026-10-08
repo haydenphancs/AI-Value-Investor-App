@@ -209,8 +209,8 @@ struct HealthCheckInfoSheet: View {
 
                 tipCard(
                     number: "2",
-                    title: "Compare to Sector",
-                    description: "The gauge shows where a metric stands vs sector average. Being better than average in 3+ areas suggests competitive advantage."
+                    title: "Compare to Peers",
+                    description: "The gauge shows where a metric stands vs its peers' median: the company's industry, or its sector when the industry has too few companies to compare. Being better than the median in 3+ areas suggests competitive advantage."
                 )
 
                 tipCard(

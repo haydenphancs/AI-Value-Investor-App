@@ -3196,6 +3196,11 @@ async def test_a_run_date_must_be_a_calendar_date(svc, bad):
         await svc.list_runs_between(bad, date(2026, 9, 30))
     with pytest.raises(ValueError):
         await svc.link_hits_between(date(2026, 9, 1), bad)
+    # the weekly cost line's script read takes the same calendar days, at either end
+    with pytest.raises(ValueError):
+        await svc.script_tokens_between(bad, date(2026, 9, 30))
+    with pytest.raises(ValueError):
+        await svc.script_tokens_between(date(2026, 9, 1), bad)
 
 
 # ── spend_by_op_since / charges_by_op_since ──────────────────────────────────
@@ -3640,3 +3645,529 @@ async def test_close_finished_runs_fences_a_null_updated_at_as_null(svc, monkeyp
     assert await svc.close_finished_runs(_P5_TODAY) == 0 and len(calls) == 1
     live = _stored(svc, raced["id"])
     assert live["status"] == "media_ready" and live["metadata"] == {"late": 1}
+
+
+# ══ 2026-10-05 — the weekly cost line's ledger half (C4) ═══════════════════════════════════════════
+#
+# `_charge_entry` is the ONE reading rule for a journal entry, shared by the X cap (`_dated_charges`:
+# unchanged and still fail-closed — the charges_since / charges_by_op_since / spend_since tests above
+# are its regression guard and stay as they are) and the digest's weekly cost line (`charges_between`,
+# which never counts an undated entry and reads an in-window amount it cannot price as UNREADABLE).
+# The two new reads never return a partial sum: they ask for limit + 1 rows and RAISE past the limit.
+
+_AT = "2026-10-01T00:00:00Z"
+_AT_DT = datetime(2026, 10, 1, tzinfo=timezone.utc)
+_WIN_START = datetime(2026, 10, 1, tzinfo=timezone.utc)
+_WIN_END = datetime(2026, 10, 4, tzinfo=timezone.utc)
+#: Monday 2026-09-21 00:00 EDT — where the digest's X journal read starts (the week before's start).
+_PREV_WEEK_START = datetime(2026, 9, 21, 4, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("entry, expected", [
+    # the amount: an int, numeric text and a float read (int() truncates); 0 and a negative ARE amounts
+    ({"at": _AT, "op": "x_create", "micros": 15000}, ("x_create", 15000, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": "15000"}, ("x_create", 15000, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": 15000.7}, ("x_create", 15000, _AT_DT)),
+    ({"at": _AT, "op": "x_create_refund", "micros": -15000}, ("x_create_refund", -15000, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": 0}, ("x_create", 0, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": 2 * 10**9}, ("x_create", 2 * 10**9, _AT_DT)),   # no bound HERE
+    # an amount that cannot be read is None — never 0, never a crash
+    ({"at": _AT, "op": "x_create"}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": None}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": True}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": False}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": "abc"}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": "15000.7"}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": [1]}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": {"n": 1}}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": float("inf")}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": float("-inf")}, ("x_create", None, _AT_DT)),
+    ({"at": _AT, "op": "x_create", "micros": float("nan")}, ("x_create", None, _AT_DT)),
+    # the time: any ISO instant, a naive one (text or datetime) read as UTC; anything else is None
+    ({"at": "2026-09-30T20:00:00-04:00", "op": "x_create", "micros": 1}, ("x_create", 1, _AT_DT)),
+    ({"at": "2026-10-01T00:00:00", "op": "x_create", "micros": 1}, ("x_create", 1, _AT_DT)),
+    ({"at": datetime(2026, 10, 1), "op": "x_create", "micros": 1}, ("x_create", 1, _AT_DT)),
+    ({"at": "not a time", "op": "x_create", "micros": 1}, ("x_create", 1, None)),
+    ({"at": None, "op": "x_create", "micros": 1}, ("x_create", 1, None)),
+    ({"at": 7, "op": "x_create", "micros": 1}, ("x_create", 1, None)),
+    ({"at": "", "op": "x_create", "micros": 1}, ("x_create", 1, None)),
+    ({"at": {}, "op": "x_create", "micros": 1}, ("x_create", 1, None)),
+    ({"op": "x_create", "micros": 1}, ("x_create", 1, None)),
+    # the op: a missing or junk op is `unknown`; a long one is cut at 64 characters
+    ({"at": _AT, "micros": 1}, (mrs.UNKNOWN_CHARGE_OP, 1, _AT_DT)),
+    ({"at": _AT, "op": None, "micros": 1}, (mrs.UNKNOWN_CHARGE_OP, 1, _AT_DT)),
+    ({"at": _AT, "op": 42, "micros": 1}, (mrs.UNKNOWN_CHARGE_OP, 1, _AT_DT)),
+    ({"at": _AT, "op": "   ", "micros": 1}, (mrs.UNKNOWN_CHARGE_OP, 1, _AT_DT)),
+    ({"at": _AT, "op": "o" * 100, "micros": 1}, ("o" * 64, 1, _AT_DT)),
+    # an entry that is not a dict is no entry at all
+    ("garbage", None), (42, None), (None, None), (["x"], None), (("x_create", 1), None),
+])
+def test_charge_entry_reads_amount_time_and_op_by_the_one_rule(entry, expected):
+    assert mrs._charge_entry(entry) == expected
+
+
+def test_charges_between_is_half_open_and_reports_undated_and_unreadable_apart():
+    import dataclasses
+
+    messy = {"metadata": {"charges": _MESSY_JOURNAL}}
+    # [10-01, 10-04): 15000 + 5000 - 4000 + 10000 + 3 + 2 + 1 + 1 summed; the two undated entries are
+    # REPORTED, never summed (the cap counts them); the eight in-window entries whose amount cannot be
+    # read are reported as unreadable (the cap skips them) — a wrong number is never the answer
+    assert mrs.charges_between(messy, _WIN_START, _WIN_END) == mrs.ChargeWindow(26_007, 2, 8)
+    # a later window holds none of the dated entries — the same two undated ones are reported again,
+    # and summed into neither window
+    assert mrs.charges_between(messy, _WIN_END, datetime(2026, 10, 5, tzinfo=timezone.utc)) == \
+        mrs.ChargeWindow(0, 2, 0)
+    # naive instants are UTC; the same window on the New York clock is the same window
+    assert mrs.charges_between(messy, datetime(2026, 10, 1), datetime(2026, 10, 4)) == mrs.ChargeWindow(26_007, 2, 8)
+    assert mrs.charges_between(messy, datetime(2026, 10, 1), _WIN_END) == mrs.ChargeWindow(26_007, 2, 8)
+    assert mrs.charges_between(messy, datetime(2026, 9, 30, 20, tzinfo=mrs.ET),
+                               datetime(2026, 10, 3, 20, tzinfo=mrs.ET)) == mrs.ChargeWindow(26_007, 2, 8)
+
+    edges = {"metadata": {"charges": [
+        {"at": "2026-10-01T00:00:00Z", "op": "x_create", "micros": 1},                 # exactly the start: in
+        {"at": "2026-09-30T23:59:59.999999+00:00", "op": "x_create", "micros": 10},    # a microsecond before: out
+        {"at": "2026-10-03T23:59:59.999999+00:00", "op": "x_create", "micros": 100},   # a microsecond before the end: in
+        {"at": "2026-10-04T00:00:00+00:00", "op": "x_create", "micros": 1000},         # exactly the end: out
+        {"at": "2026-10-03T20:00:00-04:00", "op": "x_create", "micros": 10000},        # the end, New York time: out
+        {"at": "2026-09-30T20:00:00-04:00", "op": "x_create", "micros": 100000},       # the start, New York time: in
+    ]}}
+    within = mrs.charges_between(edges, _WIN_START, _WIN_END)
+    assert within == mrs.ChargeWindow(micros=100_101)
+    # [t, t) is empty — not even an entry exactly at t
+    assert mrs.charges_between(edges, _WIN_START, _WIN_START) == mrs.ChargeWindow()
+    # an inverted window holds no dated entry (nor an unreadable one); the undated ones are still
+    # reported, never summed
+    assert mrs.charges_between(edges, _WIN_END, _WIN_START) == mrs.ChargeWindow()
+    assert mrs.charges_between(messy, _WIN_END, _WIN_START) == mrs.ChargeWindow(0, 2, 0)
+    # adjacent half-open windows partition the dated entries: each one lands in exactly one week
+    before = mrs.charges_between(edges, datetime(2026, 9, 28, tzinfo=timezone.utc), _WIN_START)
+    after = mrs.charges_between(edges, _WIN_END, datetime(2026, 10, 7, tzinfo=timezone.utc))
+    assert (before.micros, after.micros) == (10, 11_000)
+    assert before.micros + within.micros + after.micros == 111_111
+
+    # the result is a frozen (micros, undated, unreadable) triple, all zero by default
+    w = mrs.ChargeWindow(1, 2, 3)
+    assert (w.micros, w.undated, w.unreadable) == (1, 2, 3)
+    assert mrs.ChargeWindow() == mrs.ChargeWindow(0, 0, 0)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        w.micros = 5  # type: ignore[misc]
+
+
+def test_charges_between_reads_an_amount_beyond_a_thousand_dollars_as_unreadable():
+    """One journal entry beyond ±$1,000 is a hand edit, not a charge: the cost line says "unreadable"
+    for that week instead of printing it. Only inside the window, and never for an undated entry."""
+    assert mrs.CHARGE_MICROS_BOUND == 10**9
+    day2, day3 = datetime(2026, 10, 2, tzinfo=timezone.utc), datetime(2026, 10, 3, tzinfo=timezone.utc)
+    journal = {"metadata": {"charges": [
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": 10**9},             # $1,000 exactly: readable
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": 5},
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": 10**9 + 1},         # one micro over: unreadable
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": -(10**9 + 1)},
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": str(10**9 + 1)},    # text, by the one rule
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": "9" * 5000},        # hostile text: no crash
+        {"at": "2026-10-02T00:00:00Z", "op": "x_create", "micros": 1e300},             # a finite float far past it
+        {"at": "2026-10-03T00:00:00Z", "op": "x_create_refund", "micros": -10**9},     # -$1,000 exactly: readable
+        {"at": "2026-10-10T00:00:00Z", "op": "x_create", "micros": 10**12},            # outside: ignored
+        {"op": "x_create", "micros": 10**12},                                          # undated, whatever the amount
+    ]}}
+    assert mrs.charges_between(journal, day2, day3) == mrs.ChargeWindow(10**9 + 5, 1, 5)
+    assert mrs.charges_between(journal, day3, _WIN_END) == mrs.ChargeWindow(-10**9, 1, 0)
+
+
+def test_charges_between_never_raises_on_the_first_or_last_representable_instant():
+    extremes = {"metadata": {"charges": [
+        {"at": "0001-01-01T00:00:00+00:00", "op": "x_create", "micros": 1},
+        {"at": "0001-01-01T00:00:00+05:00", "op": "x_create", "micros": 2},           # before year 1 in UTC
+        {"at": "9999-12-31T23:59:59.999999+00:00", "op": "x_create", "micros": 4},    # the last instant: end-exclusive
+        {"at": "9999-12-31T23:59:59-05:00", "op": "x_create", "micros": 8},           # after year 9999 in UTC
+    ]}}
+    assert mrs.charges_between(extremes, _WIN_START, _WIN_END) == mrs.ChargeWindow()
+    widest = (datetime.min.replace(tzinfo=timezone.utc), datetime.max.replace(tzinfo=timezone.utc))
+    assert mrs.charges_between(extremes, *widest) == mrs.ChargeWindow(1)
+    assert mrs.charges_between(extremes, datetime.min, datetime.max) == mrs.ChargeWindow(1)      # naive = UTC
+
+
+@pytest.mark.parametrize("post", [
+    {}, {"metadata": None}, {"metadata": "junk"}, {"metadata": ["a"]}, {"metadata": {}},
+    {"metadata": {"charges": None}}, {"metadata": {"charges": []}}, {"metadata": {"charges": "junk"}},
+    {"metadata": {"charges": 5}}, {"metadata": {"charges": {"at": _AT, "micros": 1}}},
+    {"metadata": {"charges": ["garbage", 42, None, ["x"]]}},
+])
+def test_charges_between_without_a_journal_is_an_empty_window(post):
+    assert mrs.charges_between(post, _WIN_START, _WIN_END) == mrs.ChargeWindow() == mrs.ChargeWindow(0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_cap_still_counts_an_out_of_range_or_undated_amount(svc):
+    """The ±$1,000 bound is the cost line's alone. The X cap keeps counting every amount it can read,
+    and every undated one — an over-count can only pause X early (fail-closed)."""
+    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    journal = [{"at": "2026-10-02T00:00:00+00:00", "op": "x_create", "micros": 2 * 10**9},
+               {"op": "x_metrics_read", "micros": 7}]
+    post = {"metadata": {"charges": journal}}
+    assert mrs.charges_since(post, since) == 2_000_000_007
+    assert mrs.charges_by_op_since(post, since) == {"x_create": 2_000_000_000, "x_metrics_read": 7}
+    # the cost line reads the same journal as one unreadable and one undated entry — never as a number
+    assert mrs.charges_between(post, since, since + timedelta(days=7)) == mrs.ChargeWindow(0, 1, 1)
+    # and the cap's own reads through the ledger
+    _p5_post(svc, status="published", updated_at="2026-10-02T00:00:00+00:00",
+             metadata={"charges": copy.deepcopy(journal)})
+    assert await svc.spend_since("x", since) == 2_000_000_007
+    assert await svc.spend_by_op_since("x", since) == {"x_create": 2_000_000_000, "x_metrics_read": 7}
+
+
+# ── list_charge_rows_since / script_tokens_between ───────────────────────────
+
+
+def _spy_selects(monkeypatch, svc, table) -> List[tuple]:
+    """Record the column list of every SELECT on `table`. The fake returns every column whatever the
+    select names, so without this a read that stopped asking for a column it needs would pass."""
+    t = svc.fake.tables[table]
+    real = t.select
+    calls: List[tuple] = []
+
+    def spy(*cols):
+        calls.append(cols)
+        return real(*cols)
+
+    monkeypatch.setattr(t, "select", spy)
+    return calls
+
+
+def _counting_reads(monkeypatch) -> List[str]:
+    """The op of every ledger round trip from now on (each one goes through `_exec`)."""
+    reads: List[str] = []
+    real_exec = mrs._exec
+
+    async def counting(query, *, op, **ids):
+        reads.append(op)
+        return await real_exec(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", counting)
+    return reads
+
+
+@pytest.mark.asyncio
+async def test_list_charge_rows_since_reads_one_platform_touched_since_the_instant(svc, monkeypatch):
+    since = _PREV_WEEK_START
+    assert await svc.list_charge_rows_since("x", since) == []                     # an empty ledger
+    late = _p5_post(svc, status="published", updated_at="2026-10-04T12:00:00+00:00",
+                    metadata={"charges": _charges(("2026-10-04T12:00:00+00:00", 15000))})
+    at_since = _p5_post(svc, status="published", updated_at="2026-09-21T04:00:00+00:00",   # the boundary: in
+                        metadata={"charges": _charges(("2026-09-21T04:00:00+00:00", 15000))})
+    quiet = _p5_post(svc, status="failed", updated_at="2026-09-29T09:00:00+00:00", metadata=None)
+    # touched before `since`: not read, even carrying an entry dated after it (impossible in production —
+    # every journal write bumps updated_at — but it proves the read is bounded by the touch)
+    _p5_post(svc, status="published", updated_at="2026-09-21T03:59:59.999999+00:00",
+             metadata={"charges": _charges(("2026-09-25T00:00:00+00:00", 777))})
+    blue = _p5_post(svc, platform="bluesky", status="published", updated_at="2026-09-30T00:00:00+00:00",
+                    metadata={"charges": _charges(("2026-09-30T00:00:00+00:00", 99))})
+    selects = _spy_selects(monkeypatch, svc, mrs.POSTS)
+    rows = await svc.list_charge_rows_since("x", since)
+    assert [r["id"] for r in rows] == [at_since["id"], quiet["id"], late["id"]]         # oldest touch first
+    assert rows[0]["metadata"] == at_since["metadata"] and rows[1]["metadata"] is None  # raw rows
+    assert selects == [("id,metadata,updated_at",)]                                     # the journal is asked for
+    # a naive since is UTC; the same instant on the New York clock, or as text, is the same read
+    for same in (datetime(2026, 9, 21, 4, 0), datetime(2026, 9, 21, 0, 0, tzinfo=mrs.ET),
+                 "2026-09-21T00:00:00-04:00", "2026-09-21T04:00:00Z"):
+        assert [r["id"] for r in await svc.list_charge_rows_since("x", same)] == [r["id"] for r in rows]
+    assert [r["id"] for r in await svc.list_charge_rows_since("bluesky", since)] == [blue["id"]]
+    assert await svc.list_charge_rows_since("threads", since) == []
+
+
+@pytest.mark.parametrize("bad", [date(2026, 10, 1), "2026-10-01", None, 1759276800, "2026-10-01Tlate"])
+@pytest.mark.asyncio
+async def test_list_charge_rows_since_refuses_a_since_that_is_not_an_instant(svc, monkeypatch, bad):
+    reads = _counting_reads(monkeypatch)
+    with pytest.raises(ValueError):
+        await svc.list_charge_rows_since("x", bad)
+    assert reads == []                                                              # before any read
+
+
+@pytest.mark.asyncio
+async def test_list_charge_rows_since_raises_when_the_read_fails_never_a_silent_empty(svc, monkeypatch):
+    async def unavailable(query):
+        raise RuntimeError("503 from PostgREST")
+
+    monkeypatch.setattr(mrs, "sb_exec", unavailable)
+    with pytest.raises(mrs.MarketingRunError, match="list_charge_rows_since") as ei:
+        await svc.list_charge_rows_since("x", _PREV_WEEK_START)
+    assert "platform=x" in str(ei.value) and "RuntimeError: 503 from PostgREST" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_list_charge_rows_since_refuses_a_partial_read(svc, monkeypatch):
+    since = _PREV_WEEK_START
+    # Another platform's rows and rows untouched since `since` are filtered IN the query, so they never
+    # count toward the limit — and they are the oldest rows, the first an unfiltered read would see.
+    for i in range(3):
+        _p5_post(svc, status="published", updated_at=f"2026-09-20T00:00:0{i}+00:00")
+        _p5_post(svc, platform="bluesky", status="published", updated_at=f"2026-09-22T00:00:0{i}+00:00")
+    x_rows = [_p5_post(svc, status="published", updated_at=f"2026-09-2{3 + i}T00:00:00+00:00") for i in range(3)]
+    with pytest.raises(mrs.MarketingRunError, match="partial") as ei:
+        await svc.list_charge_rows_since("x", since, limit=2)
+    assert str(ei.value) == ("list_charge_rows_since: more than 2 x posts touched since "
+                             "2026-09-21T04:00:00.000000Z — the cost line is never a partial sum")
+    # exactly the limit is a complete read (the probe asks for limit + 1)
+    assert [r["id"] for r in await svc.list_charge_rows_since("x", since, limit=3)] == [r["id"] for r in x_rows]
+    svc.fake.tables[mrs.POSTS].rows.remove(x_rows[-1])
+    assert [r["id"] for r in await svc.list_charge_rows_since("x", since, limit=2)] == [r["id"] for r in x_rows[:2]]
+    # a limit that could read nothing, or that is not an int, is refused before any read; keyword-only
+    reads = _counting_reads(monkeypatch)
+    for bad in (0, -1, True, 2.0, "2"):
+        with pytest.raises(ValueError):
+            await svc.list_charge_rows_since("x", since, limit=bad)
+    assert reads == []
+    with pytest.raises(TypeError):
+        await svc.list_charge_rows_since("x", since, 2)  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_list_charge_rows_since_reads_at_most_five_hundred_rows_by_default(svc):
+    base = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    for i in range(500):
+        _p5_post(svc, status="published", updated_at=(base + timedelta(seconds=i)).isoformat())
+    assert len(await svc.list_charge_rows_since("x", _PREV_WEEK_START)) == 500
+    _p5_post(svc, status="published", updated_at=(base + timedelta(seconds=500)).isoformat())
+    with pytest.raises(mrs.MarketingRunError, match="more than 500 x posts"):
+        await svc.list_charge_rows_since("x", _PREV_WEEK_START)
+
+
+@pytest.mark.asyncio
+async def test_list_charge_rows_since_probe_fires_under_postgrests_max_rows(svc, monkeypatch):
+    """Production PostgREST cuts every answer at max-rows (≈1,000 here) whatever `.limit()` asks, so the
+    fake here does too. Review 2026-10-07: at the old limit of 1,000 the probe asked for 1,001 rows, got
+    1,000 and read as complete — a silent partial sum. Every limit whose probe fits still fires; a limit
+    whose probe cannot fit is refused before any read."""
+    real_execute = _Query.execute
+
+    def capped(self):
+        res = real_execute(self)
+        if self.op == "select":
+            res.data = res.data[:mrs.POSTGREST_MAX_ROWS]
+        return res
+
+    monkeypatch.setattr(_Query, "execute", capped)
+    assert mrs.POSTGREST_MAX_ROWS == 1000
+    base = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    for i in range(1200):
+        _p5_post(svc, status="published", updated_at=(base + timedelta(seconds=i)).isoformat())
+    for limit, shown in ((None, 500), (999, 999), (1, 1)):
+        kw = {} if limit is None else {"limit": limit}
+        with pytest.raises(mrs.MarketingRunError, match=f"more than {shown} x posts"):
+            await svc.list_charge_rows_since("x", _PREV_WEEK_START, **kw)
+    reads = _counting_reads(monkeypatch)
+    for too_big in (1000, 5000):
+        with pytest.raises(ValueError, match="does not fit in one PostgREST response"):
+            await svc.list_charge_rows_since("x", _PREV_WEEK_START, limit=too_big)
+    assert reads == []
+
+
+def _script_row(svc, run_date: str, tokens: Any, **extra) -> Dict[str, Any]:
+    """A `marketing_scripts` row seeded straight into the fake — what the cost line reads back."""
+    row = {"run_id": str(uuid.uuid4()), "run_date": run_date, "status": "accepted", "tokens_used": tokens,
+           "source_ref": "money_moves:test-item", "template_id": "checklist", "generations": 2,
+           "output": {"posts": {"x": _server_copy("x")}, "judge": {"mode": "enforce"}},
+           "fact_sheet": {"facts": ["a fact"]}, **extra}
+    svc.fake.tables[mrs.SCRIPTS].rows.append(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_script_tokens_between_is_inclusive_projected_and_ordered(svc, monkeypatch):
+    assert await svc.script_tokens_between(date(2026, 9, 28), date(2026, 10, 4)) == []    # an empty table
+    for day, tokens in [("2026-10-04", 22_100), ("2026-09-27", 60_000), ("2026-10-01", None),
+                        ("2026-09-28", 21_000), ("2026-10-05", 5), ("2026-09-30", "12")]:
+        _script_row(svc, day, tokens)                                                      # stored out of order
+    selects = _spy_selects(monkeypatch, svc, mrs.SCRIPTS)
+    got = await svc.script_tokens_between(date(2026, 9, 28), date(2026, 10, 4))
+    # inclusive at both ends, oldest first, two keys only, RAW values (the digest validates each count:
+    # a junk one must reach it as junk and read "unreadable", never be coerced to 0 here)
+    assert got == [{"run_date": "2026-09-28", "tokens_used": 21_000},
+                   {"run_date": "2026-09-30", "tokens_used": "12"},
+                   {"run_date": "2026-10-01", "tokens_used": None},
+                   {"run_date": "2026-10-04", "tokens_used": 22_100}]
+    assert selects == [("run_date,tokens_used",)]
+    assert await svc.script_tokens_between("2026-09-28", "2026-10-04") == got             # ISO strings
+    assert await svc.script_tokens_between(date(2026, 10, 5), date(2026, 10, 5)) == [
+        {"run_date": "2026-10-05", "tokens_used": 5}]                                     # a one-day window
+    # an inverted window, and a datetime at either end, read nothing at all
+    reads = _counting_reads(monkeypatch)
+    assert await svc.script_tokens_between(date(2026, 10, 4), date(2026, 9, 28)) == []
+    for bad in (datetime(2026, 9, 28, tzinfo=timezone.utc), datetime(2026, 9, 28)):
+        with pytest.raises(ValueError):
+            await svc.script_tokens_between(bad, date(2026, 10, 4))
+        with pytest.raises(ValueError):
+            await svc.script_tokens_between(date(2026, 9, 28), bad)
+    assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_script_tokens_between_refuses_more_scripts_than_days(svc):
+    """One script per run (PK run_id) and one run per day (UNIQUE run_date): more rows than days means
+    a day holds two, and a sum could count one twice — the read raises instead of returning them."""
+    for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
+        _script_row(svc, day, 1000)
+    assert len(await svc.script_tokens_between(date(2026, 10, 1), date(2026, 10, 3))) == 3   # one a day
+    _script_row(svc, "2026-10-02", 1000)                       # a second script on one day (a hand edit)
+    with pytest.raises(mrs.MarketingRunError,
+                       match=r"script_tokens_between: 4 scripts for the 3 days 2026-10-01\.\.2026-10-03"):
+        await svc.script_tokens_between(date(2026, 10, 1), date(2026, 10, 3))
+    with pytest.raises(mrs.MarketingRunError, match="script_tokens_between"):
+        await svc.script_tokens_between(date(2026, 10, 2), date(2026, 10, 2))
+    _script_row(svc, "2026-10-03", 1000)                       # past the probe: still refused
+    with pytest.raises(mrs.MarketingRunError, match="script_tokens_between"):
+        await svc.script_tokens_between(date(2026, 10, 1), date(2026, 10, 3))
+
+
+@pytest.mark.asyncio
+async def test_script_tokens_between_refuses_a_repeated_day_in_a_sparse_window_too(svc):
+    """The digest reads 14 days that hold about 8 scripts, so "more rows than days" alone would let a
+    second script on one day through and the Gemini part would sum it twice. Two rows on one day are
+    refused whatever the window's size (found by the 2026-10-05 test writers)."""
+    for day in ("2026-09-22", "2026-09-29", "2026-10-01", "2026-10-03"):
+        _script_row(svc, day, 1000)
+    assert len(await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))) == 4
+    _script_row(svc, "2026-10-01", 2000)                       # a second script on one day (a hand edit)
+    with pytest.raises(mrs.MarketingRunError, match=r"5 scripts for the 14 days .* a day holds two"):
+        await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))
+    # a window that does not include the repeated day is unaffected
+    assert len(await svc.script_tokens_between(date(2026, 9, 21), date(2026, 9, 30))) == 2
+
+
+@pytest.mark.asyncio
+async def test_script_tokens_between_raises_when_the_read_fails_never_a_silent_empty(svc, monkeypatch):
+    async def unavailable(query):
+        raise RuntimeError("503 from PostgREST")
+
+    monkeypatch.setattr(mrs, "sb_exec", unavailable)
+    with pytest.raises(mrs.MarketingRunError, match="script_tokens_between"):
+        await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))
+
+
+# ══ 2026-10-05 — create_posts dispatches on the content class (C5) ════════════════════════════════
+#
+# "A" gets the judge gate; every other value is refused with the existing 422 MarketingRequestInvalid
+# (the worker fails the run), AFTER the hold and accepted-script checks and BEFORE any asset read or
+# INSERT. It used to read None / "" as "A" and let every other value through with no gate at all.
+
+_UNGATED_CLASSES = ["C", None, "", "a", "B", " A", "A ", 1, True, ["A"], "class-C-template-" * 6]
+
+
+async def _class_run(svc, content_class: Any):
+    """A real (non-dry-run) run with an ACCEPTED script judged in `enforce` mode and a ready video —
+    everything a class-A run needs to become posts — whose stored class is then hand-edited (the only
+    code writer, `_heal_mirror`, always writes "A")."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    await _accept_script(svc, rid, ["x", "tiktok"])
+    video = await _ready_asset(svc, rid)
+    _stored(svc, rid)["content_class"] = content_class
+    specs = [{"platform": "x", "format": "text"},
+             {"platform": "tiktok", "format": "video", "asset_ids": [video["id"]]}]
+    return rid, specs
+
+
+@pytest.mark.parametrize("content_class", _UNGATED_CLASSES, ids=lambda v: repr(v)[:24])
+@pytest.mark.asyncio
+async def test_create_posts_refuses_every_content_class_but_a_and_writes_nothing(svc, monkeypatch, caplog,
+                                                                                content_class):
+    import logging
+
+    from app.api.error_response import ErrorCode, classify_exception
+
+    rid, specs = await _class_run(svc, content_class)
+
+    async def no_asset_read(run_id):
+        raise AssertionError("the class refusal must come before any asset read")
+
+    monkeypatch.setattr(svc, "list_assets", no_asset_read)
+    before = copy.deepcopy({name: t.rows for name, t in svc.fake.tables.items()})
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRequestInvalid) as ei:
+            await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+        with pytest.raises(mrs.MarketingRequestInvalid):          # a text-only request, no asset read either way
+            await svc.create_posts(rid, specs[:1], claim=_holder(svc, rid))
+    shown = str(content_class)[:20]
+    assert type(ei.value) is mrs.MarketingRequestInvalid
+    assert str(ei.value) == (f"run {rid}: content_class {shown!r} has no post gate — only class A, judged in "
+                             "enforce mode, becomes a post; nothing recorded")
+    assert classify_exception(ei.value) == (ErrorCode.MARKETING_REQUEST_INVALID, 422)
+    assert svc.fake.tables[mrs.POSTS].rows == []
+    assert {name: t.rows for name, t in svc.fake.tables.items()} == before        # nothing written anywhere
+    refused = [r for r in caplog.records if r.levelno == logging.ERROR and "REFUSED" in r.getMessage()]
+    assert len(refused) == 2
+    assert all(rid in r.getMessage() and f"content_class {shown!r}" in r.getMessage() for r in refused)
+
+
+@pytest.mark.asyncio
+async def test_class_a_judged_in_enforce_mode_still_becomes_posts(svc, caplog):
+    """The control for the refusals above: the same run with the class left at "A" records its posts."""
+    import logging
+
+    rid, specs = await _class_run(svc, "A")
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    assert [(p["platform"], p["format"], p["status"]) for p in posts] == [
+        ("x", "text", "pending_review"), ("tiktok", "video", "pending_review")]
+    assert len(svc.fake.tables[mrs.POSTS].rows) == 2
+    assert not [r for r in caplog.records if "REFUSED" in r.getMessage()]
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["live", "rehearsal"])
+@pytest.mark.parametrize("judge", [{"mode": "enforce"}, {"mode": "shadow"}, {"mode": "off"}, None])
+@pytest.mark.asyncio
+async def test_an_ungated_class_is_refused_whatever_the_judge_said(svc, judge, dry_run):
+    """The judge decides only inside the class-A branch. A class-C run is the 422 (the worker fails the
+    run), never the 409 judge refusal, whose hint would tell the owner to set MARKETING_JUDGE_MODE=enforce
+    — false while the judge is enforcing. A rehearsal (dry-run) run is refused the same way: the class
+    dispatch has no dry-run branch."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=dry_run, now=NOW, claim_nonce=_n())
+    output: Dict[str, Any] = {"posts": {"x": _server_copy("x")}}
+    if judge is not None:
+        output["judge"] = judge
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "output": output})
+    _stored(svc, row["id"])["content_class"] = "C"
+    with pytest.raises(mrs.MarketingRequestInvalid) as ei:
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
+    assert type(ei.value) is mrs.MarketingRequestInvalid
+    assert f"run {row['id']}: content_class 'C' has no post gate" in str(ei.value)
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.asyncio
+async def test_the_class_refusal_comes_after_the_hold_and_the_script(svc, caplog):
+    import logging
+
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    _stored(svc, rid)["content_class"] = "C"
+    spec = [{"platform": "x", "format": "text"}]
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        # no accepted script yet: the script refusal (409 — the worker waits for the writer)
+        with pytest.raises(mrs.MarketingScriptNotReady):
+            await svc.create_posts(rid, spec, claim=_holder(svc, rid))
+        await _accept_script(svc, rid, ["x"])
+        # a zombie whose claim was taken over: not held (409), whatever the class
+        with pytest.raises(MarketingRunNotHeld):
+            await svc.create_posts(rid, spec, claim=mrs.CallerClaim(1, "f" * 32))
+        with pytest.raises(MarketingRunNotFound):
+            await svc.create_posts(str(uuid.uuid4()), spec, claim=_holder(svc, rid))
+        assert not [r for r in caplog.records if "REFUSED" in r.getMessage()]
+        # held, with an accepted script: only now does the class decide
+        with pytest.raises(mrs.MarketingRequestInvalid):
+            await svc.create_posts(rid, spec, claim=_holder(svc, rid))
+        # and once the day is closed, "not held" comes first again
+        await svc.update_run(rid, status="skipped", finished=True)
+        with pytest.raises(MarketingRunNotHeld):
+            await svc.create_posts(rid, spec, claim=_holder(svc, rid))
+    assert len([r for r in caplog.records if "REFUSED" in r.getMessage()]) == 1
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+def test_an_ungated_class_is_a_422_never_a_retried_5xx():
+    from app.api.error_response import ErrorCode, classify_exception
+
+    assert classify_exception(mrs.MarketingRequestInvalid("run r: content_class 'C' has no post gate")) == (
+        ErrorCode.MARKETING_REQUEST_INVALID, 422)

@@ -200,7 +200,7 @@ def _assert_dto_and_helper(repo_src: str) -> None:
     assert re.search(r"cashFlowReported:\s*cashFlowReported\s*\?\?\s*true", helper), \
         "a missing key must mean 'reported' (today's behaviour), never 'unreported'"
     for field in ("period", "dividendYield", "buybackYield", "dividendAmount",
-                  "buybackAmount", "sharesOutstanding"):
+                  "buybackAmount", "sharesOutstanding", "marketCap"):
         assert re.search(rf"\b{field}:\s*{field}\b", helper), f"helper drops {field}"
 
     response = _body(code, "struct SignalOfConfidenceResponseDTO: Codable, FinancialsCacheable {")
@@ -242,8 +242,10 @@ def test_the_report_maps_points_through_the_same_helper():
      '        case cashFlowReported = "cashflow_reported"\n'),
     ("            cashFlowReported: cashFlowReported ?? true\n",
      "            cashFlowReported: cashFlowReported ?? false\n"),
-    ("            sharesOutstanding: sharesOutstanding,\n            cashFlowReported:",
-     "            sharesOutstanding: nil,\n            cashFlowReported:"),
+    ("            sharesOutstanding: sharesOutstanding,\n            marketCap:",
+     "            sharesOutstanding: nil,\n            marketCap:"),
+    # 2026-10-05: the Capital view's scale floor must ride the shared helper too.
+    ("            marketCap: marketCap,\n", ""),
     ("        let points = dataPoints.map { $0.toDisplayPoint() }\n",
      "        let points = dataPoints.map {\n            SignalOfConfidenceDataPoint(\n"
      "                period: $0.period, dividendYield: $0.dividendYield,\n"
@@ -766,11 +768,18 @@ def _decode_flag(wire_point: Dict) -> bool:
 
 
 def _money(millions: float) -> str:
-    """Port of `SignalOfConfidenceFormat.money(millions:)`."""
+    """Port of `SignalOfConfidenceFormat.money(millions:)` — kept equal to the port in
+    test_soc_deepcheck_ios.py (zero reads "$0"; under $10M keeps a decimal, 2026-10-05)."""
     if not math.isfinite(millions):
         return "—"
     sign = "-" if millions < 0 else ""
     m = abs(millions)
+    if m == 0:
+        return "$0"
+    if m < 0.05:
+        return f"{sign}<$0.1M"
+    if m < 9.95:
+        return f"{sign}${m:.1f}M"
     if m >= 1_000_000 or round(m / 1_000) >= 1_000:
         return f"{sign}${m / 1_000_000:.1f}T"
     if m >= 10_000:
@@ -800,7 +809,7 @@ def _newest_buyback_text(points: List[Dict]) -> str:
     amt = points[-1]["buyback_amount"] if points else None
     if amt is None or not math.isfinite(amt) or amt <= 0:
         return "$0"
-    return f"${amt:.1f}M" if amt < 1 else _money(amt)
+    return _money(amt)
 
 
 def _has_unreported(points: List[Dict]) -> bool:
@@ -860,9 +869,28 @@ def test_port_a_measured_zero_is_not_a_dash():
     means 'no filing', never 'paid nothing'."""
     pts = [_pt("Q1 '25", 0.0, 0.0, 0.0, 0.0), _pt("Q2 '25", 0.0, 0.0, 0.0, 0.0)]
     assert _label_row(pts, "dividend", "yield") == ["0.00%", "0.00%"]
-    assert _label_row(pts, "buyback", "capital") == ["$0M", "$0M"]
+    # "$0", never "$0M" (TestFlight 1.0 (11), CRWV: every cell of a non-returner read "$0M")
+    assert _label_row(pts, "buyback", "capital") == ["$0", "$0"]
     assert not _has_unreported(pts)
     assert _newest_buyback_text(pts) == "$0"
+
+
+@pytest.mark.parametrize("amt, text", [
+    (0.03, "<$0.1M"),     # review 2026-10-07: the header read "$0.0M" — a real payment as zero
+    (0.3, "$0.3M"), (0.96, "$1.0M"), (2.59, "$2.6M"), (12.3, "$12M"), (1_499, "$1.5B"),
+])
+def test_port_newest_buyback_header_matches_the_charts(amt, text):
+    pts = [_pt("Q1 '25", 0.0, 0.0, 0.0, 0.0), _pt("Q2 '25", 0.0, 0.01, 0.0, amt)]
+    assert _newest_buyback_text(pts) == text
+    assert _newest_buyback_text(pts) == _label_row(pts, "buyback", "capital")[-1], \
+        "the report header and the chart cells print one figure for one quarter"
+
+
+def test_newest_buyback_header_delegates_every_amount_to_the_shared_format():
+    ca = _body(_strip_comments(_src(_REPORT_MODELS)), "struct ReportCapitalAllocation {")
+    text = _body(ca, "var newestBuybackText: String")
+    assert "String(format:" not in text, "the header hand-rolls a format again ('$0.0M')"
+    assert re.search(r"return SignalOfConfidenceFormat\.money\(millions: amt\)\s*$", text.strip()), text
 
 
 def test_port_the_flag_wins_over_a_malformed_non_zero_placeholder():

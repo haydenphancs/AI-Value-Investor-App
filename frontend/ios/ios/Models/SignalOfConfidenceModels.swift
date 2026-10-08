@@ -71,7 +71,17 @@ struct SignalOfConfidenceDataPoint: Identifiable {
     /// indistinguishable from a measurement — it plunged the shares line to the axis and
     /// made the summary read a flat -100% share-count change (a spectacular fake
     /// buyback). Same reasoning, and the same fix, as ProfitPower's `Double?` margins.
+    /// Also nil for an interior one-quarter vendor artifact the server refuses (FMP copies the
+    /// ANNUAL average into fiscal-Q4 rows: CRWV Q4 '25 read 435M between 498M and 527M). The
+    /// newest point is never nil for that reason — the server ships the count that quarter's
+    /// own EPS implies — because build 1.0 (10) prints a nil newest count as "0.00M".
     let sharesOutstanding: Double?
+    /// The market cap (USD millions) this quarter's yields were divided by, or nil (an older
+    /// backend, or no usable cap). Only the Capital ($) view's scale reads it — never shown —
+    /// so an immaterial amount cannot fill the chart (TestFlight 1.0 (11), CRWV: a $2.6M bar
+    /// on a ~$50B company towered over a "$0–$3M" axis). Defaulted and declared before
+    /// `cashFlowReported`, so every memberwise init and preview compiles unchanged.
+    var marketCap: Double? = nil
     /// False when no cash-flow figures are on hand for this quarter: the vendor has no
     /// cash-flow filing on record for it (an interior or leading-edge hole in the history)
     /// or — for the whole series — the cash-flow fetch failed (`degraded` carries
@@ -327,12 +337,27 @@ extension DividendInfo {
 /// eight `.fixedSize()` columns: ≥ $1T `%.1fT`, ≥ $10B `%.0fB`, ≥ $1B `%.1fB`, else `%.0fM`.
 /// A value that would round up into the next tier's digits ("$1000M", "$1000B") is
 /// promoted to that tier instead.
+///
+/// The bottom of the scale (TestFlight 1.0 (11), CRWV): a measured zero is "$0" — the axis
+/// baseline's own text and the report header's ("$0M" printed in every cell of a company
+/// that returned nothing) — and an amount under $10M keeps one decimal ("$0.3M", "$2.6M",
+/// "<$0.1M"), so a real payment never reads as zero and two axis ticks never print the same
+/// figure (0.6x and 0.9x of a $1.7M axis both read "$1M" in whole millions).
 enum SignalOfConfidenceFormat {
     /// `millions` is USD millions, as every SoC amount arrives.
     static func money(millions: Double) -> String {
         guard millions.isFinite else { return "—" }
         let sign = millions < 0 ? "-" : ""
         let m = abs(millions)
+        if m == 0 {
+            return "$0"
+        }
+        if m < 0.05 {
+            return sign + "<$0.1M"
+        }
+        if m < 9.95 {
+            return sign + String(format: "$%.1fM", m)
+        }
         if m >= 1_000_000 || (m / 1_000).rounded() >= 1_000 {
             return sign + String(format: "$%.1fT", m / 1_000_000)
         }
@@ -343,6 +368,58 @@ enum SignalOfConfidenceFormat {
             return sign + String(format: "$%.1fB", m / 1_000)
         }
         return sign + String(format: "$%.0fM", m)
+    }
+}
+
+// MARK: - Bar scale (shared)
+
+/// ONE materiality floor for both Signal of Confidence charts — the Financials tab's
+/// `SignalOfConfidenceChartView` and the report's `CapitalAllocationMiniChart` draw the same
+/// quarters, and the floor went into only the first (review 2026-10-07: CRWV's lone $1.47M
+/// buyback filled 87% of the report's Capital view and 1% of the Financials tab's).
+///
+/// TestFlight 1.0 (11), CRWV: one $2.6M quarter on a ~$50B company set a "$0–$3M" axis and
+/// drew a full-height bar beside eight "$0M" cells — a lone giant bar implying significance.
+/// An axis therefore never tops out below the amount that would be material.
+enum SignalOfConfidenceScale {
+    /// The smallest top the Yield view's axis takes, in percent (trailing twelve months).
+    /// Below it a total shareholder yield draws as the short bar it is, against a 0–1% axis.
+    static let materialYieldFloor: Double = 1.0
+
+    /// The axis top below which an amount is not material, for `viewType`. Yield:
+    /// `materialYieldFloor`. Capital: a QUARTER's worth of that yield (a bar is one quarter's
+    /// cash, the yield floor a year) on the median `marketCap` of `points` (USD millions, the
+    /// yields' own denominator), so both views draw the same amount at the same height.
+    /// 0 — no floor, the data alone scales it — when no point carries a usable cap (an older
+    /// backend, a cached payload, a report stored before the cap shipped).
+    static func materialityFloor(
+        for points: [SignalOfConfidenceDataPoint],
+        viewType: SignalOfConfidenceViewType
+    ) -> Double {
+        switch viewType {
+        case .yield:
+            return materialYieldFloor
+        case .capital:
+            let caps = points.compactMap { $0.marketCap }.filter { $0.isFinite && $0 > 0 }.sorted()
+            guard !caps.isEmpty else { return 0 }
+            let middle = caps.count / 2
+            let median = caps.count % 2 == 1 ? caps[middle] : (caps[middle - 1] + caps[middle]) / 2
+            // percent → fraction (/ 100), a year → one quarter (/ 4)
+            let capitalFloor: Double = median * (materialYieldFloor / 100) / 4
+            return capitalFloor.isFinite ? capitalFloor : 0
+        }
+    }
+
+    /// True when every quarter has cash-flow figures and none returned a dollar — decided
+    /// from the CASH, never from the selected view's bars. Yields are rounded to 0.01% and
+    /// read 0.00 for a quarter with no usable market cap, so a Yield-view test said "no
+    /// dividends or buybacks" for a tiny repurchaser (and, with every cap source down, for
+    /// a top one) while the Capital view drew its bars (review 2026-10-07). A quarter with
+    /// no figures (`cashFlowReported == false`) is an unknown, not a zero, so it withholds it.
+    static func returnedNothing(_ points: [SignalOfConfidenceDataPoint]) -> Bool {
+        !points.isEmpty && points.allSatisfy { point in
+            point.cashFlowReported && !(point.dividendAmount + point.buybackAmount > 0)
+        }
     }
 }
 
@@ -387,6 +464,14 @@ struct SignalOfConfidenceSectionData {
     /// so its dividend and buyback cells read "—". Drives the card's one-line key for that dash.
     var hasUnreportedCashFlow: Bool {
         dataPoints.contains { !$0.cashFlowReported }
+    }
+
+    /// The quarter `summary.shareCountChange` is measured FROM: the oldest point that reports
+    /// a share count, by the server's own rule (oldest → newest REPORTED count). nil when none
+    /// does. Lets "+36.3%" say what it spans ("since Q4 '24") instead of leaving the reader
+    /// to guess — for a company that returns no capital, that change IS the signal.
+    var shareCountWindowStart: String? {
+        dataPoints.first { ($0.sharesOutstanding ?? 0) > 0 }?.period
     }
 }
 
@@ -466,6 +551,34 @@ extension SignalOfConfidenceSectionData {
             summary: sampleData.summary,
             dividendInfo: sampleData.dividendInfo
         )
+    }
+
+    /// Preview-only: a company that returned no capital in any quarter while its share count
+    /// rose — every cash cell a measured "$0", two quarters' counts not reported, and the
+    /// dilution as the signal. Sample shapes, not market data.
+    static var sampleNoCapitalReturnDiluting: SignalOfConfidenceSectionData {
+        let periods = ["Q3 '24", "Q4 '24", "Q1 '25", "Q2 '25", "Q3 '25", "Q4 '25", "Q1 '26", "Q2 '26"]
+        let shares: [Double?] = [nil, 400, 400, 480, 500, nil, 530, 550]
+        var points: [SignalOfConfidenceDataPoint] = []
+        for index in periods.indices {
+            points.append(SignalOfConfidenceDataPoint(
+                period: periods[index],
+                dividendYield: 0,
+                buybackYield: 0,
+                dividendAmount: 0,
+                buybackAmount: 0,
+                sharesOutstanding: shares[index],
+                marketCap: 45_000
+            ))
+        }
+        let summary = SignalOfConfidenceSummary(
+            totalYield: 0,
+            dividendYield: 0,
+            buybackYield: 0,
+            shareCountChange: 37.5,
+            buybackStatus: .diluting
+        )
+        return SignalOfConfidenceSectionData(dataPoints: points, summary: summary, dividendInfo: nil)
     }
 }
 

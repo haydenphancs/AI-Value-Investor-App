@@ -41,13 +41,29 @@ struct SignalOfConfidenceChartView: View {
     /// `ForEach(id: \.self)`, and a zero denominator in the shares normaliser.
     private var hasCapitalReturn: Bool { barTotals.contains { $0 > 0 } }
 
+    /// Every quarter has cash-flow figures and none returned a dollar: the bar band is empty
+    /// on purpose, and says so (`noCapitalReturnNote`). Decided from the CASH in both views
+    /// (`SignalOfConfidenceScale.returnedNothing`) — a rounded or unpriced 0.00% yield is
+    /// not "no dividends or buybacks".
+    private var returnedNothing: Bool {
+        SignalOfConfidenceScale.returnedNothing(dataPoints)
+    }
+
     /// Y domain for the stacked bars — always starts at 0 (bars grow from the
-    /// baseline) and is never zero-width.
+    /// baseline), is never zero-width, and never tops out below `materialityFloor`.
     private var barDomain: ClosedRange<Double> {
         let safe = ChartDomain.make(
             barTotals, includeZero: true, headroomFraction: 0.15, fallback: 0...1
         )
-        return 0...Swift.max(safe.upperBound, ChartDomain.minimumSpan)
+        let natural = Swift.max(safe.upperBound, ChartDomain.minimumSpan)
+        return 0...Swift.max(natural, materialityFloor)
+    }
+
+    /// The axis top below which an amount is not material, so it is never stretched to fill
+    /// the chart — the ONE rule both Signal of Confidence charts use
+    /// (`SignalOfConfidenceScale.materialityFloor`).
+    private var materialityFloor: Double {
+        SignalOfConfidenceScale.materialityFloor(for: dataPoints, viewType: viewType)
     }
 
     private var maxBarValue: Double { barDomain.upperBound }
@@ -140,6 +156,10 @@ struct SignalOfConfidenceChartView: View {
                 .defaultScrollAnchor(.trailing)
             }
             .frame(height: chartHeight + belowChartHeight + (dataPoints.count > Int(visibleColumnCount) ? AppSpacing.md : 0))
+            // Over the visible plot, outside the horizontal scroll so it stays in view.
+            .overlay(alignment: .top) {
+                noCapitalReturnNote
+            }
 
             // Right Y-axis labels (fixed, never scrolls)
             VStack(spacing: 0) {
@@ -244,11 +264,12 @@ struct SignalOfConfidenceChartView: View {
     // MARK: - Y-Axis Labels
 
     private var leftYAxisLabels: some View {
-        // The bar axis measures dividends + buybacks. When the company returned
-        // NO capital in any quarter the domain is a synthetic 0...1 (needed to
-        // keep the scale non-degenerate), so printing "0.9% / 0.6% / 0.3%" off
-        // it would invent gradations that describe nothing. Show only the
-        // baseline in that case — the shares-outstanding line is still real.
+        // The bar axis measures dividends + buybacks. When no bar has height the
+        // domain is synthetic (needed to keep the scale non-degenerate), so printing
+        // "0.9% / 0.6% / 0.3%" off it would invent gradations that describe nothing:
+        // the ticks go. When the company returned no CASH at all (`returnedNothing`)
+        // the baseline goes too — `noCapitalReturnNote` says what the empty band
+        // means, and the shares-outstanding line (right axis) is still real.
         VStack {
             Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.9) : "")
                 .font(AppTypography.caption)
@@ -276,7 +297,10 @@ struct SignalOfConfidenceChartView: View {
 
             Spacer()
 
-            Text(viewType == .yield ? "0%" : "$0")
+            // The baseline goes too when nothing was returned: a lone "$0" under an empty
+            // band read as a scale with nothing on it. The band's note says what it means.
+            // Only then — a Yield view whose cash was real but rounds to 0.00% keeps its "0%".
+            Text(returnedNothing ? "" : (viewType == .yield ? "0%" : "$0"))
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .lineLimit(1)
@@ -284,6 +308,27 @@ struct SignalOfConfidenceChartView: View {
         }
         .frame(height: chartHeight)
         .padding(.trailing, AppSpacing.xs)
+    }
+
+    /// Says what an empty bar band means when every quarter has cash-flow figures and none
+    /// returned anything — "no dividends or buybacks", a measured fact, not missing data.
+    /// Sits in the plot's bottom band, below the shares line (drawn inside 15–85% of the
+    /// height), where the bars would be. Not hit-testable, so the chart still scrolls.
+    @ViewBuilder
+    private var noCapitalReturnNote: some View {
+        if returnedNothing {
+            Text("No dividends or buybacks in these quarters")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.bottom, AppSpacing.xs)
+                .frame(maxWidth: .infinity)
+                .frame(height: chartHeight, alignment: .bottom)
+                .allowsHitTesting(false)
+        }
     }
 
     /// Every finite share count a quarter actually REPORTED, oldest first.
@@ -305,8 +350,13 @@ struct SignalOfConfidenceChartView: View {
     private var newestShares: Double? { reportedShares.last }
 
     /// A static right-axis label closer than this to the highlighted newest one is hidden
-    /// rather than overprinted (the caption font is ~13pt tall).
-    private let axisLabelMinSeparation: CGFloat = 14
+    /// rather than overprinted. Each label is ~13pt tall at the default size, so the old 14pt
+    /// let them touch: TestFlight 1.0 (11), CRWV's "566M" axis top sat 16pt above the bold
+    /// "551M" and read as one smudge. 20pt leaves a visible gap, and it grows with the
+    /// caption it separates (28pt at the reading cap).
+    private var axisLabelMinSeparation: CGFloat {
+        AppTypography.scaledSize(20, .caption2, maxScale: AppTypography.readingCap)
+    }
 
     private var rightYAxisLabels: some View {
         // Every label — the static max/mid/min AND the highlighted newest — is
@@ -598,6 +648,28 @@ struct SignalOfConfidenceChartView: View {
     }
 }
 
+#Preview("No / immaterial capital return") {
+    ScrollView {
+        VStack(spacing: AppSpacing.xl) {
+            // Nothing returned in any quarter: no left-axis labels, the band's note, "$0"
+            // cells (never "$0M"), and two unreported share counts skipped by the line.
+            SignalOfConfidenceChartView(
+                dataPoints: SignalOfConfidenceSectionData.sampleNoCapitalReturnDiluting.dataPoints,
+                viewType: .capital
+            )
+
+            // One immaterial quarter: the scale floor keeps a $2.5M bar on a $45B company
+            // the sliver it is (axis ≈ $0–$113M), never a full-height bar on a "$0–$3M" axis.
+            SignalOfConfidenceChartView(
+                dataPoints: SignalOfConfidenceChartPreviewData.immaterialAmount,
+                viewType: .capital
+            )
+        }
+        .padding()
+    }
+    .background(AppColors.background)
+}
+
 /// Preview-only points (sample shapes, not market data).
 private enum SignalOfConfidenceChartPreviewData {
     static var newestSharesMissing: [SignalOfConfidenceDataPoint] {
@@ -611,5 +683,21 @@ private enum SignalOfConfidenceChartPreviewData {
             sharesOutstanding: nil
         ))
         return points
+    }
+
+    /// The non-returner series with one immaterial $2.5M quarter (sample shapes).
+    static var immaterialAmount: [SignalOfConfidenceDataPoint] {
+        SignalOfConfidenceSectionData.sampleNoCapitalReturnDiluting.dataPoints.map { point -> SignalOfConfidenceDataPoint in
+            guard point.period == "Q2 '25" else { return point }
+            return SignalOfConfidenceDataPoint(
+                period: point.period,
+                dividendYield: 0.01,
+                buybackYield: 0,
+                dividendAmount: 2.5,
+                buybackAmount: 0,
+                sharesOutstanding: point.sharesOutstanding,
+                marketCap: point.marketCap
+            )
+        }
     }
 }

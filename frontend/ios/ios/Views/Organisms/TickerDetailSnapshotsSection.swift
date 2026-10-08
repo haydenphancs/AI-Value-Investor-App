@@ -12,12 +12,22 @@ struct TickerDetailSnapshotsSection: View {
     var onDeepResearchTap: (() -> Void)?
     @State private var showInfoSheet: Bool = false
 
-    private static var formattedDate: String {
+    /// "Updated on MM/dd/yyyy ET" from the OLDEST build time among the snapshots
+    /// (`computedAt`): the cards are only as fresh as the stalest one. It used to print the
+    /// DEVICE's today, so a snapshot cached for a day still read as built today. nil when no
+    /// snapshot carries a time (an older backend) — the line is then hidden, never "today".
+    private var updatedOnText: String? {
+        guard let oldest = snapshots.compactMap(\.computedAt).min() else { return nil }
+        return "Updated on \(Self.dateFormatter.string(from: oldest)) ET"
+    }
+
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "MM/dd/yyyy"
         formatter.timeZone = TimeZone(identifier: "America/New_York")
-        return formatter.string(from: Date())
-    }
+        return formatter
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
@@ -41,9 +51,11 @@ struct TickerDetailSnapshotsSection: View {
                     .buttonStyle(PlainButtonStyle())
                 }
 
-                Text("Updated on \(Self.formattedDate) ET")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                if let updatedOnText {
+                    Text(updatedOnText)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
 
             // Radar chart
@@ -373,8 +385,22 @@ struct ProTipCard: View {
 }
 
 #Preview {
+    // `sampleData` carries no build time, so this shows the header without a date line.
     ScrollView {
         TickerDetailSnapshotsSection(snapshots: SnapshotItem.sampleData)
+    }
+    .background(AppColors.background)
+}
+#Preview("Dated by the oldest build") {
+    // Two illustrative stamps: the header shows the OLDER one (10/06/2026 ET).
+    let stamps = ["2026-10-07T14:03:22.123456+00:00", "2026-10-06T21:00:00Z"]
+    let snapshots = SnapshotItem.sampleData.enumerated().map { index, item in
+        SnapshotItem(category: item.category, rating: item.rating, metrics: item.metrics,
+                     fullReportAvailable: item.fullReportAvailable,
+                     computedAt: SnapshotItem.parseComputedAt(stamps[index % stamps.count]))
+    }
+    ScrollView {
+        TickerDetailSnapshotsSection(snapshots: snapshots)
     }
     .background(AppColors.background)
 }

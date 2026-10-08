@@ -36,6 +36,11 @@ struct TickerFinancialsContent: View {
     /// series then reads "temporarily unavailable", not "isn't available for this company".
     var growthIsDegraded: Bool = false
     var profitPowerIsDegraded: Bool = false
+    /// The section's PEER lookup failed upstream (`degraded` holds "benchmarks"): the card is
+    /// complete except for the peer median, and says so in one muted line. No retry notice.
+    var growthPeerUnavailable: Bool = false
+    var profitPowerPeerUnavailable: Bool = false
+    var healthCheckPeerUnavailable: Bool = false
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -61,6 +66,7 @@ struct TickerFinancialsContent: View {
                 GrowthSectionCard(
                     growthData: growthData,
                     isDegraded: growthIsDegraded,
+                    peerComparisonUnavailable: growthPeerUnavailable,
                     onDetailTapped: {
                         onGrowthDetailTap?()
                     }
@@ -84,7 +90,8 @@ struct TickerFinancialsContent: View {
                     onDetailTapped: {
                         onProfitPowerDetailTap?()
                     },
-                    isDegraded: profitPowerIsDegraded
+                    isDegraded: profitPowerIsDegraded,
+                    peerComparisonUnavailable: profitPowerPeerUnavailable
                 )
             }
 
@@ -94,7 +101,8 @@ struct TickerFinancialsContent: View {
                     healthCheckData: healthCheckData,
                     onDetailTapped: {
                         onHealthCheckDetailTap?()
-                    }
+                    },
+                    peerComparisonUnavailable: healthCheckPeerUnavailable
                 )
             }
 

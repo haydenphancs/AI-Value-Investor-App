@@ -51,7 +51,16 @@ What must never regress (digest and run health):
   * the final word is judged against WHEN the nightly check judged the run (its own job state's
     `last_run_at`), never a guessed 22:00: a verdict that check delivered is not repeated, a run it saw
     finished is not "recovered", and a check that never went out (three Telegram 500s) leaves a failed
-    day to the final word — never silence; an unreadable job state skips the tick.
+    day to the final word — never silence; an unreadable job state skips the tick;
+  * the weekly COST line sits right under the date line (it survives the row caps and the hard cut):
+    X exact to our charges journal by each entry's OWN time over the digest's [start, end) instants,
+    Gemini / worker / the Upload-Post plan fee as labelled estimates, in integer micro-dollars. Each part
+    degrades ALONE to "unreadable" and the total then reads "≥" and names it — never a guessed number,
+    never a partial sum (a capped journal read is unreadable), never NaN, never a silent $0.000; undated
+    charges are named and never counted into any week; the ⚠️ usage line compares X + Gemini + worker
+    (never the plan fee) STRICTLY above the alert line;
+  * /go taps are "(approximate)", and the server's own `<campaign>_early` rows (the first minutes after
+    a post, mostly link scanners) are summed apart — never into a campaign or the total.
 """
 
 from __future__ import annotations
@@ -3692,13 +3701,17 @@ def test_the_week_bounds_follow_the_new_york_clock_across_the_november_change():
 
 
 def _summary(posts: List[Dict[str, Any]], **kw: Any) -> Dict[str, Any]:
+    # The cost line's reads default to "read, and empty" with the Free plan and the declared $1.00 alert
+    # line — a READABLE zero line, so a regression in it can never hide behind "unreadable".
     base: Dict[str, Any] = dict(now=NOW, week_start=WEEK_START, week_end=WEEK_END, posts=posts, runs=[],
                                 measured=[], link_hits=[], spend={}, budget_micros=2_000_000, escalated=[],
                                 runway={"pool": 34, "unused": 30, "first_repeat": date(2026, 11, 26)},
                                 metrics_job={"job": ds.JOB_METRICS, "enabled": True, "run_day": "2026-10-05",
                                              "last_run_at": "2026-10-05T10:01:00+00:00", "items_written": 4,
                                              "last_error": None},
-                                metrics_enabled=True, store="prelaunch")
+                                metrics_enabled=True, store="prelaunch",
+                                charge_rows=[], prev_runs=[], script_rows=[], upload_post_fee_micros=0,
+                                cost_warn_micros=1_000_000)
     base.update(kw)
     return ds.summarize_week(**base)
 
@@ -3716,13 +3729,21 @@ def _assert_no_model_text(text: str) -> None:
 def test_an_empty_week_is_one_short_honest_message():
     text = _digest([], runs=[])
     assert text.startswith("📊 Caydex marketing — weekly digest\nMon 2026-09-28 → Sun 2026-10-04 (ET)")
+    # a week whose cost reads all succeeded and found nothing is a READABLE zero (≈, nothing named)
+    assert text.splitlines()[2:5] == [
+        "💵 Cost last week ≈ $0.000: X $0.000 (our ledger) · Gemini ≈ $0.000 · worker ≈ $0.000 · "
+        "Upload-Post $0.000 (Free plan · 0 uploads)",
+        "Usage (X + Gemini + worker): last week ≈ $0.000 · week before ≈ $0.000",
+        "",
+    ]
     assert "Posts: none this week" in text
     # every posting day of the week without a run says so
     for d in ("Mon 09-28", "Tue 09-29", "Thu 10-01", "Sat 10-03"):
         assert f"• {d} no run (a posting day)" in text
     assert "Fri 10-02" not in text and "Sun 10-04" not in text
     assert "Engagement: no live published posts this week" in text
-    assert "/go taps: none" in text and "Review time: no decisions this week" in text
+    assert "/go taps (approximate): none" in text.splitlines() and "Review time: no decisions this week" in text
+    assert "first minutes after posting" not in text and "⚠️ Usage" not in text
     assert "Outcome unknown: none waiting for your answer" in text
     assert re.search(r"\b0 (likes?|reposts?|impressions?)\b", text) is None
 
@@ -3896,14 +3917,97 @@ def test_go_taps_per_campaign_and_the_pre_launch_note():
             {"campaign": "x", "day": "2026-10-03", "hits": True}, "junk"]
     s = _summary([], link_hits=hits)
     assert s["taps"]["rows"] == [("(unreadable)", 5), ("tiktok", 3), ("bluesky", 1)]
-    assert s["taps"]["total"] == 9 and s["taps"]["unreadable_rows"] == 4
+    assert s["taps"]["total"] == 9 and s["taps"]["unreadable_rows"] == 4 and s["taps"]["early"] == 0
     text = ds.compose_digest(s)
-    assert "/go taps: (unreadable) 5 · tiktok 3 · bluesky 1 — 9 in total" in text
+    # the whole line: no early clause when there were no early taps
+    assert "/go taps (approximate): (unreadable) 5 · tiktok 3 · bluesky 1 — 9 in total" in text.splitlines()
     assert "(4 unreadable row(s) not counted)" in text
-    assert "Pre-launch: every /go tap lands on the Coming soon page (MARKETING_APP_STORE_URL is unset)." in text
-    assert "Coming soon" not in _digest([], link_hits=hits, store="live")
-    assert "set but invalid" in _digest([], link_hits=hits, store="invalid")
-    assert "/go taps: unreadable" in _digest([], link_hits=None)
+    # the app is live since 2026-10-05: no store URL is a misconfiguration, warned like a broken one
+    assert ("⚠️ MARKETING_APP_STORE_URL is unset — every /go tap lands on the landing page, which has no App "
+            "Store link.") in text.splitlines()
+    for store in ("live", "invalid", "prelaunch"):
+        assert "Coming soon" not in _digest([], link_hits=hits, store=store)
+    assert "MARKETING_APP_STORE_URL" not in _digest([], link_hits=hits, store="live")
+    assert ("⚠️ MARKETING_APP_STORE_URL is set but invalid — /go falls back to the landing page, which has no "
+            "App Store link.") in _digest([], link_hits=hits, store="invalid").splitlines()
+    # a failed read keeps its own plain label — "approximate" describes a count, not a missing one
+    assert "/go taps: unreadable (see the web logs)" in _digest([], link_hits=None).splitlines()
+
+
+_EARLY_CLAUSE = " in the first minutes after posting (mostly link scanners)"
+
+
+def test_go_taps_count_the_first_minutes_after_posting_apart():
+    """The server-constant `<campaign>_early` rows (smart_link.EARLY_KEYS: taps inside a campaign's early
+    window, mostly link scanners) are summed APART: never a campaign row of their own, never in the total."""
+    hits = [{"campaign": "bluesky", "day": "2026-10-03", "hits": 3},
+            {"campaign": "bluesky_early", "day": "2026-10-03", "hits": 7},
+            {"campaign": "facebook_early", "day": "2026-10-04", "hits": 5},
+            {"campaign": "tiktok", "day": "2026-10-01", "hits": 2}]
+    s = _summary([], link_hits=hits)
+    assert s["taps"] == {"rows": [("bluesky", 3), ("tiktok", 2)], "total": 5, "early": 12, "unreadable_rows": 0}
+    text = ds.compose_digest(s)
+    assert ("/go taps (approximate): bluesky 3 · tiktok 2 — 5 in total — plus 12" + _EARLY_CLAUSE
+            in text.splitlines())
+    assert "_early" not in text
+
+
+@pytest.mark.parametrize("platform", ["tiktok", "youtube", "instagram", "facebook", "linkedin", "threads",
+                                      "bluesky", "x", "pinterest", "mastodon", "podcast", "blog", "hashnode",
+                                      "devto"])
+def test_every_post_platforms_early_key_is_early(platform):
+    """One early key per post platform (the /go campaigns are exactly the post platforms) — listed as
+    literals here, so a renamed or dropped key is a failure, not a silently ordinary row."""
+    s = _summary([], link_hits=[{"campaign": f"{platform}_early", "day": "2026-10-03", "hits": 2},
+                                {"campaign": platform, "day": "2026-10-03", "hits": 1}])
+    assert s["taps"] == {"rows": [(platform, 1)], "total": 1, "early": 2, "unreadable_rows": 0}
+
+
+def test_only_the_servers_early_keys_are_counted_as_early():
+    """Only `<post platform>_early` is a server key. A stray "foo_early" or "other_early" (bare /go and junk
+    slugs count under `other`, which has no early twin) is an ordinary campaign row; a mis-cased or padded
+    one is an unreadable NAME (still counted); an early row whose count cannot be read is an unreadable
+    ROW — never added to the early number."""
+    hits = [{"campaign": "foo_early", "day": "2026-10-01", "hits": 2},
+            {"campaign": "other_early", "day": "2026-10-01", "hits": 1},
+            {"campaign": "_early", "day": "2026-10-01", "hits": 1},
+            {"campaign": "X_EARLY", "day": "2026-10-01", "hits": 9},
+            {"campaign": "bluesky_early ", "day": "2026-10-01", "hits": 4},
+            {"campaign": "x_early", "day": "2026-10-01", "hits": "4"},
+            {"campaign": "bluesky_early", "day": "2026-10-01", "hits": True},
+            {"campaign": "youtube_early", "day": "2026-10-01", "hits": -1},
+            {"campaign": "x_early", "day": "2026-10-02", "hits": 3}]
+    s = _summary([], link_hits=hits)
+    assert s["taps"] == {"rows": [("(unreadable)", 13), ("foo_early", 2), ("_early", 1), ("other_early", 1)],
+                         "total": 17, "early": 3, "unreadable_rows": 3}
+    text = ds.compose_digest(s)
+    assert ("/go taps (approximate): (unreadable) 13 · foo_early 2 · _early 1 · other_early 1 — 17 in total — "
+            "plus 3" + _EARLY_CLAUSE in text.splitlines())
+    assert "  (3 unreadable row(s) not counted)" in text.splitlines()
+
+
+def test_a_week_of_only_early_taps_says_none_plus_the_early_count():
+    hits = [{"campaign": "bluesky_early", "day": "2026-10-03", "hits": 3},
+            {"campaign": "x_early", "day": "2026-10-03", "hits": 1}]
+    text = _digest([], link_hits=hits)            # _digest also asserts the 4,096-unit cap
+    assert "/go taps (approximate): none — plus 4" + _EARLY_CLAUSE in text.splitlines()
+    assert " in total" not in text
+    big = _digest([], link_hits=[{"campaign": "linkedin_early", "day": "2026-10-03", "hits": 12_345}])
+    assert "/go taps (approximate): none — plus 12,345" + _EARLY_CLAUSE in big.splitlines()
+
+
+def test_the_early_count_survives_the_row_cap_after_the_total():
+    """300 campaign rows are capped to the first eight; the early clause still closes the line, AFTER the
+    "… N more" tail and the total it is never part of. By hand: hits 1..300 → 45,150 in total; early 5 + 7."""
+    hits = [{"campaign": f"c{i:03d}", "day": "2026-09-30", "hits": i + 1} for i in range(300)]
+    hits += [{"campaign": "x_early", "day": "2026-10-03", "hits": 5},
+             {"campaign": "tiktok_early", "day": "2026-10-01", "hits": 7}]
+    s = _summary([], link_hits=hits)
+    assert (len(s["taps"]["rows"]), s["taps"]["total"], s["taps"]["early"]) == (300, 45_150, 12)
+    text = ds.compose_digest(s)
+    assert utf16_len(text) <= ds.MAX_DIGEST_UNITS
+    assert ("/go taps (approximate): c299 300 · c298 299 · c297 298 · c296 297 · c295 296 · c294 295 · c293 294 · "
+            "c292 293 · … 292 more — 45,150 in total — plus 12" + _EARLY_CLAUSE) in text.splitlines()
 
 
 def test_the_store_state_follows_the_setting(monkeypatch):
@@ -3911,6 +4015,30 @@ def test_the_store_state_follows_the_setting(monkeypatch):
     assert ds._store_state() == "prelaunch"
     monkeypatch.setattr(ds.settings, "MARKETING_APP_STORE_URL", "https://apps.apple.com/app/id6759525689")
     assert ds._store_state() == "live"
+    monkeypatch.setattr(ds.settings, "MARKETING_APP_STORE_URL", "http://evil.example/app")
+    assert ds._store_state() == "invalid"
+
+
+@pytest.mark.parametrize("preorder", [True, False])
+def test_the_pre_order_flag_never_changes_where_the_digest_says_go_lands(monkeypatch, preorder):
+    """MARKETING_APP_STORE_PREORDER changes WORDS (new captions, the landing button), never where /go lands
+    (smart_link.store_state): with no valid URL every tap still lands on the landing page and the digest
+    warns so; with a valid URL (production since the 2026-10-05 launch) it never does, whatever the flag."""
+    monkeypatch.setattr(ds.settings, "MARKETING_APP_STORE_PREORDER", preorder)
+    hits = [{"campaign": "bluesky", "day": "2026-10-03", "hits": 1}]
+    note = ("⚠️ MARKETING_APP_STORE_URL is unset — every /go tap lands on the landing page, which has no App "
+            "Store link.")
+    monkeypatch.setattr(ds.settings, "MARKETING_APP_STORE_URL", "")
+    assert ds._store_state() == "prelaunch"
+    assert note in _digest([], link_hits=hits, store=ds._store_state()).splitlines()
+    monkeypatch.setattr(ds.settings, "MARKETING_APP_STORE_URL", "https://apps.apple.com/app/id6759525689")
+    assert ds._store_state() not in ("prelaunch", "invalid")
+    assert "MARKETING_APP_STORE_URL" not in _digest([], link_hits=hits, store=ds._store_state())
+    # the flag left on after the release words new captions "pre-order": the digest says so (2026-10-08)
+    warning = ('⚠️ MARKETING_APP_STORE_PREORDER is on — new captions say "pre-order on the App Store" and the '
+               'landing button "Pre-order"; the app is on sale, so turn it off.')
+    assert ds._store_state() == ("preorder" if preorder else "live")
+    assert (warning in _digest([], link_hits=hits, store=ds._store_state()).splitlines()) is preorder
     monkeypatch.setattr(ds.settings, "MARKETING_APP_STORE_URL", "http://evil.example/app")
     assert ds._store_state() == "invalid"
 
@@ -3939,7 +4067,9 @@ def test_x_spend_with_a_zero_budget_says_x_is_off_and_unreadable_says_so():
     assert "X spend: unreadable (see the web logs)" in _digest([], spend=None)
 
 
-@pytest.mark.parametrize("budget, configured", [(None, False), (0, False), (0.0, False), (-1, False), (2.0, True)])
+@pytest.mark.parametrize("budget, configured", [(None, False), (0, False), (0.0, False), (-1, False), (2.0, True),
+                                                # finite, but its micros overflow to inf: X off, never a raise
+                                                (1e303, False)])
 def test_x_is_off_exactly_when_the_outlet_says_it_is_unconfigured(monkeypatch, budget, configured):
     """The digest's OFF line keys on `budget_micros() == 0`; pin that it is the very condition under which
     the X outlet is not configured (credentials present), so the line can never call a live X off."""
@@ -3949,6 +4079,36 @@ def test_x_is_off_exactly_when_the_outlet_says_it_is_unconfigured(monkeypatch, b
     monkeypatch.setattr(settings, "MARKETING_X_MONTHLY_BUDGET_USD", budget)
     assert (outlet_x.budget_micros() > 0) is configured
     assert outlets.adapter_for("x").configured() is configured
+
+
+def test_the_x_spend_line_never_raises_on_an_absurd_amount(caplog):
+    """A hand-edited 400-digit journal amount used to raise OverflowError in the % (and in `_usd`) and take
+    the WHOLE digest down for all three attempts. Now only the X spend line says so; every other section
+    renders. The bound is ±$1,000,000 for an op and for the month's total."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    text = _digest([], spend={"x_create": 10 ** 400})
+    assert "X spend: unreadable (see the web logs)" in text.splitlines()
+    assert "Posts: none this week" in text and text.splitlines()[2].startswith("💵 Cost last week ≈ ")
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "X spend" in r.getMessage()]
+    assert warned and "x_create" in warned[0] and str(10 ** 400)[:30] not in warned[0]
+    # the bound, on an op and on the total (a negative one too)
+    for spend in ({"x_create": 10 ** 12 + 1}, {"refund": -(10 ** 12 + 1)}, {"a_op": 6 * 10 ** 11, "b_op": 6 * 10 ** 11}):
+        assert _summary([], spend=spend)["spend"] is None, spend
+    at_bound = _summary([], spend={"x_create": 10 ** 12, "refund": -1})["spend"]
+    assert at_bound["total"] == 10 ** 12 - 1 and at_bound["by_op"] == [("x_create", 10 ** 12), ("refund", -1)]
+    # an absurd CAP (the setting is not bounded at boot) gets its own head — no float overflow in the %
+    absurd = _digest([], spend={"x_create": 44_000}, budget_micros=10 ** 13)
+    assert ("X spend 2026-10 (UTC, to date): $0.044 — the cap MARKETING_X_MONTHLY_BUDGET_USD is over "
+            "$1,000,000 (check it)") in absurd.splitlines()
+    assert ("X spend 2026-10 (UTC, to date): $0.044 of the $1000000.00 cap (0%)"
+            in _digest([], spend={"x_create": 44_000}, budget_micros=10 ** 12).splitlines())
+    # `_usd` is total: anything but an int within ±$1,000,000,000 reads "unreadable"
+    assert ds._usd(10 ** 400) == "unreadable" and ds._usd(-(10 ** 400)) == "unreadable"
+    assert ds._usd(10 ** 15) == "$1000000000.000" and ds._usd(10 ** 15 + 1) == "unreadable"
+    assert ds._usd(-(10 ** 15)) == "-$1000000000.000" and ds._usd(-(10 ** 15 + 1)) == "unreadable"
+    for junk in (1.5, float("inf"), float("nan"), True, None, "15000"):
+        assert ds._usd(junk) == "unreadable", junk
+    assert ds._usd(0) == "$0.000" and ds._usd(-15_000) == "-$0.015" and ds._usd(3_679_671) == "$3.680"
 
 
 def test_review_latency_median_and_longest_over_readable_decisions():
@@ -4123,6 +4283,12 @@ def test_a_report_that_cannot_be_capped_is_cut_at_a_line_break_within_the_limit(
     assert re.search(r" \|row \d+\|$", body)    # it ends on a whole line, never half of one
     assert utf16_len(body) > ds.MAX_DIGEST_UNITS // 2
     text.encode("utf-16-le")
+    # the cut keeps the top: the cost line under the date line survives it whole
+    assert text.splitlines()[2:4] == [
+        "💵 Cost last week ≈ $0.000: X $0.000 (our ledger) · Gemini ≈ $0.000 · worker ≈ $0.000 · "
+        "Upload-Post $0.000 (Free plan · 0 uploads)",
+        "Usage (X + Gemini + worker): last week ≈ $0.000 · week before ≈ $0.000",
+    ]
 
 
 def test_compose_is_pure_and_deterministic():
@@ -4149,6 +4315,19 @@ def test_a_hand_edited_reject_reason_counts_as_no_reason_and_never_crashes(reaso
 def test_a_section_of_the_wrong_type_reads_as_unreadable(junk):
     s = _summary([], runs=junk, measured=junk, link_hits=junk, escalated=junk)
     assert (s["runs"], s["followers"], s["taps"], s["escalated"]) == (None, None, None, None)
+    # the cost line's reads: each junk input is ITS part unreadable in both weeks, never $0.000
+    s = _summary([], runs=junk, charge_rows=junk, prev_runs=junk, script_rows=junk)
+    for week in ("last", "before"):
+        part = s["cost"][week]
+        assert (part["x"], part["gemini"], part["worker"]) == (None, None, None)
+        assert part["usage_unreadable"] == ["X", "Gemini", "worker"] and part["usage_partial"] is True
+    assert (s["cost"]["last"]["upload_post"], s["cost"]["last"]["unreadable"]) == (0, ["X", "Gemini", "worker"])
+    assert ds.compose_digest(s).splitlines()[2:4] == [
+        "💵 Cost last week ≥ $0.000 (X, Gemini and worker unreadable): X unreadable · Gemini unreadable · "
+        "worker unreadable · Upload-Post $0.000 (Free plan · 0 uploads)",
+        "Usage (X + Gemini + worker): last week ≥ $0.000 (X, Gemini and worker unreadable) · "
+        "week before ≥ $0.000 (X, Gemini and worker unreadable)",
+    ]
     s = _summary([], spend=[1, 2], runway="soon", metrics_job=["x"])
     assert (s["spend"], s["runway"], s["metrics_job"]) == (None, None, None)
     text = ds.compose_digest(s)
@@ -4163,6 +4342,624 @@ def test_count_reader_omits_everything_that_is_not_a_plain_count():
     for good in (0, 1, 10 ** 15 - 1):
         assert ds._count(good) == good
     assert math.isnan(float("nan"))
+
+
+# ── the weekly cost line (pure: summarize_week → weekly_cost → compose_digest) ─
+#
+# The worked example (design 2026-10-05; the digest of Mon 2026-10-05 covers Mon 09-28 – Sun 10-04 ET =
+# [09-28T04:00Z, 10-05T04:00Z); the week before starts 09-21T04:00Z). Every number is derived BY HAND
+# from the published formulas, in integer micro-dollars — never read back from the code:
+#   X       our journal, each entry by its own time: last week 4 × 15,000 + 5,000 − 4,000 = 61,000; the
+#           week before 3 × 15,000 + 10,000 = 55,000.
+#   Gemini  tokens × $1.50 per 1M, half-up: 82,800 → 124,200; 60,000 → 90,000.
+#   worker  per second (MB × 3,860 + 4 vCPU × 7,720 × 1,024) / 1,024 nano-$, × whole ms, half-up to micros:
+#           303.0 s at a 2,587 MB peak = 12,311; 2.6 s at the 4,096 MB fallback = 120 (46,320 nano-$ a
+#           second); 250.0 s at 2,500 MB = 10,076. Last week 4 × 12,311 + 3 × 120 = 49,604; the week
+#           before 4 × 10,076 + 3 × 120 = 40,664.
+#   Upload-Post  $16 a month × 7 / 30.4375 = 3,679,671 (half-up).
+#   Last week 61,000 + 124,200 + 49,604 + 3,679,671 = 3,914,475 ($3.914), of which usage (never the fee)
+#   234,804 ($0.235); the week before is compared by USAGE alone — 55,000 + 90,000 + 40,664 = 185,664
+#   ($0.186) — since the plan fee in force a week earlier is not recorded (today's fee would misprice it).
+
+FEE_16 = 16_000_000                     # MARKETING_UPLOAD_POST_MONTHLY_USD = 16 (Basic, billed annually)
+FEE_16_WEEK = 3_679_671
+COST_LAST = {"x": 61_000, "gemini": 124_200, "worker": 49_604}
+COST_BEFORE = {"x": 55_000, "gemini": 90_000, "worker": 40_664}
+#: (a): the normal week at $16 a month, under the declared $1.00 alert line.
+COST_A = ("💵 Cost last week ≈ $3.914: X $0.061 (our ledger) · Gemini ≈ $0.124 · worker ≈ $0.050 · "
+          "Upload-Post $3.680 (plan fee · 3 uploads)")
+
+
+def _usage(last: str = "≈ $0.235", before: str = "≈ $0.186") -> str:
+    """The usage line (X + Gemini + worker, never the plan fee): the worked example's, either week's text
+    replaceable."""
+    return f"Usage (X + Gemini + worker): last week {last} · week before {before}"
+
+
+USAGE_A = _usage()
+#: (b): a usage part unreadable — each week's readable floor, by hand. X: 124,200 + 49,604 = 173,804 and
+#: 90,000 + 40,664 = 130,664; Gemini: 61,000 + 49,604 = 110,604 and 55,000 + 40,664 = 95,664; worker:
+#: 61,000 + 124,200 = 185,200 and 55,000 + 90,000 = 145,000.
+X_FLOOR = ("≥ $0.174 (X unreadable)", "≥ $0.131 (X unreadable)")
+GEMINI_FLOOR = ("≥ $0.111 (Gemini unreadable)", "≥ $0.096 (Gemini unreadable)")
+WORKER_FLOOR = ("≥ $0.185 (worker unreadable)", "≥ $0.145 (worker unreadable)")
+#: …the X read failed or was capped (both weeks come from ONE read) — the total is a floor and names what
+#: it lacks.
+COST_X_UNREADABLE = ["💵 Cost last week ≥ $3.853 (X unreadable): X unreadable · Gemini ≈ $0.124 · worker ≈ $0.050 · "
+                     "Upload-Post $3.680 (plan fee · 3 uploads)",
+                     _usage(*X_FLOOR)]
+COST_GEMINI_UNREADABLE = ["💵 Cost last week ≥ $3.790 (Gemini unreadable): X $0.061 (our ledger) · Gemini unreadable · "
+                          "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+                          _usage(*GEMINI_FLOOR)]
+COST_WORKER_UNREADABLE = ["💵 Cost last week ≥ $3.865 (worker unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · "
+                          "worker unreadable · Upload-Post $3.680 (plan fee · 3 uploads)",
+                          _usage(*WORKER_FLOOR)]
+
+#: A posting run's billed seconds 4.2 + 1.1 + 38.5 + 95.0 + 160.3 + 3.9 = 303.0 at a 2,587.3 MB peak; the
+#: maxrss reading is not a cgroup peak and is never priced.
+_POSTING_TIMINGS = {"preflight_s": 4.2, "selected_s": 1.1, "scripted_s": 38.5, "voiced_s": 95.0, "rendered_s": 160.3,
+                    "assets_ready_s": 3.9, "voiced_cgroup_peak_mb": 2587.3, "rendered_cgroup_peak_mb": 2401.0,
+                    "rendered_self_maxrss_mb": 9999.0}
+#: A rest day: the worker's preflight only, no memory peak recorded.
+_REST_TIMINGS = {"preflight_s": 2.6}
+#: The week before's posting run: 3.0 + 40.0 + 80.0 + 127.0 = 250.0 s at 2,500 MB.
+_PREV_POSTING_TIMINGS = {"preflight_s": 3.0, "scripted_s": 40.0, "voiced_s": 80.0, "rendered_s": 127.0,
+                         "voiced_cgroup_peak_mb": 2500.0}
+#: marketing_scripts.tokens_used per ET day: the week before 4 × 15,000; last week 82,800 (a rest day's 0).
+_SCRIPT_TOKENS = {"2026-09-21": 15_000, "2026-09-22": 15_000, "2026-09-24": 15_000, "2026-09-26": 15_000,
+                  "2026-09-28": 21_000, "2026-09-29": 19_400, "2026-10-01": 22_100, "2026-10-02": 0,
+                  "2026-10-03": 20_300}
+
+
+def _charge(at: Any, op: str, micros: Any) -> Dict[str, Any]:
+    return {"at": at, "op": op, "micros": micros}
+
+
+def _x_post(run_date: str, *charges: Dict[str, Any], updated_at: str) -> Dict[str, Any]:
+    """An X post carrying a `metadata.charges` journal; `updated_at` is its last touch (every journal write
+    bumps it in production)."""
+    return _post("x", "published", run_date=run_date, meta={"charges": [dict(c) for c in charges]},
+                 updated_at=updated_at)
+
+
+def _x_journal() -> List[Dict[str, Any]]:
+    """The worked example's X posts, as `list_charge_rows_since("x", <the week before's start>)` returns them."""
+    return [
+        # the week before: three posts and a retract's delete
+        _x_post("2026-09-22", _charge("2026-09-22T20:31:00+00:00", "x_create", 15_000),
+                updated_at="2026-09-22T20:31:00+00:00"),
+        _x_post("2026-09-24", _charge("2026-09-24T20:31:00+00:00", "x_create", 15_000),
+                updated_at="2026-09-24T20:31:00+00:00"),
+        _x_post("2026-09-26", _charge("2026-09-26T20:31:00+00:00", "x_create", 15_000),
+                _charge("2026-09-27T15:00:00+00:00", "x_delete", 10_000), updated_at="2026-09-27T15:00:00+00:00"),
+        # last week: four posts, one metrics read and its correction (dated at the read it corrects)
+        _x_post("2026-09-28", _charge("2026-09-28T20:31:00+00:00", "x_create", 15_000),
+                updated_at="2026-09-28T20:31:00+00:00"),
+        _x_post("2026-09-29", _charge("2026-09-29T20:31:00+00:00", "x_create", 15_000),
+                _charge("2026-09-29T23:00:00+00:00", "x_metrics_read", 5_000),
+                _charge("2026-09-29T23:00:00+00:00", "x_metrics_read_correction", -4_000),
+                updated_at="2026-09-29T23:00:00+00:00"),
+        _x_post("2026-10-01", _charge("2026-10-01T20:31:00Z", "x_create", 15_000), updated_at="2026-10-01T20:31:00Z"),
+        # …and a metrics read on Mon 10-05: THIS week's money, never last week's
+        _x_post("2026-10-03", _charge("2026-10-03T20:31:00+00:00", "x_create", 15_000),
+                _charge("2026-10-05T10:00:00+00:00", "x_metrics_read", 5_000), updated_at="2026-10-05T10:00:00+00:00"),
+    ]
+
+
+def _uploaded(platform: str, status: str = "published", *, at: Any = "2026-10-03T21:00:00+00:00",
+              **kw: Any) -> Dict[str, Any]:
+    """A post Upload-Post ACCEPTED (`metadata.publish.upload_post.submitted_at`)."""
+    return _post(platform, status, meta={"publish": {"state": "submitted", "upload_post": {
+        "request_id": f"req-{uuid.uuid4().hex[:8]}", "submitted_at": at}}}, **kw)
+
+
+def _week_runs(posting: tuple, rest: tuple, timings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return ([_run("published", run_date=d, timings=copy.deepcopy(timings)) for d in posting]
+            + [_run("skipped", run_date=d, metadata={"skip_reason": "rest_day"}, timings=dict(_REST_TIMINGS))
+               for d in rest])
+
+
+def _cost_inputs() -> Dict[str, Any]:
+    """The worked example as `summarize_week` keyword arguments: the week's posts (three Upload-Post
+    submissions — one of them refused AFTER the submit, still an upload), this week's and the week before's
+    runs (Mon/Tue/Thu/Sat posting, the rest rest days), the X journal, both weeks' script token counts and
+    the $16 plan."""
+    return dict(
+        posts=[_uploaded("youtube", at="2026-09-29T21:00:00+00:00", run_date="2026-09-29"),
+               _uploaded("instagram", "failed", at="2026-10-01T21:00:00Z", run_date="2026-10-01"),
+               _uploaded("linkedin")],
+        runs=_week_runs(("2026-09-28", "2026-09-29", "2026-10-01", "2026-10-03"),
+                        ("2026-09-30", "2026-10-02", "2026-10-04"), _POSTING_TIMINGS),
+        prev_runs=_week_runs(("2026-09-21", "2026-09-22", "2026-09-24", "2026-09-26"),
+                             ("2026-09-23", "2026-09-25", "2026-09-27"), _PREV_POSTING_TIMINGS),
+        charge_rows=_x_journal(),
+        script_rows=[{"run_date": d, "tokens_used": n} for d, n in _SCRIPT_TOKENS.items()],
+        upload_post_fee_micros=FEE_16,
+    )
+
+
+def _cost_summary(**overrides: Any) -> Dict[str, Any]:
+    kw = _cost_inputs()
+    kw.update(overrides)
+    return _summary(kw.pop("posts"), **kw)
+
+
+def _worked_lines(**overrides: Any) -> List[str]:
+    """The worked example's digest, as lines (the 4,096-unit cap asserted)."""
+    text = ds.compose_digest(_cost_summary(**overrides))
+    assert utf16_len(text) <= ds.MAX_DIGEST_UNITS
+    return text.splitlines()
+
+
+#: The keys of each week's part the digest renders from (the design's contract; extra keys are free).
+_LAST_KEYS = ("x", "gemini", "worker", "upload_post", "total", "unreadable", "usage", "usage_unreadable",
+              "usage_partial", "undated", "uploads", "uploads_floor", "free")
+_BEFORE_KEYS = ("x", "gemini", "worker", "usage", "usage_unreadable", "usage_partial")
+EXPECTED_LAST = {"x": 61_000, "gemini": 124_200, "worker": 49_604, "upload_post": FEE_16_WEEK, "total": 3_914_475,
+                 "unreadable": [], "usage": 234_804, "usage_unreadable": [], "usage_partial": False, "undated": 0,
+                 "uploads": 3, "uploads_floor": False, "free": False}
+EXPECTED_BEFORE = {"x": 55_000, "gemini": 90_000, "worker": 40_664, "usage": 185_664, "usage_unreadable": [],
+                   "usage_partial": False}
+
+
+def test_the_cost_line_sits_under_the_date_line_and_prices_a_normal_week():
+    s = _cost_summary()
+    last, before = s["cost"]["last"], s["cost"]["before"]
+    assert {k: last[k] for k in _LAST_KEYS} == EXPECTED_LAST
+    assert {k: before[k] for k in _BEFORE_KEYS} == EXPECTED_BEFORE
+    # the week before has no fee and no total: today's plan fee is not that week's
+    assert not {"upload_post", "total", "unreadable", "uploads"} & set(before)
+    assert s["cost"]["warn"] == 1_000_000
+    lines = ds.compose_digest(s).splitlines()
+    # right under the date line, then the blank line — no ⚠️ line ($0.235 of usage is under $1.00)
+    assert lines[:5] == ["📊 Caydex marketing — weekly digest", "Mon 2026-09-28 → Sun 2026-10-04 (ET)", COST_A, USAGE_A,
+                         ""]
+    assert sum(line.startswith("💵") for line in lines) == 1
+
+
+def test_an_unreadable_part_makes_the_total_a_floor_and_names_it():
+    assert _worked_lines(charge_rows=None)[2:4] == COST_X_UNREADABLE
+    # by hand: the worker alone, 49,604 and 40,664
+    assert _worked_lines(charge_rows=None, script_rows=None)[2:4] == [
+        "💵 Cost last week ≥ $3.729 (X and Gemini unreadable): X unreadable · Gemini unreadable · worker ≈ $0.050 · "
+        "Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage("≥ $0.050 (X and Gemini unreadable)", "≥ $0.041 (X and Gemini unreadable)")]
+    none_read = _usage("≥ $0.000 (X, Gemini and worker unreadable)", "≥ $0.000 (X, Gemini and worker unreadable)")
+    three = _worked_lines(charge_rows=None, script_rows=None, runs=None, prev_runs=None)
+    assert three[2:4] == [
+        "💵 Cost last week ≥ $3.680 (X, Gemini and worker unreadable): X unreadable · Gemini unreadable · "
+        "worker unreadable · Upload-Post $3.680 (plan fee · 3 uploads)", none_read]
+    # the fee is not usage: an unreadable fee leaves the usage line as it was
+    four = _worked_lines(charge_rows=None, script_rows=None, runs=None, prev_runs=None, upload_post_fee_micros=None)
+    assert four[2:4] == [
+        "💵 Cost last week ≥ $0.000 (X, Gemini, worker and Upload-Post unreadable): X unreadable · Gemini unreadable · "
+        "worker unreadable · Upload-Post unreadable", none_read]
+    # an unreadable part is never shown as a number
+    for lines in (three, four):
+        assert re.search(r"(X|Gemini ≈|worker ≈|Upload-Post) \$0\.000", "\n".join(lines[2:4])) is None
+    # each week's runs are their own read: one failing leaves the other week whole
+    assert _worked_lines(runs=None)[2:4] == [
+        "💵 Cost last week ≥ $3.865 (worker unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · worker unreadable · "
+        "Upload-Post $3.680 (plan fee · 3 uploads)", _usage(last=WORKER_FLOOR[0])]
+    assert _worked_lines(prev_runs=None)[2:4] == [COST_A, _usage(before=WORKER_FLOOR[1])]
+
+
+@pytest.mark.parametrize("cost", [None, "x", {}, {"last": {}, "before": "x"}, {"last": [], "before": {}}])
+def test_a_cost_section_that_is_not_a_cost_says_unreadable(cost):
+    s = _summary([])
+    s["cost"] = cost
+    assert ds.compose_digest(s).splitlines()[2:4] == ["💵 Cost last week: unreadable (see the web logs)", ""]
+
+
+@pytest.mark.parametrize("at", [None, "", "garbage", 7, {}, "2026-13-01T00:00:00+00:00"])
+def test_undated_x_charges_are_named_never_counted(at):
+    """An entry whose time cannot be read belongs to no week: it is never summed into one (a weekly figure
+    that counted it would count it EVERY week) — it is named, once, whatever its amount."""
+    one = _x_journal() + [_x_post("2026-10-01", _charge(at, "x_create", 15_000), updated_at="2026-10-01T20:31:00Z")]
+    s = _cost_summary(charge_rows=one)
+    assert (s["cost"]["last"]["x"], s["cost"]["before"]["x"], s["cost"]["last"]["undated"]) == (61_000, 55_000, 1)
+    lines = ds.compose_digest(s).splitlines()
+    assert lines[2:4] == [COST_A.replace("X $0.061 (our ledger)", "X $0.061 (our ledger; 1 undated charge not counted)"),
+                          USAGE_A]
+    # two of them — one with a thousand-dollar amount, one with no readable amount at all: still only named
+    two = _x_journal() + [_x_post("2026-09-29", _charge(at, "x_create", 10 ** 12), _charge("garbage", "x_read", "abc"),
+                                  updated_at="2026-09-29T20:31:00+00:00")]
+    lines = _worked_lines(charge_rows=two)
+    assert lines[2:4] == [COST_A.replace("X $0.061 (our ledger)", "X $0.061 (our ledger; 2 undated charges not counted)"),
+                          USAGE_A]
+
+
+@pytest.mark.parametrize("bad", [{"micros": 10 ** 9 + 1}, {"micros": -(10 ** 9 + 1)}, {"micros": "abc"}, {"micros": None},
+                                 {}, {"micros": True}, {"micros": float("nan")}, {"micros": float("inf")},
+                                 {"micros": [1]}, {"micros": 10 ** 400}])
+def test_a_thousand_dollar_or_unpriceable_x_entry_makes_only_its_week_unreadable(caplog, bad):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+
+    def journal_with(at: str) -> tuple:
+        post = _x_post("2026-09-29", {"at": at, "op": "x_create", **bad}, updated_at="2026-10-02T12:00:00+00:00")
+        return post, _x_journal() + [post]
+
+    def warned(post_id: str) -> bool:
+        return any(post_id in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+    post, rows = journal_with("2026-10-01T12:00:00+00:00")                 # last week
+    assert _worked_lines(charge_rows=rows)[2:4] == [COST_X_UNREADABLE[0], _usage(last=X_FLOOR[0])]
+    assert warned(post["id"])
+    caplog.clear()
+    post, rows = journal_with("2026-09-23T12:00:00+00:00")                 # the week before
+    assert _worked_lines(charge_rows=rows)[2:4] == [COST_A, _usage(before=X_FLOOR[1])]
+    assert warned(post["id"])
+    caplog.clear()
+    for at in ("2026-10-05T04:00:00+00:00", "2026-09-21T03:59:59+00:00"):  # in neither week: nothing to read
+        post, rows = journal_with(at)
+        assert _worked_lines(charge_rows=rows)[2:4] == [COST_A, USAGE_A]
+        assert not warned(post["id"])
+
+
+def test_the_x_entry_rule_reads_numbers_and_numeric_text_up_to_a_thousand_dollars():
+    """The cost line shares the X cap's entry rule (`_charge_entry`): numeric text and a float read; one entry
+    of exactly $1,000 is still a reading (and passes the alert line); a cent more is a hand edit."""
+    extra = [_x_post("2026-10-01", _charge("2026-10-01T12:00:00+00:00", "x_create", "15000"),
+                     _charge("2026-10-01T12:00:01+00:00", "x_create", 15000.7), updated_at="2026-10-01T12:00:01+00:00")]
+    assert _cost_summary(charge_rows=_x_journal() + extra)["cost"]["last"]["x"] == 91_000
+    thousand = [_x_post("2026-10-01", _charge("2026-10-01T12:00:00+00:00", "x_create", 10 ** 9),
+                        updated_at="2026-10-01T12:00:00+00:00")]
+    lines = _worked_lines(charge_rows=_x_journal() + thousand)
+    assert lines[2:5] == [
+        "💵 Cost last week ≈ $1003.914: X $1000.061 (our ledger) · Gemini ≈ $0.124 · worker ≈ $0.050 · "
+        "Upload-Post $3.680 (plan fee · 3 uploads)", _usage(last="≈ $1000.235"),
+        "⚠️ Usage ≈ $1000.235 passed your $1.00 alert line"]
+    # a net-negative week (a refund dated in it) is shown signed, never clamped
+    refund = [_x_post("2026-10-01", _charge("2026-10-01T12:00:00+00:00", "refund", -100_000),
+                      updated_at="2026-10-01T12:00:00+00:00")]
+    s = _cost_summary(charge_rows=_x_journal() + refund)
+    assert s["cost"]["last"]["x"] == -39_000
+    assert "X -$0.039 (our ledger)" in ds.compose_digest(s).splitlines()[2]
+
+
+def test_an_x_charge_on_a_week_boundary_counts_once():
+    """Both windows are half-open on the digest's own instants: [the week before's start, start) and
+    [start, end) — an entry at a boundary lands in exactly one week, whatever offset it was written in."""
+    entries = [("2026-09-21T03:59:59+00:00", 1),          # before the week before: nowhere
+               ("2026-09-21T00:00:00-04:00", 20),         # = 09-21T04:00Z, the week before's first instant
+               ("2026-09-28T03:59:59.999999Z", 300),      # the week before's last microsecond
+               ("2026-09-28T04:00:00Z", 4_000),           # last week's first instant
+               ("2026-10-05T03:59:59+00:00", 50_000),     # last week's last second
+               ("2026-10-05T00:00:00-04:00", 600_000)]    # = 10-05T04:00Z, the end: this week's
+    rows = [_x_post("2026-09-28", *[_charge(at, "x_create", m) for at, m in entries], updated_at="2026-10-05T04:00:00Z")]
+    s = _summary([], charge_rows=rows)
+    assert (s["cost"]["last"]["x"], s["cost"]["before"]["x"]) == (54_000, 320)
+
+
+def test_a_reversal_nets_out_in_the_week_of_the_charge_it_reverses():
+    """A refund or correction is dated at the charge it reverses (run_service), however late it is WRITTEN:
+    it nets out inside that charge's own week — and one reversing a charge from before the week before
+    began belongs to neither week. By hand: last week 61,000 − 15,000 = 46,000 (total 3,899,475, usage
+    219,804); the week before 55,000 − 15,000 = 40,000 (usage 170,664)."""
+    older = [_x_post("2026-09-19", _charge("2026-09-19T20:31:00+00:00", "refund", -15_000),
+                     updated_at="2026-10-02T09:00:00+00:00")]
+    assert _worked_lines(charge_rows=_x_journal() + older)[2:4] == [COST_A, USAGE_A]
+    both = [_x_post("2026-10-01", _charge("2026-10-01T20:31:00Z", "refund", -15_000),
+                    _charge("2026-09-24T20:31:00+00:00", "x_metrics_read_correction", -15_000),
+                    updated_at="2026-10-04T12:00:00+00:00")]
+    s = _cost_summary(charge_rows=_x_journal() + both)
+    assert (s["cost"]["last"]["x"], s["cost"]["before"]["x"]) == (46_000, 40_000)
+    assert ds.compose_digest(s).splitlines()[2:5] == [
+        "💵 Cost last week ≈ $3.899: X $0.046 (our ledger) · Gemini ≈ $0.124 · worker ≈ $0.050 · "
+        "Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage("≈ $0.220", "≈ $0.171"), ""]
+
+
+def test_a_malformed_journal_row_or_entry_adds_nothing_and_keeps_x_readable():
+    """Only an IN-WINDOW entry whose amount cannot be read makes X unreadable. A row that is not an object,
+    metadata that is not an object, a journal that is not a list and an entry that is not an object hold no
+    charge at all: they add nothing, name nothing, and never cost the part its reading."""
+    in_week = _charge("2026-10-01T12:00:00+00:00", "x_create", 5)
+    junk = ["junk", None, 7, [in_week],
+            {"id": "meta-none", "metadata": None},
+            {"id": "meta-text", "metadata": "charges"},
+            {"id": "no-journal", "metadata": {"dry_run": False}},
+            {"id": "journal-text", "metadata": {"charges": "15000"}},
+            {"id": "journal-object", "metadata": {"charges": in_week}},
+            {"id": "entries-junk", "metadata": {"charges": ["x_create", 15_000, None,
+                                                             ["2026-10-01T12:00:00+00:00", "x_create", 5]]}}]
+    s = _cost_summary(charge_rows=_x_journal() + junk)
+    assert (s["cost"]["last"]["x"], s["cost"]["before"]["x"], s["cost"]["last"]["undated"]) == (61_000, 55_000, 0)
+    assert ds.compose_digest(s).splitlines()[2:4] == [COST_A, USAGE_A]
+
+
+@pytest.mark.parametrize("warn, alert", [
+    (0, None),                    # 0 = no alert line at all
+    (1_000_000, None),            # the declared $1.00: $3.914 in all, but only $0.235 of it is USAGE
+    (234_804, None),              # exactly at the line: not above it
+    (234_803, "⚠️ Usage ≈ $0.235 passed your $0.23 alert line"),
+    (200_000, "⚠️ Usage ≈ $0.235 passed your $0.20 alert line"),
+    # unreadable alert values (only a monkeypatch reaches the pure function with one): no line, no crash
+    (-1, None), (True, None), (0.2, None), ("200000", None), (None, None), (10 ** 13, None),
+])
+def test_the_usage_alert_line(warn, alert):
+    lines = _worked_lines(cost_warn_micros=warn)
+    assert lines[2:4] == [COST_A, USAGE_A]
+    assert lines[4] == (alert or "")
+    assert sum("⚠️ Usage" in line for line in lines) == (1 if alert else 0)
+
+
+def test_the_usage_alert_compares_only_what_could_be_read():
+    # X unreadable: the readable floor (Gemini + worker = $0.174) already passes $0.15 — said as a floor
+    lines = _worked_lines(charge_rows=None, cost_warn_micros=150_000)
+    assert lines[2:5] == COST_X_UNREADABLE + ["⚠️ Usage ≥ $0.174 passed your $0.15 alert line"]
+    # …but a floor under the line says nothing: the unread part might or might not pass it
+    assert _worked_lines(charge_rows=None, cost_warn_micros=200_000)[4] == ""
+    assert _worked_lines(charge_rows=None, script_rows=None, runs=None, prev_runs=None, cost_warn_micros=1)[4] == ""
+    # the Free plan changes nothing about usage
+    assert _worked_lines(upload_post_fee_micros=0, cost_warn_micros=200_000)[4] == (
+        "⚠️ Usage ≈ $0.235 passed your $0.20 alert line")
+
+
+def test_the_upload_post_part_free_vs_plan_and_what_counts_as_an_upload():
+    # (e) the Free plan: no fee, the uploads still counted
+    assert _worked_lines(upload_post_fee_micros=0)[2:4] == [
+        "💵 Cost last week ≈ $0.235: X $0.061 (our ledger) · Gemini ≈ $0.124 · worker ≈ $0.050 · "
+        "Upload-Post $0.000 (Free plan · 3 uploads)",
+        USAGE_A]
+    assert _worked_lines()[2] == COST_A                                       # $16 a month: the plan fee
+    # a capped post read may hide uploads: a floor
+    assert _worked_lines(posts_capped=True)[2] == COST_A.replace("(plan fee · 3 uploads)", "(plan fee · ≥ 3 uploads)")
+    assert _worked_lines(posts=[_uploaded("youtube")])[2].endswith("Upload-Post $3.680 (plan fee · 1 upload)")
+    assert _worked_lines(posts=[])[2].endswith("Upload-Post $3.680 (plan fee · 0 uploads)")
+    # every Upload-Post platform counts; status does not matter once Upload-Post took the job (refused after
+    # the submit = an upload)
+    counted = [_uploaded(p) for p in ("tiktok", "youtube", "instagram", "facebook", "linkedin", "threads")]
+    counted += [_uploaded("instagram", "failed"), _uploaded("youtube", "retracted"), _uploaded("facebook", "queued"),
+                _uploaded("threads", at="2026-10-03T21:00:00Z")]
+    # …and the posts Upload-Post took although no submit was recorded (an AMBIGUOUS send carries no
+    # submitted_at): reconcile FOUND it (platform_post_id), the owner tapped "It's live" (published),
+    # reconcile read its failure from Upload-Post (failed_on_platform), or Upload-Post answered with its own
+    # job or poll id
+    sent = {"request_id": "r-9", "first_sent_at": "2026-10-03T20:31:00+00:00"}
+    counted += [
+        _post("youtube", meta={"publish": {"state": "published", "upload_post": {**sent, "platform_post_id": "yt-1"}}}),
+        _post("linkedin", meta={"publish": {"state": "published", "upload_post": dict(sent)}}),
+        _post("threads", "failed", meta={"publish": {"state": "failed_on_platform", "upload_post": dict(sent)}}),
+        _post("tiktok", "failed", meta={"publish": {"state": "refused", "upload_post": {**sent, "job_id": "job-1"}}}),
+        _post("instagram", "failed", meta={"publish": {"state": "refused", "upload_post": {**sent, "job_id": 42}}}),
+        _post("facebook", "queued", meta={"publish": {"state": "submitted", "upload_post": {**sent, "poll_id": "up-7"}}}),
+        _post("youtube", "failed", meta={"publish": {"state": "refused",
+                                                     "upload_post": {**sent, "platform_post_id": "yt-2"}}}),
+    ]
+    not_counted = [
+        _uploaded("youtube", live=False),                                   # a rehearsal row
+        _uploaded("x"), _uploaded("bluesky"),                               # not an Upload-Post platform
+        _uploaded("YouTube"),                                               # not a platform at all
+        # refused before Upload-Post took it: no readable submit, no id, not on the platform
+        _uploaded("tiktok", "failed", at=None), _uploaded("tiktok", "failed", at=""),
+        _uploaded("facebook", "failed", at="not a time"), _uploaded("threads", "failed", at=7),
+        _post("linkedin", "failed", meta={"publish": {"state": "refused", "upload_post": {"request_id": "r-1"}}}),
+        _post("tiktok", "failed", meta={"publish": {"state": "refused", "upload_post": {
+            "job_id": "  ", "poll_id": True, "platform_post_id": None}}}),   # blank, bool, null ids
+        _post("youtube", "failed", meta={"publish": "submitted"}),          # publish not an object
+        _post("instagram", "failed", meta={"publish": {"upload_post": "r-1"}}),   # upload_post not an object
+        _post("facebook", "failed", meta={"upload_post": {"submitted_at": "2026-10-03T21:00:00+00:00"}}),   # not under publish
+        _post("threads", "approved", meta={"publish": {"state": "not_sent", "upload_post": dict(sent)}}),   # never left
+        _post("youtube", "skipped", meta={"publish": {"state": "absent_expired", "upload_post": dict(sent)}}),
+    ]
+    s = _cost_summary(posts=counted + not_counted)
+    assert (s["cost"]["last"]["uploads"], s["cost"]["last"]["uploads_floor"]) == (17, False)
+    assert ds.compose_digest(s).splitlines()[2].endswith("Upload-Post $3.680 (plan fee · 17 uploads)")
+    # a fee the pure function cannot read is that part unreadable — never a guessed $0 Free plan
+    for junk in (None, -1, True, 1.5, "16000000", 10 ** 13):
+        assert _worked_lines(upload_post_fee_micros=junk)[2:4] == [
+            "💵 Cost last week ≥ $0.235 (Upload-Post unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · "
+            "worker ≈ $0.050 · Upload-Post unreadable",
+            USAGE_A], junk
+
+
+def test_the_week_before_is_compared_by_usage_whatever_todays_plan_fee():
+    """Review 2026-10-07: the week before used to be priced at TODAY's fee, so the first Monday after a plan
+    change hid the change — Free → $16 showed a $0.186 week as "Week before ≈ $3.865" beside "$3.914". The
+    plan in force a week earlier is not recorded, so that week is compared by usage alone: the same line at
+    any fee, and never a total that includes one."""
+    lines = {fee: _worked_lines(upload_post_fee_micros=fee)[3] for fee in (0, FEE_16, 24_000_000, None, "junk")}
+    assert set(lines.values()) == {USAGE_A}
+    assert "3.865" not in "\n".join(_worked_lines())             # the fee-inclusive week-before total is gone
+
+
+def test_the_x_journal_probe_fits_in_one_postgrest_response():
+    """PostgREST cuts every answer at its max-rows (≈1,000) whatever `.limit()` asks: at a limit of 1,000
+    the probe row (limit + 1) could never arrive, and a cut answer read as complete (review 2026-10-07)."""
+    from app.utils.postgrest_paging import PAGE_SIZE
+    assert 0 < ds.X_CHARGE_ROW_LIMIT and ds.X_CHARGE_ROW_LIMIT + 1 <= PAGE_SIZE
+
+
+def test_an_upload_post_send_of_unknown_outcome_makes_the_upload_count_a_floor():
+    """A send that may or may not have reached Upload-Post — an ambiguous answer still queued, its
+    escalation, a crash mid-send, or a post the owner marked "Not posted" (absent from the platform, but the
+    job may still have been taken) — is not counted, and the count says "≥". One that has since resolved
+    either way is exact again."""
+    base = _cost_inputs()["posts"]                                           # 3 uploads
+    sent = {"request_id": "r-9", "first_sent_at": "2026-10-03T20:31:00+00:00"}
+    unsure = [_post("threads", "queued", meta={"publish": {"state": "unknown", "upload_post": dict(sent)}}),
+              _post("youtube", "queued", meta={"publish": {"state": "escalated", "escalated_at": "2026-10-03T22:00:00Z",
+                                                           "upload_post": dict(sent)}}),
+              _post("tiktok", "queued", meta={"publish": {"state": "sending", "upload_post": dict(sent)}}),
+              _post("linkedin", "failed", meta={"publish": {"state": "owner_not_posted", "upload_post": dict(sent)}})]
+    for post in unsure:
+        s = _cost_summary(posts=base + [post])
+        assert (s["cost"]["last"]["uploads"], s["cost"]["last"]["uploads_floor"]) == (3, True), post["platform"]
+        assert ds.compose_digest(s).splitlines()[2] == COST_A.replace("(plan fee · 3 uploads)",
+                                                                      "(plan fee · ≥ 3 uploads)")
+    # not a floor: the same states on an X / Bluesky / rehearsal row, an acknowledged submit still queued,
+    # a send that provably never left
+    exact = [_post("x", "queued", meta={"publish": {"state": "unknown"}}),
+             _post("bluesky", "queued", meta={"publish": {"state": "escalated"}}),
+             _post("threads", "queued", live=False, meta={"publish": {"state": "unknown", "upload_post": dict(sent)}}),
+             _post("threads", "approved", meta={"publish": {"state": "not_sent", "upload_post": dict(sent)}}),
+             _post("tiktok", "failed", meta={"publish": {"state": "not_sent"}}),
+             _post("facebook", "failed", meta={"publish": {"state": "refused", "upload_post": dict(sent)}})]
+    s = _cost_summary(posts=base + exact)
+    assert (s["cost"]["last"]["uploads"], s["cost"]["last"]["uploads_floor"]) == (3, False)
+    assert ds.compose_digest(s).splitlines()[2] == COST_A
+    # a hand-edited state or status of any JSON type is no state: never a crash (an unhashable list in a
+    # frozenset lookup used to raise TypeError and take the whole digest down), never counted, never a floor
+    for junk in (["unknown"], {"unknown": 1}, 7, None, True):
+        odd = [_post("threads", "queued", meta={"publish": {"state": junk, "upload_post": dict(sent)}}),
+               _post("youtube", junk if not isinstance(junk, (list, dict)) else "queued",
+                     meta={"publish": {"state": junk}})]
+        s = _cost_summary(posts=base + odd)
+        assert (s["cost"]["last"]["uploads"], s["cost"]["last"]["uploads_floor"]) == (3, False), junk
+    # the ambiguous send that reconcile later FOUND is an exact upload again
+    found = _post("threads", meta={"publish": {"state": "published", "upload_post": {**sent, "platform_post_id": "t-1"}}})
+    s = _cost_summary(posts=base + [found])
+    assert (s["cost"]["last"]["uploads"], s["cost"]["last"]["uploads_floor"]) == (4, False)
+
+
+def test_the_fee_share_is_seven_days_of_a_month_rounded_half_up():
+    assert ds._fee_week(FEE_16) == FEE_16_WEEK                 # 16,000,000 × 70,000 / 304,375 = 3,679,671.25
+    assert ds._fee_week(24_000_000) == 5_519_507               # 24 a month (Basic, monthly): …507.19
+    assert ds._fee_week(0) == 0
+    assert ds._fee_week(304_375) == 70_000                     # exact
+    assert ds._fee_week(2) == 0 and ds._fee_week(3) == 1        # 0.46 → 0; 0.69 → 1
+
+
+@pytest.mark.parametrize("timings, micros", [
+    ({}, 0),                                                                # nothing billed: a READABLE 0
+    (_POSTING_TIMINGS, 12_311),
+    (_REST_TIMINGS, 120),                                                   # no peak recorded: the 4,096 MB service
+    ({"preflight_s": 2.6, "voiced_cgroup_peak_mb": 9000.0}, 120),           # a peak above the service: 4,096
+    ({"preflight_s": 303.0, "voiced_cgroup_peak_mb": 9000.0}, 14_035),
+    ({"preflight_s": 303.0}, 14_035),
+    ({"preflight_s": 303.0, "voiced_cgroup_peak_mb": 0}, 9_357),            # a 0 MB peak: only the vCPU seconds
+    ({"preflight_s": 3600}, 166_752),                                       # the bound is still a measurement
+    (_PREV_POSTING_TIMINGS, 10_076),
+    ({"preflight_s": 10.0}, 463),
+    # keys that are not the worker's own billed seconds are ignored; junk peaks are not peaks
+    ({"preflight_s": 2.6, "download_s": 99_999, "rendered_self_maxrss_mb": 9_999.0, "planned_s": 50.0}, 120),
+    ({"preflight_s": 2.6, "voiced_cgroup_peak_mb": "2587", "rendered_cgroup_peak_mb": float("nan")}, 120),
+    # a billed value that is not seconds: unreadable, never a silent 0
+    ({"preflight_s": 3600.001}, None), ({"rendered_s": -1}, None), ({"voiced_s": True}, None),
+    ({"scripted_s": "12"}, None), ({"selected_s": None}, None), ({"assets_ready_s": float("nan")}, None),
+    ({"preflight_s": float("inf")}, None), ({"preflight_s": 2.6, "rendered_s": 10 ** 400}, None),
+    ({"preflight_s": [2.6]}, None),
+    # timings that are not an object
+    ([], None), (None, None), ("303", None),
+])
+def test_worker_cost_per_run_is_integer_bounded_and_never_a_silent_zero(timings, micros):
+    assert ds.run_worker_micros(_run("published", timings=copy.deepcopy(timings))) == micros
+
+
+def test_one_unpriceable_run_makes_only_its_weeks_worker_part_unreadable(caplog):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    base = _cost_inputs()
+    bad = _run("published", run_date="2026-10-01", timings={**_POSTING_TIMINGS, "rendered_s": "160.3"})
+    runs = [r for r in base["runs"] if r["run_date"] != "2026-10-01"] + [bad]
+    assert _worked_lines(runs=runs)[2:4] == [COST_WORKER_UNREADABLE[0], _usage(last=WORKER_FLOOR[0])]
+    assert any(bad["id"] in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    # the week before's: only the week before
+    prev_bad = _run("published", run_date="2026-09-22", timings={"voiced_s": -5})
+    prev = [r for r in base["prev_runs"] if r["run_date"] != "2026-09-22"] + [prev_bad]
+    assert _worked_lines(prev_runs=prev)[2:4] == [COST_A, _usage(before=WORKER_FLOOR[1])]
+    # a run the cost line never prices — another week's, an unreadable date, not an object — changes nothing
+    stray = [_run("published", run_date="2026-10-05", timings={"rendered_s": "x"}),
+             _run("published", run_date="2026-09-27", timings=None),
+             _run("published", run_date="not a date", timings=None), "junk", None]
+    assert _worked_lines(runs=base["runs"] + stray)[2:4] == [COST_A, USAGE_A]
+
+
+@pytest.mark.parametrize("tokens, micros", [(0, 0), (1, 2), (2, 3), (3, 5), (82_800, 124_200), (60_000, 90_000),
+                                            (2 ** 31 - 1, 3_221_225_471),
+                                            (666_666_666_666, 999_999_999_999),   # $999,999.999…: still read
+                                            (666_666_666_667, None)])            # past ±$1,000,000: unreadable
+def test_gemini_is_tokens_at_one_blended_rate(tokens, micros):
+    assert ds._gemini_week([{"run_date": "2026-10-01", "tokens_used": tokens}], WEEK_START, WEEK_END) == micros
+
+
+def test_a_junk_token_count_or_an_undatable_script_makes_gemini_unreadable(caplog):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    base = _cost_inputs()["script_rows"]
+    for junk in (None, -1, True, 1.5, "12", 10 ** 15, float("nan")):
+        rows = [dict(r, tokens_used=junk) if r["run_date"] == "2026-10-01" else r for r in base]
+        assert _worked_lines(script_rows=rows)[2:4] == [COST_GEMINI_UNREADABLE[0], _usage(last=GEMINI_FLOOR[0])], junk
+        rows = [dict(r, tokens_used=junk) if r["run_date"] == "2026-09-24" else r for r in base]
+        assert _worked_lines(script_rows=rows)[2:4] == [COST_A, _usage(before=GEMINI_FLOOR[1])], junk
+    assert any("tokens_used" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    # a row that cannot be placed in EITHER week makes both unreadable — it might belong to either
+    for bad_day in (None, "garbage", "2026-10-01T00:00:00+00:00", 20261001,
+                    datetime(2026, 10, 1, tzinfo=timezone.utc)):
+        rows = base + [{"run_date": bad_day, "tokens_used": 5}]
+        assert _worked_lines(script_rows=rows)[2:4] == COST_GEMINI_UNREADABLE, bad_day
+    assert _worked_lines(script_rows=base + ["junk"])[2:4] == COST_GEMINI_UNREADABLE
+    # a junk count on a day OUTSIDE both weeks is never read
+    stray = [{"run_date": "2026-10-05", "tokens_used": "junk"}, {"run_date": "2026-09-20", "tokens_used": -1}]
+    assert _worked_lines(script_rows=base + stray)[2:4] == [COST_A, USAGE_A]
+    # a date object is a date, as PostgREST's string is
+    assert ds._gemini_week([{"run_date": date(2026, 10, 1), "tokens_used": 2}], WEEK_START, WEEK_END) == 3
+
+
+def test_a_300_post_week_keeps_the_cost_block_whole_under_the_date_line():
+    """Rows are capped and, at worst, the text is cut from the bottom — the cost block at the top survives
+    every cap, with its ⚠️ line."""
+    emoji_error = "🔥" * 400 + " " + TOKEN_LIKE
+    posts = []
+    for i in range(300):
+        if i % 3 == 0:
+            posts.append(_uploaded("youtube", "failed", last_error=emoji_error))
+        elif i % 3 == 1:
+            posts.append(_post("bluesky", "rejected", meta={"review": {"decision": "rejected", "reason": "tone"}}))
+        else:
+            posts.append(_post(f"p{i:03d}", "published", metrics={"status": "ok", "last": {"likes": i}},
+                               external_url="https://example.invalid/" + "📈" * 300))
+    text = ds.compose_digest(_cost_summary(
+        posts=posts, posts_capped=True, cost_warn_micros=200_000,
+        link_hits=[{"campaign": f"c{i:03d}", "day": "2026-09-30", "hits": i} for i in range(300)],
+        spend={f"op_{i:03d}": i for i in range(300)},
+        escalated=[_post("x", "queued", meta={"escalated_at": "2026-10-03T20:40:00+00:00"}) for _ in range(20)]))
+    assert utf16_len(text) <= ds.MAX_DIGEST_UNITS and "… and" in text
+    assert TOKEN_SECRET not in text
+    assert text.splitlines()[2:6] == [COST_A.replace("(plan fee · 3 uploads)", "(plan fee · ≥ 100 uploads)"), USAGE_A,
+                                      "⚠️ Usage ≈ $0.235 passed your $0.20 alert line", ""]
+
+
+@pytest.mark.parametrize("name, default", [("MARKETING_UPLOAD_POST_MONTHLY_USD", 0.0),
+                                           ("MARKETING_WEEKLY_COST_WARN_USD", 1.0)])
+def test_the_cost_settings_refuse_a_bad_value_at_boot(monkeypatch, name, default):
+    """`Field(ge=0, le=10_000, allow_inf_nan=False)`: a bad Railway value fails the web deploy loudly (Railway
+    keeps the old deployment) — never a cost line silently priced on nonsense."""
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    assert type(settings).model_fields[name].default == default
+    for bad in ("-1", "-0.01", "nan", "inf", "-inf", "1e309", "10001", "10000.01", "1e300", "abc", ""):
+        monkeypatch.setenv(name, bad)
+        with pytest.raises(ValidationError) as e:
+            Settings()
+        assert [err["loc"] for err in e.value.errors()] == [(name,)], bad
+    for ok, value in (("0", 0.0), ("16", 16.0), ("16.0", 16.0), ("1.5", 1.5), ("-0", 0.0), ("10000", 10_000.0)):
+        monkeypatch.setenv(name, ok)
+        assert getattr(Settings(), name) == value, ok
+
+
+@pytest.mark.parametrize("usd, micros", [(0.0, 0), (-0.0, 0), (16.0, FEE_16), (16, FEE_16), (24.0, 24_000_000),
+                                         (1.5, 1_500_000), (10_000, 10_000_000_000), (0.0000004, 0)])
+def test_the_cost_settings_are_read_at_call_time_in_micro_dollars(monkeypatch, caplog, usd, micros):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", usd)
+    monkeypatch.setattr(settings, "MARKETING_WEEKLY_COST_WARN_USD", usd)
+    assert (ds.upload_post_fee_micros(), ds.weekly_cost_warn_micros()) == (micros, micros)
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+@pytest.mark.parametrize("bad", ["16", True, -1, -0.01, float("nan"), float("inf"), 1e9, 10_000.01, None, [16]])
+def test_an_unreadable_cost_setting_is_logged_and_never_guessed(monkeypatch, caplog, bad):
+    """Settings refuses these at boot; only a monkeypatch reaches the readers with one. The fee is then
+    UNREADABLE (never a guessed $0 Free plan); the alert line falls back to its declared $1.00. Both logged."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", bad)
+    monkeypatch.setattr(settings, "MARKETING_WEEKLY_COST_WARN_USD", bad)
+    assert ds.upload_post_fee_micros() is None
+    assert ds.weekly_cost_warn_micros() == 1_000_000
+    for name in ("MARKETING_UPLOAD_POST_MONTHLY_USD", "MARKETING_WEEKLY_COST_WARN_USD"):
+        assert any(name in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records), name
 
 
 # ── gather: the reads, against the in-memory ledger ───────────────────────────
@@ -4209,6 +5006,10 @@ def digest_ledger(monkeypatch, platforms_forbidden):
     monkeypatch.setattr(settings, "MARKETING_ENABLED", True)
     monkeypatch.setattr(settings, "MARKETING_METRICS_ENABLED", True)
     monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", "")
+    # The cost line's two settings are read at call time: pin them (the Free plan, the $1.00 alert line) so
+    # a developer's .env can never move an expected cost line. A test that wants the $16 plan sets its own.
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 0.0)
+    monkeypatch.setattr(settings, "MARKETING_WEEKLY_COST_WARN_USD", 1.0)
     from app.services.marketing import content_pool
     monkeypatch.setattr(content_pool, "eligible_keys", lambda: [f"journey:{i}" for i in range(10)])
     return svc
@@ -4240,11 +5041,17 @@ def _seed_week(svc) -> Dict[str, Any]:
     t[mrs.RUNS].rows += [_run("media_ready", run_date="2026-10-03", timings={"voiced_cgroup_peak_mb": 2500.0}),
                          _run("skipped", run_date="2026-10-02", metadata={"skip_reason": "rest_day"}),
                          _run("published", run_date="2026-09-27")]           # last week: not in this digest
-    t[mrs.SCRIPTS].rows += [{"run_id": str(uuid.uuid4()), "run_date": "2026-10-01", "source_ref": "journey:1"},
-                            {"run_id": str(uuid.uuid4()), "run_date": "2026-10-03", "source_ref": "journey:2"},
-                            {"run_id": str(uuid.uuid4()), "run_date": "2026-10-02", "source_ref": None}]
+    # `tokens_used` is NOT NULL DEFAULT 0 (migration 173): a seeded row carries it like a real one does
+    t[mrs.SCRIPTS].rows += [{"run_id": str(uuid.uuid4()), "run_date": "2026-10-01", "source_ref": "journey:1",
+                             "tokens_used": 21_000},
+                            {"run_id": str(uuid.uuid4()), "run_date": "2026-10-03", "source_ref": "journey:2",
+                             "tokens_used": 19_400},
+                            {"run_id": str(uuid.uuid4()), "run_date": "2026-10-02", "source_ref": None,
+                             "tokens_used": 0}]
     t[mrs.LINK_HITS].rows += [{"campaign": "bluesky", "day": "2026-10-03", "hits": 2},
-                              {"campaign": "x", "day": "2026-09-27", "hits": 50}]   # last week
+                              {"campaign": "bluesky_early", "day": "2026-10-03", "hits": 4},   # the first minutes
+                              {"campaign": "x", "day": "2026-09-27", "hits": 50},              # last week
+                              {"campaign": "x_early", "day": "2026-09-27", "hits": 30}]        # last week
     # #16: the day-job ledger holds every scheduled job — another job's row comes FIRST, so a read
     # that lost its `job = marketing_metrics_daily` filter would report it.
     t[ds._JOB_STATE_TABLE].rows.append(_WHALE_JOB_ROW.copy())
@@ -4260,6 +5067,13 @@ _WHALE_JOB_ROW = {"job": "whale_hydration_full", "enabled": True, "run_day": "20
                   "last_run_at": "2026-09-01T07:00:00+00:00", "last_error": "WHALE-SENTINEL boom",
                   "items_written": 77}
 
+#: `_seed_week`'s cost block, by hand: X 15,000 (10-03) + 15,000 (09-30) — the Mon 10-05 read is this week's;
+#: Gemini (21,000 + 19,400 + 0) tokens × 1.5 = 60,600; no billed run seconds (a peak alone bills nothing);
+#: the Free plan (the fixture's pin) and no Upload-Post upload inside the week. The week before: nothing.
+_SEED_WEEK_COST = ["💵 Cost last week ≈ $0.091: X $0.030 (our ledger) · Gemini ≈ $0.061 · worker ≈ $0.000 · "
+                   "Upload-Post $0.000 (Free plan · 0 uploads)",
+                   "Usage (X + Gemini + worker): last week ≈ $0.091 · week before ≈ $0.000"]
+
 
 @pytest.mark.asyncio
 async def test_gather_reads_only_our_ledger_for_the_previous_week(digest_ledger, platforms_forbidden):
@@ -4270,7 +5084,10 @@ async def test_gather_reads_only_our_ledger_for_the_previous_week(digest_ledger,
     assert report["live"] == 2 and report["status_totals"] == {"published": 1, "queued": 1}
     assert report["engagement"]["x"]["totals"] == {"likes": 4, "impressions": 90}
     assert report["followers"]["x"]["followers"] == 12 and report["followers"]["bluesky"]["followers"] == 7
+    # the early row is summed apart (and last week's early row is not this digest's)
     assert report["taps"]["rows"] == [("bluesky", 2)]
+    assert (report["taps"]["total"], report["taps"]["early"]) == (2, 4)
+    assert report["cost"]["last"]["unreadable"] == [] and report["cost"]["before"]["usage_unreadable"] == []
     # spend: this UTC month only, by op (the 09-30 charge is last month)
     assert report["spend"]["by_op"] == [("x_create", 15_000), ("x_metrics_read", 5_000)]
     assert report["spend"]["budget"] == 2_000_000
@@ -4288,6 +5105,8 @@ async def test_gather_reads_only_our_ledger_for_the_previous_week(digest_ledger,
     assert report["store"] == "prelaunch"
     text = ds.compose_digest(report)
     _assert_no_model_text(text)
+    assert text.splitlines()[2:4] == _SEED_WEEK_COST
+    assert ("/go taps (approximate): bluesky 2 — 2 in total — plus 4" + _EARLY_CLAUSE) in text.splitlines()
     assert "\nMetrics job: last completed 2026-10-05 · last attempt 10-05 06:00 ET · 2 posts written" in text
     assert "WHALE-SENTINEL" not in text and "77 posts" not in text and "2026-09-01" not in text
     assert "⚠️ Waiting for your answer (outcome unknown): 1\n  X · run 10-03 · since 10-03 16:40 ET" in text
@@ -4378,6 +5197,160 @@ async def test_a_metrics_job_that_never_ran_has_a_default_state(digest_ledger, o
     assert report["metrics_job"] == {"job": ds.JOB_METRICS, "enabled": True, "run_day": None}
     text = ds.compose_digest(report)
     assert "Metrics job: never completed" in text and "WHALE-SENTINEL" not in text
+
+
+# ── gather: the cost line's three reads ───────────────────────────────────────
+
+
+def _seed_costs(svc) -> Dict[str, Any]:
+    """The worked example (`_cost_inputs`) in the ledger, plus a row each cost read must LEAVE OUT: an X post
+    last touched one second before the week before began, yet carrying an in-week entry (impossible in
+    production, where every charge bumps `updated_at` — it proves the journal read is bounded by the touch),
+    another platform's journal, and runs and scripts (with junk values) of today and of 09-20."""
+    t = svc.fake.tables
+    kw = _cost_inputs()
+    stale = _x_post("2026-09-19", _charge("2026-09-30T12:00:00+00:00", "x_create", 700_000),
+                    updated_at="2026-09-21T03:59:59+00:00")
+    other = _post("bluesky", "published", run_date="2026-09-30",
+                  meta={"charges": [_charge("2026-09-30T12:00:00+00:00", "x_create", 800_000)]},
+                  updated_at="2026-09-30T12:00:00+00:00")
+    t[mrs.POSTS].rows += kw["charge_rows"] + [stale, other] + kw["posts"]
+    t[mrs.RUNS].rows += kw["runs"] + kw["prev_runs"] + [
+        _run("published", run_date=d, timings={"rendered_s": "junk"}) for d in ("2026-09-20", "2026-10-05")]
+    t[mrs.SCRIPTS].rows += [{"run_id": str(uuid.uuid4()), "source_ref": None, **r} for r in kw["script_rows"]]
+    t[mrs.SCRIPTS].rows += [{"run_id": str(uuid.uuid4()), "run_date": d, "source_ref": None, "tokens_used": "junk"}
+                            for d in ("2026-09-20", "2026-10-05")]
+    return {"stale": stale, "other": other}
+
+
+#: The week's live posts `_seed_costs` leaves: four X posts, the other platform's one, three submissions.
+_SEED_COSTS_LIVE = 8
+
+
+@pytest.mark.asyncio
+async def test_gather_prices_last_week_and_the_week_before_from_our_ledger(digest_ledger, platforms_forbidden,
+                                                                           monkeypatch):
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert {k: report["cost"]["last"][k] for k in _LAST_KEYS} == EXPECTED_LAST
+    assert {k: report["cost"]["before"][k] for k in _BEFORE_KEYS} == EXPECTED_BEFORE
+    assert report["cost"]["warn"] == 1_000_000 and report["live"] == _SEED_COSTS_LIVE
+    lines = ds.compose_digest(report).splitlines()
+    assert lines[1:5] == ["Mon 2026-09-28 → Sun 2026-10-04 (ET)", COST_A, USAGE_A, ""]
+    assert platforms_forbidden == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, part, name, expected", [
+    ("list_charge_rows_since", "x", "X", COST_X_UNREADABLE),
+    ("script_tokens_between", "gemini", "Gemini", COST_GEMINI_UNREADABLE),
+    ("list_runs_between", "worker", "worker", COST_WORKER_UNREADABLE),   # both weeks' runs: one method
+])
+async def test_a_failed_cost_read_degrades_only_its_part(digest_ledger, monkeypatch, caplog, method, part, name,
+                                                         expected):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)
+    monkeypatch.setattr(digest_ledger, method, _Exploding(mrs.MarketingRunError(f"{method} 503")))
+    report = await ds.gather_digest(digest_ledger, NOW)
+    for week, readable in (("last", COST_LAST), ("before", COST_BEFORE)):
+        got = report["cost"][week]
+        assert got[part] is None and got["usage_unreadable"] == [name] and got["usage_partial"] is True
+        assert {k: got[k] for k in readable if k != part} == {k: v for k, v in readable.items() if k != part}
+    assert report["cost"]["last"]["unreadable"] == [name] and report["cost"]["last"]["upload_post"] == FEE_16_WEEK
+    lines = ds.compose_digest(report).splitlines()
+    assert lines[2:4] == expected
+    assert report["live"] == _SEED_COSTS_LIVE                     # the rest of the digest is intact
+    assert ("Runs: unreadable (see the web logs)" in lines) is (method == "list_runs_between")
+    assert any(f"{method} 503" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_capped_x_journal_read_is_unreadable_never_a_partial_sum(digest_ledger, monkeypatch, caplog):
+    """The journal read asks for one row more than its limit and RAISES when it gets it: a sum over the first
+    N rows would be a wrong number that looks right."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)                     # 7 X posts touched since the week before began
+    monkeypatch.setattr(ds, "X_CHARGE_ROW_LIMIT", 7)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert (report["cost"]["last"]["x"], report["cost"]["before"]["x"]) == (61_000, 55_000)   # at the limit: whole
+    for limit in (6, 1):
+        caplog.clear()
+        monkeypatch.setattr(ds, "X_CHARGE_ROW_LIMIT", limit)
+        report = await ds.gather_digest(digest_ledger, NOW)
+        assert (report["cost"]["last"]["x"], report["cost"]["before"]["x"]) == (None, None), limit
+        assert ds.compose_digest(report).splitlines()[2:4] == COST_X_UNREADABLE
+        assert report["live"] == _SEED_COSTS_LIVE and report["spend"] is not None   # the month's line reads apart
+        assert any("partial" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records), limit
+
+
+@pytest.mark.asyncio
+async def test_gather_prices_the_november_week_on_the_new_york_clock(digest_ledger, monkeypatch):
+    """(f) Mon 2026-11-02: last week is the 169-hour [10-26T04:00Z, 11-02T05:00Z) — its extra EST hour
+    included — and the week before is [10-19T04:00Z, 10-26T04:00Z); runs and scripts go by their ET day.
+    The plan fee is still 7/30.4375 of a month, never 169 hours' worth. Preflight-only runs of 10.0 s at the
+    4,096 MB fallback are 463 each; X / Gemini by hand: last 20,000 + 250,000 and 4,000 tokens, the week
+    before 1,000 and 1,000 tokens."""
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    t = digest_ledger.fake.tables
+    t[mrs.POSTS].rows += [
+        _x_post("2026-10-17",
+                _charge("2026-10-19T03:59:59+00:00", "x_create", 30_000),        # before the week before
+                _charge("2026-10-26T03:59:59+00:00", "x_metrics_read", 1_000),   # Sun 10-25 23:59:59 EDT
+                _charge("2026-10-26T04:00:00+00:00", "x_metrics_read", 20_000),  # Mon 10-26 00:00 EDT
+                updated_at="2026-10-26T04:00:00+00:00"),
+        _x_post("2026-10-31",
+                _charge("2026-11-02T04:59:59+00:00", "x_create", 250_000),       # Sun 11-01 23:59:59 EST
+                _charge("2026-11-02T05:00:00+00:00", "x_metrics_read", 4_000),   # Mon 11-02 00:00 EST: this week
+                updated_at="2026-11-02T05:00:00+00:00")]
+    for day, tokens in (("2026-10-25", 1_000), ("2026-10-26", 2_000), ("2026-11-01", 2_000), ("2026-11-02", 7_000)):
+        t[mrs.RUNS].rows.append(_run("published", run_date=day, timings={"preflight_s": 10.0}))
+        t[mrs.SCRIPTS].rows.append({"run_id": str(uuid.uuid4()), "run_date": day, "source_ref": None,
+                                    "tokens_used": tokens})
+    report = await ds.gather_digest(digest_ledger, datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc))
+    last, before = report["cost"]["last"], report["cost"]["before"]
+    assert (last["x"], last["gemini"], last["worker"], last["upload_post"]) == (270_000, 6_000, 926, FEE_16_WEEK)
+    assert (before["x"], before["gemini"], before["worker"], before["usage"]) == (1_000, 1_500, 463, 2_963)
+    assert ds.compose_digest(report).splitlines()[1:4] == [
+        "Mon 2026-10-26 → Sun 2026-11-01 (ET)",
+        "💵 Cost last week ≈ $3.957: X $0.270 (our ledger) · Gemini ≈ $0.006 · worker ≈ $0.001 · "
+        "Upload-Post $3.680 (plan fee · 0 uploads)",
+        "Usage (X + Gemini + worker): last week ≈ $0.277 · week before ≈ $0.003"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_cost_setting_degrades_only_its_part_of_the_digest(digest_ledger, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    _seed_costs(digest_ledger)
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", "16")     # only a monkeypatch can
+    monkeypatch.setattr(settings, "MARKETING_WEEKLY_COST_WARN_USD", float("nan"))
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["cost"]["warn"] == 1_000_000                                # the declared $1.00
+    assert ds.compose_digest(report).splitlines()[2:5] == [
+        "💵 Cost last week ≥ $0.235 (Upload-Post unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · "
+        "worker ≈ $0.050 · Upload-Post unreadable",
+        USAGE_A, ""]
+    # the alert line is read at call time too
+    monkeypatch.setattr(settings, "MARKETING_WEEKLY_COST_WARN_USD", 0.2)
+    lines = ds.compose_digest(await ds.gather_digest(digest_ledger, NOW)).splitlines()
+    assert lines[4] == "⚠️ Usage ≈ $0.235 passed your $0.20 alert line"
+
+
+@pytest.mark.asyncio
+async def test_an_absurd_x_budget_never_takes_the_digest_down(digest_ledger, monkeypatch):
+    """`outlet_x.budget_micros()` is called OUTSIDE `_optional`: a budget whose micro-dollars overflow to inf
+    used to raise there and fail every attempt of the digest. X now reads as off (fail-closed); the rest
+    renders."""
+    _seed_week(digest_ledger)
+    monkeypatch.setattr(settings, "MARKETING_X_MONTHLY_BUDGET_USD", 1e303)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["spend"]["budget"] == 0
+    lines = ds.compose_digest(report).splitlines()
+    assert ("X spend 2026-10 (UTC, to date): $0.020 — X is OFF: no posts or reads "
+            "(MARKETING_X_MONTHLY_BUDGET_USD is 0 or unset)") in lines
+    assert lines[2:4] == _SEED_WEEK_COST
 
 
 # ── the cycles: the real run_day_job, an in-memory day-job ledger, a fake Telegram ──
@@ -4550,6 +5523,10 @@ async def test_the_digest_goes_out_once_on_monday_as_one_plain_text_message(bot,
     (msg,) = _sends(bot)
     assert msg["chat_id"] == OWNER and "parse_mode" not in msg and "reply_markup" not in msg
     assert msg["text"].startswith("📊 Caydex marketing — weekly digest\nMon 2026-09-28 → Sun 2026-10-04 (ET)")
+    # the cost block rides right under the date line of the message the cycle SENDS (its three reads wired
+    # through the real cycle), and the first minutes after posting are counted apart there too
+    assert msg["text"].splitlines()[2:4] == _SEED_WEEK_COST
+    assert ("/go taps (approximate): bluesky 2 — 2 in total — plus 4" + _EARLY_CLAUSE) in msg["text"].splitlines()
     assert utf16_len(msg["text"]) <= ds.MAX_DIGEST_UNITS
     _assert_no_model_text(msg["text"])
     assert digest_jobs.finishes == [(ds.JOB_DIGEST, True, 1, None)]

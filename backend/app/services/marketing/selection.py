@@ -46,32 +46,40 @@ class Template:
 TEMPLATES: Sequence[Template] = (
     Template(
         "myth_vs_fact", "Myth vs fact",
-        "Open with a common misconception the source corrects, then walk through what the "
-        "source actually shows. Cards: the myth, then the facts that answer it.",
+        "Open with a common misconception the source corrects - in the hook, labelled ('Myth: "
+        "...') or reported ('Many believe ...'), never as a yes/no question - then walk through "
+        "what the source actually shows. Cards: the myth, then the facts that answer it.",
         frozenset({"money_moves", "journey"}),
     ),
     Template(
         "three_takeaways", "Three takeaways",
-        "Distil the source into exactly three lessons a reader can reuse. Cards: one lesson "
-        "each, plus an opening card.",
+        "Open the hook on the most surprising of the three lessons - a fact or a how, why or "
+        "what question, never a count of lessons or an instruction to learn. Distil the source "
+        "into exactly three lessons a reader can reuse, two script lines each. Cards: one lesson "
+        "each, in the script's order.",
         frozenset({"money_moves", "journey"}),
     ),
     Template(
         "case_story", "Case story",
-        "Tell the business history as a short story with a beginning, a turning point and the "
-        "lesson it teaches about how businesses win or lose. Past tense for every dated fact.",
+        "Open the hook on the turning point - the choice, bet or surprise that changed the "
+        "business, naming the company - then tell the business history as a short story with a "
+        "beginning, that turning point and the lesson it teaches about how businesses win or "
+        "lose. Past tense for every dated fact. Cards: the setup, the turning point, the lesson.",
         frozenset({"money_moves"}),
     ),
     Template(
         "question_hook", "Question hook",
-        "Open with one question a curious beginner would ask, answer it step by step from the "
-        "source, and end on the principle, never on a verdict about any company.",
+        "Open with one how, why or what question a curious beginner would ask - never a yes/no "
+        "question - answer it step by step from the source, and end on the principle, never on "
+        "a verdict about any company.",
         frozenset({"money_moves", "journey"}),
     ),
     Template(
         "checklist", "Checklist",
-        "Turn the source into a short checklist of things to understand or look for. It is a "
-        "learning checklist, never a list of what to buy or sell.",
+        "Open the hook on the costly mistake or the hidden question the checklist guards "
+        "against - a fact or a how, why or what question, never 'Understand...', 'Learn...' or a "
+        "count. Then turn the source into a short checklist of things to look for or ask, one "
+        "check per card. It is a learning checklist, never a list of what to buy or sell.",
         frozenset({"money_moves", "journey"}),
     ),
 )

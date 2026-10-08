@@ -201,7 +201,7 @@ async def test_health_check_marks_a_failed_lookup_degraded(monkeypatch):
     from app.services.sector_benchmark_lookup import BenchmarkLookupFailed
 
     class _Lookup:
-        def get_current_benchmark_values(self, industry, sector, metrics):
+        def get_current_benchmarks(self, industry, sector, metrics):
             return BenchmarkLookupFailed({m: None for m in metrics})
 
     monkeypatch.setattr(hc, "get_sector_benchmark_lookup", lambda: _Lookup())

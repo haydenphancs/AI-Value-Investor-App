@@ -21,10 +21,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
-from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.schemas.stock_overview import (
+    SnapshotItemResponse,
+    SnapshotMetricResponse,
+    snapshot_build_time,
+    with_cached_build_time,
+)
 from app.services.asset_class import profile_is_fund
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
+from app.services.valuation_snapshot_service import split_peer_cells
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +143,14 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     margin, rated 5/5"), NaN/inf inputs are dropped, the latest Profit Power year is the
 #     real latest year (a zero-revenue year is a gap, not skipped to an older one), and a
 #     degraded Profit Power build marks the card degraded.
-_SNAPSHOT_PAYLOAD_VERSION = 2
+# 3 (2026-10-07): margins are TTM (ratios-ttm) against the TTM peer medians — they were the
+#     latest FISCAL year's Profit Power margins scored against TTM medians; Profit Power is
+#     only the fallback now, shown but neither compared nor scored. ROE on negative or
+#     zero shareholder equity reads "N/M", unscored (health_check_service's test); a
+#     negative value never prints a negative multiple ("-14.40x sector avg"); the rating
+#     is weighted over the SCORED metrics only (renormalised, like the Growth card); each
+#     metric carries `peer_level` and the card `computed_at`.
+_SNAPSHOT_PAYLOAD_VERSION = 3
 _VERSION_KEY = "_schema_v"
 
 # ── Ticker validation ────────────────────────────────────────────
@@ -163,7 +176,9 @@ def _first_valid(*vals: Optional[float]) -> Optional[float]:
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     val = record.get(key)
-    if val is None:
+    # A bool is no figure: float(True) == 1.0 would read as a D/E of 1.0 — a positive
+    # negative-equity "witness" (review round 3) — or a 100% margin.
+    if val is None or isinstance(val, bool):
         return None
     try:
         f = float(val)
@@ -174,13 +189,14 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
-def _ttm_margin_fallback(
+def _ttm_margin(
     ratios0: Dict[str, Any], ttm_key: str, legacy_key: str,
 ) -> Optional[float]:
     """A TTM ratios margin, as a percentage, ONLY when it can be a real margin.
 
-    This fills a margin the latest Profit Power year left empty — which, since Profit
-    Power keeps a zero/negative-revenue year as a gap, is exactly the no-revenue case.
+    The card's PRIMARY margin since 2026-10-07 (it was the fallback for a margin the
+    latest Profit Power fiscal year left empty): the peer medians it is compared with are
+    TTM, so the company side must be TTM too.
     FMP's ``*ProfitMarginTTM`` is netIncome / revenue over the same trailing year, so:
       * revenue <= 0 sign-flips it (a $1.25B loss read +113.6% and scored 5/5) — so
         the TTM revenue (``revenuePerShareTTM``) must be present and positive;
@@ -259,6 +275,17 @@ def _profitability_score(value: Optional[float], sector_median_decimal: Optional
 # comparison; the old `_get_latest_benchmark` max-year helper had no floor.
 
 
+def _usable_median(sector_decimal: Optional[float]) -> Optional[float]:
+    """A peer median (decimal) the card may print and compare against, else None.
+
+    Finite and still positive at the one decimal of percent it prints with: a
+    non-positive median anchors no "x of peers" ratio, and one that prints "0.0%" would
+    sit beside a "1500.00x" multiple. Scoring treats None as "no benchmark"."""
+    if sector_decimal is None or not math.isfinite(sector_decimal):
+        return None
+    return sector_decimal if round(sector_decimal * 100, 1) > 0 else None
+
+
 def _label_with_sector(
     label: str, val: Optional[float], sector_decimal: Optional[float],
 ) -> str:
@@ -267,16 +294,101 @@ def _label_with_sector(
 
     `val` is the company's value in percentage form (e.g. 30.0 for 30%).
     `sector_decimal` is the sector median in decimal form (e.g. 0.15 for 15%).
-    Returns the bare label when sector data is missing — iOS then renders
-    no asterisk for that row, matching today's Valuation/Health behaviour.
+    Returns the bare label when either is missing — iOS then renders no
+    asterisk for that row, matching today's Valuation/Health behaviour.
+
+    A NEGATIVE value prints the median without a multiple ("sector avg 15.0%"):
+    a loss-maker's "-0.83x sector avg 15.0%" (or ROE's "-14.40x") reads as a
+    quantity and is not one. The words stay "sector avg" whatever the peer
+    level — shipped iOS builds strip the suffix by the word "sector".
     """
-    if val is None or sector_decimal is None or sector_decimal <= 0:
+    median = _usable_median(sector_decimal)
+    if val is None or median is None:
         return label
-    sector_pct = sector_decimal * 100
-    if sector_pct == 0:
-        return label
+    sector_pct = median * 100
+    if val < 0:
+        return f"{label} (sector avg {sector_pct:.1f}%)"
     ratio = val / sector_pct
     return f"{label} ({ratio:.2f}x sector avg {sector_pct:.1f}%)"
+
+
+# Value printed for ROE on negative or zero shareholder equity — the same "not meaningful"
+# token the Financials tab's Health Check uses (health_check_service.NOT_MEANINGFUL).
+_NOT_MEANINGFUL = "N/M"
+
+
+def _equity_state(de_ratio: Optional[float], bs_equity: Optional[float]) -> Optional[str]:
+    """Why ROE is not meaningful — "negative" / "reported as zero" — or None when it is.
+
+    A replica of `health_check_service`'s negative-equity test (decided once before its
+    metric loop), so the Profitability card and the Financials tab never disagree about one
+    company: D/E (ratios-TTM) < 0, or the latest quarterly balance sheet's
+    `totalStockholdersEquity` < 0, or that equity EXACTLY 0 while D/E does not contradict it
+    (FMP zero-fills unreported fields, so a 0 beside a positive D/E is "unreported").
+    FMP's ROE is net income / equity, so a negative denominator flips its sign: a
+    McDonald's-shaped profitable company read -216% and a Boeing-shaped loss-maker +303%.
+    Pinned against the Health Check by tests/test_snapshot_cards_2026_10_07.py."""
+    de_negative = de_ratio is not None and de_ratio < 0
+    bs_negative = bs_equity is not None and bs_equity < 0
+    bs_zero = bs_equity is not None and bs_equity == 0
+    zero_equity = bs_zero and (de_ratio is None or de_ratio <= 0)
+    if de_negative or bs_negative:
+        return "negative"
+    if zero_equity:
+        return "reported as zero"
+    return None
+
+
+def _weighted_rating(parts: List[Tuple[Optional[int], float]]) -> Optional[float]:
+    """The card's continuous 1.0–5.0 composite over the SCORED metrics, re-normalised, or
+    None when nothing is scored.
+
+    `parts` is ``[(score | None, weight)]``. An unscored metric (no value, a fiscal-year
+    fallback, ROE on negative equity) used to vote the neutral sentinel 3 at full weight,
+    dragging a strong card toward "average" — the Growth card dropped that rule on
+    2026-09-30. With NOTHING scored (only fiscal-year fallback margins, an "N/M" ROE, or no
+    value at all) there is no composite: the caller rates the card 0 (unavailable) with no
+    `weighted_score`, and `_compute_with_status` flags the build "no_values", so it is never
+    persisted and the report leaves the card out. Until 2026-10-07 (review round 2) this
+    returned a neutral 3.0 there, and a fiscal-year-only card was persisted as "3/5" and
+    labelled "In Line With Industry" in the report. A weighted mean of scores in [1, 5]
+    stays in [1, 5]; a non-positive total weight is "nothing scored"."""
+    scored = [(score, weight) for score, weight in parts if score is not None]
+    total = sum(weight for _, weight in scored)
+    if not scored or total <= 0:
+        return None
+    return sum(score * weight for score, weight in scored) / total
+
+
+# The build-status reason for a card that rates nothing (company state, not an outage: the
+# report collector's `_SNAPSHOT_COMPANY_STATE_REASONS` leaves the card out and stays
+# cacheable).
+_NO_VALUES = "no_values"
+
+
+def _with_no_values(degraded: List[str]) -> List[str]:
+    """``degraded`` with "no_values" last, exactly once."""
+    return [*(d for d in degraded if d != _NO_VALUES), _NO_VALUES]
+
+
+def _first_record(raw: Any) -> Dict[str, Any]:
+    """The first object of an FMP list answer (or the answer itself when it is one)."""
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        return raw[0]
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _finite(value: Any) -> Optional[float]:
+    """A finite float, else None (Profit Power margins are floats or None)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 # ── Service ───────────────────────────────────────────────────────
@@ -358,19 +470,24 @@ class ProfitabilitySnapshotService:
             #
             # Serve it (the em-dashes are honest about the metrics) but do NOT persist,
             # so the next request retries. Same shape as the gate in
-            # `stock_overview_service`, which this service was missing.
+            # `stock_overview_service`, which this service was missing. An "N/M" ROE is a
+            # reading that is never scored, so it does not make the rating a measurement.
             _measured = [
                 m for m in (result.metrics or [])
-                if getattr(m, "value", None) not in (None, "", "—")
+                if getattr(m, "value", None) not in (None, "", "—", _NOT_MEANINGFUL)
             ]
-            if not _measured and fund_shape and not degraded:
+            # `_compute_with_status` itself flags a build that SCORES nothing "no_values"
+            # (fiscal-year fallback margins only); the gate below adds it for one that
+            # MEASURES nothing. Either way it appears once, last.
+            outage = [d for d in degraded if d != _NO_VALUES]
+            if not _measured and fund_shape and not outage:
                 # A fund: nothing to measure is its permanent answer, not an outage. Keep it
                 # in MEMORY for the normal 5 min so a burst of views makes no FMP call — but
-                # never in Supabase (a Tier-2 hit notes [], which would freeze the 3/5
-                # sentinel into a report), and its status still says `no_values`.
+                # never in Supabase (a Tier-2 hit notes [], which would freeze the unrated
+                # card into a report), and its status still says `no_values`.
                 logger.info("[fund-shape] ticker=%s step=%s", ticker, "profitability_snapshot")
                 _cache_set(cache_key, result)
-                _note_degraded(cache_key, result, [*degraded, "no_values"])
+                _note_degraded(cache_key, result, _with_no_values(degraded))
                 if not future.done():
                     future.set_result(result)
                 return result
@@ -378,12 +495,12 @@ class ProfitabilitySnapshotService:
             if not _measured:
                 logger.warning(
                     "Profitability snapshot NOT cached for %s — every metric is absent, "
-                    "so the %s/5 rating is the neutral sentinel rather than a measurement. "
-                    "Serving it uncached so the next request retries.",
+                    "so there is no measurement to rate (rating %s). Serving it uncached so "
+                    "the next request retries.",
                     ticker, getattr(result, "rating", "?"),
                 )
                 # Not cached, but still SERVED (to joiners too): its status must say so.
-                _note_degraded(cache_key, result, [*degraded, "no_values"])
+                _note_degraded(cache_key, result, _with_no_values(degraded))
                 if not future.done():
                     future.set_result(result)
                 return result
@@ -469,7 +586,7 @@ class ProfitabilitySnapshotService:
                     version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
                 )
                 return None
-            return SnapshotItemResponse(**json_data)
+            return SnapshotItemResponse(**with_cached_build_time(json_data, cached_at))
 
         except Exception as e:
             logger.warning(
@@ -508,139 +625,183 @@ class ProfitabilitySnapshotService:
     async def _compute_with_status(
         self, ticker: str,
     ) -> Tuple[SnapshotItemResponse, List[str]]:
-        """Reuse ProfitPowerService (Financials tab) for margins, FMP for ROE/ROA.
+        """TTM margins (ratios-ttm), TTM ROE / ROA (key-metrics-ttm), scored against the
+        CURRENT peer medians, which are TTM-first.
 
         Returns ``(snapshot, degraded)`` where ``degraded`` names every upstream leg that
-        RAISED (a permanent `FMPNotEntitledException` excluded), ``profit_power`` when
-        Profit Power served a build it marked degraded, and ``benchmarks`` when the peer
-        lookup failed; `get_profitability_snapshot` refuses to write such a build to the
-        24h tier.
+        RAISED and that the card depended on (a permanent `FMPNotEntitledException`
+        excluded), and ``benchmarks`` when the peer lookup failed;
+        `get_profitability_snapshot` refuses to write such a build to the 24h tier. Two
+        legs count only when the card needed them: Profit Power (the fallback for a margin
+        TTM could not give) and the balance sheet (the second negative-equity witness — it
+        counts only for a shown ROE with no usable D/E, i.e. D/E missing or exactly 0; a
+        non-zero D/E carries equity's sign by itself).
 
-        Ratios endpoint is fetched in parallel as a fallback: ProfitPowerService
-        leaves a margin empty when the latest filing has no positive `revenue`. The
-        FMP `/ratios-ttm` fields (`operatingProfitMarginTTM` etc.) fill it — but only
-        through `_ttm_margin_fallback`, which refuses a non-positive TTM revenue and an
-        exact-zero ratio.
+        Margins used to be the latest FISCAL year's Profit Power figures, scored against
+        TTM peer medians — a different twelve months on each side (2026-10-07 audit). Now
+        both sides are TTM; Profit Power fills only a margin `_ttm_margin` refuses or the
+        ratios leg lacks, and such a fiscal-year figure is SHOWN without a peer comparison
+        or a score. ROE / ROA come from /key-metrics-ttm (/ratios-ttm carries neither).
         """
         from app.services.profit_power_service import get_profit_power_service
 
-        # TTM endpoints for ratios + key_metrics so ROE/ROA/margins reflect
-        # the last 4 quarters instead of an up-to-12-months-stale fiscal-year
-        # snapshot. profit_power still drives margins when its annual data
-        # is fresh; TTM ratios are the fallback that matches what Webull
-        # and other consumer apps display.
         pp_task = get_profit_power_service().get_profit_power(ticker)
         km_task = self.fmp.get_key_metrics_ttm(ticker)
         profile_task = self.fmp.get_company_profile(ticker)
         ratios_task = self.fmp.get_ratios_ttm(ticker)
+        # Latest quarterly balance sheet: the Health Check's second negative-equity witness.
+        bs_task = self.fmp.get_balance_sheet(ticker, period="quarter", limit=1)
 
         results = await asyncio.gather(
-            pp_task, km_task, profile_task, ratios_task, return_exceptions=True
+            pp_task, km_task, profile_task, ratios_task, bs_task, return_exceptions=True
         )
-        degraded: List[str] = [
+        leg_names = ("profit_power", "key_metrics_ttm", "profile", "ratios_ttm", "balance_sheet")
+        failed = {
             name
-            for name, raw in zip(("profit_power", "key_metrics_ttm", "profile", "ratios_ttm"), results)
+            for name, raw in zip(leg_names, results)
             if isinstance(raw, Exception) and not isinstance(raw, FMPNotEntitledException)
-        ]
+        }
 
-        # Margins from profit_power (exact same as Financials tab)
+        km = _first_record(results[1]) if not isinstance(results[1], Exception) else {}
+        profile = _first_record(results[2]) if not isinstance(results[2], Exception) else {}
+        ratios0 = _first_record(results[3]) if not isinstance(results[3], Exception) else {}
+        bs = _first_record(results[4]) if not isinstance(results[4], Exception) else {}
+
+        # ── Margins: TTM first (guarded by `_ttm_margin`) ─────────────────────
+        margins: Dict[str, Optional[float]] = {
+            "gross_margin": _ttm_margin(ratios0, "grossProfitMarginTTM", "grossProfitMargin"),
+            "operating_margin": _ttm_margin(
+                ratios0, "operatingProfitMarginTTM", "operatingProfitMargin",
+            ),
+            "net_margin": _ttm_margin(ratios0, "netProfitMarginTTM", "netProfitMargin"),
+        }
+        ttm_missing = [key for key, value in margins.items() if value is None]
+
+        # ── Profit Power fallback: a fiscal-year figure for a margin TTM lacks ──
         pp = results[0] if not isinstance(results[0], Exception) else None
-        # Profit Power SERVES a degraded build (a failed income / cash-flow leg) rather
-        # than raising, so the leg above "succeeded". Its margins may be holes this card
-        # then backfills from TTM ratios — a different basis — and persisting that for
-        # 24h would outlive the outage the Profit Power build itself refuses to persist.
         pp_degraded = list(getattr(pp, "degraded", None) or []) if pp is not None else []
-        if pp_degraded:
-            degraded.append("profit_power")
-            logger.warning(
-                "Profitability snapshot for %s uses a DEGRADED Profit Power build (%s)",
-                ticker, ", ".join(pp_degraded),
-            )
-        gross_margin = None
-        op_margin = None
-        net_margin = None
-        if pp and pp.annual:
+        fiscal_year_margins: set = set()
+        if ttm_missing and pp is not None and getattr(pp, "annual", None):
             # Sorted oldest→newest, and Profit Power keeps a zero/negative-revenue year as
             # an all-None gap rather than dropping it — so this really is the latest
             # fiscal year (it used to be an OLDER year presented and scored as current).
             latest = pp.annual[-1]
-            gross_margin = latest.gross_margin
-            op_margin = latest.operating_margin
-            net_margin = latest.net_margin
+            for key in ttm_missing:
+                fy_value = _finite(getattr(latest, key, None))
+                if fy_value is not None:
+                    margins[key] = fy_value
+                    fiscal_year_margins.add(key)
+            if fiscal_year_margins:
+                logger.info(
+                    "Profitability snapshot for %s: %s from the latest fiscal year (no "
+                    "usable TTM ratio) — shown without a peer comparison or a score",
+                    ticker, ", ".join(sorted(fiscal_year_margins)),
+                )
+        pp_needed = bool(ttm_missing)
+        if pp_degraded:
+            # Profit Power SERVES a degraded build (a failed income / cash-flow leg) rather
+            # than raising. Its holes matter only when this card had to fall back on it.
+            logger.warning(
+                "Profitability snapshot for %s: Profit Power build is DEGRADED (%s) — %s",
+                ticker, ", ".join(pp_degraded),
+                "the card needed its fallback margins" if pp_needed
+                else "unused, every margin is TTM",
+            )
+        elif "profit_power" in failed and not pp_needed:
+            logger.info(
+                "Profitability snapshot for %s: Profit Power leg failed but unused — every "
+                "margin is TTM", ticker,
+            )
 
-        # ROE/ROA from FMP key-metrics (ratios endpoint returns None for these)
-        km_raw = results[1]
-        km = {}
-        if isinstance(km_raw, list) and km_raw:
-            km = km_raw[0]
-        elif isinstance(km_raw, dict):
-            km = km_raw
-
+        # ── ROE / ROA (key-metrics-ttm) and the negative-equity test ──────────
         # Field names: /key-metrics-ttm uses TTM-suffixed names; legacy
         # bare names are kept as fallbacks in case FMP rolls the schema.
         roe = _to_pct(_first_valid(
             _safe_float(km, "returnOnEquityTTM"),
             _safe_float(km, "returnOnEquity"),
         ))
-        roa_raw = _first_valid(
+        roa = _to_pct(_first_valid(
             _safe_float(km, "returnOnAssetsTTM"),
             _safe_float(km, "returnOnAssets"),
             _safe_float(km, "returnOnTangibleAssetsTTM"),
             _safe_float(km, "returnOnTangibleAssets"),
+        ))
+        de_ratio = _first_valid(
+            _safe_float(ratios0, "debtToEquityRatioTTM"),
+            _safe_float(ratios0, "debtToEquityRatio"),
         )
-        roa = _to_pct(roa_raw)
-
-        # Sector for benchmark comparison
-        profile_raw = results[2]
-        profile = {}
-        if isinstance(profile_raw, dict):
-            profile = profile_raw
-        elif isinstance(profile_raw, list) and profile_raw:
-            profile = profile_raw[0]
-
-        # Ratios fallback for margins the latest Profit Power year left empty (no
-        # revenue that year, a bank's missing gross profit, or no Profit Power build at
-        # all). Guarded by `_ttm_margin_fallback`: it must not bring a sign-flipped or a
-        # fabricated-zero margin back by another route.
-        ratios_raw = results[3] if not isinstance(results[3], Exception) else []
-        ratios0: Dict[str, Any] = {}
-        if isinstance(ratios_raw, list) and ratios_raw and isinstance(ratios_raw[0], dict):
-            ratios0 = ratios_raw[0]
-        elif isinstance(ratios_raw, dict):
-            ratios0 = ratios_raw
-
-        if gross_margin is None:
-            gross_margin = _ttm_margin_fallback(ratios0, "grossProfitMarginTTM", "grossProfitMargin")
-        if op_margin is None:
-            op_margin = _ttm_margin_fallback(
-                ratios0, "operatingProfitMarginTTM", "operatingProfitMargin",
+        bs_equity = _safe_float(bs, "totalStockholdersEquity")
+        if bs_equity == 0 and de_ratio is not None and de_ratio > 0:
+            logger.warning(
+                "Profitability snapshot for %s: balance-sheet totalStockholdersEquity is 0 "
+                "but D/E=%r is positive — treating the 0 as unreported, ROE judged",
+                ticker, de_ratio,
             )
-        if net_margin is None:
-            net_margin = _ttm_margin_fallback(ratios0, "netProfitMarginTTM", "netProfitMargin")
+        equity_state = _equity_state(de_ratio, bs_equity) if roe is not None else None
+        if equity_state is not None:
+            logger.info(
+                "Profitability snapshot for %s: roe %s%% is not meaningful — shareholder "
+                "equity %s (D/E=%r, equity=%r) — shown as N/M, left out of the rating",
+                ticker, roe, equity_state, de_ratio, bs_equity,
+            )
+        # The balance sheet is the SECOND negative-equity witness. Its failure degrades the
+        # build (never persisted; the report drops the card and is not shared-cached) only
+        # when it could change the outcome: a shown ROE with NO usable D/E — D/E missing,
+        # or exactly 0 (zero debt, or FMP's zero-fill, says nothing about equity's sign).
+        # A non-zero D/E carries the sign of equity on its own (debt is never negative): a
+        # negative one has already ruled ROE "N/M", a positive one is judged alone. Review
+        # round 3 (R3-CARDS-4): counting the leg whenever ROE was shown made a 429 on this
+        # one extra call drop the card from almost every report during a rebuild burst.
+        # Accepted cost: a ratios-TTM D/E that lags the quarter equity turned negative is
+        # caught only when this leg answers — the WARNING below names every build judged
+        # without it (and such a build is persisted for the 24 h tier like a clean one).
+        de_witness = de_ratio is not None and de_ratio != 0
+        bs_needed = roe is not None and not de_witness
+        if "balance_sheet" in failed and roe is not None and de_witness and de_ratio > 0:
+            bs_error = results[4]
+            logger.warning(
+                "Profitability snapshot for %s: balance-sheet leg FAILED (%s: %s) — ROE "
+                "%s%% judged on ratios-TTM D/E=%r alone, no second negative-equity "
+                "witness; the balance-sheet leg is not counted as degradation",
+                ticker, type(bs_error).__name__, bs_error, roe, de_ratio,
+            )
+
+        degraded: List[str] = []
+        for name in leg_names:
+            if name == "profit_power":
+                if pp_needed and ("profit_power" in failed or pp_degraded):
+                    degraded.append("profit_power")
+            elif name == "balance_sheet":
+                if bs_needed and "balance_sheet" in failed:
+                    degraded.append("balance_sheet")
+            elif name in failed:
+                degraded.append(name)
 
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""
         # Industry-relative: prefer INDUSTRY peers, fall back to sector per cell.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        # CURRENT benchmark per metric: TTM row if present, else latest mature
-        # annual value (fallback). {metric: value | None}.
+        # CURRENT benchmark per metric (`get_current_benchmarks`: mature industry TTM →
+        # mature sector TTM → newest complete mature annual → none), with its peer level.
         cur_bench: Dict[str, Optional[float]] = {}
+        cur_levels: Dict[str, Optional[str]] = {}
         if sector:
             try:
                 lookup = get_sector_benchmark_lookup()
                 # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
-                cur_bench = await asyncio.to_thread(
-                    lookup.get_current_benchmark_values,
+                cells = await asyncio.to_thread(
+                    lookup.get_current_benchmarks,
                     industry,
                     sector,
                     ["gross_margin", "operating_margin", "net_margin", "roe", "roa"],
                 )
+                cur_bench, cur_levels = split_peer_cells(cells)
                 # A FAILED lookup (swallowed DB error) answers the same all-None shape as
                 # "this peer group has no rows" — but it is a transient hole, not an
                 # answer: every score falls back to absolute thresholds and every label
                 # loses its "vs sector". Serve it; never persist it.
-                if lookup_failed(cur_bench):
+                if lookup_failed(cells):
                     logger.warning(
                         "Profitability snapshot: benchmark lookup FAILED for %s "
                         "(industry=%r, sector=%r) — scoring on absolute thresholds, build "
@@ -653,73 +814,72 @@ class ProfitabilitySnapshotService:
                     "scoring on absolute thresholds, build marked degraded",
                     ticker, type(e).__name__, e,
                 )
-                cur_bench = {}
+                cur_bench, cur_levels = {}, {}
                 degraded.append("benchmarks")
 
-        # Score each metric against the CURRENT (TTM-first) sector/industry median
-        sector_gross = cur_bench.get("gross_margin")
-        sector_op = cur_bench.get("operating_margin")
-        sector_net = cur_bench.get("net_margin")
-        sector_roe = cur_bench.get("roe")
-        sector_roa = cur_bench.get("roa")
+        def _row(label: str, key: str, value: Optional[float], weight: float):
+            """(metric, (score, weight)) for one row. A fiscal-year fallback is shown but
+            neither compared nor scored; ROE on negative / zero equity reads "N/M"."""
+            if key == "roe" and equity_state is not None:
+                return SnapshotMetricResponse(
+                    name=label, value=_NOT_MEANINGFUL, metric_key=key, score=None,
+                ), (None, weight)
+            if value is None:
+                return SnapshotMetricResponse(
+                    name=label, value=_fmt_pct(None), metric_key=key, score=None,
+                ), (None, weight)
+            if key in fiscal_year_margins:
+                return SnapshotMetricResponse(
+                    name=label, value=_fmt_pct(value), metric_key=key, score=None,
+                ), (None, weight)
+            median = _usable_median(cur_bench.get(key))
+            score = _profitability_score(value, median)
+            name = _label_with_sector(label, value, median)
+            level = cur_levels.get(key) if name != label else None
+            return SnapshotMetricResponse(
+                name=name, value=_fmt_pct(value), metric_key=key, score=score,
+                peer_level=level if level in ("industry", "sector") else None,
+            ), (score, weight)
 
-        score_gross = _profitability_score(gross_margin, sector_gross)
-        score_op = _profitability_score(op_margin, sector_op)
-        score_net = _profitability_score(net_margin, sector_net)
-        score_roe = _profitability_score(roe, sector_roe)
-        score_roa = _profitability_score(roa, sector_roa)
-
-        # Weighted: Gross 15% + Op 20% + Net 25% + ROE 25% + ROA 15% = 100%.
-        # Net and ROE keep the largest share because they reflect bottom-line
-        # efficiency and capital return — the two metrics value investors weight most.
-        weighted = (
-            score_gross * 0.15
-            + score_op * 0.20
-            + score_net * 0.25
-            + score_roe * 0.25
-            + score_roa * 0.15
-        )
-        rating = max(1, min(5, round(weighted)))
-
-        metrics = [
-            SnapshotMetricResponse(
-                name=_label_with_sector("Gross Margin", gross_margin, sector_gross),
-                value=_fmt_pct(gross_margin),
-                metric_key="gross_margin",
-                score=score_gross if gross_margin is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_label_with_sector("Operating Margin", op_margin, sector_op),
-                value=_fmt_pct(op_margin),
-                metric_key="operating_margin",
-                score=score_op if op_margin is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_label_with_sector("Net Margin", net_margin, sector_net),
-                value=_fmt_pct(net_margin),
-                metric_key="net_margin",
-                score=score_net if net_margin is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_label_with_sector("Return on Equity (ROE)", roe, sector_roe),
-                value=_fmt_pct(roe),
-                metric_key="roe",
-                score=score_roe if roe is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_label_with_sector("Return on Assets (ROA)", roa, sector_roa),
-                value=_fmt_pct(roa),
-                metric_key="roa",
-                score=score_roa if roa is not None else None,
-            ),
+        # Weights: Gross 15% + Op 20% + Net 25% + ROE 25% + ROA 15% = 100% (re-normalised
+        # over the scored rows). Net and ROE keep the largest share because they reflect
+        # bottom-line efficiency and capital return — the two metrics value investors
+        # weight most.
+        rows = [
+            _row("Gross Margin", "gross_margin", margins["gross_margin"], 0.15),
+            _row("Operating Margin", "operating_margin", margins["operating_margin"], 0.20),
+            _row("Net Margin", "net_margin", margins["net_margin"], 0.25),
+            _row("Return on Equity (ROE)", "roe", roe, 0.25),
+            _row("Return on Assets (ROA)", "roa", roa, 0.15),
         ]
+        metrics = [metric for metric, _ in rows]
+        weighted = _weighted_rating([part for _, part in rows])
+        if weighted is None:
+            # Nothing scored: the values (fiscal-year margins, an "N/M" ROE, em-dashes) are
+            # shown, but no verdict is made up from them — rating 0 is "unavailable" on
+            # every iOS build, and "no_values" keeps the build out of the 24h tier and out
+            # of the report (company state, so the report stays cacheable). INFO: the gate
+            # in `get_profitability_snapshot` logs the not-persisted WARNING itself (and a
+            # fund lands here on every 5-min rebuild).
+            logger.info(
+                "Profitability snapshot for %s: no metric is scored (fiscal-year fallback "
+                "margins: %s; ROE equity state: %s) — rating unavailable, build marked "
+                "no_values (served, never persisted)",
+                ticker, ", ".join(sorted(fiscal_year_margins)) or "none",
+                equity_state or "n/a",
+            )
+            rating = 0
+            degraded = _with_no_values(degraded)
+        else:
+            rating = max(1, min(5, round(weighted)))
 
         snapshot = SnapshotItemResponse(
             category="Profitability",
             rating=rating,
             metrics=metrics,
             full_report_available=True,
-            weighted_score=round(weighted, 3),
+            weighted_score=round(weighted, 3) if weighted is not None else None,
+            computed_at=snapshot_build_time(),
         )
         # Fund verdict for the gate (see `_fund_shape_by_key`): the RAW profile leg is a dict
         # that positively says fund, and both TTM metric legs answered raw lists — a leg that

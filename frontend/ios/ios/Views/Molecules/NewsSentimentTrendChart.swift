@@ -11,8 +11,14 @@
 //  scored headline, and "nothing scored" must not look like "no news".
 //
 //  Honest labelling: these are the headlines Cay AI SCORED for this feed (the feed's recent
-//  window, refreshed through the trading day), not every article published. The footer says
-//  so, and the chart never extrapolates a day it was not given.
+//  window, refreshed through the trading day), not every article published. The card counts
+//  "headlines", never "all news"; the legend row says how far back the scored headlines on
+//  file go ("since Jul 1" from the backend's `tracking_since`, "120+ days" once that reaches
+//  the log's retention edge); and the chart never extrapolates a day it was not given.
+//
+//  No "Ask" button and no "Headlines Cay AI scored" footer (owner, TestFlight 1.0 (11)): a
+//  question about tone is asked from the Insights card above, whose chat is grounded on every
+//  window of this card (backend `summarize_tone`).
 //
 
 import SwiftUI
@@ -20,11 +26,10 @@ import Charts
 
 struct NewsSentimentTrendChart: View {
     let trend: SentimentTrend
-    /// The toggle's selection. While it differs from `trend.window` the new window is still
-    /// loading, so the previous bars stay on screen, dimmed.
+    /// The toggle's selection. The ViewModel cuts every window from one 90-day answer, so this
+    /// normally equals `trend.window` at once; should it ever differ, the bars on screen are
+    /// another window's and stay dimmed under a spinner rather than pass for this one.
     @Binding var window: SentimentTrendWindow
-    /// "Ask Cay AI about this trend". Hidden when nil.
-    var onAskCay: (() -> Void)? = nil
     /// The app stopped re-checking a history that is still being built (the backend can queue
     /// a ticker for hours). The placeholder then stops spinning and stops promising minutes.
     var buildingStalled: Bool = false
@@ -50,7 +55,6 @@ struct NewsSentimentTrendChart: View {
                 chart
                 legend
             }
-            footer
         }
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)
@@ -192,7 +196,8 @@ struct NewsSentimentTrendChart: View {
         .opacity(isUpdating ? 0.45 : 1)
         .animation(.easeInOut(duration: 0.2), value: isUpdating)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("News tone, last \(trend.window.days) days")
+        // Says who scored them: the visible "Headlines Cay AI scored" footer is gone.
+        .accessibilityLabel("News tone of the headlines Cay AI scored, last \(trend.window.days) days")
         .accessibilityValue(accessibilitySummary)
     }
 
@@ -327,16 +332,42 @@ struct NewsSentimentTrendChart: View {
         }).flatMap { abs($0.date.timeIntervalSince(target)) < 86_400 * 1.5 ? $0.dayKey : nil }
     }
 
-    // MARK: - Legend + footer
+    // MARK: - Legend + coverage
 
+    /// The legend, with the coverage label ("since Jul 1") right-aligned on the same row (owner,
+    /// TestFlight 1.0 (11)). When that row does not fit — large Dynamic Type, a narrow phone, a
+    /// long month name — the label drops to its own line, still on the right, instead of
+    /// truncating either half.
     private var legend: some View {
-        HStack(spacing: AppSpacing.md) {
-            legendItem(color: AppColors.gainGraphic, label: "Positive", height: 8)
-            legendItem(color: AppColors.lossGraphic, label: "Negative", height: 8)
-            legendItem(color: AppColors.textMuted, label: "Neutral", height: 3)
-            Spacer()
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: AppSpacing.md) {
+                legendItems
+                Spacer(minLength: AppSpacing.sm)
+                if let coverage = coverageText {
+                    coverageLabel(coverage)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                HStack(spacing: AppSpacing.md) {
+                    legendItems
+                }
+                if let coverage = coverageText {
+                    coverageLabel(coverage)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var legendItems: some View {
+        legendItem(color: AppColors.gainGraphic, label: "Positive", height: 8)
+        legendItem(color: AppColors.lossGraphic, label: "Negative", height: 8)
+        legendItem(color: AppColors.textMuted, label: "Neutral", height: 3)
     }
 
     private func legendItem(color: Color, label: String, height: CGFloat) -> some View {
@@ -350,27 +381,30 @@ struct NewsSentimentTrendChart: View {
         }
     }
 
-    private var footer: some View {
-        HStack(alignment: .center, spacing: AppSpacing.sm) {
-            Text(footerText)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: AppSpacing.sm)
-            if let onAskCay {
-                AskCayAIPill(title: "Ask about this", action: onAskCay)
-            }
-        }
+    private func coverageLabel(_ text: String) -> some View {
+        Text(text)
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
     }
 
-    private var footerText: String {
+    /// How far back this feed's scored headlines go — a property of the SCOPE, so the same on
+    /// every window:
+    /// - "since Jul 1": the oldest scored day on file (`trackingSince`), which is the day
+    ///   scoring began while the history is younger than the backend log keeps;
+    /// - "120+ days" once it reaches that edge (`historyReachesRetentionEdge`): the sweep has
+    ///   dropped the first days, the date would drift forward daily, and only the bound is true;
+    /// - "filling in 90 days…" while the history is still being built.
+    /// nil when the backend sent no date — never a date guessed from the bars, which on 7D
+    /// would claim a week-old start for a feed scored since July.
+    private var coverageText: String? {
         if trend.isBuildingHistory && !trend.days.isEmpty {
-            return "Headlines Cay AI scored · filling in 90 days…"
+            return "filling in 90 days…"
         }
-        guard let since = trend.trackingSince ?? trend.days.first?.date else {
-            return "Headlines Cay AI scored"
+        guard let since = trend.trackingSince else { return nil }
+        if trend.historyReachesRetentionEdge() {
+            return "\(SentimentTrend.retentionDays)+ days"
         }
-        return "Headlines Cay AI scored · since \(Self.shortDate(since))"
+        return "since \(Self.shortDate(since))"
     }
 
     private var accessibilitySummary: String {
@@ -430,8 +464,7 @@ struct NewsSentimentTrendChart: View {
             scope: "ORCL", window: .month, days: days,
             trackingSince: days.first?.date
         ),
-        window: .constant(.month),
-        onAskCay: {}
+        window: .constant(.month)
     )
     .padding()
     .background(AppColors.background)

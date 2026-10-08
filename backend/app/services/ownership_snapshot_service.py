@@ -29,7 +29,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
-from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.schemas.stock_overview import (
+    SnapshotItemResponse,
+    SnapshotMetricResponse,
+    snapshot_build_time,
+    with_cached_build_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,11 @@ _CACHE_TTL = 300  # 5 minutes
 #: 3 → the insider flow it summarises was rebuilt (2026-10-03): "Ordinary Shares" filers
 #:     (NYAX) read "Neutral" with no insider trades, other issuers' rows counted (BRK-B),
 #:     Form 4/A amendments double-counted.
-_SNAPSHOT_PAYLOAD_VERSION = 3
+#: 4 → (2026-10-08, the 1.01 release) a Form 4/A now supersedes only the lines of ITS OWN share
+#:     class or series (`_insider_common` keeps "Series A" / "Series C" apart), so the insider
+#:     flow of a Series-class issuer (FWONA/FWONK, LBRDA/LBRDK) can change; the Holders payload
+#:     moved to v5 for the same rows, and this card must not keep the old flow for 24 h beside it.
+_SNAPSHOT_PAYLOAD_VERSION = 4
 _VERSION_KEY = "_schema_v"
 
 
@@ -265,7 +274,8 @@ class OwnershipSnapshotService:
                     version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
                 )
                 return None
-            return SnapshotItemResponse(**json_data)
+            # A row from before `computed_at` existed: its build time is its cached_at.
+            return SnapshotItemResponse(**with_cached_build_time(json_data, cached_at))
 
         except Exception as e:
             logger.warning(f"Ownership snapshot cache check failed for {ticker}: {e}")
@@ -384,6 +394,7 @@ class OwnershipSnapshotService:
             rating=rating,
             metrics=metrics,
             full_report_available=True,
+            computed_at=snapshot_build_time(),
         )
 
     def _compute_rating(

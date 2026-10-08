@@ -13,7 +13,8 @@ it with the loop's own thread.
 
 `stock_overview_service`'s degraded Price card (built when the valuation snapshot fails)
 used to call `get_current_benchmark_values` inline from the synchronous
-`_build_full_response`; `get_overview` now prefetches it on a worker thread and hands it in.
+`_build_full_response`, then prefetched it on a worker thread. Since 2026-10-07 that card
+shows its (annual) multiples with no peer comparison, so it reads no benchmark at all.
 The deep-research door (`ResearchAgent.run`) now dispatches `assemble_report` the same way
 the direct door does.
 """
@@ -73,6 +74,7 @@ def lookup_threads(monkeypatch) -> List[tuple]:
 
     cls = sbl.SectorBenchmarkLookup
     monkeypatch.setattr(cls, "get_benchmarks", _recorder("get_benchmarks", _empty_series))
+    monkeypatch.setattr(cls, "get_benchmark_series", _recorder("get_benchmark_series", _empty_series))
     monkeypatch.setattr(cls, "get_benchmark_values", _recorder("get_benchmark_values", _empty_series))
     monkeypatch.setattr(cls, "get_current_benchmarks", _recorder("get_current_benchmarks", _empty_current))
     monkeypatch.setattr(
@@ -109,8 +111,10 @@ async def test_growth_build_reads_benchmarks_off_the_loop(lookup_threads):
 
     svc = _bare(GrowthService, fmp=_FakeFMP())
     await svc._build_growth("AAPL")
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_benchmarks"})
-    assert sum(1 for n, _ in lookup_threads if n == "get_benchmarks") == 3
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_benchmark_series"})
+    # annual + calendar_quarter, one peer group per line (the unused QoQ read was dropped
+    # 2026-10-07)
+    assert sum(1 for n, _ in lookup_threads if n == "get_benchmark_series") == 2
 
 
 @pytest.mark.asyncio
@@ -122,8 +126,8 @@ async def test_profit_power_build_reads_benchmarks_off_the_loop(lookup_threads):
     # Profit Power reads the RICH cells only since 2026-09-30 (it needs the sample size
     # to hold back thin benchmark periods), so `get_benchmark_values` is no longer called:
     # annual + quarterly series, both off the loop.
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_benchmarks"})
-    assert sum(1 for n, _ in lookup_threads if n == "get_benchmarks") == 2
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_benchmark_series"})
+    assert sum(1 for n, _ in lookup_threads if n == "get_benchmark_series") == 2
 
 
 @pytest.mark.asyncio
@@ -132,7 +136,7 @@ async def test_valuation_snapshot_reads_benchmarks_off_the_loop(lookup_threads):
 
     svc = _bare(ValuationSnapshotService, fmp=_FakeFMP())
     await svc._compute_with_status("AAPL")
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmark_values"})
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmarks"})
 
 
 @pytest.mark.asyncio
@@ -148,7 +152,7 @@ async def test_profitability_snapshot_reads_benchmarks_off_the_loop(lookup_threa
     monkeypatch.setattr(profit_power_service, "get_profit_power_service", lambda: _NoProfitPower())
     svc = _bare(ProfitabilitySnapshotService, fmp=_FakeFMP())
     await svc._compute_with_status("AAPL")
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmark_values"})
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmarks"})
 
 
 @pytest.mark.asyncio
@@ -157,7 +161,8 @@ async def test_health_check_build_reads_benchmarks_off_the_loop(lookup_threads):
 
     svc = _bare(HealthCheckService, fmp=_FakeFMP())
     await svc._build_health_check("AAPL")
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmark_values"})
+    # The rich cells since 2026-10-07: the card reports the median's peer level.
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmarks"})
 
 
 @pytest.mark.asyncio
@@ -172,7 +177,7 @@ async def test_health_snapshot_fallback_reads_benchmarks_off_the_loop(lookup_thr
     monkeypatch.setattr(health_check_service, "get_health_check_service", lambda: _FailingHealthCheck())
     svc = _bare(HealthSnapshotService, fmp=_FakeFMP())
     await svc._compute_with_status("AAPL")
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmark_values"})
+    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmarks"})
 
 
 @pytest.mark.asyncio
@@ -257,7 +262,7 @@ async def test_harness_detects_an_on_loop_call(lookup_threads):
         _assert_off_loop(lookup_threads, threading.get_ident(), {"get_benchmarks"})
 
 
-# ── stock overview: the degraded Price card's benchmark read ───────────────────────
+# ── stock overview: the degraded Price card reads NO benchmark (2026-10-07) ─────────
 
 
 class _NoSnapshots:
@@ -348,14 +353,17 @@ def _price_card(response):
 
 
 @pytest.mark.asyncio
-async def test_stock_overview_fallback_price_card_reads_benchmarks_off_the_loop(
+async def test_stock_overview_fallback_price_card_reads_no_benchmark(
     lookup_threads, monkeypatch,
 ):
+    """The degraded card compares nothing (its ratios are annual, every median is TTM), so
+    it must not pay for a sector-benchmark read — on or off the loop."""
     svc = _overview_service(monkeypatch, _NoSnapshots(valuation_fails=True))
     response = await svc.get_overview("AAPL", "1D", "5min", False)
-    assert _price_card(response).metrics, "the degraded Price card was not built"
-    _assert_off_loop(lookup_threads, threading.get_ident(), {"get_current_benchmark_values"})
-    assert sum(1 for n, _ in lookup_threads if n == "get_current_benchmark_values") == 1
+    card = _price_card(response)
+    assert card.metrics, "the degraded Price card was not built — the test proves nothing"
+    assert card.rating == 0 and all(m.score is None for m in card.metrics)
+    assert lookup_threads == [], f"the degraded card read a benchmark: {lookup_threads}"
 
 
 @pytest.mark.asyncio
@@ -369,11 +377,9 @@ async def test_stock_overview_reads_no_benchmark_when_the_valuation_snapshot_suc
     assert [n for n, _ in lookup_threads if n == "get_current_benchmark_values"] == []
 
 
-def test_the_synchronous_overview_builder_uses_the_prefetched_bench_and_reads_nothing(
-    lookup_threads,
-):
-    """`_build_full_response` runs on the loop; handed a prefetched bench it must do no
-    lookup of its own, and the card must be scored against exactly those medians."""
+def test_the_synchronous_overview_builder_reads_nothing(lookup_threads):
+    """`_build_full_response` runs on the loop: it must do no lookup, and its degraded
+    Price card carries no peer claim (no "sector avg", no score)."""
     from app.services import stock_overview_service as sos
 
     svc = sos.StockOverviewService.__new__(sos.StockOverviewService)
@@ -382,32 +388,11 @@ def test_the_synchronous_overview_builder_uses_the_prefetched_bench_and_reads_no
         {"profile": dict(_PROFILE), "fin_ratios": [{"priceToEarningsRatioTTM": 35.0}]},
         {"quote": {"price": 300.0}, "chart_data": []},
         "1D", "5min", False,
-        valuation_bench={"pe_ratio": 22.0},
     )
-    pe_name = next(m.name for m in _price_card(response).metrics if m.metric_key == "pe")
-    assert "sector avg 22" in pe_name
+    card = _price_card(response)
+    pe = next(m for m in card.metrics if m.metric_key == "pe")
+    assert pe.name == "P/E" and pe.value == "35.00" and pe.score is None
     assert lookup_threads == [], f"the sync builder did its own lookup: {lookup_threads}"
-
-
-@pytest.mark.asyncio
-async def test_stock_overview_bench_prefetch_never_raises(monkeypatch):
-    from app.services import stock_overview_service as sos
-
-    calls: List[tuple] = []
-
-    class _Exploding:
-        def get_current_benchmark_values(self, industry, sector, metrics):
-            calls.append((industry, sector))
-            raise RuntimeError("supabase down")
-
-    monkeypatch.setattr(sos, "get_sector_benchmark_lookup", lambda: _Exploding())
-    svc = sos.StockOverviewService.__new__(sos.StockOverviewService)
-    assert await svc._fetch_valuation_bench("AAPL", dict(_PROFILE)) == {}
-    assert calls == [("Consumer Electronics", "Technology")]
-    # No sector (or no profile at all): nothing to look up, and nothing is read.
-    for profile in ({}, {"sector": None}, None, "junk"):
-        assert await svc._fetch_valuation_bench("AAPL", profile) == {}
-    assert len(calls) == 1
 
 
 # ── deep research: `assemble_report` ────────────────────────────────────────────

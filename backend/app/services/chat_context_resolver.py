@@ -1146,10 +1146,15 @@ class ChatContextResolver:
         `reference_id` is the scope — a ticker, a coin pair or `__MARKET__` — optionally
         followed by `|ETF` (see `updates_scope_class_hint`). Three cache reads, run together
         and each allowed to fail on its own: the stored Insights card, the feed's in-window
-        headlines (with Cay AI's label where one exists) and the news-tone trend for the
-        window the chart showed (`window=7|30|90` in the client context; else 30).
-        Nothing is generated: the card is only ever written by the sweeper, and the trend is
-        a GROUP BY over stored labels.
+        headlines (with Cay AI's label where one exists) and the News Tone card — ONE 90-day
+        trend read, cut into the card's 7D / 30D / 90D windows (counts, net score, tone word,
+        and how far back the scored headlines on file go — `since_phrase`, never a "first
+        scored" date the 120-day log cannot vouch for), plus the day-level detail of the window the chart
+        showed (`window=7|30|90` in the client context; else 30). The tone card has no "Ask"
+        button of its own since 2026-10-05 (TestFlight 1.0 (11)): a question about tone is
+        asked from the Insights card, so every window has to be here. Nothing is generated:
+        the card is only ever written by the sweeper, and the trend is a GROUP BY over stored
+        labels.
 
         It mirrors `GET /updates/feed` so the model is told what the user actually sees: the
         headline window is the feed's UNFILTERED one, the stored card is "on screen" only
@@ -1163,7 +1168,7 @@ class ChatContextResolver:
             logger.warning("chat_context: invalid UPDATES_SCOPE ref=%r", _log_ref(reference_id, 64))
             return None
 
-        from datetime import date as _date, datetime, timezone
+        from datetime import datetime, timezone
 
         from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
         from app.services.news_insight_service import (
@@ -1171,8 +1176,9 @@ class ChatContextResolver:
             select_recent_corpus,
         )
         from app.services.news_sentiment_trend_service import (
+            TREND_DAYS,
             get_news_sentiment_trend_service,
-            summarize_trend,
+            summarize_tone,
         )
         from app.utils.market_hours import ET
 
@@ -1194,18 +1200,18 @@ class ChatContextResolver:
             recent, _hours = select_recent_corpus(rows, now)
             return recent
 
-        # The window the chart was SHOWING when "Ask about this" was tapped (iOS sends
-        # `window=N`): the answer must quote the numbers on screen, not a fixed 30 days.
+        # The window the chart was SHOWING when the chat was opened (iOS sends `window=N`):
+        # it gets the day-level detail. Every window's totals are grounded regardless.
         window = updates_trend_window(client_context)
 
         async def _trend():
-            data = await get_news_sentiment_trend_service().get_trend(scope, window, now=now)
-            since = data.get("tracking_since")
-            return summarize_trend(
-                data.get("series") or [], days=window, today=now.astimezone(ET).date(),
-                tracking_since=_date.fromisoformat(since) if since else None,
-                history_status=data.get("history_status"),
+            # The WIDEST window, once: the 7D and 30D answers are exact cuts of it (same day
+            # rule, same tracking start, same partial days, same history status), and the app
+            # reads the same 90-day entry, so this is usually a memory hit.
+            data = await get_news_sentiment_trend_service().get_trend(
+                scope, max(TREND_DAYS), now=now,
             )
+            return summarize_tone(data, focus_days=window, today=now.astimezone(ET).date())
 
         card, feed_recent, trend_text = await asyncio.gather(
             _card(), _feed_window(), _trend(), return_exceptions=True,

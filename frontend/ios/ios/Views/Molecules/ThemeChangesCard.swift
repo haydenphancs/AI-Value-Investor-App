@@ -10,6 +10,11 @@
 //  changes can otherwise read as buy/sell advice. A review with no changes is still shown
 //  as one honest line — "reviewed, nothing better found" is information.
 //
+//  LOCKED (2026-10-04): a Free caller is not sent a row that names a company its plan
+//  withholds from the list (backend `theme_detail_redaction.py`), only how many there were
+//  (`lockedCount`). Those become one locked line that opens the plan sheet — and the
+//  "no changes" sentence is never shown while rows were withheld, because it would be false.
+//
 
 import SwiftUI
 
@@ -17,6 +22,10 @@ struct ThemeChangesCard: View {
     let reviewedOn: Date?
     let changes: [ThemeChange]
     var onTickerTap: ((String) -> Void)? = nil
+    /// Change rows the caller's plan withholds (they name a company the list hides).
+    var lockedCount: Int = 0
+    /// Opens the plan sheet from the locked line.
+    var onLockedTap: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -32,7 +41,7 @@ struct ThemeChangesCard: View {
                 }
             }
 
-            if changes.isEmpty {
+            if changes.isEmpty && lockedCount <= 0 {
                 // Claims only what the rules guarantee: a list can stay unchanged while an
                 // outsider ranks above a member (the buffer, a first strike, tenure), and the
                 // rank includes the market and size tie-breakers, so "most closely tied" was
@@ -45,6 +54,9 @@ struct ThemeChangesCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
                     ForEach(changes) { change in
                         row(change)
+                    }
+                    if lockedCount > 0 {
+                        lockedRow
                     }
                 }
             }
@@ -97,6 +109,36 @@ struct ThemeChangesCard: View {
         }
     }
 
+    private var lockedTitle: String {
+        lockedCount == 1 ? "1 more change" : "\(lockedCount) more changes"
+    }
+
+    /// The withheld rows, as one line: a count, never a name (none was sent).
+    private var lockedRow: some View {
+        Button { onLockedTap?() } label: {
+            HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
+                // TEXT-role tokens: the glyph and the hint are read, so 4.5:1 in both modes.
+                Image(systemName: "lock.fill")
+                    .font(AppTypography.iconXS)
+                    .foregroundColor(AppColors.primaryBlue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(lockedTitle)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("Upgrade to see every change")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.primaryBlue)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Shows upgrade options")
+    }
+
     /// TEXT-role tokens — this ink is read, so it must clear 4.5:1 in both appearances.
     private func tint(_ kind: ThemeChange.Kind) -> Color {
         switch kind {
@@ -116,6 +158,18 @@ struct ThemeChangesCard: View {
             ThemeChange(dto: ThemeChangeDTO(ticker: "PLL", companyName: "Piedmont Lithium", action: "removed",
                                             reason: "Removed: it no longer trades on a US exchange."))!,
         ])
+        .padding()
+        .background(AppColors.background)
+}
+
+#Preview("Free — rows withheld") {
+    ThemeChangesCard(
+        reviewedOn: ThemeReviewDate.parse("2026-10-01"),
+        changes: [
+            ThemeChange(dto: ThemeChangeDTO(ticker: "PLL", companyName: "Piedmont Lithium", action: "removed",
+                                            reason: "Removed: it no longer trades on a US exchange."))!,
+        ],
+        lockedCount: 2)
         .padding()
         .background(AppColors.background)
 }

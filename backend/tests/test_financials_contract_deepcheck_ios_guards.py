@@ -403,7 +403,11 @@ def test_the_margins_line_names_its_fiscal_year():
     assert "let periodLabel = Self.fiscalPeriodLabel(latest.period)" in margins
     assert 'Margins (\\(periodLabel)) — ' in margins
     assert 'Margins — ' not in margins
-    assert "Avg Net Margin (\\(periodLabel))" in margins
+    # The peer figure is the peers' median for the same period, never dated with the
+    # company's fiscal-year label (2026-10-07; the wording is pinned in
+    # test_ios_benchmark_wording_2026_10_07.py against the backend's own text).
+    assert "Avg Net Margin (" not in margins
+    assert "peer-group median net margin" in margins
 
 
 def _period_label_body() -> str:

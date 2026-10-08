@@ -28,15 +28,16 @@ struct ProfitabilityChartSheet: View {
         // 4 margins (from profit_power) + ROE/ROA (from the card's baked history),
         // in display order.
         var series = marginSeries
-        // ROE/ROA come from the card's baked history and carry no peer level of
-        // their own — reuse the margins' ticker-level peer group so the whole
-        // sheet labels consistently ("Industry" vs "Sector").
-        let peerLevel = marginSeries.first?.peerLevel
+        // ROE/ROA come from the card's baked history. Each line names its OWN peer group
+        // per tab (`toProfitabilitySeries` reads sectorAnnualLevel / sectorQuarterlyLevel:
+        // a line is one population, chosen per period type); a report that predates those
+        // fields falls back to the margins' payload-wide level.
+        let fallbackLevel: String? = marginSeries.first?.peerLevel
         if let roe = card.metrics.first(where: { $0.historyKey == "roe" }) {
-            series.append(roe.toProfitabilitySeries(.roe, peerLevel: peerLevel))
+            series.append(roe.toProfitabilitySeries(.roe, peerLevel: fallbackLevel))
         }
         if let roa = card.metrics.first(where: { $0.historyKey == "roa" }) {
-            series.append(roa.toProfitabilitySeries(.roa, peerLevel: peerLevel))
+            series.append(roa.toProfitabilitySeries(.roa, peerLevel: fallbackLevel))
         }
         self.allSeries = series
 
@@ -56,11 +57,15 @@ struct ProfitabilityChartSheet: View {
         allSeries.first { $0.metric == m }
     }
 
-    /// "Industry" when the benchmark line is industry-level, else "Sector".
-    /// Prefer the ticker-wide card level (matches the card footnote + other
-    /// drill-downs); fall back to the profit_power per-series level.
+    /// "Industry" when the drawn benchmark line is industry-level, else "Sector".
+    /// The line ON SCREEN names its own group: the selected metric's level for the selected
+    /// TAB first (the backend picks each metric's annual and quarterly line separately, so
+    /// the Quarterly tab can be a sector line under an industry Annual one), then the
+    /// series' period-agnostic level (an older report), then the ticker-wide card level.
     private var peerWord: String {
-        let level = card.peerGroupLevel ?? series(selectedMetric)?.peerLevel
+        let line: ProfitabilityMetricSeries? = series(selectedMetric)
+        let own: String? = selectedPeriod == .annual ? line?.annualPeerLevel : line?.quarterlyPeerLevel
+        let level: String? = own ?? line?.peerLevel ?? card.peerGroupLevel
         return level == "industry" ? "Industry" : "Sector"
     }
 
@@ -257,15 +262,19 @@ struct ProfitabilityChartSheet: View {
                         .font(AppTypography.labelSmall)
                         .foregroundColor(AppColors.textSecondary)
                 }
-                HStack(spacing: 5) {  // dashed-gray sector swatch
-                    HStack(spacing: 2) {
-                        ForEach(0..<3, id: \.self) { _ in
-                            Capsule().fill(AppColors.growthSectorGray).frame(width: 4, height: 2)
+                // Only a line that is DRAWN is named (2026-10-08): with no peer value on
+                // screen there is no dashed line, so no "Industry/Sector Average" entry.
+                if current.contains(where: { $0.sector != nil }) {
+                    HStack(spacing: 5) {  // dashed-gray sector swatch
+                        HStack(spacing: 2) {
+                            ForEach(0..<3, id: \.self) { _ in
+                                Capsule().fill(AppColors.growthSectorGray).frame(width: 4, height: 2)
+                            }
                         }
+                        Text("\(peerWord) Average")
+                            .font(AppTypography.labelSmall)
+                            .foregroundColor(AppColors.textSecondary)
                     }
-                    Text("\(peerWord) Average")
-                        .font(AppTypography.labelSmall)
-                        .foregroundColor(AppColors.textSecondary)
                 }
             }
             if let pair = sectorPair {

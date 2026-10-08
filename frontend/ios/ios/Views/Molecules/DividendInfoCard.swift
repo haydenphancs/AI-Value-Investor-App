@@ -166,6 +166,11 @@ struct BuybackOnlyInfoCard: View {
     /// False when fewer than two quarters reported a share count: `shareCountChange` is
     /// then a 0.0 placeholder, and printing it as "+0.0%" claimed a measured flat count.
     var shareCountChangeKnown: Bool = true
+    /// The quarter the change is measured from (`SignalOfConfidenceSectionData
+    /// .shareCountWindowStart`), e.g. "Q4 '24". A bare "+36.3%" did not say over what span —
+    /// and for a company that returns no capital, that dilution IS the confidence signal
+    /// (TestFlight 1.0 (11), CRWV). nil keeps the bare figure.
+    var shareCountWindowStart: String? = nil
 
     private var formattedBuybackYield: String {
         String(format: "%.1f%%", buybackYield)
@@ -174,7 +179,9 @@ struct BuybackOnlyInfoCard: View {
     private var formattedShareCountChange: String {
         guard shareCountChangeKnown else { return "—" }
         // Sign is meaningful here: negative == shrinking share count == buybacks.
-        return String(format: "%+.1f%%", shareCountChange)
+        let change = String(format: "%+.1f%%", shareCountChange)
+        guard let start = shareCountWindowStart, !start.isEmpty else { return change }
+        return "\(change) since \(start)"
     }
 
     private var shareCountChangeColor: Color {
@@ -282,6 +289,14 @@ private struct DividendInfoRow: View {
                 buybackYield: 1.4,
                 shareCountChange: 0.0,
                 shareCountChangeKnown: false
+            )
+
+            // Returns no capital and dilutes: the change names its window (sample values).
+            BuybackOnlyInfoCard(
+                buybackStatus: .diluting,
+                buybackYield: 0.0,
+                shareCountChange: 36.3,
+                shareCountWindowStart: "Q4 '24"
             )
         }
         .padding()

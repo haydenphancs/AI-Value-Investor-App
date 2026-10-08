@@ -126,16 +126,31 @@ struct ThemeDetailDTO: Decodable {
     let performance: ThemePerformanceDTO?
     let insight: ThemeInsightDTO?
     let news: [ThemeNewsItemDTO]?
+    // Plan gate (2026-10-04). The SERVER decides it: a Free caller is sent only the first
+    // companies plus COUNTS of what was withheld, never the withheld companies themselves.
+    // All Optional — an older backend omits them and the screen renders as it always did.
+    let isLocked: Bool?
+    let tierRequired: String?
+    let lockedConstituentsCount: Int?
+    let lockedChangesCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case slug, title, subtitle, constituents, changes, performance, insight, news
         case imageUrl = "image_url"
         case accentHex = "accent_hex"
         case updatedOn = "updated_on"
+        case isLocked = "is_locked"
+        case tierRequired = "tier_required"
+        case lockedConstituentsCount = "locked_constituents_count"
+        case lockedChangesCount = "locked_changes_count"
     }
 
     func toDisplay() -> ThemeDetail {
-        ThemeDetail(
+        // Hoisted with explicit types to keep the initializer below cheap to type-check.
+        let locked: Bool = isLocked ?? false
+        let lockedCompanies: Int = ThemeDetail.lockedRowCount(lockedConstituentsCount)
+        let lockedChanges: Int = Swift.max(0, lockedChangesCount ?? 0)
+        return ThemeDetail(
             slug: slug,
             title: title,
             subtitle: subtitle ?? "",
@@ -156,7 +171,10 @@ struct ThemeDetailDTO: Decodable {
             changes: (changes ?? []).compactMap { ThemeChange(dto: $0) },
             performance: performance.flatMap { ThemePerformance(dto: $0) },
             insight: insight.flatMap { ThemeInsight(dto: $0) },
-            news: (news ?? []).compactMap { ThemeNewsItem(dto: $0) }
+            news: (news ?? []).compactMap { ThemeNewsItem(dto: $0) },
+            isLocked: locked,
+            lockedCompanyCount: lockedCompanies,
+            lockedChangeCount: lockedChanges
         )
     }
 }
@@ -175,6 +193,28 @@ struct ThemeConstituent: Identifiable {
     /// "Pure play" / "Diversified"; nil hides the tag.
     var roleLabel: String? = nil
     var isNew: Bool = false
+}
+
+extension ThemeConstituent {
+    /// Stand-in text for ONE blurred row the caller's plan withholds. Not a company: the
+    /// server never sends a withheld company to a locked caller, so these rows are drawn from
+    /// `ThemeDetail.lockedCompanyCount` alone. The words are generic on purpose — if the blur
+    /// ever failed to apply, a row would read "Hidden company", never a real name or a price
+    /// that could pass for one. Varied lengths only so the blurred rows look like a list.
+    static func lockedPlaceholder(_ index: Int) -> ThemeConstituent {
+        let names = ["Hidden company name", "Hidden company", "Company in this theme",
+                     "Another hidden company", "Theme company"]
+        let tickers = ["XXXX", "XXX", "XXXXX", "XXXX", "XX"]
+        let slot = ((index % names.count) + names.count) % names.count
+        return ThemeConstituent(
+            ticker: tickers[slot],
+            name: names[slot],
+            priceText: "$00.00",
+            changeText: "+0.00%",
+            isPositive: true,
+            marketCapText: ""
+        )
+    }
 }
 
 /// One line of "What changed this month".
@@ -291,8 +331,30 @@ struct ThemeDetail {
     var performance: ThemePerformance? = nil
     var insight: ThemeInsight? = nil
     var news: [ThemeNewsItem] = []
+    /// The caller's plan is hiding part of this theme (Free). Informational only — the rows
+    /// and the lock are keyed off the COUNTS below, so a theme of five or fewer shows no lock.
+    var isLocked: Bool = false
+    /// Companies the server withheld: one blurred stand-in row each, after `companies`.
+    var lockedCompanyCount: Int = 0
+    /// "What changed this month" rows withheld (they named a withheld company).
+    var lockedChangeCount: Int = 0
 
-    var isEmpty: Bool { companies.isEmpty }
+    /// Nothing at all to list — neither a company nor a locked stand-in.
+    var isEmpty: Bool { companies.isEmpty && lockedCompanyCount == 0 }
+
+    /// The monthly-review card has something honest to say.
+    var showsChangesCard: Bool { reviewedOn != nil || !changes.isEmpty || lockedChangeCount > 0 }
+
+    /// A theme holds at most a few dozen stocks; a count far beyond that is a corrupted value,
+    /// not a list, and must not lay out thousands of blurred rows.
+    static let maxLockedRows = 60
+
+    /// The wire's withheld count, clamped to `0...maxLockedRows` (nil → 0).
+    static func lockedRowCount(_ raw: Int?) -> Int {
+        let value: Int = raw ?? 0
+        if value <= 0 { return 0 }
+        return value < maxLockedRows ? value : maxLockedRows
+    }
 }
 
 // MARK: - Formatting

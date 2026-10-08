@@ -39,6 +39,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from app.services.marketing.compliance import (
     clean,
+    own_word_brands,
     scan_text,
     sentence_company_mentions,
     sentences,
@@ -395,6 +396,23 @@ def load_corpus() -> Dict[str, ContentItem]:
     if not items:
         logger.error("marketing content pool: the Learn corpus produced NO items")
     return items
+
+
+def title_companies(item: ContentItem) -> Tuple[str, ...]:
+    """The companies a business case study's TITLE names, as the title spells them, in order — what
+    its hook should name (writer prompt, HOOK AND TITLES). Its fact sheet names others too (Tesla's
+    names Ford, GM, Toyota), so the title is the authority. () for an investing lesson, whose hook
+    names no company. Pure; uses the item's own word-brands so "Visa" is found in "Visa vs
+    Mastercard" (and a person's name in a company term never is)."""
+    if item.kind != MONEY_MOVES:
+        return ()
+    sk = skeleton(item.title)
+    out: List[str] = []
+    for _name, start, end in sentence_company_mentions(sk, own_word_brands(item.company_terms)):
+        found = sk[start:end]
+        if found not in out:
+            out.append(found)
+    return tuple(out)
 
 
 def eligible_keys() -> List[str]:

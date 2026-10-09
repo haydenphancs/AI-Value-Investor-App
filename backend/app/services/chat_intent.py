@@ -30,18 +30,23 @@ never REMOVE a non-English note, and ``InlineDisclaimerNotice`` is on screen for
 whole conversation. Non-English trade turns degrade to the old fallback, never to
 nothing. Adding a language is an additive table, not a redesign.
 
-A SECOND, independent gate lives here too: ``is_web_search_intent`` — did the user
-explicitly ask to search the web, look something up, or verify / double-check something?
-It decides whether report chat offers its paid ``web_search`` tool on this turn (see the
-section at the bottom of this file).
+A SECOND, independent gate lives here too: ``web_ask_kind`` / ``is_web_search_intent`` — did
+the user explicitly ask to search the web, look something up or verify / double-check something
+("explicit"), or ask for the latest news ("news")? It decides whether chat offers its paid
+``web_search`` tool on an ASKED turn and how round 1 is forced (see the section at the bottom of
+this file). ``is_market_data_question`` (never answered from the web) and ``web_fallback_topic``
+(a closed category label for the automatic tier's shadow log) sit beside it.
 
 Pure, no I/O, never raises.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # ── 1. NEGATIVE MASK — run FIRST, replaces each span with a space ────────────
 #
@@ -194,12 +199,13 @@ def is_trade_intent(text: Optional[str]) -> bool:
 # WEB-SEARCH INTENT — "did the user explicitly ask to search / look up / verify?"
 # ═════════════════════════════════════════════════════════════════════════════
 #
-# The gate for report chat's `web_search` tool (`chat_web_search_service.open_web_search_turn`).
-# OWNER DECISION (2026-10-02): explicit request ONLY — no chip, never model-decided. So this is
-# tuned for PRECISION, the opposite of `is_trade_intent`: a false positive declares a paid tool,
-# collapses a multi-lens answer to one lens and adds the web rule to the prompt; a false negative
-# answers from the report as every turn did before. The model still decides whether to CALL the
-# tool, and only a call costs money.
+# The ASKED-turn gate for chat's `web_search` tool (`chat_web_search_service.decide_web_search`).
+# OWNER DECISION (2026-10-02): an asked search needs an explicit request — no chip opens it. (The
+# separate AUTOMATIC tier of 2026-10-08 is model-decided, switched off by default, and does not read
+# this classifier to open.) So this is tuned for PRECISION, the opposite of `is_trade_intent`: a
+# false positive declares a paid tool, collapses a multi-lens answer to one lens and adds the web
+# rule to the prompt; a false negative answers from Caydex's data as every turn did before. The
+# model still decides whether to CALL the tool, and only a call costs money.
 #
 # ⚠️ The product is called a "research REPORT", so bare "research" NEVER triggers ("summarize this
 # research report", "what does the research say"). Nor does "Google Search" the product (Alphabet's
@@ -285,8 +291,13 @@ _WEB_IMPERATIVE_START = (
     r"(?:^\W*|[.?!;:]\s{0,6}\W{0,4})(?:please\s+|pls\s+|now\s+|also\s+|ok(?:ay)?\s*,?\s+)?"
 )
 
-# 4. The asks themselves.
-_WEB_INTENT_RE = re.compile("|".join((
+# 4. The asks themselves, in TWO kinds (2026-10-08, owner decision 5): an EXPLICIT ask — search /
+#    look up / browse / google / verify / double-check / "is this still true?" — keeps the forced
+#    web call; a NEWS ask — "the latest news", "any updates?", "what's new with X", "in the news",
+#    "check the news" — is answered from Caydex's licensed headlines FIRST (the headlines tool is
+#    forced in round 1) and the web may follow. A message matching both is EXPLICIT: the search
+#    verb wins ("Search for news about the CEO", "search the web for the latest news").
+_WEB_EXPLICIT_RE = re.compile("|".join((
     # search the web / online / the news
     r"\bsearch\w*\s+(?:(?:on|in|through|across)\s+)?(?:the\s+)?(?:web|internet|net|online|news)\b",
     r"\b(?:web|internet|online)\s+search\w*\b",
@@ -299,8 +310,7 @@ _WEB_INTENT_RE = re.compile("|".join((
     # look it up / look online
     r"\blook\s+(?:(?:it|this|that|them|these|those|him|her)\s+)?up\b",
     r"\blook(?:ing)?\s+(?:(?:it|this|that)\s+)?(?:online|on\s+the\s+(?:web|internet|net))\b",
-    r"\bcheck\w*\s+(?:(?:it|this|that)\s+)?(?:online|the\s+(?:web|internet|net|news|headlines)|"
-    r"(?:the\s+)?(?:latest|recent)\s+(?:news|headlines))\b",
+    r"\bcheck\w*\s+(?:(?:it|this|that)\s+)?(?:online|the\s+(?:web|internet|net))\b",
     r"\b(?:search|look|check|find|research|verify|confirm|dig|read)\w*\b[^.?!\n]{0,60}?"
     r"\b(?:online|on\s+the\s+(?:web|internet|net))(?=\s*(?:[.?!\n]|$))",
     r"\bresearch\w*\s+(?:(?:it|this|that|them)\s+)?(?:online|on\s+the\s+(?:web|internet|net))\b",
@@ -322,15 +332,6 @@ _WEB_INTENT_RE = re.compile("|".join((
     # google it
     r"\bgoogle\s+(?:it|that|this|them)\b",
     r"\b(?:please|pls|can\s+you|could\s+you|would\s+you|you\s+should|just)\s+google\b",
-    # the latest / any news
-    r"\b(?:latest|recent|newest|current|fresh|breaking|today's)\s+(?:news|headlines|updates?|"
-    r"developments?|announcements?|coverage)\b",
-    r"\bany\s+(?:new\s+|recent\s+|fresh\s+|other\s+|more\s+|good\s+|bad\s+)?"
-    r"(?:news|updates?|developments?|headlines)\b",
-    r"\bwhat(?:'s|\s+is|\s+are)\s+the\s+(?:latest|news)"
-    r"(?:\s*\??\s*$|\s+(?:on|with|about|for|regarding|today)\b)",
-    r"\bthe\s+latest\s+(?:on|with|about|for|regarding)\b",
-    r"\bin\s+the\s+news\b",
     # verify / double-check / confirm — only in a request frame or the imperative position
     _WEB_IMPERATIVE_START + _WEB_CHECK_VERBS + r"\b",
     r"\b" + _WEB_REQUEST_FRAME + r"\s+(?:please\s+)?(?:also\s+)?" + _WEB_CHECK_VERBS + r"\b",
@@ -345,20 +346,255 @@ _WEB_INTENT_RE = re.compile("|".join((
     r"\bstill\s+(?:true|accurate|valid|current|up[\s-]to[\s-]date)\s*\?",
 )), re.IGNORECASE)
 
+_WEB_NEWS_RE = re.compile("|".join((
+    # check the news / the headlines / the latest news
+    r"\bcheck\w*\s+(?:(?:it|this|that)\s+)?(?:the\s+(?:news|headlines)|"
+    r"(?:the\s+)?(?:latest|recent)\s+(?:news|headlines))\b",
+    # the latest / any news
+    r"\b(?:latest|recent|newest|current|fresh|breaking|today's)\s+(?:news|headlines|updates?|"
+    r"developments?|announcements?|coverage)\b",
+    r"\bany\s+(?:new\s+|recent\s+|fresh\s+|other\s+|more\s+|good\s+|bad\s+)?"
+    r"(?:news|updates?|developments?|headlines)\b",
+    r"\bwhat(?:'s|\s+is|\s+are)\s+the\s+(?:latest|news)"
+    r"(?:\s*\??\s*$|\s+(?:on|with|about|for|regarding|today)\b)",
+    r"\bthe\s+latest\s+(?:on|with|about|for|regarding)\b",
+    r"\bin\s+the\s+news\b",
+    # "what's new with Nvidia?", "what is new at Apple" — a COMPANY subject only. Report chat is
+    # live, and "What's new in this report?", "what is new in the latest 10-K?" or "what's new
+    # with the moat score?" are questions about the REPORT, not news asks (review 2026-10-09): so
+    # only "with" / "at", never a determiner or pronoun next ("with the …", "with this …"), and
+    # never a report / filing / score noun in the next 40 characters ("with Apple's earnings").
+    r"\bwhat(?:'s|\s+is)\s+new\s+(?:with|at)\s+"
+    r"(?!(?:the|this|that|these|those|its|it|their|his|her|your|my|our|a|an)\b)"
+    r"(?![^.?!\n]{0,40}?\b(?:reports?|filings?|10-?[kq]|8-k|20-f|thesis|scores?|analysis|"
+    r"sections?|results|earnings|guidance|financials|statements?|balance\s+sheet|valuation|"
+    r"ratings?|moat|numbers|data|chart)\b)",
+)), re.IGNORECASE)
+
+# The kinds `web_ask_kind` returns (the web-search service reads them by these names).
+WEB_ASK_EXPLICIT = "explicit"
+WEB_ASK_NEWS = "news"
+
+
+def _fold_web_text(text: object) -> Optional[str]:
+    """The capped, apostrophe-folded scan text, or None for a non-string / blank message."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return text[:_WEB_SCAN_MAX].translate(_WEB_APOSTROPHES)
+
+
+def web_ask_kind(text: Optional[str]) -> Optional[str]:
+    """``"explicit"`` (search / look up / google / verify / fact-check / "still true?"), ``"news"``
+    (the latest news, any updates, what's new with X, in the news) or None. Explicit wins when both
+    match. Negated asks are masked first, the finance-prose traps are masked before the tables.
+    Pure, English-only, linear-time on a capped input, never raises."""
+    try:
+        t = _fold_web_text(text)
+        if t is None:
+            return None
+        t = _WEB_NEG_RE.sub(" ", t)
+        if _WEB_STRONG_RE.search(t):
+            return WEB_ASK_EXPLICIT
+        masked = _WEB_MASK_RE.sub(" ", t)
+        if _WEB_EXPLICIT_RE.search(masked):
+            return WEB_ASK_EXPLICIT
+        if _WEB_NEWS_RE.search(masked):
+            return WEB_ASK_NEWS
+        return None
+    except Exception as e:  # noqa: BLE001 — a gate must never break a turn
+        logger.warning("web ask classifier failed (%s) — read as no ask", type(e).__name__)
+        return None
+
 
 def is_web_search_intent(text: Optional[str]) -> bool:
     """True when the user explicitly asked to search the web, look something up, get the latest
-    news, or verify / double-check something. Pure, English-only, never raises.
+    news, or verify / double-check something (`web_ask_kind` is not None). Pure, English-only,
+    never raises.
 
     NEVER fires on bare "research" (the product is a "research report"), on "Google Search" the
     product, on searching inside the report, or on a negated ask."""
+    return web_ask_kind(text) is not None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MARKET-DATA QUESTIONS — never answered from the web (owner decision 2026-10-08)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Prices, quotes, % moves, market caps, index levels, FX rates, the VIX and the DXY are market
+# data: they come from Caydex's licensed feed (or are "not in Caydex data"), never from a web page.
+# `is_market_data_question` closes the AUTOMATIC web tier for such a turn, and the web-search
+# service refuses a query that reads as one on EVERY tier. Tuned for RECALL — a false positive only
+# means no automatic search on that turn (the Caydex tools still answer); a false negative is
+# backstopped by the tool descriptions, the prompt rules and the snippet scrub. NOT company
+# fundamentals: "OpenAI's revenue" is a fact the web may hold that Caydex does not. Bounded
+# quantifiers on a capped input (linear time).
+_MD_CCY = r"(?:usd|eur|jpy|gbp|cny|cnh|cad|aud|nzd|chf|inr|krw|hkd|sgd|mxn|brl|sek|nok|try|zar)"
+_MD_CURRENCY_WORD = (
+    r"(?:dollars?|euros?|yen|pounds?|sterling|yuan|renminbi|rupees?|won|francs?|pesos?|reais|real|"
+    r"loonie|aussie)"
+)
+_MD_INDEX = r"(?:s&p(?:\s*500)?|sp\s*500|spx|dow(?:\s+jones)?|djia|nasdaq(?:\s+composite|\s*100)?|russell\s*2000|ftse(?:\s*100)?|nikkei(?:\s*225)?|dax|stoxx(?:\s*600)?|hang\s+seng)"
+#: The coins named by NAME in a market-data question or a web query — a CURATED list of names that
+#: are never ordinary words or brands (final review 2026-10-09: "ethereum price" and "Solana price"
+#: passed both layers). Never the raw CoinGecko map: "near", "stellar", "flow", "render", "one",
+#: "sky", "trump", "compound", "curve", "dash", "mask", "rose" are words. Shared with the web-search
+#: service's query refusal and snippet scrub (`chat_web_search_service`).
+MARKET_COIN_NAMES = (
+    r"(?:bitcoin|btc|ether(?:eum)?|eth|solana|dogecoin|cardano|litecoin|polkadot|chainlink|"
+    r"shiba\s+inu|monero)"
+)
+_MARKET_DATA_RE = re.compile("|".join((
+    # a security's price or quote
+    r"\b(?:stock|share|shares|coin|token|crypto|" + MARKET_COIN_NAMES + r"|etf|fund|index|futures?|"
+    r"gold|silver|oil|crude|copper)\s+(?:price|prices|quote|quotes)\b",
+    r"\bprice\s+(?:of|for)\s+(?:a\s+|one\s+|the\s+|its\s+)?(?:share|shares|stock|"
+    + MARKET_COIN_NAMES + r"|gold|silver|oil|crude|coin|token)\b",
+    # the shapes the final review found open (2026-10-09): "what did AAPL close at", "how did the
+    # market do", "how is Tesla stock doing", "is bitcoin above 100k", "what's the yen doing"
+    r"\bwhat\s+did\s+(?:the\s+)?\S{1,24}\s+(?:stock\s+|shares?\s+)?(?:close|closed|end|finish)\s+"
+    r"(?:at|the\s+day\s+at)\b",
+    r"\bhow\s+(?:did|does|do|is|are|was|were|has|have)\s+(?:the\s+)?(?:stock\s+)?(?:market|markets|"
+    r"stocks|wall\s+street|\S{1,24}\s+(?:stock|shares))\s+(?:do|doing|done|perform|performing|"
+    r"performed|trade|trading|traded|close|closed|finish|finished)\b",
+    r"\bwhat\s+(?:the\s+)?\S{1,24}\s+(?:stock\s+|shares?\s+)?(?:closed|ended|finished|opened)\s+at\b",
+    r"\bhow\s+(?:the\s+)?(?:stock\s+)?(?:market|markets|stocks|wall\s+street|\S{1,24}\s+(?:stock|shares))"
+    r"\s+(?:did|does|is\s+doing|was\s+doing|performed|traded|closed|finished)\b",
+    r"\bis\s+(?:the\s+)?\S{1,24}\s+(?:above|below|over|under)\s+\$?\d",
+    r"\bwhat(?:'s|\s+is|\s+are)\s+(?:the\s+)?(?:stock\s+)?(?:market|markets|" + _MD_CURRENCY_WORD
+    + r"|" + MARKET_COIN_NAMES + r"|" + _MD_INDEX + r"|gold|silver|oil|crude)\s+doing\b",
+    r"\b(?:ytd|year[\s-]to[\s-]date|weekly|monthly)\s+(?:return|gain|loss|change|move|"
+    r"performance)s?\b",
+    r"\bwhat(?:'s|\s+is|\s+was)\s+(?:the\s+|its\s+)?(?:current\s+|latest\s+|live\s+)?(?:price|quote)\b",
+    r"\b(?:current|live|latest|today's|real[\s-]?time|last|closing|opening)\s+"
+    r"(?:price|quote|trading\s+price|share\s+price|close)\b",
+    r"\bprice\s+(?:today|now|right\s+now)\b",
+    r"\bprice\s*\?",
+    r"\b(?:get|give|show|tell)\s+(?:me\s+)?(?:a\s+|the\s+)?quote\b",
+    r"\bquotes?\s+(?:for|on)\b",
+    r"\btrading\s+at\b",
+    r"\bhow\s+much\s+(?:is|are|does|do)\s+(?:a\s+|one\s+)?(?:share|shares|stock|" + MARKET_COIN_NAMES
+    + r"|gold|silver|oil)\b",
+    r"\bhow\s+much\s+is\s+\S{1,24}\s+(?:trading|worth|stock|shares?|selling\s+for)\b",
+    # the terse quote asks (review 2026-10-09): "What's NVDA at right now?", "Where's bitcoin
+    # at?", "What's the euro at?", "Is the Nasdaq up?", "How much is Tesla?", "What's Apple
+    # worth?" — the question must END there (or with now / today), so "What's Apple at risk of?",
+    # "Where is Apple at with AI?" and "Is revenue up this quarter?" stay open.
+    r"\b(?:what|where)(?:'s|\s+is|\s+are)\s+(?:the\s+)?\S{1,24}\s+(?:at|worth|trading\s+at)"
+    r"(?:\s+(?:right\s+)?now|\s+today|\s+the\s+moment)?\s*(?:[?.!]|$)",
+    r"\bwhere\s+(?:the\s+)?\S{1,24}\s+(?:is|are|was)\s+(?:trading|at)\b",
+    r"\bis\s+(?:the\s+)?\S{1,24}\s+(?:up|down|green|red)"
+    r"(?:\s+(?:today|(?:right\s+)?now|so\s+far|yet|this\s+(?:morning|afternoon|week)))?\s*(?:[?.!]|$)",
+    r"\bhow\s+much\s+is\s+(?:a\s+share\s+of\s+)?(?!(?:it|this|that|they|he|she|the)\b)\S{1,24}"
+    r"(?:\s+(?:right\s+)?now|\s+today)?\s*(?:\?|$)",
+    # % moves and changes
+    r"\bhow\s+much\s+(?:is|did|has|was|are|have)\s+\S{1,24}\s+(?:\S{1,24}\s+)?(?:up|down|move|moved|"
+    r"rise|risen|rose|fall|fallen|fell|gain|gained|lose|lost|drop|dropped|jump|jumped|climb|climbed)\b",
+    r"\b(?:percent(?:age)?|%)\s+(?:change|move|gain|loss|drop|decline|rise)\b",
+    r"\b(?:price|daily|intraday|today's)\s+(?:change|move|movement|performance|action)\b",
+    r"\bup\s+or\s+down\s+(?:today|now)\b",
+    r"\b(?:is|are|was)\s+\S{1,24}\s+(?:up|down)\s+(?:today|this\s+(?:week|month|morning|afternoon)|"
+    r"so\s+far|right\s+now|now)\b",
+    # market capitalisation
+    r"\bmarket\s+cap(?:s|italization|italisation|italizations)?\b",
+    # a company's market value, bare too ("Verify Nvidia's market value") — never the accounting
+    # term "fair market value"
+    r"(?<!fair\s)\bmarket\s+value\b",
+    # index levels
+    r"\b(?:index|indices)\s+(?:level|levels|value|close|closing)\b",
+    r"\b(?:level|close|closing\s+level)\s+of\s+(?:the\s+)?" + _MD_INDEX + r"\b",
+    r"\b(?:where|what)(?:'s|\s+is|\s+was|\s+did|\s+are)\s+(?:the\s+)?" + _MD_INDEX + r"\s+(?:at|trading|today|now|"
+    r"close|closed|closing|end|ended|ending|level|finish|finished)\b",
+    # highs, lows, targets, volume
+    r"\b(?:52|fifty[\s-]two)[\s-]week\s+(?:high|low|range)\b",
+    r"\ball[\s-]time\s+(?:high|low)s?\b",
+    r"\bprice\s+targets?\b", r"\btarget\s+price\b",
+    r"\btrading\s+volume\b", r"\bvolume\s+today\b",
+    # exchange rates
+    r"\bexchange\s+rates?\b", r"\b(?:fx|forex|currency)\s+(?:rates?|quotes?|prices?)\b", r"\bforex\b",
+    r"\bconversion\s+rate\b",
+    r"\b" + _MD_CCY + r"\s{0,2}[/-]\s{0,2}" + _MD_CCY + r"\b",
+    r"\b(?:eur|gbp|aud|nzd)usd\b", r"\busd(?:jpy|cad|chf|cny|cnh|inr|krw|hkd|sgd|mxn|brl)\b",
+    r"\b" + _MD_CURRENCY_WORD + r"\s+(?:to|vs\.?|versus|against|in)\s+(?:the\s+)?" + _MD_CURRENCY_WORD + r"\b",
+    # "the euro dollar rate", "dollar yen exchange rate", "the dollar rate" (never "the real rate
+    # of return": `real` is a currency word only beside another one)
+    r"\b" + _MD_CURRENCY_WORD + r"[\s/-]{1,3}" + _MD_CURRENCY_WORD + r"\s+(?:exchange\s+)?rates?\b",
+    r"\b(?:dollar|euro|yen|pound|sterling|yuan|renminbi|rupee|franc|peso)\s+(?:exchange\s+)?rates?\b",
+    r"\bhow\s+much\s+is\s+(?:a|one|1)\s+(?:dollar|euro|yen|pound|yuan|rupee|bitcoin|btc)\b",
+    # the VIX and the DXY (neither is in Caydex data)
+    r"\bvix\b", r"\bvolatility\s+index\b", r"\bfear\s+gauge\b",
+    r"\bdxy\b", r"\b(?:us\s+|u\.s\.\s+)?dollar\s+index\b",
+)), re.IGNORECASE)
+
+
+def is_market_data_question(text: Optional[str]) -> bool:
+    """True for a price / quote / % move / market cap / index level / FX rate / exchange rate /
+    VIX / DXY / dollar-index ask. Pure, English-only, linear-time on a capped input, never raises."""
     try:
-        if not isinstance(text, str) or not text.strip():
-            return False
-        t = text[:_WEB_SCAN_MAX].translate(_WEB_APOSTROPHES)
-        t = _WEB_NEG_RE.sub(" ", t)
-        if _WEB_STRONG_RE.search(t):
-            return True
-        return bool(_WEB_INTENT_RE.search(_WEB_MASK_RE.sub(" ", t)))
-    except Exception:  # noqa: BLE001 — a gate must never break a turn
+        t = _fold_web_text(text)
+        return bool(t is not None and _MARKET_DATA_RE.search(t))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("market-data classifier failed (%s)", type(e).__name__)
         return False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WEB FALLBACK TOPIC — a category label for the automatic tier's SHADOW logging only
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `AUTO_WEB_SHADOW category=<label>` tells the owner which kinds of question would reach the
+# automatic web search, before it is switched on. It decides NOTHING: the gate never reads it. The
+# label is a closed vocabulary (never message text), first match wins in table order, and a
+# message that matches no row is "other".
+WEB_FALLBACK_TOPICS = (
+    "lawsuit_regulatory", "product_launch", "guidance_commentary", "ipo_calendar",
+    "macro_calendar", "filing_text", "private_company", "event", "other",
+)
+_TOPIC_TABLE = (
+    ("lawsuit_regulatory", re.compile(
+        r"\b(?:lawsuits?|sued|suing|sues|class[\s-]action|settlements?|probes?|investigations?|"
+        r"antitrust|doj|department\s+of\s+justice|ftc|subpoena\w*|fined|penalt(?:y|ies)|recalls?|"
+        r"recalled|regulators?|regulatory|indict\w*|court|ruling|verdict|litigation|injunctions?|"
+        r"sec\s+(?:charges?|probe|investigation|filed|sued|fine))\b", re.IGNORECASE)),
+    ("product_launch", re.compile(
+        r"\b(?:launch\w*|unveil\w*|release\s+date|rollout|rolled\s+out|new\s+(?:product|model|"
+        r"phone|chip|device|feature)s?|debut\w*|keynote)\b", re.IGNORECASE)),
+    ("guidance_commentary", re.compile(
+        r"\b(?:guidance|outlook|earnings\s+call|conference\s+call|on\s+the\s+call|investor\s+day|"
+        r"management\s+said|(?:ceo|cfo)\s+(?:said|says|comments?)|commentary|transcripts?)\b",
+        re.IGNORECASE)),
+    ("ipo_calendar", re.compile(
+        r"\b(?:ipos?|going\s+public|go\s+public|direct\s+listing|spacs?|listing\s+date|"
+        r"upcoming\s+listings?)\b", re.IGNORECASE)),
+    ("macro_calendar", re.compile(
+        r"\b(?:fomc|fed\s+meeting|rate\s+decision|cpi\s+(?:release|report|print)|jobs\s+report|"
+        r"non[\s-]?farm|payrolls|economic\s+calendar|gdp\s+(?:release|report)|"
+        r"next\s+(?:fed|cpi|jobs))\b", re.IGNORECASE)),
+    ("filing_text", re.compile(
+        r"(?:\b(?:8|10|20|6)-[kqf]\b|\bs-1\b|\bproxy\b|\brisk\s+factors?\b|\bannual\s+report\b|"
+        r"\bfootnotes?\b|\bthe\s+filing\b)", re.IGNORECASE)),
+    ("private_company", re.compile(
+        r"\b(?:private\s+compan(?:y|ies)|privately[\s-]held|start[\s-]?ups?|pre[\s-]ipo|"
+        r"funding\s+rounds?|series\s+[a-h]\s+(?:round|funding)|openai|spacex|stripe|databricks|"
+        r"bytedance|xai)\b", re.IGNORECASE)),
+    ("event", re.compile(
+        r"\b(?:merger|mergers|acqui(?:re|res|red|ring|sition|sitions)|buyout|takeover|spin[\s-]?offs?|"
+        r"layoffs?|job\s+cuts|resign\w*|steps?\s+down|stepped\s+down|appoint\w*|hired|fired|"
+        r"partnerships?|bankruptcy|chapter\s+11|strikes?|outages?|hack\w*|breach\w*|scandal\w*)\b",
+        re.IGNORECASE)),
+)
+
+
+def web_fallback_topic(text: Optional[str]) -> Optional[str]:
+    """The automatic tier's shadow-log category (`WEB_FALLBACK_TOPICS`), or None for a
+    non-string / blank message. Used ONLY for counts-only logging. Pure, never raises."""
+    try:
+        t = _fold_web_text(text)
+        if t is None:
+            return None
+        for label, rx in _TOPIC_TABLE:
+            if rx.search(t):
+                return label
+        return "other"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("web topic classifier failed (%s)", type(e).__name__)
+        return None

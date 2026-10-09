@@ -337,6 +337,12 @@ class RevenueEngineResponse(BaseModel):
     # Set only for a gross stack; with it the shares of reported revenue add to 100%.
     # None otherwise and on older reports (iOS decodes it as Optional).
     intersegment_eliminations: Optional[float] = None
+    # The ISO 4217 code the segment figures are reported in (the income statement's
+    # `reportedCurrency`: "TWD" for a 20-F filer), never converted. The collector writes only
+    # a 3-letter uppercase code (`_currency_code`), else None; None on older reports too.
+    # Additive: iOS decodes it as an Optional and prefixes the Revenue Engine card's amounts
+    # with the code instead of "$" (older builds ignore the key); report chat names it.
+    reporting_currency: Optional[str] = None
 
 
 # ── Deep Dive: Moat & Competition ─────────────────────────────────────────────

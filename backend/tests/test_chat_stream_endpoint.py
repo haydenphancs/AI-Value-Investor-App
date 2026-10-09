@@ -15,13 +15,16 @@ Stubs (each at the binding the handler resolves, per .claude/rules/testing.md):
   * `app.services.chat_service.ChatService` (imported INSIDE event_gen) → a fake whose
     `gemini.stream_agentic` yields scripted thought/answer/tool events;
   * `app.services.chat_starter_warm_service.lookup` → miss (or a tripwire);
-  * the reader-lens / memory / token-accounting helpers → no-ops.
+  * the reader-lens / memory / token-accounting helpers → no-ops;
+  * the unanswered-turn refund (2026-10-09): its judge is the fake gemini's `generate_json`
+    (answers "answered" unless a test scripts otherwise) and its per-account allowance is
+    `_FakeBudget`, patched at `chat_answer_coverage.get_chat_budget_service`.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -46,6 +49,13 @@ class _Result:
 class _Query:
     def __init__(self, db: "_FakeDB", table: str):
         self.db, self.table, self.op, self.payload = db, table, "select", None
+        self.columns = ""
+
+    def select(self, *cols, **k):
+        # Recorded so the unanswered check's history read (the one select naming the
+        # `web_searched` JSON path) can be answered from `db.prior_rows`.
+        self.columns = str(cols[0]) if cols else ""
+        return self
 
     def __getattr__(self, name):
         # eq / neq / in_ / gte / lte / order / limit / range / single / maybe_single
@@ -83,6 +93,9 @@ class _Query:
             # A prior assistant row with a card exists unless a test says otherwise —
             # the common case for a later turn of a grounded session.
             return _Result([{"id": "prior-card"}] if self.db.prior_card else [])
+        if self.table == "chat_messages" and self.op == "select" and "web_searched" in self.columns:
+            # The unanswered check's history read (`chat._previous_turn_loader`).
+            return _Result([dict(r) for r in self.db.prior_rows])
         if self.table == "chat_messages" and self.op == "insert":
             out = []
             for i, row in enumerate(self.payload if isinstance(self.payload, list) else [self.payload]):
@@ -98,6 +111,8 @@ class _FakeDB:
         self.calls: List[tuple] = []
         self.inserted_messages: List[Dict[str, Any]] = []
         self.prior_card = True   # a later grounded turn already has a card on file
+        # The history the unanswered check reads (newest first, as the query orders it).
+        self.prior_rows: List[Dict[str, Any]] = []
 
     def table(self, name: str) -> _Query:
         return _Query(self, name)
@@ -148,6 +163,50 @@ class _Quota:
     def charged(self) -> bool:
         return not (self.refunds or self.settled)
 
+    # What the unanswered check reads off the real `_ChatQuota` (2026-10-09).
+    @property
+    def outcome(self) -> str:
+        return "refunded" if (self.refunds or self.settled) else "charged"
+
+    @property
+    def is_settled(self) -> bool:
+        return self._settled
+
+    @property
+    def is_refunded(self) -> bool:
+        return bool(self.refunds or self.settled)
+
+
+class _FakeBudget:
+    """The unanswered check's per-account allowance (`chat_budget_service`'s two RPCs), in
+    memory: `try_claim_turn` answers the new count or -1 at the cap, `refund_turn` floors at 0."""
+
+    current: "Optional[_FakeBudget]" = None
+
+    def __init__(self):
+        self.counts: Dict[str, int] = {}
+        self.claims: List[tuple] = []
+        self.releases: List[str] = []
+        self.claim_raises: Optional[BaseException] = None
+        self.claim_delay = 0.0   # a slow claim RPC (it runs in the money section's thread)
+
+    def try_claim_turn(self, bucket_key, limit=None):
+        self.claims.append((bucket_key, limit))
+        if self.claim_delay:
+            import time as _t
+            _t.sleep(self.claim_delay)
+        if self.claim_raises is not None:
+            raise self.claim_raises
+        n = self.counts.get(bucket_key, 0)
+        if limit is not None and n >= limit:
+            return -1
+        self.counts[bucket_key] = n + 1
+        return n + 1
+
+    def refund_turn(self, bucket_key):
+        self.releases.append(bucket_key)
+        self.counts[bucket_key] = max(0, self.counts.get(bucket_key, 0) - 1)
+
 
 def _events(*evs):
     async def _gen(*a, **k):
@@ -156,12 +215,28 @@ def _events(*evs):
     return _gen
 
 
+_ANSWERED = '{"main_question_answered": true, "reason": "answered"}'
+_UNANSWERED = '{"main_question_answered": false, "reason": "no_data"}'
+
+
 class _FakeGemini:
     # The continuation round (`stream_text`) a CUT answer triggers. Class-level knobs,
     # reset by the harness: the events it streams, or whether it raises on first read.
     continue_events: List[Any] = []
     continue_raises: bool = False
     continue_calls: List[Dict[str, Any]] = []
+    # The unanswered check's judge (`generate_json`, the only JSON call this harness makes):
+    # the verdict text it answers, an exception it raises instead, and every call's kwargs.
+    coverage_text: Any = _ANSWERED
+    coverage_raises: Optional[BaseException] = None
+    coverage_calls: List[Dict[str, Any]] = []
+
+    async def generate_json(self, prompt, **kwargs):
+        cls = type(self)
+        cls.coverage_calls.append({"prompt": prompt, **kwargs})
+        if cls.coverage_raises is not None:
+            raise cls.coverage_raises
+        return {"text": cls.coverage_text}
 
     def __init__(self, events):
         self._events = events
@@ -300,9 +375,16 @@ def harness(monkeypatch):
     _FakeGemini.continue_events = []
     _FakeGemini.continue_raises = False
     _FakeGemini.continue_calls = []
+    _FakeGemini.coverage_text = _ANSWERED
+    _FakeGemini.coverage_raises = None
+    _FakeGemini.coverage_calls = []
     _FakeChatService.events = [("thought", "Let me check."), ("answer", "Apple is "),
                                ("answer", "doing fine.")]
     monkeypatch.setattr(cs, "ChatService", _FakeChatService)
+    # The unanswered check's allowance: never the real budget RPC (hermetic suite).
+    import app.services.chat_answer_coverage as coverage_mod
+    _FakeBudget.current = _FakeBudget()
+    monkeypatch.setattr(coverage_mod, "get_chat_budget_service", lambda: _FakeBudget.current)
 
     async def _lookup(q):
         warm_calls.append(q)
@@ -2981,3 +3063,1283 @@ def test_a_fallback_after_prep_raised_carries_its_own_spent_unit(harness, monkey
     r = _post(client, message="Search the web for xqzv and write 6,000 words")
     assert r.status_code == 200, r.text
     assert quota.settled == [] and quota.refunds == []
+
+
+# ── the log-only numeric grounding audit (`CHAT_GROUNDING`, 2026-10-08) ───────────────────
+#
+# One INFO line per turn, counts only, on both doors; the audit runs on the ENFORCED answer
+# and can never change it. The source-scan half (placement, mutation-tested) is
+# `tests/test_chat_grounding_hook.py`.
+
+import logging as _logging  # noqa: E402
+
+import app.services.chat_numeric_grounding as _grounding  # noqa: E402
+
+_GROUNDING_TOOL_EVENTS = [
+    ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"},
+              "result": {"widget_type": "none", "current_price": 231.5}}),
+    ("answer", "Apple trades at $231.50, and its Zebracorn margin is 41.9%."),
+]
+
+
+def _grounding_lines(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("CHAT_GROUNDING door=")]
+
+
+def test_a_streamed_turn_logs_one_counts_only_grounding_line(harness, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_GROUNDING_TOOL_EVENTS)
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    lines = _grounding_lines(caplog)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    # $231.50 is in the tool result; 41.9% is in nothing (and sits in a "margin" sentence).
+    for token in ("door=stream", f"session={_SESSION}", "fallback=False", "numbers=2",
+                  "grounded=1", "ungrounded=1", "shadow_enforce=1", "skipped=-"):
+        assert token in line, (token, line)
+    assert "Zebracorn" not in line and "231" not in line
+
+
+def test_the_answer_is_byte_identical_when_the_audit_raises(harness, monkeypatch, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_GROUNDING_TOOL_EVENTS)
+    baseline = _parse_sse(_post(client).text)[-1][1]["message"]["content"]
+
+    def _boom(*a, **k):
+        raise RuntimeError("audit exploded")
+    monkeypatch.setattr(_grounding, "audit_answer", _boom)
+    _FakeChatService.events = list(_GROUNDING_TOOL_EVENTS)
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    assert frames[-1][0] == "done"
+    assert frames[-1][1]["message"]["content"] == baseline
+    assert "skipped=error" in _grounding_lines(caplog)[0]
+
+
+def test_a_hook_that_raises_never_touches_the_turn(harness, monkeypatch, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_GROUNDING_TOOL_EVENTS)
+    baseline = _parse_sse(_post(client).text)[-1][1]["message"]["content"]
+
+    def _boom(*a, **k):
+        raise RuntimeError("hook exploded")
+    monkeypatch.setattr(chat_mod, "start_grounding_audit", _boom)
+    _FakeChatService.events = list(_GROUNDING_TOOL_EVENTS)
+    r = _post(client)
+    frames = _parse_sse(r.text)
+    assert frames[-1][0] == "done" and frames[-1][1]["message"]["content"] == baseline
+    assert quota.delivered == 2 and quota.refunds == []
+
+
+def test_a_fallback_answer_logs_the_fallbacks_own_audit(harness, monkeypatch, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": "Full healthy answer. " * 3, "tokens_used": 80,
+        "grounding_audit": {"numbers": 3, "grounded": 2, "ungrounded": 1, "asset": "STOCK"},
+    }
+
+    async def _boom(*a, **k):
+        raise RuntimeError("stream died before any token")
+        yield  # pragma: no cover
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", lambda self, prompt, **kw: _boom())
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    line = _grounding_lines(caplog)[0]
+    for token in ("fallback=True", "numbers=3", "grounded=2", "ungrounded=1", "asset=STOCK"):
+        assert token in line, (token, line)
+
+
+def test_a_fallback_without_an_audit_logs_a_skip_not_the_streams_evidence(harness, monkeypatch,
+                                                                          caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "Full healthy answer 77.7%. " * 3,
+                                        "tokens_used": 80}
+
+    async def _boom(*a, **k):
+        raise RuntimeError("stream died")
+        yield  # pragma: no cover
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", lambda self, prompt, **kw: _boom())
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        _post(client)
+    line = _grounding_lines(caplog)[0]
+    assert "fallback=True" in line and "skipped=no_audit" in line and "numbers=0" in line
+
+
+def test_a_cached_deep_dive_replay_is_a_skip(harness, caplog):
+    client, db, quota, _ = harness
+    db.session_row.update({"stock_id": "SPY", "context_type": "ETF", "reference_id": "SPY"})
+    _FakeChatService.prep_overrides = {"asset_type": "ETF", "is_deep_dive": True,
+                                       "deep_dive_cached": "CACHED BRIEF 41.9% " * 30}
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        _post(client, "Give me a deep dive on SPY", context="SPY $500 +1%")
+    line = _grounding_lines(caplog)[0]
+    assert "skipped=cached" in line and "numbers=0" in line
+
+
+def test_a_turn_whose_web_results_reached_the_model_is_never_audited(harness, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"web_turn": _web_turn(), "web_search_granted": True,
+                                       "asset_type": "STOCK"}
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "Apple DOJ"},
+                  "result": dict(_DELIVERED_WEB)}),
+        ("answer", "Reuters, Sep 30, 2026: the case moved to trial with a $9.9B claim."),
+    ]
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = _post(client, message="Search the web for the Apple DOJ case")
+    assert r.status_code == 200, r.text
+    line = _grounding_lines(caplog)[0]
+    assert "skipped=web_turn" in line and "numbers=0" in line
+
+
+def test_the_prep_seed_is_the_evidence(harness, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"grounding_seed": {"caydex": ["Net margin 41.9%."]}}
+    _FakeChatService.events = [("answer", "Its net margin is 41.9%.")]
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        _post(client)
+    line = _grounding_lines(caplog)[0]
+    assert "grounded=1" in line and "ungrounded=0" in line
+
+
+def test_the_stream_evidence_is_the_models_truncated_view(harness, caplog):
+    """The `tool` frame carries the FULL handler result; the model was handed
+    `truncate_tool_result(...)` of it. A close only in the pruned tail must not ground."""
+    from app.integrations.gemini import truncate_tool_result
+    client, db, quota, _ = harness
+    result = {"widget_type": "none", "points": [{"date": "2026-01-02",
+                                                 "close": round(100 + i * 0.37, 2)}
+                                                for i in range(600)]}
+    head, tail = result["points"][0]["close"], result["points"][-1]["close"]
+    assert tail not in {p["close"] for p in truncate_tool_result(result)["points"]}
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"}, "result": result}),
+        ("answer", f"It closed at ${head:.2f} and later at ${tail:.2f}."),
+    ]
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    line = _grounding_lines(caplog)[0]
+    assert "grounded=1" in line and "ungrounded=1" in line, line
+
+
+def test_a_slow_audit_still_logs_its_line_and_the_turn_ends_on_done(harness, monkeypatch, caplog):
+    """A slow audit still logs its line, and the turn's `done` frame (what iOS finalises on) is
+    sent whatever the audit is doing."""
+    import threading
+    client, db, quota, _ = harness
+    gate = threading.Event()
+    real = _grounding.audit_answer
+
+    def _slow(answer, evidence, **k):
+        gate.wait(0.3)
+        return real(answer, evidence, **k)
+
+    monkeypatch.setattr(_grounding, "audit_answer", _slow)
+    _FakeChatService.events = list(_GROUNDING_TOOL_EVENTS)
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = _post(client)
+    gate.set()
+    frames = _parse_sse(r.text)
+    assert frames[-1][0] == "done", [f[0] for f in frames]
+    assert len(_grounding_lines(caplog)) == 1
+
+
+def test_the_send_door_logs_generate_responses_audit(harness, caplog):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": "Plain answer. " * 3, "tokens_used": 30,
+        "grounding_audit": {"numbers": 5, "grounded": 4, "exempt": 1, "asset": "ETF"},
+    }
+    with caplog.at_level(_logging.INFO, logger=_grounding.__name__):
+        r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    lines = _grounding_lines(caplog)
+    assert len(lines) == 1, lines
+    for token in ("door=send", "numbers=5", "grounded=4", "exempt=1", "asset=ETF"):
+        assert token in lines[0], (token, lines[0])
+
+
+def test_the_send_door_answer_is_unchanged_when_the_log_raises(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+    base = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages",
+                       json={"message": "hi"}).json()["content"]
+
+    def _boom(*a, **k):
+        raise RuntimeError("log exploded")
+    monkeypatch.setattr(chat_mod, "log_grounding_audit", _boom)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200 and r.json()["content"] == base
+
+
+# ── the 2026-10-08 web tiers through the stream door ──────────────────────────
+#
+# An ASKED web turn (an explicit tier) is answered in single mode with round 1 forced as prep says;
+# an AUTOMATIC web turn keeps a synthesis route and DROPS its search (no tool, no handler, prep's
+# no-web instructions — the merge cannot keep attributions), and in single mode it is declared
+# unforced with its tier's description. Its delivered results carry the automatic caveat, on the
+# stream and on the send door.
+
+_AUTO_CAVEAT_LEAD = "Cay AI searched the web because Caydex's data did not cover this."
+
+
+def _auto_turn():
+    from app.services.chat_web_search_service import WebSearchTurn
+    return WebSearchTurn(user_id=_USER["id"], tier="auto")
+
+
+def test_an_automatic_web_turn_routed_to_a_synthesis_drops_its_search(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _synthesize_router(monkeypatch)
+    called = []
+    monkeypatch.setattr(_FakeChatService, "stream_synthesis",
+                        lambda self, prep, msg, route, tools, handlers, signals=None:
+                        (called.append((prep, route, tools, handlers))
+                         or _events(("answer", "merged answer."))()))
+    _FakeChatService.prep_overrides = {
+        "web_turn": _auto_turn(), "web_search_granted": True, "asset_type": "STOCK",
+        "web_force_first": None, "web_search_mode": "auto",
+        "system_instruction": "SYS WITH WEB", "system_instruction_no_tools": "SYS NO TOOLS",
+        "system_instruction_no_web": "SYS NO WEB", "system_instruction_no_tools_no_web": "SYS NT NW",
+    }
+    r = _post(client, message="Any lawsuits against Apple?")
+    assert r.status_code == 200, r.text
+    routing = [d for e, d in _parse_sse(r.text) if e == "routing"]
+    assert routing and routing[0]["mode"] == "synthesize", "the lenses the router chose still run"
+    prep, route, tools, handlers = called[0]
+    assert "web_search" not in handlers
+    assert "web_search" not in {fd.name for t in tools for fd in (t.function_declarations or [])}
+    assert prep["system_instruction"] == "SYS NO WEB" and prep["system_instruction_no_tools"] == "SYS NT NW"
+    assert prep["web_turn"] is None
+    svc = _FakeChatService.instances[-1]
+    assert svc.gemini.stream_calls == [], "a synthesis, not a single agentic stream"
+
+
+def test_an_automatic_web_turn_in_single_mode_is_declared_unforced(harness, monkeypatch):
+    client, db, quota, _ = harness
+    from app.services.agents import chat_tools
+    _FakeChatService.prep_overrides = {
+        "web_turn": _auto_turn(), "web_search_granted": True, "asset_type": "STOCK",
+        "web_force_first": None, "web_search_mode": "auto",
+    }
+    r = _post(client, message="Any lawsuits against Apple?")
+    assert r.status_code == 200, r.text
+    (call,) = _FakeChatService.instances[-1].gemini.stream_calls
+    decls = {fd.name: fd.description for t in call["tools"] for fd in (t.function_declarations or [])}
+    assert decls["web_search"] == chat_tools.WEB_SEARCH_TIER_DESCRIPTIONS["auto"]
+    assert call["force_first_tool"] is None and "web_search" in call["tool_handlers"]
+
+
+@pytest.mark.parametrize("force", ["web_search", ("get_ticker_news", "explain_price_move")])
+def test_an_asked_web_turn_forces_what_prep_decided(harness, monkeypatch, force):
+    client, db, quota, _ = harness
+    _synthesize_router(monkeypatch)
+    _FakeChatService.prep_overrides = {"web_turn": _web_turn(), "web_search_granted": True,
+                                       "asset_type": "STOCK", "web_force_first": force}
+    r = _post(client, message="What's the latest news on Apple?")
+    assert r.status_code == 200, r.text
+    (call,) = _FakeChatService.instances[-1].gemini.stream_calls
+    assert call["force_first_tool"] == force
+    assert [d for e, d in _parse_sse(r.text) if e == "routing"][0]["mode"] == "single"
+
+
+def test_a_delivered_automatic_search_carries_the_automatic_caveat(harness, monkeypatch):
+    client, db, quota, _ = harness
+    turn = _turn_with_pills([_WEB_PILL])
+    turn.tier = "auto"
+    _web_prep(turn, report_as_of=None, web_force_first=None)
+    _FakeChatService.events = [*_web_tool_events(), ("answer", "Reuters, Sep 30, 2026: a suit was filed.")]
+    frames = _parse_sse(_post(client, message="Any lawsuits against Apple?").text)
+    done = frames[-1][1]["message"]
+    assert done["content"].endswith("\n\n" + _AUTO_CAVEAT_LEAD + " " + _CAVEAT_LEAD)
+    assert done["content"].count(_AUTO_CAVEAT_LEAD) == 1
+
+
+def test_an_asked_search_never_carries_the_automatic_sentence(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _web_prep(_turn_with_pills([_WEB_PILL]))
+    _FakeChatService.events = [*_web_tool_events(), ("answer", "Reuters: the case advanced.")]
+    frames = _parse_sse(_post(client, message="Can you verify the DOJ case?").text)
+    assert _AUTO_CAVEAT_LEAD not in frames[-1][1]["message"]["content"]
+
+
+def test_the_send_door_appends_the_automatic_caveat_from_the_result_flag(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": f"Reuters, Sep 30, 2026: a suit was filed.\n\n{_AUTO_CAVEAT_LEAD}",  # model's copy
+        "tokens_used": 30, "web_search_used": True, "web_search_automatic": True,
+        "web_sources": [dict(_WEB_PILL)],
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages",
+                    json={"message": "Any lawsuits against Apple?"})
+    assert r.status_code == 200, r.text
+    content = r.json()["content"]
+    assert content == "Reuters, Sep 30, 2026: a suit was filed.\n\n" + _AUTO_CAVEAT_LEAD + " " + _CAVEAT_LEAD
+    assert content.count(_AUTO_CAVEAT_LEAD) == 1
+
+
+def _code_only(src: str) -> str:
+    import io as _io
+    import tokenize as _tok
+    lines = src.splitlines(keepends=True)
+    for tok in _tok.generate_tokens(_io.StringIO(src).readline):
+        if tok.type == _tok.COMMENT:
+            (row, col) = tok.start
+            lines[row - 1] = lines[row - 1][:col] + lines[row - 1][col + len(tok.string):]
+    return "".join(lines)
+
+
+def test_both_doors_pass_the_automatic_flag_to_the_caveat_and_the_caller_to_the_chips():
+    """Source scan (comments stripped by `tokenize`, bounded to each call's parentheses)."""
+    import re as _re
+    from pathlib import Path as _Path
+    src = _code_only((_Path(__file__).resolve().parents[1] / "app/api/v1/endpoints/chat.py").read_text())
+
+    def calls(callee):
+        out = []
+        for m in _re.finditer(_re.escape(callee) + r"\(", src):
+            depth, i = 1, m.end()
+            while depth:
+                depth += {"(": 1, ")": -1}.get(src[i], 0)
+                i += 1
+            out.append(src[m.end(): i - 1])
+        return out
+
+    notes = calls("finalize_answer_notes")
+    assert len(notes) == 2
+    assert 'web_auto=ai_result.get("web_search_automatic") is True' in notes[0]
+    assert "web_auto=web_search_automatic" in notes[1]
+    (chips,) = calls("chat_service.generate_followup_suggestions")
+    assert _re.search(r'\buser_id=user\["id"\]', chips)
+    assert _re.search(r"drop_web_chips = _drops_web_search_chips\(session\.data\) or web_chips_dropped\(",
+                      src)
+
+
+@pytest.mark.parametrize("consent,all_chats,expected", [
+    ("3", True, ["What drives the moat?"]),                                   # search one tap away
+    (None, True, ["Any recent news on AVGO?", "What drives the moat?"]),      # not for this caller
+    ("3", False, ["Any recent news on AVGO?", "What drives the moat?"]),      # switch off
+])
+def test_history_replay_drops_news_chips_where_every_chat_search_is_open_for_the_caller(
+        harness, monkeypatch, consent, all_chats, expected):
+    client, db, quota, _ = harness
+    import app.services.chat_web_search_service as cws
+    monkeypatch.setattr(cws.settings, "CHAT_REPORT_WEB_SEARCH_ENABLED", True)
+    monkeypatch.setattr(cws.settings, "BRAVE_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(cws.settings, "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED", all_chats)
+
+    class _History(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == "chat_messages":
+                q.order = lambda col, desc=False: q
+                q.limit = lambda n: q
+                q.execute = lambda: _Result([
+                    {"id": "m2", "session_id": _SESSION, "role": "assistant", "content": "The moat…",
+                     "created_at": "2026-10-02T00:00:02+00:00", "citations": None, "tokens_used": None,
+                     "rich_content": {"suggestions": ["Any recent news on AVGO?", "What drives the moat?",
+                                                      "Search the web for the AVGO DOJ case"]}},
+                    {"id": "m1", "session_id": _SESSION, "role": "user", "content": "What is the moat?",
+                     "created_at": "2026-10-02T00:00:01+00:00", "rich_content": None,
+                     "citations": None, "tokens_used": None},
+                ])
+            return q
+
+    hdb = _History({**db.session_row, "id": _SESSION, "session_type": "NORMAL",
+                    "context_type": "STOCK", "created_at": "2026-10-02T00:00:00+00:00",
+                    "updated_at": "2026-10-02T00:00:00+00:00", "title": None, "is_saved": False,
+                    "message_count": 2})
+    app.dependency_overrides[get_supabase] = lambda: hdb
+    headers = {"X-AI-Consent-Version": consent} if consent else {}
+    r = client.get(f"/api/v1/chat/sessions/{_SESSION}", headers=headers)
+    assert r.status_code == 200, r.text
+    # The search-the-web chip is a dead end or a paid search everywhere: always dropped.
+    assert r.json()["messages"][-1]["suggestions"] == expected
+
+
+# ── review 2026-10-09: the fallback inherits the stream's web decision; a deferred automatic
+#    search restarts its live status; an ASKED search on the automatic tier is not "automatic" ──
+
+
+def test_an_automatic_turn_dropped_for_a_synthesis_hands_the_drop_to_the_fallback(harness, monkeypatch):
+    """The synthesis drop (no search) must survive the stream→non-stream fallback: the fallback is
+    handed `web_turn=None` AND the dropped decision, so it neither re-decides (it could grant the
+    automatic search again and claim units on a turn logged AUTO_WEB_DROPPED) nor re-logs."""
+    from app.services.chat_web_search_service import WebSearchDecision
+    client, db, quota, _ = harness
+    _synthesize_router(monkeypatch)
+
+    async def _boom(*a, **k):
+        raise RuntimeError("synthesis died")
+        yield  # pragma: no cover — an async generator
+
+    monkeypatch.setattr(_FakeChatService, "stream_synthesis",
+                        lambda self, prep, msg, route, tools, handlers, signals=None: _boom())
+    decision = WebSearchDecision(tier="auto", reason="auto", explicit_open=True, context="STOCK")
+    _FakeChatService.prep_overrides = {
+        "web_turn": _auto_turn(), "web_search_granted": True, "asset_type": "STOCK",
+        "web_force_first": None, "web_search_mode": "auto", "web_decision": decision,
+        "system_instruction_no_web": "SYS NO WEB", "system_instruction_no_tools_no_web": "SYS NT NW",
+    }
+    _FakeChatService.fallback_result = {"content": "Fallback answer. " * 3, "tokens_used": 30}
+    r = _post(client, message="Any lawsuits against Apple?")
+    assert r.status_code == 200, r.text
+    svc = _FakeChatService.instances[-1]
+    assert svc.fallback_calls == 1
+    assert svc.fallback_kwargs["web_turn"] is None
+    handed = svc.fallback_kwargs["web_decision"]
+    assert isinstance(handed, WebSearchDecision) and not handed.granted
+    assert handed.reason == "dropped" and handed.on_request and not handed.shadow
+
+
+def test_the_fallback_is_handed_the_streams_decision_when_no_tier_opened(harness):
+    """Shadow mode / a closed tier: prep's decision (no turn) reaches the fallback, so a fallback
+    turn logs its AUTO_WEB_SHADOW line once, not twice."""
+    from app.services.chat_web_search_service import WebSearchDecision
+    client, db, quota, _ = harness
+    decision = WebSearchDecision(reason="no_ask", none_line=True, shadow=True, shadow_topic="other")
+    _FakeChatService.prep_overrides = {"web_turn": None, "web_decision": decision}
+    _FakeChatService.fallback_result = {"content": "Fallback answer. " * 3, "tokens_used": 30}
+
+    async def _boom(*a, **k):
+        yield ("answer", "partial…")
+        raise RuntimeError("stream died")
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: _boom()
+    try:
+        r = _post(client, message="What is the moat?")
+    finally:
+        _FakeGemini.stream_agentic = orig
+    assert r.status_code == 200, r.text
+    svc = _FakeChatService.instances[-1]
+    assert svc.fallback_kwargs["web_turn"] is None and svc.fallback_kwargs["web_decision"] is decision
+
+
+_DEFERRED_WEB = {"web_search": True, "status": "deferred", "query": "Apple lawsuit",
+                 "result_count": 0, "results": [], "note": "No web search ran yet.", "deferred": True}
+
+
+def _observed_stream(monkeypatch, rounds, answer="Reuters, Sep 30, 2026: a suit was filed."):
+    """A fake `stream_agentic` that, like the real one, hands each round's runner names to the
+    door's `on_tool_round` observer BEFORE the round's `tool_start` frames, then yields the round's
+    `tool` events. `rounds`: [(names, [(name, result), ...]), ...]."""
+    def _stream(self, prompt, **kw):
+        self.stream_calls.append({"prompt": prompt, **kw})
+        observe = kw.get("on_tool_round")
+
+        async def _gen():
+            for names, calls in rounds:
+                if observe is not None:
+                    observe(tuple(names))
+                for name, _res in calls:
+                    yield ("tool_start", {"name": name})
+                for name, res in calls:
+                    yield ("tool", {"name": name, "args": {"q": name}, "result": res})
+            yield ("answer", answer)
+        return _gen()
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", _stream)
+
+
+def _unelected_auto_turn():
+    """A real automatic-tier `WebSearchTurn` whose search has NOT been elected yet."""
+    from app.services.chat_web_search_service import WebSearchTurn
+    return WebSearchTurn(user_id=_USER["id"], tier="auto")
+
+
+def test_a_deferred_automatic_search_sends_no_tool_start_and_the_real_search_announces_itself(
+        harness, monkeypatch):
+    """Final review 2026-10-09: an automatic search called beside Caydex's own tools is DEFERRED —
+    no search runs that round — so its `tool_start` must not reach the client ("Searching the
+    web…" for the whole round, then an unexplained skipped state). When the model calls it again
+    in a later round, that real search's start does go out."""
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _web_prep(_unelected_auto_turn(), report_as_of=None, web_force_first=None)
+    _observed_stream(monkeypatch, [
+        (("check_company_financials", "web_search"),
+         [("check_company_financials", {"ok": True}), ("web_search", dict(_DEFERRED_WEB))]),
+        (("web_search",), [("web_search", _delivered_web_result())]),
+    ])
+    frames = _parse_sse(_post(client, message="Any lawsuits against Apple?").text)
+    starts = [d for e, d in frames if e == "tool_start"]
+    assert starts == [{"name": "web_search"}], "only the real search announces itself"
+    first_start = next(i for i, (e, _d) in enumerate(frames) if e == "tool_start")
+    webs = [(i, d) for i, (e, d) in enumerate(frames) if e == "tool_step" and d["name"] == "web_search"]
+    assert webs[0][1].get("skipped") is True and webs[0][0] < first_start
+    assert not webs[1][1].get("skipped") and webs[1][0] > first_start
+
+
+def test_a_deferred_automatic_search_with_no_follow_up_sends_no_tool_start(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _web_prep(_unelected_auto_turn(), report_as_of=None, web_force_first=None)
+    _observed_stream(monkeypatch, [
+        (("check_company_financials", "web_search"),
+         [("check_company_financials", {"ok": True}), ("web_search", dict(_DEFERRED_WEB))]),
+    ], answer="Apple's revenue grew, from Caydex's figures.")
+    frames = _parse_sse(_post(client, message="How did Apple's revenue do?").text)
+    assert [e for e, _ in frames].count("tool_start") == 0
+    assert quota.settled == [] and quota.refunds == [], "Caydex's tool answered: charged"
+
+
+def test_a_lone_automatic_search_still_announces_itself(harness, monkeypatch):
+    """The suppression is exact: a search alone in its round is never deferred, so its start is
+    forwarded."""
+    client, db, quota, _ = harness
+    _web_prep(_unelected_auto_turn(), report_as_of=None, web_force_first=None)
+    _observed_stream(monkeypatch, [(("web_search",), [("web_search", _delivered_web_result())])])
+    frames = _parse_sse(_post(client, message="Any lawsuits against Apple?").text)
+    assert [d for e, d in frames if e == "tool_start"] == [{"name": "web_search"}]
+
+
+def test_a_failed_caydex_tool_beside_a_deferred_search_is_refunded_no_tools(harness, monkeypatch):
+    """Final review 2026-10-09: a deferred search ran nothing, so it is NEUTRAL for the refund gate —
+    counted as a success, a turn whose only real tool failed upstream was charged."""
+    client, db, quota, _ = harness
+    _web_prep(_unelected_auto_turn(), report_as_of=None, web_force_first=None)
+    failed = {"error": "timed_out", "tool": "check_company_financials", "upstream": True}
+    _observed_stream(monkeypatch, [
+        (("check_company_financials", "web_search"),
+         [("check_company_financials", failed), ("web_search", dict(_DEFERRED_WEB))]),
+    ], answer="Caydex's figures could not be loaded right now.")
+    r = _post(client, message="How did Apple's revenue do?")
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_degraded_no_tools"], (quota.settled, quota.refunds)
+
+
+def test_a_failed_caydex_tool_then_a_delivered_search_stays_charged(harness, monkeypatch):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_WEB_SOURCES_PERSIST", False)
+    _web_prep(_unelected_auto_turn(), report_as_of=None, web_force_first=None)
+    failed = {"error": "timed_out", "tool": "check_company_financials", "upstream": True}
+    _observed_stream(monkeypatch, [
+        (("check_company_financials", "web_search"),
+         [("check_company_financials", failed), ("web_search", dict(_DEFERRED_WEB))]),
+        (("web_search",), [("web_search", _delivered_web_result())]),
+    ])
+    r = _post(client, message="Any lawsuits against Apple?")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == [], "web results reached the answer: charged"
+
+
+def test_an_asked_search_on_the_automatic_tier_carries_no_automatic_sentence(harness, monkeypatch):
+    """Every-chat search off, the automatic tier on: an explicit ask reaches the automatic tier —
+    the user asked, so "searched because Caydex's data did not cover this" would misstate why."""
+    client, db, quota, _ = harness
+    turn = _turn_with_pills([_WEB_PILL])
+    turn.tier = "auto"
+    turn.ask_kind = "explicit"
+    _web_prep(turn, report_as_of=None, web_force_first=None)
+    _FakeChatService.events = [*_web_tool_events(), ("answer", "Reuters, Sep 30, 2026: a suit.")]
+    frames = _parse_sse(_post(client, message="Search the web for Apple lawsuits").text)
+    content = frames[-1][1]["message"]["content"]
+    assert _AUTO_CAVEAT_LEAD not in content and _CAVEAT_LEAD in content
+
+
+# ── the unanswered-turn refund (owner decision 2026-10-09) ────────────────────
+#
+# A cheap judge grades whether the reply gave what the MAIN question asked for; "not answered"
+# refunds the credit SILENTLY (`settle_no_cost("chat_unanswered")`, no label), at most
+# `CHAT_UNANSWERED_REFUND_DAILY_CAP` times per account per ET day. Both doors and the
+# stream→non-stream fallback run the ONE decision (`chat_answer_coverage.decide_unanswered_refund`)
+# behind the settlement ladder. These drive it through the real handlers.
+
+_DECLINE = "Caydex's data here does not include Apple's analyst price target."
+
+
+def _send(client, message="What is Apple's analyst price target?"):
+    return client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": message},
+                       headers={"Authorization": "Bearer test"})
+
+
+def _judged_reply(call) -> str:
+    p = call["prompt"]
+    return p[p.index("<<<ASSISTANT_REPLY>>>"):p.index("<<<END_ASSISTANT_REPLY>>>")]
+
+
+def _stream_dies_then(monkeypatch):
+    async def _boom(*a, **k):
+        yield ("answer", "partial stream text…")
+        raise RuntimeError("stream died")
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", lambda self, prompt, **kw: _boom())
+
+
+def test_an_unanswered_streamed_turn_is_refunded_and_the_judge_saw_the_pre_note_answer(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client, message="What is Apple's analyst price target? Should I buy?")
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_unanswered"] and quota.refunds == []
+    frames = _parse_sse(r.text)
+    names = [f[0] for f in frames]
+    assert names[-2:] == ["credits", "done"], "settled BEFORE the credits frame"
+    credits = frames[-2][1]
+    assert credits["outcome"] == "refunded" and credits["credits"] == 0
+    # The judge ran once on the cheap model, temperature 0, thinking off, no cache…
+    (call,) = _FakeGemini.coverage_calls
+    assert call["model_name"] == chat_mod.settings.CHAT_CHEAP_MODEL
+    assert call["temperature"] == 0.0 and call["thinking_budget"] == 0 and call["cache"] is False
+    assert call["usage_tag"] == "chat_coverage"
+    # …on the enforced answer BEFORE the code-written notes (the trade-intent disclaimer is
+    # appended to the stored answer, never to what the judge read).
+    reply = _judged_reply(call)
+    assert _DECLINE in reply
+    assert "not financial advice" not in reply.lower()
+    assert "not financial advice" in frames[-1][1]["message"]["content"].lower()
+    # One allowance unit claimed, on the uuid5 bucket, under the configured cap.
+    (claim,) = _FakeBudget.current.claims
+    from app.services.chat_answer_coverage import refund_bucket
+    assert claim == (refund_bucket(_USER["id"]), chat_mod.settings.CHAT_UNANSWERED_REFUND_DAILY_CAP)
+    assert _FakeBudget.current.releases == []
+
+
+def test_an_answered_streamed_turn_stays_charged_and_claims_nothing(harness):
+    client, db, quota, _ = harness
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert len(_FakeGemini.coverage_calls) == 1, "a plain charged turn is judged"
+    assert quota.settled == [] and quota.refunds == []
+    assert _FakeBudget.current.claims == []
+    assert _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+
+
+@pytest.mark.parametrize("text,raises", [
+    ("I think it was answered.", None),                                   # prose
+    ('{"main_question_answered": "false", "reason": "no_data"}', None),   # wrong type
+    ('{"main_question_answered": false, "reason": "answered"}', None),   # contradiction
+    ("", None),
+    (None, RuntimeError("judge exploded")),
+    (None, TimeoutError("judge timed out")),
+], ids=["prose", "string-bool", "contradiction", "empty", "raises", "timeout"])
+def test_a_failed_judge_leaves_the_turn_charged_on_both_doors(harness, text, raises):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = text
+    _FakeGemini.coverage_raises = raises
+    _FakeChatService.events = [("answer", _DECLINE)]
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+    r2 = _send(client)
+    assert r2.status_code == 200, r2.text
+    assert quota.settled == [] and quota.refunds == []
+    assert _FakeBudget.current.claims == [], "no verdict → no allowance claimed"
+
+
+def test_the_judge_timeout_bounds_a_hung_judge(harness, monkeypatch):
+    """A judge that never answers is cut at CHAT_UNANSWERED_JUDGE_TIMEOUT_SECONDS: charged."""
+    import asyncio as _asyncio
+    import app.services.chat_answer_coverage as coverage_mod
+    client, db, quota, _ = harness
+    monkeypatch.setattr(coverage_mod, "_judge_timeout", lambda: 0.05)
+
+    async def _hang(self, prompt, **kw):
+        await _asyncio.sleep(30)
+    monkeypatch.setattr(_FakeGemini, "generate_json", _hang)
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+
+
+def test_the_send_door_refunds_an_unanswered_turn_identically(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    r = _send(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_unanswered"] and quota.refunds == []
+    assert len(_FakeGemini.coverage_calls) == 1
+    assert _DECLINE in _judged_reply(_FakeGemini.coverage_calls[0])
+
+
+@pytest.mark.parametrize("budget_s,judge_s,judged", [
+    (10.5, 6.0, False),     # under 2 + 6 + 3 = 11 s left: not judged
+    (12.0, 6.0, True),
+    (19.0, 15.0, False),    # the minimum follows the judge timeout (2 + 15 + 3 = 20 s)
+    (21.0, 15.0, True),
+])
+def test_the_send_door_judges_only_with_the_derived_minimum_left(harness, monkeypatch, budget_s,
+                                                                 judge_s, judged):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    monkeypatch.setattr(chat_mod.settings, "CHAT_SEND_BUDGET_SECONDS", budget_s)
+    monkeypatch.setattr(chat_mod.settings, "CHAT_UNANSWERED_JUDGE_TIMEOUT_SECONDS", judge_s)
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    r = _send(client)
+    assert r.status_code == 200, r.text
+    assert len(_FakeGemini.coverage_calls) == (1 if judged else 0)
+    assert quota.settled == (["chat_unanswered"] if judged else [])
+    assert quota.delivered == 1, "exactly one free-follow-up grant attempt either way"
+
+
+def test_the_send_door_decision_ends_by_the_send_budgets_deadline(harness, monkeypatch, caplog):
+    """Review 2026-10-09: the send door's decision had no outer bound — a slow judge (the setting
+    allows 15 s) on a late turn answered past iOS's 60 s ceiling, a charged turn the user then
+    re-sent. It is now cut at the budget's deadline, the money grace kept back."""
+    import time as _t
+    import app.services.chat_answer_coverage as coverage_mod
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_SEND_BUDGET_SECONDS", 1.0)
+    monkeypatch.setattr(coverage_mod, "send_door_min_seconds", lambda: 0.0)   # let it be judged
+    monkeypatch.setattr(coverage_mod, "MONEY_SECTION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(coverage_mod, "_judge_timeout", lambda: 30.0)
+
+    async def _hang(self, prompt, **kw):
+        type(self).coverage_calls.append({"prompt": prompt, **kw})
+        import asyncio as _a
+        await _a.sleep(30)
+    monkeypatch.setattr(_FakeGemini, "generate_json", _hang)
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    t0 = _t.monotonic()
+    with caplog.at_level("WARNING"):
+        r = _send(client)
+    assert r.status_code == 200, r.text
+    assert _t.monotonic() - t0 < 5.0, "cut at the deadline, not at the judge's 30 s"
+    assert len(_FakeGemini.coverage_calls) == 1 and quota.settled == []
+    assert quota.delivered == 1, "the held grant is released by the cancelled decision"
+    assert any("outran the send budget" in r.getMessage() and "not settled" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_send_door_deadline_during_the_money_section_still_records_the_refund(real_quota,
+                                                                               monkeypatch):
+    """The deadline lands while the claim RPC runs: the money section finishes as a unit, the
+    cancelled decision waits for it (bounded), and the row records the silent refund."""
+    import app.services.chat_answer_coverage as coverage_mod
+    client, db, holder, grants = real_quota
+    _FakeGemini.coverage_text = _UNANSWERED
+    monkeypatch.setattr(chat_mod.settings, "CHAT_SEND_BUDGET_SECONDS", 1.3)
+    monkeypatch.setattr(coverage_mod, "send_door_min_seconds", lambda: 0.0)
+    monkeypatch.setattr(coverage_mod, "MONEY_SECTION_GRACE_SECONDS", 1.0)
+    _FakeBudget.current.claim_delay = 0.6
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    r = _send(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["credit"] == _SILENT, "the refund that landed is on the response"
+    assert _stored_credit(db) == _SILENT
+    assert [c["reason"] for c in _LedgerCredits.calls] == ["chat_unanswered"]
+    assert grants.grants == [], "a refunded turn grants no free follow-up"
+
+
+def test_the_fallback_judges_its_own_answer_not_the_aborted_stream(harness, monkeypatch, caplog):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _stream_dies_then(monkeypatch)
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    with caplog.at_level("INFO", logger="app.services.chat_answer_coverage"):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_unanswered"]
+    reply = _judged_reply(_FakeGemini.coverage_calls[0])
+    assert _DECLINE in reply and "partial stream text" not in reply
+    line = [r.getMessage() for r in caplog.records if "CHAT_UNANSWERED" in r.getMessage()][-1]
+    assert "door=stream_fallback" in line and "action=refunded" in line
+
+
+def test_a_fallback_whose_own_answer_used_web_results_is_never_judged(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _stream_dies_then(monkeypatch)
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30,
+                                        "web_search_used": True, "web_sources": []}
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+
+
+def test_a_turn_whose_web_results_were_delivered_is_never_judged(harness):
+    """Brave's terms bar judging an AI answer built on their results: never judged, charged."""
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "Apple target"},
+                  "result": dict(_DELIVERED_WEB)}),
+        ("answer", _DECLINE),
+    ]
+    r = _post(client, message="Search the web for Apple's price target")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30,
+                                        "web_search_used": True}
+    _send(client)
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+
+
+@pytest.mark.parametrize("result", [
+    {"web_search": True, "status": "daily_limit", "result_count": 0, "results": [], "note": "x"},
+    # A cached "nothing found" hands its unit back (`stats["refunded"]`), so it spent nothing.
+    {"web_search": True, "status": "no_results", "result_count": 0, "results": []},
+    {"web_search": True, "status": "deferred", "query": "q", "result_count": 0, "results": []},
+    {"web_search": True, "status": "unavailable", "result_count": 0, "results": []},
+], ids=["daily_limit", "no_results-no-unit", "deferred", "unavailable"])
+def test_a_search_that_spent_no_unit_does_not_block_the_check(harness, result):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "q"}, "result": result}),
+        ("answer", "I couldn't search the web just now, and Caydex's data doesn't include it."),
+    ]
+    r = _post(client, message="Search the web for Apple's price target")
+    assert r.status_code == 200, r.text
+    assert len(_FakeGemini.coverage_calls) == 1
+    assert quota.settled == ["chat_unanswered"]
+
+
+_EMPTY_WEB = {"web_search": True, "status": "no_results", "result_count": 0, "results": []}
+
+
+def test_an_empty_search_that_spent_a_unit_is_never_judged_on_the_stream(harness, caplog):
+    """Review 2026-10-09: the search ran, Brave billed it, a unit of the ONE global daily cap is
+    gone and nothing came back — refunding it made the search free and repeatable (10 a day per
+    account; ~18 accounts drain everyone's cap). The owner's 2026-10-03 rule keeps a turn whose
+    search spent a unit charged; the check now stops at it, before the judge."""
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    turn = _web_turn()
+    turn._unit_spent = True
+    _FakeChatService.prep_overrides = {"web_turn": turn, "web_search_granted": True,
+                                       "system_instruction_no_tools": "SYS-NO-TOOLS"}
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "xqzv"}, "result": dict(_EMPTY_WEB)}),
+        ("answer", "Nothing usable came back from the web."),
+    ]
+    with caplog.at_level("INFO", logger="app.services.chat_answer_coverage"):
+        r = _post(client, message="Search the web for xqzv")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == [] and quota.refunds == []
+    assert _FakeBudget.current.claims == []
+    assert _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+    line = [r.getMessage() for r in caplog.records if "CHAT_UNANSWERED door=" in r.getMessage()][-1]
+    assert "action=skipped:web_unit_spent" in line
+
+
+def test_an_empty_search_that_spent_a_unit_is_never_judged_on_the_send_door(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.fallback_result = {"content": "Nothing usable came back from the web.",
+                                        "tokens_used": 30, "web_search_used": False,
+                                        "web_search_spent": True}
+    r = _send(client, message="Search the web for xqzv")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+    assert quota.delivered == 1
+
+
+def test_an_empty_search_that_spent_a_unit_in_the_fallback_is_never_judged(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _stream_dies_then(monkeypatch)
+    _FakeChatService.fallback_result = {"content": "Nothing usable came back from the web.",
+                                        "tokens_used": 30, "web_search_used": False,
+                                        "web_search_spent": True}
+    r = _post(client, message="Search the web for xqzv")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+
+
+_WEB_HISTORY = [
+    {"role": "assistant", "content": "Reuters reported the case advanced.", "web_searched": True},
+    {"role": "user", "content": "Search the web for the DOJ case", "web_searched": None},
+]
+
+
+def test_a_follow_up_to_a_web_built_answer_is_never_judged_on_either_door(harness, caplog):
+    """Review 2026-10-09: "summarise that in one line" answers from a history holding an answer
+    built on Brave results, and the previous-turn read handed that answer to the judge. A turn
+    whose model history holds a web-built answer is not judged — charged."""
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    db.prior_rows = list(_WEB_HISTORY)
+    _FakeChatService.events = [("answer", _DECLINE)]
+    with caplog.at_level("INFO", logger="app.services.chat_answer_coverage"):
+        r = _post(client, message="summarise that in one line")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+    assert _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+    lines = [r.getMessage() for r in caplog.records if "CHAT_UNANSWERED door=" in r.getMessage()]
+    assert "action=skipped:prior_web_turn" in lines[-1], lines
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    r2 = _send(client, message="summarise that in one line")
+    assert r2.status_code == 200, r2.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+
+
+def test_an_unreadable_history_leaves_the_turn_charged(harness):
+    """A history row without the selected flag (a shape drift) must never read as "no web
+    turn": not judged, charged."""
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    db.prior_rows = [{"role": "assistant", "content": "Earlier answer."}]
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+
+
+def test_a_history_without_web_answers_is_judged_with_the_last_exchange(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    db.prior_rows = [
+        {"role": "assistant", "content": "Apple's CEO is Tim Cook.", "web_searched": None},
+        {"role": "user", "content": "Who runs Apple?", "web_searched": None},
+    ]
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client, message="and his pay?")
+    assert r.status_code == 200, r.text
+    (call,) = _FakeGemini.coverage_calls
+    assert "Cay AI: Apple's CEO is Tim Cook." in call["prompt"]
+    assert quota.settled == ["chat_unanswered"]
+
+
+def test_a_cut_web_answer_stays_charged_even_when_the_judge_says_unanswered(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "Apple DOJ"}, "result": dict(_DELIVERED_WEB)}),
+        ("answer", "Reuters reported on Sep 30, 2026 that the case advanced, and **"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    r = _post(client, message="Search the web for the DOJ case and write 3,000 words")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == [] and _FakeGemini.coverage_calls == []
+
+
+def test_a_cut_answer_after_a_spent_empty_search_stays_charged_with_an_unanswered_verdict(harness):
+    """The ladder keeps it charged WITHOUT settling (only a log line): the check's `degraded`
+    gate is what stops a separate `if` from refunding it."""
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    turn = _web_turn()
+    turn._unit_spent = True
+    _FakeChatService.prep_overrides = {"web_turn": turn, "web_search_granted": True,
+                                       "system_instruction_no_tools": "SYS-NO-TOOLS"}
+    _FakeChatService.events = [
+        ("tool", {"name": "web_search", "args": {"query": "xqzv"},
+                  "result": {"web_search": True, "status": "no_results", "result_count": 0,
+                             "results": []}}),
+        ("answer", "Nothing usable came back from the web; from the report, margins held and **"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    r = _post(client, message="Search the web for xqzv and write 6,000 words")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == [] and _FakeGemini.coverage_calls == []
+
+
+def test_a_starter_replay_stays_charged_even_when_the_judge_says_unanswered(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _warm_hit(monkeypatch, widget=None, stale=False)
+    r = _post(client, message="What's hot today?")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.refunds == [] and _FakeGemini.coverage_calls == []
+
+
+def test_a_cache_hit_settles_once_and_is_never_judged(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    db.session_row.update({"stock_id": "SPY", "context_type": "ETF", "reference_id": "SPY"})
+    _FakeChatService.prep_overrides = {"asset_type": "ETF", "is_deep_dive": True,
+                                       "deep_dive_cached": "CACHED BRIEF " * 30}
+    r = _post(client, "Give me a deep dive on SPY", context="SPY $500 +1%")
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_cache_hit"] and _FakeGemini.coverage_calls == []
+    assert quota.every_call == ["settle:chat_cache_hit"], "no second settlement attempt"
+
+
+def test_a_degraded_refund_is_never_judged_or_settled_twice(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"},
+                  "result": {"error": "timed_out", "upstream": True}}),
+        ("answer", _DECLINE),
+    ]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.every_call == ["settle:chat_degraded_no_tools"]
+    assert _FakeGemini.coverage_calls == []
+
+
+def test_a_live_deep_dive_is_never_judged(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [("answer", "Valuation: not available. Risks: not available.")]
+    r = _post(client, message="Give me a deep dive on Apple")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+    _FakeChatService.fallback_result = {"content": "Valuation: not available.", "tokens_used": 9}
+    _send(client, message="Market deep dive please")
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+
+
+@pytest.mark.parametrize("mode,judged,settled", [
+    ("off", 0, []), ("shadow", 1, []), ("on", 1, ["chat_unanswered"]), ("bogus", 0, []),
+])
+def test_the_mode_switch(harness, monkeypatch, caplog, mode, judged, settled):
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod.settings, "CHAT_UNANSWERED_REFUND_MODE", mode)
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [("answer", _DECLINE)]
+    with caplog.at_level("INFO", logger="app.services.chat_answer_coverage"):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    assert len(_FakeGemini.coverage_calls) == judged
+    assert quota.settled == settled
+    if mode == "shadow":
+        assert _FakeBudget.current.claims == [], "shadow never claims an allowance unit"
+    lines = [r.getMessage() for r in caplog.records if "CHAT_UNANSWERED door=" in r.getMessage()]
+    assert (lines == []) is (mode in ("off", "bogus")), lines
+
+
+def test_the_log_line_never_carries_the_question_or_the_answer(harness, caplog):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    secret_q = "What is ZZTOPSECRET's analyst price target?"
+    _FakeChatService.events = [("answer", "Caydex's data does not include QQSENSITIVEANSWER.")]
+    with caplog.at_level("DEBUG"):
+        r = _post(client, message=secret_q)
+    assert r.status_code == 200, r.text
+    lines = [r.getMessage() for r in caplog.records if "CHAT_UNANSWERED" in r.getMessage()]
+    assert lines and all("ZZTOPSECRET" not in l and "QQSENSITIVEANSWER" not in l for l in lines)
+
+
+def test_the_allowance_caps_refunds_at_ten_per_account_per_day(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [("answer", _DECLINE)]
+    from app.services.chat_answer_coverage import refund_bucket
+    _FakeBudget.current.counts[refund_bucket(_USER["id"])] = 10
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == [], "the 11th unanswered turn of the day is charged"
+    assert _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+
+
+def test_an_allowance_outage_leaves_the_turn_charged(harness):
+    from app.services.chat_budget_service import ChatBudgetUnavailable
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeBudget.current.claim_raises = ChatBudgetUnavailable("rpc down")
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+
+
+# ── the silent payload, through the REAL `_ChatQuota` ─────────────────────────
+
+class _LedgerCredits:
+    """`CreditService` at the binding chat.py uses: every refund recorded, answering the
+    migration-142 envelope (`refunded` the first time a ref is seen, `already_refunded` after)."""
+    calls: List[Dict[str, Any]] = []
+    answer: Any = "migration-142"
+
+    def refund_ledgered(self, user_id, amount, *, reason, ref_id, **kw):
+        cls = type(self)
+        cls.calls.append({"user_id": user_id, "amount": amount, "reason": reason, "ref_id": ref_id})
+        if cls.answer != "migration-142":
+            return cls.answer
+        seen = sum(1 for c in cls.calls if c["ref_id"] == ref_id)
+        return {"outcome": "refunded" if seen == 1 else "already_refunded", "spendable": 42}
+
+
+class _GrantLog:
+    def __init__(self):
+        self.grants: List[Any] = []
+
+    def grant_free_followup(self, session_id, seconds=None):
+        self.grants.append(session_id)
+
+
+@pytest.fixture
+def real_quota(harness, monkeypatch):
+    client, db, _fake, warm = harness
+    _LedgerCredits.calls = []
+    _LedgerCredits.answer = "migration-142"
+    monkeypatch.setattr(chat_mod, "CreditService", _LedgerCredits)
+    grants = _GrantLog()
+    monkeypatch.setattr(chat_mod, "get_chat_budget_service", lambda: grants)
+    holder: Dict[str, Any] = {}
+
+    def _claim(*a, **k):
+        q = chat_mod._ChatQuota(_USER, None, is_guest=False, ref_id=f"{_SESSION}:turn",
+                                session_id=_SESSION, balance_after=41)
+        holder["quota"] = q
+        return q, None
+    monkeypatch.setattr(chat_mod, "_claim_chat_quota", _claim)
+    return client, db, holder, grants
+
+
+def _stored_credit(db):
+    """The `credit` key the row ends up with (the last chat_messages write that carries it)."""
+    found = None
+    for table, op, payload in db.calls:
+        if table == "chat_messages" and op == "update" and isinstance(payload, dict):
+            rc = payload.get("rich_content")
+            if isinstance(rc, dict) and "credit" in rc:
+                found = rc["credit"]
+    return found
+
+
+_SILENT = {"outcome": "refunded", "credits": 0, "reason": "chat_unanswered", "label": None}
+
+
+def test_the_stream_refund_is_silent_live_and_on_the_row(real_quota):
+    client, db, holder, grants = real_quota
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    credits = frames[-2][1]
+    assert credits == {**_SILENT, "balance": 42}, credits
+    assert not credits["label"], "no label → shipped iOS shows no badge, refreshes the balance"
+    assert _stored_credit(db) == _SILENT
+    done_credit = frames[-1][1]["message"].get("credit")
+    assert done_credit == _SILENT, done_credit
+    # The chips survived the re-attach: the row's last write carries both keys.
+    last = [p for t, op, p in db.calls if t == "chat_messages" and op == "update"][-1]
+    assert last["rich_content"].get("suggestions"), "the credit write kept the chips"
+    # Exactly one ledger refund, on the turn's own ref, and NO free-follow-up grant.
+    assert [(c["reason"], c["ref_id"]) for c in _LedgerCredits.calls] == [
+        ("chat_unanswered", f"{_SESSION}:turn")]
+    assert grants.grants == [], "a refunded turn grants no free follow-up"
+
+
+def test_an_answered_turn_with_the_real_quota_grants_once_and_persists_nothing(real_quota):
+    client, db, holder, grants = real_quota
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+    assert _LedgerCredits.calls == [] and _stored_credit(db) is None
+    assert grants.grants == [_SESSION], "the held grant is released exactly once"
+
+
+def test_the_send_door_refund_is_silent_too(real_quota):
+    client, db, holder, grants = real_quota
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30}
+    r = _send(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["credit"] == _SILENT
+    assert _stored_credit(db) == _SILENT
+    assert grants.grants == []
+
+
+def test_a_ledger_that_proves_nothing_moved_returns_the_allowance_unit(real_quota):
+    client, db, holder, grants = real_quota
+    _FakeGemini.coverage_text = _UNANSWERED
+    _LedgerCredits.answer = {"outcome": "no_matching_debit"}
+    _FakeChatService.events = [("answer", _DECLINE)]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    credits = _parse_sse(r.text)[-2][1]
+    assert credits["outcome"] == "charged" and credits["label"] is None
+    from app.services.chat_answer_coverage import refund_bucket
+    bucket = refund_bucket(_USER["id"])
+    assert _FakeBudget.current.releases == [bucket] and _FakeBudget.current.counts[bucket] == 0
+    assert _stored_credit(db) is None
+
+
+def test_a_stream_wait_timeout_during_the_money_section_still_shows_the_refund(real_quota,
+                                                                              monkeypatch,
+                                                                              caplog):
+    """Review 2026-10-09: the door's wait ran out while the claim RPC ran; it cancelled, logged
+    "the turn stays charged" and sent a `charged` frame — and the worker thread then refunded,
+    with no line anywhere. Now the door waits for the money section (bounded) and reads the
+    quota: the frame, the row and the log all say refunded."""
+    client, db, holder, grants = real_quota
+    _FakeGemini.coverage_text = _UNANSWERED
+    monkeypatch.setattr(chat_mod, "decision_wait_seconds", lambda: 0.05)
+    _FakeBudget.current.claim_delay = 0.8
+    _FakeChatService.events = [("answer", _DECLINE)]
+    with caplog.at_level("INFO"):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    credits = _parse_sse(r.text)[-2][1]
+    assert credits == {**_SILENT, "balance": 42}, credits
+    assert _stored_credit(db) == _SILENT
+    assert [c["reason"] for c in _LedgerCredits.calls] == ["chat_unanswered"]
+    assert grants.grants == []
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("outran its wait" in m and "— refunded" in m for m in msgs), msgs
+    assert any("CHAT_UNANSWERED door=stream" in m and "action=refunded" in m for m in msgs)
+
+
+def test_a_stream_wait_timeout_during_the_judge_leaves_the_turn_charged(harness, monkeypatch,
+                                                                       caplog):
+    import asyncio as _asyncio
+    client, db, quota, _ = harness
+    monkeypatch.setattr(chat_mod, "decision_wait_seconds", lambda: 0.05)
+
+    async def _hang(self, prompt, **kw):
+        await _asyncio.sleep(30)
+    monkeypatch.setattr(_FakeGemini, "generate_json", _hang)
+    _FakeChatService.events = [("answer", _DECLINE)]
+    with caplog.at_level("INFO"):
+        r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and _parse_sse(r.text)[-2][1]["outcome"] == "charged"
+    assert quota.delivered == 1, "the cancelled decision released the held grant"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("outran its wait" in m and "not settled" in m for m in msgs), msgs
+    assert any("CHAT_UNANSWERED door=stream" in m and "action=cancelled" in m for m in msgs)
+
+
+def test_double_settlement_is_impossible_on_the_real_quota():
+    """The check settles through `settle_no_cost`, whose shared `_settled` flag makes every
+    later settlement — a second check, the ladder, the finally backstop — a no-op."""
+    import app.api.v1.endpoints.chat as cm
+    calls = []
+
+    class _C:
+        def refund_ledgered(self, *a, **k):
+            calls.append(k["reason"])
+            return {"outcome": "refunded", "spendable": 3}
+
+    orig = cm.CreditService
+    cm.CreditService = _C
+    try:
+        q = cm._ChatQuota(_USER, None, is_guest=False, ref_id="s:t", session_id="s")
+        q.settle_no_cost("chat_unanswered")
+        q.settle_no_cost("chat_unanswered")
+        q.settle_no_cost("chat_degraded_no_tools")
+        q.refund_once("chat_stream_cancelled")
+    finally:
+        cm.CreditService = orig
+    assert calls == ["chat_unanswered"]
+    assert q.is_settled and q.is_refunded and q.outcome == "refunded"
+    assert q.cost_payload() == _SILENT
+    assert q.cost_frame()["label"] is None and q.cost_frame()["balance"] == 3
+
+
+@pytest.mark.parametrize("reason,label", [
+    ("chat_cache_hit", "1 credit refunded — no AI cost"),
+    ("chat_degraded_no_tools", "1 credit refunded — incomplete answer"),
+    ("chat_undelivered", "1 credit refunded"),
+    ("chat_unanswered", None),
+])
+def test_only_the_unanswered_refund_is_unlabelled(reason, label):
+    import app.api.v1.endpoints.chat as cm
+
+    class _C:
+        def refund_ledgered(self, *a, **k):
+            return {"outcome": "refunded", "spendable": 3}
+
+    orig = cm.CreditService
+    cm.CreditService = _C
+    try:
+        q = cm._ChatQuota(_USER, None, is_guest=False, ref_id="s:t", session_id="s")
+        q.settle_no_cost(reason)
+    finally:
+        cm.CreditService = orig
+    assert q.cost_payload()["label"] == label
+    assert q.cost_payload()["outcome"] == "refunded"

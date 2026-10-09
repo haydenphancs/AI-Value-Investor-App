@@ -40,7 +40,7 @@ from app.services._insider_common import (
     normalize_insider_name,
     prepare_insider_rows,
 )
-from app.services._insider_holdings import insider_holdings_from_rows
+from app.services._insider_holdings import insider_holdings_from_rows, roster_from_holdings
 from app.services.corporate_actions_service import (
     effective_window_for_quarter,
     corporate_actions_source,
@@ -392,7 +392,12 @@ _SUPABASE_CACHE_TTL_HOURS = 24
 #:     days keeps its reported 0 as the current figure (a v4 row showed an older figure in
 #:     its place), the direct cap keeps the running holding behind a run of from-zero awards,
 #:     and an emptied from-zero lot no longer joins a same-day 'one of 0 or X'.
-_HOLDERS_PAYLOAD_VERSION = 5
+#: 6 → one insider roster (2026-10-08): the Top 10 Insiders sheet reads each person's direct
+#:     holding after their latest Form 4 (`roster_from_holdings`, the balances chat states)
+#:     instead of the first raw row per name — a v5 row showed CRWV's Venturo at an RSU line's
+#:     984,380 beside chat's 302,526. The row also carries the float figure chat states
+#:     (`ownership_detail.float_*`) and each congressional disclosure's filing date.
+_HOLDERS_PAYLOAD_VERSION = 6
 _VERSION_KEY = "payload_version"
 
 #: Below this insider block, `institutions + insiders > 100` is physically impossible
@@ -484,6 +489,36 @@ def _insiders_pct_from_profile(profile: Dict[str, Any]) -> float:
     if 0 < insiders_pct < 1.0:
         insiders_pct *= 100.0
     return max(0.0, min(100.0, insiders_pct))
+
+
+def _float_stamps(row: Any) -> Dict[str, Any]:
+    """The shares-float row's figures for `OwnershipDetailSchema` (the ONE float source the
+    chat tool states): float shares and shares outstanding only when finite and positive, the
+    free-float percent only inside (0, 100] — the same reading `_insiders_pct_from_profile`
+    takes of ``freeFloat`` — and the row's date only when it is a calendar date. Anything
+    else is None (not reported), never 0. Never raises."""
+    if not isinstance(row, dict):
+        return {}
+
+    def positive(key: str) -> Optional[float]:
+        if isinstance(row.get(key), bool):
+            return None
+        value = _safe_float(row, key, float("nan"))
+        return value if math.isfinite(value) and value > 0 else None
+
+    free_float = positive("freeFloat")
+    as_of = row.get("date")
+    day = as_of.strip()[:10] if isinstance(as_of, str) else ""
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        day = ""
+    return {
+        "float_shares": positive("floatShares"),
+        "outstanding_shares": positive("outstandingShares"),
+        "free_float_percent": free_float if free_float is not None and free_float <= 100.0 else None,
+        "float_as_of": day or None,
+    }
 
 # The most recent N quarters are NOT settled: 13F filings arrive over the ~45
 # days after quarter-end and keep getting amended for months. A row cached
@@ -938,6 +973,7 @@ class HoldersService:
             self._ownership_detail,
             ticker, insider_trading, degraded, data_year, data_quarter, issuer_cik=issuer_cik,
             built_at=now.isoformat(timespec="seconds"), raw_rows=raw_insider_rows,
+            float_row=shares_float,
         )
         # The list is "Last 12 Months" too, like the chart and the summary card: a 1000-row
         # page reaches back years, and the old 100-row pager's ~99-row overshoot became up to
@@ -952,12 +988,15 @@ class HoldersService:
                 sorted(foreign), issuer_cik,
             )
         if getattr(insider_roster, "fetch_failed", False):
-            # A failed roster is not "no insiders": keep the build out of the 24h tier.
+            # Since 2026-10-08 the roster only supplies the activity list's TITLES (the Top 10
+            # sheet reads `roster_from_holdings`), and each activity falls back to its own
+            # row's `typeOfOwner`: a failed roster costs nothing worth refusing the 24h tier
+            # for. Logged, not degraded.
             logger.warning(
-                "Insider roster fetch failed for %s (%s) — build not persisted",
+                "[holders-roster] Insider roster fetch failed for %s (%s) — activity titles "
+                "fall back to each row's own role; build still persisted",
                 ticker, getattr(insider_roster, "reason", ""),
             )
-            degraded.append("Insider roster")
         insider_roster = _issuer_roster(insider_roster, issuer_cik)
 
         # Build each section. The prior settled quarter's summary is fetched ONLY when
@@ -981,8 +1020,14 @@ class HoldersService:
                                "— build not persisted", ticker, prior_year, prior_quarter, type(e).__name__, e)
                 degraded.append("Inst prior-quarter summary")
                 prior_summary = None
+        # Top 10 Insiders: ONE roster with chat and the report — each person's direct holding
+        # after their latest Form 4 (`roster_from_holdings`), never the first raw roster row
+        # (an RSU line read 984,380 for CRWV's Venturo beside chat's 302,526). No holdings (the
+        # issuer CIK unknown, the rows unattributable, the fetch failed) → an EMPTY sheet: the
+        # raw roster is not a fallback, it is the bug.
+        top_insiders = self._top_insider_roster(ticker, ownership_detail)
         breakdown = self._build_shareholder_breakdown(
-            company_profile, institutional_holders, insider_roster, current_price,
+            company_profile, institutional_holders, top_insiders, current_price,
             inst_ownership_summary, prior_summary=prior_summary, ticker=ticker,
         )
         # Split ratio for the 13F data quarter. A split multiplies the share count
@@ -1099,10 +1144,14 @@ class HoldersService:
         issuer_cik: Optional[str] = None,
         built_at: Optional[str] = None,
         raw_rows: Optional[List[Dict[str, Any]]] = None,
+        float_row: Any = None,
     ) -> OwnershipDetailSchema:
-        """Chat-only ownership detail (`HoldersResponse.ownership_detail`, never on the wire).
+        """Ownership detail (`HoldersResponse.ownership_detail`, never on the wire itself): Ask
+        Cay AI's ownership figures AND, through `_top_insider_roster`, the Top 10 Insiders sheet
+        (and the report's Key Management) — so withheld holdings EMPTY that sheet too.
 
-        Insider holdings are WITHHELD (None — the chat tool says "unavailable") when the rows
+        Insider holdings are WITHHELD (None — the chat tool says "unavailable", the Top 10
+        Insiders sheet is empty) when the rows
         cannot be trusted to be this issuer's: the CIK lookup failed (BRK-B's feed would read
         Berkshire's stakes in other companies as its insiders' holdings) — or no CIK was found
         at all and the rows name more than one issuer — or the fetch failed with nothing to
@@ -1111,7 +1160,8 @@ class HoldersService:
 
         Every outcome is stamped with `built_at` (when the filings were read) and the feed
         marker of `raw_rows` (`_insider_feed_marker`), which the chat's freshness probe
-        compares against (`newer_insider_filing`).
+        compares against (`newer_insider_filing`), and with the float figures of `float_row`
+        (the build's shares-float row, `_float_stamps`).
 
         Never raises: a defect here must not cost the Holders tab its build.
         """
@@ -1125,6 +1175,7 @@ class HoldersService:
         stamps = dict(
             institutions_quarter=f"Q{data_quarter} {data_year}", built_at=built_at,
             newest_filed=newest_filed, newest_filed_ids=newest_ids,
+            **_float_stamps(float_row),
         )
         if "Issuer CIK" in degraded:
             logger.warning(
@@ -1159,10 +1210,14 @@ class HoldersService:
                     "(empty records, no reporter or no date) — skipped", ticker, skipped, len(rows),
                 )
             holdings = InsiderHoldingsSchema(complete=not fetch_failed, **built)
-        except Exception:  # noqa: BLE001 — a chat-only extra must never fail the Holders build
+        except Exception:  # noqa: BLE001 — a defect here must never fail the Holders build
+            # Final review 2026-10-09: no longer chat-only — the Top 10 Insiders sheet ranks from
+            # these holdings, so a failed derivation empties it (the old line said "the Holders
+            # tab itself is unaffected", which stopped being true).
             logger.exception(
                 "[holders-insider-holdings] %s: holdings derivation FAILED — withheld from "
-                "chat; the Holders tab itself is unaffected", ticker,
+                "chat AND the Top 10 Insiders sheet is empty (the rest of the tab is built)",
+                ticker,
             )
             holdings = None
         return OwnershipDetailSchema(insider_holdings=holdings, **stamps)
@@ -1264,11 +1319,52 @@ class HoldersService:
 
     # ── Shareholder Breakdown ─────────────────────────────────────
 
+    @staticmethod
+    def _top_insider_roster(
+        ticker: str, detail: Optional[OwnershipDetailSchema],
+    ) -> List[Dict[str, Any]]:
+        """The Top 10 Insiders roster: `roster_from_holdings` over this build's own
+        `ownership_detail.insider_holdings` — the balances Ask Cay AI states and the report's
+        Key Management reads. Withheld holdings give an EMPTY roster (WARNING), never the raw
+        first-row roster. The sheet ranks DIRECT holdings: people whose direct balance the
+        filings leave ambiguous, whose direct balance a later no-balance transaction may have
+        changed (`changed_after`), or who hold only indirectly (a trust, family member or
+        entity — often a founder) are left out of the ranking and counted in a WARNING, never
+        ranked on a guess. Never raises: a defect here must not cost the tab."""
+        holdings = getattr(detail, "insider_holdings", None) if detail is not None else None
+        if holdings is None:
+            logger.warning(
+                "[holders-top-insiders] %s: ranked sheet empty (reason=holdings_unavailable) — "
+                "the Top 10 Insiders sheet is empty (never the raw roster)", ticker,
+            )
+            return []
+        try:
+            ranked = roster_from_holdings(holdings)
+            unknown = len(roster_from_holdings(holdings, include_unknown=True)) - len(ranked)
+        except Exception:  # noqa: BLE001
+            logger.exception("[holders-top-insiders] %s: ranked sheet empty "
+                             "(reason=derivation_failed)", ticker)
+            return []
+        if unknown:
+            logger.warning(
+                "[holders-top-insiders] %s: %d insider(s) left out of the ranked sheet — no "
+                "current direct figure (ambiguous or possibly stale in the filings, or held "
+                "only indirectly; never ranked as 0)", ticker, unknown,
+            )
+        if not ranked:
+            # ONE greppable line per blank sheet (final review 2026-10-09), so the rate of empty
+            # Top 10 Insiders sheets after the v6 rollout can be measured from the logs.
+            logger.warning(
+                "[holders-top-insiders] %s: ranked sheet empty (reason=%s)", ticker,
+                "no_direct_figure" if unknown else "no_insiders",
+            )
+        return ranked
+
     def _build_shareholder_breakdown(
         self,
         profile: Dict[str, Any],
         inst_holders: List[Dict[str, Any]],
-        insider_roster: List[Dict[str, Any]],
+        top_insiders: List[Dict[str, Any]],
         current_price: float,
         inst_summary: Optional[Dict[str, Any]] = None,
         prior_summary: Optional[Dict[str, Any]] = None,
@@ -1342,7 +1438,7 @@ class HoldersService:
         top_10_institutions = self._build_top_institutions(inst_holders)
         outstanding_shares = _safe_float(profile, "outstandingShares", 0.0)
         top_10_insiders = self._build_top_insiders(
-            insider_roster, current_price, outstanding_shares
+            top_insiders, current_price, outstanding_shares
         )
 
         return ShareholderBreakdownSchema(
@@ -1425,13 +1521,21 @@ class HoldersService:
         current_price: float,
         outstanding_shares: float = 0.0,
     ) -> List[TopInsiderSchema]:
+        """Rank `roster` (`roster_from_holdings` rows) by holding value, top 10.
+
+        A row with an unknown share count (None, NaN, a bool, a non-number) or none at all
+        (0) holds nothing that can be ranked: it is left out — never listed as "$0.0M"."""
         if not roster:
             return []
 
         # Build insiders with their share value
         insiders = []
         for r in roster:
+            if not isinstance(r, dict) or isinstance(r.get("numberOfShares"), bool):
+                continue
             shares = _safe_float(r, "numberOfShares", 0.0)
+            if shares <= 0:
+                continue
             value_millions = (shares * current_price) / 1_000_000 if current_price > 0 else 0.0
             # Compute ownership % from shares / outstanding shares
             if outstanding_shares > 0 and shares > 0:
@@ -1441,8 +1545,13 @@ class HoldersService:
                 if 0 < ownership_pct < 1.0:
                     ownership_pct *= 100.0
 
+            display = r.get("display_name")
             insiders.append({
-                "name": normalize_insider_name(r.get("owner")),
+                # `roster_from_holdings` rows carry the display name already ("Brian M.
+                # Venturo"); `normalize_insider_name` is not idempotent on it ("M. Venturo
+                # Brian"), so only a raw FMP name ("VENTURO BRIAN M") is normalised.
+                "name": (display.strip() if isinstance(display, str) and display.strip()
+                         else normalize_insider_name(r.get("owner"))),
                 # `.get(k, default)` does NOT fall back on a present-but-null
                 # value, and TopInsiderSchema.title is a required str.
                 "title": clean_role_title(r.get("title") or r.get("typeOfOwner")),
@@ -2064,6 +2173,14 @@ class HoldersService:
                 owner_raw = (trade.get("owner") or "").strip()
                 owner = owner_raw if owner_raw else "Self"
 
+                # When the report was filed (the trade `date` may be 45 days earlier).
+                disclosed = trade.get("disclosureDate")
+                disclosed = disclosed.strip()[:10] if isinstance(disclosed, str) else ""
+                try:
+                    datetime.strptime(disclosed, "%Y-%m-%d")
+                except ValueError:
+                    disclosed = ""
+
                 # Price at transaction date
                 price = _find_price_at_date(tx_date)
 
@@ -2077,6 +2194,7 @@ class HoldersService:
                     owner=owner,
                     transaction_type=tx_type,
                     price_at_transaction=round(price, 2),
+                    disclosure_date=disclosed or None,
                 ))
 
         # Sort by date descending

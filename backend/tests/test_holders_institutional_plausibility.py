@@ -35,7 +35,7 @@ def _svc() -> HoldersService:
 
 def _breakdown(profile, summary, holders=None, prior=None):
     return HoldersService._build_shareholder_breakdown(
-        _svc(), profile=profile, inst_holders=holders or [], insider_roster=[],
+        _svc(), profile=profile, inst_holders=holders or [], top_insiders=[],
         current_price=10.0, inst_summary=summary, prior_summary=prior, ticker="T",
     )
 

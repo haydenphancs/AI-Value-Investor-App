@@ -422,6 +422,7 @@ async def test_ticker_report_block_is_bounded(resolver, monkeypatch):
         + 2 * (20 + ccr._MAX_REPORT_THESIS)                            # bull / bear
         + 80 + rows * (60 + ccr._COMPETITOR_NAME_CAP + ccr._COMPETITOR_SEGMENT_CAP)
         + 2 * (300 + rows * 4) + 100 + 100                             # method, badge, source
+        + ccr._REPORT_FIGURES_LEAD_CAP + 1                             # figures lead
         + 100                                                          # dump header
     )
     assert len(head) <= lead_bound, (len(head), lead_bound)
@@ -1473,30 +1474,58 @@ _OLD_CHILD_PRIORITY = {
 @pytest.mark.asyncio
 async def test_the_fair_value_and_pillar_scores_survive_a_full_report(resolver, monkeypatch):
     """F1 (2026-10-01 review): "What is Cay's fair value?" / "How strong is each moat pillar?"
-    were answered "not included here" — the figures sorted behind JSONB trivia one level down."""
+    were answered "not included here" — the figures sorted behind JSONB trivia one level down.
+    Since 2026-10-08 they ride in the figures lead, labelled, and leave the dump (said once)."""
     block = await _resolve_report(resolver, monkeypatch, _avgo_shaped_report())
+    head = block.split("Report data the user can see", 1)[0]
     lines = _dump_of(block).splitlines()
-    for figure in _HEADLINE_FIGURES:
-        assert figure in lines, figure
-    # The estimate leads its block; the trivia that used to beat it does not get ahead of it.
-    dcf = [l for l in lines if l.startswith("wall_street_consensus.caydex_fair_value.")]
-    assert dcf[0] == _HEADLINE_FIGURES[0], dcf
+    assert ("Caydex fair value: 180.25 USD per share (Caydex model estimate, not a price "
+            "target); range 150.75–210.75; as of 2026-09-22") in head
+    for d in range(5):
+        assert f"Dim {d} 7.5 vs peers 5" in head, d
+    assert not any("caydex_fair_value" in l or ".dimensions" in l for l in lines)
     # Every narrative still shows (the per-section share is unchanged).
     for marker in _NARRATIVE_MARKERS:
         assert marker in "\n".join(lines), marker
-    # A pillar's per-metric drivers and confidence are on no screen: never in the dump.
-    assert not any(".drivers" in l or ".confidence" in l for l in lines)
+    # A pillar's per-metric drivers and confidence are on no screen: never in the block.
+    for hidden in (".drivers", ".confidence", "sub_score", "0.3988", "sector_median"):
+        assert hidden not in block, hidden
     assert len("\n".join(lines)) <= _ccr._REPORT_DUMP_CAP
 
 
+def _direct_report_flatten(report, child_priority):
+    """The resolver's dump call WITHOUT the figures prune, at the pre-2026-10-08 cap: what the
+    child-priority map does to a block the figures lead did not take."""
+    return _flatten_for_grounding(report, 3600, skip_top=_ccr._REPORT_SKIP_TOP,
+                                  priority_top=_ccr._REPORT_PRIORITY, fair=True,
+                                  child_priority=child_priority).splitlines()
+
+
+def test_the_child_priority_still_leads_each_block_with_its_headline_figure():
+    """The map's own contract, kept for a direct flatten of a report: the estimate and the
+    pillar scores lead their dicts — and the old (direct-children-only) map loses both."""
+    lines = _direct_report_flatten(_avgo_shaped_report(), _ccr._REPORT_CHILD_PRIORITY)
+    for figure in _HEADLINE_FIGURES:
+        assert figure in lines, figure
+    dcf = [l for l in lines if l.startswith("wall_street_consensus.caydex_fair_value.")]
+    assert dcf[0] == _HEADLINE_FIGURES[0], dcf
+    old = _direct_report_flatten(_avgo_shaped_report(), _OLD_CHILD_PRIORITY)
+    assert _HEADLINE_FIGURES[0] not in old
+    assert not any(l.startswith("moat_competition.dimensions[0].score") for l in old)
+    assert "wall_street_consensus.caydex_fair_value.beta: 1.2" in old   # the trivia that won
+
+
 @pytest.mark.asyncio
-async def test_the_old_child_order_drops_the_headline_figures(resolver, monkeypatch):
-    """Anti-vacuity: the same report under the old (direct-children-only) map loses both."""
-    monkeypatch.setattr(_ccr, "_REPORT_CHILD_PRIORITY", _OLD_CHILD_PRIORITY)
-    lines = _dump_of(await _resolve_report(resolver, monkeypatch, _avgo_shaped_report())).splitlines()
-    assert _HEADLINE_FIGURES[0] not in lines
-    assert not any(l.startswith("moat_competition.dimensions[0].score") for l in lines)
-    assert "wall_street_consensus.caydex_fair_value.beta: 1.2" in lines   # the trivia that won
+async def test_the_figures_reach_the_model_only_through_the_lead(resolver, monkeypatch):
+    """Anti-vacuity for the prune: with the figures lead switched off, none of the figures it
+    carries is anywhere in the block — the dump no longer holds a copy."""
+    monkeypatch.setattr(_ccr, "_report_figures_lead", lambda report: [])
+    block = await _resolve_report(resolver, monkeypatch, _avgo_shaped_report())
+    for figure in ("180.25", "150.75", "Dim 0", "Segment 5", "4,502.5", "Officer 9", "Metric00",
+                   "57.8", "59.5", "Beat 6 of 8", "63,887", "FY 2026"):
+        assert figure not in block, figure
+    for marker in _NARRATIVE_MARKERS:   # the narratives are untouched
+        assert marker in block, marker
 
 
 def test_child_priority_matches_dotted_paths_at_any_depth():
@@ -2450,3 +2479,1001 @@ async def test_a_late_handler_never_writes_the_report_date(resolver, monkeypatch
     assert await resolver.resolve("TICKER_REPORT", "ORCL|lynch", "cc", meta=meta) == "cc"
     await asyncio.wait_for(finished.wait(), timeout=1.0)
     assert meta == {}
+
+
+# ── The report figures lead (2026-10-08, plan A5) ────────────────────────────────────
+#
+# Report chat saw 1 of 5 moat pillars, 1 of 6 segments and no fundamentals line: the fair dump
+# handed a full report's section ~2 lines. The figures now LEAD (`_report_figures_lead`), one
+# labelled line per group, ≤ `_REPORT_FIGURES_LEAD_CAP`, and leave the dump (said once). The
+# forecast's growth is recomputed from the projections — the collector stores 0.0 for "unknown".
+
+def _figures_block_of(block: str) -> str:
+    """The block's lead (everything before the dump header)."""
+    return block.split("Report data the user can see", 1)[0]
+
+
+def _full_figures_report(**overrides):
+    """The AVGO-shaped fixture with REALISTIC figure sections (the base fixture's projections
+    are eight copies of one placeholder row, and it carries no track record or top holders)."""
+    report = _json.loads(_json.dumps(_avgo_shaped_report()))
+    rf = report["revenue_forecast"]
+    rf["projections"] = [
+        {"period": str(y), "revenue": r, "revenue_label": f"${r:.1f}B", "eps": e,
+         "eps_label": f"${e:.2f}", "is_forecast": True, "eps_analyst_count": 30}
+        for y, r, e in ((2026, 70.1, 6.80), (2027, 80.2, 8.10), (2028, 90.3, 9.40), (2029, 99.9, 10.70))
+    ]
+    rf["forecast_analyst_count"] = 41
+    # The stored rates match their projections, as the collector's always do (it computes them
+    # from the unrounded estimates over the same window); the base fixture's 57.8 / 59.5 do not.
+    rf["cagr"], rf["eps_growth"] = 12.5, 16.3
+    rf["earnings_track_record"] = [
+        {"period": f"Q{q} '{yy}", "surprise_percent": s, "beat": res == "beat", "result": res}
+        for yy, q, s, res in ((25, 1, 9.9, "beat"), (25, 2, 8.8, "beat"), (25, 3, 7.7, "beat"),
+                              (25, 4, 6.6, "beat"), (26, 1, 3.1, "beat"), (26, 2, 2.04, "beat"),
+                              (26, 3, 0.0, "met"), (26, 4, -1.2, "miss"))
+    ]
+    report["key_management"]["top_holders"] = [
+        {"name": "Holder A", "title": "10% Owner", "ownership": "460M", "ownership_value": "—",
+         "percent_ownership": 9.8},
+        {"name": "Holder B", "title": "10% Owner", "ownership": "380M", "ownership_value": "—",
+         "percent_ownership": None, "percent_owned": 8.1},
+    ]
+    report["fundamental_metrics"] = [
+        {"title": title, "star_rating": stars, "quality_label": verdict, "metrics": [
+            {"label": label, "value": value, "annual_history": [{"period": "2020", "value": 1.0}] * 10}
+            for label, value in metrics]}
+        for title, stars, verdict, metrics in (
+            ("Profitability", 4, "Margins well above industry peers",
+             (("Gross Margin*", "77.3%"), ("Operating Margin*", "31.8%"), ("ROE*", "11.4%"))),
+            ("Growth", 5, "Growth well above industry peers",
+             (("Revenue Growth*", "44.0%"), ("EPS Growth*", "38.1%"))),
+            ("Valuation", 2, "Valuation rich vs industry", (("P/E (TTM)*", "68.4x"),)),
+            ("Health", 3, "Balance sheet in line with peers", (("Debt/Equity*", "0.9x"),)),
+        )
+    ]
+    for key, value in overrides.items():
+        report[key] = value
+    return _jsonb_order(report)
+
+
+def _wire_metric(label, value, peer_level="industry"):
+    return {"label": label, "value": value, "trend": None, "peer_level": peer_level,
+            "history_key": "k", "annual_history": [{"period": "2020", "value": 1.0}] * 10}
+
+
+def _wire_realistic_report(**overrides):
+    """A full report built from the REAL wire shapes, not iOS display labels: the snapshot
+    services' metric labels with their peer suffixes (profitability "(1.20x sector avg 64.3%)",
+    valuation "(1.30x sector avg 22.40)" / "(sector avg 22.40)", health "(vs sector 0.95)"),
+    `peer_level` "industry", the card verdict vocabulary, the DCF service's method label, the
+    collector's 5 officers / 3 holders with real-length filing titles, and stored growth rates
+    that match their projections (the collector computes them over the same window)."""
+    report = {
+        "symbol": "MSFT", "company_name": "Microsoft Corporation", "executive_summary_text": "s",
+        "wall_street_consensus": {"caydex_fair_value": {
+            "status": "ok", "fair_value": 412.37, "currency": "USD", "range_low": 351.12,
+            "range_high": 478.94, "as_of": "2026-10-07", "method": "2-stage free cash flow to equity",
+            "discount_rate_pct": 9.12, "terminal_growth_pct": 2.5, "alternative_value": 389.5}},
+        "moat_competition": {"dimensions": [
+            {"name": n, "score": s, "peer_score": p, "source": src} for n, s, p, src in (
+                ("Switching Costs", 8.5, 6.1, "measured"), ("Network Effects", 7.5, 5.4, "grounded"),
+                ("Intangible Assets", 8.0, 6.3, "measured"), ("Cost Advantage", 6.5, 5.9, "measured"),
+                ("Efficient Scale", 7.0, 5.0, "measured"))]},
+        "revenue_engine": {
+            "period": "FY 2025", "revenue_unit": "Billions", "total_revenue": 281.72,
+            "intersegment_eliminations": 0.0,
+            "segments": [{"name": n, "current_revenue": c, "previous_revenue": p} for n, c, p in (
+                ("Server Products and Tools", 98.44, 79.97), ("Office Products and Cloud Services", 95.36, 84.94),
+                ("Windows and Devices", 26.04, 25.0), ("Gaming", 23.46, 21.5),
+                ("LinkedIn Corporation", 17.81, 16.37), ("Search and News Advertising", 13.88, 12.58))]},
+        "revenue_forecast": {
+            "cagr": 13.7, "eps_growth": 15.2, "forecast_analyst_count": 52,
+            "beat_summary": "Beat 8 of 8",
+            "projections": [
+                {"period": str(y), "revenue": r, "revenue_label": f"${r:.1f}B", "eps": e,
+                 "eps_label": f"${e:.2f}", "is_forecast": True}
+                for y, r, e in ((2026, 325.12, 15.71), (2027, 371.94, 18.28), (2028, 421.6, 20.97),
+                                (2029, 478.04, 24.04))],
+            "earnings_track_record": [
+                {"period": f"Q{q} '{yy}", "surprise_percent": s, "beat": True, "result": "beat"}
+                for yy, q, s in ((25, 1, 4.1), (25, 2, 3.6), (25, 3, 6.2), (25, 4, 5.0), (26, 1, 2.9),
+                                 (26, 2, 7.4), (26, 3, 3.3), (26, 4, 4.8))]},
+        "key_management": {
+            "officers": [
+                {"name": n, "title": t, "ownership": o, "ownership_value": "$1.0B", "percent_owned": p,
+                 "percent_ownership": None} for n, t, o, p in (
+                    ("Satya Nadella", "director, Chairman and Chief Executive Officer", "1.2M", 0.016123),
+                    ("Amy E. Hood", "EVP, Chief Financial Officer", "520K", 0.006977),
+                    ("Bradford L. Smith", "Vice Chair and President", "660K", 0.008855),
+                    ("Judson Althoff", "EVP & Chief Commercial Officer", "140K", 0.001878),
+                    ("Takeshi Numoto", "EVP, Chief Marketing Officer", "50K", 0.000671))],
+            "top_holders": [
+                {"name": n, "title": "10% Owner", "ownership": o, "ownership_value": "—",
+                 "percent_ownership": b, "percent_owned": d} for n, o, b, d in (
+                    ("Vanguard Group Inc", "680.1M", 9.1, 9.148213),
+                    ("BlackRock Inc.", "540.3M", 7.3, 7.267701),
+                    ("State Street Corp", "300.2M", 4.0, 4.038197))]},
+        "fundamental_metrics": [
+            {"title": "Profitability", "star_rating": 5, "peer_group_level": "industry",
+             "quality_label": "Fat Margins vs Industry, Weak Returns on Equity", "metrics": [
+                 _wire_metric("Gross Margin (1.20x sector avg 57.4%)", "68.82%"),
+                 _wire_metric("Operating Margin (1.58x sector avg 28.3%)", "44.69%"),
+                 _wire_metric("Net Margin (1.65x sector avg 21.8%)", "35.97%"),
+                 _wire_metric("Return on Equity (ROE) (0.93x sector avg 31.6%)", "29.65%"),
+                 _wire_metric("Return on Assets (ROA) (1.42x sector avg 12.3%)", "17.43%")]},
+            {"title": "Growth", "star_rating": 4, "peer_group_level": "industry",
+             "quality_label": "Rapid Sales Growth, Cash Flow Surging", "metrics": [
+                 _wire_metric("Revenue Growth (YoY)", "+14.9%", None),
+                 _wire_metric("EPS Growth", "+15.5%", None),
+                 _wire_metric("Free Cash Flow Growth (YoY)", "-2.6%", None),
+                 _wire_metric("Operating Income Growth", "+17.4%", None)]},
+            {"title": "Valuation", "star_rating": 2, "peer_group_level": "industry",
+             "quality_label": "Pricey vs Industry, Cheap on Cash Flow", "metrics": [
+                 _wire_metric("P/E (1.37x sector avg 26.10)", "35.84"),
+                 _wire_metric("P/B (1.21x sector avg 8.69)", "10.48"),
+                 _wire_metric("P/S (1.62x sector avg 7.92)", "12.86"),
+                 _wire_metric("P/FCF (sector avg 37.20)", "Neg."),
+                 _wire_metric("EV/EBITDA (1.11x sector avg 21.40)", "23.79"),
+                 _wire_metric("Earnings Yield (0.73x sector avg 3.83%)", "2.79%")]},
+            {"title": "Health", "star_rating": 4, "peer_group_level": "industry",
+             "quality_label": "Rock-Solid Balance Sheet, Strained Interest Cover", "metrics": [
+                 _wire_metric("Altman Z-Score", "9.42", None),
+                 _wire_metric("Debt-to-Equity (vs sector 0.95)", "0.90"),
+                 _wire_metric("Current Ratio (vs sector 1.53)", "1.35"),
+                 _wire_metric("Interest Coverage (vs sector 18.40)", "41.20"),
+                 _wire_metric("Quick Ratio (vs sector 1.32)", "1.21")]},
+        ],
+    }
+    for key, value in overrides.items():
+        report[key] = value
+    return _jsonb_order(report)
+
+
+def _fig_lines(report) -> list:
+    return _ccr._report_figures_lead(report)
+
+
+@pytest.mark.asyncio
+async def test_the_full_avgo_report_leads_with_every_figure(resolver, monkeypatch):
+    report = _avgo_shaped_report()
+    block = await _resolve_report(resolver, monkeypatch, report)
+    head = _figures_block_of(block)
+    lead = _fig_lines(report)
+    assert "\n".join(lead) in head                      # the block carries exactly the lead
+    # All five pillars, each with its peer score.
+    pillars = next(l for l in lead if l.startswith("Moat pillars (score out of 10): "))
+    for d in range(5):
+        assert f"Dim {d} 7.5 vs peers 5" in pillars, d
+    assert "…" not in pillars
+    # All six segments, largest first, with share, period and unit.
+    segments = next(l for l in lead if l.startswith("Revenue segments ("))
+    assert segments.startswith("Revenue segments (FY 2026; Billions of reporting currency; "
+                               "% = share of total revenue 63,887), largest first: ")
+    names = [f"Segment {i} " for i in (5, 4, 3, 2, 1, 0)]
+    positions = [segments.index(n) for n in names]
+    assert positions == sorted(positions)
+    assert "Segment 5 4,502.5 (7.0%, prior yr 4,003.8)" in segments
+    # The collector stores at most five officers; this synthetic report holds ten, so the line
+    # shows the first five in the stored (role-rank) order and says how many it shows.
+    officers = next(l for l in lead if l.startswith("Officers, in role order"))
+    assert officers.startswith("Officers, in role order (first 5 of 10; ")
+    order = [officers.index(f"Officer {i} (VP)") for i in range(5)]
+    assert order == sorted(order) and "…" not in officers
+    assert "Officer 5 (VP)" not in officers
+    assert "Officer 0 (VP): 1,000.5 shares, 0.01%" in officers
+    # Every fundamentals card.
+    for c in range(6):
+        assert f"Card{c} card: Metric{c}0 45%" in head, c
+    assert "Earnings vs analyst EPS estimates: Beat 6 of 8." in lead
+    # Sizes: the lead and the (narrative-only) dump are both bounded.
+    assert len("\n".join(lead)) <= _ccr._REPORT_FIGURES_LEAD_CAP
+    dump = _dump_of(block)
+    assert len(dump) <= _ccr._REPORT_DUMP_CAP == 3000
+    for marker in _NARRATIVE_MARKERS:
+        assert marker in dump, marker
+
+
+@pytest.mark.asyncio
+async def test_a_figure_is_said_once_never_in_the_dump_too(resolver, monkeypatch):
+    block = await _resolve_report(resolver, monkeypatch, _full_figures_report())
+    dump = _dump_of(block)
+    for moved in ("moat_competition.dimensions", "revenue_engine.segments", "revenue_engine.period",
+                  "revenue_engine.total_revenue", "revenue_engine.revenue_unit",
+                  "key_management.officers", "key_management.top_holders",
+                  "revenue_forecast.cagr", "revenue_forecast.eps_growth",
+                  "revenue_forecast.beat_summary", "revenue_forecast.forecast_analyst_count",
+                  "caydex_fair_value", "fundamental_metrics", "annual_history"):
+        assert moved not in dump, moved
+    assert block.count("Officer 3 (VP)") == 1 and block.count("180.25") == 1
+    assert block.count("Margins well above industry peers") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_small_report_with_dump_room_still_says_each_figure_once(resolver, monkeypatch):
+    """The AVGO dump is full, so its budget alone could hide a duplicate: a small report leaves
+    the dump room for every key it is allowed to walk."""
+    report = {
+        "company_name": "Small", "executive_summary_text": "s",
+        "fundamental_metrics": [{"title": "Growth", "star_rating": 4, "quality_label": "CARDVERDICT",
+                                 "metrics": [{"label": "Revenue Growth", "value": "METRICVALUE"}]}],
+        "moat_competition": {"durability_note": "DURABLEMARK",
+                             "dimensions": [{"name": "PILLARNAME", "score": 6.5, "peer_score": 5.5}]},
+        "revenue_engine": {"analysis_note": "ENGINEMARK", "period": "FY 2025", "revenue_unit": "Millions",
+                           "total_revenue": 1000.0,
+                           "segments": [{"name": "SEGNAME", "current_revenue": 600.0}]},
+        "revenue_forecast": {"insight": "FORECASTMARK", "cagr": 0.0, "eps_growth": 0.0,
+                             "beat_summary": "Beat 3 of 4", "forecast_analyst_count": 17},
+        "key_management": {"ownership_insight": "OWNMARK",
+                           "officers": [{"name": "OFFICERNAME", "title": "CEO", "ownership": "1.0M"}],
+                           "top_holders": [{"name": "HOLDERNAME", "title": "10% Owner"}]},
+        "wall_street_consensus": {"current_price": 50.5,
+                                  "caydex_fair_value": {"status": "ok", "fair_value": 77.25}},
+    }
+    block = await _resolve_report(resolver, monkeypatch, report, ref="SMLL|warren_buffett")
+    dump = _dump_of(block)
+    for once in ("CARDVERDICT", "METRICVALUE", "PILLARNAME", "SEGNAME", "OFFICERNAME", "HOLDERNAME",
+                 "77.25", "Beat 3 of 4", "FY 2025", "Millions"):
+        assert block.count(once) == 1, once
+        assert once not in dump, once
+    for marker in ("DURABLEMARK", "ENGINEMARK", "FORECASTMARK", "OWNMARK", "50.5"):
+        assert marker in dump, marker
+    assert "cagr" not in block and "eps_growth" not in block and "17 analysts" not in block
+
+
+@pytest.mark.asyncio
+async def test_a_realistic_full_report_fits_every_group(resolver, monkeypatch):
+    report = _full_figures_report()
+    lead = _fig_lines(report)
+    text = "\n".join(lead)
+    assert len(text) <= _ccr._REPORT_FIGURES_LEAD_CAP
+    assert [l.split(" ", 1)[0] for l in lead] == [
+        "Caydex", "Moat", "Revenue", "Forward", "Earnings",
+        "Profitability", "Growth", "Valuation", "Health", "Officers,", "Top"]
+    assert ("Earnings vs analyst EPS estimates (Beat 6 of 8; last reported quarters, oldest "
+            "first): Q1 '26 beat +3.1%; Q2 '26 beat +2.0%; Q3 '26 met +0.0%; Q4 '26 miss -1.2%") in lead
+    # The collector's "10% Owner" title is the head's own words: said once, not per holder.
+    assert ("Top holders, 10%+ owners (each one's latest 13D/G filing, may predate the report): Holder A: 460M shares, "
+            "9.8% beneficial; Holder B: 380M shares, 8.1% of shares") in lead
+    assert ("Profitability card (4/5 stars; Margins well above industry peers): Gross Margin* 77.3%; "
+            "Operating Margin* 31.8%; ROE* 11.4%") in lead
+    block = await _resolve_report(resolver, monkeypatch, report)
+    assert text in _figures_block_of(block)
+
+
+# Every metric of `_wire_realistic_report`, as the lead states it: the wire label peer-worded
+# ("industry", `peer_level`) and its suffix restated as "<value> (industry avg <median>)".
+_WIRE_CARD_LINES = (
+    "Profitability card (5/5 stars; Fat Margins vs Industry, Weak Returns on Equity): "
+    "Gross Margin 68.82% (industry avg 57.4%); Operating Margin 44.69% (industry avg 28.3%); "
+    "Net Margin 35.97% (industry avg 21.8%); Return on Equity (ROE) 29.65% (industry avg 31.6%); "
+    "Return on Assets (ROA) 17.43% (industry avg 12.3%)",
+    "Growth card (4/5 stars; Rapid Sales Growth, Cash Flow Surging): Revenue Growth (YoY) +14.9%; "
+    "EPS Growth +15.5%; Free Cash Flow Growth (YoY) -2.6%; Operating Income Growth +17.4%",
+    "Valuation card (2/5 stars; Pricey vs Industry, Cheap on Cash Flow): P/E 35.84 (industry avg "
+    "26.10); P/B 10.48 (industry avg 8.69); P/S 12.86 (industry avg 7.92); P/FCF Neg. (industry avg "
+    "37.20); EV/EBITDA 23.79 (industry avg 21.40); Earnings Yield 2.79% (industry avg 3.83%)",
+    "Health card (4/5 stars; Rock-Solid Balance Sheet, Strained Interest Cover): Altman Z-Score 9.42; "
+    "Debt-to-Equity 0.90 (vs industry 0.95); Current Ratio 1.35 (vs industry 1.53); Interest "
+    "Coverage 41.20 (vs industry 18.40); Quick Ratio 1.21 (vs industry 1.32)",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_report_with_the_real_wire_labels_states_every_card_and_metric(
+        resolver, monkeypatch, caplog):
+    """The sizing is pinned on the REAL wire shapes, not on short display labels: every card and
+    every metric (with its peer median), the five officers and three holders, all whole — and
+    nothing logged as cut. The old caps (220 per card, 720 for all, a 2,400 lead with the cards
+    after the officers) cut ROE and left out the Valuation and Health cards on this report."""
+    report = _wire_realistic_report()
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        lead = _fig_lines(report)
+    text = "\n".join(lead)
+    assert len(text) <= _ccr._REPORT_FIGURES_LEAD_CAP
+    # ~10% headroom for longer names, verdicts and titles than this fixture's.
+    assert len(text) <= 0.95 * _ccr._REPORT_FIGURES_LEAD_CAP
+    assert not [r for r in caplog.records if "cut for space" in r.getMessage()]
+    assert "…" not in text and "sector" not in text
+    for card in _WIRE_CARD_LINES:
+        assert card in lead, card
+    officers = next(l for l in lead if l.startswith("Officers, in role order ("))
+    for name in ("Satya Nadella (director, Chairman and Chief Executive Officer): 1.2M shares, "
+                 "0.0161%", "Amy E. Hood", "Bradford L. Smith", "Judson Althoff", "Takeshi Numoto"):
+        assert name in officers, name
+    assert lead[-1] == ("Top holders, 10%+ owners (each one's latest 13D/G filing, may predate the report): Vanguard Group Inc: "
+                        "680.1M shares, 9.1% beneficial; BlackRock Inc.: 540.3M shares, 7.3% "
+                        "beneficial; State Street Corp: 300.2M shares, 4% beneficial")
+    assert "revenue CAGR 2026–2029 13.7%/yr; EPS CAGR 2026–2029 15.2%/yr" in text
+    block = await _resolve_report(resolver, monkeypatch, report, ref="MSFT|warren_buffett")
+    assert text in _figures_block_of(block)
+    assert "sector avg" not in block and "vs sector" not in block
+
+
+def test_long_filing_titles_still_fit_every_officer():
+    """Five officers whose filing titles run to the 48-character cut still fit the line whole."""
+    report = _wire_realistic_report()
+    for o in report["key_management"]["officers"]:
+        o["title"] = "director, President, Chief Executive Officer and Chairman of the Board"
+    lead = _fig_lines(report)
+    officers = next(l for l in lead if l.startswith("Officers, in role order ("))
+    assert not officers.endswith("; …")
+    assert officers.count("director, President, Chief Executive Officer…") == 5
+    assert len("\n".join(lead)) <= _ccr._REPORT_FIGURES_LEAD_CAP
+    assert lead[-1].startswith("Top holders")
+
+
+# ── the forecast: the stored growth rate, or one recomputed where it is 0.0 ("unknown") ──
+
+def test_the_forecast_states_the_stored_cagr_with_its_window():
+    """The stored rate is the one the card and the PDF print (the collector computed it from the
+    unrounded estimates over this same window), labelled with the window's first and last year."""
+    report = _full_figures_report()
+    line = next(l for l in _fig_lines(report) if l.startswith("Forward forecasts"))
+    assert line == (
+        "Forward forecasts (analyst estimate): "
+        "revenue CAGR 2026–2029 12.5%/yr; EPS CAGR 2026–2029 16.3%/yr; "
+        "41 analysts on the nearest year; 2026 revenue $70.1B, EPS $6.80; 2027 revenue $80.2B, "
+        "EPS $8.10; 2028 revenue $90.3B, EPS $9.40; 2029 revenue $99.9B, EPS $10.70")
+
+
+def _forecast_line(projections, **rf):
+    report = {"revenue_forecast": {"cagr": 0.0, "eps_growth": 0.0, "projections": projections, **rf}}
+    lines = [l for l in _fig_lines(report) if l.startswith("Forward forecasts")]
+    return lines[0] if lines else None
+
+
+def _row(period, revenue=None, eps=None, **extra):
+    row = {"period": period, "revenue": revenue, "eps": eps, "is_forecast": True}
+    if isinstance(revenue, (int, float)) and not isinstance(revenue, bool):
+        row["revenue_label"] = f"${revenue}B"
+    if isinstance(eps, (int, float)) and not isinstance(eps, bool):
+        row["eps_label"] = f"${eps}"
+    row.update(extra)
+    return row
+
+
+def _eps_rows(values, yoy=None):
+    return [_row(str(2026 + i), None, v, **({"eps_yoy_pct": yoy[i]} if yoy else {}))
+            for i, v in enumerate(values)]
+
+
+def test_a_stored_rate_beats_one_recomputed_from_rounded_projections():
+    """Raw EPS 0.1249 → 0.2951 is stored as 33.2 (the card: "+33% CAGR"); the payload's rounded
+    0.12 → 0.30 would compound to 35.7. The lead says what the card says."""
+    line = _forecast_line(_eps_rows([0.12, 0.17, 0.23, 0.30]), eps_growth=33.2)
+    assert "EPS CAGR 2026–2029 33.2%/yr" in line
+    assert "35.7" not in line and "revenue CAGR" not in line
+
+
+@pytest.mark.parametrize("stored", [float("nan"), float("inf"), -float("inf"), True, "12.5",
+                                    1e300, 5e6, -1e5, None, 0, 0.0, [12.5]])
+def test_a_stored_rate_that_is_not_a_number_is_never_stated(stored):
+    """Garbage and the 0.0 "unknown" fall through to the recompute — here refused, because
+    rounded projections this small cannot carry a rate."""
+    line = _forecast_line(_eps_rows([0.12, 0.17, 0.23, 0.30]), eps_growth=stored)
+    assert "CAGR" not in line
+    assert "nan" not in line.lower() and "inf" not in line.lower() and "12.5" not in line
+
+
+@pytest.mark.parametrize("projections", [
+    # A repeated period: the window is not the one the stored rate was computed over.
+    [_row("2026", None, 10.0), _row("2026", None, 99.0), _row("2027", None, 11.0)],
+    # An endpoint without a positive estimate: the stored rate contradicts the payload.
+    [_row("2026", None, 0.0), _row("2027", None, 11.0), _row("2028", None, 12.1)],
+    [_row("2026", None, 10.0), _row("2027", None, -1.0)],
+    # A row the lead cannot read.
+    [_row("2026", None, 10.0), "garbage", _row("2027", None, 11.0)],
+])
+def test_a_stored_rate_is_stated_only_over_an_intact_window(projections):
+    line = _forecast_line(projections, eps_growth=77.7) or ""
+    assert "77.7" not in line
+
+
+def test_the_sentinel_rate_is_recomputed_by_chaining_the_unrounded_yoy():
+    """A turnaround: the first year is a loss, so the collector stored 0.0. The positive years'
+    YoY changes (computed from the unrounded estimates) chain into the rate the rounded 0.30
+    base could not carry."""
+    line = _forecast_line(_eps_rows([-0.5, 0.30, 0.80, 1.40], yoy=[None, None, 166.7, 75.0]))
+    rate = ((1 + 1.667) * (1 + 0.75)) ** 0.5 * 100 - 100
+    assert f"EPS CAGR 2027–2029 {rate:.1f}%/yr" in line
+    # Without the YoY the rounded base is refused (0.295-0.305 → 1.395-1.405: 114-118%/yr).
+    assert "CAGR" not in _forecast_line(_eps_rows([-0.5, 0.30, 0.80, 1.40]))
+
+
+@pytest.mark.parametrize("between", ["garbage", None, {"period": None, "eps": 0.5},
+                                     {"period": "2026", "eps": 0.5, "is_forecast": True}])
+def test_the_yoy_chain_needs_consecutive_payload_rows(between):
+    """A YoY is measured against the PAYLOAD's previous row: past a row the lead dropped (junk,
+    no period, a repeated period) it is not a change from the row the lead kept, even when its
+    number happens to agree — and the rounded 0.30 base alone cannot carry the rate."""
+    rows = [_row("2026", None, 0.30), between, _row("2027", None, 0.80, eps_yoy_pct=166.7)]
+    line = _forecast_line(rows) or ""
+    assert "CAGR" not in line
+    # Anti-vacuity: the same rows without the dropped one chain into a rate.
+    assert "EPS CAGR 2026–2027 166.7%/yr" in _forecast_line([rows[0], rows[2]])
+
+
+def test_an_implausible_recomputed_rate_is_never_stated():
+    """10 → 20,000 in a year is 199,900%/yr: a corrupt row, from the projections or the chain."""
+    assert "CAGR" not in _forecast_line(_eps_rows([10.0, 20000.0]))
+    assert "CAGR" not in _forecast_line(_eps_rows([10.0, 20000.0], yoy=[None, 199900.0]))
+    # A large but plausible rate is stated (from the unrounded YoY: the rounded 10 → 100 alone
+    # spans 899.4-900.6%, wider than a one-decimal rate may claim).
+    assert "CAGR 2026–2027 900.0%/yr" in _forecast_line(_eps_rows([10.0, 100.0], yoy=[None, 900.0]))
+    assert "CAGR" not in _forecast_line(_eps_rows([10.0, 100.0]))
+
+
+@pytest.mark.parametrize("values, yoy, expected", [
+    # A YoY the rounded projections contradict is never compounded: the rate comes from the
+    # projections themselves when they can carry it, else there is none.
+    ([10.0, 11.0, 12.1], [None, 500.0, 10.0], "EPS CAGR 2026–2028 10.0%/yr"),
+    ([0.12, 0.17, 0.30], [None, 41.7, 500.0], None),
+    # A missing link (a NaN or bool YoY) falls back the same way.
+    ([10.0, 11.0, 12.1], [None, float("nan"), 10.0], "EPS CAGR 2026–2028 10.0%/yr"),
+    ([10.0, 11.0, 12.1], [None, True, 10.0], "EPS CAGR 2026–2028 10.0%/yr"),
+    # A gap (no estimate) breaks the chain; 0.12 alone cannot carry the rate.
+    ([0.12, 0.0, 0.30], [None, None, None], None),
+])
+def test_the_yoy_chain_degrades_to_the_projections(values, yoy, expected):
+    line = _forecast_line(_eps_rows(values, yoy=yoy)) or ""
+    if expected is None:
+        assert "CAGR" not in line
+    else:
+        assert expected in line and "500" not in line
+
+
+@pytest.mark.parametrize("projections", [
+    [],                                                        # no estimates at all
+    [_row("2027", 1.0)],                                       # one positive projection
+    [_row("2027", 1.0)] * 8,                                   # the base fixture: one period, repeated
+    [_row("2026", 0.0), _row("2027", 5.0)],                    # the collector's 0.0 "no estimate"
+    [_row("2026", -3.0), _row("2027", 5.0)],                   # a non-positive base
+    [_row("2026", float("nan")), _row("2027", 5.0)],
+    [_row("2026", float("inf")), _row("2027", 5.0)],
+    [_row("2026", True), _row("2027", 5.0)],                   # a bool is not a revenue
+    [_row("2026", "70.1"), _row("2027", 80.2)],                # a string is not either
+    [_row("2029", 9.0), _row("2026", 5.0)],                    # unsorted years
+    [_row("2026", 0.05), _row("2027", 5.0)],                   # a base the rounding cannot carry
+    [_row("2026", 1e300), _row("2027", 5.0)],                  # a corrupt magnitude
+])
+def test_no_cagr_line_from_fewer_than_two_usable_projections(projections):
+    line = _forecast_line(projections) or ""
+    assert "CAGR" not in line
+    assert "0.0%" not in line and "nan" not in line.lower() and "inf" not in line.lower()
+
+
+def test_the_zero_sentinels_never_reach_the_block_at_all():
+    report = {"revenue_forecast": {"cagr": 0.0, "eps_growth": 0.0, "projections": [_row("2027", 1.0)],
+                                   "insight": "FORECASTMARK"}}
+    pruned = _ccr._without_lead_figures(report)
+    assert "cagr" not in pruned["revenue_forecast"] and "eps_growth" not in pruned["revenue_forecast"]
+    assert pruned["revenue_forecast"]["insight"] == "FORECASTMARK"
+    assert "cagr" in report["revenue_forecast"]          # the input is never mutated
+
+
+@pytest.mark.asyncio
+async def test_a_zero_sentinel_report_states_no_growth_rate(resolver, monkeypatch):
+    report = {"company_name": "X", "executive_summary_text": "s",
+              "revenue_forecast": {"cagr": 0.0, "eps_growth": 0.0, "insight": "FORECASTMARK",
+                                   "projections": [_row("2027", 4.2, 1.5)]}}
+    block = await _resolve_report(resolver, monkeypatch, report, ref="X|warren_buffett")
+    assert "CAGR" not in block and "cagr" not in block and "eps_growth" not in block
+    assert "Forward forecasts (analyst estimate): 2027 revenue $4.2B, EPS $1.5" in block
+    assert "FORECASTMARK" in block
+
+
+@pytest.mark.parametrize("projections, expected", [
+    # Non-year labels: the span is the row distance (the collector's own rule).
+    ([_row("FY0", 10.0), _row("FY1", 11.0), _row("FY2", 12.1)], "revenue CAGR FY0–FY2 10.0%/yr"),
+    # "FY2026"-style labels are years.
+    ([_row("FY2026", 10.0), _row("FY2028", 12.1)], "revenue CAGR FY2026–FY2028 10.0%/yr"),
+    # A gap row with no estimate keeps the year span honest.
+    ([_row("2026", 10.0), _row("2027", 0.0), _row("2028", 12.1)], "revenue CAGR 2026–2028 10.0%/yr"),
+    # A shrinking forecast keeps its sign.
+    ([_row("2026", 10.0), _row("2027", 9.0)], "revenue CAGR 2026–2027 -10.0%/yr"),
+    # A loss year is left out of the EPS rate; the endpoints that remain are positive (and
+    # large enough for their 2-decimal rounding to carry the rate).
+    ([_row("2026", 10.0, 20.0), _row("2027", 11.0, -10.0), _row("2028", 12.1, 24.2)],
+     "EPS CAGR 2026–2028 10.0%/yr"),
+    # The same loss year with a small EPS: 1.995-2.005 → 2.415-2.425 is 9.7-10.3%/yr, a guess.
+    ([_row("2026", None, 2.0), _row("2027", None, -1.0), _row("2028", None, 2.42)], None),
+])
+def test_the_recomputed_cagr(projections, expected):
+    if expected is None:
+        assert "CAGR" not in (_forecast_line(projections) or "")
+    else:
+        assert expected in _forecast_line(projections)
+
+
+def test_a_repeated_period_is_stated_once_first_row_wins():
+    line = _forecast_line([_row("2026", 100.0), _row("2026", 990.0), _row("2027", 110.0)])
+    assert line.count("2026 revenue") == 1 and "$990.0B" not in line
+    assert "revenue CAGR 2026–2027 10.0%/yr" in line
+
+
+def test_forecast_rows_degrade_by_omission():
+    line = _forecast_line([
+        _row("2026", 0.0, 0.0),                    # the collector's "$0" placeholders → nothing
+        _row("2027", 5.0, -1.25, eps_label="$-1.25"),   # a loss keeps its sign
+        _row("2028", 6.0, is_forecast=False),      # an actual is not an analyst estimate
+        "garbage", None, {"period": None, "revenue": 3.0},
+        _row("2029\n2030", 7.0),                   # a label cannot start a new line
+    ], forecast_analyst_count=True)                # a bool is not a count
+    assert line.startswith("Forward forecasts (analyst estimate): ")
+    assert "$0" not in line and "2026" not in line and "2028" not in line
+    assert "2027 revenue $5.0B, EPS $-1.25" in line
+    assert "\n" not in line and "analysts" not in line
+    assert _forecast_line("not-a-list") is None
+
+
+# ── the fair value: labelled, absent when the switch is off ──
+
+@pytest.mark.asyncio
+async def test_the_fair_value_leads_labelled_when_dcf_is_on(resolver, monkeypatch):
+    block = await _resolve_report(resolver, monkeypatch, _avgo_shaped_report())
+    line = next(l for l in block.splitlines() if l.startswith("Caydex fair value"))
+    assert line == ("Caydex fair value: 180.25 USD per share (Caydex model estimate, not a price "
+                    "target); range 150.75–210.75; as of 2026-09-22; method: earnings; discount "
+                    "rate 9.26%; terminal growth 2.5%; revenue-based cross-check 171.5")
+
+
+@pytest.mark.asyncio
+async def test_the_fair_value_is_absent_when_dcf_is_off(resolver, monkeypatch):
+    from app.config import settings
+    report = _avgo_shaped_report()
+
+    async def fake_get(ticker, persona):
+        return report
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    monkeypatch.setattr(settings, "DCF_ENABLED", False)
+    block = await resolver.resolve("TICKER_REPORT", "AVGO|bill_ackman", None)
+    for leaked in ("Caydex fair value", "180.25", "150.75", "210.75", "171.5", "price target",
+                   "caydex_fair_value", "9.26"):
+        assert leaked not in block, leaked
+    assert "Moat pillars (score out of 10): Dim 0 7.5" in block   # the rest still leads
+    # Anti-vacuity: the stored report still holds the estimate the switch withdrew.
+    assert report["wall_street_consensus"]["caydex_fair_value"]["fair_value"] == 180.25
+
+
+@pytest.mark.parametrize("dcf, expected", [
+    ({"status": "refused", "refusal_reason": "Earnings are negative."},
+     "Caydex fair value: none published for this report — Earnings are negative."),
+    ({"status": "refused"}, "Caydex fair value: none published for this report."),
+    ({"status": "ok", "fair_value": 42.5}, "Caydex fair value: 42.5 per share (Caydex model "
+                                           "estimate, not a price target)."),
+    # The shared currency rule (`app.utils.currency.currency_code`, 2026-10-09) reads "usd" as
+    # USD, as the report and the Overview do; the inverted range is still dropped.
+    ({"status": "ok", "fair_value": 42.5, "currency": "usd", "range_low": 50.0, "range_high": 40.0},
+     "Caydex fair value: 42.5 USD per share (Caydex model estimate, not a price target)."),
+    ({"status": "ok", "fair_value": 42.5, "currency": " twd "},
+     "Caydex fair value: 42.5 TWD per share (Caydex model estimate, not a price target)."),
+    ({"status": "ok", "fair_value": 42.5, "currency": "ßU"},
+     "Caydex fair value: 42.5 per share (Caydex model estimate, not a price target)."),
+    ({"status": "ok", "fair_value": 42.5, "currency": "US$"},
+     "Caydex fair value: 42.5 per share (Caydex model estimate, not a price target)."),
+    ({"status": "ok", "fair_value": float("nan"), "range_low": 1.0, "range_high": 2.0}, None),
+    ({"status": "ok", "fair_value": -5.0}, None),
+    ({"status": "ok", "fair_value": True}, None),
+    ({"fair_value": 42.5}, None),                       # no status: not a published estimate
+    ({"status": "pending", "fair_value": 42.5}, None),
+    ("not-a-dict", None),
+    (None, None),
+])
+def test_the_fair_value_line_degrades_by_omission(dcf, expected):
+    lines = _fig_lines({"wall_street_consensus": {"caydex_fair_value": dcf}})
+    got = [l for l in lines if l.startswith("Caydex fair value")]
+    assert got == ([expected] if expected else [])
+
+
+def test_the_fair_value_never_relabels_an_analyst_target():
+    """The analyst rating and targets are unlicensed and stay dropped; the lead's only
+    "price target" words are the disclaimer that the estimate is not one."""
+    report = {"wall_street_consensus": dict(_ANALYST_ERA_WS)}
+    text = "\n".join(_fig_lines(report))
+    for leaked in ("205.5", "150.5", "260.5", "strong_buy", "deep_undervalued", "15.9", "analyst_"):
+        assert leaked not in text, leaked
+    assert text.lower().count("target") == 1 and "not a price target" in text
+
+
+def _resolve_ticker_report_code() -> str:
+    import ast as _ast
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(_ccr.ChatContextResolver._resolve_ticker_report))
+    return _ast.unparse(_ast.parse(src))   # this def only; comments gone, calls normalised
+
+
+def test_the_lead_reads_the_report_after_the_kill_switch():
+    """Def-bound and comment-free (`ast.unparse`): the figures lead is built from the report the
+    kill switch already stripped, so a withdrawn estimate can never lead."""
+    code = _resolve_ticker_report_code()
+    assert code.index("report = strip_caydex_if_disabled(report)") \
+        < code.index("lead.extend(_report_figures_lead(report))")
+    assert "_without_lead_figures(_without_unmeasured_guidance(report))" in code
+    assert "skip_top=_REPORT_SKIP_TOP" in code and "fundamental_metrics" in _ccr._REPORT_SKIP_TOP
+
+
+# ── the other groups: outliers degrade by omission ──
+
+def test_moat_pillars_tolerate_garbage_and_follow_the_pdf_peer_rule():
+    dims = [None, "x", 5, [], {"name": "NaN", "score": float("nan")}, {"name": "Inf", "score": float("inf")},
+            {"name": "Bool", "score": True}, {"name": "High", "score": 11.0}, {"score": 4.0},
+            {"name": "Real", "score": 6.5, "peer_score": 0.0, "source": "grounded"},
+            {"name": "real", "score": 9.0},                            # duplicate name
+            {"name": "Legacy", "score": 3.0, "peer_score": 0, "source": "ai_legacy"}]
+    line = _fig_lines({"moat_competition": {"dimensions": dims}})[0]
+    assert line == "Moat pillars (score out of 10): Real 6.5 (researched); Legacy 3 (qualitative)"
+    # One real peer score switches the peer line on for every valid one.
+    line = _fig_lines({"moat_competition": {"dimensions": [
+        {"name": "A", "score": 6.5, "peer_score": 0.0}, {"name": "B", "score": 7.0, "peer_score": 5.5},
+        {"name": "C", "score": 7.0, "peer_score": float("nan")}]}})[0]
+    assert line == "Moat pillars (score out of 10): A 6.5 vs peers 0; B 7 vs peers 5.5; C 7"
+    assert _fig_lines({"moat_competition": {"dimensions": "garbage"}}) == []
+    assert _fig_lines({"moat_competition": {"dimensions": [None, {}]}}) == []
+
+
+def test_segments_sort_bound_and_label_their_currency():
+    eng = {"period": "FY 2025", "revenue_unit": "Millions", "total_revenue": 1000.0,
+           "reporting_currency": "TWD", "intersegment_eliminations": 50.0,
+           "segments": [{"name": "Small", "current_revenue": 100.0, "previous_revenue": 90.0},
+                        {"name": "Corporate", "current_revenue": -20.0},          # negative: no share
+                        {"name": "Big", "current_revenue": 700.0, "previous_revenue": float("nan")},
+                        {"name": "Corrupt", "current_revenue": 5000.0},           # above the total
+                        {"name": "Nan", "current_revenue": float("nan")},
+                        {"name": "big", "current_revenue": 1.0},                  # duplicate name
+                        {"name": None, "current_revenue": 9.0}, "garbage", None,
+                        {"name": "Huge", "current_revenue": 1e300}]}
+    line = _fig_lines({"revenue_engine": eng})[0]
+    assert line == (
+        "Revenue segments (FY 2025; Millions of TWD; % = share of total revenue 1,000; "
+        "intersegment sales of 50 removed in consolidation), largest first: Corrupt 5,000; "
+        "Big 700 (70.0%); Small 100 (10.0%, prior yr 90); Corporate -20")
+    # No total, no unit, an invalid currency: no shares, and no invented currency.
+    line = _fig_lines({"revenue_engine": {"total_revenue": 0, "currency": "dollars", "segments": [
+        {"name": f"S{i}", "current_revenue": float(i)} for i in range(9)]}})[0]
+    assert line == ("Revenue segments (amounts in reporting currency), largest first: "
+                    "S8 8; S7 7; S6 6; S5 5; S4 4; S3 3")
+    assert _fig_lines({"revenue_engine": {"segments": []}}) == []
+    assert _fig_lines({"revenue_engine": "garbage"}) == []
+    # One currency rule everywhere (`app.utils.currency.currency_code`): a stored report whose
+    # code is not canonical still names it; a case-folding trap never becomes a code.
+    seg = [{"name": "A", "current_revenue": 1.0}]
+    assert "Millions of TWD" in _fig_lines({"revenue_engine": {
+        "revenue_unit": "Millions", "reporting_currency": " twd ", "segments": seg}})[0]
+    assert "amounts in reporting currency" in _fig_lines({"revenue_engine": {
+        "reporting_currency": "ßU", "segments": seg}})[0]
+
+
+@pytest.mark.parametrize("rows, expected", [
+    # Legacy rows (no `result`): only a negative surprise may be called a miss.
+    ([{"period": "Q1", "surprise_percent": 0.0, "beat": False},
+      {"period": "Q2", "surprise_percent": -0.04, "beat": False},
+      {"period": "Q3", "surprise_percent": 2.0, "beat": True}],
+     "Q1 +0.0%; Q2 +0.0%; Q3 beat +2.0%"),
+    ([{"period": "Q1", "surprise_percent": -3.0, "beat": False}], "Q1 miss -3.0%"),
+    # Malformed rows are skipped; only the last four usable rows are shown.
+    ([None, "x", {"period": "Q0", "surprise_percent": float("nan")}, {"surprise_percent": 1.0},
+      {"period": "Q1", "surprise_percent": True}]
+     + [{"period": f"R{i}", "surprise_percent": float(i), "result": "beat"} for i in range(6)],
+     "R2 beat +2.0%; R3 beat +3.0%; R4 beat +4.0%; R5 beat +5.0%"),
+    ([{"period": "Q1", "surprise_percent": 1.0, "result": "bogus", "beat": "yes"}], "Q1 +1.0%"),
+])
+def test_the_track_record_rows(rows, expected):
+    line = _fig_lines({"revenue_forecast": {"earnings_track_record": rows}})[0]
+    assert line == f"Earnings vs analyst EPS estimates (last reported quarters, oldest first): {expected}"
+    assert "-0.0" not in line
+
+
+def test_management_skips_placeholders_and_dedupes():
+    km = {"officers": [
+        {"name": "Data unavailable", "title": "Officer", "ownership": "—"},       # placeholder
+        {"name": "Jane Roe", "title": "CEO", "ownership": "—", "percent_owned": None},
+        {"name": "jane roe", "title": "CEO", "ownership": "2M"},                   # duplicate
+        {"name": "John Doe", "title": None, "ownership": 0, "percent_owned": float("nan")},
+        {"name": "Ann Lee", "title": "CFO", "ownership": "0", "percent_owned": 250.0},   # % > 100
+        {"name": "Al Kim", "title": "COO", "ownership": 1e300, "percent_owned": True},
+        {"name": "Bo Li", "title": "CTO", "ownership": "1.2M", "percent_owned": 0.0123},
+        None, "garbage", {"title": "No name"}],
+        "top_holders": "garbage"}
+    lines = _fig_lines({"key_management": km})
+    assert lines == ["Officers, in role order (direct holdings after each one's latest Form 4, not as of the report date; % of shares "
+                     "outstanding): Jane Roe (CEO); John Doe; Ann Lee (CFO); Al Kim (COO); "
+                     "Bo Li (CTO): 1.2M shares, 0.0123%"]
+
+
+def test_fundamentals_cards_skip_empty_values():
+    cards = [
+        {"title": "Profitability", "star_rating": 0, "quality_label": "Data unavailable", "metrics": []},
+        {"title": "Growth", "star_rating": 6, "quality_label": None, "metrics": [
+            {"label": "Revenue Growth", "value": "—"}, {"label": "EPS Growth", "value": "N/A"},
+            {"name": "FCF Growth", "value": "12%"}, {"label": "Score", "value": 7.25},
+            {"label": "Bad", "value": float("nan")}, {"label": None, "value": "1%"}, "garbage"]},
+        {"title": "Valuation", "star_rating": True, "quality_label": "Rich", "metrics": "garbage"},
+        {"title": None, "metrics": [{"label": "X", "value": "1"}]}, None,
+    ]
+    assert _fig_lines({"fundamental_metrics": cards}) == [
+        "Growth card: FCF Growth 12%; Score 7.25",
+        "Valuation card (Rich).",
+    ]
+
+
+def _one_metric_line(label, value="77.30%", **metric):
+    cards = [{"title": "Profitability", "metrics": [{"label": label, "value": value, **metric}]}]
+    lines = _fig_lines({"fundamental_metrics": cards})
+    return lines[0] if lines else None
+
+
+@pytest.mark.parametrize("label, peer_level, expected", [
+    # An INDUSTRY median is named the industry's, as on the 1.1 card (`peer_wording`).
+    ("Gross Margin (1.20x sector avg 64.3%)", "industry", "Gross Margin 77.30% (industry avg 64.3%)"),
+    ("Debt-to-Equity (vs sector 0.95)", "industry", "Debt-to-Equity 77.30% (vs industry 0.95)"),
+    ("P/E (sector average 22.40)", "industry", "P/E 77.30% (industry average 22.40)"),
+    # A sector median, an unset level (older reports) or a junk level keeps the wire's word.
+    ("Gross Margin (1.20x sector avg 64.3%)", "sector", "Gross Margin 77.30% (sector avg 64.3%)"),
+    ("Gross Margin (1.20x sector avg 64.3%)", None, "Gross Margin 77.30% (sector avg 64.3%)"),
+    ("Gross Margin (1.20x sector avg 64.3%)", "INDUSTRY", "Gross Margin 77.30% (sector avg 64.3%)"),
+    ("Gross Margin (1.20x sector avg 64.3%)", 5, "Gross Margin 77.30% (sector avg 64.3%)"),
+    # A loss-maker's label prints the median without a multiple.
+    ("Net Margin (sector avg 12.3%)", "industry", "Net Margin 77.30% (industry avg 12.3%)"),
+    # A label with no peer suffix is stated as it is.
+    ("Revenue Growth (YoY)", None, "Revenue Growth (YoY) 77.30%"),
+    ("Altman Z-Score", "industry", "Altman Z-Score 77.30%"),
+    # A median too long to state whole is dropped with its words, never cut.
+    ("Gross Margin (1.20x sector avg 123456789012345678901234567%)", "industry", "Gross Margin 77.30%"),
+])
+def test_a_card_metric_is_peer_worded_and_restated_compactly(label, peer_level, expected):
+    line = _one_metric_line(label, peer_level=peer_level)
+    assert line == f"Profitability card: {expected}"
+
+
+def test_a_card_metric_label_too_long_to_state_whole_is_dropped():
+    assert _one_metric_line("Gross Margin " + "x" * 200) is None
+    assert _one_metric_line("Gross Margin\n(1.20x sector avg 64.3%)", peer_level="industry") == (
+        "Profitability card: Gross Margin 77.30% (industry avg 64.3%)")   # controls → spaces
+    assert _one_metric_line(" (1.20x sector avg 64.3%)") == "Profitability card: (1.20x sector avg 64.3%) 77.30%"
+
+
+@pytest.mark.asyncio
+async def test_the_block_names_an_industry_median_the_industrys(resolver, monkeypatch):
+    """End to end: the resolved block says "industry avg" for an industry median, so report
+    chat cannot call it a "sector average" beside a 1.1 card that says "industry"."""
+    report = _wire_realistic_report()
+    block = await _resolve_report(resolver, monkeypatch, report, ref="MSFT|warren_buffett")
+    assert "Gross Margin 68.82% (industry avg 57.4%)" in block
+    assert "sector avg" not in block
+    # Anti-vacuity: the stored wire labels still say "sector".
+    assert report["fundamental_metrics"][0]["metrics"][0]["label"] == "Gross Margin (1.20x sector avg 57.4%)"
+
+
+@pytest.mark.parametrize("previous", [0.0, 0, -12.5, float("nan"), True, "80.0", None])
+def test_a_segment_without_a_real_prior_year_states_none(previous):
+    """0.0 is the collector's "no prior-year figure" (no FY-1 record; always for "Unallocated"),
+    and iOS shows a prior only when it is > 0 — never "prior yr 0"."""
+    line = _fig_lines({"revenue_engine": {"total_revenue": 100.0, "segments": [
+        {"name": "Unallocated", "current_revenue": 20.0, "previous_revenue": previous},
+        {"name": "Core", "current_revenue": 80.0, "previous_revenue": 70.0}]}})[0]
+    assert line.endswith("largest first: Core 80 (80.0%, prior yr 70); Unallocated 20 (20.0%)")
+    assert line.count("prior yr") == 1
+
+
+def test_officers_beyond_the_limit_say_how_many_are_shown():
+    rows = [{"name": f"Person {i}", "title": "VP"} for i in range(7)]
+    rows.insert(3, {"name": "person 1", "title": "Dup"})          # a duplicate is not counted
+    line = _fig_lines({"key_management": {"officers": rows}})[0]
+    assert line == ("Officers, in role order (first 5 of 7; direct holdings after each one's latest Form 4, not as of the report date; % of "
+                    "shares outstanding): Person 0 (VP); Person 1 (VP); Person 2 (VP); Person 3 (VP); "
+                    "Person 4 (VP)")
+    exactly = _fig_lines({"key_management": {"officers": rows[:4] + rows[5:6]}})[0]
+    assert "first" not in exactly and "Person 4" in exactly
+
+
+def test_a_holders_own_title_is_kept_and_the_collectors_label_is_not_repeated():
+    line = _fig_lines({"key_management": {"top_holders": [
+        {"name": "Fund A", "title": "10% Owner", "percent_ownership": 9.5},
+        {"name": "Fund B", "title": "10 PERCENT OWNER", "percent_ownership": 8.0},
+        {"name": "Jane Roe", "title": "director, 10 percent owner", "percent_ownership": 12.0}]}})[0]
+    assert line == ("Top holders, 10%+ owners (each one's latest 13D/G filing, may predate the report): Fund A: 9.5% beneficial; "
+                    "Fund B: 8% beneficial; Jane Roe (director, 10 percent owner): 12% beneficial")
+    # An officer keeps any title, that one included.
+    officer = _fig_lines({"key_management": {"officers": [{"name": "X Y", "title": "10% Owner"}]}})[0]
+    assert officer.endswith(": X Y (10% Owner)")
+
+
+def test_a_line_cut_for_space_is_logged_once(monkeypatch, caplog):
+    """A figure the room drops reads "not included here" to the model, so every cut is logged —
+    one bounded WARNING per lead naming each cut line, and none when everything fits."""
+    monkeypatch.setattr(_ccr, "_REPORT_FIGURES_LEAD_CAP", 1900)
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        lead = _fig_lines(_wire_realistic_report())
+    assert len("\n".join(lead)) <= 1900
+    msgs = [r.getMessage() for r in caplog.records if "cut for space" in r.getMessage()]
+    assert len(msgs) == 1, msgs
+    assert "'MSFT'" in msgs[0] and "\n" not in msgs[0]
+    assert "Officers, in role order left out" in msgs[0] and "Top holders, 10%+ owners left out" in msgs[0]
+    cut_card = next(l for l in lead if l.endswith("; …"))
+    name = cut_card.split(" (", 1)[0]
+    assert f"{name} " in msgs[0] and "items" in msgs[0]
+    monkeypatch.undo()                                      # the shipped cap: everything fits
+    caplog.clear()
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        _fig_lines(_wire_realistic_report())
+    assert not [r for r in caplog.records if "cut for space" in r.getMessage()]
+
+
+def test_the_cut_log_is_bounded_and_cannot_forge_a_line(monkeypatch, caplog):
+    monkeypatch.setattr(_ccr, "_REPORT_FIGURES_LEAD_CAP", 300)
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        _fig_lines(_monster_report() | {"symbol": "X\nERROR forged" * 50})
+    msgs = [r.getMessage() for r in caplog.records if "cut for space" in r.getMessage()]
+    assert len(msgs) == 1 and "\n" not in msgs[0] and len(msgs[0]) < 700
+
+
+@pytest.mark.parametrize("report", [
+    {}, {"moat_competition": None}, {"revenue_engine": []}, {"revenue_forecast": "x"},
+    {"key_management": {"officers": None, "top_holders": None}}, {"fundamental_metrics": {}},
+    {"wall_street_consensus": {"caydex_fair_value": {}}},
+])
+def test_a_legacy_report_without_the_figures_degrades_to_no_lines(report):
+    assert _fig_lines(report) == []
+    assert _ccr._report_figures_lead("not-a-dict") == []
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_report_still_resolves_with_no_figures(resolver, monkeypatch):
+    report = {"company_name": "Legacy Co", "executive_summary_text": "LEGACYMARK summary.",
+              "moat_competition": {"durability_note": "DURABLEMARK"},
+              "revenue_engine": {"analysis_note": "ENGINEMARK"},
+              "key_management": {"ownership_insight": "OWNMARK"}}
+    block = await _resolve_report(resolver, monkeypatch, report, ref="LGCY|warren_buffett")
+    for marker in ("LEGACYMARK", "DURABLEMARK", "ENGINEMARK", "OWNMARK"):
+        assert marker in block, marker
+    for absent in ("Moat pillars", "Revenue segments", "Officers", "Forward forecasts",
+                   "Caydex fair value", "Earnings vs", "None", "nan"):
+        assert absent not in block, absent
+
+
+# ── bounds, failure isolation, vendor names ──
+
+def _monster_report():
+    big = "N" * 500
+    return {
+        "wall_street_consensus": {"caydex_fair_value": {
+            "status": "ok", "fair_value": 123456789.25, "range_low": 1.5, "range_high": 2e14,
+            "as_of": "d" * 500, "method": "m " * 500, "discount_rate_pct": 9.5,
+            "terminal_growth_pct": 2.5, "alternative_value": 3e14}},
+        "moat_competition": {"dimensions": [{"name": f"{big}{i}", "score": 5.0, "peer_score": 5.0}
+                                            for i in range(200)]},
+        "revenue_engine": {"period": "p " * 200, "revenue_unit": "u " * 200, "total_revenue": 9e14,
+                           "segments": [{"name": f"{big}{i}", "current_revenue": 1e14 - i,
+                                         "previous_revenue": 9e13} for i in range(200)]},
+        "revenue_forecast": {
+            "projections": [_row(f"{1900 + i}", 1e14, 1e10) for i in range(200)],
+            "forecast_analyst_count": 9999,
+            "earnings_track_record": [{"period": big, "surprise_percent": 1e14, "result": "beat"}] * 200,
+            "beat_summary": big},
+        "key_management": {
+            "officers": [{"name": f"{big}{i}", "title": big, "ownership": big} for i in range(200)],
+            "top_holders": [{"name": f"{big}{i}", "title": big, "ownership": "9" * 500}
+                            for i in range(200)]},
+        "fundamental_metrics": [{"title": big, "star_rating": 5, "quality_label": big, "metrics": [
+            {"label": big, "value": "9" * 500} for _ in range(200)]} for _ in range(200)],
+    }
+
+
+def test_the_lead_is_bounded_even_for_a_monster_report():
+    import re as _re
+    lead = _fig_lines(_monster_report())
+    text = "\n".join(lead)
+    assert 0 < len(text) <= _ccr._REPORT_FIGURES_LEAD_CAP
+    # Priority order: the earlier groups win the room, the fundamentals cards squeeze first.
+    assert lead[0].startswith("Caydex fair value: 123,456,789.25 per share (Caydex model estimate")
+    assert lead[1].startswith("Moat pillars") and lead[2].startswith("Revenue segments")
+    # Never a cut figure: a long value / period / holding is dropped whole (names may be cut
+    # on a word boundary — text, not a number). The 500-digit strings never appear at all.
+    assert not _re.search(r"\d…", text)
+    assert "9" * 25 not in text and "d" * 25 not in text
+    for line in lead:
+        assert "\n" not in line
+
+
+def test_a_figure_string_too_long_to_state_whole_is_dropped_not_cut():
+    lines = _fig_lines({
+        "fundamental_metrics": [{"title": "Growth", "metrics": [
+            {"label": "Revenue Growth", "value": "12.3456789012345678901234%"},   # 25 chars
+            {"label": "EPS Growth", "value": "38.1%"}]}],
+        "key_management": {"officers": [{"name": "A B", "title": "CEO", "ownership": "12345678901234567"}]},
+        "revenue_forecast": {"earnings_track_record": [
+            {"period": "Q1 '26 (fiscal, restated)", "surprise_percent": 1.0, "result": "beat"}],
+            "projections": [_row("2026", 1.0, 1.0, revenue_label="$1.0B but a very long label")]},
+    })
+    assert lines == ["Forward forecasts (analyst estimate): 2026 EPS $1.0",
+                     "Growth card: EPS Growth 38.1%",
+                     "Officers, in role order (direct holdings after each one's latest Form 4, not as of the report date; % of shares "
+                     "outstanding): A B (CEO)"]
+
+
+@pytest.mark.parametrize("cap", [0, -5, 3])
+def test_fit_items_never_cuts_an_item(cap):
+    assert _ccr._fit_items("Head: ", ["4,502.5", "3,602"], cap) is None
+    assert _ccr._fit_items("", [], cap) is None
+
+
+def test_fit_items_keeps_whole_items_and_marks_a_cut():
+    f = _ccr._fit_items
+    assert f("H: ", ["aa", "bb", "cc"], 100) == "H: aa; bb; cc"
+    assert f("H: ", ["aa", "bb", "cc"], len("H: aa; bb; cc")) == "H: aa; bb; cc"   # exact fit
+    assert f("H: ", ["aa", "bb", "cc"], len("H: aa; bb; cc") - 1) == "H: aa; bb; …"
+    assert f("H: ", ["aa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"], 12) == "H: aa; …"
+    assert f("Whole line.", [], 11) == "Whole line." and f("Whole line.", [], 10) is None
+    # The cut marker is budgeted too: a line never exceeds its cap, at any cap.
+    assert f("H: ", ["aa", "bb", "cc"], len("H: aa; bb")) == "H: aa; …"
+    for items in (["aa", "bb", "cc"], ["a" * 7, "b", "c" * 4, "d"], ["x"]):
+        for cap in range(0, 40):
+            got = f("H: ", items, cap)
+            assert got is None or len(got) <= cap, (items, cap, got)
+            if got is not None:   # whole items only, in order
+                kept = got[len("H: "):].removesuffix("; …").split("; ")
+                assert kept == items[:len(kept)], (items, cap, got)
+
+
+def test_a_raising_group_costs_only_itself(monkeypatch, caplog):
+    def boom(report):
+        raise RuntimeError("malformed\nforged")
+
+    groups = list(_ccr._FIGURE_GROUPS)
+    groups.insert(1, (boom, 300))
+    monkeypatch.setattr(_ccr, "_FIGURE_GROUPS", tuple(groups))
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        lead = _fig_lines(_full_figures_report(symbol="AVGO\nERROR forged"))
+    assert lead[0].startswith("Caydex fair value") and lead[1].startswith("Moat pillars")
+    msgs = [r.getMessage() for r in caplog.records if "report figures group" in r.getMessage()]
+    assert len(msgs) == 1 and "boom" in msgs[0] and "RuntimeError" in msgs[0]
+    assert "'AVGO\\nERROR forged'" in msgs[0]            # the symbol is %r-rendered, one record
+    assert "\n" not in msgs[0]                            # and so is the exception text
+    # A raise in a pure builder is a bug: the record carries the stack that locates it.
+    record = next(r for r in caplog.records if "report figures group" in r.getMessage())
+    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
+
+
+def test_the_figures_lead_names_no_model_or_vendor():
+    import re as _re
+    for report in (_full_figures_report(), _avgo_shaped_report(), _monster_report()):
+        text = "\n".join(_fig_lines(report)).lower()
+        for word in ("gemini", "google", "openai", "llm", "fmp", "financial modeling prep",
+                     "grounded"):
+            assert word not in text, word
+        assert not _re.search(r"\b(nan|none|true|false|inf|-inf)\b", text), text
+
+
+def test_without_lead_figures_is_scoped_and_never_mutates():
+    report = {"Moat_Competition": {"dimensions": [1]},                    # not the section name
+              "moat_competition": {"Dimensions": [1], "durability_note": "D"},
+              "key_management": "garbage",
+              "elsewhere": {"officers": ["kept"], "cagr": 1.0}}
+    out = _ccr._without_lead_figures(report)
+    assert out["moat_competition"] == {"durability_note": "D"}        # child keys: any case
+    assert out["Moat_Competition"] == {"dimensions": [1]}
+    assert out["key_management"] == "garbage"
+    assert out["elsewhere"] == {"officers": ["kept"], "cagr": 1.0}
+    assert report["moat_competition"] == {"Dimensions": [1], "durability_note": "D"}
+    assert _ccr._without_lead_figures("x") == "x"
+
+
+# ── final review 2026-10-09: Key Management names its real, filing-dated basis ──
+
+
+def test_key_management_never_dates_a_holding_to_the_report():
+    """An officer's figure is the direct balance after that person's latest Form 4 (it can be a
+    year before the report) and a holder's is its latest 13D/G (it can be years old): the lead
+    used to call both "as of the report date"."""
+    report = _wire_realistic_report()
+    text = "\n".join(_fig_lines(report))
+    assert "holdings as of the report date" not in text
+    assert "(as of the report date)" not in text
+    officers = next(l for l in text.splitlines() if l.startswith("Officers, in role order ("))
+    assert "direct holdings after each one's latest Form 4, not as of the report date" in officers
+    holders = next(l for l in text.splitlines() if l.startswith("Top holders, 10%+ owners ("))
+    assert "each one's latest 13D/G filing, may predate the report" in holders

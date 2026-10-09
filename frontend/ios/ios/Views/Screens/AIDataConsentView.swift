@@ -25,11 +25,20 @@ struct AIDataConsentView: View {
     private let whatWeSend: [Row] = [
         Row(text: "The message you type, and the recent messages in that conversation."),
         Row(text: "Market data for whatever you're looking at, so the answer is relevant."),
-        // Report chat's web search (2026-10-02): a query DERIVED from what the user typed goes to
-        // a second third-party service, so the consent gate says so (App Review 5.1.2(i)). Never
-        // name the vendor here (CLAUDE.md invariant #7); the Privacy Policy §4 names it.
-        Row(text: "When you ask Cay AI to search the web in a report chat, a short search query "
-                + "(such as the company, its ticker and the topic) goes to a web search provider.")
+        // Web search (2026-10-02; every chat + automatic since consent v3, 2026-10-09): a query
+        // DERIVED from what the user typed goes to a second third-party service, so the consent
+        // gate says so (App Review 5.1.2(i)) — including the search Cay AI runs without being
+        // asked, which is why this text bumped `AIConsentStore.currentVersion` to 3. Never name
+        // the vendor here (CLAUDE.md invariant #7); the Privacy Policy §4 names it.
+        // Only claims code enforces: the query's content is the model's, so the row gives
+        // examples, and the removal sentence is `sanitize_web_query` (backend). No promise about
+        // prices here: that rule is a model instruction, which the Privacy Policy states as one,
+        // and this text ships in the binary, so a deploy cannot correct it.
+        // (No quoted text in these comments: the legal-page tests read every string literal.)
+        Row(text: "In any chat, when you ask Cay AI to search the web, or when Caydex's own data "
+                + "can't answer your question, a short search query (such as the company, its "
+                + "ticker and the topic) goes to a web search provider. Amounts, percentages and "
+                + "email addresses are removed from it.")
     ]
 
     private let whatWeDont: [Row] = [

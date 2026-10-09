@@ -42,8 +42,28 @@ from app.services.agents.persona_config import PersonaConfig
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
 from app.services.agents.persona_scoring import _vital_score
 from app.utils.peer_wording import peer_worded_metric_name
+from app.utils.currency import currency_code, money_prefix
 
 logger = logging.getLogger(__name__)
+
+
+# "Insider Ownership" (the Insiders & Ownership snapshot's WIRE name) is 100% minus the free
+# float — insiders AND strategic holders (a parent company, a founder's trust, a government
+# stake) — not what insiders own. The report's four Fundamentals & Growth cards do not carry
+# that metric today; should one ever reach a REPORT-MODEL surface (the card-values block,
+# the thesis digest), the model reads this honest label. What the model reads only: the
+# wire label, every stored report and every iOS build keep "Insider Ownership". Same words
+# as chat (`chat_service._CHAT_INSIDER_OWNERSHIP_LABEL`; a test pins them equal).
+REPORT_INSIDER_OWNERSHIP_LABEL = "Held outside the public float (insiders + strategic holders)"
+_REPORT_MODEL_METRIC_RENAMES = {"insider ownership": REPORT_INSIDER_OWNERSHIP_LABEL}
+
+
+def report_model_metric_name(metric: Any) -> str:
+    """A snapshot / card metric's name as the REPORT model reads it: peer-worded (an industry
+    median named as the industry's), then the model-only renames above. Never raises; never
+    used for a wire label."""
+    name = peer_worded_metric_name(metric)
+    return _REPORT_MODEL_METRIC_RENAMES.get(" ".join(name.split()).lower(), name)
 
 
 # ── Honest fallbacks (visible to the user when Gemini fails) ──────────
@@ -996,27 +1016,67 @@ EVIDENCE:
 {write_block}"""
 
 
-def _fmt_millions_usd(v: Any) -> Optional[str]:
-    """A Revenue Engine value (always MILLIONS on the wire) as compact dollars:
+def _fmt_millions_usd(v: Any, currency: Any = None, *, unknown_prefix: str = "$") -> Optional[str]:
+    """A Revenue Engine value (always MILLIONS on the wire) as a compact amount:
     209586.0 → "$209.6B". The prompts used to print the raw number beside the section's
     `revenue_unit`, which said "Billions" for any $1B+ company — telling the model iPhone
-    earned 209,586 billion. None when missing / non-finite."""
+    earned 209,586 billion. None when missing / non-finite (or a bool).
+
+    `currency` is the engine's `reporting_currency`: a non-USD code prefixes the amount with
+    the code instead of "$" ("TWD 2.16T", "-TWD 394M"), so a TWD filer's segments never read
+    as dollars to the model; USD keeps the "$". An UNKNOWN currency (None or garbage) takes
+    `unknown_prefix` — "$" by default (`app.utils.currency.money_prefix`), "" at the engine's
+    prompt sites, which never dress an unconfirmed currency as dollars (final review
+    2026-10-09)."""
+    if isinstance(v, bool):
+        return None
     try:
         m = float(v)
     except (TypeError, ValueError):
         return None
     if not math.isfinite(m):
         return None
-    dollars = m * 1e6
-    sign = "-" if dollars < 0 else ""
-    a = abs(dollars)
+    prefix = unknown_prefix if currency_code(currency) is None else money_prefix(currency)
+    amount = m * 1e6
+    sign = "-" if amount < 0 else ""
+    a = abs(amount)
     if a >= 1e12:
-        return f"{sign}${a / 1e12:.2f}T"
+        return f"{sign}{prefix}{a / 1e12:.2f}T"
     if a >= 1e9:
-        return f"{sign}${a / 1e9:.1f}B"
+        return f"{sign}{prefix}{a / 1e9:.1f}B"
     if a >= 1e6:
-        return f"{sign}${a / 1e6:.0f}M"
-    return f"{sign}${a:,.0f}"
+        return f"{sign}{prefix}{a / 1e6:.0f}M"
+    return f"{sign}{prefix}{a:,.0f}"
+
+
+_UNCONFIRMED_CURRENCY_NOTE = (" (amounts in the company's reporting currency, not confirmed — "
+                              "never assume US dollars)")
+
+
+def _engine_currency_note(engine: Dict[str, Any]) -> str:
+    """One clause for the segment figures beside it: "" for a CONFIRMED USD engine (its figures
+    read "$"), the code for a non-USD one, and — final review 2026-10-09 — the unconfirmed clause
+    for an UNKNOWN currency, whose figures carry no symbol (they used to read "$" beside statement
+    lines in the filer's own code). Never converted: the model is told the figures are in that
+    currency, not that they equal any dollar amount."""
+    code = currency_code(engine.get("reporting_currency")) if isinstance(engine, dict) else None
+    if code == "USD":
+        return ""
+    if code is None:
+        return _UNCONFIRMED_CURRENCY_NOTE
+    return (f" (amounts in {code}, the company's reporting currency — not US dollars; never "
+            f"convert them)")
+
+
+#: The Revenue Engine takeaway renders INSIDE the card whose rows every shipped iOS build prints
+#: with a hard-coded "$" (no build decodes `reporting_currency`), so for any engine whose currency
+#: is not CONFIRMED US dollars the note carries NO money amount — "TWD 1.70T" in the note under a
+#: "$1.70T" row contradicted the card (final review 2026-10-09). This instruction overrides the
+#: STYLE block's "cite a concrete number": the cached Stage B evidence still lists amounts.
+_ENGINE_NO_AMOUNTS = (
+    "Do not state any money amount (the card beside this line shows the figures in its own "
+    "format); cite the shares of revenue and the YoY changes only."
+)
 
 
 def _revenue_engine_analysis_note_prompt(
@@ -1025,6 +1085,10 @@ def _revenue_engine_analysis_note_prompt(
     re_section = shell.get("revenue_engine", {}) or {}
     segs = re_section.get("segments", []) or []
     eliminations = re_section.get("intersegment_eliminations")
+    # The figures' own currency (the filer's reporting currency): never dressed as dollars. Only
+    # a CONFIRMED USD engine prints amounts here (`_ENGINE_NO_AMOUNTS`).
+    money = re_section.get("reporting_currency")
+    amounts_ok = currency_code(money) == "USD"
 
     # Pre-compute YoY % and share-of-total per segment so the model
     # doesn't do arithmetic (it's bad at it) and so the prompt can
@@ -1051,11 +1115,17 @@ def _revenue_engine_analysis_note_prompt(
         seg_str = "no segment breakdown available"
         frame_hint = "Note the breakdown is unavailable and keep it short."
     else:
-        seg_str = "; ".join(
-            f"{s['name']} {_fmt_millions_usd(s['curr']) or 'n/a'} "
-            f"({s['share_pct']:.0f}% of revenue, {s['yoy_label']})"
-            for s in enriched
-        )
+        if amounts_ok:
+            seg_str = "; ".join(
+                f"{s['name']} {_fmt_millions_usd(s['curr'], money) or 'n/a'} "
+                f"({s['share_pct']:.0f}% of revenue, {s['yoy_label']})"
+                for s in enriched
+            )
+        else:
+            seg_str = "; ".join(
+                f"{s['name']} ({s['share_pct']:.0f}% of revenue, {s['yoy_label']})"
+                for s in enriched
+            )
 
         # Frame hint — pick the most interesting story based on the data.
         # Rising threshold sits at 10% so mature-large-cap segments (Apple
@@ -1101,24 +1171,37 @@ def _revenue_engine_analysis_note_prompt(
     # A GROSS stack (segments include sales between the company's own segments): the
     # shares of reported revenue add to more than 100%, which the model must not read as
     # an arithmetic error or "narrate" as more than all of revenue.
-    elim_str = _fmt_millions_usd(eliminations) if eliminations else None
-    gross_line = (
-        f"\nNOTE: the segments are reported GROSS of {elim_str} of intersegment sales "
-        "that consolidation eliminates, so their shares of revenue add to more than 100%. "
-        "Do not sum the shares."
-        if elim_str else ""
-    )
+    elim_str = _fmt_millions_usd(eliminations, money) if eliminations else None
+    if elim_str and amounts_ok:
+        gross_line = (
+            f"\nNOTE: the segments are reported GROSS of {elim_str} of intersegment sales "
+            "that consolidation eliminates, so their shares of revenue add to more than 100%. "
+            "Do not sum the shares."
+        )
+    elif elim_str:
+        gross_line = (
+            "\nNOTE: the segments are reported GROSS of intersegment sales that consolidation "
+            "eliminates, so their shares of revenue add to more than 100%. Do not sum the shares."
+        )
+    else:
+        gross_line = ""
+    # A confirmed-USD engine keeps its amounts (and needs no currency clause); every other engine
+    # gets neither amounts nor a currency clause, and the explicit no-amount rule.
+    seg_note = ""
+    no_amounts = ""
+    if enriched and not amounts_ok:
+        no_amounts = "\n" + _ENGINE_NO_AMOUNTS
 
     return f"""Write a one-line takeaway on the revenue engine.
 
-SEGMENTS: {seg_str}{gross_line}
+SEGMENTS{seg_note}: {seg_str}{gross_line}
 
 FRAME: {frame_hint}
 
 {_style_block(persona)}
 {_length_brief(1, 25)}
 
-Use the YoY numbers above — don't invent them, don't restate them as a list.
+Use the YoY numbers above — don't invent them, don't restate them as a list.{no_amounts}
 Name what is shifting (or what is concentrated) and what it means for the business."""
 
 
@@ -2314,14 +2397,15 @@ def _digest_revenue_engine(report: Dict[str, Any]) -> List[str]:
             yoy = None
         # Values are MILLIONS on every report (old and new); the `revenue_unit` beside them
         # used to read "Billions" ("iPhone 209,586Billions"), so format, never append it.
-        curs = _fmt_millions_usd(cur)
+        # An unknown currency carries no "$" (final review 2026-10-09); the header names it.
+        curs = _fmt_millions_usd(cur, reng.get("reporting_currency"), unknown_prefix="")
         piece = f"{s.get('name', '?')} {curs}" if curs else f"{s.get('name', '?')}"
         yoys = _f_num(yoy, "{:+.0f}")
         if yoys is not None:
             piece += f" ({yoys}% YoY)"
         parts.append(piece)
     if parts:
-        out.append("REVENUE ENGINE: " + "; ".join(parts))
+        out.append("REVENUE ENGINE" + _engine_currency_note(reng) + ": " + "; ".join(parts))
     return out
 
 
@@ -2335,9 +2419,10 @@ def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
             continue
         stars = c.get("star_rating")
         # An INDUSTRY median keeps the wire words "sector avg" in its label; name it the
-        # industry's here, as the EVIDENCE block does (`app/utils/peer_wording.py`).
+        # industry's here, as the EVIDENCE block does (`app/utils/peer_wording.py`). The
+        # model-only renames ("Insider Ownership" = 100 − free float) ride the same helper.
         mstr = ", ".join(
-            f"{peer_worded_metric_name(SimpleNamespace(name=m.get('label', '?'), peer_level=m.get('peer_level')))} "
+            f"{report_model_metric_name(SimpleNamespace(name=m.get('label', '?'), peer_level=m.get('peer_level')))} "
             f"{m.get('value', '?')}"
             for m in (c.get("metrics") or []) if isinstance(m, dict)
         )

@@ -144,6 +144,22 @@ def _fresh_holders_tiers(monkeypatch):
     monkeypatch.setattr(hs, "_background_tasks", set())
 
 
+@pytest.fixture(autouse=True)
+def _no_side_reads(monkeypatch):
+    """The tool's two side reads (short interest through its cache, the company-profile row)
+    are stubbed for every test here: hermetic, and answered as 'not available'. Tests that
+    exercise them patch these again."""
+    async def _no_short(sym):
+        return {}
+
+    async def _no_profile(sym):
+        return None
+
+    monkeypatch.setattr(cot, "_load_short_interest", _no_short)
+    monkeypatch.setattr(cot, "_issuer_profile_flags", _no_profile)
+    monkeypatch.setattr(cot, "_side_tasks", set())   # never another test's (or loop's) tasks
+
+
 def _wired(fmp, supabase=None):
     """A HoldersService on fakes with a COLD 5-minute tier (a second build in one test must
     not be served the first one's entry)."""
@@ -203,7 +219,7 @@ async def test_the_holdings_ride_into_the_24h_tier_and_back_and_a_v2_row_is_refu
     resp, _ = await svc.get_holders_with_status("CRWV")
     await _drain()
     payload = supabase.upserts[0]["response_json"]
-    assert payload["payload_version"] == hs._HOLDERS_PAYLOAD_VERSION == 5
+    assert payload["payload_version"] == hs._HOLDERS_PAYLOAD_VERSION == 6
     assert payload["ownership_detail"]["insider_holdings"]["insiders"][0]["name"] == "Brian M. Venturo"
     json.dumps(payload, allow_nan=False)  # the row is valid JSON for the jsonb column
 
@@ -214,7 +230,8 @@ async def test_the_holdings_ride_into_the_24h_tier_and_back_and_a_v2_row_is_refu
     assert cached is not None
     assert _holdings(cached).insiders[0].holdings[0].shares == 302526
 
-    for version in (2, 3, 4):   # 2: no holdings; 3 and 4: holdings by earlier review rounds' rules
+    # 2: no holdings; 3-4: holdings by earlier review rounds' rules; 5: the raw-row Top 10
+    for version in (2, 3, 4, 5):
         stale_shape = dict(payload, payload_version=version)
         old = _wired(_FMP([]), _Supabase(cached=[{"response_json": stale_shape, "cached_at": now}]))
         assert old._check_supabase_cache("CRWV") is None, f"a v{version} row is rebuilt, not served"
@@ -367,8 +384,11 @@ async def test_the_tool_answers_the_testflight_question_with_the_balance_and_its
     assert venturo["name"] == "Brian M. Venturo"
     assert venturo["holdings"][0] == (
         "Class A Common Stock held directly: 302,526 shares as of 2026-09-30")
-    assert venturo["latest_transaction"].startswith("2026-09-30 (filed 2026-10-02): S-Sale: "
-                                                    "disposed of 65,616 shares at an average $87.69")
+    # Plain words from the Holders tab's own code table (2026-10-08): an open-market sale,
+    # its dollar figure being PROCEEDS — never "the tax".
+    assert venturo["latest_transaction"] == (
+        "2026-09-30 (filed 2026-10-02): S-Sale: sold 65,616 shares in the open market at an "
+        "average $87.69 (about $5.75 million in sale proceeds)")
     assert venturo["holdings"][2].endswith("[earlier figure]")
     assert out["insiders"]["covers_filings_since"] == "2025-07-01"
     how = out["how_to_read"]
@@ -654,6 +674,7 @@ class _Fresh:
 def _fresh_probe_clock(monkeypatch):
     monkeypatch.setattr(cot, "_last_probe", {})
     monkeypatch.setattr(cot, "_fresh_reads", {})
+    monkeypatch.setattr(cot, "_fresh_views", {})
     monkeypatch.setattr(cot, "_probe_inflight", {})
 
 

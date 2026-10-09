@@ -163,6 +163,21 @@ _INFLIGHT_MODULES = [
     # one probe-and-rebuild per ticker; concurrent questions join it under `asyncio.shield`
     # (the tool runs under a timeout), and a cancelled leader settles the future in `finally`.
     "chat_ownership_tool.py",
+    # Added 2026-10-09 with Ask Cay AI's data tools. All four are Task-based (no bare
+    # Future): every caller joins through `asyncio.shield`, the in-flight entry is cleared by
+    # the task's own `add_done_callback` (never the caller's frame), and a caller that gives
+    # up — a tool timeout, a cancelled chat turn — leaves the build running to warm its caches.
+    # * the company profile + key executives, one upstream load per symbol (a profile-only
+    #   and a full load are keyed apart, and a profile-only caller may join a full one);
+    "company_facts_service.py",
+    # * the company's own press releases, one fetch per symbol, waited on with a bound
+    #   (`asyncio.wait`, which never cancels the task it waits on);
+    "press_release_service.py",
+    # * the financials tool, one build per (symbol, section) plus shared source reads;
+    "chat_financials_tool.py",
+    # * the Overview's fundamentals bundle (~15 upstream calls cold), one build per ticker
+    #   shared by the screen, the key-facts read and every chat section that needs it.
+    "stock_overview_service.py",
 ]
 
 

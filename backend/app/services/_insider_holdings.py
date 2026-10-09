@@ -46,6 +46,7 @@ lines are therefore not here — and are not "shares owned".
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import deque
@@ -64,6 +65,8 @@ from app.services._insider_common import (
     normalize_insider_name,
 )
 
+logger = logging.getLogger(__name__)
+
 # Shares. A chain links when one line's balance-before equals another's balance-after
 # within half a share (FMP balances are whole shares; fractional DRIP lots round).
 _TOLERANCE = 0.5
@@ -72,6 +75,7 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # "-5", "1,234" and "NaN" are not balances a filing reports.
 _PLAIN_NUMBER_RE = re.compile(r"^\d{1,15}(?:\.\d{1,6})?$")
 _LABEL_MAX = 60
+_ROLE_RAW_MAX = 200
 
 #: People kept per issuer (most recent filers first), indirect balances kept per line, the
 #: trades summarised for the newest day, and the balances an ambiguous day may have ended on.
@@ -792,6 +796,10 @@ def _person(rows: List[_Row]) -> Dict[str, Any]:
     return {
         "name": _display_name(name),
         "role": role or "Insider",
+        # The filing's own role string ("director, officer: VP Sales"), kept for the one roster
+        # (`roster_from_holdings`): Key Management ranks officers by FMP's "officer:" tag,
+        # which `role` has cleaned away.
+        "type_of_owner": title.strip()[:_ROLE_RAW_MAX] if title else None,
         "latest_transaction_date": latest_date,
         "latest_filing_date": filed or None,
         "latest_trades": _trades(on_latest),
@@ -862,3 +870,183 @@ def insider_holdings_from_rows(
         "inactive_not_shown_names": [p["name"] for p in inactive][:MAX_NAMED],
         "rows_skipped": skipped,
     }
+
+
+# ── One roster for every surface (2026-10-08) ──────────────────────────────────────────
+#
+# The Holders tab's "Top 10 Insiders" sheet and the report's Key Management used to take the
+# FIRST raw Form 4 row per person (`FMPClient.get_insider_roster`): for CRWV's Brian Venturo
+# that row was an RSU line (984,380 units) while Ask Cay AI said 302,526 Class A shares held
+# directly — three surfaces, three numbers. `roster_from_holdings` turns the chained balances
+# above (the same `insider_holdings` the chat tool reads) into the roster both builders read.
+
+#: What every roster row's number is — said once, so no surface reads it as a total.
+ROSTER_BASIS = "shares held directly right after the person's latest reported Form 4 transaction"
+
+
+def _field(obj: Any, key: str) -> Any:
+    """`key` from a dict (`insider_holdings_from_rows`) or a model (`InsiderHoldingsSchema`)."""
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _traded_direct(holdings: Any) -> Optional[Any]:
+    """The person's traded DIRECT holding: the first entry of each direct line (the holding
+    the person trades from — lots and earlier figures follow it, `_direct_entries`), and of
+    those the newest; on the same day the larger (two share classes held side by side are
+    never added together)."""
+    firsts: Dict[str, Any] = {}
+    for entry in holdings if isinstance(holdings, (list, tuple)) else []:
+        if _field(entry, "held") != "direct":
+            continue
+        security = str(_field(entry, "security") or "")
+        firsts.setdefault(security, entry)
+    if not firsts:
+        return None
+
+    def rank(entry: Any) -> Tuple[str, float]:
+        as_of = _field(entry, "as_of")
+        shares = holding_value(_field(entry, "shares"))
+        return (as_of if isinstance(as_of, str) else "", shares if shares is not None else -1.0)
+
+    return max(firsts.values(), key=rank)
+
+
+def _possibly_stale(entry: Any) -> bool:
+    """True when a later transaction on the line reported no usable balance
+    (`changed_after` on or after the entry's own date): the figure is the balance BEFORE that
+    trade, so it is not the person's holding after their latest Form 4 — a 50,000 pre-sale
+    balance beside a 40,000-share sale that printed no balance read as "holds 50,000"."""
+    after = _field(entry, "changed_after")
+    if not isinstance(after, str) or not after.strip():
+        return False
+    as_of = _field(entry, "as_of")
+    return not isinstance(as_of, str) or not as_of or after.strip()[:10] >= as_of[:10]
+
+
+def roster_from_holdings(holdings: Any, *, include_unknown: bool = False) -> List[Dict[str, Any]]:
+    """One roster row per listed insider, from `insider_holdings_from_rows` output (a dict) or
+    an `InsiderHoldingsSchema`: ``{owner, display_name, title, typeOfOwner, role,
+    numberOfShares, as_of, security, basis}``, in the holdings' order (most recent filer
+    first). ``title`` / ``typeOfOwner`` are the filing's raw role string (as the old roster
+    carried them — Key Management ranks officers by its "officer:" tag), ``role`` the cleaned
+    one; a holdings row stored before the raw string was kept falls back to ``role``.
+
+    ``numberOfShares`` is the person's traded DIRECT holding after their latest Form 4
+    (`_traded_direct`) — never an option or RSU line (those are not holdings), never an
+    indirect holding, and nothing is ever summed. Three kinds of person have NO such figure:
+    one whose direct balance the filings leave ambiguous (the day's lines do not show which
+    came last — `possible_shares`), one whose direct balance a later transaction reporting no
+    usable balance may have changed (`changed_after`, `_possibly_stale`), and one with no
+    direct holding at all (held only through a trust, family member or entity). They are left
+    out of a RANKED list (the Top 10 sheet ranks direct holdings), or, with
+    ``include_unknown`` (Key Management, which lists officers by ROLE — an indirect-only CEO
+    must not vanish while junior officers stay), kept with ``numberOfShares`` None — unknown,
+    shown "—", never 0. ``owner`` and ``display_name`` are the
+    holdings' display name ("Brian M. Venturo"): `normalize_insider_name` is NOT idempotent
+    on it, so readers take ``display_name`` as it is. Pure; never raises; [] for None or a
+    malformed input.
+    """
+    people = _field(holdings, "insiders") if holdings is not None else None
+    out: List[Dict[str, Any]] = []
+    for person in people if isinstance(people, (list, tuple)) else []:
+        try:
+            name = _field(person, "name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            entry = _traded_direct(_field(person, "holdings"))
+            if entry is None and not include_unknown:
+                continue
+            shares = None
+            if entry is not None and not _possibly_stale(entry):
+                shares = holding_value(_field(entry, "shares"))
+            if shares is None and not include_unknown:
+                continue
+            role = _field(person, "role")
+            role = role.strip() if isinstance(role, str) and role.strip() else "Insider"
+            raw_role = _field(person, "type_of_owner")
+            raw_role = raw_role.strip() if isinstance(raw_role, str) and raw_role.strip() else role
+            as_of = _field(entry, "as_of") if entry is not None else None
+            out.append({
+                "owner": name.strip(),
+                "display_name": name.strip(),
+                # The old roster's shape: `title` / `typeOfOwner` are the filing's raw role
+                # string (the builders clean it themselves); `role` is the cleaned one.
+                "title": raw_role,
+                "typeOfOwner": raw_role,
+                "role": role,
+                "numberOfShares": shares,
+                "as_of": as_of if isinstance(as_of, str) and as_of else None,
+                "security": (str(_field(entry, "security") or "Shares") if entry is not None
+                             else None),
+                "basis": ROSTER_BASIS,
+            })
+        except Exception as e:  # noqa: BLE001 — one malformed person never costs the roster
+            logger.warning("[insider-roster] skipped a malformed holdings entry: %s: %s",
+                           type(e).__name__, e)
+            continue
+    return out
+
+
+def roster_name_key(name: Any) -> str:
+    """A name compared across shapes: lower-cased tokens, one-letter ones (initials) dropped,
+    sorted — "Brian M. Venturo", "VENTURO BRIAN M" and "Venturo, Brian" are one key."""
+    if not isinstance(name, str):
+        return ""
+    tokens = [t for t in re.split(r"[^a-z0-9]+", name.lower()) if len(t) > 1]
+    return " ".join(sorted(tokens))
+
+
+def unlisted_filers(
+    rows: Any, listed_names: Iterable[Any], *, since: str,
+) -> List[Dict[str, Any]]:
+    """Roster rows, ``numberOfShares`` None, for people who filed a Form 4 dated on or after
+    `since` (``YYYY-MM-DD``) in `rows` — this issuer's rows on ANY security line, options and
+    RSUs included — but are not among `listed_names` (`roster_name_key`). Key Management lists
+    officers by role: a CEO whose only lines in the window are option grants or RSU vestings
+    (`_parse` drops those lines, so the holdings never name them), or who is past the
+    holdings' people cap, is listed with an unknown count ("—") instead of vanishing. Each
+    person's role and name come from their newest row. Newest filer first; pure; never raises
+    (a malformed row is skipped)."""
+    listed = {k for k in (roster_name_key(n) for n in listed_names or []) if k}
+    newest: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    for raw in rows if isinstance(rows, list) else []:
+        try:
+            if not isinstance(raw, dict):
+                continue
+            day = _text(raw.get("transactionDate"))[:10]
+            if not _is_day(day):
+                day = _filed_day(raw)
+            reporter = insider_reporter_key(raw)
+            if not reporter or not day or day < since:
+                continue
+            prev = newest.get(reporter)
+            if prev is None or day > prev[0]:
+                newest[reporter] = (day, raw)
+        except Exception as e:  # noqa: BLE001 — one malformed row never costs the list
+            logger.warning("[insider-roster] skipped a malformed filer row: %s: %s",
+                           type(e).__name__, e)
+    out: List[Dict[str, Any]] = []
+    seen = set(listed)
+    for day, raw in sorted(newest.values(), key=lambda dr: dr[0], reverse=True):
+        name = _display_name(raw.get("reportingName"))
+        key = roster_name_key(name)
+        if not key or key in seen or name.strip().lower() == "insider":
+            continue
+        seen.add(key)
+        title = raw.get("typeOfOwner")
+        title = title.strip()[:_ROLE_RAW_MAX] if isinstance(title, str) and title.strip() else None
+        role = clean_role_title(title).rstrip(":").strip() if title else "Insider"
+        out.append({
+            "owner": name.strip(),
+            "display_name": name.strip(),
+            "title": title or role or "Insider",
+            "typeOfOwner": title or role or "Insider",
+            "role": role or "Insider",
+            "numberOfShares": None,
+            "as_of": None,
+            "security": None,
+            "basis": ROSTER_BASIS,
+        })
+    return out

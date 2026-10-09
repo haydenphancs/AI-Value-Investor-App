@@ -715,3 +715,34 @@ async def test_the_gate_still_answers_false_on_a_real_clean_split(monkeypatch, s
     s, _ = _degradable(monkeypatch, svc)   # TEN_TO_ONE, a cleanly classified 10:1
 
     assert await s.has_unclassified_adjustment("AAA", *CLOSED) is False
+
+
+# ── final review 2026-10-09: the unclassified dates, tri-state (Ask Cay AI's splits line) ──
+
+
+@pytest.mark.asyncio
+async def test_a_1_for_150_reverse_split_is_an_unclassified_date_never_a_split_row(svc):
+    """1/150 snaps to no admissible ratio: absent from `get_split_rows`, present here — so the
+    chat's splits line can never answer "no stock split" for a window that holds one."""
+    s, fake = svc(*_bars([
+        ("2024-02-29", 0.10, 15.0),
+        ("2024-03-01", 15.0, 15.0),        # adjustment factor 1/150
+    ]))
+    assert await s.get_split_rows("AAA", "2024-01-01", "2024-06-30") == []
+    assert await s.unclassified_adjustment_dates_or_none("AAA", "2024-01-01", "2024-06-30") == ["2024-03-01"]
+
+
+@pytest.mark.asyncio
+async def test_a_clean_window_has_no_unclassified_dates(svc):
+    s, _ = svc()
+    assert await s.unclassified_adjustment_dates_or_none("AAA", "2024-01-01", "2024-06-30") == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_derivation_is_none_never_an_empty_list(svc, monkeypatch):
+    s, _ = svc()
+
+    async def failed(*a, **k):
+        return None
+    monkeypatch.setattr(s, "_events_or_none", failed)
+    assert await s.unclassified_adjustment_dates_or_none("AAA", "2024-01-01") is None

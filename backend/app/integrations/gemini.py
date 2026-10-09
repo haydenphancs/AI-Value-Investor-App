@@ -794,22 +794,51 @@ def _stream_thinking_config(budget: Optional[int]) -> Any:
 
 #: `generate_with_tools` runs a forced turn's extra tool round only this early: the send door wraps
 #: the whole call in `CHAT_SEND_BUDGET_SECONDS` (50 s), and a cold round-2 tool can take 30 s.
+#: (Used only when the caller passes no `deadline`; with one, the gate is the time LEFT.)
 _FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS = 20.0
 
+#: With a turn `deadline` (`generate_with_tools`), every tool round must end this long before it, so
+#: the follow-up Gemini call — and a possible tool-less final one — still fit inside the send
+#: door's budget (review 2026-10-09: two waves of 30 s ceilings alone passed the 50 s budget and the
+#: turn was cancelled with tool data in hand).
+_SEND_ANSWER_RESERVE_SECONDS = 12.0
 
-def _forced_tool_config(config: Any, force_tool: Optional[str], tool_handlers: Dict[str, Any]) -> Any:
-    """A copy of `config` whose request MUST call `force_tool` (function calling mode ANY, that one
-    name allowed), or None when nothing is forced. Used for the FIRST round only: the caller's
-    gate has already decided the tool runs (report chat's explicit "search the web" ask), and
-    a prompt rule alone did not hold — under a routed lens, and whenever the question said
-    "news", the model took the headlines tool instead (prod 2026-10-03; a probe: 0/6 under the
-    sentiment lens, 1/6 under the general one). A name with no handler is never forced (the
-    call would end in an error result). The copy keeps every other field, thinking included."""
-    if not force_tool or tool_handlers.get(force_tool) is None:
+
+def _forced_names(force_tool: Any, tool_handlers: Dict[str, Any]) -> List[str]:
+    """The names round 1 may call: `force_tool` is one name or a sequence of names; only names
+    with a handler survive (order kept, duplicates dropped). Anything else → []."""
+    if isinstance(force_tool, str):
+        candidates: List[Any] = [force_tool]
+    elif isinstance(force_tool, (list, tuple, frozenset, set)):
+        candidates = sorted(force_tool) if isinstance(force_tool, (set, frozenset)) else list(force_tool)
+    else:
+        return []
+    out: List[str] = []
+    for name in candidates:
+        if isinstance(name, str) and name and name not in out and tool_handlers.get(name) is not None:
+            out.append(name)
+    return out
+
+
+def _forced_tool_config(config: Any, force_tool: Any, tool_handlers: Dict[str, Any]) -> Any:
+    """A copy of `config` whose request MUST call one of `force_tool` (function calling mode ANY,
+    those names allowed), or None when nothing is forced. `force_tool` is one name or a sequence.
+    Used for the FIRST round only — the caller's gate already decided what runs first:
+      * an explicit "search the web / verify" ask → the web search (a prompt rule alone did not
+        hold: under a routed lens, and whenever the question said "news", the model took the
+        headlines tool instead — prod 2026-10-03; a probe: 0/6 under the sentiment lens);
+      * a "latest news" ask → Caydex's licensed news tools (owner decision 2026-10-08:
+        licensed data first) — the screen company's headline tools, or the market snapshot when
+        no company is in view — so the declared web search can only follow in a later round;
+      * never the web for a market-data question (the caller passes nothing to force).
+    A name with no handler is never forced (the call would end in an error result). The copy keeps
+    every other field, thinking and the full tool declarations included."""
+    names = _forced_names(force_tool, tool_handlers)
+    if not names:
         return None
     return config.model_copy(update={"tool_config": types.ToolConfig(
         function_calling_config=types.FunctionCallingConfig(
-            mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=[force_tool],
+            mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=names,
         ),
     )})
 
@@ -893,13 +922,46 @@ _TOOL_TIMEOUTS: Dict[str, float] = {
     # quarter history). The handler is shielded, so a timeout still finishes and warms the
     # build for the next question. (Literal name, as above: `chat_tools.OWNERSHIP_TOOL`.)
     "check_ownership_filings": 20.0,
-    # Report chat's web search (`chat_web_search_service`): two budget-claim RPCs off the loop
-    # plus Brave's hard bound (BRAVE_SEARCH_TIMEOUT_SECONDS + 2 s), with slack. The handler is
-    # shielded, and a model re-issue after a `timed_out` joins the same per-turn search, so
-    # nothing is paid twice. (The literal name, not an import: this integration must not
-    # import the services layer; `test_gemini_tool_result_guards` pins it equal.)
-    "web_search": 12.0,
+    # Ask Cay AI's financials tool (`chat_financials_tool`, 2026-10-08): up to ten cache-aside
+    # reads of the Financials / Overview services, each bounded at ~15 s inside the tool, so a
+    # cold ticker answers with what loaded and names the rest. Shielded like every handler: a
+    # timeout still finishes the reads and warms their caches. (Literal name, as above:
+    # `chat_tools.FINANCIALS_TOOL`.)
+    "check_company_financials": 20.0,
+    # Ask Cay AI's asset-profile tool (`chat_profile_tool`, 2026-10-08): company facts and
+    # peers, fund facts or coin facts, each a cache-aside read. The tool answers "still
+    # loading" at its own overall deadline (10.5 s), inside this ceiling, so the model gets
+    # the facts that did load rather than a bare timeout. Shielded like every handler.
+    # (Literal name, as above: `chat_tools.PROFILE_TOOL`.)
+    "check_asset_profile": 12.0,
+    # Ask Cay AI's web search (`chat_web_search_service`): up to three budget-claim RPCs off the
+    # loop (an automatic search claims its account's bucket, the automatic global bucket and the
+    # global cap, in order) plus Brave's hard bound (BRAVE_SEARCH_TIMEOUT_SECONDS + 2 s), with
+    # slack. The handler is shielded, and a model re-issue after a `timed_out` joins the same
+    # per-turn search, so nothing is paid twice. (The literal name, not an import: this
+    # integration must not import the services layer; `test_gemini_tool_result_guards` pins it.)
+    "web_search": 15.0,
 }
+
+def _tool_ceiling(name: str) -> float:
+    """One tool's ceiling in seconds: its `_TOOL_TIMEOUTS` entry, else `CHAT_TOOL_TIMEOUT_SECONDS`."""
+    return float(_TOOL_TIMEOUTS.get(name) or getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
+
+
+def _not_run_result(name: str) -> Dict[str, Any]:
+    """The result of a job still queued when the round's time ran out (a turn `deadline`): its
+    handler never starts. Model-facing, so no vendor name. `upstream`: the time went to OUR slow
+    data requests, so a turn on which nothing at all loaded is refunded like any other upstream
+    failure (a job that DID load keeps the turn charged — `tool_results` is not empty)."""
+    return {
+        "error": "not_run",
+        "tool": name,
+        "upstream": True,
+        "detail": "This data request did not run: the answer's time ran out while other requests "
+                  "were loading. Answer from the results you have and say this part could not be "
+                  "loaded.",
+    }
+
 
 # Tools whose arguments are derived from the USER's own words: their args never reach a log
 # line verbatim (a web query is a paraphrase of a user's question). Logged as a shape instead.
@@ -915,7 +977,8 @@ def _loggable_tool_args(name: str, args: Any) -> Any:
     return {k: f"<{len(str(v))} chars>" for k, v in args.items()}
 
 
-async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[str, Any]) -> Any:
+async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[str, Any],
+                            max_wait: Optional[float] = None) -> Any:
     """Run one function-calling handler with the guards every caller needs.
 
     * Unknown tool → an error result (never an exception): the model gets one
@@ -929,11 +992,15 @@ async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[s
     * Per-call timeout (`CHAT_TOOL_TIMEOUT_SECONDS`) → `{"error": "timed_out"}`.
       An index tool that recomputes a cold detail cache used to hold the whole
       stream — the same stall the context resolver caps at 4 s — with no bound.
+    * `max_wait` (the round's time left before the turn's deadline) lowers the ceiling,
+      never raises it.
     """
     if handler is None:
         logger.warning("Gemini requested unknown tool: %s", name)
         return {"error": f"unknown tool: {name}"}
-    timeout = float(_TOOL_TIMEOUTS.get(name) or getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
+    timeout = _tool_ceiling(name)
+    if max_wait is not None:
+        timeout = max(0.01, min(timeout, float(max_wait)))
     try:
         # SHIELDED: the ceiling abandons THIS caller's wait, it must not cancel the work.
         # A market tool is usually the LEADER of a shared in-flight build (`get_index_detail`,
@@ -952,6 +1019,292 @@ async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[s
         from app.log_redaction import redact_secrets
         return {"error": redact_secrets(f"{type(e).__name__}: {e}")[:200], "tool": name,
                 "upstream": True}
+
+
+# ── One round's tool calls, run CONCURRENTLY (2026-10-08) ─────────────────────
+#
+# Both doors used to await each call of a round one after another, so a round's latency was the
+# SUM of its tools: two 20 s tools in one round passed the send door's 50 s budget
+# (`CHAT_SEND_BUDGET_SECONDS`) and the turn was refunded as GEMINI_UNAVAILABLE. A round is now
+# planned (`_plan_tool_round`: the per-turn memo's replays, identical calls folded into one
+# job) and its unique jobs run together (`_gather_tool_calls`), so the round costs its SLOWEST
+# tool. Each job still goes through `_run_tool_handler`: its own shield, its own
+# `_TOOL_TIMEOUTS` ceiling and its own error result, so one slow or failing tool never cancels
+# another. Results come back in the MODEL's call order — one function_response (and, on the
+# stream door, one `tool` event) per call, exactly as before.
+#
+# A round is BOUNDED (fix round, 2026-10-08). Unbounded, a cancelled turn (the send door's
+# budget, the stream deadline, a client gone) let every job of the round keep going behind the
+# shield — one 1-credit turn could start a dozen cold builds at once (`check_ownership_filings`
+# is ~a dozen FMP calls per cold ticker) on the shared FMP pool other users' screens wait on;
+# the serial loop had started only the first. So:
+#   * at most `_TOOL_ROUND_MAX_CONCURRENCY` jobs wait on a handler at once. The permit is taken
+#     BEFORE `_run_tool_handler` creates the handler, so a cancelled turn never starts a queued
+#     job, and a queued job's ceiling does not burn while it waits. (A handler that outlives its
+#     ceiling keeps running shielded and its permit returns — so the hard ceiling on handlers one
+#     round can start is the job cap below.)
+#   * at most `_TOOL_ROUND_MAX_JOBS` unique jobs WITH a handler per round; every call past it is
+#     refused with its own `too_many_tool_calls` result (no `upstream` flag: the model asked for
+#     too much, so it never counts toward a refund) and the model may ask again next round.
+#     8 jobs / 4 at a time is two waves — and with 30 s ceilings (`explain_price_move`,
+#     `get_market_snapshot`) two waves alone can pass the send door's 50 s budget, so the send
+#     door also passes a turn `deadline`: each job's wait is capped at the time left and a job
+#     still queued when it runs out never starts (`_not_run_result`).
+#     Memo replays, in-round duplicates and unknown tools run no handler and use no slot.
+#
+# The two limits are SETTINGS (`CHAT_TOOL_ROUND_MAX_CONCURRENCY` / `CHAT_TOOL_ROUND_MAX_JOBS`),
+# read at CALL time through `_round_max_concurrency()` / `_round_max_jobs()`. The module
+# constants below are the code's own defaults, pinned equal to the settings' declared defaults
+# (`test_chat_financials_tool`); a setting whose value differs from its declared default wins,
+# so the environment rules in production, and a unit test can still patch one constant in
+# isolation (the settings then sit at their defaults).
+_TOOL_ROUND_MAX_CONCURRENCY = 4
+_TOOL_ROUND_MAX_JOBS = 8
+_ROUND_LIMIT_BOUNDS = (1, 16)
+
+
+def _round_limit(setting: str, code_default: Any) -> Any:
+    """The effective round limit: `settings.<setting>` when it is set away from its declared
+    default (an int in 1..16, never a bool), else `code_default`. An out-of-range value — which
+    the Settings field refuses at boot, so only a runtime assignment can produce one — logs a
+    WARNING and falls back to the code default. Never raises."""
+    raw = getattr(settings, setting, None)
+    try:
+        declared = type(settings).model_fields[setting].default
+    except Exception:  # noqa: BLE001 — a settings double without the field: the code default
+        declared = None
+    if raw is None or raw == declared:
+        return code_default
+    low, high = _ROUND_LIMIT_BOUNDS
+    if isinstance(raw, int) and not isinstance(raw, bool) and low <= raw <= high:
+        return raw
+    logger.warning("Gemini round limit %s=%r is outside %d..%d — using %r", setting, raw,
+                   low, high, code_default)
+    return code_default
+
+
+def _round_max_concurrency() -> Any:
+    return _round_limit("CHAT_TOOL_ROUND_MAX_CONCURRENCY", _TOOL_ROUND_MAX_CONCURRENCY)
+
+
+def _round_max_jobs() -> Any:
+    return _round_limit("CHAT_TOOL_ROUND_MAX_JOBS", _TOOL_ROUND_MAX_JOBS)
+
+
+def _too_many_calls_result(name: str, limit: Optional[int] = None) -> Dict[str, Any]:
+    """The result a call past `_TOOL_ROUND_MAX_JOBS` gets — model-facing, so no vendor name."""
+    return {
+        "error": "too_many_tool_calls",
+        "tool": name,
+        "limit": _round_max_jobs() if limit is None else limit,
+        "detail": "This step already runs the maximum number of data requests; request this "
+                  "one again in your next step if you still need it.",
+    }
+
+
+def _call_args(fc: Any) -> Dict[str, Any]:
+    """`fc.args` as a plain dict ({} when absent). A malformed upstream value (not a mapping)
+    degrades to {} with a WARNING — the handler then answers its own "missing argument" error —
+    instead of raising out of the round and failing a turn that may hold other good calls."""
+    raw = getattr(fc, "args", None)
+    if not raw:
+        return {}
+    try:
+        return dict(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning("Gemini tool %s: arguments are not a mapping (%s: %s) — running with {}",
+                       getattr(fc, "name", "?"), type(e).__name__, e)
+        return {}
+
+
+def _tool_call_key(name: str, args: Any) -> Optional[Tuple[str, str]]:
+    """The (name, canonical-JSON args) identity of one call: the per-turn memo's key and the
+    in-round dedup key. None when the args cannot be canonicalised (mixed-type keys, a cycle,
+    absurd nesting): that call is never deduped or memoised, and a WARNING says so — it used to
+    raise out of `stream_agentic` and fail the turn."""
+    try:
+        return (name, json.dumps(args, sort_keys=True, default=str))
+    except (TypeError, ValueError, RecursionError) as e:
+        logger.warning("Gemini tool %s: arguments cannot be canonicalised (%s: %s) — "
+                       "run without dedup", name, type(e).__name__, e)
+        return None
+
+
+#: One round's plan. `slots[i]` answers the model's i-th call:
+#:   ("memo", result)          — the per-turn memo replays a SUCCESSFUL earlier-round result
+#:   ("job", j, is_first)      — served by `jobs[j]`; only the FIRST identical call runs it, every
+#:                               later identical call in the same round shares its result
+#:   ("refused", result)       — past `_TOOL_ROUND_MAX_JOBS`: runs nothing, answered with its own
+#:                               `too_many_tool_calls` result (never memoised)
+#: `jobs[j]` is (name, handler-or-None, args, key) — run once each, concurrently.
+_RoundSlot = Tuple[Any, ...]
+_RoundJob = Tuple[str, Optional[Callable], Dict[str, Any], Optional[Tuple[str, str]]]
+
+
+def _runner_names(jobs: List[_RoundJob]) -> List[str]:
+    """The names of the round's jobs that will RUN a handler, in the model's order — what the
+    round observer is told. A memo replay, an in-round duplicate, a call refused past the job cap
+    and an unknown tool run nothing, so none of them may defer the automatic web search (review
+    2026-10-09: a memo-replayed financials call beside `web_search` deferred it every round)."""
+    return [name for name, handler, _args, _key in jobs if handler is not None]
+
+
+def _notify_tool_round(observer: Optional[Callable[[Tuple[str, ...]], Any]],
+                       names: List[str]) -> None:
+    """Tell the caller's `on_tool_round` observer which tools the round about to run executes
+    (`_runner_names`; an EMPTY tuple on the last round that runs tools, after which a deferred
+    search could never run) — BEFORE any of its handlers starts. The chat doors use it so an
+    automatic web search called beside one of Caydex's own tools waits for their results
+    (`chat_web_search_service.WebSearchTurn.note_tool_round`). Never raises: an observer failure is
+    logged and the round runs as if there were no observer."""
+    if observer is None:
+        return
+    try:
+        observer(tuple(n for n in names if isinstance(n, str)))
+    except Exception as e:  # noqa: BLE001 — an observer must never break a round
+        logger.warning("Gemini tool-round observer failed (%s: %s) — round runs unobserved",
+                       type(e).__name__, e)
+
+
+def _memoisable(result: Any) -> bool:
+    """A tool result the per-turn memo may replay: never an error (a transient failure is not frozen
+    for the turn), and never one marked `deferred` (it asks to be run again — the automatic web
+    search answers that while Caydex's own tools run in the same round)."""
+    return not (isinstance(result, dict) and (result.get("error") or result.get("deferred") is True))
+
+
+def _plan_tool_round(
+    calls: List[Any],
+    tool_handlers: Dict[str, Callable],
+    memo: Optional[Dict[Tuple[str, str], Any]] = None,
+) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[_RoundSlot], List[_RoundJob]]:
+    """Split one round's function calls into (per-call (name, args), per-call slots, unique jobs).
+
+    `memo` is `stream_agentic`'s per-turn memo (successful results only); the send door has none,
+    so every call there is a job. A call whose args cannot be keyed is its own job. A NEW call
+    with a handler once `_TOOL_ROUND_MAX_JOBS` such jobs are planned is refused (WARNING, names
+    only — never arguments)."""
+    named: List[Tuple[str, Dict[str, Any]]] = []
+    slots: List[_RoundSlot] = []
+    jobs: List[_RoundJob] = []
+    first_job: Dict[Tuple[str, str], int] = {}
+    runnable = 0
+    refused: List[str] = []
+    max_jobs = _round_max_jobs()   # read once per round, at call time
+    for fc in calls:
+        name = fc.name
+        args = _call_args(fc)
+        key = _tool_call_key(name, args)
+        handler = tool_handlers.get(name)
+        named.append((name, args))
+        if key is not None and memo is not None and key in memo:
+            slots.append(("memo", memo[key]))
+        elif key is not None and key in first_job:
+            slots.append(("job", first_job[key], False))
+        elif handler is not None and runnable >= max_jobs:
+            slots.append(("refused", _too_many_calls_result(name, max_jobs)))
+            refused.append(name)
+        else:
+            if key is not None:
+                first_job[key] = len(jobs)
+            if handler is not None:
+                runnable += 1
+            slots.append(("job", len(jobs), True))
+            jobs.append((name, handler, args, key))
+    if refused:
+        logger.warning(
+            "Gemini round asked for more than %d unique tool calls — refusing %d: %s",
+            max_jobs, len(refused), ",".join(refused)[:300],
+        )
+    return named, slots, jobs
+
+
+async def _gather_tool_calls(
+    jobs: List[_RoundJob], *, door: str, calls: int, refused: int = 0,
+    deadline: Optional[float] = None,
+) -> List[Any]:
+    """Run one round's UNIQUE jobs concurrently; one result per job, in the order given.
+
+    At most `_TOOL_ROUND_MAX_CONCURRENCY` jobs wait on a handler at once; the permit is taken
+    BEFORE `_run_tool_handler` creates the handler, so a job still queued when the turn is
+    cancelled never starts.
+
+    `deadline` (a `time.monotonic()` instant, the send door's): each job's wait is capped at the
+    time left once it holds its permit, and a job whose permit arrives at or after the deadline
+    never starts its handler (`_not_run_result`) — so the round always settles before the turn's
+    budget and the follow-up answers from the jobs that finished.
+
+    `_run_tool_handler` converts every handler failure — a raise, a timeout, an unknown tool —
+    into an error RESULT, so the gather only ever ends early by cancellation. A cancelled turn
+    (client gone, the send budget, the stream budget's deadline) cancels the gather, which cancels
+    each running job's WAIT and every queued job's permit wait; the shielded handlers already
+    running keep going and warm their caches, exactly as a serial await did. A CancelledError is
+    never turned into a result: one that a job raised on its own is re-raised once the round has
+    settled (a serial round raised it too). Logs one `GEMINI_TOOL_ROUND` line — names and
+    durations only, never arguments — INFO when the round settles, WARNING with
+    `outcome=cancelled` (and how many handlers had `started`) when it does not, so the latency
+    probes also see the rounds a budget cut."""
+    if not jobs:
+        return []
+    started = time.monotonic()
+    gate = asyncio.Semaphore(max(1, int(_round_max_concurrency())))
+    handlers_started = 0
+
+    async def _timed(name: str, handler: Optional[Callable], args: Dict[str, Any]) -> Tuple[Any, float]:
+        nonlocal handlers_started
+        async with gate:
+            max_wait: Optional[float] = None
+            if deadline is not None and handler is not None:
+                max_wait = deadline - time.monotonic()
+                if max_wait <= 0:
+                    logger.warning("Gemini tool %s not run: the round's time ran out before it "
+                                   "started", name)
+                    return _not_run_result(name), 0.0
+            if handler is not None:
+                handlers_started += 1
+            t0 = time.monotonic()
+            result = await _run_tool_handler(name, handler, args, max_wait=max_wait)
+            return result, time.monotonic() - t0
+
+    try:
+        outcomes = await asyncio.gather(
+            *(_timed(name, handler, args) for name, handler, args, _key in jobs),
+            return_exceptions=True,
+        )
+        results: List[Any] = []
+        durations: List[str] = []
+        for (name, _handler, _args, _key), outcome in zip(jobs, outcomes):
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome      # CancelledError / KeyboardInterrupt: never swallowed
+            if isinstance(outcome, Exception):
+                # Unreachable by design (`_run_tool_handler` never raises an Exception); kept so a
+                # bug in the runner costs ONE call its result, not the whole round.
+                logger.error("Gemini tool %s: the round runner raised %s: %s", name,
+                             type(outcome).__name__, outcome, exc_info=outcome)
+                from app.log_redaction import redact_secrets
+                results.append({"error": redact_secrets(f"{type(outcome).__name__}: {outcome}")[:200],
+                                "tool": name, "upstream": True})
+                durations.append(f"{name}:error")
+                continue
+            result, elapsed = outcome
+            results.append(result)
+            durations.append(f"{name}:{elapsed:.2f}s")
+    except BaseException as e:
+        # The round did not settle: the turn was cancelled mid-round, or a job raised a
+        # CancelledError of its own. Names and elapsed only — never arguments — then re-raise.
+        logger.warning(
+            "GEMINI_TOOL_ROUND door=%s calls=%d ran=%d refused=%d started=%d elapsed=%.2fs "
+            "outcome=%s tools=%s",
+            door, calls, len(jobs), refused, handlers_started, time.monotonic() - started,
+            "cancelled" if isinstance(e, asyncio.CancelledError) else type(e).__name__,
+            ",".join(name for name, _h, _a, _k in jobs)[:500],
+        )
+        raise
+    logger.info(
+        "GEMINI_TOOL_ROUND door=%s calls=%d ran=%d refused=%d elapsed=%.2fs tools=%s",
+        door, calls, len(jobs), refused, time.monotonic() - started, ",".join(durations),
+    )
+    return results
 
 
 class GeminiClient:
@@ -1469,7 +1822,10 @@ class GeminiClient:
         model_name: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
-        force_first_tool: Optional[str] = None,
+        force_first_tool: Any = None,
+        extra_round_tools: Optional[Any] = None,
+        on_tool_round: Optional[Callable[[Tuple[str, ...]], Any]] = None,
+        deadline: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Generate a response using Gemini Function Calling (single-round).
@@ -1488,10 +1844,27 @@ class GeminiClient:
             thinking_budget: Optional thinking ceiling (`_thinking_config` semantics;
                 None = attach nothing). The chat door passes its own budget because
                 `max_output_tokens` bounds thoughts + answer together.
-            force_first_tool: Optional tool the FIRST request must call (`_forced_tool_config`);
-                the follow-up uses the ordinary config.
+            force_first_tool: Optional tool name, or names, the FIRST request must call
+                (`_forced_tool_config`); the follow-up uses the ordinary config. A forced turn gets
+                ONE extra executed round for the follow-up's own calls (bounded below).
+            extra_round_tools: Optional names whose call in an UNFORCED follow-up earns that same
+                one extra round — the automatic web search, which the model may call only after
+                Caydex's tools ran (`chat_web_search_service.web_extra_round_tools`). Same bound.
+            on_tool_round: Optional observer called with each executed round's tool names
+                before its handlers run (`_notify_tool_round`; never raises). The extra round
+                is the LAST round that runs tools, so it is observed as an empty tuple: a
+                deferred automatic search could never run after it.
+            deadline: Optional `time.monotonic()` instant by which the WHOLE call must end (the
+                send door's budget). Tool rounds end `_SEND_ANSWER_RESERVE_SECONDS` before it
+                (each job's wait capped, a queued job past it never started), and the extra
+                round runs only while its slowest call's ceiling still fits; None keeps the
+                elapsed-time gate (`_FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS`).
         """
         model = model_name or self.model_name
+        tool_deadline = (
+            deadline - _SEND_ANSWER_RESERVE_SECONDS
+            if isinstance(deadline, (int, float)) and not isinstance(deadline, bool) else None
+        )
         config = self._config(
             system_instruction=system_instruction, tools=tools,
             max_output_tokens=max_output_tokens,
@@ -1522,23 +1895,46 @@ class GeminiClient:
                     if getattr(p, "function_call", None) and p.function_call.name
                 ]
 
-            async def _run_calls(calls: List[Any]) -> List[Any]:
-                """Run every call; ONE function_response per call, in order."""
-                response_parts: List[Any] = []
-                for fc in calls:
-                    args = dict(fc.args) if fc.args else {}
-                    handler = tool_handlers.get(fc.name)
+            async def _run_calls(calls: List[Any], *, final_round: bool = False) -> List[Any]:
+                """Run every call; ONE function_response per call, in the model's call order.
+
+                The round's unique calls run CONCURRENTLY (`_gather_tool_calls`), so the round
+                costs its slowest tool inside the send door's 50 s budget; an identical call
+                (same name, same canonical args) in the same round runs once and shares the
+                result. `tool_results` / `tool_errors` keep one entry per CALL, as before. A call
+                past `_TOOL_ROUND_MAX_JOBS` is refused with its own error response (no `upstream`
+                flag, so it never counts toward the refund)."""
+                named, slots, jobs = _plan_tool_round(calls, tool_handlers)
+                # Only the jobs that RUN a handler; nothing on the last executed round (a search
+                # deferred there could never run) — see `_runner_names`.
+                _notify_tool_round(on_tool_round, [] if final_round else _runner_names(jobs))
+                for name, handler, args, _key in jobs:
                     if handler is not None:
-                        logger.info("Gemini invoked tool '%s' with args: %s", fc.name,
-                                    _loggable_tool_args(fc.name, args))
-                    handler_result = await _run_tool_handler(fc.name, handler, args)
+                        logger.info("Gemini invoked tool '%s' with args: %s", name,
+                                    _loggable_tool_args(name, args))
+                job_results = await _gather_tool_calls(
+                    jobs, door="send", calls=len(calls),
+                    refused=sum(1 for s in slots if s[0] == "refused"),
+                    deadline=tool_deadline,
+                )
+                response_parts: List[Any] = []
+                for (name, _args), slot in zip(named, slots):
+                    if slot[0] == "refused":
+                        handler, handler_result = None, slot[1]
+                    else:
+                        _kind, job_index, is_first = slot
+                        handler = jobs[job_index][1]
+                        handler_result = job_results[job_index]
+                        if not is_first:
+                            logger.info("Gemini repeated tool '%s' with identical args in one "
+                                        "round — sharing the round's single run", name)
                     if isinstance(handler_result, dict) and handler_result.get("error"):
-                        tool_errors.append({"name": fc.name, "error": handler_result["error"],
+                        tool_errors.append({"name": name, "error": handler_result["error"],
                                             "upstream": bool(handler_result.get("upstream"))})
                     elif handler is not None:
                         tool_results.append(handler_result)
                     response_parts.append(types.Part.from_function_response(
-                        name=fc.name,
+                        name=name,
                         response={"result": truncate_tool_result(handler_result)},
                     ))
                 return response_parts
@@ -1567,10 +1963,21 @@ class GeminiClient:
                     finish=_response_finish(follow_up),
                 )
                 text = _response_text(follow_up)
-                if (
-                    forced and _has_function_call(follow_up)
-                    and time.monotonic() - started < _FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS
-                ):
+                extra_ran = False
+                follow_calls = _calls_in(follow_up) if _has_function_call(follow_up) else []
+                extra_earned = forced or (
+                    bool(extra_round_tools)
+                    and any(c.name in extra_round_tools for c in follow_calls)
+                )
+                if tool_deadline is not None:
+                    # The time LEFT decides: the follow-up's slowest call must still fit before the
+                    # answer reserve (a capped wait would mostly time out — and the budget never
+                    # overruns either way, since every wait is capped at the deadline).
+                    _need = max((_tool_ceiling(c.name) for c in follow_calls), default=0.0)
+                    extra_fits = tool_deadline - time.monotonic() >= _need
+                else:
+                    extra_fits = time.monotonic() - started < _FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS
+                if extra_earned and follow_calls and extra_fits:
                     # The FORCED first request could call only the forced tool, so this door's one
                     # executed round would otherwise be spent on it: the follow-up's own calls
                     # (the headlines, a chart) run once more here, as stream_agentic's round 2
@@ -1579,8 +1986,12 @@ class GeminiClient:
                     # when the follow-up ALSO carries text: that text is a preamble ("Let me also
                     # pull the headlines"), and returning it alone delivered one sentence as a
                     # charged answer. Skipped late in the send budget: the tool-less round below
-                    # still answers from what is in hand.
-                    more_parts = await _run_calls(_calls_in(follow_up))
+                    # still answers from what is in hand. An UNFORCED follow-up earns the same
+                    # round when it calls a tool in `extra_round_tools` (the automatic web search
+                    # after Caydex's tools could not answer) — every one of its calls runs, through
+                    # the same concurrent round runner.
+                    extra_ran = True
+                    more_parts = await _run_calls(follow_calls, final_round=True)
                     history = history + [
                         follow_up.candidates[0].content,
                         types.Content(role="user", parts=more_parts),
@@ -1594,7 +2005,7 @@ class GeminiClient:
                         model=model, finish=_response_finish(follow_up),
                     )
                     text = _response_text(follow_up)
-                if _has_function_call(follow_up) and (not text or forced):
+                if _has_function_call(follow_up) and (not text or forced or extra_ran):
                     # (A forced turn's follow-up that STILL calls tools here — after its extra
                     # round, or with the round skipped late — answers tool-less too, never with a
                     # bare preamble.)
@@ -1704,21 +2115,34 @@ class GeminiClient:
         usage_tag: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
-        force_first_tool: Optional[str] = None,
+        force_first_tool: Any = None,
+        on_tool_round: Optional[Callable[[Tuple[str, ...]], Any]] = None,
     ):
         """Stream a MULTI-ROUND agentic answer: the model can call function-calling tools
         mid-stream (manual FC), while reasoning + answer stream throughout.
 
-        `force_first_tool`: round 1 MUST call that tool (`_forced_tool_config`); later rounds
-        run on the ordinary config, so the model may add other tools and then answer.
+        `force_first_tool`: round 1 MUST call that tool, or one of those tools (a name or a
+        sequence, `_forced_tool_config`); later rounds run on the ordinary config, so the model
+        may add other tools — the web search after a news ask's licensed headlines — and then
+        answer.
+
+        `on_tool_round`: optional observer called with each round's names of the jobs that RUN
+        a handler (`_runner_names` — no memo replay, duplicate, refused or unknown call; an empty
+        tuple on the last round that runs tools) before any of its handlers runs
+        (`_notify_tool_round`; never raises).
 
         Yields tagged events:
           * ("thought", str) — a reasoning summary chunk (→ the thinking card)
           * ("answer", str)  — an answer text chunk (→ the message bubble)
-          * ("tool_start", {"name"}) — immediately BEFORE a (non-replayed) handler runs, so
-            the caller can show live progress ("Searching the web…") during a slow tool. A
-            caller that does not care must simply ignore the kind.
-          * ("tool", {"name","args","result"}) — AFTER a tool ran (→ tool_step + widget extraction)
+          * ("tool_start", {"name"}) — BEFORE a (non-replayed) handler runs, so the caller can
+            show live progress ("Searching the web…") during a slow tool. A round's calls run
+            CONCURRENTLY (at most `_TOOL_ROUND_MAX_CONCURRENCY` at once), so every `tool_start`
+            of the round comes first, before any of its handlers start. A caller that does not
+            care must simply ignore the kind.
+          * ("tool", {"name","args","result"}) — AFTER the round's tools ran, one per call in the
+            model's call order (→ tool_step + widget extraction); a replay of this turn's earlier
+            result, or an identical call later in the same round, carries `"memoized": True`; a
+            call past `_TOOL_ROUND_MAX_JOBS` carries its own `too_many_tool_calls` error result
           * ("finish", str)  — LAST, only when the answer was CUT (MAX_TOKENS / SAFETY /
             RECITATION) after real answer text streamed; the caller must not settle
             that turn as complete.
@@ -1804,27 +2228,57 @@ class GeminiClient:
                     verdict = True
                     _quota_circuit.record_success()
                     return
-                # Run the requested tools, emit a "tool" event each, feed responses back next round.
+                # Run the requested tools CONCURRENTLY, then emit a "tool" event per call and
+                # feed one response per call back next round — both in the model's call order.
+                # Every `tool_start` is announced BEFORE any handler of the round runs; a memo
+                # replay or an identical call later in the same round announces nothing (it runs
+                # no handler) and is marked `memoized`. A call past `_TOOL_ROUND_MAX_JOBS` runs
+                # nothing either: no `tool_start`, its own `too_many_tool_calls` result, never
+                # memoised (the model may ask again next round).
+                named, slots, jobs = _plan_tool_round(fcalls, tool_handlers, memo)
+                # Only the jobs that RUN a handler (`_runner_names`); nothing on the last round
+                # that runs tools — the final round ignores tool calls, so a search deferred there
+                # could never run.
+                _notify_tool_round(on_tool_round,
+                                   [] if _round == max_rounds - 1 else _runner_names(jobs))
+                for name, handler, args, _key in jobs:
+                    if handler is not None:
+                        logger.info("Gemini invoked tool '%s' with args: %s", name,
+                                    _loggable_tool_args(name, args))
+                        yield "tool_start", {"name": name}
+                job_results = await _gather_tool_calls(
+                    jobs, door="stream", calls=len(fcalls),
+                    refused=sum(1 for s in slots if s[0] == "refused"),
+                )
+                for (_name, _handler, _args, key), result in zip(jobs, job_results):
+                    # Only SUCCESSFUL results are memoised: a transient failure is not frozen for
+                    # the turn, and a later round's retry runs again — and neither is a result
+                    # marked `deferred` (`_memoisable`).
+                    if key is not None and _memoisable(result):
+                        memo[key] = result
                 response_parts: List[Any] = []
-                for fc in fcalls:
-                    args = dict(fc.args) if fc.args else {}
-                    memo_key = (fc.name, json.dumps(args, sort_keys=True, default=str))
-                    if memo_key in memo:
-                        result = memo[memo_key]
+                for (name, args), slot in zip(named, slots):
+                    if slot[0] == "memo":
+                        result = slot[1]
                         logger.info("Gemini re-issued tool '%s' with identical args — "
-                                    "replaying this turn's result", fc.name)
-                        yield "tool", {"name": fc.name, "args": args, "result": result,
+                                    "replaying this turn's result", name)
+                        yield "tool", {"name": name, "args": args, "result": result,
                                        "memoized": True}
+                    elif slot[0] == "refused":
+                        result = slot[1]
+                        yield "tool", {"name": name, "args": args, "result": result}
                     else:
-                        handler = tool_handlers.get(fc.name)
-                        if handler is not None:
-                            yield "tool_start", {"name": fc.name}
-                        result = await _run_tool_handler(fc.name, handler, args)
-                        if not (isinstance(result, dict) and result.get("error")):
-                            memo[memo_key] = result
-                        yield "tool", {"name": fc.name, "args": args, "result": result}
+                        _kind, job_index, is_first = slot
+                        result = job_results[job_index]
+                        if is_first:
+                            yield "tool", {"name": name, "args": args, "result": result}
+                        else:
+                            logger.info("Gemini repeated tool '%s' with identical args in one "
+                                        "round — sharing the round's single run", name)
+                            yield "tool", {"name": name, "args": args, "result": result,
+                                           "memoized": True}
                     response_parts.append(types.Part.from_function_response(
-                        name=fc.name,
+                        name=name,
                         response={"result": json.dumps(truncate_tool_result(result), default=str)},
                     ))
                 message = response_parts

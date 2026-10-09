@@ -314,12 +314,18 @@ class PushDispatchService:
 
         ⚠️ ONLY A DEFINITE ANSWER IS EVER MEMOISED, and "no flags present" is not one.
 
-        Two writers share `company_profile_cache.profile_json` on the same `ticker` key
-        with `upsert(on_conflict="ticker")`, so the last one replaces the value WHOLE:
-        `whale_service` stores the raw FMP profile (which carries `isEtf`/`isFund`),
-        while `stock_overview_service._upsert_company_profile_db` — reached from every
-        ticker-detail view, so much the more frequent writer — stores a FORMATTED dict of
-        description / ceo / founded / sector / … carrying neither flag.
+        Three writers share `company_profile_cache.profile_json` on the same `ticker` key.
+        `whale_service` stores the raw FMP profile WHOLE (`upsert(on_conflict="ticker")`;
+        it carries `isEtf`/`isFund`). Since 2026-10-09 the other two MERGE into the row
+        they read (`company_facts_service.merge_profile_row`): the Overview's
+        `stock_overview_service._upsert_company_profile_db` — reached from every
+        ticker-detail view, so much the more frequent writer — lays its FORMATTED dict
+        (description / ceo / founded / sector / …) over the row, copies the flags only
+        when its own profile read returned real bools (`fund_flags`) and otherwise keeps
+        the row's; `company_facts_service` adds its blocks the same way. So a detail view no
+        longer erases the flags — but a row can still lack them: no row yet, a row written
+        before the flags were copied, or one whose every writer's profile read came back
+        without them.
 
         So three outcomes are genuinely different and must not collapse into two:
           * flags present and truthy → True, cacheable;
@@ -328,8 +334,9 @@ class PushDispatchService:
 
         Caching that third case is what would have made this worse than useless: the memo
         has no TTL and the service is a process-lifetime singleton, so ONE lookup before
-        the profile landed — or any lookup after a detail view had trimmed the flags away
-        — pinned "not a fund" until the next deploy. A 13F alert for SPY fired before
+        the profile landed — or, while the Overview still replaced the row whole, any lookup
+        after a detail view had trimmed the flags away — pinned "not a fund" until the next
+        deploy. A 13F alert for SPY fired before
         anyone had opened SPY would have routed every later SPY notification to the equity
         screen for the life of that instance.
 

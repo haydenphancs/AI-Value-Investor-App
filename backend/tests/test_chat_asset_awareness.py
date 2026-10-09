@@ -66,12 +66,21 @@ _MARKET = {"get_market_snapshot"}
 # Who holds the stock, from its filings (TestFlight 1.0 (11), 2026-10-05): equity chats only —
 # a fund, a coin, an index or a futures contract has no Form 4 filers.
 _OWNERSHIP = {"check_ownership_filings"}
+# A company's reported figures (2026-10-08): equity chats only — a fund, a coin, an index or a
+# futures contract has no company financial statements.
+_FINANCIALS = {"check_company_financials"}
+# What a ticker IS (2026-10-08): a company's CEO, executives, headcount, HQ, listing date and
+# peers; a fund's fee, holdings and sectors; a coin's supply. Every class with a profile — an
+# index or a futures contract has none.
+_PROFILE = {"check_asset_profile"}
+# Caydex's data tools: both behind the `CHAT_DATA_TOOLS_ENABLED` kill switch.
+_DATA_TOOLS = _FINANCIALS | _PROFILE
 
 _EXPECTED = {
-    "STOCK":     {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET | _OWNERSHIP,
-    "NORMAL":    {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET | _OWNERSHIP,
-    "ETF":       {"get_stock_chart_data", "get_sentiment_analysis"} | _NEWS | _MARKET,
-    "CRYPTO":    {"get_stock_chart_data", "get_sentiment_analysis"} | _NEWS | _MARKET,
+    "STOCK":     {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET | _OWNERSHIP | _FINANCIALS | _PROFILE,
+    "NORMAL":    {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"} | _NEWS | _MARKET | _OWNERSHIP | _FINANCIALS | _PROFILE,
+    "ETF":       {"get_stock_chart_data", "get_sentiment_analysis"} | _NEWS | _MARKET | _PROFILE,
+    "CRYPTO":    {"get_stock_chart_data", "get_sentiment_analysis"} | _NEWS | _MARKET | _PROFILE,
     # An index has no per-symbol news feed, but market breadth is most of any index answer.
     "INDEX":     {"get_market_overview"} | _MARKET,
     # A futures contract has no per-ticker "why did it move" attribution (no industry, no
@@ -107,7 +116,7 @@ def test_analyst_ratings_are_never_offered_for_an_unrated_asset(asset_type):
 
 def test_stock_keeps_every_equity_tool(licensed_analyst_data):
     """Anti-vacuity: a filter that returned {} for everything would pass the assertions above."""
-    assert len(chat_tools.tools_for_asset_type("STOCK")) == 7
+    assert len(chat_tools.tools_for_asset_type("STOCK")) == 9
 
 
 def test_every_asset_class_can_reach_sector_and_market_data(licensed_analyst_data):
@@ -169,8 +178,92 @@ def test_the_licence_filter_removes_ONLY_the_analyst_tool(unlicensed_analyst_dat
     assert set(chat_tools.tools_for_asset_type("STOCK")) == {
         "get_stock_chart_data",
         "get_sentiment_analysis",
-    } | _NEWS | _MARKET | _OWNERSHIP
+    } | _NEWS | _MARKET | _OWNERSHIP | _FINANCIALS | _PROFILE
     assert set(chat_tools.tools_for_asset_type("INDEX")) == {"get_market_overview"} | _MARKET
+
+
+# ── 1c. The data-tools KILL SWITCH (`CHAT_DATA_TOOLS_ENABLED`) ─────────────
+
+
+@pytest.fixture
+def data_tools_off(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "CHAT_DATA_TOOLS_ENABLED", False)
+
+
+@pytest.mark.parametrize("asset_type", sorted(_EXPECTED))
+def test_the_kill_switch_removes_exactly_the_data_tools(asset_type, licensed_analyst_data, data_tools_off):
+    assert set(chat_tools.tools_for_asset_type(asset_type)) == _EXPECTED[asset_type] - _DATA_TOOLS
+    declared = {fd.name for t in chat_tools.build_chat_tool_declarations(asset_type)
+                for fd in (t.function_declarations or [])}
+    assert declared == _EXPECTED[asset_type] - _DATA_TOOLS
+    block = chat_tools.capability_block(chat_tools.tools_for_asset_type(asset_type))
+    assert "check_company_financials" not in block and "FINANCIAL FIGURES" not in block
+    assert "check_asset_profile" not in block and "COMPANY, FUND AND COIN FACTS" not in block
+
+
+def test_the_kill_switch_is_not_vacuous(licensed_analyst_data):
+    """Anti-vacuity for the test above: with the switch ON, every data tool is really granted
+    somewhere — a `_DATA_TOOLS` that lost a member would make the subtraction a no-op."""
+    granted = set().union(*(chat_tools.tools_for_asset_type(a) for a in _EXPECTED))
+    assert _DATA_TOOLS <= granted
+    assert chat_tools._DATA_TOOLS == frozenset(_DATA_TOOLS)
+
+
+def test_the_kill_switch_also_closes_the_web_turn_and_the_chip_scope(licensed_analyst_data, data_tools_off):
+    for asset_type in ("STOCK", "NORMAL", "ETF", "CRYPTO"):
+        assert not (_DATA_TOOLS & chat_tools.tools_for_asset_type(asset_type, web_search=True))
+    assert "reported financial figures" not in chat_tools.chip_scope_block("STOCK")
+    for asset_type, clause in _PROFILE_CHIP_CLAUSES.items():
+        assert clause not in chat_tools.chip_scope_block(asset_type), asset_type
+
+
+def test_the_kill_switch_defaults_on():
+    from app.config import Settings
+    assert Settings.model_fields["CHAT_DATA_TOOLS_ENABLED"].default is True
+
+
+@pytest.mark.parametrize("asset_type", ["ETF", "CRYPTO", "INDEX", "COMMODITY"])
+def test_the_financials_tool_is_never_offered_for_a_non_company(asset_type, licensed_analyst_data):
+    assert "check_company_financials" not in chat_tools.tools_for_asset_type(asset_type)
+
+
+@pytest.mark.parametrize("asset_type", ["INDEX", "COMMODITY"])
+def test_the_profile_tool_is_never_offered_for_an_index_or_a_commodity(asset_type, licensed_analyst_data):
+    """An index level or a futures contract has no company, fund or coin profile."""
+    assert "check_asset_profile" not in chat_tools.tools_for_asset_type(asset_type)
+    assert "check_asset_profile" not in chat_tools.capability_block(
+        chat_tools.tools_for_asset_type(asset_type))
+
+
+# The profile chip clause each class gets — a coin chat is never steered to "who is the CEO",
+# a stock chat never to "the fund's expense ratio"; a general chat gets the class-neutral one.
+_PROFILE_CHIP_CLAUSES = {
+    "STOCK": "its key facts — the CEO and executives, headcount, headquarters, listing date and peers",
+    "NORMAL": "its key facts — a company's CEO and executives",
+    "ETF": "the fund's key facts — its expense ratio, assets, top holdings and sector weights",
+    "CRYPTO": "the coin's supply — circulating, total and maximum — and its fully diluted value",
+}
+
+
+@pytest.mark.parametrize("asset_type", ["STOCK", "NORMAL", "ETF", "CRYPTO"])
+def test_the_profile_tool_is_offered_with_its_own_chip_scope(asset_type, licensed_analyst_data):
+    assert "check_asset_profile" in chat_tools.tools_for_asset_type(asset_type)
+    scope = chat_tools.chip_scope_block(asset_type)
+    assert _PROFILE_CHIP_CLAUSES[asset_type] in scope
+    if asset_type == "CRYPTO":
+        assert "CEO" not in scope and "expense ratio" not in scope
+    if asset_type == "STOCK":
+        assert "expense ratio" not in scope and "a coin's supply" not in scope
+    if asset_type == "ETF":
+        assert "CEO" not in scope and "a coin's supply" not in scope
+
+
+@pytest.mark.parametrize("asset_type", ["INDEX", "COMMODITY"])
+def test_no_profile_chip_where_the_tool_is_not_granted(asset_type, licensed_analyst_data):
+    scope = chat_tools.chip_scope_block(asset_type)
+    for clause in _PROFILE_CHIP_CLAUSES.values():
+        assert clause not in scope
 
 
 def test_the_analyst_tool_returns_the_moment_the_package_is_repurchased(

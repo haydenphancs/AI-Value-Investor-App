@@ -78,6 +78,58 @@ def normalize_insider_name(raw: Optional[str]) -> str:
     return f"{first_middle_titled} {last_titled}".strip() or "Insider"
 
 
+# ── The ONE Form 4 code table (2026-10-08) ─────────────────────────────────────────
+#
+# `classify_insider_transaction` (the Holders tab, the report, alerts) and
+# `plain_transaction_phrase` (Ask Cay AI's ownership tool) both read a code through
+# `transaction_family`, so the words a user reads in chat can never describe a row the tab
+# counts differently. The family → label map reproduces the classifier exactly as it was
+# (P informative buy; pure S informative sell; S+OE / S+DIS / S…EXEMPT, F, D, C and anything
+# unknown uninformative sell; A, M, G uninformative buy).
+_CODE_PREFIXES = (
+    ("P", "purchase"),
+    ("S", "sale"),            # refined by `transaction_family` (+OE / +DIS / EXEMPT)
+    ("A", "award"),
+    ("M", "exercise"),
+    ("G", "gift"),
+    ("F", "tax_withholding"),
+    ("D", "return_to_issuer"),
+    ("C", "conversion"),
+)
+_FAMILY_LABEL = {
+    "purchase": "Informative Buy",
+    "sale": "Informative Sell",
+    "sale_option_exercise": "Uninformative Sell",
+    "sale_award_settlement": "Uninformative Sell",
+    "sale_exempt": "Uninformative Sell",
+    "award": "Uninformative Buy",
+    "exercise": "Uninformative Buy",
+    "gift": "Uninformative Buy",
+    "tax_withholding": "Uninformative Sell",
+    "return_to_issuer": "Uninformative Sell",
+    "conversion": "Uninformative Sell",
+    "other": "Uninformative Sell",
+}
+
+
+def transaction_family(tx_type: Any) -> str:
+    """The family of a FMP ``transactionType`` ("S-Sale", "F-InKind", "M-Exempt"…).
+
+    One of the keys of `_FAMILY_LABEL`; "other" for an empty, non-string or unknown code."""
+    tx = tx_type.strip().upper() if isinstance(tx_type, str) else ""
+    for prefix, family in _CODE_PREFIXES:
+        if tx.startswith(prefix):
+            if family == "sale":
+                if "+OE" in tx:
+                    return "sale_option_exercise"
+                if "+DIS" in tx:
+                    return "sale_award_settlement"
+                if "EXEMPT" in tx:
+                    return "sale_exempt"
+            return family
+    return "other"
+
+
 def classify_insider_transaction(tx_type: str) -> str:
     """Classify a FMP ``transactionType`` string into one of four labels.
 
@@ -91,24 +143,102 @@ def classify_insider_transaction(tx_type: str) -> str:
       - S-Sale+OE / +DIS     → Uninformative Sell
       - A-*/M-*/G-*          → Uninformative Buy (awards, exercises, gifts)
       - F-*/D-*              → Uninformative Sell (tax withholding, disposition)
+
+    Reads the shared code table (`transaction_family`).
     """
-    tx = (tx_type or "").strip().upper()
+    return _FAMILY_LABEL[transaction_family(tx_type)]
 
-    if tx.startswith("P"):
-        return "Informative Buy"
 
-    if tx.startswith("S"):
-        if "+OE" in tx or "+DIS" in tx or "EXEMPT" in tx:
-            return "Uninformative Sell"
-        return "Informative Sell"
+def _phrase_number(value: Any) -> Optional[float]:
+    """A finite, non-negative int/float for the phrase, else None. Bools and strings are not
+    figures (the tool's rows are already validated floats; anything else is not trusted)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
 
-    if tx.startswith(("A", "M", "G")):
-        return "Uninformative Buy"
 
-    if tx.startswith(("F", "D")):
-        return "Uninformative Sell"
+def _phrase_shares(shares: Optional[float]) -> str:
+    if shares is None:
+        return "an unreported number of shares"
+    if float(shares).is_integer():
+        text = f"{int(shares):,}"
+    else:
+        text = f"{shares:,.4f}".rstrip("0").rstrip(".")
+    return f"{text} share" if shares == 1 else f"{text} shares"
 
-    return "Uninformative Sell"
+
+def _phrase_dollars(value: float) -> str:
+    if value >= 1e9:
+        return f"${value / 1e9:,.2f} billion"
+    if value >= 1e6:
+        return f"${value / 1e6:,.2f} million"
+    return f"${value:,.0f}"
+
+
+def plain_transaction_phrase(
+    code: Any, shares: Any, avg_price: Any, *, acquired: Optional[bool] = None,
+) -> str:
+    """One plain-English clause for a Form 4 transaction, from the SAME code table as
+    `classify_insider_transaction`.
+
+    The wording is what a model must not get wrong:
+      * F (tax withholding) is shares the company kept to pay the tax on vesting stock — NOT
+        a sale, and the filing reports no tax amount, so no dollar total is ever given;
+      * a pure S is an open-market SALE whose dollar figure is sale PROCEEDS (shares ×
+        average price) — never "the tax";
+      * M is an option / restricted-stock-unit exercise or conversion, A a grant, G a gift,
+        P an open-market purchase.
+    `acquired` (the row's A/D flag) only picks the verb where the code alone cannot
+    (a gift given or received, a conversion in or out). Never raises; a missing, NaN,
+    negative or non-numeric share count or price is left out, never shown as 0.
+    """
+    family = transaction_family(code)
+    count = _phrase_number(shares)
+    price = _phrase_number(avg_price)
+    price = price if price is not None and price > 0 else None
+    amount = _phrase_shares(count)
+    at = f" at an average ${price:,.2f}" if price is not None else ""
+    if family == "purchase":
+        text = f"bought {amount} in the open market{at}"
+        if price is not None and count:
+            text += f" (about {_phrase_dollars(count * price)} paid)"
+        return text
+    if family == "sale":
+        text = f"sold {amount} in the open market{at}"
+        if price is not None and count:
+            text += f" (about {_phrase_dollars(count * price)} in sale proceeds)"
+        return text
+    if family == "sale_option_exercise":
+        return f"sold {amount}{at} as part of an option exercise"
+    if family == "sale_award_settlement":
+        return f"sold {amount}{at} as part of a stock-award settlement"
+    if family == "sale_exempt":
+        return f"sold {amount}{at} in an exempt transaction"
+    if family == "tax_withholding":
+        value = f", valued at ${price:,.2f} a share" if price is not None else ""
+        return f"had {amount} withheld to cover taxes (not a sale; no tax amount is reported){value}"
+    if family == "exercise":
+        verb = "disposed of" if acquired is False else "acquired"
+        return f"{verb} {amount} through an option or restricted-stock-unit exercise or conversion"
+    if family == "award":
+        return f"received {amount} as a grant or award"
+    if family == "gift":
+        if acquired is True:
+            return f"received {amount} as a gift"
+        if acquired is False:
+            return f"gave {amount} as a gift"
+        return f"reported a gift of {amount}"
+    if family == "return_to_issuer":
+        return f"returned {amount} to the company"
+    if family == "conversion":
+        if acquired is True:
+            return f"received {amount} in a conversion from another class or security"
+        if acquired is False:
+            return f"converted {amount} into another class or security"
+        return f"reported a conversion of {amount}"
+    label = code.strip()[:20] if isinstance(code, str) and code.strip() else ""
+    return f"reported a transaction of {amount}" + (f" (code {label})" if label else "")
 
 
 # ── Form 4 row predicates (CEO Buys signal, home E2 2026-09-23) ────────

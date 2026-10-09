@@ -40,6 +40,15 @@ def _voice_on(monkeypatch):
     monkeypatch.setattr(settings, "CHAT_REPORT_VOICE_ENABLED", True)
 
 
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch):
+    """The instruction carries a minute-resolution date line (2026-10-08); the byte-equality
+    tests below build twice, and a minute boundary between the two builds must not split them."""
+    import app.services.chat_service as cs
+    from datetime import datetime, timezone
+    monkeypatch.setattr(cs, "_now_et", lambda: datetime(2026, 10, 8, 18, 5, tzinfo=timezone.utc))
+
+
 def _report(svc, ref="AAPL|lynch", **kw):
     return svc._build_system_instruction("REPORT", "AAPL", reference_id=ref, **kw)
 

@@ -87,17 +87,8 @@ struct RevenueSegment: Identifiable {
         return (currentRevenue / totalRevenue) * 100
     }
 
-    /// Formatted revenue string (e.g., "$12.5B").
-    /// Backend always emits in MILLIONS — branch the display tier here.
-    var formattedRevenue: String {
-        if currentRevenue >= 1_000_000 {
-            return String(format: "$%.2fT", currentRevenue / 1_000_000)
-        } else if currentRevenue >= 1000 {
-            return String(format: "$%.1fB", currentRevenue / 1000)
-        } else {
-            return String(format: "$%.0fM", currentRevenue)
-        }
-    }
+    // The amount is formatted by `ReportRevenueEngineData.formattedRevenue(for:)`: the
+    // reporting currency belongs to the whole breakdown, not to a row.
 
     /// Formatted percentage string (e.g., "25%")
     var formattedPercentage: String {
@@ -156,6 +147,10 @@ struct ReportRevenueEngineData {
     /// the panel draws it as a negative line. nil for every other stack and older reports.
     /// `var` with a default so existing memberwise inits and previews still compile.
     var intersegmentEliminations: Double? = nil
+    /// ISO 4217 code every amount here is reported in ("TWD" for TSM), never converted. nil
+    /// when unknown and on reports cached before 2026-10-08. `var` with a default for the
+    /// same reason as `intersegmentEliminations`.
+    var reportingCurrency: String? = nil
 
     /// The eliminations line, when there is one to draw (finite and positive).
     var hasEliminations: Bool {
@@ -163,10 +158,15 @@ struct ReportRevenueEngineData {
         return e.isFinite && e > 0
     }
 
-    /// "-$17.7B" — the same M / B / T tiers as the segment rows.
+    /// "-$17.7B" — the same M / B / T tiers and currency as the segment rows.
     var formattedEliminations: String {
         guard let e = intersegmentEliminations, e.isFinite else { return "—" }
-        return "-" + Self.formatMillions(e)
+        return "-" + formatMillions(e)
+    }
+
+    /// A segment's amount: "$12.5B", or "TWD 2.90T" for a non-USD filer.
+    func formattedRevenue(for segment: RevenueSegment) -> String {
+        formatMillions(segment.currentRevenue)
     }
 
     /// "-33%" of the reported total, so the column visibly adds back to 100%.
@@ -175,14 +175,46 @@ struct ReportRevenueEngineData {
         return String(format: "-%.0f%%", e / totalRevenue * 100)
     }
 
-    private static func formatMillions(_ value: Double) -> String {
+    /// Every amount on the card goes through here. Backend emits MILLIONS, so:
+    ///   < 1,000        → "$NM"    (e.g., $57M company)
+    ///   < 1,000,000    → "$N.NB"  (e.g., $57,230M = "$57.2B")
+    ///   ≥ 1,000,000    → "$N.NNT" (e.g., $1,200,000M = "$1.20T")
+    /// with `moneyPrefix` in place of "$" ("TWD 3.81T").
+    private func formatMillions(_ value: Double) -> String {
+        let prefix = Self.moneyPrefix(reportingCurrency)
         if value >= 1_000_000 {
-            return String(format: "$%.2fT", value / 1_000_000)
+            return prefix + String(format: "%.2fT", value / 1_000_000)
         } else if value >= 1000 {
-            return String(format: "$%.1fB", value / 1000)
+            return prefix + String(format: "%.1fB", value / 1000)
         } else {
-            return String(format: "$%.0fM", value)
+            return prefix + String(format: "%.0fM", value)
         }
+    }
+
+    // MARK: - Reporting Currency
+
+    /// An ISO-4217-shaped code ("USD", "TWD") or nil — never a guess, never defaulted to USD.
+    /// Mirrors the backend's `app/utils/currency.py::currency_code`: trimmed, then exactly
+    /// three ASCII letters, then upper-cased. " twd " → "TWD"; "US$", "N/A", "", "USDT" and
+    /// non-ASCII letters ("ÜSD") → nil.
+    static func currencyCode(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        let scalars = trimmed.unicodeScalars
+        guard scalars.count == 3, scalars.allSatisfy({ asciiLetters.contains($0) }) else { return nil }
+        return trimmed.uppercased()
+    }
+
+    /// A–Z and a–z only: `CharacterSet.letters` would admit "Ü".
+    private static let asciiLetters: CharacterSet =
+        CharacterSet(charactersIn: "A"..."Z").union(CharacterSet(charactersIn: "a"..."z"))
+
+    /// What goes before an amount: "$" for US dollars AND for an unknown currency (the
+    /// card's behaviour before the currency was carried), else the code and a space
+    /// ("TWD "), so a non-USD filer's figure is never dressed as dollars. Mirrors the
+    /// backend's `money_prefix`.
+    static func moneyPrefix(_ currency: String?) -> String {
+        guard let code = currencyCode(currency), code != "USD" else { return "$" }
+        return code + " "
     }
 
     // MARK: - Role Assignment Logic
@@ -218,18 +250,9 @@ struct ReportRevenueEngineData {
         return .diversified
     }
 
-    /// Total revenue formatted. Backend emits in MILLIONS, so:
-    ///   < 1,000        → "$NM"   (e.g., $57M company)
-    ///   < 1,000,000    → "$N.NB" (e.g., $57,230M = "$57.2B")
-    ///   ≥ 1,000,000    → "$N.NNT" (e.g., $1,200,000M = "$1.20T")
+    /// Total revenue formatted — same tiers and currency as the segment rows.
     var formattedTotalRevenue: String {
-        if totalRevenue >= 1_000_000 {
-            return String(format: "$%.2fT", totalRevenue / 1_000_000)
-        } else if totalRevenue >= 1000 {
-            return String(format: "$%.1fB", totalRevenue / 1000)
-        } else {
-            return String(format: "$%.0fM", totalRevenue)
-        }
+        formatMillions(totalRevenue)
     }
 }
 
@@ -289,5 +312,19 @@ extension ReportRevenueEngineData {
         period: "FY 2025",
         analysisNote: nil,
         intersegmentEliminations: 17_600
+    )
+
+    /// A non-USD filer (illustrative, not market data): every amount carries the reporting
+    /// currency's code instead of "$" ("TWD 2.90T").
+    static let sampleForeignCurrency = ReportRevenueEngineData(
+        segments: [
+            RevenueSegment(name: "Wafers", currentRevenue: 2_900_000, previousRevenue: 2_300_000, totalRevenue: 3_800_000),
+            RevenueSegment(name: "Other", currentRevenue: 900_000, previousRevenue: 850_000, totalRevenue: 3_800_000)
+        ],
+        totalRevenue: 3_800_000,
+        revenueUnit: "Millions",
+        period: "FY 2025",
+        analysisNote: nil,
+        reportingCurrency: "TWD"
     )
 }

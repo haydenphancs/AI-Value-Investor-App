@@ -802,11 +802,12 @@ def test_a_cache_miss_is_never_memoised_as_not_a_fund():
 
 
 def test_a_profile_with_the_flags_STRIPPED_is_unknown_not_false():
-    """Two writers share `company_profile_cache.profile_json` on the same key with
-    `upsert(on_conflict="ticker")`, so the last one replaces it whole.
-    `stock_overview_service._upsert_company_profile_db` — reached from every ticker-detail
-    view — stores a FORMATTED dict (description / ceo / founded / sector / …) carrying
-    neither flag. Remembering that as "not a fund" is how opening SPY once would
+    """A `company_profile_cache.profile_json` row can carry NEITHER flag: no writer's profile
+    read has supplied one yet. Until 2026-10-09 every ticker-detail view produced exactly that
+    row — `stock_overview_service._upsert_company_profile_db` replaced the row whole with a
+    FORMATTED dict (description / ceo / founded / sector / …); it now merges into the row and
+    keeps a flag another writer stored (`company_facts_service.merge_profile_row`), but the
+    flagless row still exists. Remembering it as "not a fund" is how opening SPY once would
     permanently mis-route its alerts.
     """
     trimmed = {"description": "SPDR S&P 500 ETF Trust", "sector": "", "ceo": None}

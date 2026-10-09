@@ -207,6 +207,10 @@ class CongressActivitySchema(BaseModel):
     owner: str = "Self"                            # "Self", "Spouse", "Joint"
     transaction_type: str = "Purchase"             # "Purchase" or "Sale"
     price_at_transaction: float = Field(0.0)
+    # When the report was FILED (a periodic transaction report may come up to 45 days after
+    # the trade `date`). Additive and Optional (2026-10-08): shipped builds ignore the key;
+    # Ask Cay AI's ownership tool states it ("disclosed on …").
+    disclosure_date: Optional[str] = None
 
 
 class CongressActivitiesDataSchema(BaseModel):
@@ -263,6 +267,9 @@ class InsiderTradeSchema(BaseModel):
 class InsiderOwnerSchema(BaseModel):
     name: str
     role: str = "Insider"
+    # The filing's raw role string ("director, officer: VP Sales"), for the one insider roster
+    # (`roster_from_holdings`, 2026-10-08). Optional: chat never prints it.
+    type_of_owner: Optional[str] = None
     latest_transaction_date: str = ""
     latest_filing_date: Optional[str] = None
     latest_trades: List[InsiderTradeSchema] = []
@@ -302,6 +309,14 @@ class OwnershipDetailSchema(BaseModel):
     # what `HoldersService.newer_insider_filing` compares a one-page probe against.
     newest_filed: Optional[str] = None
     newest_filed_ids: List[str] = []
+    # The ONE float figure the chat tool states (2026-10-08): the shares-float row this build
+    # already fetched, which `shareholder_breakdown.insiders_percent` (100 − free float) is
+    # computed from too — so the float, the shares outstanding and the insiders' share in one
+    # answer never come from two reads taken at different times. None = not reported (never 0).
+    float_shares: Optional[float] = None
+    outstanding_shares: Optional[float] = None
+    free_float_percent: Optional[float] = None
+    float_as_of: Optional[str] = None
 
 
 # ── Top-level response ───────────────────────────────────────────

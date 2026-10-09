@@ -413,13 +413,19 @@ def ensure_disclaimer(text: Optional[str], *, trade_intent: bool) -> str:
 #   * it carries none of `_DISCLAIMER_MARKERS` / `_STRIP_MARKERS`, so it never makes the legal
 #     line look already present and the history-load strip leaves it alone;
 #   * it never names the search engine (IDENTITY_RULE's spirit: a vendor name is not ours to
-#     put in an answer).
+#     put in an answer);
+#   * on the AUTOMATIC tier (2026-10-08: a search the user did not ask for) it opens with
+#     `WEB_CAVEAT_AUTO_LEAD` ("Cay AI searched the web because Caydex's data did not cover
+#     this."), and a model-written copy of that sentence is stripped like the lead.
 #
 # The report date comes from the resolver (`meta["report_as_of"]`, the report's own close date)
 # and is humanized here; anything that does not validate drops the date clause, never the
 # caveat.
 
 WEB_CAVEAT_LEAD = "Web results are third-party and may be outdated or inaccurate."
+# The automatic tier (2026-10-08): a search the user did NOT ask for is announced, by code, ahead
+# of the lead — transparency about why the answer cites the web at all.
+WEB_CAVEAT_AUTO_LEAD = "Cay AI searched the web because Caydex's data did not cover this."
 _WEB_CAVEAT_DATE_TEMPLATE = " Your report reflects data as of {date}."
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -430,12 +436,17 @@ _ISO_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?
 # newline, at least one digit.
 _HUMAN_DATE_RE = re.compile(r"^[A-Za-z0-9 ,/\-]{4,40}$")
 _WEB_CAVEAT_PREFIX = "web results are third-party"
+_WEB_CAVEAT_AUTO_PREFIX = "cay ai searched the web because"
+_WEB_CAVEAT_PREFIXES = (_WEB_CAVEAT_PREFIX, _WEB_CAVEAT_AUTO_PREFIX)
 _WEB_CAVEAT_MAX_LINE = 300
 _WEB_CAVEAT_LIST_MARK_RE = re.compile(r"^\s*(?:[-*+•]\s+|\d+[.)]\s+|#{1,6}\s+|>\s*)+")
 _WEB_CAVEAT_DATE_LINE_RE = re.compile(r"^your report reflects data as of [^\n]{1,60}$", re.IGNORECASE)
 # The model glued the caveat onto the end of a prose line instead of giving it its own.
-_WEB_CAVEAT_TAIL_RE = re.compile(r"(?<=[.!?])[ \t]+[*_]*web results are third-party\b[^\n]{0,280}$",
-                                 re.IGNORECASE)
+_WEB_CAVEAT_TAIL_RE = re.compile(
+    r"(?<=[.!?])[ \t]+[*_]*(?:web results are third-party|cay ai searched the web because)\b"
+    r"[^\n]{0,280}$",
+    re.IGNORECASE,
+)
 
 
 def humanize_report_date(value: object) -> Optional[str]:
@@ -467,11 +478,13 @@ def humanize_report_date(value: object) -> Optional[str]:
         return None
 
 
-def web_caveat_line(report_as_of: object = None) -> str:
+def web_caveat_line(report_as_of: object = None, *, automatic: bool = False) -> str:
     """The caveat sentence(s): the lead, plus "Your report reflects data as of <date>." when
-    the report date validates (`humanize_report_date`)."""
+    the report date validates (`humanize_report_date`). `automatic=True` (a search the user did
+    not ask for) puts `WEB_CAVEAT_AUTO_LEAD` first; only an exact `True` counts."""
     date = humanize_report_date(report_as_of)
-    return WEB_CAVEAT_LEAD + (_WEB_CAVEAT_DATE_TEMPLATE.format(date=date) if date else "")
+    lead = (WEB_CAVEAT_AUTO_LEAD + " " if automatic is True else "") + WEB_CAVEAT_LEAD
+    return lead + (_WEB_CAVEAT_DATE_TEMPLATE.format(date=date) if date else "")
 
 
 def _caveat_body(line: str) -> str:
@@ -482,7 +495,7 @@ def _caveat_body(line: str) -> str:
 
 def _is_web_caveat_line(line: str) -> bool:
     s = _caveat_body(line)
-    return bool(s) and len(s) <= _WEB_CAVEAT_MAX_LINE and s.lower().startswith(_WEB_CAVEAT_PREFIX)
+    return bool(s) and len(s) <= _WEB_CAVEAT_MAX_LINE and s.lower().startswith(_WEB_CAVEAT_PREFIXES)
 
 
 def strip_web_caveat(text: Optional[str]) -> str:
@@ -496,7 +509,8 @@ def strip_web_caveat(text: Optional[str]) -> str:
     a reply that is nothing but the caveat is returned as it was. Idempotent; never raises."""
     if not text or not isinstance(text, str):
         return text if isinstance(text, str) else ""
-    if _WEB_CAVEAT_PREFIX not in text.lower():
+    low = text.lower()
+    if not any(prefix in low for prefix in _WEB_CAVEAT_PREFIXES):
         return text
     lines = text.split("\n")
     kept: List[str] = []
@@ -533,6 +547,7 @@ def strip_web_caveat(text: Optional[str]) -> str:
 
 def finalize_answer_notes(
     text: Optional[str], *, trade_intent: bool, web_used: bool, report_as_of: object,
+    web_auto: bool = False,
 ) -> Tuple[str, str]:
     """Every code-authored closing note, in one place. Returns ``(final_text, live_suffix)``.
 
@@ -545,10 +560,13 @@ def finalize_answer_notes(
     so ``final_text`` always ends with it. All three keywords are REQUIRED: both chat doors
     must decide, and a default would let one silently keep the old behaviour. On a turn with
     ``web_used=False`` and no caveat copy in the text, the result is exactly
-    ``finalize_disclaimer``'s."""
+    ``finalize_disclaimer``'s.
+
+    ``web_auto`` (the automatic tier: a search the user did not ask for) leads the caveat with
+    `WEB_CAVEAT_AUTO_LEAD`; it changes nothing unless ``web_used``."""
     base = strip_web_caveat(text)
     final, suffix = finalize_disclaimer(base, trade_intent=trade_intent)
     if not web_used:
         return final, suffix
-    note = "\n\n" + web_caveat_line(report_as_of)
+    note = "\n\n" + web_caveat_line(report_as_of, automatic=web_auto is True)
     return final + note, suffix + note

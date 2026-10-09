@@ -130,8 +130,10 @@ def test_a_1_0_caller_is_never_offered_a_search_and_is_told_none_ran(search_swit
 
 def test_a_1_1_caller_gets_the_search(search_switched_on):
     turn = _as_caller("1.1", ws.open_web_search_turn, "REPORT", "TICKER_REPORT", _ASK, "user-1", "AAPL")
-    assert turn is not None
-    assert _as_caller("1.1", ws.web_search_intent_unserved, "REPORT", "TICKER_REPORT", _ASK) is False
+    assert turn is not None and turn.tier == ws.TIER_REPORT_EXPLICIT
+    unserved = _as_caller("1.1", lambda: ws.web_search_intent_unserved(
+        "REPORT", "TICKER_REPORT", _ASK, user_id="user-1"))
+    assert unserved is False
     assert _as_caller("1.1", ws.web_search_offered_on_request, "REPORT", "TICKER_REPORT") is True
 
 

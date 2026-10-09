@@ -170,14 +170,24 @@ def test_the_page_states_the_real_specialist_cap_and_tool_count():
     block = _data_block()
     assert f"≤{settings.CHAT_MAX_SPECIALISTS} of 7 lenses" in block
     assert f"(≤{settings.CHAT_MAX_SPECIALISTS})" in block
-    assert len(TOOL_DESCRIPTIONS) == 9, (
-        "the page's tool table lists 8 per-class tools (check_ownership_filings joined "
-        "2026-10-05) plus the gated 9th, web_search"
+    assert len(TOOL_DESCRIPTIONS) == 11, (
+        "the page's tool table lists 10 per-class tools (check_ownership_filings joined "
+        "2026-10-05, check_company_financials and check_asset_profile 2026-10-08) plus the "
+        "gated 11th, web_search"
     )
     for tool in ("explain_price_move", "get_market_overview", "web_search",
-                 "check_ownership_filings"):
+                 "check_ownership_filings", "check_company_financials", "check_asset_profile"):
         assert tool in block or tool.replace("get_", "") in block
-    assert "The 9th tool, <code>web_search</code>" in block
+    assert "The 11th tool, <code>web_search</code>" in block
+    assert "The 10th tool" not in block, "the old count is still on the page"
+    # The profile tool's per-class grant is on the page: STOCK/NORMAL and ETF/CRYPTO list it,
+    # INDEX and COMMODITY do not.
+    table = block[block.index("STOCK/NORMAL:"):block.index("†analyst is licence-stripped")]
+    stock, rest = table.split("ETF/CRYPTO:", 1)
+    etf, rest = rest.split("INDEX:", 1)
+    index, commodity = rest.split("COMMODITY:", 1)
+    assert "asset profile" in stock and "asset profile" in etf
+    assert "profile" not in index and "profile" not in commodity
     # The gated tool is described as gated, not as one more per-class tool.
     assert "web_search=True" in block and "open_web_search_turn" in block
 

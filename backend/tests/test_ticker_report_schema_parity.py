@@ -242,7 +242,6 @@ def _make_collected_data(
     }
     out.news = []
     out.insider_trades = []
-    out.insider_roster = []
     out.segments_raw = []
     out.earnings_dates = []
     out.analyst_analysis = None
@@ -1908,6 +1907,232 @@ def test_reports_without_the_new_fields_still_validate():
     assert model.revenue_engine.intersegment_eliminations is None
     assert model.revenue_forecast.annual_timeline[0].period_end is None
     assert model.revenue_forecast.earnings_track_record[0].result is None
+
+
+# ── Revenue Engine reporting currency (2026-10-08, additive) ──────────────────────────
+#
+# `revenue_engine.reporting_currency` is the ISO code the segment figures are reported in
+# (the income statement's `reportedCurrency` for the engine's fiscal year, never converted),
+# None when unknown. Report chat names it ("Millions of TWD"), and iOS decodes it as an
+# OPTIONAL `RevenueEngineDTO.reportingCurrency` so the Revenue Engine card prefixes amounts
+# with the code instead of "$" (formatters pinned in `test_ios_revenue_engine_currency.py`).
+# Builds shipped before that ignore the key — the DTO is synthesized Codable, which ignores an
+# unknown key and reads an absent Optional as nil (pinned below, with the guards proved
+# non-vacuous on mutated source). Pinned through the REAL `_build_sections` +
+# `assemble_report`: present, absent, garbage, and old stored reports.
+
+_UNSET = object()
+
+
+def _engine_currency_report(c2025=_UNSET, c2024=_UNSET, *, persona="warren_buffett"):
+    """A TSM-shaped breakdown (FY2025, two segments) over annual income whose
+    `reportedCurrency` is set per year (`_UNSET` = no key), then the real sections + report."""
+    from app.schemas.revenue_breakdown import RevenueBreakdownResponse, RevenueSourceSchema
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data(ticker="TSM", persona=persona)
+    out.revenue_breakdown = RevenueBreakdownResponse(
+        symbol="TSM", fiscal_year="2025",
+        revenue_sources=[RevenueSourceSchema(name="Wafers", value=2.9e12),
+                         RevenueSourceSchema(name="Other", value=0.9e12)],
+        cost_of_sales=0.0, operating_expense=0.0, tax=0.0, reported_revenue=3.8e12,
+    )
+    out.income = []
+    for year, cur in (("2025", c2025), ("2024", c2024)):
+        row = {"date": f"{year}-12-31", "fiscalYear": year, "calendarYear": int(year),
+               "revenue": 3.8e12, "netIncome": 1.7e12, "operatingIncome": 1.9e12}
+        if cur is not _UNSET:
+            row["reportedCurrency"] = cur
+        out.income.append(row)
+    coll._build_sections(out)
+    report = coll.assemble_report(out, stage_a_fallback())
+    return out, report
+
+
+@pytest.mark.parametrize("persona_key", sorted(PERSONA_KEYS))
+def test_revenue_engine_reporting_currency_present_reaches_the_wire(persona_key):
+    out, report = _engine_currency_report("TWD", "TWD", persona=persona_key)
+    assert out.revenue_engine_partial["reporting_currency"] == "TWD"
+    model = TickerReportResponse.model_validate(report)
+    assert model.revenue_engine.reporting_currency == "TWD"
+    assert model.revenue_engine.period == "FY 2025" and model.revenue_engine.segments
+    dumped = json.loads(json.dumps(model.model_dump(mode="json")))
+    assert dumped["revenue_engine"]["reporting_currency"] == "TWD"
+
+
+def test_revenue_engine_reporting_currency_follows_the_engine_year():
+    _, report = _engine_currency_report("TWD", "USD")
+    assert TickerReportResponse.model_validate(report).revenue_engine.reporting_currency == "TWD"
+
+
+def test_revenue_engine_reporting_currency_absent_is_none_and_still_on_the_wire():
+    out, report = _engine_currency_report()
+    assert out.revenue_engine_partial["reporting_currency"] is None
+    model = TickerReportResponse.model_validate(report)
+    assert model.revenue_engine.reporting_currency is None
+    assert "reporting_currency" in model.model_dump()["revenue_engine"]
+
+
+@pytest.mark.parametrize("garbage", [
+    "US$", "N/A", "", "  ", "TWDX", "ÜSD", "ßU", 840, True, None, float("nan"),
+    ["TWD"], {"code": "TWD"}, "X" * 100_000,
+])
+def test_revenue_engine_reporting_currency_garbage_is_none_never_a_crash(garbage):
+    _, report = _engine_currency_report(garbage, garbage)
+    model = TickerReportResponse.model_validate(report)   # must not raise
+    assert model.revenue_engine.reporting_currency is None
+
+
+@pytest.mark.parametrize("raw", ["twd", " TWD ", "Twd\n"])
+def test_revenue_engine_reporting_currency_non_canonical_case_is_normalised(raw):
+    """The overview upper-cases the same feed value (`stock_overview_service._currency_code`),
+    so the report does too: "twd" reaches the wire as "TWD", never as unknown or raw."""
+    _, report = _engine_currency_report(raw, raw)
+    assert TickerReportResponse.model_validate(report).revenue_engine.reporting_currency == "TWD"
+
+
+def test_revenue_engine_reporting_currency_mixed_years_without_a_match_is_none():
+    """No FY2025 row code (garbage) and the other years disagree → unknown, never a guess."""
+    out, _ = _engine_currency_report("n/a", "USD")
+    assert out.revenue_engine_partial["reporting_currency"] == "USD"   # unanimous among valid
+    out.income.append({"date": "2023-12-31", "fiscalYear": "2023", "revenue": 3e12,
+                       "reportedCurrency": "TWD"})
+    TickerReportDataCollector()._build_sections(out)
+    assert out.revenue_engine_partial["reporting_currency"] is None
+
+
+def test_an_old_stored_report_and_collection_without_the_currency_still_validate():
+    """Reports and collections cached before 2026-10-08 carry no `reporting_currency`."""
+    from app.services.ticker_data_cache import _deserialize, _serialize
+    import dataclasses
+
+    out, report = _engine_currency_report("TWD", "TWD")
+    report["revenue_engine"].pop("reporting_currency")
+    assert TickerReportResponse.model_validate(report).revenue_engine.reporting_currency is None
+
+    blob = _serialize(out)
+    assert blob is not None
+    blob["revenue_engine_partial"].pop("reporting_currency")
+    back = _deserialize(blob, {f.name for f in dataclasses.fields(CollectedTickerData)})
+    assert back is not None
+    rebuilt = TickerReportDataCollector().assemble_report(back, stage_a_fallback())
+    assert TickerReportResponse.model_validate(rebuilt).revenue_engine.reporting_currency is None
+
+
+# ── iOS: RevenueEngineDTO decodes `reporting_currency` OPTIONALLY; older builds ignore it ──
+
+_IOS_REPORT_DTOS = (
+    __import__("pathlib").Path(__file__).resolve().parents[2]
+    / "frontend/ios/ios/Models/TickerReportResponse.swift"
+)
+
+
+def _swift_decl_body(src: str, header: str) -> str:
+    """The brace-bound body of the first declaration matching `header`, comments stripped
+    (a `//` or `/* */` comment mentioning a decoder can never satisfy or trip the check)."""
+    import re as _re
+
+    code = _re.sub(r"/\*[\s\S]*?\*/", "", src)
+    code = _re.sub(r"//[^\n]*", "", code)
+    m = _re.search(header, code)
+    assert m, f"declaration not found: {header}"
+    start = m.end() - 1
+    depth = 0
+    for i in range(start, len(code)):
+        depth += code[i] == "{"
+        depth -= code[i] == "}"
+        if depth == 0:
+            return code[start:i + 1]
+    raise AssertionError(f"unbalanced braces after {header}")
+
+
+def _revenue_engine_dto_tolerates_unknown_keys(src: str) -> bool:
+    """Synthesized Decodable ignores keys it does not know; only a hand-written decoder
+    (`init(from:)`, or a check over `allKeys`) could refuse `reporting_currency`."""
+    body = _swift_decl_body(src, r"struct\s+RevenueEngineDTO\s*:\s*Codable\s*\{")
+    return "init(from" not in body and "allKeys" not in body
+
+
+def test_the_shipped_revenue_engine_dto_ignores_the_new_key():
+    src = _IOS_REPORT_DTOS.read_text()
+    assert _revenue_engine_dto_tolerates_unknown_keys(src)
+    # No extension adds a decoder to it elsewhere in this file.
+    assert "extension RevenueEngineDTO" not in src
+    # Non-vacuous: a strict hand-written decoder inside the DTO trips the guard…
+    header = "struct RevenueEngineDTO: Codable {"
+    assert header in src
+    strict = src.replace(header, header + (
+        "\n    init(from decoder: Decoder) throws {"
+        "\n        let c = try decoder.container(keyedBy: CodingKeys.self)"
+        "\n        precondition(c.allKeys.count == 6)\n        fatalError()\n    }"
+    ), 1)
+    assert not _revenue_engine_dto_tolerates_unknown_keys(strict)
+    # …while a COMMENT that names one does not.
+    commented = src.replace(header, header + "\n    // init(from decoder:) with allKeys\n", 1)
+    assert _revenue_engine_dto_tolerates_unknown_keys(commented)
+
+
+def _swift_dto_fields(body: str) -> dict[str, tuple[str, bool]]:
+    """`{wire key: (swift name, optional?)}` for every stored `let` of a Codable DTO body,
+    read from its `CodingKeys` (a case without a raw value uses the Swift name)."""
+    import re as _re
+
+    lets = {m.group(1): m.group(2).rstrip().endswith("?")
+            for m in _re.finditer(r"\blet\s+(\w+)\s*:\s*([^\n=]+)", body)}
+    keys_body = _swift_decl_body(body, r"enum\s+CodingKeys\s*:\s*String\s*,\s*CodingKey\s*\{")
+    out: dict[str, tuple[str, bool]] = {}
+    for m in _re.finditer(r"case\s+(\w+)(?:\s*=\s*\"([^\"]+)\")?", keys_body):
+        name, wire = m.group(1), m.group(2) or m.group(1)
+        assert name in lets, f"CodingKey {name} has no stored property"
+        out[wire] = (name, lets[name])
+    return out
+
+
+def _revenue_engine_dto_decodes_currency_optionally(src: str) -> bool:
+    fields = _swift_dto_fields(_swift_decl_body(src, r"struct\s+RevenueEngineDTO\s*:\s*Codable\s*\{"))
+    return fields.get("reporting_currency") == ("reportingCurrency", True)
+
+
+def test_the_ios_revenue_engine_dto_decodes_reporting_currency_as_optional():
+    src = _IOS_REPORT_DTOS.read_text()
+    assert _revenue_engine_dto_decodes_currency_optionally(src)
+    # Non-vacuous: REQUIRED would crash every report cached before 2026-10-08 on decode…
+    assert not _revenue_engine_dto_decodes_currency_optionally(
+        src.replace("let reportingCurrency: String?", "let reportingCurrency: String", 1))
+    # …and a wrong wire key would silently read nil forever.
+    assert not _revenue_engine_dto_decodes_currency_optionally(
+        src.replace('case reportingCurrency = "reporting_currency"',
+                    'case reportingCurrency = "reportingCurrency"', 1))
+
+
+@pytest.mark.parametrize("case", ["twd", "absent", "null", "old_report"])
+def test_every_required_ios_revenue_engine_field_is_on_the_wire(case):
+    """Decode parity against the REAL dumped wire shape: every non-Optional iOS field is
+    always present (a missing one = decode crash), `reporting_currency` is the only one an
+    old report may lack, and when present it is a 3-letter code or null — the two shapes the
+    Optional `String?` decodes."""
+    fields = _swift_dto_fields(
+        _swift_decl_body(_IOS_REPORT_DTOS.read_text(), r"struct\s+RevenueEngineDTO\s*:\s*Codable\s*\{"))
+    if case == "twd":
+        _, report = _engine_currency_report("TWD", "TWD")
+    elif case == "null":
+        _, report = _engine_currency_report("N/A", "N/A")
+    else:
+        _, report = _engine_currency_report()
+    wire = json.loads(json.dumps(
+        TickerReportResponse.model_validate(report).model_dump(mode="json")))["revenue_engine"]
+    if case == "old_report":
+        wire.pop("reporting_currency")
+
+    for key, (name, optional) in fields.items():
+        if not optional:
+            assert key in wire and wire[key] is not None, f"iOS requires {key} ({name})"
+    if case == "old_report":
+        assert "reporting_currency" not in wire and fields["reporting_currency"][1] is True
+    else:
+        value = wire["reporting_currency"]
+        assert value is None or (isinstance(value, str) and len(value) == 3 and value.isupper())
+        assert value == ("TWD" if case == "twd" else None)
 
 
 def test_a_thin_placeholder_breakdown_reports_no_segments_and_no_top_segment():

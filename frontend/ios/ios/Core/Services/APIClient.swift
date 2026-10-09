@@ -880,6 +880,15 @@ actor APIClient {
         request.setValue("iOS", forHTTPHeaderField: "X-Platform")
         request.setValue(Bundle.main.appVersion, forHTTPHeaderField: "X-App-Version")
 
+        // The AI-consent text this install ACCEPTED (2026-10-09). The server opens web search in
+        // any chat, and the automatic search, only for a consent that disclosed them (3+). The
+        // app version cannot carry that: "1.01" parses the same before and after the copy
+        // changed. Omitted while no consent is held, so a missing header never reads as a grant.
+        // A nonisolated UserDefaults read — this actor never touches the @MainActor store.
+        if let consentVersion = AIConsentStore.acceptedVersionForRequests() {
+            request.setValue(String(consentVersion), forHTTPHeaderField: "X-AI-Consent-Version")
+        }
+
         // Pre-flight auth gate.
         //
         // `authPolicy` existed for a long time (as `requiresAuth`) and was consulted by exactly

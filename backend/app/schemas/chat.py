@@ -152,6 +152,12 @@ class StockChartWidget(BaseModel):
     # None = unknown (old builds/data); True = US session open → the card shows a green "Live"
     # dot, otherwise "Closed". Optional so old iOS builds ignore it (subset parity holds).
     is_market_open: Optional[bool] = None
+    # The ISO code of the currency the price fields are in (the listing's TRADING currency), or
+    # None when unknown — never defaulted to USD. This dict is also the quote tool result the chat
+    # model reads, and the prompt places a price "in the currency the stock trades in": without the
+    # code a US quote had to be answered "(currency not confirmed)" (final review 2026-10-09).
+    # Additive and Optional: iOS ignores unknown keys.
+    currency: Optional[str] = None
     historical_data: List[HistoricalDataPoint] = []
 
 
@@ -167,6 +173,12 @@ class MarketOverviewMacroItem(BaseModel):
     signal: str  # "positive", "neutral", "cautious"
 
 
+#: What `MarketOverviewWidget.macro_indicators` ARE: the index pipeline writes those signals
+#: with the model (`index_service`), so they are labels, not readings. The widget is also the
+#: tool result the chat model reads, which is why the basis travels with it.
+MACRO_INDICATORS_BASIS = "outlook labels written by Cay AI, not measured data"
+
+
 class MarketOverviewWidget(BaseModel):
     """Structured payload the frontend uses to render a market overview card."""
     widget_type: str = "market_overview"
@@ -177,14 +189,28 @@ class MarketOverviewWidget(BaseModel):
     # carries (`ValuationSnapshotResponse.pe_known`); the card rendered "P/E (TTM) 0.0x ·
     # Yield 0.0%" under a badge reading "Unknown" without it. Defaults True.
     pe_known: bool = True
+    # The 0 sentinel stays: iOS decodes `forwardPe` as a NON-optional Double, so a null would
+    # be a decode failure on every shipped build. `forward_pe_known` (2026-10-08) carries the
+    # truth — False unless a real forward multiple exists (the index pipeline has no source for
+    # one and writes 0.0). Additive; iOS ignores unknown keys.
     forward_pe: float
+    forward_pe_known: bool = False
     valuation_level: str  # "Bargain", "Fair Value", "Expensive", "Overheated"
     earnings_yield: float
+    # False unless the earnings yield is a real figure: it is 1/PE, written as 0 whenever the P/E
+    # is unknown (final review 2026-10-09). The 0 sentinel stays — iOS decodes `earningsYield` as a
+    # non-optional Double and gates the card on `pe_known`; this flag is for the chat model, which
+    # reads this card as a tool result. Fail-closed default; additive (iOS ignores unknown keys).
+    earnings_yield_known: bool = False
     historical_avg_pe: float
     sectors: List[MarketOverviewSector] = []
     advancing: int = 0
     declining: int = 0
     macro_indicators: List[MarketOverviewMacroItem] = []
+    # How to read `macro_indicators` (`MACRO_INDICATORS_BASIS` when any are present, else
+    # None). Additive and unread by iOS; it is there for the chat model, which reads this card
+    # as a tool result and otherwise took the labels for measured data.
+    macro_indicators_basis: Optional[str] = None
     # The index the card was built for (`^GSPC`, `^IXIC`, …). Gives the card an IDENTITY
     # for `chat_tools.widget_key` — every overview card used to key as `market_overview:`
     # so, on an index chat, a tool card for a DIFFERENT index was deduped against the

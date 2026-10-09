@@ -17,10 +17,12 @@ it wrong:
   "1Y-ago price". This module never trusts the caller's order: it sorts by date.
 * **A calendar offset is not an index offset.** Markets shut at weekends and FRED
   prints `"."` on holidays (dropped before it reaches us), so "12 observations back"
-  is not "a year ago". `fred.get_snapshot` documents exactly this trap — its `obs[6]`
-  is a ~6-DAY window on a daily series, not six months — which is why nothing here
-  reuses it. We bisect on the date, stepping back to the last observation at or before
-  the target, the way `price_volatility` already does for its σ windows.
+  is not "a year ago". `fred.get_snapshot` fell into exactly this trap until 2026-10-09
+  — its old `obs[6]` was a ~6-DAY window on a daily series, not six months. It now
+  counts its 6- and 12-month windows by exact date and answers None for a daily or
+  weekly series (it reads only the newest 14 observations), so it is still no source for
+  the windows here. We bisect on the date, stepping back to the last observation at or
+  before the target, the way `price_volatility` already does for its σ windows.
 * **A short series must refuse, not shrink.** Returning a 4-month change under a "1Y"
   label is the mislabelling `_compute_return` guards against in `crypto_service`.
   Not enough history → `None`.

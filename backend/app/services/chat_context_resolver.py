@@ -31,7 +31,12 @@ import asyncio
 import logging
 import math
 import re
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+# A leaf module (stdlib only): the one rule for naming a metric's peer group to a model.
+from app.utils.peer_wording import peer_worded_metric_name
+from app.utils.currency import currency_code
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +60,13 @@ _MAX_REPORT_SUMMARY = 800   # executive-summary portion of the report lead
 _MAX_REPORT_MODULE = 280    # the price-move narrative / commodity blurb in a lead
 _MAX_REPORT_THESIS = 600    # each of the bull / bear case lines in the report lead
 _DUMP_CAP = 2800            # the flattened-payload portion (per screen). Lead adds ~0.2–1.2k on top.
-# The TICKER_REPORT dump, flattened in FAIR mode (every section gets a share). Ten
-# sections at 2800 left each ~280 chars; 3600 gives each ~360 — most of a narrative line.
-# The report lead (summary, thesis, competitor list) adds ~2k on top, ~5k at worst.
-_REPORT_DUMP_CAP = 3600
+# The TICKER_REPORT dump, flattened in FAIR mode (every section gets a share). It carries the
+# NARRATIVES only since 2026-10-08: the figures it used to hold (moat pillars, segments,
+# fundamentals cards, officers, the forecast, the fair value) moved to the figures lead
+# (`_report_figures_lead`, `_REPORT_FIGURES_LEAD_CAP`), so 3000 (down from 3600) still gives each
+# narrative section its line. The report lead (summary, thesis, competitors) adds ~2k on top and
+# the figures lead up to 3.2k more (`_REPORT_FIGURES_LEAD_CAP`).
+_REPORT_DUMP_CAP = 3000
 _STR_CAP = 400              # any single string field is trimmed to this in the dump
 # Fair mode never cuts a string to fewer than this many characters: a 12-char stub of a
 # narrative is noise, so the line is dropped instead.
@@ -151,6 +159,18 @@ _LINE_TEXT, _LINE_NUM, _LINE_LIST = "text", "num", "list"
 # must miss the cache rather than ground an old chat on today's Activist report.
 _DEFAULT_PERSONA = "warren_buffett"
 
+# Top-level report keys the TICKER_REPORT dump never walks: the lead's own keys, the disclaimer,
+# and the internal scoring inputs.
+_REPORT_SKIP_TOP: Tuple[str, ...] = (
+    "symbol", "company_name", "exchange", "agent", "quality_score",
+    "live_date", "price_close_date", "price_action", "executive_summary_text",
+    "disclaimer_text", "core_thesis",   # core_thesis: in the lead
+    "fundamental_metrics",              # the cards: in the figures lead (2026-10-08)
+    # Internal scoring inputs, never sent to iOS: they carry the analyst rating/target (or the
+    # estimate re-labelled "price_target") and a "deep_undervalued" valuation status.
+    "_scoring_inputs", "key_vitals",
+)
+
 # TICKER_REPORT dump order (fair mode — every present section gets a share). The moat sits
 # early: it is what "who are the competitors / how wide is the moat" questions need.
 _REPORT_PRIORITY: Tuple[str, ...] = (
@@ -168,6 +188,9 @@ _REPORT_PRIORITY: Tuple[str, ...] = (
 # The moat's pillar scores lead its one-sentence `competitive_insight`: on a full report the
 # section gets the durability note plus ~2 lines, the insight's subject (the rivals) is in
 # the lead's competitor list, and the durability note already says which rival threatens most.
+# Since 2026-10-08 the TICKER_REPORT resolver takes the pillars and the estimate out of the dump
+# (`_without_lead_figures`: they ride in the figures lead, labelled); their entries stay so a
+# direct flatten of a report still leads with the headline figure, as the tests pin.
 _REPORT_CHILD_PRIORITY: Dict[str, Tuple[str, ...]] = {
     "moat_competition": ("durability_note", "dimensions", "competitive_insight", "market_dynamics"),
     "moat_competition.dimensions[*]": ("name", "score", "peer_score", "source"),
@@ -180,6 +203,9 @@ _REPORT_CHILD_PRIORITY: Dict[str, Tuple[str, ...]] = {
     ),
     "macro_data": ("headline", "overall_threat_level", "intelligence_brief", "risk_factors",
                    "last_updated"),
+    # The narrative leads what is left of these sections once the lead took their figures.
+    "key_management": ("ownership_insight",),
+    "hidden_market_signals": ("insight",),
 }
 # `[0]`, `[12]` … in a walked path → `[*]`, the form `_REPORT_CHILD_PRIORITY` is keyed by.
 _LIST_INDEX = re.compile(r"\[\d+\]")
@@ -550,6 +576,661 @@ def _competitor_lead(report: Dict[str, Any]) -> List[str]:
         out.append(f"How the list was built: {found}.")
     elif source is None:
         out.append(_COMPETITOR_SOURCE_UNKNOWN_TEXT)
+    return out
+
+
+# ── Report figures lead (TICKER_REPORT, 2026-10-08) ─────────────────
+# The report's headline FIGURES rode in the fair dump, where a full report's section share held
+# about two lines: report chat saw 1 of 5 moat pillars, 1 of 6 segments and no fundamentals line,
+# and `revenue_forecast.cagr` reached it as "0" whenever the collector had no CAGR (it writes 0.0
+# for "unknown"). They now lead, one labelled fixed-format line per group, and leave the dump
+# (`_LEAD_OWNED_SECTION_KEYS`), so a figure is stated once and always with its label.
+#
+# Groups in PRIORITY order: when the lead runs out of room the later groups shrink first (a line
+# keeps only whole items — a number is never cut, and every cut is logged at WARNING). The caps
+# are sized on the REAL wire shapes (the snapshot services' metric labels, FMP officer titles,
+# the collector's 5 officers / 3 holders): a full report uses ~2.9-3.0k and every group fits
+# whole, with room to spare for longer segment names, verdicts and filing titles. The per-group caps add up
+# to more than the lead cap on purpose, so only an oversized report squeezes the tail — officers
+# and holders, which the fundamentals cards now precede.
+_REPORT_FIGURES_LEAD_CAP = 3200
+_FIG_FAIR_VALUE_CAP = 300
+_FIG_MOAT_CAP = 320
+_FIG_SEGMENTS_CAP = 480
+_FIG_FORECAST_CAP = 340
+_FIG_TRACK_CAP = 240
+_FIG_OFFICERS_CAP = 600      # five officers with 48-char filing titles
+_FIG_TOP_HOLDERS_CAP = 260
+_FIG_CARD_CAP = 340          # one fundamentals card (five metrics with their peer medians)
+_FIG_CARDS_CAP = 1150        # every fundamentals card together
+_FIG_SCAN_ROWS = 50          # the most list rows any group reads (a corrupt list is bounded)
+_FIG_PILLARS_MAX = 8
+_FIG_SEGMENTS_MAX = 6
+_FIG_TRACK_ROWS = 4
+_FIG_OFFICERS_MAX = 5        # the collector stores at most 5 (`officers[:5]`); more says "N of M"
+_FIG_TOP_HOLDERS_MAX = 3
+_FIG_CARDS_MAX = 6
+_FIG_METRICS_MAX = 12
+_FIG_NAME_CAP = 60
+_FIG_METRIC_LABEL_CAP = 96   # a metric's wire label, peer suffix included (~50 on real cards)
+# A larger magnitude is a corrupt row, never a figure (a segment of 1e15 millions is 1e21 dollars).
+_FIG_MAX_ABS = 1e15
+# Projections are stored rounded to 2 decimals of their unit (±0.005). A growth rate recomputed
+# from them is stated only when that rounding moves it by less than this many percentage points
+# end to end: 0.12 → 0.30 over three years can be anything from 33% to 38% a year, and "35.7%"
+# would be a guess.
+_PROJECTION_ROUNDING = 0.005
+_CAGR_MAX_ERROR_PP = 0.2
+# A compound rate at or beyond this (1,000x a year) is a corrupt row, stored or recomputed.
+_CAGR_MAX_ABS = 1e5
+_FIG_MORE = "; …"
+_FAIR_VALUE_LABEL = "Caydex model estimate, not a price target"
+_FISCAL_YEAR = re.compile(r"(?:FY\s?)?((?:19|20)\d{2})")
+# What a fundamentals card prints for "no value" — never a figure.
+_FIG_EMPTY_VALUES = frozenset({"—", "–", "-", "n/a", "na", "none", "null", "nan", "inf", "-inf",
+                               "data unavailable"})
+# The title the collector gives every 13D/G holder: said by the holders line's own head.
+_REDUNDANT_HOLDER_TITLES = frozenset({"10% owner", "10 percent owner"})
+# A pillar's provenance, said only when it is not the default measured-from-financials tier.
+_PILLAR_SOURCE_TAG = {"grounded": "researched", "ai_legacy": "qualitative"}
+# A snapshot metric's wire label ends in its peer median — "(1.20x sector avg 64.3%)",
+# "(sector avg 22.4)", "(vs sector 0.95)" (the profitability / valuation / health snapshot
+# services), after `peer_worded_metric_name` possibly "industry". The lead restates it as
+# "Gross Margin 77.30% (industry avg 64.3%)": the multiple is value ÷ median, so dropping it
+# loses nothing. Run on a label already bounded to `_FIG_METRIC_LABEL_CAP`; `[^()]` cannot
+# backtrack across a parenthesis, so the scan stays linear.
+_METRIC_PEER_SUFFIX = re.compile(
+    r"\s\((?:-?\d+(?:\.\d+)?x )?((?:sector|industry) (?:avg|average)|vs (?:sector|industry))"
+    r" ([^()]+)\)$"
+)
+
+# Keys the figures lead renders, dropped from the dump (`_without_lead_figures`): said once, with
+# their label. A fair value is never dumped unlabelled, and `cagr` / `eps_growth` never at all
+# (0.0 when unknown — the lead states the real rate with its window, `_projection_growth`). Dropped
+# whether or not the lead could render them: a malformed block degrades by omission, never into an
+# unlabelled dump line. `fundamental_metrics` (a top-level list) is skipped by the dump call itself.
+_LEAD_OWNED_SECTION_KEYS: Dict[str, frozenset] = {
+    "moat_competition": frozenset({"dimensions"}),
+    "revenue_engine": frozenset({"segments", "period", "revenue_unit", "total_revenue",
+                                 "intersegment_eliminations", "reporting_currency", "currency"}),
+    "revenue_forecast": frozenset({"cagr", "eps_growth", "beat_summary", "forecast_analyst_count"}),
+    "key_management": frozenset({"officers", "top_holders"}),
+    "wall_street_consensus": frozenset({"caydex_fair_value"}),
+}
+
+_FigSpec = Tuple[str, List[str], int]   # (head, whole items, cap): one lead line
+
+
+def _fig_float(value: Any) -> Optional[float]:
+    """A report figure as a float, or None (bool, non-numeric, NaN, ±inf, implausibly large)."""
+    f = _finite_float(value)
+    return f if f is not None and abs(f) < _FIG_MAX_ABS else None
+
+
+def _fig_amount(value: float) -> str:
+    """An amount as text: comma-grouped, one decimal, no trailing ".0", never "-0"."""
+    text = f"{value:,.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return "0" if text == "-0" else text
+
+
+def _fig_pct(value: float, signed: bool = False) -> str:
+    """A percentage with one decimal; a value that rounds to zero is "0.0", never "-0.0"."""
+    v = round(value, 1) + 0.0
+    return f"{v:+.1f}%" if signed else f"{v:.1f}%"
+
+
+def _fig_label(value: Any, cap: int) -> Optional[str]:
+    """A figure-bearing string (a value, a period, a date) as one grounding token, WHOLE or
+    None: `_clean_label` would cut a long one on a word boundary, and a cut "1,234,567" or
+    "Q1 '26" is a wrong figure, not a shorter one."""
+    text = _clean_label(value, 10 * cap)
+    return text if text and len(text) <= cap else None
+
+
+def _currency_code(value: Any) -> Optional[str]:
+    """The ONE shared currency rule (`app.utils.currency.currency_code`): " twd " → "TWD",
+    garbage → None. Report values are already normalised by the collector; this keeps an older
+    stored report, or a hand-built payload, from reading differently here."""
+    return currency_code(value)
+
+
+def _fit_items_counted(head: str, items: List[str], cap: int,
+                       sep: str = "; ") -> Tuple[Optional[str], int]:
+    """`_fit_items` plus how many items it kept (the lead logs a cut)."""
+    if cap <= 0:
+        return None, 0
+    if not items:
+        return (head if head and len(head) <= cap else None), 0
+    kept: List[str] = []
+    for i, item in enumerate(items):
+        room_for_more = 0 if i == len(items) - 1 else len(_FIG_MORE)
+        if len(head) + len(sep.join(kept + [item])) + room_for_more > cap:
+            break
+        kept.append(item)
+    if not kept:
+        return None, 0
+    line = head + sep.join(kept)
+    return (line + _FIG_MORE if len(kept) < len(items) else line), len(kept)
+
+
+def _fit_items(head: str, items: List[str], cap: int, sep: str = "; ") -> Optional[str]:
+    """`head` plus as many WHOLE items as fit in `cap` characters, "; …" marking a cut list.
+    An item is never cut (a cut "4,502.5" reads "4,50"). With no items the head is the whole
+    line. None when nothing honest fits."""
+    return _fit_items_counted(head, items, cap, sep)[0]
+
+
+def _fair_value_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """Cay's published estimate, read from the payload AFTER the kill switch
+    (`strip_caydex_if_disabled` leaves no block while DCF is off), always labelled."""
+    ws = report.get("wall_street_consensus")
+    dcf = ws.get("caydex_fair_value") if isinstance(ws, dict) else None
+    if not isinstance(dcf, dict):
+        return []
+    status = dcf.get("status")
+    if status == "refused":
+        reason = _clean_label(dcf.get("refusal_reason"), 160)
+        line = "Caydex fair value: none published for this report" + (f" — {reason}" if reason else ".")
+        return [(line, [], _FIG_FAIR_VALUE_CAP)]
+    value = _fig_float(dcf.get("fair_value"))
+    if status != "ok" or value is None or value <= 0:
+        return []
+    code = _currency_code(dcf.get("currency"))
+    head = f"Caydex fair value: {_num(value)}{' ' + code if code else ''} per share ({_FAIR_VALUE_LABEL})"
+    items: List[str] = []
+    low, high = _fig_float(dcf.get("range_low")), _fig_float(dcf.get("range_high"))
+    if low is not None and high is not None and 0 < low <= high:
+        items.append(f"range {_num(low)}–{_num(high)}")
+    as_of = _fig_label(dcf.get("as_of"), 24)
+    if as_of:
+        items.append(f"as of {as_of}")
+    method = _clean_label(dcf.get("method"), 48)
+    if method:
+        items.append(f"method: {method}")
+    for key, label in (("discount_rate_pct", "discount rate"), ("terminal_growth_pct", "terminal growth")):
+        pct = _fig_float(dcf.get(key))
+        if pct is not None:
+            items.append(f"{label} {_num(pct)}%")
+    alt = _fig_float(dcf.get("alternative_value"))
+    if alt is not None and alt > 0:
+        items.append(f"revenue-based cross-check {_num(alt)}")
+    return [(head + "; ", items, _FIG_FAIR_VALUE_CAP) if items else (head + ".", [], _FIG_FAIR_VALUE_CAP)]
+
+
+def _moat_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """Every moat pillar (iOS decodes name / score / peer_score / source): score of 10, the peer
+    score beside it, and the provenance when it is not the measured tier."""
+    mc = report.get("moat_competition")
+    dims = mc.get("dimensions") if isinstance(mc, dict) else None
+    if not isinstance(dims, list):
+        return []
+    rows: List[Tuple[str, float, Optional[float], Any]] = []
+    seen = set()
+    for d in dims[:_FIG_SCAN_ROWS]:
+        if len(rows) >= _FIG_PILLARS_MAX:
+            break
+        if not isinstance(d, dict):
+            continue
+        name = _clean_label(d.get("name"), _FIG_NAME_CAP)
+        score = _threat_score(d.get("score"))   # any 0-10 score: bool / NaN / out of range → None
+        if not name or score is None or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        rows.append((name, score, _threat_score(d.get("peer_score")), d.get("source")))
+    if not rows:
+        return []
+    # The PDF's rule (`pdf_charts`): a pillar set whose peer scores are all 0 draws no peer line.
+    has_peer = any(peer for _n, _s, peer, _src in rows)
+    items: List[str] = []
+    for name, score, peer, source in rows:
+        text = f"{name} {_num(score)}"
+        if has_peer and peer is not None:
+            text += f" vs peers {_num(peer)}"
+        tag = _PILLAR_SOURCE_TAG.get(source) if isinstance(source, str) else None
+        if tag:
+            text += f" ({tag})"
+        items.append(text)
+    return [("Moat pillars (score out of 10): ", items, _FIG_MOAT_CAP)]
+
+
+def _segment_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """Up to six revenue segments, largest first: amount, share of total revenue, prior year —
+    with the breakdown's period, unit and currency (the report's own currency code when it
+    carries one, else "reporting currency": nothing is converted)."""
+    eng = report.get("revenue_engine")
+    if not isinstance(eng, dict):
+        return []
+    segs = eng.get("segments")
+    rows: List[Tuple[str, float, Optional[float]]] = []
+    seen = set()
+    if isinstance(segs, list):
+        for s in segs[:_FIG_SCAN_ROWS]:
+            if not isinstance(s, dict):
+                continue
+            name = _clean_label(s.get("name"), _FIG_NAME_CAP)
+            current = _fig_float(s.get("current_revenue"))
+            if not name or current is None or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            rows.append((name, current, _fig_float(s.get("previous_revenue"))))
+    if not rows:
+        return []
+    rows.sort(key=lambda r: r[1], reverse=True)   # stable: equal amounts keep payload order
+    total = _fig_float(eng.get("total_revenue"))
+    total = total if total is not None and total > 0 else None
+    items: List[str] = []
+    for name, current, previous in rows[:_FIG_SEGMENTS_MAX]:
+        bits: List[str] = []
+        # A share only of a positive total, and never one above 100% (a corrupt row).
+        if total is not None and 0 <= current <= total:
+            bits.append(_fig_pct(current / total * 100))
+        # 0.0 is the collector's "no prior-year figure" (no FY-1 record; always for
+        # "Unallocated"), and iOS shows a prior only when it is > 0 (`hasPriorAnchor`).
+        if previous is not None and previous > 0:
+            bits.append(f"prior yr {_fig_amount(previous)}")
+        items.append(f"{name} {_fig_amount(current)}" + (f" ({', '.join(bits)})" if bits else ""))
+    head_bits: List[str] = []
+    period = _fig_label(eng.get("period"), 20)
+    if period:
+        head_bits.append(period)
+    unit = _fig_label(eng.get("revenue_unit"), 16)
+    money = (_currency_code(eng.get("reporting_currency")) or _currency_code(eng.get("currency"))
+             or "reporting currency")
+    head_bits.append(f"{unit} of {money}" if unit else f"amounts in {money}")
+    if total is not None:
+        head_bits.append(f"% = share of total revenue {_fig_amount(total)}")
+    elim = _fig_float(eng.get("intersegment_eliminations"))
+    if elim is not None and elim > 0:
+        head_bits.append(f"intersegment sales of {_fig_amount(elim)} removed in consolidation")
+    return [(f"Revenue segments ({'; '.join(head_bits)}), largest first: ", items, _FIG_SEGMENTS_CAP)]
+
+
+_ProjRow = Tuple[int, str, Dict[str, Any]]   # (payload index, period label, projection row)
+# The collector's stored growth rate per projected field (0.0 = "unknown").
+_STORED_GROWTH_KEY = {"revenue": "cagr", "eps": "eps_growth"}
+
+
+def _stored_growth(value: Any) -> Optional[float]:
+    """A stored `cagr` / `eps_growth` as a rate, or None for the collector's 0.0 "unknown" (and for
+    NaN, ±inf, a bool, a string or an implausible magnitude)."""
+    f = _fig_float(value)
+    return f if f is not None and f != 0 and abs(f) < _CAGR_MAX_ABS else None
+
+
+def _chained_ratio(rows: List[_ProjRow], field: str, k0: int, k1: int) -> Optional[float]:
+    """rows[k1] / rows[k0] for `field`, chained from the per-row YoY changes (`<field>_yoy_pct`,
+    which the collector computed from the UNROUNDED estimates). None when a link is missing —
+    each row must be the next payload row (a dropped row breaks the chain), every base positive
+    (a YoY off a non-positive base is not a ratio), every YoY finite — or when the chain disagrees
+    with the rounded projections themselves (a corrupt YoY is never compounded into a rate)."""
+    ratio = 1.0
+    for k in range(k0 + 1, k1 + 1):
+        prev_src, _prev_period, prev = rows[k - 1]
+        src, _period, row = rows[k]
+        base, value = _fig_float(prev.get(field)), _fig_float(row.get(field))
+        yoy = _fig_float(row.get(f"{field}_yoy_pct"))
+        if (src != prev_src + 1 or base is None or base <= 0 or value is None or value <= 0
+                or yoy is None or yoy <= -100):
+            return None
+        ratio *= 1.0 + yoy / 100.0
+    v0, v1 = _fig_float(rows[k0][2].get(field)), _fig_float(rows[k1][2].get(field))
+    if v0 is None or v1 is None or not math.isfinite(ratio):
+        return None
+    # The rounded endpoints bound the true ratio; each YoY carries its own 0.05pp rounding.
+    slack = 1.001 ** (k1 - k0)
+    low = max(v1 - _PROJECTION_ROUNDING, 0.0) / (v0 + _PROJECTION_ROUNDING)
+    high = (v1 + _PROJECTION_ROUNDING) / (v0 - _PROJECTION_ROUNDING) if v0 > _PROJECTION_ROUNDING \
+        else math.inf
+    return ratio if low / slack <= ratio <= high * slack else None
+
+
+def _projection_growth(rows: List[_ProjRow], field: str, stored: Optional[float],
+                       complete: bool) -> Optional[Tuple[float, str, str]]:
+    """(rate %/yr, first period, last period) for `field` across the projections, or None.
+
+    The STORED rate (`cagr` / `eps_growth`) is the one the report card and the PDF print — the
+    collector computed it from the unrounded estimates over this same visible window — so it is
+    stated whenever it is a real number and the window is intact (every payload row kept, both
+    endpoints positive), labelled with the window's first and last period. Its 0.0 means
+    "unknown" (an endpoint without a positive estimate) and is never stated: the rate is then
+    recomputed over the positive points — chained from the per-row YoY when every link is there,
+    else from the rounded projections only when their rounding cannot move it by more than
+    `_CAGR_MAX_ERROR_PP`. The span is the fiscal-year difference when both labels are years (a
+    non-increasing pair → None: unsorted rows), else the row distance."""
+    if len(rows) < 2:
+        return None
+    if complete and stored is not None:
+        v0, v1 = _fig_float(rows[0][2].get(field)), _fig_float(rows[-1][2].get(field))
+        if v0 is not None and v0 > 0 and v1 is not None and v1 > 0:
+            return stored, rows[0][1], rows[-1][1]
+    points: List[Tuple[int, str, float]] = []
+    for k, (_src, period, p) in enumerate(rows):
+        v = _fig_float(p.get(field))
+        if v is not None and v > 0:
+            points.append((k, period, v))
+    if len(points) < 2:
+        return None
+    (k0, p0, v0), (k1, p1, v1) = points[0], points[-1]
+    y0, y1 = _FISCAL_YEAR.fullmatch(p0), _FISCAL_YEAR.fullmatch(p1)
+    years = int(y1.group(1)) - int(y0.group(1)) if y0 and y1 else k1 - k0
+    if years <= 0:
+        return None
+    try:
+        ratio = _chained_ratio(rows, field, k0, k1)
+        if ratio is None:
+            low = (v1 - _PROJECTION_ROUNDING) / (v0 + _PROJECTION_ROUNDING)
+            if v0 <= _PROJECTION_ROUNDING or low <= 0:
+                return None
+            high = (v1 + _PROJECTION_ROUNDING) / (v0 - _PROJECTION_ROUNDING)
+            if (high ** (1.0 / years) - low ** (1.0 / years)) * 100.0 > _CAGR_MAX_ERROR_PP:
+                return None
+            ratio = v1 / v0
+        rate = (ratio ** (1.0 / years) - 1.0) * 100.0
+    except (OverflowError, ZeroDivisionError, ValueError):
+        return None
+    return (rate, p0, p1) if math.isfinite(rate) and abs(rate) < _CAGR_MAX_ABS else None
+
+
+def _forecast_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """The forward analyst forecast, labelled as the analysts' estimate, with its growth rate:
+    the stored one the card shows, or one recomputed from the projections when the collector
+    stored 0.0 for "unknown" (`_projection_growth`)."""
+    rf = report.get("revenue_forecast")
+    if not isinstance(rf, dict):
+        return []
+    projections = rf.get("projections")
+    rows: List[_ProjRow] = []
+    seen = set()
+    if isinstance(projections, list):
+        for src, p in enumerate(projections[:_FIG_SCAN_ROWS]):
+            if not isinstance(p, dict) or p.get("is_forecast") is False:
+                continue
+            period = _fig_label(p.get("period"), 12)
+            if not period or period in seen:   # a repeated period is a corrupt row
+                continue
+            seen.add(period)
+            rows.append((src, period, p))
+    # The stored rate describes the WHOLE window: usable only when no row was dropped.
+    complete = isinstance(projections, list) and len(rows) == len(projections)
+    years: List[str] = []
+    for _src, period, p in rows:
+        bits: List[str] = []
+        rev = _fig_float(p.get("revenue"))
+        rev_label = _fig_label(p.get("revenue_label"), 16) if rev is not None and rev > 0 else None
+        if rev_label:
+            bits.append(f"revenue {rev_label}")
+        eps = _fig_float(p.get("eps"))   # 0.0 is the collector's "no estimate"; a loss keeps its sign
+        eps_label = _fig_label(p.get("eps_label"), 16) if eps is not None and eps != 0 else None
+        if eps_label:
+            bits.append(f"EPS {eps_label}")
+        if bits:
+            years.append(f"{period} {', '.join(bits)}")
+    growth: List[str] = []
+    for field, label in (("revenue", "revenue"), ("eps", "EPS")):
+        cagr = _projection_growth(rows, field, _stored_growth(rf.get(_STORED_GROWTH_KEY[field])),
+                                  complete)
+        if cagr is not None:
+            rate, first, last = cagr
+            growth.append(f"{label} CAGR {first}–{last} {_fig_pct(rate)}/yr")
+    if not years and not growth:
+        return []
+    items = growth[:]
+    count = rf.get("forecast_analyst_count")
+    if isinstance(count, int) and not isinstance(count, bool) and 0 < count < 10_000:
+        items.append(f"{count:,} analysts on the nearest year")
+    items.extend(years)
+    return [("Forward forecasts (analyst estimate): ", items, _FIG_FORECAST_CAP)]
+
+
+def _track_record_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """The beat/miss summary plus the last four reported quarters (EPS surprise vs estimate),
+    oldest first — the order the collector stores them in."""
+    rf = report.get("revenue_forecast")
+    if not isinstance(rf, dict):
+        return []
+    rows = rf.get("earnings_track_record")
+    items: List[str] = []
+    if isinstance(rows, list):
+        for r in rows[-_FIG_SCAN_ROWS:]:
+            if not isinstance(r, dict):
+                continue
+            period = _fig_label(r.get("period"), 16)
+            surprise = _fig_float(r.get("surprise_percent"))
+            if not period or surprise is None:
+                continue
+            result = r.get("result") if r.get("result") in ("beat", "miss", "met") else None
+            # A report stored before `result` existed has `beat` alone, which is False for a
+            # met quarter too: only a surprise that SHOWS negative may be called a miss (a
+            # -0.04% prints "+0.0%", and "miss +0.0%" contradicts itself).
+            if result is None and r.get("beat") is True:
+                result = "beat"
+            elif result is None and r.get("beat") is False and round(surprise, 1) < 0:
+                result = "miss"
+            items.append(f"{period} {result + ' ' if result else ''}{_fig_pct(surprise, signed=True)}")
+        items = items[-_FIG_TRACK_ROWS:]
+    summary = _fig_label(rf.get("beat_summary"), 40)
+    if items:
+        head = ("Earnings vs analyst EPS estimates ("
+                + (f"{summary}; " if summary else "") + "last reported quarters, oldest first): ")
+        return [(head, items, _FIG_TRACK_CAP)]
+    if summary:
+        return [(f"Earnings vs analyst EPS estimates: {summary}.", [], _FIG_TRACK_CAP)]
+    return []
+
+
+def _ownership_text(value: Any) -> Optional[str]:
+    """A holding as the report shows it ("1.0M", or a number), or None for "—" / zero."""
+    if isinstance(value, str):
+        text = _fig_label(value, 16)
+        return text if text and any(c in "123456789" for c in text) else None
+    f = _fig_float(value)
+    return _fig_amount(f) if f is not None and f > 0 else None
+
+
+def _manager_item(row: Any, top_holder: bool) -> Optional[Tuple[str, str]]:
+    """(dedupe key, item) for one officer / holder: "Name (Title): 1.0M shares, 0.43%"."""
+    if not isinstance(row, dict):
+        return None
+    name = _clean_label(row.get("name"), _FIG_NAME_CAP)
+    if not name or name.lower() == "data unavailable":   # the collector's placeholder row
+        return None
+    title = _clean_label(row.get("title"), 48)
+    if top_holder and title and title.lower() in _REDUNDANT_HOLDER_TITLES:
+        title = None   # the line's head already says "10%+ owners"
+    holding: List[str] = []
+    shares = _ownership_text(row.get("ownership"))
+    if shares:
+        holding.append(f"{shares} shares")
+    direct = _fig_float(row.get("percent_owned"))
+    beneficial = _fig_float(row.get("percent_ownership")) if top_holder else None
+    if beneficial is not None and 0 < beneficial <= 100:
+        holding.append(f"{_num(beneficial)}% beneficial")
+    elif direct is not None and 0 < direct <= 100:
+        # An officer line's head says what the bare % is; a holder's says it in words.
+        holding.append(f"{_num(direct)}% of shares" if top_holder else f"{_num(direct)}%")
+    item = name + (f" ({title})" if title else "") + (f": {', '.join(holding)}" if holding else "")
+    return name.lower(), item
+
+
+def _management_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """Officers in the stored order (the collector's role rank: CEO, CFO, COO, …) and the 10%+
+    holders. Each line names its REAL basis (final review 2026-10-09 — it used to say "as of the
+    report date"): an officer's figure is the direct balance right after that person's latest
+    Form 4 (`roster_from_holdings`, which can be a year before the report), and a holder's is
+    from its latest 13D/G filing (which can be years old). A list longer than the line's limit
+    says how many it shows ("first 5 of 9"), so a missing officer reads as not shown, never as
+    absent."""
+    km = report.get("key_management")
+    if not isinstance(km, dict):
+        return []
+    specs: List[_FigSpec] = []
+    for key, top, limit, label, note, cap in (
+        ("officers", False, _FIG_OFFICERS_MAX, "Officers, in role order",
+         "direct holdings after each one's latest Form 4, not as of the report date; % of "
+         "shares outstanding", _FIG_OFFICERS_CAP),
+        ("top_holders", True, _FIG_TOP_HOLDERS_MAX, "Top holders, 10%+ owners",
+         "each one's latest 13D/G filing, may predate the report", _FIG_TOP_HOLDERS_CAP),
+    ):
+        rows = km.get(key)
+        if not isinstance(rows, list):
+            continue
+        items: List[str] = []
+        seen = set()
+        for row in rows[:_FIG_SCAN_ROWS]:
+            built = _manager_item(row, top)
+            if built is None or built[0] in seen:
+                continue
+            seen.add(built[0])
+            items.append(built[1])
+        if items:
+            shown = f"first {limit} of {len(items)}; " if len(items) > limit else ""
+            specs.append((f"{label} ({shown}{note}): ", items[:limit], cap))
+    return specs
+
+
+def _metric_value(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        text = _fig_label(value, 24)
+        return text if text and text.lower() not in _FIG_EMPTY_VALUES else None
+    f = _fig_float(value)
+    return _num(f) if f is not None else None
+
+
+def _metric_item(m: Dict[str, Any]) -> Optional[str]:
+    """One card metric as "Gross Margin 77.30% (industry avg 64.3%)", or None.
+
+    The wire label is peer-worded first (`peer_worded_metric_name`: an INDUSTRY median is the
+    industry's, as on the 1.1 card — the wire keeps "sector" for shipped iOS builds), then its
+    peer suffix is restated compactly (`_METRIC_PEER_SUFFIX`). A label too long to state whole is
+    dropped, never cut: its suffix carries a figure. A label with no recognised suffix is kept
+    as it is."""
+    label = (_fig_label(m.get("label"), _FIG_METRIC_LABEL_CAP)
+             or _fig_label(m.get("name"), _FIG_METRIC_LABEL_CAP))
+    value = _metric_value(m.get("value"))
+    if not label or not value:
+        return None
+    label = peer_worded_metric_name(SimpleNamespace(name=label, peer_level=m.get("peer_level")))
+    peer = _METRIC_PEER_SUFFIX.search(label)
+    if peer is None:
+        return f"{label} {value}"
+    name = label[:peer.start()].strip()
+    if not name:
+        return None
+    median = _fig_label(peer.group(2), 24)
+    return f"{name} {value}" + (f" ({peer.group(1)} {median})" if median else "")
+
+
+def _fundamentals_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """The fundamentals cards as the report shows them: title, stars of 5, the verdict, and each
+    metric's value with its peer median (the card's display strings; history arrays never)."""
+    cards = report.get("fundamental_metrics")
+    if not isinstance(cards, list):
+        return []
+    specs: List[_FigSpec] = []
+    for card in cards[:_FIG_SCAN_ROWS]:
+        if len(specs) >= _FIG_CARDS_MAX:
+            break
+        if not isinstance(card, dict):
+            continue
+        title = _clean_label(card.get("title"), 32)
+        if not title:
+            continue
+        items: List[str] = []
+        metrics = card.get("metrics")
+        if isinstance(metrics, list):
+            for m in metrics[:_FIG_METRICS_MAX]:
+                item = _metric_item(m) if isinstance(m, dict) else None
+                if item:
+                    items.append(item)
+        bits: List[str] = []
+        stars = _fig_float(card.get("star_rating"))
+        if stars is not None and stars.is_integer() and 1 <= stars <= 5:
+            bits.append(f"{int(stars)}/5 stars")
+        verdict = _clean_label(card.get("quality_label"), 80)
+        if verdict and verdict.lower() not in _FIG_EMPTY_VALUES:
+            bits.append(verdict)
+        if not items and not bits:
+            continue
+        head = f"{title} card" + (f" ({'; '.join(bits)})" if bits else "")
+        specs.append((head + ": ", items, _FIG_CARD_CAP) if items else (head + ".", [], _FIG_CARD_CAP))
+    return specs
+
+
+# (builder, group cap) in priority order — see the block comment above. The cards precede the
+# officers: "what is the ROE / debt-to-equity?" is asked far more than the fifth officer's stake.
+_FIGURE_GROUPS = (
+    (_fair_value_figures, _FIG_FAIR_VALUE_CAP),
+    (_moat_figures, _FIG_MOAT_CAP),
+    (_segment_figures, _FIG_SEGMENTS_CAP),
+    (_forecast_figures, _FIG_FORECAST_CAP),
+    (_track_record_figures, _FIG_TRACK_CAP),
+    (_fundamentals_figures, _FIG_CARDS_CAP),
+    (_management_figures, _FIG_OFFICERS_CAP + _FIG_TOP_HOLDERS_CAP),
+)
+
+
+def _fig_line_name(head: str) -> str:
+    """A lead line's name for a log message ("Health card", "Officers, in role order")."""
+    return _cap(re.split(r" \(|: ", head, maxsplit=1)[0], 40)
+
+
+def _report_figures_lead(report: Any) -> List[str]:
+    """The report's figures as labelled lines, ≤ `_REPORT_FIGURES_LEAD_CAP` characters joined.
+
+    A group with nothing usable — a legacy report without the section, a malformed row, a NaN —
+    is left out (never a "0", never "None"), and a group that raises costs only itself. A line
+    the room forced to drop items, or to leave out, is logged at WARNING (one record per lead):
+    the figure it lost is then "not included here" to the model, so the cut must be visible."""
+    if not isinstance(report, dict):
+        return []
+    out: List[str] = []
+    used = 0
+    cuts: List[str] = []
+    for build, group_cap in _FIGURE_GROUPS:
+        try:
+            specs = build(report)
+        except Exception as e:   # one malformed group must never cost the block
+            logger.warning(
+                "chat_context: report figures group %s skipped for %r (%s: %r)",
+                build.__name__, _log_ref(report.get("symbol"), 32), type(e).__name__,
+                _log_ref(e, 200), exc_info=True,
+            )
+            continue
+        group_used = 0
+        for head, items, cap in specs:
+            newline = 1 if out else 0
+            room = min(cap, group_cap - group_used, _REPORT_FIGURES_LEAD_CAP - used - newline)
+            line, kept = _fit_items_counted(head, items, room)
+            if line is None:
+                cuts.append(f"{_fig_line_name(head)} left out")
+                continue
+            if kept < len(items):
+                cuts.append(f"{_fig_line_name(head)} {kept}/{len(items)} items")
+            out.append(line)
+            used += len(line) + newline
+            group_used += len(line) + 1
+    if cuts:
+        logger.warning(
+            "chat_context: report figures lead for %r cut for space (%d chars): %r",
+            _log_ref(report.get("symbol"), 32), used, _log_ref("; ".join(cuts), 400),
+        )
+    return out
+
+
+def _without_lead_figures(report: Any) -> Any:
+    """The report minus `_LEAD_OWNED_SECTION_KEYS`, for the dump: a section is found by the exact
+    name the lead reads it under; its child keys match case-insensitively, like every key list
+    here. Never mutates its input."""
+    if not isinstance(report, dict):
+        return report
+    out = dict(report)
+    for section, keys in _LEAD_OWNED_SECTION_KEYS.items():
+        node = out.get(section)
+        if isinstance(node, dict):
+            out[section] = {k: v for k, v in node.items()
+                            if not (isinstance(k, str) and k.lower() in keys)}
     return out
 
 
@@ -1071,24 +1752,21 @@ class ChatContextResolver:
         # the bull case?" then read as missing from the report.
         lead.extend(_thesis_lead(report))
         lead.extend(_competitor_lead(report))
+        # The figures (pillars, segments, cards, earnings, forecast, officers, fair value), read
+        # from `report` AFTER the kill switch above, so a withdrawn estimate never leads.
+        lead.extend(_report_figures_lead(report))
 
-        # DUMP — every other section the user can see (assessment, fundamentals, revenue, moat,
-        # ownership, Wall Street, macro, critical factors) minus the lead keys + the heavy
-        # chart/price arrays.
+        # DUMP — every other section the user can see (assessment, revenue, moat, ownership,
+        # Wall Street, macro, critical factors) minus the lead keys, the figures the lead
+        # carries, and the heavy chart/price arrays.
         dump = _flatten_for_grounding(
-            _without_unmeasured_guidance(report), _REPORT_DUMP_CAP,
-            skip_top=("symbol", "company_name", "exchange", "agent", "quality_score",
-                      "live_date", "price_close_date", "price_action", "executive_summary_text",
-                      "disclaimer_text", "core_thesis",   # core_thesis: in the lead
-                      # Internal scoring inputs, never sent to iOS: they carry the analyst
-                      # rating/target (or the estimate re-labelled "price_target") and a
-                      # "deep_undervalued" valuation status.
-                      "_scoring_inputs", "key_vitals"),
+            _without_lead_figures(_without_unmeasured_guidance(report)), _REPORT_DUMP_CAP,
+            skip_top=_REPORT_SKIP_TOP,
             # ORDERED, and budgeted FAIRLY: a report read back from JSONB stores its keys
             # shortest-first, so `macro_data` came first and spent the whole budget before
             # the moat, revenue and Wall Street sections were reached. Each section now gets
             # a share, narrative children first; macro is last because its brief is the
-            # most generic. fundamental_metrics is not listed → it takes what is left.
+            # most generic. Unlisted top-level keys share what is left.
             priority_top=_REPORT_PRIORITY,
             fair=True,
             child_priority=_REPORT_CHILD_PRIORITY,

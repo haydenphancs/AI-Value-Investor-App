@@ -40,6 +40,17 @@ def _explanation(*, tier: str, kind: CauseKind, change: float = -22.0, tag: str 
     )
 
 
+@pytest.fixture(autouse=True)
+def no_macro(monkeypatch):
+    """The snapshot's macro leg (FRED) is its own suite (`test_chat_market_snapshot_macro.py`).
+    Here it reads as absent, so every snapshot below is exactly the breadth it always was —
+    and no test reaches the real FRED client (the suite is hermetic)."""
+    async def _absent():
+        return {}
+
+    monkeypatch.setattr(cmt, "_fetch_macro_block", _absent)
+
+
 @pytest.fixture
 def no_news(monkeypatch):
     """Tier 2 stubbed out. Every test here is about tier 1 and tier 3."""

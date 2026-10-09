@@ -285,16 +285,104 @@ def test_startup_requires_the_current_consent_version():
     assert re.search(r"hasConsented\s*=\s*current\b", init), "hasConsented is not the versioned verdict"
 
 
-def test_the_consent_version_was_bumped_with_the_web_search_row():
-    store = _code(_CONSENT_STORE)
-    match = re.search(r"static let currentVersion\s*=\s*(\d+)", store)
+def _current_version() -> int:
+    match = re.search(r"static let currentVersion\s*=\s*(\d+)", _code(_CONSENT_STORE))
     assert match, "AIConsentStore.currentVersion is gone"
+    return int(match.group(1))
+
+
+def test_the_consent_version_was_bumped_with_the_web_search_row():
     view = _strip_comments(_consent_view_source())
     if "Brave" in view or "web search" in view.lower():
-        assert int(match.group(1)) >= 2, (
+        assert _current_version() >= 2, (
             "the consent sheet discloses web search but currentVersion was not bumped past the "
             "1.0 text, so 1.0 consents still count"
         )
+
+
+def test_the_every_chat_and_automatic_search_row_carries_consent_v3():
+    """2026-10-09: the row now discloses web search in ANY chat, including the search Cay AI runs
+    without being asked. A v2 consent described report chat and an explicit ask only, so it must
+    not count for the new text — the version moves to 3, everyone re-consents once, and the server
+    opens the new flows only for an `X-AI-Consent-Version` of 3+."""
+    view = _strip_comments(_consent_view_source())
+    assert "In any chat" in view and "can't answer your question" in view, (
+        "scan drifted — the consent sheet no longer carries the every-chat / automatic row"
+    )
+    assert _current_version() == 3, (
+        f"currentVersion is {_current_version()}: the every-chat + automatic web-search row is "
+        f"consent text 3. Lower and the v2 consents (report chat, explicit ask only) still count "
+        f"for a flow they never described; higher without a new row re-prompts everyone for nothing"
+    )
+
+
+# ── 2c. The server learns WHICH consent text was accepted (2026-10-09) ────────
+#
+# "1.01" parses the same before and after the copy changed, so the app version cannot tell the
+# server whether this person saw the every-chat / automatic web-search row. The app sends the
+# ACCEPTED consent version as `X-AI-Consent-Version`, and omits it while no consent is held.
+
+_API_CLIENT = _IOS / "Core" / "Services" / "APIClient.swift"
+_CONSENT_HEADER = "X-AI-Consent-Version"
+
+
+def test_every_request_carries_the_accepted_consent_version_when_one_is_held():
+    """Brace-bound to `buildRequest` — the one funnel behind request<T>, request, downloadData and
+    openStream — and to the `if let` that holds the read, so the header can only be set when the
+    reader returned a version."""
+    build = _decl_block(_code(_API_CLIENT), "private func buildRequest(for endpoint: APIEndpoint")
+    assert "request.setValue(\"application/json\", forHTTPHeaderField: \"Accept\")" in build, (
+        "scan drifted — this is not the request builder"
+    )
+    guarded = _decl_block(build, "if let consentVersion = AIConsentStore.acceptedVersionForRequests()")
+    assert f'request.setValue(String(consentVersion), forHTTPHeaderField: "{_CONSENT_HEADER}")' in guarded, (
+        "the accepted consent version is no longer sent — the server keeps every-chat and "
+        "automatic web search closed for a consent it cannot see"
+    )
+
+
+def test_the_consent_header_is_set_in_exactly_one_place():
+    """Omitted without consent: a second, unguarded `setValue` (say, of `currentVersion`) would
+    claim the new text for someone who never accepted it."""
+    code = _code(_API_CLIENT)
+    assert code.count(f'"{_CONSENT_HEADER}"') == 1, (
+        f"{_CONSENT_HEADER} is written more than once (or not at all) in APIClient — it must come "
+        f"only from the guarded accepted-version read"
+    )
+    for path in sorted(_IOS.rglob("*.swift")):
+        if path.name == "APIClient.swift":
+            continue
+        assert _CONSENT_HEADER not in _strip_comments(path.read_text(encoding="utf-8")), (
+            f"{path.relative_to(_IOS)} sets {_CONSENT_HEADER} outside the request funnel"
+        )
+
+
+def test_the_accepted_version_reader_omits_the_header_without_consent():
+    """The reader's contract: nil unless consent is GRANTED, then the stored version (no stored
+    version = the original text, 1) — never `currentVersion`, which would report the new text for
+    a v2 grant. Nonisolated and UserDefaults-only, because the network actor calls it."""
+    body = _decl_block(_code(_CONSENT_STORE), "nonisolated static func acceptedVersionForRequests(")
+    assert re.search(r"guard defaults\.bool\(forKey: Keys\.granted\) else \{ return nil \}", body), (
+        "the reader no longer returns nil without a grant, so the header could claim a consent "
+        "that was withdrawn or never given"
+    )
+    assert "Keys.version" in body and "?? 1" in body, (
+        "the reader must report the ACCEPTED version, reading a version-less grant as text 1"
+    )
+    for forbidden in ("currentVersion", "hasConsented", "AIConsentStore.shared", "grantedAt"):
+        assert forbidden not in body, (
+            f"the reader touches {forbidden!r} — it must report only the stored accepted version, "
+            f"and must not reach @MainActor state from the network actor"
+        )
+
+
+def test_the_keys_the_nonisolated_reader_uses_are_nonisolated():
+    """The project defaults every type to MainActor isolation, so the `Keys` constants the
+    nonisolated reader uses must be nonisolated too, or the read would need the main actor."""
+    code = _code(_CONSENT_STORE)
+    assert re.search(r"nonisolated\s+private\s+enum\s+Keys\b|private\s+nonisolated\s+enum\s+Keys\b", code), (
+        "Keys lost `nonisolated` while acceptedVersionForRequests (nonisolated) still reads it"
+    )
 
 
 def test_consent_is_dropped_when_a_session_ends():
@@ -437,6 +525,19 @@ def test_the_privacy_policy_names_the_row_that_actually_exists():
 #                                       => RED  (withdraw_confirmation) — bounded to the ACTION
 #                                               closure, so the `message:` prose below it cannot
 #                                               satisfy the scan
+#   2026-10-09 (consent v3 + X-AI-Consent-Version), each observed RED, then restored:
+#   AIConsentStore: currentVersion 3 -> 2          => RED (every_chat_and_automatic_search_row_v3)
+#   APIClient: the setValue moved OUT of the `if let consentVersion` block (unconditional,
+#              `String(AIConsentStore.currentVersion)`)
+#                                                  => RED (every_request_carries)
+#   APIClient: a second, unguarded `setValue("3", … "X-AI-Consent-Version")` before the auth gate
+#                                                  => RED (exactly_one_place)
+#   AIConsentStore: the reader's `guard … else { return nil }` -> `guard true else …`
+#                                                  => RED (reader_omits_the_header_without_consent)
+#   AIConsentStore: the reader returns `currentVersion` instead of the stored version
+#                                                  => RED (reader_omits_the_header_without_consent)
+#   AIConsentStore: `nonisolated` dropped from `enum Keys`
+#                                                  => RED (keys_the_nonisolated_reader_uses)
 #   CRITICAL — neutralise `_strip_comments` to the identity function, THEN delete the :338 gate
 #                                       => still RED. testing.md rule 1: if this had gone green,
 #                                          the "Third-party AI consent gate (App Review

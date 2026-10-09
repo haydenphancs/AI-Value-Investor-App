@@ -28,15 +28,28 @@ _GENERAL = ChatSpecialist(
 )
 
 _SPECIALISTS: Dict[str, ChatSpecialist] = {
+    # 2026-10-08: no "forward P/E" and no "price vs. analyst targets" anchor. No chat data
+    # carries a forward multiple (the index card's is a 0 placeholder, flagged
+    # `forward_pe_known=False`), analyst price targets are outside the data licence, and a
+    # fair-value figure is a MODEL estimate — naming any of them as an anchor invited the model
+    # to supply it from memory. Final review 2026-10-09: the no-analyst-tool clause names only
+    # ratings and price targets (the unlicensed part) — "no analyst data" contradicted the base
+    # prompt's licensed revenue / EPS ESTIMATES and, appended last, won on every valuation turn.
     "valuation": ChatSpecialist(
         "valuation", "Valuation",
-        "LENS: Answer through a VALUATION lens — is it cheap or expensive, and why? Anchor on P/E, "
-        "forward P/E, earnings yield, price vs. analyst targets, and what the multiple implies about "
-        "expectations. Pull the price tool you are offered (on an index screen that is the "
-        "market-overview tool, which carries the index's P/E, forward P/E and earnings yield) "
-        "and the analyst tool when it is offered, for real numbers; if no analyst tool is "
-        "offered, say Caydex has no analyst data rather than recalling a consensus. Don't drift "
-        "into unrelated technicals or macro.",
+        "LENS: Answer through a VALUATION lens — is it cheap or expensive, and why? Anchor on "
+        "P/E and the other multiples in your data (earnings yield and any others it gives, each "
+        "with its period), and what the multiple implies about expectations. Use a forward "
+        "multiple only if your data states one, and never read a 0 or a missing multiple as a "
+        "value. A fair-value figure is a model estimate, never a price target — never give a "
+        "price target, and do not anchor on analyst price targets. Pull the price tool you are "
+        "offered (on an index screen that is the market-overview tool, which carries the "
+        "index's P/E and earnings yield when they are known) and the analyst tool when it is "
+        "offered, for real numbers; if no analyst tool is offered, say Caydex has no analyst "
+        "ratings or price targets rather than recalling them; analysts' revenue and EPS "
+        "estimates, when your data or the estimates section of the financials tool you are "
+        "offered gives them, may be used, labelled as estimates and never as a rating, "
+        "recommendation or target. Don't drift into unrelated technicals or macro.",
     ),
     "technicals": ChatSpecialist(
         "technicals", "Technicals",
@@ -49,8 +62,9 @@ _SPECIALISTS: Dict[str, ChatSpecialist] = {
     "fundamentals": ChatSpecialist(
         "fundamentals", "Fundamentals",
         "LENS: Answer through a FUNDAMENTALS lens — revenue/earnings growth, margins, balance-sheet "
-        "health, moat, and business quality. Ground claims in the provided financials + tool data. "
-        "This is about the BUSINESS, not the chart.",
+        "health, moat, and business quality. Ground claims in the company data you were given, "
+        "and in the financials tool when you are offered one; name the period of every figure "
+        "(fiscal year or trailing twelve months). This is about the BUSINESS, not the chart.",
     ),
     "macro": ChatSpecialist(
         "macro", "Macro",
@@ -63,7 +77,9 @@ _SPECIALISTS: Dict[str, ChatSpecialist] = {
         # that it could not do sectors at all.
         "rotation, rates, and macro drivers. Use get_market_snapshot for sector performance, "
         "market breadth and what is moving today — it names every sector, so answer sector "
-        "questions from it rather than declining them. On an index screen, also use the "
+        "questions from it rather than declining them — and for its dated macro readings on "
+        "rates, inflation, unemployment and exchange rates, each with its date; the VIX and the "
+        "DXY are not in Caydex data, so never estimate them. On an index screen, also use the "
         "market-overview tool for "
         # Was "Do NOT name specific indices — say 'the market'", a second copy of the gag that
         # `_ASSET_PERSONAS["INDEX"]` carried. This lens is selected on index detail screens too,

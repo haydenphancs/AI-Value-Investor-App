@@ -894,3 +894,204 @@ async def test_the_extra_round_is_skipped_late_in_the_send_budget(monkeypatch):
     )
     assert out["text"] == "Answer from the web results." and ran == ["web_search"]
     assert len(calls) == 3 and not _declared_names(calls[2]["config"]), "the tool-less final round"
+
+
+# ── 2026-10-08 web tiers: a NEWS ask forces Caydex's licensed headlines in round 1 (the web may
+# follow); an explicit ask still forces the web search; the AUTOMATIC tier is never forced, and on
+# the send door its unforced web call after Caydex's tools earns the one bounded extra round. ──
+
+
+@pytest.mark.parametrize("force,handlers,expected", [
+    (("get_ticker_news", "explain_price_move"), {"get_ticker_news": 1, "explain_price_move": 1},
+     ["get_ticker_news", "explain_price_move"]),
+    (("get_ticker_news", "explain_price_move"), {"get_ticker_news": 1}, ["get_ticker_news"]),
+    (["explain_price_move", "explain_price_move"], {"explain_price_move": 1}, ["explain_price_move"]),
+    (frozenset({"get_ticker_news", "explain_price_move"}), {"get_ticker_news": 1, "explain_price_move": 1},
+     ["explain_price_move", "get_ticker_news"]),                    # a set: sorted, deterministic
+    ("web_search", {"web_search": 1}, ["web_search"]),
+    (("get_ticker_news",), {}, []),
+    (("", None, 5, "get_ticker_news"), {"get_ticker_news": 1}, ["get_ticker_news"]),
+    (None, {"web_search": 1}, []), (5, {"web_search": 1}, []), ({"web_search": 1}, {"web_search": 1}, []),
+])
+def test_forced_names_keep_order_drop_junk_and_need_a_handler(force, handlers, expected):
+    assert gem._forced_names(force, handlers) == expected
+
+
+def test_a_tuple_forces_mode_any_on_exactly_those_names():
+    async def h(args):
+        return {}
+
+    base = GeminiClient.__new__(GeminiClient)
+    base._temperature = 0.7
+    base._max_tokens = 8192
+    cfg = base._config(system_instruction="S", tools=_real_tools(), max_output_tokens=10,
+                       thinking_config=None)
+    forced = gem._forced_tool_config(cfg, ("get_ticker_news", "explain_price_move"),
+                                     {"get_ticker_news": h, "explain_price_move": h, "web_search": h})
+    mode, names = _forced_names(forced)
+    assert mode.endswith("ANY") and names == ["get_ticker_news", "explain_price_move"]
+    assert "web_search" in _declared_names(forced), "the web tool stays declared for a later round"
+    assert gem._forced_tool_config(cfg, ("get_ticker_news",), {"web_search": h}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_news_ask_streams_licensed_headlines_first_then_may_add_the_web():
+    gem._quota_circuit.reset()
+    client, configs = _recording_stream_client([
+        [_StreamChunk(_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"})))],
+        [_StreamChunk(_Part(fc=_FC("web_search", {"query": "Microsoft antitrust"})))],
+        [_StreamChunk(_Part(text="Done."))],
+    ])
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+
+    events = [e async for e in client.stream_agentic(
+        "p", tools=_real_tools(),
+        tool_handlers={n: make(n) for n in ("get_ticker_news", "explain_price_move", "web_search")},
+        force_first_tool=("get_ticker_news", "explain_price_move"),
+    )]
+    assert ran == ["get_ticker_news", "web_search"]
+    assert [p["name"] for k, p in events if k == "tool"] == ["get_ticker_news", "web_search"]
+    mode, names = _forced_names(configs[0])
+    assert mode.endswith("ANY") and names == ["get_ticker_news", "explain_price_move"]
+    assert configs[1] is None and configs[2] is None, "round 2 is unforced: the web may follow"
+
+
+@pytest.mark.asyncio
+async def test_the_send_door_runs_the_web_after_a_news_asks_forced_headlines():
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Let me also check the web."), _Part(fc=_FC("web_search", {"query": "q"}))]),
+        _Resp([_Part(text="Answer with both.")]),
+    ]
+    client, calls = _client(responses)
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(),
+        tool_handlers={n: make(n) for n in ("get_ticker_news", "web_search")},
+        force_first_tool=("get_ticker_news", "explain_price_move"),
+    )
+    assert out["text"] == "Answer with both." and ran == ["get_ticker_news", "web_search"]
+    assert _forced_names(calls[0]["config"])[1] == ["get_ticker_news"]
+
+
+def _named(*pairs):
+    ran: list = []
+
+    def make(name):
+        async def h(args):
+            ran.append(name)
+            return {"ok": name}
+        return h
+    return ran, {n: make(n) for n in pairs}
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_web_call_after_caydex_tools_earns_the_extra_round():
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("check_company_financials", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Caydex has no lawsuit data; checking the web."),
+               _Part(fc=_FC("web_search", {"query": "Microsoft lawsuit"}))]),
+        _Resp([_Part(text="Final answer.")]),
+    ]
+    client, calls = _client(responses)
+    ran, handlers = _named("check_company_financials", "web_search")
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(), tool_handlers=handlers,
+        extra_round_tools=frozenset({"web_search"}),
+    )
+    assert out["text"] == "Final answer." and ran == ["check_company_financials", "web_search"]
+    assert all(_forced_names(c["config"]) is None for c in calls), "the automatic tier is never forced"
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_unforced_follow_up_calling_another_tool_keeps_its_text_and_runs_nothing_more():
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("check_company_financials", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Here is the answer."), _Part(fc=_FC("get_ticker_news", {"ticker": "MSFT"}))]),
+    ]
+    client, calls = _client(responses)
+    ran, handlers = _named("check_company_financials", "get_ticker_news", "web_search")
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(), tool_handlers=handlers,
+        extra_round_tools=frozenset({"web_search"}),
+    )
+    assert out["text"] == "Here is the answer." and ran == ["check_company_financials"] and len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_extra_round_is_skipped_late_in_the_send_budget(monkeypatch):
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("check_company_financials", {"ticker": "MSFT"}))]),
+        _Resp([_Part(fc=_FC("web_search", {"query": "q"}))]),
+        _Resp([_Part(text="Tool-less final.")]),
+    ]
+    client, calls = _client(responses)
+    ran, handlers = _named("check_company_financials", "web_search")
+    # The 20 s bound already spent (patched to 0 rather than moving the process clock).
+    monkeypatch.setattr(gem, "_FORCED_EXTRA_ROUND_MAX_ELAPSED_SECONDS", 0.0)
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(), tool_handlers=handlers,
+        extra_round_tools=frozenset({"web_search"}),
+    )
+    assert out["text"] == "Tool-less final." and ran == ["check_company_financials"]
+    assert not _declared_names(calls[-1]["config"]), "the last answer is tool-less"
+
+
+@pytest.mark.asyncio
+async def test_without_extra_round_tools_the_unforced_door_is_unchanged():
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("check_company_financials", {"ticker": "MSFT"}))]),
+        _Resp([_Part(fc=_FC("web_search", {"query": "q"}))]),
+        _Resp([_Part(text="Final.")]),
+    ]
+    client, calls = _client(responses)
+    ran, handlers = _named("check_company_financials", "web_search")
+    out = await client.generate_with_tools(prompt="p", tools=_real_tools(), tool_handlers=handlers)
+    assert out["text"] == "Final." and ran == ["check_company_financials"] and len(calls) == 3
+
+
+def test_the_web_tool_timeout_covers_three_claims_and_the_hard_bound():
+    """An automatic search makes three budget RPCs before the Brave call (its hard bound is the
+    timeout + 2 s); the handler's ceiling must cover them with slack."""
+    assert gem._TOOL_TIMEOUTS["web_search"] >= float(settings.BRAVE_SEARCH_TIMEOUT_SECONDS) + 2.0 + 3.0
+
+
+@pytest.mark.asyncio
+async def test_after_the_automatic_extra_round_a_still_calling_follow_up_answers_tool_less():
+    """Bounded: one extra executed round only. A follow-up that STILL calls a tool after it —
+    even with a preamble — gets the tool-less final answer, never the bare preamble."""
+    gem._quota_circuit.reset()
+    responses = [
+        _Resp([_Part(fc=_FC("check_company_financials", {"ticker": "MSFT"}))]),
+        _Resp([_Part(fc=_FC("web_search", {"query": "Microsoft lawsuit"}))]),
+        _Resp([_Part(text="Let me also pull the chart."),
+               _Part(fc=_FC("get_stock_chart_data", {"ticker": "MSFT"}))]),
+        _Resp([_Part(text="Final.")]),
+    ]
+    client, calls = _client(responses)
+    ran, handlers = _named("check_company_financials", "web_search", "get_stock_chart_data")
+    out = await client.generate_with_tools(
+        prompt="p", tools=_real_tools(), tool_handlers=handlers,
+        extra_round_tools=frozenset({"web_search"}),
+    )
+    assert out["text"] == "Final." and ran == ["check_company_financials", "web_search"]
+    assert len(calls) == 4 and not _declared_names(calls[3]["config"])

@@ -238,7 +238,18 @@ async def test_company_profile_write_runs_off_the_event_loop(monkeypatch):
     assert seen["thread"] != loop_thread, (
         "_upsert_company_profile_db ran ON the event loop thread"
     )
-    assert set(seen["payload"]) == {
+    # The ten FORMATTED keys are the row's readers' contract (the chat's STOCK profile line,
+    # `company_facts_service`'s Overview-row path). Beside them the payload may carry only the
+    # raw-profile values copied verbatim, each present only when the profile has a real one:
+    # the fund flags, country / ADR (2026-10-08), and the name and logo whale_service reads
+    # (`profile_display_fields`, 2026-10-09). This profile has a name and nothing else.
+    formatted = {
         "description", "ceo", "founded", "employees", "headquarters",
         "website", "sector", "industry", "sector_performance", "industry_rank",
-    }, "the payload shape changed — app/services/chat_context_resolver reads these keys"
+    }
+    copied = {"isEtf", "isFund", "country", "is_adr", "companyName", "image"}
+    keys = set(seen["payload"])
+    assert formatted <= keys, "a formatted key went missing — the row's readers need all ten"
+    assert keys - formatted <= copied, f"unexpected payload keys: {keys - formatted - copied}"
+    assert keys - formatted == {"companyName"}, keys - formatted
+    assert seen["payload"]["companyName"] == "Broadcom"

@@ -278,15 +278,34 @@ def test_replay_of_stored_chips_is_filtered_and_an_all_refused_row_shows_none():
 
 # ── report chat: no paid web search one tap away (owner decision 2026-10-02) ──
 
+# News and verify chips: answerable from Caydex's headlines and data, so kept where no web search
+# opens on an ask, dropped where one does (a paid search one tap away).
 _WEB_CHIPS = ["Any recent news on AVGO?", "What's the latest news?", "Can you verify the margin?",
-              "Search the web for the DOJ case", "Is this still true?"]
-_PLAIN_CHIPS = ["What drives the moat?", "How does it compare to peers?", "Summarize this research report"]
+              "Is this still true?", "What's new with Nvidia?"]
+# Chips that ask to SEARCH THE WEB: dropped everywhere — a paid search one tap away where a web
+# tier is open, a dead end ("no web search is available in this chat") everywhere else.
+_SEARCH_THE_WEB_CHIPS = ["Search the web for the DOJ case", "Google it", "Can you look it up online?",
+                         "Check other websites for this", "Search for news about the CEO",
+                         "Browse the web for analyst reactions"]
+_PLAIN_CHIPS = ["What drives the moat?", "How does it compare to peers?", "Summarize this research report",
+                "How big is Amazon Web Services?", "What is the company's website?"]
 
 
 @pytest.mark.parametrize("chip", _WEB_CHIPS)
 def test_a_web_search_chip_is_dropped_only_in_a_report_chat(chip):
     assert is_answerable_chip(chip) is True, "outside a report chat it is an ordinary chip"
     assert is_answerable_chip(chip, drop_web_search=True) is False
+
+
+@pytest.mark.parametrize("chip", _SEARCH_THE_WEB_CHIPS)
+def test_a_search_the_web_chip_is_dropped_everywhere(chip):
+    assert is_answerable_chip(chip) is False, "no web tier answers it: a dead end"
+    assert is_answerable_chip(chip, drop_web_search=True) is False, "a paid search one tap away"
+
+
+@pytest.mark.parametrize("chip", _PLAIN_CHIPS)
+def test_web_words_that_are_not_an_ask_never_drop_a_chip(chip):
+    assert is_answerable_chip(chip) is True
 
 
 @pytest.mark.parametrize("chip", _PLAIN_CHIPS)

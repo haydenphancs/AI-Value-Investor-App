@@ -146,8 +146,10 @@ async def fetch_etf_tickers(tickers: Sequence[str]) -> set:
     column before 2026-09-11, so every ETF added before then still reads as a stock — and no
     symbol-shape rule can tell SPY is a fund. Read from `company_profile_cache`, never FMP.
     Only a definite `isEtf: true` counts (`isFund` also covers closed-end and mutual funds,
-    which the ETF grounding does not serve); a row without the flag — a formatted write by
-    the detail screen drops it — is unknown and stays a stock. One batched read; a failure
+    which the ETF grounding does not serve); a row without the flag is unknown and stays a
+    stock. (Since 2026-10-09 the detail screen's formatted write MERGES into the row and keeps
+    a flag another writer stored — `company_facts_service.merge_profile_row` — so a row lacks
+    it only when no writer's profile read has supplied one yet.) One batched read; a failure
     is logged and answers "none" (the pills keep their class). Never raises.
     """
     symbols = [t for t in dict.fromkeys(str(t).strip().upper() for t in tickers or []) if t]

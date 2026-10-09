@@ -4,8 +4,8 @@ Environment variables with Pydantic validation.
 """
 
 from pathlib import Path
-from typing import Optional
-from pydantic import Field
+from typing import Literal, Optional
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
@@ -577,6 +577,27 @@ class Settings(BaseSettings):
     # stream with no bound (the context resolver caps the same call at 4 s).
     GEMINI_TOOL_RESULT_MAX_CHARS: int = 8000
     CHAT_TOOL_TIMEOUT_SECONDS: float = 8.0
+    # One agentic round's tool calls run CONCURRENTLY (`gemini._gather_tool_calls`, 2026-10-08):
+    # at most CHAT_TOOL_ROUND_MAX_CONCURRENCY handlers wait at once, and at most
+    # CHAT_TOOL_ROUND_MAX_JOBS unique calls with a handler run per round (every call past it is
+    # answered `too_many_tool_calls`). Read at call time. The defaults (4 / 8) are two waves; with
+    # the 30 s ceilings (`explain_price_move`, `get_market_snapshot`) two waves alone can pass the
+    # send door's 50 s budget (`CHAT_SEND_BUDGET_SECONDS`), so the send door also hands its tool
+    # rounds the budget's DEADLINE: each job's wait is capped at the time left and a job still
+    # queued when it runs out never starts (`gemini._gather_tool_calls`). An out-of-range value
+    # fails the deploy at boot (Railway keeps the previous deployment running).
+    CHAT_TOOL_ROUND_MAX_CONCURRENCY: int = Field(4, ge=1, le=16)
+    CHAT_TOOL_ROUND_MAX_JOBS: int = Field(8, ge=1, le=16)
+    # Kill switch for Ask Cay AI's Caydex data tools (2026-10-08): `check_company_financials`
+    # (a company's reported figures, read through the same cache-aside services the Financials
+    # and Overview tabs use — no Gemini on that path) AND `check_asset_profile` (company, fund
+    # and coin facts: the CEO and executives, headcount, a fund's fees and holdings, a coin's
+    # supply). False withdraws BOTH tools from every chat at once — the declarations, the handler
+    # maps and the prompt's capability block all filter through `chat_tools.tools_for_asset_type`
+    # — and the WHAT YOU KNOW rule drops its company-reported tier, "current executives"
+    # included (`ChatService._knowledge_rule`), back to the 2026-09-16 text. Read per turn;
+    # flipping it needs a Railway variable change and a restart.
+    CHAT_DATA_TOOLS_ENABLED: bool = True
     # Wall-clock budget for the NON-STREAMING chat door (`POST /messages`, the client's
     # stream-failure fallback). It sends nothing until the answer is complete and iOS gives
     # it a 60 s idle timeout, while the server's own ceilings on that path are all LARGER
@@ -842,6 +863,51 @@ class Settings(BaseSettings):
     # chat turn.
     CHAT_WEB_SOURCES_PERSIST: bool = False
 
+    # ── Web search beyond report chat (owner decisions 2026-10-08, PLAN A8) ───────
+    #
+    # Every switch below is FAIL-CLOSED and ALSO requires the master switch above
+    # (`CHAT_REPORT_WEB_SEARCH_ENABLED`, which the eval scripts force off) plus a Brave key. Both
+    # open ONLY for a signed-in caller whose `X-AI-Consent-Version` header (the AI consent the
+    # user ACCEPTED in the app) is at least `CHAT_WEB_SEARCH_MIN_CONSENT_VERSION`: consent v3 is
+    # the permission screen that discloses search in every chat and the automatic search; a
+    # missing, unreadable or older header stays closed (`chat_web_search_service.
+    # decide_web_search`). Report chat's explicit-ask search keeps its own gate (app ≥ 1.1.0).
+    #
+    # Explicit asks ("search the web", "verify", "the latest news") in ANY chat, Learn included.
+    CHAT_WEB_SEARCH_ALL_CHATS_ENABLED: bool = False
+    # The AUTOMATIC fallback: the model calls Caydex's tools first and may call the web search
+    # (unforced) only when they cannot answer — never for prices, quotes, market data, FX, the
+    # VIX or the DXY, never in a Learn chat or a deep dive. "off" (default) does nothing;
+    # "shadow" declares nothing, claims nothing and makes no search call — it logs one counts-only
+    # `AUTO_WEB_SHADOW` line per eligible turn; "on" declares the tool. Any other value reads as
+    # "off" (here and again at read time).
+    CHAT_AUTO_WEB_SEARCH_MODE: Literal["off", "shadow", "on"] = "off"
+    # The automatic tier's share of the explicit cap above (it is claimed THEN the global cap is
+    # claimed too, so the 180 is never exceeded): at most this many automatic searches a day
+    # across all accounts, and at most the per-account number for one account. Explicit asks may
+    # always use the whole global cap. Out-of-range values fail the deploy at boot.
+    CHAT_AUTO_WEB_SEARCH_DAILY_CAP: int = Field(100, ge=0, le=180)
+    CHAT_AUTO_WEB_SEARCH_PER_ACCOUNT_DAILY: int = Field(5, ge=0, le=50)
+    # Staged rollout: comma-separated user ids that may get the automatic tier while it is "on";
+    # empty = every signed-in caller with consent v3.
+    CHAT_AUTO_WEB_SEARCH_ACCOUNT_ALLOWLIST: str = ""
+    # The AI consent version whose permission screen discloses every-chat and automatic search.
+    # Never below 3 (the Privacy Policy's consent clause depends on it): a lower value fails the
+    # deploy. `scripts/asc_review_resubmit.py` checks this default before the any-chat review notes.
+    CHAT_WEB_SEARCH_MIN_CONSENT_VERSION: int = Field(3, ge=3, le=999)
+
+    @field_validator("CHAT_AUTO_WEB_SEARCH_MODE", mode="before")
+    @classmethod
+    def _auto_web_search_mode_fails_closed(cls, value: object) -> str:
+        """`CHAT_AUTO_WEB_SEARCH_MODE`: off / shadow / on, case- and space-insensitive; anything
+        else (a typo, an empty string, a bool) reads as "off" rather than failing the deploy —
+        the switch must never open by accident, and a bad value must not take the API down."""
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("off", "shadow", "on"):
+                return v
+        return "off"
+
     # ── Pre-warmed suggestion-chip answers (`chat_starter_warm_service`) ──────────
     #
     # The day's global chips are answered by a background pass and stored for one ET day,
@@ -896,6 +962,36 @@ class Settings(BaseSettings):
     # mechanism is unchanged: CHAT_FREE_FOLLOWUP_SECONDS=300 in the Railway environment and a
     # RESTART (settings is an lru_cache'd singleton).
     CHAT_FREE_FOLLOWUP_SECONDS: int = 0
+
+    # The unanswered-turn refund (owner decision 2026-10-09, `services/chat_answer_coverage.py`):
+    # when a cheap judge finds the reply did not give what the user's MAIN question asked for, the
+    # turn's credit is handed back — silently (no label under the answer; credit history reads
+    # "Not charged — Cay AI didn't fully answer"). "on" judges and refunds; "shadow" judges and
+    # logs one `CHAT_UNANSWERED` line, never refunds; "off" does nothing. Any other value reads
+    # as "off" (here and again at read time). Never judged: a turn whose web results reached the
+    # answer or whose model history holds such an answer (Brave's terms), a turn whose web search
+    # spent a unit of the global daily cap (owner decision 2026-10-03), a cache / starter replay,
+    # a deep dive, an already-settled turn, a question or reply too long to be read whole.
+    CHAT_UNANSWERED_REFUND_MODE: Literal["off", "shadow", "on"] = "on"
+    # At most this many such refunds per account per ET day (a `chat_usage_budget` bucket, claimed
+    # only on a "not answered" verdict); past it an unanswered turn is charged normally. 0 = none.
+    CHAT_UNANSWERED_REFUND_DAILY_CAP: int = Field(10, ge=0, le=100)
+    # The judge's own ceiling. A timeout leaves the turn charged. The send door judges only with
+    # 2 s (previous-turn read) + this + 3 s (money-section grace) of CHAT_SEND_BUDGET_SECONDS
+    # left — 11 s by default, derived (`chat_answer_coverage.send_door_min_seconds`) — and its
+    # decision ends by that budget's deadline.
+    CHAT_UNANSWERED_JUDGE_TIMEOUT_SECONDS: float = Field(6.0, ge=1, le=15)
+
+    @field_validator("CHAT_UNANSWERED_REFUND_MODE", mode="before")
+    @classmethod
+    def _unanswered_refund_mode_fails_closed(cls, value: object) -> str:
+        """`CHAT_UNANSWERED_REFUND_MODE`: off / shadow / on, case- and space-insensitive; anything
+        else (a typo, an empty string, a bool) reads as "off" rather than failing the deploy."""
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("off", "shadow", "on"):
+                return v
+        return "off"
 
     # Report pre-warming. After each market close the persona-neutral
     # ticker_data_cache goes stale; warming the top watchlist tickers means the

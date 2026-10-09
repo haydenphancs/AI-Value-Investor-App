@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "October 2, 2026",
+            lastUpdated: "October 9, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -74,7 +74,7 @@ struct TermsOfUseView: View {
             paragraphs: [
                 "Market data, financial statements, prices, and related information are provided by third-party sources and may be delayed, inaccurate, or incomplete. Quotes may be delayed by 15\u{2013}20 minutes or more depending on the exchange and provider.",
                 "We do not guarantee the accuracy, completeness, or timeliness of any data. Where the App\u{2019}s data conflicts with an official exchange or filing, the official source controls. Third-party content is the responsibility of its providers.",
-                "Web search results. When you ask Cay AI to search the web in a report chat, the answer may draw on, and link to, web pages found by our third-party web search provider. Those results are third-party content that we do not control or verify; they may be outdated, inaccurate, or incomplete, and links take you to sites we do not operate. You may use web results shown in the App only for your own personal, non-commercial use, and you may not scrape, copy, store, cache, resell, or redistribute them, or use them to build, train, or improve any artificial intelligence or machine learning model, dataset, or search service."
+                "Web search results. When Cay AI searches the web \u{2014} because you asked it to, or automatically because Caydex\u{2019}s own data could not answer your question \u{2014} the answer may draw on, and link to, web pages found by our third-party web search provider, each shown with its publisher and, when known, its date. Those results are third-party content that we do not control or verify, and they do not reflect Caydex\u{2019}s views; they may be outdated, inaccurate, or incomplete, and links take you to sites we do not operate. You may use web results shown in the App only for your own personal, non-commercial use, and you may not scrape, copy, store, cache, resell, or redistribute them, or use them to build, train, or improve any artificial intelligence or machine learning model, dataset, or search service."
             ]
         ),
         LegalSection(

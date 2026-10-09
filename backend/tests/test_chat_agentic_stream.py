@@ -432,11 +432,26 @@ def test_declarations_default_to_the_full_equity_set(monkeypatch):
         "get_ticker_news", "explain_price_move", "get_market_snapshot",
         # Who holds the stock, from its filings (TestFlight 1.0 (11), 2026-10-05).
         "check_ownership_filings",
+        # The company's reported figures — Caydex data first (2026-10-08).
+        "check_company_financials",
+        # Who runs it, where it is based, when it listed, its peers (2026-10-08).
+        "check_asset_profile",
     }
+    # Pinned by NAME, not derived from `chat_tools._STOCK_TOOLSET`: a set read back from the
+    # table under test would agree with any edit to that table, including one that silently
+    # strips a tool from every stock chat.
     assert _tool_names() == equity
     assert _tool_names("STOCK") == equity
     assert _tool_names("NORMAL") == equity
     assert _tool_names("who-knows") == equity
+    # The table is the source of the declarations, so the two must agree too — an entry in
+    # one but not the other is a tool the model is offered and cannot call (or the reverse).
+    assert set(_ct.tools_for_asset_type(None)) == equity
+    # The data-tools kill switch withdraws exactly Caydex's two data tools and nothing else.
+    from app.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "CHAT_DATA_TOOLS_ENABLED", False)
+    assert _tool_names("STOCK") == equity - {"check_company_financials", "check_asset_profile"}
 
 
 def test_declarations_gate_market_overview():

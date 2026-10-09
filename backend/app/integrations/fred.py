@@ -24,8 +24,10 @@ Failure modes:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -120,9 +122,12 @@ class FREDObservation:
 class FREDSeriesSnapshot:
     """Latest value + computed change windows for a FRED series.
 
-    Built by `FREDClient.get_snapshot`. `yoy_pct` is None when fewer
-    than 12 monthly observations are available (newer series); callers
-    treat that as "no signal" rather than 0.
+    Built by `FREDClient.get_snapshot`. Both windows are counted BY DATE from the latest
+    observation (`_dated_rows` / `_months_before`): `yoy_pct` against the observation dated
+    exactly twelve months earlier, the 6-month fields against the one dated exactly six months
+    earlier. Either is None when that observation is absent — a month FRED never published, a
+    short series, or a daily / weekly series (only the newest 14 observations are read, so no
+    row is that far back). Callers treat None as "no signal", never 0.
     """
     series_id: str
     latest: float
@@ -130,6 +135,49 @@ class FREDSeriesSnapshot:
     yoy_pct: Optional[float] = None
     change_6mo_pct: Optional[float] = None  # absolute pp change for rate series
     change_6mo_relative_pct: Optional[float] = None  # % change
+
+
+def _dated_rows(observations: Any) -> Dict[date, float]:
+    """``{date: value}`` from FRED observations, whatever their order. Pure.
+
+    A row whose date does not parse, whose value is not a finite number (or is a bool) is
+    skipped. A date carrying two DIFFERENT values is dropped as ambiguous — never resolved by
+    whichever row came first; the same value twice is one row. The same rules as the chat's
+    macro leg (`chat_market_tools._yoy_by_date`), so a chat answer and a report grade one CPI
+    reading alike. Negative values are kept (the 10Y-2Y spread goes negative); a percentage
+    is never taken from a non-positive base (see `get_snapshot`)."""
+    rows: Dict[date, float] = {}
+    ambiguous: set = set()
+    for ob in observations if isinstance(observations, (list, tuple)) else []:
+        raw_day = getattr(ob, "date", None)
+        raw_val = getattr(ob, "value", None)
+        if not isinstance(raw_day, str) or isinstance(raw_val, bool) or raw_val is None:
+            continue
+        try:
+            day = date.fromisoformat(raw_day.strip()[:10])
+            val = float(raw_val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(val):
+            continue
+        if day in rows and rows[day] != val:
+            ambiguous.add(day)
+        rows.setdefault(day, val)
+    for day in ambiguous:
+        rows.pop(day, None)
+    return rows
+
+
+def _months_before(day: date, months: int) -> Optional[date]:
+    """The same day-of-month `months` calendar months earlier, or None when that day does not
+    exist (31 August → "31 February"; 29 February → a non-leap year). FRED dates a monthly
+    observation on the 1st, so a monthly series always lands. Pure."""
+    index = day.year * 12 + (day.month - 1) - months
+    year, month0 = divmod(index, 12)
+    try:
+        return date(year, month0 + 1, day.day)
+    except ValueError:
+        return None
 
 
 class FREDClient:
@@ -220,17 +268,18 @@ class FREDClient:
     async def get_snapshot(self, series_id: str) -> Optional[FREDSeriesSnapshot]:
         """Latest value + 1Y / 6M change for a FRED series.
 
-        Returns None when the latest observation is missing. Change
-        windows are best-effort — when fewer observations are available
-        the corresponding field is None.
+        Returns None when there is no dated, finite observation. The change windows are
+        counted by DATE from the latest observation (see `FREDSeriesSnapshot`); a window
+        whose anniversary observation is absent is None, never a longer or shorter window.
         """
         cache_key = (series_id, "snapshot")
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached  # type: ignore[no-any-return]
 
-        # Fetch enough rows for a 1Y window on monthly data (13 obs)
-        # plus a buffer so the 6M point (obs[6]) lands on real data.
+        # 14 rows of a monthly series span at least 13 months, so its 12-month anniversary is
+        # in the window even when a month or two was never published (the rows FRED marks
+        # '.' are dropped before they reach us).
         # ⚠️ ONE definition of the limit, because the failure-memo key below is derived
         # from it. This read `limit=14` here and re-spelled the key as the literal
         # `(series_id, "obs:14")` five lines down: correct today, and silently vacuous the
@@ -248,33 +297,49 @@ class FREDClient:
                 return None
             _cache_set(cache_key, None)
             return None
-        latest = obs[0]
+        # Every window is counted BY DATE, never by position. The old `obs[12]` / `obs[6]` were
+        # the 13th / 7th row of the newest 14 AFTER `get_observations` had dropped every
+        # missing ('.') observation — so a month FRED never published (October 2025 CPI, the
+        # shutdown lapse) silently turned "year-on-year" into a 13-month change for a whole
+        # year, and the report's macro module graded inflation on it. A missing anniversary
+        # row is now no reading at all (None), which the macro module already treats as "no
+        # signal". The newest row is the latest DATE, whatever order the API answered in.
+        rows = _dated_rows(obs)
+        if not rows:
+            # Rows came back but none is a dated, finite observation: no snapshot — and not
+            # memoised, since this is a malformed answer rather than "no observations".
+            logger.warning(
+                "FRED snapshot for %s: %d observation(s) but none dated and finite — no "
+                "snapshot", series_id, len(obs),
+            )
+            return None
+        latest_day = max(rows)
+        latest_value = rows[latest_day]
 
-        def _at(idx: int) -> Optional[float]:
-            return obs[idx].value if idx < len(obs) else None
-
-        # YoY = (latest - obs[12]) / obs[12]; use None when we don't
-        # have 13 observations yet.
+        # YoY (%) against the observation dated exactly twelve months earlier. A non-positive
+        # base is not a price-index level, so no percentage is taken from it.
         yoy_pct: Optional[float] = None
-        prior_year = _at(12)
+        year_ago = _months_before(latest_day, 12)
+        prior_year = rows.get(year_ago) if year_ago is not None else None
         if prior_year is not None and prior_year > 0:
-            yoy_pct = (latest.value - prior_year) / prior_year * 100
+            yoy_pct = (latest_value - prior_year) / prior_year * 100
 
-        # 6-month delta. For rate-of-change series (CPI level → YoY %),
-        # we expose both absolute (pp) and relative (%) so callers can
-        # choose the right one for their threshold.
+        # 6-month delta against the observation dated exactly six months earlier. For
+        # rate-of-change series (CPI level → YoY %) we expose both absolute (pp) and relative
+        # (%) so callers can choose the right one for their threshold.
         change_6mo_abs: Optional[float] = None
         change_6mo_rel: Optional[float] = None
-        prior_6mo = _at(6)
+        half_year_ago = _months_before(latest_day, 6)
+        prior_6mo = rows.get(half_year_ago) if half_year_ago is not None else None
         if prior_6mo is not None:
-            change_6mo_abs = latest.value - prior_6mo
+            change_6mo_abs = latest_value - prior_6mo
             if prior_6mo != 0:
-                change_6mo_rel = (latest.value - prior_6mo) / abs(prior_6mo) * 100
+                change_6mo_rel = (latest_value - prior_6mo) / abs(prior_6mo) * 100
 
         snap = FREDSeriesSnapshot(
             series_id=series_id,
-            latest=latest.value,
-            as_of=latest.date,
+            latest=latest_value,
+            as_of=latest_day.isoformat(),
             yoy_pct=yoy_pct,
             change_6mo_pct=change_6mo_abs,
             change_6mo_relative_pct=change_6mo_rel,
@@ -307,14 +372,13 @@ def get_fred_client() -> FREDClient:
 # Short-list of FRED series the ticker-report Macro module pulls. Each
 # is mapped to a deterministic risk factor in `ticker_report_data_collector`.
 #
-# Cadence note: get_snapshot returns the latest observation + 6-month
-# (index 6) and 12-month (index 12) deltas. The math is observation-
-# index based, not calendar based, so weekly series (ICSA → ~6 wk
-# window for index 6) and daily series (T5YIE, BAMLH0A0HYM2 → ~6 d
-# window) report a much shorter horizon than monthly ones. Callers in
-# `ticker_report_data_collector` re-derive the appropriate moving
-# average / level reading from `latest` directly when the windowed
-# delta isn't the right shape.
+# Cadence note: get_snapshot returns the latest observation + the 6-month and 12-month
+# deltas, counted BY DATE (2026-10-09; they used to be observation indexes 6 and 12, which a
+# month FRED never published turned into 7- and 13-month windows). Only the newest 14
+# observations are read, so a weekly (ICSA) or daily (T5YIE, DGS10, T10Y2Y, BAMLH0A0HYM2)
+# series has no row six or twelve months back and its windowed fields are None. Callers in
+# `ticker_report_data_collector` read only `latest` for those series; the windowed fields are
+# read for the monthly CPI / core PCE (year-on-year) and FEDFUNDS / UNRATE (6-month).
 MACRO_SERIES: Dict[str, Dict[str, str]] = {
     "CPIAUCSL": {
         "label": "Consumer Price Index (CPI)",

@@ -273,7 +273,7 @@ def test_overlapping_ownership_is_reported_honestly_not_clamped():
         _svc(),
         profile={"freeFloat": 34.956},
         inst_holders=[],
-        insider_roster=[],
+        top_insiders=[],
         current_price=10.0,
         inst_summary={"ownershipPercent": 78.3514},
     )

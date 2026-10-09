@@ -1,0 +1,1070 @@
+{
+ "_recorded": "2026-10-09, FMP /stable (profile, income-statement quarter limit=4 and annual limit=2, ratios-ttm, key-metrics-ttm, analyst-estimates annual limit=5); trimmed to the fields Key Stats reads. Never refreshed by a test (the suite is hermetic).",
+ "TSM": {
+  "profile": {
+   "symbol": "TSM",
+   "currency": "USD",
+   "price": 452.69,
+   "marketCap": 2347867631200,
+   "isAdr": true,
+   "country": "TW"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "TWD",
+    "epsDiluted": 136.25,
+    "eps": 136.25,
+    "weightedAverageShsOutDil": 5186400000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q1",
+    "fiscalYear": "2026",
+    "reportedCurrency": "TWD",
+    "epsDiluted": 111.55,
+    "eps": 111.55,
+    "weightedAverageShsOutDil": 5186257000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "TWD",
+    "epsDiluted": 98.4,
+    "eps": 98.4,
+    "weightedAverageShsOutDil": 5186504800
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q3",
+    "fiscalYear": "2025",
+    "reportedCurrency": "TWD",
+    "epsDiluted": 88.75,
+    "eps": 89.05,
+    "weightedAverageShsOutDil": 5186008600
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2025-12-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "TWD",
+    "epsDiluted": 333.05
+   },
+   {
+    "date": "2024-12-31",
+    "fiscalYear": "2024",
+    "reportedCurrency": "TWD",
+    "epsDiluted": 230.8
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "TSM",
+    "priceToEarningsRatioTTM": 29.558363278080446,
+    "netIncomePerShareTTM": 431.37
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "TSM",
+    "marketCap": 66127620000000
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2029-12-31",
+    "epsAvg": 1091.91003
+   },
+   {
+    "date": "2028-12-31",
+    "epsAvg": 893.26646
+   },
+   {
+    "date": "2027-12-31",
+    "epsAvg": 709.38715
+   },
+   {
+    "date": "2026-12-31",
+    "epsAvg": 538.40292
+   },
+   {
+    "date": "2025-12-31",
+    "epsAvg": 323.34358
+   }
+  ]
+ },
+ "BABA": {
+  "profile": {
+   "symbol": "BABA",
+   "currency": "USD",
+   "price": 110.24,
+   "marketCap": 264231182178,
+   "isAdr": true,
+   "country": "CN"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q1",
+    "fiscalYear": "2027",
+    "reportedCurrency": "CNY",
+    "epsDiluted": 3.68,
+    "eps": 4.48,
+    "weightedAverageShsOutDil": 2415500000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q4",
+    "fiscalYear": "2026",
+    "reportedCurrency": "CNY",
+    "epsDiluted": 10.4,
+    "eps": 10.96,
+    "weightedAverageShsOutDil": 2404375000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q3",
+    "fiscalYear": "2026",
+    "reportedCurrency": "CNY",
+    "epsDiluted": 6.64,
+    "eps": 6.96,
+    "weightedAverageShsOutDil": 2413750000
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "CNY",
+    "epsDiluted": 8.72,
+    "eps": 9.04,
+    "weightedAverageShsOutDil": 2396000000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2026-03-31",
+    "fiscalYear": "2026",
+    "reportedCurrency": "CNY",
+    "epsDiluted": 44
+   },
+   {
+    "date": "2025-03-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "CNY",
+    "epsDiluted": 53.6
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "BABA",
+    "priceToEarningsRatioTTM": 23.531705426356588,
+    "netIncomePerShareTTM": 31.5
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "BABA",
+    "marketCap": 1746359749050
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2031-03-31",
+    "epsAvg": 0
+   },
+   {
+    "date": "2030-03-31",
+    "epsAvg": 73.04408
+   },
+   {
+    "date": "2029-03-31",
+    "epsAvg": 77.1899
+   },
+   {
+    "date": "2028-03-31",
+    "epsAvg": 60.90293
+   },
+   {
+    "date": "2027-03-31",
+    "epsAvg": 43.14683
+   }
+  ]
+ },
+ "HDB": {
+  "profile": {
+   "symbol": "HDB",
+   "currency": "USD",
+   "price": 22.125,
+   "marketCap": 113486613848,
+   "isAdr": true,
+   "country": "IN"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q1",
+    "fiscalYear": "2027",
+    "reportedCurrency": "INR",
+    "epsDiluted": 37.41,
+    "eps": 37.5,
+    "weightedAverageShsOutDil": 5144269000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q4",
+    "fiscalYear": "2026",
+    "reportedCurrency": "INR",
+    "epsDiluted": 39.54,
+    "eps": 39.66,
+    "weightedAverageShsOutDil": 5146879000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q3",
+    "fiscalYear": "2026",
+    "reportedCurrency": "INR",
+    "epsDiluted": 38.58,
+    "eps": 38.58,
+    "weightedAverageShsOutDil": 5149930000
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "INR",
+    "epsDiluted": 39.01,
+    "eps": 39.01,
+    "weightedAverageShsOutDil": 5121233000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2026-03-31",
+    "fiscalYear": "2026",
+    "reportedCurrency": "INR",
+    "epsDiluted": 147.84
+   },
+   {
+    "date": "2025-03-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "INR",
+    "epsDiluted": 138.6
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "HDB",
+    "priceToEarningsRatioTTM": 13.765083690151808,
+    "netIncomePerShareTTM": 153.91
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "HDB",
+    "marketCap": 10895202126348
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2030-03-31",
+    "epsAvg": 256.77151
+   },
+   {
+    "date": "2029-03-31",
+    "epsAvg": 215.60465
+   },
+   {
+    "date": "2028-03-31",
+    "epsAvg": 185.0453
+   },
+   {
+    "date": "2027-03-31",
+    "epsAvg": 158.94035
+   },
+   {
+    "date": "2026-03-31",
+    "epsAvg": 146.96549
+   }
+  ]
+ },
+ "NVO": {
+  "profile": {
+   "symbol": "NVO",
+   "currency": "USD",
+   "price": 38.4313,
+   "marketCap": 170658366864,
+   "isAdr": true,
+   "country": "DK"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "DKK",
+    "epsDiluted": 4.74,
+    "eps": 4.74,
+    "weightedAverageShsOutDil": 4435800000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q1",
+    "fiscalYear": "2026",
+    "reportedCurrency": "DKK",
+    "epsDiluted": 10.91,
+    "eps": 10.93,
+    "weightedAverageShsOutDil": 4448700000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "DKK",
+    "epsDiluted": 6.04,
+    "eps": 6.06,
+    "weightedAverageShsOutDil": 4447851000
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q3",
+    "fiscalYear": "2025",
+    "reportedCurrency": "DKK",
+    "epsDiluted": 4.5,
+    "eps": 4.5,
+    "weightedAverageShsOutDil": 4446800000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2025-12-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "DKK",
+    "epsDiluted": 23.03
+   },
+   {
+    "date": "2024-12-31",
+    "fiscalYear": "2024",
+    "reportedCurrency": "DKK",
+    "epsDiluted": 22.63
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "NVO",
+    "priceToEarningsRatioTTM": 9.778794431731503,
+    "netIncomePerShareTTM": 26.296623418974317
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "NVO",
+    "marketCap": 1139052198717
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2030-12-31",
+    "epsAvg": 28.44027
+   },
+   {
+    "date": "2029-12-31",
+    "epsAvg": 26.98003
+   },
+   {
+    "date": "2028-12-31",
+    "epsAvg": 24.02295
+   },
+   {
+    "date": "2027-12-31",
+    "epsAvg": 22.07429
+   },
+   {
+    "date": "2026-12-31",
+    "epsAvg": 22.21236
+   }
+  ]
+ },
+ "SONY": {
+  "profile": {
+   "symbol": "SONY",
+   "currency": "USD",
+   "price": 24.185,
+   "marketCap": 142025584019,
+   "isAdr": true,
+   "country": "JP"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q1",
+    "fiscalYear": "2026",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 57.82,
+    "eps": 58.07,
+    "weightedAverageShsOutDil": 5917342000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 13.73,
+    "eps": 13.73,
+    "weightedAverageShsOutDil": 6037755000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q3",
+    "fiscalYear": "2025",
+    "reportedCurrency": "JPY",
+    "epsDiluted": -169.03,
+    "eps": -169.03,
+    "weightedAverageShsOutDil": 5966945000
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q2",
+    "fiscalYear": "2025",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 60.1,
+    "eps": 60.48,
+    "weightedAverageShsOutDil": 6022680000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2026-03-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "JPY",
+    "epsDiluted": -54.7
+   },
+   {
+    "date": "2025-03-31",
+    "fiscalYear": "2024",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 187.92
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "SONY",
+    "priceToEarningsRatioTTM": -103.78231292517005,
+    "netIncomePerShareTTM": -37.613559639623496
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "SONY",
+    "marketCap": 22397570334980
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2031-03-31",
+    "epsAvg": 333.80657
+   },
+   {
+    "date": "2031-03-31",
+    "epsAvg": 328.57864
+   },
+   {
+    "date": "2030-03-31",
+    "epsAvg": 293.06958
+   },
+   {
+    "date": "2029-03-31",
+    "epsAvg": 245.1585
+   },
+   {
+    "date": "2028-03-31",
+    "epsAvg": 231.23623
+   }
+  ]
+ },
+ "TM": {
+  "profile": {
+   "symbol": "TM",
+   "currency": "USD",
+   "price": 185.05,
+   "marketCap": 219133363931,
+   "isAdr": true,
+   "country": "JP"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q1",
+    "fiscalYear": "2027",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 1222.2,
+    "eps": 1222.2,
+    "weightedAverageShsOutDil": 1223875700
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q4",
+    "fiscalYear": "2026",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 639.1,
+    "eps": 639.1,
+    "weightedAverageShsOutDil": 1303340000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q3",
+    "fiscalYear": "2026",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 982.2,
+    "eps": 982.2,
+    "weightedAverageShsOutDil": 1303338700
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 715.1,
+    "eps": 715.1,
+    "weightedAverageShsOutDil": 1303344500
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2026-03-31",
+    "fiscalYear": "2026",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 3130.1
+   },
+   {
+    "date": "2025-03-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "JPY",
+    "epsDiluted": 3595.6
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "TM",
+    "priceToEarningsRatioTTM": 8.283055381638112,
+    "netIncomePerShareTTM": 3663.6
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "TM",
+    "marketCap": 34463383243040
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2031-03-31",
+    "epsAvg": 6503.97778
+   },
+   {
+    "date": "2030-03-31",
+    "epsAvg": 4622.01863
+   },
+   {
+    "date": "2029-03-31",
+    "epsAvg": 3884.11295
+   },
+   {
+    "date": "2028-03-31",
+    "epsAvg": 3511.02639
+   },
+   {
+    "date": "2027-03-31",
+    "epsAvg": 3142.91117
+   }
+  ]
+ },
+ "ASML": {
+  "profile": {
+   "symbol": "ASML",
+   "currency": "USD",
+   "price": 1787.2006,
+   "marketCap": 688819264766,
+   "isAdr": true,
+   "country": "NL"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 7.56,
+    "eps": 7.57,
+    "weightedAverageShsOutDil": 385700000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q1",
+    "fiscalYear": "2026",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 7.15,
+    "eps": 7.15,
+    "weightedAverageShsOutDil": 385700000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 7.34,
+    "eps": 7.35,
+    "weightedAverageShsOutDil": 387000000
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q3",
+    "fiscalYear": "2025",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 5.48,
+    "eps": 5.49,
+    "weightedAverageShsOutDil": 387600000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2025-12-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 24.71
+   },
+   {
+    "date": "2024-12-31",
+    "fiscalYear": "2024",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 19.24
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "ASML",
+    "priceToEarningsRatioTTM": 58.193033381712624,
+    "netIncomePerShareTTM": 27.60352880124546
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "ASML",
+    "marketCap": 618133373966
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2030-12-31",
+    "epsAvg": 105.58126
+   },
+   {
+    "date": "2029-12-31",
+    "epsAvg": 90.2196
+   },
+   {
+    "date": "2028-12-31",
+    "epsAvg": 69.26733
+   },
+   {
+    "date": "2027-12-31",
+    "epsAvg": 53.55676
+   },
+   {
+    "date": "2026-12-31",
+    "epsAvg": 38.70724
+   }
+  ]
+ },
+ "SAP": {
+  "profile": {
+   "symbol": "SAP",
+   "currency": "USD",
+   "price": 214.985,
+   "marketCap": 250508082444,
+   "isAdr": true,
+   "country": "DE"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 1.88,
+    "eps": 1.89,
+    "weightedAverageShsOutDil": 1158000000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q1",
+    "fiscalYear": "2026",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 1.65,
+    "eps": 1.66,
+    "weightedAverageShsOutDil": 1168000000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 1.57,
+    "eps": 1.58,
+    "weightedAverageShsOutDil": 1172000000
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q3",
+    "fiscalYear": "2025",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 1.7,
+    "eps": 1.72,
+    "weightedAverageShsOutDil": 1177000000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2025-12-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 6.24
+   },
+   {
+    "date": "2024-12-31",
+    "fiscalYear": "2024",
+    "reportedCurrency": "EUR",
+    "epsDiluted": 2.65
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "SAP",
+    "priceToEarningsRatioTTM": 27.87445255474453,
+    "netIncomePerShareTTM": 6.761491760624458
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "SAP",
+    "marketCap": 220383764269
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2030-12-31",
+    "epsAvg": 11.98292
+   },
+   {
+    "date": "2029-12-31",
+    "epsAvg": 10.75332
+   },
+   {
+    "date": "2028-12-31",
+    "epsAvg": 9.76174
+   },
+   {
+    "date": "2027-12-31",
+    "epsAvg": 8.36455
+   },
+   {
+    "date": "2026-12-31",
+    "epsAvg": 7.13126
+   }
+  ]
+ },
+ "BHP": {
+  "profile": {
+   "symbol": "BHP",
+   "currency": "USD",
+   "price": 85.79,
+   "marketCap": 217936205443,
+   "isAdr": true,
+   "country": "AU"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q4",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 1.66,
+    "eps": 1.66,
+    "weightedAverageShsOutDil": 2544500000
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 2.22,
+    "eps": 2.24,
+    "weightedAverageShsOutDil": 2544500000
+   },
+   {
+    "date": "2025-06-30",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "USD",
+    "epsDiluted": 1.82,
+    "eps": 1.82,
+    "weightedAverageShsOutDil": 2541500000
+   },
+   {
+    "date": "2024-12-31",
+    "period": "Q2",
+    "fiscalYear": "2025",
+    "reportedCurrency": "USD",
+    "epsDiluted": 1.74,
+    "eps": 1.74,
+    "weightedAverageShsOutDil": 2541500000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2026-06-30",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 3.86
+   },
+   {
+    "date": "2025-06-30",
+    "fiscalYear": "2025",
+    "reportedCurrency": "USD",
+    "epsDiluted": 3.56
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "BHP",
+    "priceToEarningsRatioTTM": 21.901333402061855,
+    "netIncomePerShareTTM": 3.87
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "BHP",
+    "marketCap": 215871273401.03976
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2031-06-30",
+    "epsAvg": 5
+   },
+   {
+    "date": "2030-06-30",
+    "epsAvg": 4.79795
+   },
+   {
+    "date": "2029-06-30",
+    "epsAvg": 5.1471
+   },
+   {
+    "date": "2028-06-30",
+    "epsAvg": 4.92055
+   },
+   {
+    "date": "2027-06-30",
+    "epsAvg": 4.89584
+   }
+  ]
+ },
+ "INFY": {
+  "profile": {
+   "symbol": "INFY",
+   "currency": "USD",
+   "price": 10.765,
+   "marketCap": 43679848700,
+   "isAdr": true,
+   "country": "IN"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-30",
+    "period": "Q1",
+    "fiscalYear": "2027",
+    "reportedCurrency": "USD",
+    "epsDiluted": 0.2,
+    "eps": 0.2,
+    "weightedAverageShsOutDil": 4095000000
+   },
+   {
+    "date": "2026-03-31",
+    "period": "Q4",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 0.23,
+    "eps": 0.23,
+    "weightedAverageShsOutDil": 3995652174
+   },
+   {
+    "date": "2025-12-31",
+    "period": "Q3",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 0.18,
+    "eps": 0.18,
+    "weightedAverageShsOutDil": 4121795902
+   },
+   {
+    "date": "2025-09-30",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 0.2,
+    "eps": 0.21,
+    "weightedAverageShsOutDil": 4257894737
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2026-03-31",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 0.83
+   },
+   {
+    "date": "2025-03-31",
+    "fiscalYear": "2025",
+    "reportedCurrency": "USD",
+    "epsDiluted": 0.76
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "INFY",
+    "priceToEarningsRatioTTM": 13.803614782843269,
+    "netIncomePerShareTTM": 74.82780932249555
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "INFY",
+    "marketCap": 4144896469724.9995
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2030-03-31",
+    "epsAvg": 0.98889
+   },
+   {
+    "date": "2029-03-31",
+    "epsAvg": 0.87527
+   },
+   {
+    "date": "2028-03-31",
+    "epsAvg": 0.83184
+   },
+   {
+    "date": "2027-03-31",
+    "epsAvg": 0.79769
+   },
+   {
+    "date": "2026-03-31",
+    "epsAvg": 0.76175
+   }
+  ]
+ },
+ "AAPL": {
+  "profile": {
+   "symbol": "AAPL",
+   "currency": "USD",
+   "price": 333.2,
+   "marketCap": 4893827019200,
+   "isAdr": false,
+   "country": "US"
+  },
+  "income_quarterly": [
+   {
+    "date": "2026-06-27",
+    "period": "Q3",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 2.03,
+    "eps": 2.04,
+    "weightedAverageShsOutDil": 14750302000
+   },
+   {
+    "date": "2026-03-28",
+    "period": "Q2",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 2.01,
+    "eps": 2.02,
+    "weightedAverageShsOutDil": 14768115000
+   },
+   {
+    "date": "2025-12-27",
+    "period": "Q1",
+    "fiscalYear": "2026",
+    "reportedCurrency": "USD",
+    "epsDiluted": 2.84,
+    "eps": 2.85,
+    "weightedAverageShsOutDil": 14810356000
+   },
+   {
+    "date": "2025-09-27",
+    "period": "Q4",
+    "fiscalYear": "2025",
+    "reportedCurrency": "USD",
+    "epsDiluted": 1.85,
+    "eps": 1.85,
+    "weightedAverageShsOutDil": 15004697000
+   }
+  ],
+  "income_annual": [
+   {
+    "date": "2025-09-27",
+    "fiscalYear": "2025",
+    "reportedCurrency": "USD",
+    "epsDiluted": 7.46
+   },
+   {
+    "date": "2024-09-28",
+    "fiscalYear": "2024",
+    "reportedCurrency": "USD",
+    "epsDiluted": 6.08
+   }
+  ],
+  "ratios_ttm": [
+   {
+    "symbol": "AAPL",
+    "priceToEarningsRatioTTM": 38.0365296803653,
+    "netIncomePerShareTTM": 8.775216496290799
+   }
+  ],
+  "key_metrics_ttm": [
+   {
+    "symbol": "AAPL",
+    "marketCap": 4893827019200
+   }
+  ],
+  "analyst_est": [
+   {
+    "date": "2030-09-27",
+    "epsAvg": 12.905
+   },
+   {
+    "date": "2029-09-27",
+    "epsAvg": 12.23979
+   },
+   {
+    "date": "2028-09-27",
+    "epsAvg": 10.68651
+   },
+   {
+    "date": "2027-09-27",
+    "epsAvg": 9.60811
+   },
+   {
+    "date": "2026-09-27",
+    "epsAvg": 8.83556
+   }
+  ]
+ }
+}

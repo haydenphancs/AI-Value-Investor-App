@@ -46,7 +46,7 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 | Identifiers → **User ID** | Yes | App Functionality | Account UUID |
 | Identifiers → **Device ID** | Yes | App Functionality | Random per-install UUID in the Keychain, sent as `X-Guest-Id` (`GuestIdentity.swift`). Rate limiting + pre-sign-in learning progress |
 | Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_items.shares`, `market_value`) |
-| User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback. Since 2026-10-02, ONLY when the user asks Cay AI to search the web in a report chat, a short query the AI writes from that message (company, ticker, topic; no identity) goes to Brave Search, a service provider (Privacy Policy §3/§4) |
+| User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback. Since 2026-10-02, when Cay AI runs a web search, a short query the AI writes from that message (company, ticker, topic, a time period; amounts and percentages in digits or words, links and email addresses removed by `sanitize_web_query`; no identity sent with it) goes to Brave Search, a service provider (Privacy Policy §3/§4). Today: when the user asks, in a report chat (app ≥ 1.1). The backend built 2026-10-09 can also search in any chat, when asked or automatically when Caydex's data cannot answer — only once its switches (`CHAT_WEB_SEARCH_ALL_CHATS_ENABLED`, `CHAT_AUTO_WEB_SEARCH_MODE`) are on AND the user has accepted AI consent v3 (`X-AI-Consent-Version` ≥ 3, the 1.01 permission screen); never for prices or other market data. No new data type: the query is derived from User Content already declared |
 | User Content → **Photos or Videos** | Yes | App Functionality | Optional screenshot the user attaches to a Help Us Improve bug report, emailed to support@. Out-of-process `PhotosPicker`, one image at a time, visible in the composer before it sends |
 | Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities, and the optional learning preferences (experience level, explanation style, answer length, topics of interest) in `user_investor_profile` |
 | Purchases → **Purchase History** | Yes | App Functionality | StoreKit 2 subscriptions + the four consumable credit packs. Every verified transaction is written to `credit_purchases` with a **NOT NULL `user_id`** alongside `transaction_id` / `product_id` / `price_cents`; subscriptions also set `users.tier`. Linked, therefore — see the note below |
@@ -162,8 +162,10 @@ or email.
   three copies (served HTML, `documents/legal/privacy.html`, `PrivacyPolicyView.swift`), the
   consent row in `AIDataConsentView.swift`, and this file. `tests/test_legal_pages.py`
   fails the build if the "not kept" sentence survives a persistence default flip.
-- **Review notes, §7 below** — "no unrestricted web access" is still true (web search runs only
-  on an explicit ask in a report chat, and a source link opens one publisher page in
+- **Review notes, §7 below** — "no unrestricted web access" is still true (web search is one
+  bounded tool call per question with daily caps, never a browser: on an explicit ask in a
+  report chat today, and — after consent v3, with the backend switches on — on an ask or
+  automatically in any chat; a source link opens one publisher page in
   `SFSafariViewController`, as the Updates screen already did), and the 18+ rating is
   unaffected. If that sentence is ever reworded, edit `backend/scripts/asc_review_resubmit.py`,
   not this copy.

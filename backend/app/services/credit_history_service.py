@@ -98,6 +98,10 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     # turn is refused with 409 and this compensating refund is attempted; it matches a
     # debit only when the charge actually landed, so most of these never write a row.
     "chat_precharge_unconfirmed": (KIND_REFUND, "Refund · Ask Cay AI", _REF_CHAT),
+    # Delivered, but a judge found the reply did not give what the main question asked for
+    # (`chat_answer_coverage`, owner decision 2026-10-09). Silent in chat — no badge — so this
+    # row is the one place the user sees why the balance did not drop.
+    "chat_unanswered": (KIND_REFUND, "Not charged — Cay AI didn't fully answer", _REF_CHAT),
     # grants
     "grant": (KIND_GRANT, "Welcome credits", _REF_NONE),
     "monthly_reset": (KIND_GRANT, "Monthly credits", _REF_NONE),
@@ -113,10 +117,10 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
 #: PREFIX families — matched only after an exact miss.
 #:
 #: ⚠️ `chat_degraded_*` is COMPOSED AT RUNTIME: `endpoints/chat.py` builds
-#: `f"chat_degraded_{stream_signals['degraded']}"` from a suffix that `chat_service.py`
-#: chooses. Two suffixes exist today (`no_specialists`, `unmerged`) and a third needs no
-#: endpoint change at all — so a dict-only lookup here is a future blank row, not a
-#: hypothetical one.
+#: `f"chat_degraded_{degraded_reason}"` from a suffix that `chat_service.py` / the stream door
+#: choose. Five suffixes exist today (`no_tools`, `truncated`, `partial_specialists`,
+#: `no_specialists`, `unmerged`) and a sixth needs no endpoint change at all — so a dict-only
+#: lookup here is a future blank row, not a hypothetical one.
 _REASON_PREFIXES: Tuple[Tuple[str, Tuple[str, str, str]], ...] = (
     ("chat_degraded_", (KIND_REFUND, "Refund · answer was incomplete", _REF_CHAT)),
 )

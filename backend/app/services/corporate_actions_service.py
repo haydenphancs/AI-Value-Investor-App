@@ -982,6 +982,20 @@ class CorporateActionsService:
             for ev in events
         )
 
+    async def unclassified_adjustment_dates_or_none(
+        self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None,
+    ) -> Optional[List[str]]:
+        """The dates (newest first) of share-basis changes inside the window that could NOT be
+        resolved to a split ratio — a reverse split beyond 1-for-100, a spin-off — or None when
+        the window could not be derived. Same derivation and cache key as :meth:`get_split_rows`
+        (no extra upstream call after it). For Ask Cay AI's splits line (final review
+        2026-10-09): `get_split_rows` drops these events, so a window holding only a 1-for-150
+        reverse split read as "no stock split" — a confident false statement."""
+        events = await self._events_or_none(symbol, from_date, to_date, kind="split")
+        if events is None:
+            return None
+        return sorted((ev.date for ev in events if not ev.is_split), reverse=True)
+
     async def get_ex_dividend_dates(
         self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None
     ) -> List[str]:

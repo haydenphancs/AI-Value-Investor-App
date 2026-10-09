@@ -101,8 +101,12 @@ def env(monkeypatch):
     monkeypatch.setattr(s, "BRAVE_SEARCH_TIMEOUT_SECONDS", 4.0)
     monkeypatch.setattr(s, "BRAVE_SEARCH_EXTRA_SNIPPETS", False)
     monkeypatch.setattr(s, "GEMINI_TOOL_RESULT_MAX_CHARS", 8000)
+    # The 2026-10-08 tiers stay CLOSED here (this file is the report tier's): explicit.
+    monkeypatch.setattr(s, "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED", False)
+    monkeypatch.setattr(s, "CHAT_AUTO_WEB_SEARCH_MODE", "off")
     monkeypatch.setattr(cws, "_cache", {})
     monkeypatch.setattr(cws, "_inflight", {})
+    monkeypatch.setattr(cws, "_auto_latch", {})
     led = _Ledger()
     monkeypatch.setattr(cmt, "get_chat_budget_service", lambda: led)
     brave = _Brave()
@@ -144,6 +148,18 @@ def _walk_strings(node: Any):
     ("call 555-123-4567 Apple", "555"),
     ("Apple rev391b growth", "rev391b"),
     ("Apple <script>alert</script> {x} [y] `z` |w| ^v ~u *t _s =r", "<"),
+    # a currency code or a metric glued to a figure (final review 2026-10-09: the product branch
+    # kept them, so the legal copy's "amounts are removed" was false)
+    ("Apple USD500 fine", "USD500"),
+    ("Apple EUR20 settlement", "EUR20"),
+    ("Apple EUR-20 fine", "EUR-20"),
+    ("Apple fine-USD500", "USD500"),
+    ("Apple Rs100 fine", "Rs100"),
+    ("Apple CHF5 fine", "CHF5"),
+    ("Apple GBP1000 fine", "GBP1000"),
+    ("Apple EPS2 beat", "EPS2"),
+    ("Apple pe28 multiple", "pe28"),
+    ("Apple ROE157 metric", "ROE157"),
 ])
 def test_sanitizer_drops_figures_and_identifiers(raw, absent):
     out = cws.sanitize_web_query(raw)
@@ -152,7 +168,8 @@ def test_sanitizer_drops_figures_and_identifiers(raw, absent):
 
 
 @pytest.mark.parametrize("token", ["2025", "Q3", "FY2025", "10-K", "H100", "GPT-5", "3Q25", "Q3'25",
-                                   "M4", "13F", "8-K", "FY24"])
+                                   "M4", "13F", "8-K", "FY24", "A100", "USB4", "iPhone16", "PS5",
+                                   "EV9"])
 def test_sanitizer_keeps_years_periods_forms_and_products(token):
     out = cws.sanitize_web_query(f"Apple {token} update")
     assert out is not None and token in out.split(), out
@@ -161,6 +178,50 @@ def test_sanitizer_keeps_years_periods_forms_and_products(token):
 def test_sanitizer_keeps_a_site_operator_and_strips_currency_symbols():
     assert cws.sanitize_web_query("Apple site:reuters.com") == "Apple site:reuters.com"
     assert cws.sanitize_web_query("$AAPL DOJ case") == "AAPL DOJ case"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    # Review 2026-10-09: the 1.01 legal copy says "Amounts, percentages, links, and email
+    # addresses are removed from the query before it is sent" — in WORDS and in any link form too.
+    ("Apple revenue five billion dollars", "Apple revenue"),
+    ("Tesla margin twelve percent", "Tesla margin"),
+    ("Nvidia up ten per cent", "Nvidia up"),
+    ("Apple one hundred twenty three million shares", "Apple shares"),
+    ("Apple one hundred and twenty shares", "Apple shares"),
+    ("Apple twenty-three percent", "Apple"),
+    ("twenty-three percent", None),
+    ("Apple margin percentage", "Apple margin"),
+    ("Apple a quarter billion fine", "Apple a fine"),
+    ("Apple 25 basis points rate", "Apple rate"),
+    ("Apple bps guidance", "Apple guidance"),
+    ("reuters.com/markets/us/apple-sued lawsuit Apple", "lawsuit Apple"),
+    ("AAPL ftp://x.y/z DOJ", "AAPL DOJ"),
+    ("Apple javascript:alert(1) lawsuit", "Apple lawsuit"),
+    ("Apple data:text/html,x lawsuit", "Apple lawsuit"),
+    ("Apple site:reuters.com/markets lawsuit", "Apple lawsuit"),
+])
+def test_sanitizer_removes_amounts_percentages_and_links_in_any_form(raw, expected):
+    assert cws.sanitize_web_query(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    "Apple quarter results", "Apple first quarter 2026 earnings call", "top three risks Apple",
+    "Amazon.com lawsuit", "Dollar General lawsuit", "Apple site:reuters.com",
+    "Apple one quarter results", "U.S./China tariffs Apple",
+])
+def test_sanitizer_keeps_ordinary_words_that_merely_look_numeric(raw):
+    assert cws.sanitize_web_query(raw) == raw
+
+
+@pytest.mark.parametrize("raw,leak", [
+    ("Apple revenue five billion dollars", ("five", "billion", "dollars")),
+    ("Tesla margin twelve percent", ("twelve", "percent")),
+    ("reuters.com/markets/us/apple-sued", ("reuters.com", "/")),
+    ("x ftp://evil.example/y Apple", ("ftp", "evil")),
+])
+def test_no_amount_word_or_link_reaches_the_engine(raw, leak):
+    out = cws.sanitize_web_query(raw) or ""
+    assert not any(token in out for token in leak), out
 
 
 def test_sanitizer_caps_words_and_chars():
@@ -218,22 +279,36 @@ def test_the_switch_and_the_key_close_the_gate(env, monkeypatch, setting, value)
 
 def test_the_gate_is_case_insensitive_and_never_raises(env, monkeypatch):
     assert cws.open_web_search_turn(" report ", "ticker_report", "verify this", UID) is not None
-    monkeypatch.setattr(cws, "is_web_search_intent", lambda *_: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(cws, "web_ask_kind", lambda *_: (_ for _ in ()).throw(RuntimeError("x")))
     assert cws.open_web_search_turn("REPORT", "TICKER_REPORT", "verify this", UID) is None
+    # The decision itself fails CLOSED, with the line that forbids claiming a search.
+    d = cws.decide_web_search("REPORT", "TICKER_REPORT", "verify this", UID)
+    assert d.tier is None and d.unavailable is True and d.reason == "error"
 
 
 def test_intent_unserved_is_the_closed_gate_with_an_ask(env, monkeypatch):
-    f = cws.web_search_intent_unserved
-    assert f("REPORT", "TICKER_REPORT", "verify this") is False          # available
+    """Since 2026-10-08 it reads the turn's ONE decision: an ASKED turn that no tier serves, in
+    ANY chat, gets the "no web search on this turn" line (the model must never claim one)."""
+    monkeypatch.setattr(cws.settings, "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED", False)
+    monkeypatch.setattr(cws.settings, "CHAT_AUTO_WEB_SEARCH_MODE", "off")
+
+    def f(st, ct, msg, uid=UID):
+        return cws.web_search_intent_unserved(st, ct, msg, user_id=uid)
+
+    assert f("REPORT", "TICKER_REPORT", "verify this") is False          # served (report tier)
+    assert f("REPORT", "TICKER_REPORT", "verify this", None) is True     # signed out: not served
+    assert f("NORMAL", "TICKER_REPORT", "verify this") is True           # every-chat search is off
+    assert f("REPORT", "ETF", "verify this") is True
     monkeypatch.setattr(cws.settings, "CHAT_REPORT_WEB_SEARCH_ENABLED", False)
     assert f("REPORT", "TICKER_REPORT", "verify this") is True
     assert f("REPORT", "TICKER_REPORT", "what is the moat?") is False     # no ask
-    assert f("NORMAL", "TICKER_REPORT", "verify this") is False           # not a report chat
-    assert f("REPORT", "ETF", "verify this") is False
     monkeypatch.setattr(cws.settings, "CHAT_REPORT_WEB_SEARCH_ENABLED", True)
     monkeypatch.setattr(cws.settings, "BRAVE_SEARCH_API_KEY", "")
     assert f("REPORT", "TICKER_REPORT", "verify this") is True
     assert f(None, None, None) is False
+    # A decision handed in is read as-is.
+    assert cws.web_search_intent_unserved(
+        None, None, None, decision=cws.WebSearchDecision(unavailable=True)) is True
 
 
 # ── one search per turn ───────────────────────────────────────────────────────
@@ -503,11 +578,16 @@ async def test_one_global_claim_and_no_per_account_bucket(env):
     assert led.claims == [(GLOBAL, 500)]
 
 
-def test_the_default_cap_is_180_and_there_is_no_per_account_setting():
+def test_the_default_cap_is_180_and_the_explicit_bucket_has_no_per_account_setting():
+    """The owner's 2026-10-03 "no per-account cap" decision binds the EXPLICIT tiers' bucket. The
+    automatic tier (2026-10-08, model-decided) has its own per-account cap — a different setting,
+    claimed only on an automatic search (`test_chat_web_search_tiers.py`)."""
     fields = Settings.model_fields
     assert fields["CHAT_REPORT_WEB_SEARCH_DAILY_CAP"].default == 180
     assert not any("WEB_SEARCH_USER" in name for name in fields), "the per-account cap was removed"
     assert not hasattr(cws, "_user_report_web_search_bucket")
+    per_account = [n for n in fields if "PER_ACCOUNT" in n and "WEB_SEARCH" in n]
+    assert per_account == ["CHAT_AUTO_WEB_SEARCH_PER_ACCOUNT_DAILY"], per_account
 
 
 @pytest.mark.asyncio

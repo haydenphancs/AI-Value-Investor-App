@@ -1919,6 +1919,329 @@ class ETFService:
 
         return response
 
+    # ── Fund facts (Ask Cay AI's asset-profile tool) ─────────────
+
+    async def get_fund_facts(self, symbol: str) -> Dict[str, Any]:
+        """A fund's facts as one dict, for a reader that is not the ETF screen (Ask Cay AI).
+
+        Reads ONLY the shared `_get_fundamentals` section — the same cached profile / etf-info
+        / holdings / sector-weightings the Profile and Holdings & Risk endpoints build from
+        (12 h memory + `etf_snapshot_cache`), so a warm fund costs no upstream call. It never
+        touches `get_etf_detail`, `_build_strategy` or `_generate_hook_text` (Gemini) and
+        never the quote (no price here). Same fallbacks as the screen (`_ETF_REFERENCE` for
+        the fee, holdings count and index), each labelled when used.
+
+        Unknown is OMITTED and named in ``unavailable`` — never 0: a 0 expense ratio is the
+        screen's "—", not "free"; a holding whose weight cannot be read keeps its name and
+        loses its weight; NaN, inf, negative and bool weights are not weights. Never raises:
+        ``{"symbol", "available": False, "error", "upstream": True}`` when nothing could be
+        read. Concurrent calls for one symbol share one build.
+        """
+        sym = (symbol or "").strip().upper() if isinstance(symbol, str) else ""
+        if not sym:
+            return {"available": False, "error": "no fund symbol supplied"}
+        inflight: Dict[str, "asyncio.Task"] = self.__dict__.setdefault(
+            "_fund_facts_inflight", {})
+
+        def _num(value: Any) -> Optional[float]:
+            if isinstance(value, bool) or value is None:
+                return None
+            if isinstance(value, str):
+                value = value.replace("%", "").replace(",", "").strip()
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                return None
+            return f if math.isfinite(f) else None
+
+        def _text(value: Any, cap: int = 120) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            t = value.strip()
+            if not t or t.lower() in ("n/a", "na", "--", "-", "—", "none", "null", "unknown"):
+                return None
+            return t if len(t) <= cap else t[: cap - 1].rstrip() + "…"
+
+        def _day(value: Any) -> Optional[str]:
+            if not isinstance(value, str) or len(value.strip()) < 10:
+                return None
+            try:
+                datetime.strptime(value.strip()[:10], "%Y-%m-%d")
+            except ValueError:
+                return None
+            return value.strip()[:10]
+
+        def _money(value: float, currency: Optional[str]) -> str:
+            # The code only when navCurrency gives one: an unconfirmed currency was printed as
+            # "USD" (final review 2026-10-09) — the bare figure now, and a field below says it is
+            # not confirmed (the financials tool's own convention).
+            head = f"{currency} " if currency else ""
+            for div, unit in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+                if abs(value) >= div:
+                    return f"{head}{value / div:.1f}{unit}"
+            return f"{head}{value:,.0f}"
+
+        async def _build() -> Dict[str, Any]:
+            try:
+                fund = await self._get_fundamentals(sym)
+            except Exception as e:  # noqa: BLE001 — degrade to an answered outage
+                logger.warning("fund facts: fundamentals read failed for %s: %s: %s",
+                               sym, type(e).__name__, e)
+                return {"symbol": sym, "available": False, "upstream": True,
+                        "error": "fund data could not be loaded right now"}
+            fund = fund if isinstance(fund, dict) else {}
+            info = fund.get("etf_info") if isinstance(fund.get("etf_info"), dict) else {}
+            profile = fund.get("profile") if isinstance(fund.get("profile"), dict) else {}
+            holders = fund.get("holders") if isinstance(fund.get("holders"), list) else []
+            sector_rows = (fund.get("sector_weights")
+                           if isinstance(fund.get("sector_weights"), list) else [])
+            ref = _ETF_REFERENCE.get(sym, {})
+            out: Dict[str, Any] = {"symbol": sym, "available": True}
+            unavailable: List[str] = []
+            notes: List[str] = []
+
+            name = _text(info.get("name") or profile.get("companyName"), 160)
+            if name:
+                out["name"] = name
+            for key, value in (
+                ("issuer", info.get("etfCompany") or info.get("companyName")),
+                ("index_tracked", info.get("indexTracked") or info.get("index")),
+                ("asset_class", info.get("assetClass")),
+                ("domicile", info.get("domicile")),
+            ):
+                t = _text(value)
+                if t:
+                    out[key] = t
+            if "index_tracked" not in out and _text(ref.get("index")):
+                out["index_tracked"] = ref["index"]
+                notes.append("index_tracked is from Caydex's reference table")
+            inception = _day(info.get("inceptionDate")) or _day(profile.get("ipoDate"))
+            if inception:
+                out["inception_date"] = inception
+            else:
+                unavailable.append("inception date")
+
+            fee = _num(info.get("expenseRatio"))
+            fee_source = "fund data"
+            if fee is None or fee <= 0:
+                fee = _num(ref.get("expense_ratio"))
+                fee_source = "Caydex's reference table (may be dated)"
+            if fee is not None and 0 < fee < 100:
+                out["expense_ratio_percent"] = round(fee, 4)
+                out["expense_ratio_basis"] = f"annual expense ratio, % of assets — from {fee_source}"
+            else:
+                unavailable.append("expense ratio")
+
+            # A real 3-letter code or nothing (`currency_code`): "USDX" or "us$" is unknown, never
+            # truncated into a code.
+            from app.utils.currency import currency_code
+            currency = currency_code(info.get("navCurrency"))
+            aum = _num(info.get("assetsUnderManagement") or info.get("totalAssets")
+                       or info.get("aum") or info.get("netAssets"))
+            if aum is not None and aum > 0:
+                out["assets_under_management"] = _money(aum, currency)
+                if currency is None:
+                    out["assets_under_management_currency"] = (
+                        "not confirmed (the fund's NAV currency) — never assume US dollars")
+            else:
+                unavailable.append("assets under management")
+
+            count = _num(info.get("holdingsCount") or info.get("numberOfHoldings"))
+            count_from_ref = False
+            if count is None or count <= 0:
+                count = _num(ref.get("holdings"))
+                count_from_ref = True
+            if count is not None and count > 0:
+                out["holdings_count"] = int(count)
+                if count_from_ref:
+                    notes.append("holdings_count is from Caydex's reference table (may be dated)")
+            else:
+                unavailable.append("number of holdings")
+
+            # Top holdings, by weight (rows of unknown weight after the weighted ones).
+            weighted: List[Tuple[float, Dict[str, Any]]] = []
+            unweighted: List[Dict[str, Any]] = []
+            seen: set = set()
+            stamps: List[str] = []
+            for row in holders:
+                if not isinstance(row, dict):
+                    continue
+                label = _text(row.get("name") or row.get("companyName"), 100)
+                ticker = _text(row.get("asset") or row.get("symbol"), 16)
+                if not label and not ticker:
+                    continue
+                key = (ticker or "", (label or "").lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                item: Dict[str, Any] = {}
+                if ticker:
+                    item["symbol"] = ticker
+                if label:
+                    item["name"] = label
+                w = _num(row.get("weightPercentage") if row.get("weightPercentage") is not None
+                         else row.get("weight"))
+                stamp = _day(row.get("updatedAt") or row.get("updated") or row.get("date"))
+                if stamp:
+                    stamps.append(stamp)
+                if w is not None and 0 < w <= 100:
+                    item["weight_percent"] = round(w, 2)
+                    weighted.append((w, item))
+                else:
+                    unweighted.append(item)
+            weighted.sort(key=lambda p: p[0], reverse=True)
+            top = [item for _, item in weighted] + unweighted
+            top = top[:10]
+            if top:
+                out["top_holdings"] = top
+                known = [h["weight_percent"] for h in top if "weight_percent" in h]
+                if known:
+                    out["top_holdings_weight_percent"] = round(sum(known), 1)
+                    if len(known) < len(top):
+                        notes.append("top_holdings_weight_percent sums only the holdings "
+                                     "listed with a weight")
+            else:
+                unavailable.append("top holdings")
+
+            # Sector weights: etf-info's list first (the screen's source), else the
+            # sector-weightings rows. The "Cash & Others" row is the screen's allocation input,
+            # never a sector — matched exactly as the screen matches it ("cash" AND "other").
+            sectors: List[Dict[str, Any]] = []
+            info_sectors = [r for r in info.get("sectorsList") or [] if isinstance(r, dict)] \
+                if isinstance(info.get("sectorsList"), list) else []
+            source_rows = info_sectors or sector_rows
+
+            def _row_weight(row: Dict[str, Any]) -> Optional[float]:
+                return _num(row.get("exposure") if row.get("exposure") is not None
+                            else row.get("weightPercentage")
+                            if row.get("weightPercentage") is not None else row.get("weight"))
+
+            def _is_cash_row(label: Optional[str]) -> bool:
+                low = (label or "").lower()
+                return "cash" in low and "other" in low
+
+            for row in source_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                label = _text(row.get("industry") or row.get("sector") or row.get("name"), 60)
+                w = _row_weight(row)
+                if not label or w is None or w < 0 or w > 100:
+                    continue
+                if _is_cash_row(label):
+                    continue
+                sectors.append({"sector": label, "weight_percent": round(w, 2)})
+            # The allocation's cash line, read from the SAME rows the screen's builder reads.
+            # An unreadable one (NaN, a bool, out of range) is not 0% cash — the builder would
+            # coerce it to 0, so the allocation is declined instead.
+            lumped = False
+            cash_unreadable = False
+            for row in info_sectors:
+                if not _is_cash_row(_text(row.get("industry") or row.get("sector"), 60)):
+                    continue
+                w = _row_weight(row)
+                if w is None or w < 0 or w > 100:
+                    cash_unreadable = True
+                elif w >= 95:
+                    lumped = True
+                break   # the builder reads the first cash row only
+            sectors.sort(key=lambda r: r["weight_percent"], reverse=True)
+            if sectors:
+                out["sector_weights"] = sectors[:11]
+            else:
+                unavailable.append("sector weights")
+
+            # Asset allocation: the screen's OWN builder (`_build_asset_allocation`, the
+            # Holdings & Risk endpoint's), never a re-derivation. FMP lumps a fund it cannot
+            # break down (TLT, BND, GLD) into one "Cash & Others" row at 100%; copying that row
+            # told the model a bond fund was all cash. The builder knows that 100% is the
+            # underlying bonds or gold. Implausible output (a bucket < 0 or > 100, or a total
+            # far from 100) is omitted and named, never shown.
+            asset_class_raw = info.get("assetClass")
+            asset_class = asset_class_raw.strip() if isinstance(asset_class_raw, str) \
+                and asset_class_raw.strip() else "Equity"
+            allocation: Dict[str, float] = {}
+            try:
+                if cash_unreadable:
+                    raise ValueError("the fund's cash-and-other weight is unreadable")
+                alloc = self._build_asset_allocation(
+                    sectors_list=info_sectors, asset_class=asset_class,
+                    total_assets=aum if aum is not None and aum > 0 else 0.0,
+                )
+                buckets = {"equities": alloc.equities, "bonds": alloc.bonds,
+                           "commodities": alloc.commodities, "crypto": alloc.crypto,
+                           "cash": alloc.cash}
+                values = [_num(v) for v in buckets.values()]
+                if all(v is not None and 0 <= v <= 100 for v in values) \
+                        and abs(sum(values) - 100.0) <= 1.0:
+                    allocation = {k: round(float(v), 2) for k, v in buckets.items()
+                                  if float(v) > 0}
+            except Exception as e:  # noqa: BLE001 — the rest of the facts stand without it
+                logger.warning("fund facts: asset allocation failed for %s: %s: %s",
+                               sym, type(e).__name__, e)
+                allocation = {}
+            ac_low = asset_class.lower()
+            decomposable_lump = any(t in ac_low for t in (
+                "bond", "fixed", "income", "commodity", "gold", "alternative"))
+            if allocation and lumped and not decomposable_lump \
+                    and allocation.get("cash", 0.0) >= 95:
+                # The same lump on a fund the builder has no rule for (an equity or currency
+                # fund): "100% cash" would be the lump, not the fund. Declined, not shown.
+                allocation = {}
+                notes.append("the fund data lumps this fund's holdings into one 'cash and "
+                             "other' line, so its asset allocation cannot be stated")
+            if allocation:
+                out["asset_allocation_percent"] = allocation
+                if "cash" in allocation:
+                    out["cash_and_other_percent"] = allocation["cash"]
+                if lumped and decomposable_lump:
+                    notes.append(
+                        "asset_allocation_percent is Caydex's estimate, as on the fund's "
+                        "screen: the fund data does not break this fund's holdings down, so "
+                        "about 5% is assumed to be operating cash and the rest is the fund's "
+                        "asset class")
+                elif not info_sectors:
+                    notes.append("asset_allocation_percent is inferred from the asset class, "
+                                 "as on the fund's screen (no cash line in the fund data)")
+            else:
+                unavailable.append("asset allocation")
+
+            info_stamp = _day(info.get("updatedAt"))
+            as_of = info_stamp or (max(stamps) if stamps else None)
+            if as_of:
+                out["as_of"] = as_of
+            else:
+                out["as_of_note"] = "fund data cached within the last 12 hours"
+            if unavailable:
+                out["unavailable"] = unavailable
+            if notes:
+                out["notes"] = notes
+            if not info and not holders and not name:
+                return {"symbol": sym, "available": False, "upstream": True,
+                        "error": "fund data could not be loaded right now"}
+            return out
+
+        task = inflight.get(sym)
+        if task is None:
+            task = asyncio.ensure_future(_build())
+            inflight[sym] = task
+
+            def _done(t: "asyncio.Task", s: str = sym) -> None:
+                if inflight.get(s) is t:
+                    inflight.pop(s, None)
+                if not t.cancelled() and t.exception() is not None:
+                    logger.warning("fund facts: build for %s raised %s", s, t.exception())
+
+            task.add_done_callback(_done)
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — `_build` never raises; belt and braces
+            logger.warning("fund facts: failed for %s: %s: %s", sym, type(e).__name__, e)
+            return {"symbol": sym, "available": False, "upstream": True,
+                    "error": "fund data could not be loaded right now"}
+        return json.loads(json.dumps(result))
+
     def _build_sectors_from_info(
         self, sectors_list: List[Dict]
     ) -> List[ETFSectorWeightResponse]:

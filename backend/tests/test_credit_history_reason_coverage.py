@@ -246,3 +246,19 @@ def test_retired_writers_are_really_retired():
         assert reason not in written, f"{reason} is written again — remove it from _RETIRED_WRITERS"
         assert _is_mapped(reason), f"{reason} must stay mapped: its ledger rows still render"
         assert len(why) > 30
+
+
+def test_the_unanswered_refund_has_its_own_readable_row():
+    """`chat_unanswered` (owner decision 2026-10-09) is silent in chat — no badge under the
+    answer — so the credit history row is the ONE place the user learns why the balance did not
+    drop. It must be found by the scan (written as a literal by the coverage module, not composed)
+    and carry the owner's exact wording, as a refund."""
+    from app.services.credit_history_service import KIND_REFUND, describe_reason
+
+    found = _scan_python()
+    assert "chat_unanswered" in found, "the scan no longer sees the unanswered settlement"
+    assert "app/services/chat_answer_coverage.py" in found["chat_unanswered"]
+    assert "chat_unanswered" in KNOWN_REASONS
+    kind, title, _ref = describe_reason("chat_unanswered")
+    assert kind == KIND_REFUND
+    assert title == "Not charged — Cay AI didn't fully answer"

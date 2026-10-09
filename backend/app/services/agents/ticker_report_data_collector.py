@@ -56,7 +56,6 @@ from app.services.sector_benchmark_lookup import (
     lookup_failed,
 )
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
-from app.utils.peer_wording import peer_worded_metric_name
 from app.services.financials_metric_gate import (
     CURRENT_RATIO,
     GATED_METRICS,
@@ -94,6 +93,7 @@ from app.integrations.fmp import FMPClient, get_fmp_client
 from app.services.dcf_report_gate import current_dcf_source, strip_caydex_if_disabled
 from app.services.report_degradation import GROUNDING_FREE_KEY
 from app.utils.period_labels import quarterly_period_label
+from app.utils.currency import currency_code, money_prefix
 from app.services._analyst_common import analyst_is_usable
 from app.schemas.analyst import (
     AnalystAnalysisResponse,
@@ -118,9 +118,14 @@ from app.services._insider_common import (
     is_ceo_role,
     is_equity_line,
     is_informative,
-    issuer_roster,
     normalize_insider_name,
     prepare_insider_rows,
+    _normalize_cik,
+)
+from app.services._insider_holdings import (
+    insider_holdings_from_rows,
+    roster_from_holdings,
+    unlisted_filers,
 )
 from app.services.sector_aggregates_service import (
     SectorAggregates,
@@ -379,7 +384,9 @@ class CollectedTickerData:
     historical: Dict[str, Any] = field(default_factory=dict)
     news: List[Dict[str, Any]] = field(default_factory=list)
     insider_trades: List[Dict[str, Any]] = field(default_factory=list)
-    insider_roster: List[Dict[str, Any]] = field(default_factory=list)
+    # (No `insider_roster`: Key Management reads `roster_from_holdings` since 2026-10-08, so
+    # the separate roster fetch — and the cache block its failure caused — are gone. A stored
+    # collection carrying the key loads fine: `_deserialize` skips unknown fields.)
     # True when the insider window fetch FAILED or lost a page (`_settle_insider_rows`): the
     # report then states "unavailable" instead of computing "Buys 0 / Neutral" from nothing.
     # A failed fetch also lands on `degraded_sections`, which blocks the ticker_data_cache
@@ -561,16 +568,6 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
         return
     if attr == "holders_response":
         _settle_holders_result(out, result, ticker)
-        return
-    if attr == "insider_roster" and getattr(result, "fetch_failed", False):
-        # The roster feeds Key Management: a failed fetch is not "no officers", so the
-        # collection (and the report built from it) must not be shared-cached.
-        logger.warning(
-            "[report-degraded-section] %s: insider roster fetch failed (%s) — Key Management "
-            "may lack officers; not cached", ticker, getattr(result, "reason", ""),
-        )
-        out.insider_roster = []
-        out.degraded_sections.append("insider_roster:fetch_failed")
         return
     if isinstance(result, Exception):
         logger.warning(
@@ -1684,7 +1681,6 @@ class TickerReportDataCollector:
                 ),
                 [],
             ),
-            ("insider_roster", self.fmp.get_insider_roster(ticker), []),
             ("beneficial_owners", self.fmp.get_beneficial_ownership(ticker), []),
             (
                 "segments_raw",
@@ -2826,7 +2822,7 @@ class TickerReportDataCollector:
             or 0
         )
         out.key_management_partial = _build_key_management(
-            issuer_roster(out.insider_roster, issuer_cik),
+            _key_management_roster(out, insider_rows, issuer_cik),
             profile,
             current_price,
             beneficial_owners=out.beneficial_owners,
@@ -2848,6 +2844,9 @@ class TickerReportDataCollector:
             fiscal_year=engine_inputs["fiscal_year"],
             total_revenue=engine_inputs["total_revenue"],
             intersegment_eliminations=engine_inputs["intersegment_eliminations"],
+            reporting_currency=_engine_reporting_currency(
+                out.income, engine_inputs["fiscal_year"], out.ticker,
+            ),
         )
 
         # ── Revenue forecast (projections + CAGR — guidance from AI) ─
@@ -3897,7 +3896,8 @@ def _format_revenue(rev: Optional[float]) -> str:
     return f"${rev:,.0f}"
 
 
-def _format_money_compact(value: Optional[float]) -> str:
+def _format_money_compact(value: Optional[float], currency: Any = None, *,
+                          unknown_prefix: str = "$") -> str:
     """Signed, compact dollar string for AI-facing context (evidence + digest).
 
     Large values are abbreviated (-$394M, $1.2B, $53B, $2.1T); values under $1M
@@ -3905,15 +3905,29 @@ def _format_money_compact(value: Optional[float]) -> str:
     Factors quote these numbers VERBATIM, so shortening them here is what turns
     "Free CF: $-394,000,000" into "Free CF: -$394M". Unlike `_format_revenue`,
     this handles negatives (FCF, buybacks). 0 → "$0"; None/unparseable → "N/A".
+
+    `currency` (optional; passed by the Revenue Segments block — the engine's
+    `reporting_currency` — and by the statement lines, each row's own
+    `reportedCurrency`): a non-USD code replaces the "$" with the code and a space
+    ("TWD 2.2T", "-TWD 394M", "TWD 0"); USD, None or garbage keep "$"
+    (`app.utils.currency.money_prefix`), so every other caller is unchanged.
+
+    NaN / inf and a bool are "N/A", never "$nan" or "$1": a malformed statement
+    row must not hand the model a figure (2026-10-09).
     """
-    if value is None:
+    if value is None or isinstance(value, bool):
         return "N/A"
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "N/A"
+    if not math.isfinite(v):
+        return "N/A"
+    # `unknown_prefix` for an UNKNOWN currency: "$" by default (every caller before reporting
+    # currencies were carried), "" at the Revenue Segments block (final review 2026-10-09).
+    prefix = unknown_prefix if currency_code(currency) is None else money_prefix(currency)
     if v == 0:
-        return "$0"
+        return f"{prefix}0"
     sign = "-" if v < 0 else ""
     a = abs(v)
 
@@ -3922,13 +3936,13 @@ def _format_money_compact(value: Optional[float]) -> str:
         return s[:-2] if s.endswith(".0") else s  # 394.0 → "394", 1.2 → "1.2"
 
     if a >= 1e12:
-        return f"{sign}${_abbr(a / 1e12)}T"
+        return f"{sign}{prefix}{_abbr(a / 1e12)}T"
     if a >= 1e9:
-        return f"{sign}${_abbr(a / 1e9)}B"
+        return f"{sign}{prefix}{_abbr(a / 1e9)}B"
     if a >= 1e6:
-        return f"{sign}${_abbr(a / 1e6)}M"
+        return f"{sign}{prefix}{_abbr(a / 1e6)}M"
     # Under $1M — write it out in full.
-    return f"{sign}${a:,.0f}"
+    return f"{sign}{prefix}{a:,.0f}"
 
 
 def _format_currency_short(v: float) -> str:
@@ -6043,12 +6057,80 @@ def _segment_growth_pct(
     return _safe_pct_change(curr, prev)
 
 
+def _currency_code(value: Any) -> Optional[str]:
+    """An ISO-4217-shaped code ("USD", "TWD") or None — the ONE shared rule
+    (`app.utils.currency.currency_code`: trimmed, 3 ASCII letters, upper-cased; "ßU" is never
+    "SSU"), so the report's Revenue Engine code, the Overview's financials currency and report
+    chat never read one FMP `reportedCurrency` differently. Kept as a thin wrapper: tests and
+    callers in this module import the name."""
+    return currency_code(value)
+
+
+def _engine_reporting_currency(
+    income: Any, fiscal_year: Any, ticker: str = "",
+) -> Optional[str]:
+    """The currency the Revenue Engine's figures are reported in — the income statement's
+    `reportedCurrency`, never converted (segment values come from the filer's own segment
+    note, in its reporting currency).
+
+    The row for the engine's fiscal year decides (the breakdown pairs each segmentation year
+    with the SAME fiscal year's income, by `_record_year`). With no year, no row for it, or no
+    valid code on it, the code every annual row agrees on is used. Duplicate rows for the
+    year that disagree, mixed codes with no year match, no rows or no valid code → None (report
+    chat then says "reporting currency"): a wrong currency label is worse than none."""
+    from app.services.revenue_breakdown_service import _record_year
+
+    rows = [r for r in income if isinstance(r, dict)] if isinstance(income, (list, tuple)) else []
+    fy = str(fiscal_year).strip() if fiscal_year not in (None, "") else ""
+    year_codes: Set[str] = set()
+    all_codes: Set[str] = set()
+    for rec in rows:
+        code = _currency_code(rec.get("reportedCurrency"))
+        if code is None:
+            continue
+        all_codes.add(code)
+        if not fy:
+            continue
+        try:
+            year = _record_year(rec)
+        except (TypeError, ValueError) as exc:  # a non-string period-end date
+            # A malformed upstream row (degraded: it can no longer decide the year's code).
+            logger.warning(
+                "[report-revenue-engine-currency] %s: income row year unreadable (%s: %s) — "
+                "not matched to FY%s", ticker, type(exc).__name__, exc, fy,
+            )
+            continue
+        if year == fy:
+            year_codes.add(code)
+    if len(year_codes) == 1:
+        return next(iter(year_codes))
+    if len(year_codes) > 1:
+        # Duplicate rows for one fiscal year that contradict each other: bad upstream data,
+        # and the label is dropped — WARNING. (Mixed codes ACROSS years, below, is a real
+        # history — a filer that changed currency — so it stays INFO.)
+        logger.warning(
+            "[report-revenue-engine-currency] %s: FY%s income rows disagree on the reporting "
+            "currency (%s) — left unknown", ticker, fy, ", ".join(sorted(year_codes)),
+        )
+        return None
+    if len(all_codes) == 1:
+        return next(iter(all_codes))
+    if all_codes:
+        logger.info(
+            "[report-revenue-engine-currency] %s: annual income rows carry mixed reporting "
+            "currencies (%s) and none matches FY%s — left unknown",
+            ticker, ", ".join(sorted(all_codes)), fy or "?",
+        )
+    return None
+
+
 def _build_revenue_engine(
     segments: List[Dict[str, Any]],
     *,
     fiscal_year: Optional[str] = None,
     total_revenue: Optional[float] = None,
     intersegment_eliminations: Optional[float] = None,
+    reporting_currency: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Emit segments in MILLIONS — iOS decides how to render (M / B / T).
 
@@ -6065,8 +6147,12 @@ def _build_revenue_engine(
     * `total_revenue` is the share denominator: reported revenue when known (see
       `_engine_inputs_from_sources`), else the segment sum.
     * `intersegment_eliminations` (millions, positive) is set only for a gross stack.
+    * `reporting_currency` is the ISO code the values are in (`_engine_reporting_currency`),
+      re-guarded here (`_currency_code`) so no caller can put a garbage code on the wire;
+      None when unknown.
     """
     period = f"FY {fiscal_year}" if fiscal_year else ""
+    currency = _currency_code(reporting_currency)
     if not segments:
         return {
             "segments": [],
@@ -6074,6 +6160,7 @@ def _build_revenue_engine(
             "revenue_unit": "Millions",
             "period": period,
             "intersegment_eliminations": None,
+            "reporting_currency": currency,
             "analysis_note": None,  # filled by AI
         }
 
@@ -6099,6 +6186,7 @@ def _build_revenue_engine(
         "intersegment_eliminations": (
             round(eliminations / divisor, 2) if eliminations is not None else None
         ),
+        "reporting_currency": currency,
         "analysis_note": None,  # AI fills
     }
 
@@ -6753,6 +6841,85 @@ def _filer_key(name: Any) -> str:
     return " ".join(sorted(tokens))
 
 
+def _key_management_roster(
+    out: Any, insider_rows: List[Dict[str, Any]], issuer_cik: Any,
+) -> List[Dict[str, Any]]:
+    """Key Management's officer roster — ONE source with the Holders tab's Top 10 and Ask Cay
+    AI (2026-10-08): each person's direct holding after their latest Form 4
+    (`roster_from_holdings`), never the first raw Form 4 row per name (an RSU line read
+    984,380 for CRWV's Venturo beside chat's 302,526).
+
+    Read from the Holders build this collection already holds (`holders_response`, the very
+    object the chat tool reads) when it carries the holdings; otherwise derived here from this
+    collection's own prepared rows (`insider_holdings_from_rows` — the same derivation; the
+    holders object can arrive without them, and `ownership_detail` is excluded from every
+    `model_dump`). An unavailable insider fetch, or rows naming several issuers with no issuer
+    CIK to tell them apart, give an EMPTY roster — never the raw one. Officers with no direct
+    figure — an ambiguous or possibly-stale balance, or stock held only through a trust or
+    entity — stay listed with an unknown count ("—"), and so does anyone who filed in the
+    trailing window on another line (options, RSUs) or past the holdings' people cap
+    (`_km_unlisted`): Key Management lists officers by ROLE, so the CEO never vanishes while
+    junior officers stay. Never raises."""
+    detail = getattr(getattr(out, "holders_response", None), "ownership_detail", None)
+    holdings = getattr(detail, "insider_holdings", None) if detail is not None else None
+    ticker = getattr(out, "ticker", "?")
+    try:
+        if holdings is not None:
+            roster = roster_from_holdings(holdings, include_unknown=True)
+            return roster + _km_unlisted(out, roster, issuer_cik)
+        if getattr(out, "insider_unavailable", False):
+            logger.warning(
+                "[report-key-management] %s: insider rows unavailable — no officer holdings "
+                "(never the raw roster)", ticker,
+            )
+            return []
+        if _normalize_cik(issuer_cik) is None:
+            issuers = {
+                cik for cik in (_normalize_cik(r.get("companyCik"))
+                                for r in insider_rows or [] if isinstance(r, dict))
+                if cik
+            }
+            if len(issuers) > 1:
+                logger.warning(
+                    "[report-key-management] %s: no issuer CIK and the insider rows name %d "
+                    "issuers — officer holdings withheld", ticker, len(issuers),
+                )
+                return []
+        built = insider_holdings_from_rows(insider_rows or [])
+        roster = roster_from_holdings(built, include_unknown=True)
+        return roster + _km_unlisted(out, roster, issuer_cik)
+    except Exception:  # noqa: BLE001 — Key Management falls back to its CEO row, never a 500
+        logger.exception("[report-key-management] %s: roster derivation FAILED", ticker)
+        return []
+
+
+def _km_unlisted(
+    out: Any, roster: List[Dict[str, Any]], issuer_cik: Any,
+) -> List[Dict[str, Any]]:
+    """This issuer's filers in the trailing insider window that the holdings roster does not
+    name (only option / RSU lines, or past its people cap) — unknown counts, never a figure
+    from a derivative line. The collection's RAW window rows (`insider_trades`, every security
+    line), issuer-filtered; withheld (logged) when no issuer CIK can tell several issuers
+    apart. Raises only through the caller's guard."""
+    from app.services._insider_common import filter_issuer_rows
+
+    raw = getattr(out, "insider_trades", None)
+    if not isinstance(raw, list) or not raw:
+        return []
+    rows, _ = filter_issuer_rows(raw, issuer_cik)
+    if _normalize_cik(issuer_cik) is None:
+        issuers = {cik for cik in (_normalize_cik(r.get("companyCik")) for r in rows) if cik}
+        if len(issuers) > 1:
+            logger.warning(
+                "[report-key-management] %s: no issuer CIK and the raw insider rows name %d "
+                "issuers — filers outside the holdings roster withheld",
+                getattr(out, "ticker", "?"), len(issuers),
+            )
+            return []
+    names = [r.get("display_name") or r.get("owner") for r in roster if isinstance(r, dict)]
+    return unlisted_filers(rows, names, since=insider_window_cutoff())
+
+
 def _build_key_management(
     insider_roster: List[Dict[str, Any]],
     profile: Dict[str, Any],
@@ -6831,8 +6998,9 @@ def _build_key_management(
     # roster entry tagged "10 percent owner". Nothing checked they were the same human.
     #
     # The mismatch is the NORMAL case, not the exotic one, because the two sources have
-    # different populations: `get_insider_roster` is derived from the last 100 Form 4
-    # TRANSACTIONS (fmp.py), so a founder who has not traded recently — precisely the
+    # different populations: the roster is derived from recent Form 4 TRANSACTIONS
+    # (`roster_from_holdings` since 2026-10-08; FMP's last-100 roster before), so a founder
+    # who has not traded recently — precisely the
     # holder 13G exists to surface — is absent from it, while some other person tagged
     # "10 percent owner" is present. The report then printed that other person's name
     # next to the founder's 1.157B shares and a "43% owner" chip. Misattributing a
@@ -6874,6 +7042,9 @@ def _build_key_management(
                 "10 percent owner" in raw_type
                 or "10% owner" in raw_type
             )
+            # None = the filings leave the balance ambiguous (`roster_from_holdings` with
+            # `include_unknown`): an UNKNOWN count, shown "—" — never "0".
+            shares_known = r.get("numberOfShares") is not None
             shares = _safe_float(r, "numberOfShares")
             pct: Optional[float] = None
             in_top = False
@@ -6885,6 +7056,7 @@ def _build_key_management(
             override = by_filer_name.get(filer_key) if filer_key else None
             if is_major and override is not None:
                 shares = override["shares"]
+                shares_known = True
                 pct = override["pct"] or None
                 in_top = True
                 matched_filer_keys.add(filer_key)
@@ -6904,10 +7076,14 @@ def _build_key_management(
                 round(shares / shares_outstanding * 100, 6)
                 if shares_outstanding > 0 and shares > 0 else None
             )
+            display = r.get("display_name")
             row = {
-                "name": normalize_insider_name(r.get("owner")),
+                # `roster_from_holdings` rows carry the display name already; normalising it
+                # again would reorder it ("M. Venturo Brian"). A raw FMP name is normalised.
+                "name": (display.strip() if isinstance(display, str) and display.strip()
+                         else normalize_insider_name(r.get("owner"))),
                 "title": cleaned_title,
-                "ownership": _format_shares_short(shares),
+                "ownership": _format_shares_short(shares) if shares_known else "—",
                 "ownership_value": value_str,
                 "percent_ownership": round(pct, 1) if pct else None,
                 "percent_owned": percent_owned,
@@ -9821,6 +9997,16 @@ def _gated_context_lines(gated: Dict[str, str]) -> List[str]:
 # ── Shared evidence/context builder for AI prompts ────────────────────
 
 
+def _non_usd_statement_codes(rows: Any) -> List[str]:
+    """The non-USD reporting currencies of the statement rows printed in the financial
+    context, sorted and deduped (`app.utils.currency.currency_code`; USD, unknown and garbage
+    are left out). A filer that changed its reporting currency lists both. Pure; [] for junk."""
+    if not isinstance(rows, (list, tuple)):
+        return []
+    codes = {currency_code(r.get("reportedCurrency")) for r in rows if isinstance(r, dict)}
+    return sorted(c for c in codes if c and c != "USD")
+
+
 def build_financial_context(out: CollectedTickerData) -> str:
     """Compact, fact-only evidence string for Stage A and Stage B prompts.
 
@@ -9945,22 +10131,38 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 or (stmt.get("date") or "")[:4]
                 or "?"
             )
+            # Each statement row's OWN `reportedCurrency` (2026-10-09): TSM's rows are TWD, and a
+            # bare "$" here sat a few lines above the segments block's "TWD 2.2T" — two
+            # currencies for one revenue figure. USD / unknown still print "$".
+            cur = stmt.get("reportedCurrency")
             parts.append(
-                f"\n[{yr}] Revenue: {_format_money_compact(stmt.get('revenue', 0))} | "
-                f"Net Income: {_format_money_compact(stmt.get('netIncome', 0))}"
+                f"\n[{yr}] Revenue: {_format_money_compact(stmt.get('revenue', 0), cur)} | "
+                f"Net Income: {_format_money_compact(stmt.get('netIncome', 0), cur)}"
             )
 
     if balance:
         b = balance[0]
-        parts.append(f"\nTotal Assets: {_format_money_compact(b.get('totalAssets', 0))}")
-        parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0))}")
-        parts.append(f"Cash: {_format_money_compact(b.get('cashAndCashEquivalents', 0))}")
+        cur = b.get("reportedCurrency")
+        parts.append(f"\nTotal Assets: {_format_money_compact(b.get('totalAssets', 0), cur)}")
+        parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0), cur)}")
+        parts.append(f"Cash: {_format_money_compact(b.get('cashAndCashEquivalents', 0), cur)}")
 
     if cash_flow:
         cf = cash_flow[0]
-        parts.append(f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0))}")
-        parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0))}")
-        parts.append(f"Buybacks: {_format_money_compact(cf.get('commonStockRepurchased', 0))}")
+        cur = cf.get("reportedCurrency")
+        parts.append(
+            f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
+        parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
+        parts.append(
+            f"Buybacks: {_format_money_compact(cf.get('commonStockRepurchased', 0), cur)}")
+
+    statement_codes = _non_usd_statement_codes(
+        list(income[:3] if income else []) + list(balance[:1] if balance else [])
+        + list(cash_flow[:1] if cash_flow else []))
+    if statement_codes:
+        parts.append(
+            f"(Statement amounts above are in {', '.join(statement_codes)} as reported, not "
+            "converted to US dollars.)")
 
     # The multiples the MODEL is told must be the ones the USER is shown. `out.computed`
     # already resolves TTM-first (see `_cur` in `_compute_metrics`), so read it rather
@@ -10064,25 +10266,43 @@ def build_financial_context(out: CollectedTickerData) -> str:
             )
 
     if out.revenue_engine_partial.get("segments"):
-        # Pre-formatted dollars. The engine's values are MILLIONS, and this header used to
+        # Pre-formatted amounts. The engine's values are MILLIONS, and this header used to
         # print "Billions" beside them for every $1B+ company — the model was told iPhone
         # earned 209,586 billion. A formatted "$209.6B" leaves no unit to misread.
+        # They are in the filer's REPORTING currency (`reporting_currency`): a non-USD code
+        # prefixes them ("TWD 2.2T") and is named in the header, so TSM's segments never
+        # read as dollars; USD or unknown keep "$" (2026-10-09).
         engine = out.revenue_engine_partial
-        parts.append(f"\nRevenue Segments ({engine.get('period') or 'latest fiscal year'}):")
+        money = currency_code(engine.get("reporting_currency"))
+        # An UNKNOWN currency (mixed codes, a failed income read, a collection cached before the
+        # field existed) is never dressed as dollars beside statement lines in the filer's own
+        # code (final review 2026-10-09): no symbol, and the header says it is not confirmed.
+        if money is None:
+            in_code = ("; amounts in the company's reporting currency, not confirmed — never "
+                       "assume US dollars")
+        elif money != "USD":
+            in_code = f"; amounts in {money}, not converted"
+        else:
+            in_code = ""
+
+        def _seg_money(v: float) -> str:
+            return _format_money_compact(v, money, unknown_prefix="")
+
+        parts.append(
+            f"\nRevenue Segments ({engine.get('period') or 'latest fiscal year'}{in_code}):")
         for seg in engine["segments"][:6]:
             prior = seg.get("previous_revenue") or 0.0
             parts.append(
-                f"  {seg['name']}: {_format_money_compact(seg['current_revenue'] * 1e6)} "
-                f"(prior year: {_format_money_compact(prior * 1e6) if prior > 0 else 'n/a'})"
+                f"  {seg['name']}: {_seg_money(seg['current_revenue'] * 1e6)} "
+                f"(prior year: "
+                f"{_seg_money(prior * 1e6) if prior > 0 else 'n/a'})"
             )
         if engine.get("total_revenue"):
-            parts.append(
-                f"  Total revenue: {_format_money_compact(engine['total_revenue'] * 1e6)}"
-            )
+            parts.append(f"  Total revenue: {_seg_money(engine['total_revenue'] * 1e6)}")
         if engine.get("intersegment_eliminations"):
             parts.append(
                 "  Intersegment eliminations: "
-                f"-{_format_money_compact(engine['intersegment_eliminations'] * 1e6)} "
+                f"-{_seg_money(engine['intersegment_eliminations'] * 1e6)} "
                 "(segments are reported gross; their shares of revenue add to more than 100%)"
             )
 
@@ -10131,6 +10351,12 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
         ("Valuation", out.snap_valuation),
         ("Financial Health", out.snap_health),
     ]
+    # The metric names: peer-worded, plus the model-only renames — ONE helper with the thesis
+    # digest, so the two report-model surfaces can never word a metric apart. Lazy import:
+    # narrative_prompts is heavy (the Gemini client, persona_config) and every lazy importer
+    # of this module (ticker_data_cache, widget_movers_service) would load it too.
+    from app.services.agents.narrative_prompts import report_model_metric_name
+
     rendered: List[str] = []
     for title, snap in snaps:
         if snap is None or not snap.metrics:
@@ -10142,8 +10368,10 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
             # The wire name says "sector avg" / "vs sector" for every median (shipped iOS
             # strips the suffix by that word); `peer_level` names whose median it is. The
             # 1.1 card calls an industry median "industry avg", so the model must too, or
-            # the frozen narrative says "sector average" beside it (2026-10-08).
-            rendered.append(f"  {peer_worded_metric_name(m)}: {m.value}")
+            # the frozen narrative says "sector average" beside it (2026-10-08). The same
+            # helper applies the model-only renames ("Insider Ownership" is 100 − free float:
+            # `narrative_prompts.REPORT_INSIDER_OWNERSHIP_LABEL`); the wire label is untouched.
+            rendered.append(f"  {report_model_metric_name(m)}: {m.value}")
     if not rendered:
         return ""
     header = (

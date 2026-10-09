@@ -28,6 +28,7 @@ from typing import Any, Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.services import pdf_charts
+from app.utils.currency import currency_code
 from app.services.dcf_report_gate import (
     strip_caydex_if_disabled,
     wall_street_insight_is_for_this_card,
@@ -693,6 +694,11 @@ def build_context(
             "revenue_unit": engine.get("revenue_unit") or "",
             "period": engine.get("period") or "",
             "analysis_note": engine.get("analysis_note") or "",
+            # The filer's reporting currency of the segment figures (None when unknown). The
+            # section prints only shares and growth today; any AMOUNT added to it must be
+            # prefixed through `app.utils.currency.money_prefix(reporting_currency)` — "TWD
+            # 2.2T", never "$2.2T" for a non-USD filer (`tests/test_segment_money_currency.py`).
+            "reporting_currency": currency_code(engine.get("reporting_currency")),
         },
         "fundamentals": {
             "cards": data.get("fundamental_metrics") or [],

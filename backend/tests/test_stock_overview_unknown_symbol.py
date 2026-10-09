@@ -96,9 +96,31 @@ async def test_a_priced_symbol_still_serves_through_the_same_path(monkeypatch):
         return {"quote": {"price": 300.0}, "chart_data": []}
     monkeypatch.setattr(svc, "_get_volatile", _priced_volatile)
 
+    async def _profiled_fundamentals(ticker):
+        return {"profile": {"companyName": "Broadcom", "sector": "Technology"}}
+    monkeypatch.setattr(svc, "_get_fundamentals", _profiled_fundamentals)
+
     resp = await svc.get_overview("AVGO", "3M", "1day", False)
     assert resp.current_price == 300.0
     assert writes == ["AVGO"]
     assert _cache_get("stock_overview:AVGO:3M:1day:False", ttl=sos._VOLATILE_TTL) is resp, (
         "the key format the refusal test probes must be the one a served overview is pinned under"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_priced_symbol_with_no_profile_writes_no_profile_row(monkeypatch):
+    """The screen still serves (the quote is real), but the shared `company_profile_cache` row
+    is NOT written from an empty profile: every field would be a placeholder ("N/A"), laid over
+    a CEO / sector another writer stored (2026-10-09; the write merges now, so a placeholder
+    write would erase real values rather than the whole row)."""
+    svc = _service()
+    writes = _stub_everything_empty(monkeypatch, svc)
+
+    async def _priced_volatile(ticker, chart_range, interval, extended_hours, **kwargs):
+        return {"quote": {"price": 300.0}, "chart_data": []}
+    monkeypatch.setattr(svc, "_get_volatile", _priced_volatile)
+
+    resp = await svc.get_overview("AVGQ", "3M", "1day", False)
+    assert resp.current_price == 300.0
+    assert writes == []

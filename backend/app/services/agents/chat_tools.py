@@ -9,13 +9,16 @@ becomes an inline widget; analyst / sentiment results only inform the model's an
 Handlers take an svc argument (a ChatService) rather than importing it, to avoid a circular import.
 """
 
+import inspect
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from google.genai import types
 
-from app.services._analyst_common import analyst_section_available
+from app.config import settings
+from app.services._analyst_common import analyst_estimates_available, analyst_section_available
 from app.services.chat_security import sanitize_symbol
+from app.services.entitlements import congress_holders_unlocked
 
 logger = logging.getLogger(__name__)
 
@@ -86,34 +89,146 @@ _NEWS_TOOLS = frozenset({"get_ticker_news", "explain_price_move"})
 # renders an unknown tool by de-snake-casing its name.
 OWNERSHIP_TOOL = "check_ownership_filings"
 
-# Report chat's live web search (`chat_web_search_service`). The ONE name both files share:
+# A company's reported figures (`chat_financials_tool`, 2026-10-08): Key Stats, statements by
+# fiscal year and quarter, margins, the balance sheet's debt and cash, earnings results and
+# dates, analysts' revenue/EPS ESTIMATES (licensed; ratings and targets are not), valuation
+# multiples and the fair-value model, segments, dividends and splits — read through the SAME
+# cache-aside services the Financials and Overview tabs use, never Gemini. The audit behind it:
+# that data was cached and licensed, yet chat had no way to reach it, so a NORMAL chat answered
+# revenue and EPS from memory. Equity classes only. Shipped app builds with no label for it
+# render the de-snake-cased name, "Check company financials" — a true progress line.
+FINANCIALS_TOOL = "check_company_financials"
+# Its optional `section` — a CLOSED vocabulary, described in the schema (no `enum`, which a
+# strict declaration validator can 400 on — the `recency` precedent) and normalised here
+# (`normalize_section`). "summary" is the default because the send door allows ONE tool round:
+# one call must answer most questions.
+FINANCIAL_SECTIONS = (
+    "summary", "growth", "margins", "health", "earnings",
+    "estimates", "valuation", "segments", "dividends",
+)
+# The tools that declare a `section` parameter (`tests/test_chat_tool_boundary.py` allows the
+# parameter on these alone).
+SECTION_TOOLS = frozenset({FINANCIALS_TOOL})
+_SECTION_MAX_CHARS = 32
+# Fixed text — NEVER an echo of the model's value, which is model output.
+_SECTION_NOTE = (
+    "That section is not one this tool has, so the summary is shown. Valid sections: "
+    + ", ".join(FINANCIAL_SECTIONS) + "."
+)
+# What a ticker IS (`chat_profile_tool`, 2026-10-08): a company's CEO and key executives,
+# headcount, headquarters, listing date and peers; a fund's fee, assets, holdings and sector
+# weights; a coin's supply, fully diluted value and rank, plus the market-wide Crypto Fear &
+# Greed reading — each read through the screens' own caches (company facts, fund facts, coin
+# facts), never Gemini. The audit behind it: "who is the CEO of X", "SPY's expense ratio" and
+# "Bitcoin's max supply" were answered from memory, because the only profile chat ever saw was
+# the cached row of the stock on screen. Granted to STOCK, NORMAL, ETF and CRYPTO (an index or
+# a futures contract has no such profile). It resolves the asset class ITSELF, against the
+# screen — so its handler never canonicalises a bare coin first (`resolved_as` says what it
+# found). `ChatService._knowledge_rule` adds "current executives" to the company-reported
+# tier wherever a class grants it. Shipped app builds with no label for it render the
+# de-snake-cased name, "Check asset profile" — a true progress line.
+PROFILE_TOOL = "check_asset_profile"
+# Its optional `kind` — a CLOSED vocabulary like `section` (described, no schema `enum`;
+# normalised by `normalize_profile_kind`, never echoed). Without it the tool resolves a ticker
+# against the screen, so a symbol a coin shares with a listed company ("LTC": Litecoin and LTC
+# Properties) is the coin everywhere but that company's own screen — and "Who is LTC
+# Properties' CEO?" in a general chat could never reach the company. With it, the user's own
+# words decide (`ChatService._fetch_asset_profile_data` reads the symbol as that kind).
+PROFILE_KINDS = ("company", "fund", "coin")
+# The tools that declare a `kind` parameter (`tests/test_chat_tool_boundary.py` allows the
+# parameter on these alone).
+KIND_TOOLS = frozenset({PROFILE_TOOL})
+_KIND_MAX_CHARS = 32
+# Accepted spellings → the member. Exact, after strip + lower-case; anything else is ignored.
+_KIND_ALIASES: Dict[str, str] = {
+    "company": "company", "stock": "company", "equity": "company",
+    "fund": "fund", "etf": "fund",
+    "coin": "coin", "crypto": "coin", "cryptocurrency": "coin",
+}
+# Fixed text — NEVER an echo of the model's value, which is model output.
+_KIND_NOTE = (
+    "That kind is not one this tool has, so the ticker was resolved as usual. Valid kinds: "
+    + ", ".join(PROFILE_KINDS) + "."
+)
+# Caydex's data tools — behind the `CHAT_DATA_TOOLS_ENABLED` kill switch (applied in
+# `tools_for_asset_type`, so the declarations, the handler maps and the prompt all follow it).
+_DATA_TOOLS = frozenset({FINANCIALS_TOOL, PROFILE_TOOL})
+
+
+def normalize_profile_kind(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(kind, note)`` for the model's `kind` argument: a `PROFILE_KINDS` member or None.
+    Only a string of at most 32 characters is read (stripped, lower-cased, an exact
+    `_KIND_ALIASES` key). Omitted / blank → (None, None): the screen decides. Anything else →
+    (None, a fixed note listing the valid kinds). The raw value is never echoed. Never
+    raises."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str) or len(raw) > _KIND_MAX_CHARS:
+        return None, _KIND_NOTE
+    try:
+        key = str(raw).strip().lower()
+    except Exception:  # noqa: BLE001 — an odd str subclass is refused, never a crash
+        return None, _KIND_NOTE
+    if not key:
+        return None, None
+    member = _KIND_ALIASES.get(key)
+    return (member, None) if member is not None else (None, _KIND_NOTE)
+
+
+def normalize_section(raw: Any) -> Tuple[str, Optional[str]]:
+    """``(section, note)`` for the model's `section` argument — always a `FINANCIAL_SECTIONS`
+    member. Only a string of at most 32 characters is read: stripped, lower-cased, spaces and
+    hyphens to underscores, then an EXACT member. Omitted / blank → ("summary", None); anything
+    else → ("summary", a fixed note listing the valid sections). The raw value is never echoed
+    back. Never raises."""
+    if raw is None:
+        return "summary", None
+    if not isinstance(raw, str) or len(raw) > _SECTION_MAX_CHARS:
+        return "summary", _SECTION_NOTE
+    key = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    if not key:
+        return "summary", None
+    if key in FINANCIAL_SECTIONS:
+        return key, None
+    return "summary", _SECTION_NOTE
+
+# Ask Cay AI's live web search (`chat_web_search_service`). The ONE name both files share:
 # defined HERE and imported by the service, never the reverse — this module must not pull the
 # budget / database code in at import (`tests/test_chat_tool_boundary.py`). It is in NO asset
 # class's table below: `tools_for_asset_type(..., web_search=True)` adds it only on a turn the
-# service's gate opened (REPORT session, TICKER_REPORT screen, the switch, a key, a signed-in
-# caller and an explicit ask), so the declaration, the handler map and the prompt's capability
-# block all follow that one decision.
+# service's ONE decision granted a tier (`decide_web_search`: report chat's explicit ask, an
+# explicit ask in any chat, or the automatic fallback), so the declaration, the handler map and
+# the prompt's capability block all follow that one decision. Its description and capability line
+# follow the tier (`web_search_mode`: "explicit" | "news" | "auto", `WEB_SEARCH_MODES`).
 WEB_SEARCH_TOOL = "web_search"
+#: The declaration / capability variants of the web tool (`web_search_mode`). "explicit" is the
+#: registry's own text (`TOOL_DESCRIPTIONS[WEB_SEARCH_TOOL]`); the other two live OUT of the
+#: registry so its tool count stays the count of TOOLS (`test_ask_cay_ai_design_page_parity`).
+WEB_SEARCH_MODES = ("explicit", "news", "auto")
 
 _STOCK_TOOLSET = frozenset({
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
-}) | _NEWS_TOOLS | {_MARKET_TOOL, OWNERSHIP_TOOL}
+}) | _NEWS_TOOLS | {_MARKET_TOOL, OWNERSHIP_TOOL, FINANCIALS_TOOL, PROFILE_TOOL}
 
 _TOOLS_BY_ASSET_TYPE: Dict[str, frozenset] = {
     # Every chat about a company — its ticker screen, its report and its Updates feed all
     # resolve to STOCK (`ChatService._detect_asset_type`) — gets the ownership tool.
+    # It also gets the financials tool (a company's own reported figures) and the profile tool
+    # (who runs it, where it is based, when it listed, its peers).
     "STOCK": _STOCK_TOOLSET,
     # No screen context: the user may ask about any stock, so keep the full equity set.
     "NORMAL": _STOCK_TOOLSET,
-    # A fund has no analyst coverage, but it does have news sentiment and a real quote.
+    # A fund has no analyst coverage, but it does have news sentiment and a real quote — and a
+    # profile (its fee, assets, holdings and sector weights).
     "ETF": frozenset({"get_stock_chart_data", "get_sentiment_analysis"})
-           | _NEWS_TOOLS | {_MARKET_TOOL},
+           | _NEWS_TOOLS | {_MARKET_TOOL, PROFILE_TOOL},
     # Sentiment IS meaningful for a coin — `sentiment_service` has a crypto news branch — but
     # only if the caller passes `is_crypto`; see `ChatService._fetch_sentiment_data`.
     # News is routed on the same flag, so a coin gets `news/crypto` rather than an equity
-    # query for "BTCUSD" that returns nothing.
+    # query for "BTCUSD" that returns nothing. Its profile is its supply (circulating, total,
+    # max), fully diluted value and rank.
     "CRYPTO": frozenset({"get_stock_chart_data", "get_sentiment_analysis"})
-              | _NEWS_TOOLS | {_MARKET_TOOL},
+              | _NEWS_TOOLS | {_MARKET_TOOL, PROFILE_TOOL},
     # An index has no analyst ratings and no per-symbol social sentiment; it has the
     # market-overview aggregate, which is the tool built for exactly this case — plus the
     # breadth snapshot, which is what "why is the market down" actually needs.
@@ -149,10 +264,15 @@ def tools_for_asset_type(asset_type: Optional[str], *, web_search: bool = False)
 
     The ONE registry — the declarations, the handlers and the prompt's `capability_block` —
     filters through this function, so closing it here closes every door.
+
+    `CHAT_DATA_TOOLS_ENABLED` (Settings, default True) is the kill switch for Caydex's data
+    tools (`_DATA_TOOLS`): off, they leave every class at once, read per turn.
     """
     allowed = _TOOLS_BY_ASSET_TYPE.get((asset_type or "").strip().upper(), _STOCK_TOOLSET)
     if not analyst_section_available():
         allowed = allowed - {"get_analyst_analysis"}
+    if not settings.CHAT_DATA_TOOLS_ENABLED:
+        allowed = allowed - _DATA_TOOLS
     if web_search:
         allowed = allowed | {WEB_SEARCH_TOOL}
     return allowed
@@ -192,8 +312,12 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     ),
     "get_ticker_news": (
         "Fetch the most recent news headlines for a ticker, with key points and publisher. "
-        "Call whenever the user asks what is happening with a company, what the news is, or "
-        "what is behind a story — and before saying you do not know why something happened."
+        "For a listed company it also returns the company's own latest press releases "
+        "(`press_releases`: results, guidance, buybacks, leadership changes and other "
+        "announcements, each dated) — the company's own statements, not independent "
+        "reporting. Call whenever the user asks what is happening with a company, what the "
+        "news is, what the company announced or what guidance it gave, or what is behind a "
+        "story — and before saying you do not know why something happened."
     ),
     "explain_price_move": (
         "Explain why a ticker moved TODAY. Returns the identified cause (earnings, analyst "
@@ -206,25 +330,71 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "Look up who owns a company's stock, from its SEC filings: for each insider (officer, "
         "director or 10% owner) the shares they reported holding right AFTER their most "
         "recent transaction — held directly and through trusts or entities, each with its "
-        "as-of date — plus their latest purchase or sale, and the share held by institutions "
-        "with the largest institutional holders from the latest quarterly 13F filings. Call it "
-        "for any question about how many shares someone owns or holds, what an insider has "
-        "left after selling or buying, how much insiders or institutions own, or who the "
-        "biggest holders are. The figures are as of each filing, not live."
+        "as-of date — plus their latest purchase or sale in plain words; insiders' open-market "
+        "buying and selling over the last 3, 6 and 12 months; the share held by institutions, "
+        "the largest institutional holders and how they changed in the latest quarterly 13F "
+        "filings; the public float and shares outstanding; short interest with its settlement "
+        "date and days to cover; and congressional trading disclosures where the user's plan "
+        "includes them. Call it for any question about how many shares someone owns or holds, "
+        "what an insider has left after selling or buying, whether insiders or institutions "
+        "are buying or selling, how much insiders or institutions own, who the biggest holders "
+        "are, the float, short interest, or members of Congress trading the stock. The figures "
+        "are as of each filing, not live."
+    ),
+    FINANCIALS_TOOL: (
+        "Look up a company's reported financial figures from Caydex's financial data. Optional "
+        "`section` picks the depth: summary (the default: key stats, the latest fiscal year and "
+        "quarter, margins, the last earnings result and the next report date, valuation "
+        "multiples, and the balance sheet's debt and cash), growth (revenue, EPS, net income, "
+        "operating income and free cash flow by fiscal year and quarter, with year-over-year "
+        "change), margins, health (debt, cash, liquidity and leverage), earnings (results "
+        "against analysts' estimates and the next report date), estimates (analysts' forward "
+        "revenue and EPS estimates, when available), valuation (multiples and a fair-value "
+        "model estimate), segments (revenue by business segment) or dividends (yield, "
+        "per-share history, ex-dividend date and stock splits). Call it before answering any "
+        "question about a company's revenue, earnings, EPS, margins, growth, cash flow, debt, "
+        "cash, valuation multiples, fair value, dividends, splits, earnings dates or results, "
+        "or analysts' revenue or EPS estimates, and never answer those figures from memory. "
+        "Every figure comes with its period (fiscal year, quarter or trailing twelve months), "
+        "its basis and its currency. It carries no analyst ratings and no price targets. Listed "
+        "companies only: not funds, coins, indexes or commodities."
+    ),
+    PROFILE_TOOL: (
+        "Look up what a ticker is, from Caydex's licensed profile data. For a company: its "
+        "name, CEO and key executives with their titles, employee count, headquarters, "
+        "listing (IPO) date, sector, industry, exchange, website and comparable companies "
+        "(peers). For a fund: its issuer, the index it tracks, expense ratio, assets, number "
+        "of holdings, top holdings and sector weights. For a coin: its circulating, total and "
+        "maximum supply, fully diluted value and market-cap rank, plus the market-wide Crypto "
+        "Fear & Greed reading. Call it before answering who runs a company or who its "
+        "executives are, how many people it employs, where it is based, when it listed, who "
+        "its peers are, a fund's fee, holdings or sector mix, or a coin's supply — and never "
+        "answer those from memory. It lists a company's current officers, not its founders "
+        "or past leaders. The result says what the ticker resolved to (`resolved_as`): on a "
+        "company's or fund's own screen its symbol means that asset, even when a coin shares "
+        "it, and elsewhere a symbol a coin shares means the coin — unless the optional `kind` "
+        "(company, fund or coin) says which one the user means; set it when the user's words "
+        "make that clear, such as LTC Properties versus Litecoin. No prices: the price tool "
+        "has those."
     ),
     _MARKET_TOOL: (
         "Fetch how the market is doing TODAY: every sector's daily move, the "
         "leading and lagging industries, the biggest gaining and losing stocks, "
-        "and today's market news summary with its cited catalyst. Takes no "
-        "arguments. Call for any question about sectors, market breadth, what is "
-        "hot or trending today, sector rotation, or why the market moved — "
-        "including when the user names one sector, such as Basic Materials or "
-        "Technology."
+        "and today's market news summary with its cited catalyst — plus official "
+        "macro readings, each dated: the fed funds rate, the 10-year Treasury yield "
+        "and the 10-year minus 2-year spread, unemployment, CPI and core PCE "
+        "inflation year-on-year, the euro, yen and pound exchange rates and the "
+        "broad dollar index (not the DXY). Takes no arguments. Call for any "
+        "question about sectors, market breadth, what is hot or trending today, "
+        "sector rotation, or why the market moved — including when the user names "
+        "one sector, such as Basic Materials or Technology — and for any interest "
+        "rate, Treasury yield, inflation, unemployment or exchange-rate question. "
+        "The VIX and the DXY are not in Caydex data."
     ),
     "get_market_overview": (
         "Fetch overall market valuation (P/E, forward P/E, earnings yield), sector "
-        "performance, and macro indicators. For INDEX / broad-market questions, NOT "
-        "individual stocks."
+        "performance, and macro outlook labels (written outlooks, not measured readings). "
+        "For INDEX / broad-market questions, NOT individual stocks."
     ),
     WEB_SEARCH_TOOL: (
         "Search the public web — ONLY for what the user explicitly asked, in this message, to "
@@ -236,7 +406,7 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "ONLY on a turn where the user explicitly asked for a web search or a check, so call it "
         "for that request — including news requests: the headlines tool may add its licensed "
         "headlines alongside it, never instead of it. Never use this for prices, quotes, price "
-        "changes or other market data."
+        "changes or other market data — exchange rates, the VIX and the DXY included."
     ),
 }
 
@@ -250,32 +420,106 @@ TOOL_CAPABILITIES: Dict[str, str] = {
     ),
     "get_analyst_analysis": "get_analyst_analysis for Wall Street ratings, consensus and price targets",
     "get_sentiment_analysis": "get_sentiment_analysis for social and news mood on a ticker",
-    "get_ticker_news": "get_ticker_news for recent headlines about a company or coin",
+    "get_ticker_news": (
+        "get_ticker_news for recent headlines about a company or coin, and a company's own "
+        "latest press releases (its results, guidance and other announcements)"
+    ),
     "explain_price_move": (
         "explain_price_move for why a specific ticker moved TODAY — it returns the actual "
         "cause, how unusual the move is for that ticker, how its industry and the market did, "
         "and recent headlines"
     ),
+    # The four data tools' lines are short noun lists (final review 2026-10-09): each tool was
+    # described three times — its declaration (which already says "call it before answering",
+    # with the sections and fields), this line, and a routing paragraph — and the system prompt
+    # had grown ~50%. The declaration carries the detail; the routing paragraph carries the rules
+    # found nowhere else; the VIX / DXY line lives once, in MACRO READINGS.
     OWNERSHIP_TOOL: (
-        "check_ownership_filings for who owns a company's stock — each insider's shares held "
-        "after their latest reported transaction, as of that filing, and the institutional "
-        "ownership with the largest holders"
+        "check_ownership_filings for who owns a company's stock — insiders' holdings and "
+        "trades, institutional owners, the float, short interest and, on the user's plan, "
+        "congressional disclosures"
+    ),
+    FINANCIALS_TOOL: (
+        "check_company_financials for a company's reported figures — growth, margins, cash "
+        "flow, debt and cash, valuation, earnings, estimates when available, segments, "
+        "dividends and splits"
+    ),
+    PROFILE_TOOL: (
+        "check_asset_profile for a company's executives, size, headquarters, listing date and "
+        "peers, a fund's fees and holdings, or a coin's supply"
     ),
     _MARKET_TOOL: (
-        "get_market_snapshot for how the market itself is doing today — every sector's move, "
-        "leading and lagging industries, the day's biggest gainers and losers, and today's "
-        "market news summary"
+        "get_market_snapshot for how the market is doing today — sector moves, leaders and "
+        "laggards, top gainers and losers and the day's market news — plus dated official "
+        "macro readings (rates, Treasury yields, inflation, unemployment and exchange rates)"
     ),
     "get_market_overview": (
         "get_market_overview for the index's valuation (P/E, forward P/E, earnings yield), "
-        "sector performance and macro indicators"
+        "sector performance and macro outlook labels"
     ),
     WEB_SEARCH_TOOL: (
         "web_search for third-party web pages on what the user explicitly asked you to look "
         "up, verify or get the latest on in this message — once per question, and never for "
-        "prices, quotes or market data"
+        "prices, quotes or market data (exchange rates, the VIX and the DXY included)"
     ),
 }
+
+# ── The web tool's tier variants (kept OUT of the two registries above) ──────────
+# "explicit" (an explicit search / verify ask, round 1 forced to the search) is the registry text.
+# "news" (a latest-news ask): Caydex's licensed news is forced in round 1 — the company's headline
+# tools, or the market snapshot when no company is in view — so the search is offered only for what
+# it does not cover; used ONLY when round 1 really is forced to them
+# (`chat_web_search_service.web_search_mode(turn, allowed)`), else the "explicit" text. "auto" (the automatic fallback, never forced): only
+# after Caydex's data and tools could not answer. The explicit text says the tool is offered only
+# on an explicit ask and MUST be called; declared unchanged on the other tiers, it would make the
+# model search on nearly every turn that sees it. Every variant keeps the never-for-market-data
+# phrases the Privacy Policy states as a model instruction (`test_legal_pages`).
+_WEB_QUERY_GUIDE = (
+    "`query`: a short search — the company name or ticker, the topic and, if needed, a year or "
+    "quarter; never a figure, price or percentage, and nothing about the user. Optional "
+    "`recency`: day, week, month or year. Returns third-party pages with their publisher and "
+    "date — not Caydex data and not the report's view."
+)
+_WEB_NEVER_MARKET = (
+    "Never use this for prices, quotes, price changes or other market data — exchange rates, "
+    "the VIX and the DXY included."
+)
+WEB_SEARCH_TIER_DESCRIPTIONS: Dict[str, str] = {
+    "explicit": TOOL_DESCRIPTIONS[WEB_SEARCH_TOOL],
+    "news": (
+        "Search the public web — on this turn the user asked for the latest news. Caydex's "
+        "licensed headlines come first (the company's own, or the market-wide news when no "
+        "company is in view) and were fetched before this tool is offered: call it at most "
+        "once, and only for what those headlines and Caydex's data do not cover. "
+        + _WEB_QUERY_GUIDE + " " + _WEB_NEVER_MARKET
+    ),
+    "auto": (
+        "Search the public web as a FALLBACK: call it only after Caydex's data and tools could "
+        "not answer — for example an event, a lawsuit or regulatory action, a product launch, "
+        "what management said, an IPO or economic calendar, a filing's text or a private "
+        "company — and at most once. Never call it to restate or check a figure Caydex's data "
+        "holds. " + _WEB_QUERY_GUIDE + " " + _WEB_NEVER_MARKET
+    ),
+}
+WEB_SEARCH_TIER_CAPABILITIES: Dict[str, str] = {
+    "explicit": TOOL_CAPABILITIES[WEB_SEARCH_TOOL],
+    "news": (
+        "web_search for third-party web pages after Caydex's licensed headlines, only for what "
+        "they do not cover — once per question, and never for prices, quotes or market data "
+        "(exchange rates, the VIX and the DXY included)"
+    ),
+    "auto": (
+        "web_search as a fallback for third-party web pages, only when Caydex's data and tools "
+        "cannot answer — once per question, never to restate a Caydex figure, and never for "
+        "prices, quotes or market data (exchange rates, the VIX and the DXY included)"
+    ),
+}
+
+
+def _web_mode(mode: Optional[str]) -> str:
+    """A `web_search_mode` normalised to `WEB_SEARCH_MODES`; anything else is "explicit" (the
+    registry text, the 2026-10-02 behaviour)."""
+    return mode if isinstance(mode, str) and mode in WEB_SEARCH_MODES else "explicit"
 
 # What a ticker tool answers when the model's argument is not a symbol. Fixed text —
 # never an echo of the argument, which is model output.
@@ -284,14 +528,19 @@ _INVALID_TICKER = {"error": "invalid or missing ticker"}
 # Tools that take no arguments / a symbol rather than a ticker.
 _NO_ARG_TOOLS = frozenset({_MARKET_TOOL})
 _SYMBOL_ARG_TOOLS = frozenset({"get_market_overview"})
+# The tools with a closed-vocabulary `section` beside the ticker (`normalize_section`).
+_SECTION_ARG_TOOLS = SECTION_TOOLS
 # The ONE tool with a free-form argument. The query is model output: the service sanitizes it
 # (no figure, no URL, no email, ≤ 16 words) before anything leaves the server, and validates
 # `recency` itself — no `enum` in the schema, which a strict declaration validator can 400 on.
 _QUERY_ARG_TOOLS = frozenset({WEB_SEARCH_TOOL})
 
 
-def _declaration(name: str) -> types.FunctionDeclaration:
-    description = TOOL_DESCRIPTIONS[name]
+def _declaration(name: str, web_search_mode: Optional[str] = None) -> types.FunctionDeclaration:
+    description = (
+        WEB_SEARCH_TIER_DESCRIPTIONS[_web_mode(web_search_mode)] if name == WEB_SEARCH_TOOL
+        else TOOL_DESCRIPTIONS[name]
+    )
     if name in _NO_ARG_TOOLS:
         return types.FunctionDeclaration(
             name=name, description=description,
@@ -318,6 +567,53 @@ def _declaration(name: str) -> types.FunctionDeclaration:
                 required=["query"],
             ),
         )
+    if name in _SECTION_ARG_TOOLS:
+        return types.FunctionDeclaration(
+            name=name, description=description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
+                        description="The company's stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+                    ),
+                    "section": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "Optional: which figures — one of " + ", ".join(FINANCIAL_SECTIONS)
+                            + ". Defaults to summary."
+                        ),
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
+    if name in KIND_TOOLS:
+        return types.FunctionDeclaration(
+            name=name, description=description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "The ticker symbol of the company, fund or coin (e.g. AAPL, SPY, "
+                            "BTC)."
+                        ),
+                    ),
+                    "kind": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "Optional: what the user means by the ticker — one of "
+                            + ", ".join(PROFILE_KINDS)
+                            + ". Leave it out unless the user's words say which, for a symbol "
+                            "a coin shares with a listed company or fund."
+                        ),
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
     if name in _SYMBOL_ARG_TOOLS:
         return types.FunctionDeclaration(
             name=name, description=description,
@@ -339,23 +635,34 @@ def _declaration(name: str) -> types.FunctionDeclaration:
 # order, but say so rather than rely on it).
 _TOOL_ORDER = (
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
-    "get_ticker_news", "explain_price_move", OWNERSHIP_TOOL, _MARKET_TOOL,
-    "get_market_overview", WEB_SEARCH_TOOL,
+    "get_ticker_news", "explain_price_move", FINANCIALS_TOOL, OWNERSHIP_TOOL, PROFILE_TOOL,
+    _MARKET_TOOL, "get_market_overview", WEB_SEARCH_TOOL,
 )
 
 
 def build_chat_tool_declarations(
     asset_type: Optional[str] = None, *, web_search: bool = False,
+    web_search_mode: Optional[str] = None,
 ) -> List[types.Tool]:
     """The tools the agentic chat may call, filtered to those meaningful for `asset_type`
-    (plus `web_search` only when the turn's gate opened — see `tools_for_asset_type`)."""
+    (plus `web_search` only when the turn's gate opened — see `tools_for_asset_type` — with the
+    description of its tier, `web_search_mode`)."""
     allowed = tools_for_asset_type(asset_type, web_search=web_search)
-    decls = [_declaration(name) for name in _TOOL_ORDER if name in allowed]
+    decls = [_declaration(name, web_search_mode) for name in _TOOL_ORDER if name in allowed]
     # An empty `function_declarations` list is not a valid Tool — return no tools at all.
     return [types.Tool(function_declarations=decls)] if decls else []
 
 
-def capability_block(allowed: frozenset) -> str:
+def _round_job_cap() -> int:
+    """`CHAT_TOOL_ROUND_MAX_JOBS` for the prompt — the same setting the round planner reads;
+    its declared default when the value is not an int in 1..16 (never a bool)."""
+    raw = settings.CHAT_TOOL_ROUND_MAX_JOBS
+    if isinstance(raw, int) and not isinstance(raw, bool) and 1 <= raw <= 16:
+        return raw
+    return 8
+
+
+def capability_block(allowed: frozenset, *, web_search_mode: Optional[str] = None) -> str:
     """The system-prompt paragraph that names ONLY the tools this chat actually has.
 
     Two rules ride on it and are conditioned the same way:
@@ -371,11 +678,23 @@ def capability_block(allowed: frozenset) -> str:
     names = [n for n in _TOOL_ORDER if n in allowed]
     if not names:
         return ""
-    lines = "; ".join(TOOL_CAPABILITIES[n] for n in names)
+    lines = "; ".join(
+        WEB_SEARCH_TIER_CAPABILITIES[_web_mode(web_search_mode)] if n == WEB_SEARCH_TOOL
+        else TOOL_CAPABILITIES[n]
+        for n in names
+    )
     text = (
         "WHAT YOU CAN ANSWER. You are not limited to a single company's price. You have: "
         + lines + ". "
     )
+    if len(names) > 1:
+        # A round's calls run CONCURRENTLY (`gemini._gather_tool_calls`) and the send door
+        # allows a single round, so one step with every tool beats a chain of steps. The number
+        # is the round's job cap — a call past it is refused (`too_many_tool_calls`).
+        text += (
+            "When a question needs several tools, request them together in one step (at most "
+            f"{_round_job_cap()}) rather than one after another. "
+        )
     has_why = "explain_price_move" in allowed
     has_snapshot = _MARKET_TOOL in allowed
     has_news = "get_ticker_news" in allowed
@@ -440,18 +759,80 @@ def capability_block(allowed: frozenset) -> str:
         "Never invent a CAUSE for a price move that a tool did not give you, and never pad "
         "an answer with a guess — but never stop at 'I don't know' either. "
     )
+    if FINANCIALS_TOOL in allowed:
+        # Company-reported figures used to be answered from memory in a NORMAL chat — no tool
+        # carried them. "Analysts' estimates" is named only while that dataset is licensed.
+        estimates = (
+            ", analysts' revenue and EPS estimates" if analyst_estimates_available() else ""
+        )
+        text += (
+            "FINANCIAL FIGURES — revenue, EPS, margins, cash flow, debt and cash, valuation "
+            "multiples, dividends, splits, earnings dates and results"
+            + estimates
+            + " — mean call check_company_financials (the summary first, a section for depth); "
+            "give each figure with its period, basis and currency, and never answer them from "
+            "memory. "
+        )
     if OWNERSHIP_TOOL in allowed:
         # The TestFlight 1.0 (11) dead end: "how many shares does he own now?" was answered
         # "Caydex does not have information on his current total ownership" — with no tool
         # that could have said otherwise.
         text += (
             "OWNERSHIP QUESTIONS — how many shares an insider owns or has left after a sale or "
-            "purchase, how much insiders or institutions own, who the biggest holders are — "
-            "mean call check_ownership_filings before answering; never say Caydex has no "
-            "ownership information without calling it. Give every holding with its as-of "
-            "filing date, never as a live count, and keep shares held directly and through "
-            "trusts or entities as separate figures. "
+            "purchase, how much insiders or institutions own, who the biggest holders are, "
+            "whether insiders or institutions are buying or selling, the float, short interest, "
+            "or congressional trading — mean call check_ownership_filings before answering; "
+            "never say Caydex has no ownership information without calling it. Give every "
+            "holding with its as-of filing date, never as a live count, and keep shares held "
+            "directly and through trusts or entities as separate figures. A sale's dollar "
+            "figure is its proceeds; shares withheld for taxes are not a sale. When the result "
+            "says congressional disclosures are locked, say they are on Caydex Pro and name "
+            "no member and no trade. "
         )
+    if PROFILE_TOOL in allowed:
+        # "Who is the CEO of X", "SPY's expense ratio", "Bitcoin's max supply" were answered
+        # from memory: no tool carried a profile for any ticker but the one on screen.
+        # The "not in Caydex's data" clause is scoped to CURRENT officers and profile figures:
+        # written as "a role it does not list", it reached founders, creators and maintainers —
+        # roles no profile lists — and revived the TestFlight E5 refusal ("Who maintains DOGE?"
+        # → "Caydex has no information"), against WHAT YOU KNOW's background tier.
+        # Its "facts take precedence over memory" sentence is gone: CAYDEX DATA FIRST says it in
+        # every prompt (final review 2026-10-09). The rules found only here stay.
+        text += (
+            "COMPANY, FUND AND COIN FACTS — who runs a company or its executives, its employees, "
+            "headquarters, listing date or peers, a fund's expense ratio, holdings or sector "
+            "weights, or a coin's supply — mean call check_asset_profile before answering. A "
+            "current officer (the CEO, the CFO or another executive) or a profile figure it does "
+            "not list is not in Caydex's data, so say that rather than naming a person or giving "
+            "a figure from memory. Founders, creators, maintainers and past leaders are "
+            "background, not profile data: answer them from general knowledge, hedged where they "
+            "could have changed. Read the `resolved_as` line to know which asset the facts "
+            "describe. "
+        )
+    if has_news:
+        # The licensed answer to "what guidance did X give": the company's own releases ride
+        # with the headlines (`press_releases`). A release is the issuer's statement.
+        text += (
+            "COMPANY ANNOUNCEMENTS — what a listed company announced, reported or guided to — "
+            "mean call get_ticker_news and read its press_releases: attribute each to the "
+            "company with its date ('the company said on Oct 1, 2026 …'), as the company's own "
+            "statement, never as independent reporting or as Caydex's view. "
+        )
+    if has_snapshot:
+        # Macro readings (FRED, public-domain series) ride in the snapshot, dated. FX is market
+        # data: the only answer is that block. The VIX and the DXY are not in our data at all.
+        text += (
+            "MACRO READINGS — an interest rate, a Treasury yield, inflation, unemployment or an "
+            "exchange rate — mean call get_market_snapshot and give its dated macro reading "
+            "('as of <date>'), never a figure from memory. The VIX and the DXY are not in "
+            "Caydex data: say so plainly rather than estimating them. "
+        )
+        if "get_market_overview" in allowed:
+            text += (
+                "get_market_overview's macro indicators are written outlook labels, not "
+                "measured readings: for a rate, an inflation figure or an exchange rate, use "
+                "the snapshot's dated readings. "
+            )
     return text
 
 
@@ -469,11 +850,34 @@ _CHIP_SCOPE_BY_TOOL: Dict[str, str] = {
     "get_stock_chart_data": "the live price, today's change, volume and market cap",
     "get_ticker_news": "recent news",
     "explain_price_move": "why the price moved",
-    OWNERSHIP_TOOL: "who owns it — insiders' reported share holdings and institutional ownership",
-    "get_market_snapshot": "how the market and its sectors are doing",
+    FINANCIALS_TOOL: (
+        "reported financial figures — revenue, earnings, margins, cash flow, debt and cash, "
+        "valuation multiples, earnings dates and results, revenue by segment, dividends and "
+        "splits"
+    ),
+    OWNERSHIP_TOOL: (
+        "who owns it — insiders' reported share holdings and recent buying or selling, "
+        "institutional ownership and changes, the float and short interest"
+    ),
+    # The class-neutral wording (a general chat may ask about any of the three); a chat on one
+    # kind of asset gets its own clause (`_PROFILE_CHIP_SCOPE_BY_ASSET_TYPE`), so a coin chat is
+    # never steered to "who is the CEO".
+    PROFILE_TOOL: (
+        "its key facts — a company's CEO and executives, headcount, headquarters, listing "
+        "date and peers; a fund's expense ratio, holdings and sector weights; a coin's supply"
+    ),
+    "get_market_snapshot": (
+        "how the market and its sectors are doing, and the latest official macro readings "
+        "(interest rates, inflation, unemployment, exchange rates)"
+    ),
     "get_market_overview": "how the market and its sectors are doing, the index's level, valuation and breadth",
     "get_sentiment_analysis": "the mood in news and social chatter",
     "get_analyst_analysis": "analyst ratings and consensus",
+}
+_PROFILE_CHIP_SCOPE_BY_ASSET_TYPE: Dict[str, str] = {
+    "STOCK": "its key facts — the CEO and executives, headcount, headquarters, listing date and peers",
+    "ETF": "the fund's key facts — its expense ratio, assets, top holdings and sector weights",
+    "CRYPTO": "the coin's supply — circulating, total and maximum — and its fully diluted value",
 }
 _CHIP_SCOPE_ALWAYS = (
     "what the asset is, its history, who created or maintains it and how it works; "
@@ -531,7 +935,13 @@ def chip_scope_block(asset_type: Optional[str], context_type: Optional[str] = No
     if ctx == "UPDATES_SCOPE":
         specific = _CHIP_SCOPE_UPDATES + specific
     allowed = tools_for_asset_type(key)
-    data_clauses = [_CHIP_SCOPE_BY_TOOL[name] for name in _TOOL_ORDER if name in allowed and name in _CHIP_SCOPE_BY_TOOL]
+
+    def _clause(name: str) -> str:
+        if name == PROFILE_TOOL:
+            return _PROFILE_CHIP_SCOPE_BY_ASSET_TYPE.get(key, _CHIP_SCOPE_BY_TOOL[name])
+        return _CHIP_SCOPE_BY_TOOL[name]
+
+    data_clauses = [_clause(name) for name in _TOOL_ORDER if name in allowed and name in _CHIP_SCOPE_BY_TOOL]
     data = "; ".join(data_clauses)
     forbidden = _CHIP_FORBIDDEN + ("" if "get_analyst_analysis" in allowed else _CHIP_FORBIDDEN_ANALYST) + _CHIP_FORBIDDEN_TAIL
     return (
@@ -551,14 +961,30 @@ def _is_profiled_index(symbol: str) -> bool:
     return symbol in _INDEX_PROFILES
 
 
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """Whether `fn` can be called with keyword `name` (or takes ``**kwargs``)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 def build_chat_tool_handlers(
     svc: Any,
     screen_symbol: Optional[str] = None,
     screen_asset_type: Optional[str] = None,
     user_id: Optional[str] = None,
     web_turn: Any = None,
+    user_tier: Optional[str] = None,
 ) -> Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]:
     """Map each tool name → async handler delegating to the ChatService fetch methods.
+
+    `user_tier` is the caller's plan (`user["tier"]`). Only the ownership tool reads it, and
+    only to unlock congressional disclosures: None — the default every caller that does not
+    pass it gets — "free" and anything unrecognised stay LOCKED
+    (`entitlements.congress_holders_unlocked` fails closed), so no member's name or trade
+    reaches a Free caller's answer.
 
     `web_turn` is the turn's `chat_web_search_service.WebSearchTurn`, or None. Only when it
     exists does the map gain the `web_search` handler — every round, specialist and the
@@ -707,13 +1133,64 @@ def build_chat_tool_handlers(
     async def _snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
         return await svc._fetch_market_snapshot_data()
 
-    async def _ownership(args: Dict[str, Any]) -> Dict[str, Any]:
-        # The screen exemption matters here too: on LTC Properties' screen "LTC" is the REIT,
-        # never canonicalised to Litecoin's pair (which the tool would then refuse).
-        sym, _ = _resolve(args)
+    def _resolve_equity(args: Any) -> Optional[str]:
+        # The filings and the statements exist only for listed securities, so the symbol is
+        # NEVER canonicalised to a coin pair — on any screen: "LTC" is LTC Properties (the
+        # tools would refuse Litecoin's "LTCUSD" outright), "BTC" the listed Bitcoin trust.
+        # Each tool says what it resolved to (`resolved_as`). Same closed-vocabulary gate as
+        # `_resolve`, with the same mis-keyed `symbol` fallback.
+        a = args if isinstance(args, dict) else {}
+        return sanitize_symbol(a.get("ticker") or a.get("symbol"))
+
+    async def _financials(args: Dict[str, Any]) -> Dict[str, Any]:
+        a = args if isinstance(args, dict) else {}
+        sym = _resolve_equity(a)
         if sym is None:
-            return _invalid(args)
-        return await svc._fetch_ownership_data(sym)
+            return _invalid(a)
+        # Normalised BEFORE the service is called: the service only ever sees a member of
+        # `FINANCIAL_SECTIONS`, and the model's own value never reaches the result.
+        section, note = normalize_section(a.get("section"))
+        result = await svc._fetch_financials_data(sym, section)
+        if note and isinstance(result, dict):
+            result = {**result, "section_note": note}
+        return result
+
+    async def _ownership(args: Dict[str, Any]) -> Dict[str, Any]:
+        sym = _resolve_equity(args)
+        if sym is None:
+            return _invalid(args if isinstance(args, dict) else {})
+        fetch = svc._fetch_ownership_data
+        if congress_holders_unlocked(user_tier):
+            if _accepts_keyword(fetch, "user_tier"):
+                # A plan that includes congressional disclosures: the tier travels with it.
+                return await fetch(sym, user_tier=user_tier)
+            # A fetch that cannot take the tier serves the locked default: fail CLOSED.
+            logger.warning(
+                "chat tool check_ownership_filings: the ownership fetch takes no user_tier — "
+                "serving the locked default to a %s caller", user_tier,
+            )
+        # Every other tier — None included — is the locked default of the fetch itself.
+        return await fetch(sym)
+
+    async def _profile(args: Dict[str, Any]) -> Dict[str, Any]:
+        a = args if isinstance(args, dict) else {}
+        # The same closed-vocabulary gate, and NO coin canonicalisation: the profile tool
+        # classifies the symbol ITSELF against the screen (company / fund / coin) — on the LTC
+        # Properties screen "LTC" is the REIT, on the Grayscale trust's ETF screen "BTC" is the
+        # fund, in a general chat a bare "BTC" is Bitcoin — and says which (`resolved_as`).
+        # Turning "LTC" into "LTCUSD" here would decide the class before the screen is read.
+        sym = _resolve_equity(a)
+        if sym is None:
+            return _invalid(a)
+        # Normalised BEFORE the service is called: the service only ever sees a member of
+        # `PROFILE_KINDS` (or None), and the model's own value never reaches the result.
+        kind, note = normalize_profile_kind(a.get("kind"))
+        result = await svc._fetch_asset_profile_data(
+            sym, screen_symbol=screen or None, screen_asset_type=screen_asset_type, kind=kind,
+        )
+        if note and isinstance(result, dict):
+            result = {**result, "kind_note": note}
+        return result
 
     handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {
         "get_stock_chart_data": _stock,
@@ -723,6 +1200,8 @@ def build_chat_tool_handlers(
         "get_ticker_news": _news,
         "explain_price_move": _why,
         OWNERSHIP_TOOL: _ownership,
+        FINANCIALS_TOOL: _financials,
+        PROFILE_TOOL: _profile,
         _MARKET_TOOL: _snapshot,
     }
     if web_turn is not None:

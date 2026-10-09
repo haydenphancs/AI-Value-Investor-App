@@ -73,8 +73,12 @@ def web_env(monkeypatch):
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_ENABLED", True)
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_DAILY_CAP", 500)
     monkeypatch.setattr(s, "CHAT_REPORT_WEB_SEARCH_CACHE_TTL_SECONDS", 120)
+    # The 2026-10-08 tiers stay CLOSED here (this file is the report tier's).
+    monkeypatch.setattr(s, "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED", False)
+    monkeypatch.setattr(s, "CHAT_AUTO_WEB_SEARCH_MODE", "off")
     monkeypatch.setattr(cws, "_cache", {})
     monkeypatch.setattr(cws, "_inflight", {})
+    monkeypatch.setattr(cws, "_auto_latch", {})
     led = _Ledger()
     monkeypatch.setattr(cmt, "get_chat_budget_service", lambda: led)
     brave = _Brave()
@@ -455,12 +459,26 @@ def test_the_comment_stripper_is_string_aware_and_strips_comments():
 
 
 def test_single_mode_is_decided_before_the_routing_frame():
+    """An ASKED web turn (an explicit tier — and an unknown tier, the conservative side) collapses
+    to one lens; an AUTOMATIC web turn routed to a synthesis drops its search instead (prep's
+    no-web instructions). Both are decided BEFORE the routing frame promises any lens."""
     body = _event_gen_source()
     collapse = body.index("route = single_lens_route(route)")
     assert collapse < body.index('_sse("routing"'), "a web turn must never promise lenses"
     assert collapse < body.index('_sse("sources"')
-    assert re.search(r"web_turn\s*=\s*prep\.get\(\"web_turn\"\)\s*\n\s*if web_turn is not None:\s*\n"
+    assert re.search(r"web_turn\s*=\s*prep\.get\(\"web_turn\"\)\s*\n"
+                     r"\s*fallback_web_decision = prep\.get\(\"web_decision\"\)\s*\n"
+                     r"\s*web_tier = getattr\(web_turn, "
+                     r"\"tier\", None\) if web_turn is not None else None\s*\n\s*"
+                     r"if web_turn is not None and web_tier != TIER_AUTO:\s*\n"
                      r"\s*route = single_lens_route\(route\)", body)
+    drop = body.index('route.get("mode") == "synthesize"')
+    assert collapse < drop < body.index('_sse("routing"')
+    tail = body[drop: body.index('_sse("routing"')]
+    assert "web_turn = None" in tail and '"system_instruction_no_web"' in tail
+    assert '"system_instruction_no_tools_no_web"' in tail
+    # The fallback inherits the drop (review 2026-10-09): it must not re-decide the turn.
+    assert "fallback_web_decision = decision_without_web(fallback_web_decision)" in tail
 
 
 def test_the_turn_reaches_the_handlers_the_declarations_and_the_fallback():
@@ -469,12 +487,24 @@ def test_the_turn_reaches_the_handlers_the_declarations_and_the_fallback():
     assert re.search(r"\bweb_turn=web_turn\b", handlers) and 'user_id=user["id"]' in handlers
     (decls,) = _call_args(body, "build_chat_tool_declarations")
     assert "web_search=web_turn is not None" in decls
+    # The variant reads the granted tools ("news" only when round 1 is forced to the licensed
+    # news) — and `allowed` is bound BEFORE the declarations are built.
+    assert "web_search_mode=web_search_mode(web_turn, allowed)" in decls
+    assert body.index("allowed = tools_for_asset_type(") < body.index("build_chat_tool_declarations(")
     assert any("web_search=web_turn is not None" in a for a in _call_args(body, "tools_for_asset_type"))
-    # Round 1 of a web turn MUST call the search (mode ANY on that one tool), and only then.
+    # Round 1 of a web turn calls what the decision says (an explicit ask: the search; a news
+    # ask: the licensed headlines; the automatic tier: nothing forced), and only on a web turn.
     (agentic,) = _call_args(body, "stream_agentic")
-    assert re.search(r"\bforce_first_tool=WEB_SEARCH_TOOL if web_turn is not None else None\b", agentic)
+    assert re.search(r'\bforce_first_tool=prep\.get\("web_force_first"\) if web_turn is not None '
+                     r'else None', agentic)
+    # Each round's tool names reach the turn (an automatic search beside Caydex's tools waits).
+    assert re.search(r"\bon_tool_round=web_turn\.note_tool_round if web_turn is not None else None",
+                     agentic)
     fallback = [a for a in _call_args(body, "chat_service.generate_response")]
     assert len(fallback) == 1 and re.search(r"\bweb_turn=web_turn\b", fallback[0])
+    # …and, with no turn, the stream's own decision — never a second one (review 2026-10-09).
+    assert re.search(r"\bweb_decision=fallback_web_decision\b", fallback[0])
+    assert body.index("fallback_web_decision = None") < body.index("try:")
     assert re.search(r"web_search_used = bool\(ai_result\.get\(\"web_search_used\"\)\)", body)
 
 
@@ -526,8 +556,12 @@ async def test_the_send_door_tells_a_report_chat_it_can_search_on_request(web_en
 
 @pytest.mark.asyncio
 async def test_no_on_request_line_when_search_is_off(web_env, monkeypatch):
+    """With every tier closed the chat gets the NONE line (2026-10-08) — never the on-request
+    line, which would promise a search that cannot run."""
     monkeypatch.setattr(cws.settings, "BRAVE_SEARCH_API_KEY", "")
     svc = _svc(monkeypatch)
     svc.gemini = _Gem()
     await _gen(svc, msg="what is the moat?")
-    assert "WEB SEARCH:" not in svc.gemini.kw["system_instruction"]
+    instr = svc.gemini.kw["system_instruction"]
+    assert ChatService._WEB_ON_REQUEST_RULE not in instr
+    assert instr.count("WEB SEARCH:") == 1 and ChatService._WEB_NONE_RULE in instr

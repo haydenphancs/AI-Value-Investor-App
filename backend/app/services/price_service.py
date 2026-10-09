@@ -523,7 +523,7 @@ class PriceService:
         # entitled source for it now that `quote` is 402. Parsed here so every consumer of a
         # single quote gets it back; the batch (screener) path has no band and omits both keys.
         year_low, year_high = parse_range_band(row.get("range"))
-        return cls._shape(
+        out = cls._shape(
             symbol=symbol,
             name=row.get("companyName"),
             price=price,
@@ -539,6 +539,15 @@ class PriceService:
             is_etf=bool(row.get("isEtf")),
             is_fund=bool(row.get("isFund")),
         )
+        # The TRADING currency the price fields are in (`/stable/profile` carries it), present
+        # only when it is a real ISO code — the fixed key set is unchanged otherwise, like
+        # `yearLow`/`yearHigh`. Read by the chat's quote card and its LIVE QUOTE line, which
+        # used to print "$" for every listing (final review 2026-10-09).
+        from app.utils.currency import currency_code
+        code = currency_code(row.get("currency"))
+        if code is not None:
+            out["currency"] = code
+        return out
 
     @staticmethod
     def _snapshot_is_current(snap: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:

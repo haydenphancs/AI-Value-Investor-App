@@ -2855,6 +2855,92 @@ class FMPClient:
             logger.warning(f"Stock peers failed for {ticker}: {e}")
             return []
 
+    # ── Key executives & press releases (both entitled) ────────────
+    #
+    # Unlike most methods above, these two RAISE a typed `FMPException` on every failure and
+    # return `[]` only when FMP answered with no rows. Their callers keep a cache, and a
+    # swallowed failure would be cached as "this company has no executives / issued no press
+    # release" — the outage-as-empty-answer class `EmptyAfterFailure` documents. No message
+    # carries `str(httpx error)`: that is the request URL, `apikey=` included.
+
+    async def get_key_executives(self, ticker: str) -> List[Dict[str, Any]]:
+        """The company's key executives (stable ``key-executives``, package "3 Company
+        Information"). Rows as FMP sends them — ``name``, ``title``, ``pay``,
+        ``currencyPay``, ``gender``, ``yearBorn``, ``active`` (``titleSince`` on some rows).
+
+        ``[]`` = FMP answered with no rows (or 404: no data for the symbol). Any other failure
+        RAISES: ``FMPRateLimitException`` / ``FMPAuthException`` / ``FMPNotEntitledException``
+        / ``FMPUnavailableException`` as `_make_request` raises them, and a plain
+        ``FMPException`` for any other HTTP status or a non-list body.
+        """
+        sym = (ticker or "").strip().upper()
+        if not sym:
+            return []
+        try:
+            data = await self._make_request("key-executives", params={"symbol": sym})
+        except FMPException:
+            raise
+        except httpx.HTTPStatusError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 404:
+                logger.info("FMP key-executives: no data for %s (404)", sym)
+                return []
+            raise FMPException(f"FMP key-executives failed for {sym}: HTTP {status}") from e
+        except httpx.HTTPError as e:
+            raise FMPUnavailableException(
+                f"FMP key-executives failed for {sym}: {type(e).__name__}"
+            ) from e
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            raise FMPException(
+                f"FMP key-executives for {sym} returned {type(data).__name__}, expected a list"
+            )
+        return [row for row in data if isinstance(row, dict)]
+
+    async def get_press_releases(
+        self, ticker: str, limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """The company's own press releases, newest first (stable ``news/press-releases``,
+        package "9 Market News"). Rows: ``symbol``, ``publishedDate``, ``publisher``,
+        ``title``, ``image``, ``site``, ``text``, ``url``.
+
+        ``symbols`` is ALWAYS sent: FMP's news endpoints fall back to a default symbol (AAPL)
+        when it is omitted (see `get_stock_news`), so a blank ticker returns ``[]`` without a
+        call. ``limit`` is clamped to 1..50. Failure contract as `get_key_executives`.
+        """
+        sym = (ticker or "").strip().upper()
+        if not sym:
+            return []
+        try:
+            n = int(limit) if not isinstance(limit, bool) else 10
+        except (TypeError, ValueError):
+            n = 10
+        n = max(1, min(n, 50))
+        try:
+            data = await self._make_request(
+                "news/press-releases", params={"symbols": sym, "limit": n, "page": 0},
+            )
+        except FMPException:
+            raise
+        except httpx.HTTPStatusError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 404:
+                logger.info("FMP press releases: no data for %s (404)", sym)
+                return []
+            raise FMPException(f"FMP press releases failed for {sym}: HTTP {status}") from e
+        except httpx.HTTPError as e:
+            raise FMPUnavailableException(
+                f"FMP press releases failed for {sym}: {type(e).__name__}"
+            ) from e
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            raise FMPException(
+                f"FMP press releases for {sym} returned {type(data).__name__}, expected a list"
+            )
+        return [row for row in data if isinstance(row, dict)]
+
     # ── Company outlook (may require higher-tier subscription) ──────
 
     async def get_company_outlook(self, ticker: str) -> Dict[str, Any]:

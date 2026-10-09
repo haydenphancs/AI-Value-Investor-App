@@ -221,6 +221,14 @@ def test_skipped_agrees_with_the_service_outcomes():
                                    if status == cws.STATUS_OK else [])
         for repeat in (False, True):
             assert ws._web_step_skipped(out.for_model(repeat=repeat)) is expected, status
+            # The automatic tier's notes differ; the client-facing verdict never does.
+            assert ws._web_step_skipped(out.for_model(repeat=repeat, tier=cws.TIER_AUTO)) is expected
+    # A market-data query refused before any search (2026-10-08): no "Searching the web" claim.
+    assert ws._web_step_skipped(cws._refused("Apple stock price")) is True
+    # An automatic search deferred behind Caydex's own tools (2026-10-09): it did not run either.
+    deferred = cws._deferred("Apple lawsuit")
+    assert ws._web_step_skipped(deferred) is True and not cws.web_results_delivered(deferred)
+    assert "error" not in deferred and "upstream" not in deferred, "never a refundable failure"
 
 
 # ── end to end: pills the service builds pass the placement and the contract ──

@@ -597,10 +597,12 @@ def _engine_report(engine):
 
 
 def test_analysis_note_prompt_formats_dollars_and_explains_a_gross_stack():
+    # A CONFIRMED US-dollar engine (final review 2026-10-09: only USD prints amounts in the note,
+    # since the iOS card's rows are "$"; an unknown currency is amount-free — test_segment_money_currency).
     inputs = _revenue_engine_inputs(_intc_breakdown(), [], [], ticker="INTC")
     engine = _build_revenue_engine(
         inputs["segments"], fiscal_year="2025", total_revenue=inputs["total_revenue"],
-        intersegment_eliminations=inputs["intersegment_eliminations"],
+        intersegment_eliminations=inputs["intersegment_eliminations"], reporting_currency="USD",
     )
     prompt = np_._revenue_engine_analysis_note_prompt(_persona(), "EVIDENCE", _engine_report(engine))
     assert "Client Computing Group $32.2B (61% of revenue" in prompt
@@ -612,7 +614,7 @@ def test_analysis_note_prompt_has_no_gross_note_for_a_normal_stack():
     engine = _build_revenue_engine(
         [{"name": "iPhone", "current_revenue": 209.586e9, "previous_revenue": 201.0e9,
           "total_revenue": 416.0e9}],
-        fiscal_year="2025", total_revenue=416.0e9,
+        fiscal_year="2025", total_revenue=416.0e9, reporting_currency="USD",
     )
     prompt = np_._revenue_engine_analysis_note_prompt(_persona(), "EVIDENCE", _engine_report(engine))
     assert "iPhone $209.6B" in prompt and "GROSS" not in prompt
@@ -623,8 +625,12 @@ def test_digest_formats_millions_and_ignores_a_legacy_billions_unit():
                             "previous_revenue": 201183.0, "total_revenue": 391035.0}],
               "revenue_unit": "Billions", "total_revenue": 391035.0, "period": "FY 2026"}
     line = " ".join(np_._digest_revenue_engine({"revenue_engine": legacy}))
-    assert "iPhone $209.6B (+4% YoY)" in line
+    # A legacy report carries no `reporting_currency`: formatted from millions, but never dressed
+    # as dollars (final review 2026-10-09) — the header says the currency is not confirmed.
+    assert "iPhone 209.6B (+4% YoY)" in line and "not confirmed" in line
     assert "Billions" not in line and "209,586" not in line
+    usd = " ".join(np_._digest_revenue_engine({"revenue_engine": {**legacy, "reporting_currency": "USD"}}))
+    assert "iPhone $209.6B (+4% YoY)" in usd
 
 
 @pytest.mark.parametrize("v,expected", [
@@ -641,7 +647,7 @@ def test_financial_context_segments_are_formatted_dollars():
     inputs = _revenue_engine_inputs(_intc_breakdown(), [], [], ticker="INTC")
     out.revenue_engine_partial = _build_revenue_engine(
         inputs["segments"], fiscal_year="2025", total_revenue=inputs["total_revenue"],
-        intersegment_eliminations=inputs["intersegment_eliminations"],
+        intersegment_eliminations=inputs["intersegment_eliminations"], reporting_currency="USD",
     )
     text = C.build_financial_context(out)
     block = text.split("Revenue Segments", 1)[1].split("\n\n", 1)[0]

@@ -40,6 +40,7 @@ licensed path (`chat_web_search_service`).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from collections import Counter
@@ -224,8 +225,204 @@ async def fetch_ticker_news(ticker: str, is_crypto: bool = False) -> Dict[str, A
 
 # ── Tool 2: the market's own day ──────────────────────────────────────────────
 
+# The snapshot's macro leg (2026-10-08): official readings from FRED, so "what's the fed funds
+# rate / CPI / the euro" is answered from data with a date instead of from memory. PUBLIC-DOMAIN
+# series only — US government statistics (Federal Reserve, BLS, BEA). Never an ICE BofA series
+# (BAMLH0A0HYM2 and kin are copyrighted) and never VIXCLS (the VIX is Cboe's).
+# `(series, label, unit, digits, use_yoy)`; ONE table, so a test can pin the
+# allowlist. FX rates are MARKET DATA: the only answer for them is this table, never a web
+# search. Kept compact (~1.4 KB for all ten): the snapshot shares one 8,000-char tool result
+# with the breadth legs, so the shared provenance lives once in `_MACRO_NOTE` and a busy day's
+# long industry tail gives way to it (`_fit_snapshot`).
+_MACRO_SERIES = (
+    ("FEDFUNDS", "Effective federal funds rate, monthly average", "%", 2, False),
+    ("DGS10", "10-year Treasury yield", "%", 2, False),
+    ("T10Y2Y", "10-year minus 2-year Treasury spread", "percentage points", 2, False),
+    ("UNRATE", "US unemployment rate, monthly", "%", 1, False),
+    ("CPIAUCSL", "US CPI inflation, monthly", "% year-on-year", 1, True),
+    ("PCEPILFE", "US core PCE inflation, monthly", "% year-on-year", 1, True),
+    ("DEXUSEU", "Euro", "US dollars per euro", 4, False),
+    ("DEXJPUS", "Japanese yen", "yen per US dollar", 2, False),
+    ("DEXUSUK", "British pound", "US dollars per pound", 4, False),
+    ("DTWEXBGS", "Nominal broad dollar index (Federal Reserve; not the DXY)",
+     "index, Jan 2006 = 100", 2, False),
+)
+#: Exchange rates and the dollar index are prices, and an unemployment rate is never 0: a
+#: non-positive reading of these is malformed. Rates and spreads keep their sign.
+_MACRO_POSITIVE_ONLY = frozenset({"DEXUSEU", "DEXJPUS", "DEXUSUK", "DTWEXBGS", "UNRATE"})
+#: The leg's own bound. The series are fetched concurrently and cached for hours, so a warm
+#: process answers in milliseconds; a slow read past this is left running (it warms the cache)
+#: and named under `unavailable`.
+_MACRO_WAIT_SECONDS = 5.0
+_MACRO_NOTE = (
+    "Official readings: say 'as of <date>', never 'today'; a monthly as_of is the month's first "
+    "day. Sources: Federal Reserve (rates, noon New York exchange rates, dollar index), US "
+    "Bureau of Labor Statistics (CPI, unemployment), US Bureau of Economic Analysis (core PCE, "
+    "excl. food and energy). A negative spread = an inverted curve. Exchange rates come only "
+    "from these readings. The VIX is not in Caydex data, nor is the DXY — say so, never "
+    "estimate them; the broad dollar index is not the DXY."
+)
+_MACRO_UNAVAILABLE = {
+    "available": False,
+    "note": ("Macro readings could not be read right now. Say so; never estimate an interest "
+             "rate, inflation figure or exchange rate from memory. The VIX is not in Caydex "
+             "data."),
+}
+#: Strong references for macro reads left running past the bound.
+_macro_tasks: set = set()
+#: Rows read for a year-on-year series: the same window (and so the same cache entry) the
+#: macro client's own snapshot reads, wide enough that one missing month still leaves the row
+#: a year back inside it.
+_YOY_OBS_LIMIT = 14
+
+
+def _yoy_by_date(observations: Any) -> Optional[Any]:
+    """Year-on-year % from the row dated EXACTLY one year before the latest, or None.
+
+    Counted by DATE, never by position. The macro client's `yoy_pct` used to be the 13th row
+    of the newest 14 after it had dropped every missing ('.') observation — so a month that was
+    never published (October 2025 CPI, the shutdown lapse) silently turned "year-on-year" into
+    a 13-month change for a year. Since 2026-10-09 `fred.get_snapshot` counts its windows by
+    date too, with the same row rules (`fred._dated_rows`); this leg keeps its own copy over the
+    same 14-row read. A missing anniversary row is no reading at all, and the series is named
+    under `unavailable`. Rows are re-sorted and de-duplicated (a date carrying two different
+    values is dropped as ambiguous); a non-finite, bool or non-positive index level is not a
+    level. Pure."""
+    from datetime import date as _date
+    from types import SimpleNamespace
+
+    rows: Dict[Any, float] = {}
+    ambiguous: set = set()
+    for ob in observations if isinstance(observations, (list, tuple)) else []:
+        raw_day = getattr(ob, "date", None)
+        raw_val = getattr(ob, "value", None)
+        if not isinstance(raw_day, str) or isinstance(raw_val, bool):
+            continue
+        try:
+            day = _date.fromisoformat(raw_day.strip()[:10])
+            val = float(raw_val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(val) or val <= 0:
+            continue
+        if day in rows and rows[day] != val:
+            ambiguous.add(day)
+        rows.setdefault(day, val)
+    for day in ambiguous:
+        rows.pop(day, None)
+    if not rows:
+        return None
+    latest_day = max(rows)
+    try:
+        anniversary = latest_day.replace(year=latest_day.year - 1)
+    except ValueError:      # 29 February
+        return None
+    prior = rows.get(anniversary)
+    if prior is None:
+        return None
+    latest = rows[latest_day]
+    return SimpleNamespace(latest=latest, as_of=latest_day.isoformat(),
+                           yoy_pct=(latest - prior) / prior * 100.0)
+
+
+async def _fetch_yoy(client: Any, series: str) -> Optional[Any]:
+    """One year-on-year series, by date (`_yoy_by_date`). The client answers [] on failure."""
+    return _yoy_by_date(await client.get_observations(series, limit=_YOY_OBS_LIMIT))
+
+
+def _macro_reading(spec: tuple, snap: Any) -> Optional[Dict[str, Any]]:
+    """One snapshot → one reading, or None when it cannot be stated honestly."""
+    series, label, unit, digits, use_yoy = spec
+    if snap is None:
+        return None
+    raw = getattr(snap, "yoy_pct", None) if use_yoy else getattr(snap, "latest", None)
+    if isinstance(raw, bool):
+        return None
+    value = _num(raw, digits)
+    if value is None:
+        return None
+    if series in _MACRO_POSITIVE_ONLY and not use_yoy and value <= 0:
+        return None
+    as_of = getattr(snap, "as_of", None)
+    if not isinstance(as_of, str) or len(as_of) < 10:
+        return None
+    try:
+        from datetime import date as _date
+
+        _date.fromisoformat(as_of[:10])
+    except ValueError:
+        return None
+    return {"label": label, "value": value, "unit": unit, "as_of": as_of[:10]}
+
+
+async def _fetch_macro_block() -> Dict[str, Any]:
+    """The snapshot's `macro` block. Never raises; every series degrades on its own."""
+    try:
+        from app.integrations.fred import get_fred_client
+
+        client = get_fred_client()
+        if not client.is_configured:
+            logger.warning("chat tool: macro readings unavailable — the macro data source is "
+                           "not configured")
+            return dict(_MACRO_UNAVAILABLE)
+        # A year-on-year series is computed here BY DATE (`_fetch_yoy`) — the rule the
+        # client's own `yoy_pct` has followed too since 2026-10-09 — and never read from the
+        # snapshot's `yoy_pct`; a level series reads the client's snapshot.
+        tasks = {asyncio.ensure_future(_fetch_yoy(client, spec[0]) if spec[4]
+                                       else client.get_snapshot(spec[0])): spec
+                 for spec in _MACRO_SERIES}
+    except Exception as e:  # noqa: BLE001 — the rest of the snapshot must not depend on it
+        logger.warning("chat tool: macro leg could not start: %s: %s", type(e).__name__, e)
+        return dict(_MACRO_UNAVAILABLE)
+    for task in tasks:
+        # Held strongly until each read settles — also when this leg's own wait is cut short
+        # (a read left running warms the series cache for the next question).
+        _macro_tasks.add(task)
+        task.add_done_callback(_macro_tasks.discard)
+
+    done, pending = await asyncio.wait(set(tasks), timeout=_MACRO_WAIT_SECONDS)
+    for task in pending:
+        def _late(t: "asyncio.Task", series: str = tasks[task][0]) -> None:
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("chat tool: macro series %s failed late: %s", series,
+                               t.exception())
+
+        task.add_done_callback(_late)
+
+    readings: List[Dict[str, Any]] = []
+    unavailable: List[str] = []
+    for task, spec in tasks.items():   # table order, not completion order
+        reading = None
+        if task in done:
+            if task.cancelled():
+                pass
+            elif task.exception() is not None:
+                logger.warning("chat tool: macro series %s failed: %s: %s", spec[0],
+                               type(task.exception()).__name__, task.exception())
+            else:
+                reading = _macro_reading(spec, task.result())
+        if reading is None:
+            unavailable.append(spec[1])
+        else:
+            readings.append(reading)
+    if pending:
+        logger.warning("chat tool: %d macro series still loading after %.1fs — named as "
+                       "unavailable", len(pending), _MACRO_WAIT_SECONDS)
+    if not readings:
+        logger.warning("chat tool: no macro reading could be read (%d series)", len(tasks))
+        return dict(_MACRO_UNAVAILABLE)
+    block: Dict[str, Any] = {"readings": readings, "note": _MACRO_NOTE}
+    if unavailable:
+        block["unavailable"] = unavailable
+        block["unavailable_note"] = ("These readings could not be read right now — say so; "
+                                     "never estimate them.")
+    return block
+
+
 async def fetch_market_snapshot() -> Dict[str, Any]:
-    """Sector + industry breadth, today's biggest movers, and the Updates AI market card.
+    """Sector + industry breadth, today's biggest movers, the Updates AI market card, and
+    the dated official macro readings (`_fetch_macro_block`: rates, inflation, unemployment,
+    exchange rates — public-domain FRED series only).
 
     Every leg is FREE and already cached. Sector and industry performance are derived from
     one entitled `company-screener` sweep (FMP's own `sector-performance-snapshot` is 402
@@ -246,9 +443,10 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
         movers.get_industry_performance(),
         movers.get_scanner_inputs(),
         get_news_insight_service().get_cards([MARKET_SCOPE]),
+        _fetch_macro_block(),
         return_exceptions=True,
     )
-    sectors, industries, scanner, cards = results
+    sectors, industries, scanner, cards, macro = results
     out: Dict[str, Any] = {}
     # Which SESSION every percentage below describes — see `_stamp_session`.
     session_dates: Counter = Counter()
@@ -334,12 +532,69 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
         if card:
             out["market_story"] = _card_digest(card)
 
+    # The macro leg is added LAST and judged apart: it is not market breadth, so it neither
+    # turns an all-legs-down snapshot into a success on its own "unavailable" note, nor hides
+    # that the breadth legs failed when only the macro readings came back.
+    if isinstance(macro, BaseException):
+        logger.warning("chat tool: macro leg raised: %s: %s", type(macro).__name__, macro)
+        macro = dict(_MACRO_UNAVAILABLE)
+    has_macro = isinstance(macro, dict) and bool(macro.get("readings"))
     if not out:
-        return {"error": "No market data could be read right now.", "upstream": True}
+        if not has_macro:
+            return {"error": "No market data could be read right now.", "upstream": True}
+        return {
+            "macro": macro,
+            "market_breadth_note": ("Sector, industry and mover data could not be read right "
+                                    "now — say so; never describe the market's day as flat."),
+        }
     as_of = _as_of_session(session_dates)
     if as_of:
         out["as_of_session"] = as_of
+    if isinstance(macro, dict) and macro:
+        out["macro"] = macro
+        if has_macro:
+            _fit_snapshot(out)
     return out
+
+
+#: The snapshot's own size target: inside `GEMINI_TOOL_RESULT_MAX_CHARS` with headroom, so the
+#: generic structural pruner (which caps EVERY list, the macro readings included) never runs.
+_SNAPSHOT_MARGIN = 300
+
+
+def _fit_snapshot(out: Dict[str, Any]) -> None:
+    """Make room for the macro readings by giving way from the LEAST essential breadth row up:
+    the tail of `other_industries_that_moved` (sorted by absolute move, so its tail is the
+    smallest movers), counted under `other_industries_not_listed` — never silently. Runs only
+    when the snapshot carries macro readings AND overflows; otherwise the breadth is exactly
+    what it was. In place; never raises."""
+    try:
+        from app.config import settings
+
+        cap = int(getattr(settings, "GEMINI_TOOL_RESULT_MAX_CHARS", 8000) or 8000)
+        budget = max(2000, cap - _SNAPSHOT_MARGIN)
+
+        def size() -> int:
+            return len(json.dumps(out, default=str))
+
+        if size() <= budget:
+            return
+        rest = out.get("other_industries_that_moved")
+        dropped = 0
+        while isinstance(rest, list) and rest and size() > budget:
+            rest.pop()
+            dropped += 1
+            # The count note is part of the size it is fitted to.
+            out["other_industries_not_listed"] = (
+                f"{dropped} more industries moved at least {_INDUSTRY_MIN_MOVE_PCT}% but are not "
+                "listed in this answer (not loaded — never 'flat')")
+        if isinstance(rest, list) and not rest:
+            out.pop("other_industries_that_moved", None)
+        if dropped:
+            logger.info("chat tool: market snapshot made room for macro readings by leaving "
+                        "%d smaller industry moves out", dropped)
+    except Exception as e:  # noqa: BLE001 — the generic pruner still bounds the result
+        logger.warning("chat tool: snapshot fit failed: %s: %s", type(e).__name__, e)
 
 
 def _stamp_session(row: Dict[str, Any], stamp: Any, tally: Counter) -> None:

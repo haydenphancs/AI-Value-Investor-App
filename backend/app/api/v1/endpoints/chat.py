@@ -42,18 +42,45 @@ from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
 from app.services.credit_service import CreditService, CreditServiceUnavailable, refund_did_not_happen
 from app.integrations.gemini import GeminiTimeoutError, _is_clean_finish, is_length_cut
+# The grounding audit reads a tool result as the model saw it (the same structural shrink).
+from app.integrations.gemini import truncate_tool_result
 import time as _time
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
+# Log-only numeric grounding audit (`CHAT_GROUNDING`): counts only, never changes an answer.
+from app.services.chat_numeric_grounding import (
+    GroundingEvidence,
+    log_grounding_audit,
+    settle_grounding_audit,
+    start_grounding_audit,
+)
 from app.services.chat_intent import is_trade_intent
 from app.services.chat_chip_filter import filter_answerable_chips
+# The unanswered-turn refund (2026-10-09): gates → a cheap judge → a per-account daily allowance →
+# `settle_no_cost("chat_unanswered")`, one decision for both doors. Silent in chat (no label).
+from app.services.chat_answer_coverage import (
+    UNANSWERED_REASON,
+    CoverageTurn,
+    PriorContext,
+    cancel_wait_seconds,
+    decide_unanswered_refund,
+    decision_wait_seconds,
+    send_door_timeout,
+    unanswered_skip_reason,
+)
 from app.services.chat_web_search_service import (
     MAX_WEB_PILLS,
+    STATUS_DEFERRED,
     STATUS_NO_RESULTS,
+    TIER_AUTO,
     WEB_SEARCH_TOOL,
     # The builder's own URL policy, reused (never copied) to check a STORED web pill on read.
     _safe_https_url,
+    capture_client_ai_consent_version,
+    decision_without_web,
     single_lens_route,
+    web_chips_dropped,
     web_results_delivered,
+    web_search_mode,
 )
 from app.schemas.chat_starters import ChatStartersResponse
 from app.services.chat_starters_service import get_chat_starters_service
@@ -73,8 +100,11 @@ logger = logging.getLogger(__name__)
 sec_logger = logging.getLogger("chat.security")
 
 # Records the caller's `X-App-Version` for the request, so report chat's web search can stay off
-# on an app version whose in-app copy predates it (`chat_web_search_service.report_web_search_available`).
-router = APIRouter(dependencies=[Depends(capture_client_app_version)])
+# on an app version whose in-app copy predates it (`chat_web_search_service.report_web_search_available`),
+# and the caller's ACCEPTED AI consent (`X-AI-Consent-Version`), so every-chat and automatic web
+# search open only for consent v3+ (`chat_web_search_service.decide_web_search`; fails closed).
+router = APIRouter(dependencies=[Depends(capture_client_app_version),
+                                 Depends(capture_client_ai_consent_version)])
 
 
 # Fixed namespace for the IP-derived budget bucket. Random once, constant forever — changing
@@ -189,6 +219,10 @@ def _refund_chat_turn(user: dict, x_guest_id) -> None:
         logger.warning("Chat turn refund failed (%s: %s)", type(e).__name__, e)
 
 
+#: Refund reasons settled with NO label: outcome "refunded", nothing rendered under the answer.
+_SILENT_REFUND_REASONS = frozenset({UNANSWERED_REASON})
+
+
 class _ChatQuota:
     """One chat turn's metering, resolved per identity.
 
@@ -252,6 +286,16 @@ class _ChatQuota:
             return 0
         return settings.CHAT_CREDIT_COST
 
+    @property
+    def is_settled(self) -> bool:
+        """A settlement already ran on this turn (either method) — a second one is a no-op."""
+        return self._settled
+
+    @property
+    def is_refunded(self) -> bool:
+        """The ledger PROVED the credit came back (`refund_did_not_happen` was False)."""
+        return self._refunded
+
     def refund_once(self, reason: str) -> None:
         if self._settled:
             return
@@ -259,10 +303,13 @@ class _ChatQuota:
         self._refund_reason = reason
         if self._free:
             # ⚠️ MUST return before `refund_ledgered`. A free turn wrote NO debit, so a
-            # refund against its ref_id finds no matching row, falls through to
-            # `refund_credits`' granted-first fallback and pays out
-            # `LEAST(amount, used)` — MINTING a credit the user never spent, on every
-            # failed free turn. `_free` is checked first for exactly this reason.
+            # refund against its ref_id finds no matching row. Before migrations 139/142 that
+            # fell through to `refund_credits`' granted-first fallback and paid out
+            # `LEAST(amount, used)` — MINTING a credit on every failed free turn. Since 142 the
+            # fallback runs only when NO ref_id is given (chat always passes one), so the call
+            # would now answer `no_matching_debit`, move nothing, and fire a false REFUND LEAK
+            # alert (`refund_ledgered` logs an unmatched ref at ERROR). The guard stays: it is
+            # still wrong to "refund" a turn nobody paid for, and the alert must stay meaningful.
             #
             # Deliberately does NOT set `_refunded`: nothing was refunded, so the turn's
             # reported outcome stays "free_followup" rather than claiming a credit came
@@ -334,6 +381,12 @@ class _ChatQuota:
             # Kept SHORT. This renders in a capsule badge on the message's metadata line,
             # beside the timestamp — a long string wraps the capsule toward a square, which
             # `Capsule()` draws as a circle with the text clipped inside it.
+            if self._refund_reason in _SILENT_REFUND_REASONS:
+                # Owner decision 2026-10-09: an unanswered turn is refunded SILENTLY — no note
+                # under the answer. Shipped iOS renders the badge only for a non-empty label
+                # (`ChatTurnCostDTO.isWorthShowing`) and refreshes the balance on outcome
+                # "refunded", so the balance simply does not drop. Credit history names it.
+                return None
             if self._refund_reason == "chat_cache_hit":
                 return f"{n} {unit} refunded — no AI cost"
             if (self._refund_reason or "").startswith("chat_degraded_"):
@@ -350,8 +403,13 @@ class _ChatQuota:
 
         Carries no balance: a spendable balance is an ACCOUNT fact, and this dict is
         replayed verbatim on every history reload, where it would be stale.
+
+        A SILENT refund (`chat_unanswered`) has no label but IS persisted — outcome
+        "refunded", credits 0, label None — so a reload shows the same thing the live frame
+        did (nothing on screen) and the row still records that the turn cost nothing.
         """
-        if self._label() is None:
+        silent = self._refunded and self._refund_reason in _SILENT_REFUND_REASONS
+        if self._label() is None and not silent:
             return None
         return {
             "outcome": self.outcome,
@@ -1230,6 +1288,107 @@ def _attach_turn_cost(supabase, assistant_row: dict, quota, rich: Optional[dict]
     return merged
 
 
+def _unanswered_turn(
+    *,
+    door: str,
+    quota: Any,
+    user: dict,
+    question: Any,
+    answer: Any,
+    cache_hit: bool,
+    starter_replay: bool,
+    degraded: Any,
+    web_results_delivered: bool,
+    web_unit_spent: bool,
+    send_budget_left: Optional[float] = None,
+) -> Optional[CoverageTurn]:
+    """The unanswered check's view of a delivered turn (`chat_answer_coverage.CoverageTurn`).
+
+    Read off the quota AFTER the settlement ladder, so an earlier settlement (cache hit, degraded
+    refund) and a degraded turn the ladder deliberately kept charged (a cut web answer) both stop
+    the check at its gates — the `elif` behind the ladder, without a second copy of the ladder.
+    Unknown values fail closed (an unreadable quota reads as settled). Never raises: None skips.
+    """
+    try:
+        outcome = getattr(quota, "outcome", None)
+        return CoverageTurn(
+            door=door,
+            question=question if isinstance(question, str) else "",
+            answer=answer if isinstance(answer, str) else "",
+            is_guest=bool(user.get("is_guest")),
+            outcome=outcome if isinstance(outcome, str) else None,
+            settled=getattr(quota, "is_settled", True) is not False,
+            cache_hit=cache_hit is True,
+            starter_replay=starter_replay is True,
+            degraded=bool(degraded),
+            web_results_delivered=web_results_delivered is True,
+            web_unit_spent=web_unit_spent is True,
+            send_budget_left=send_budget_left,
+        )
+    except Exception as e:  # noqa: BLE001 — never on a delivered turn's path
+        logger.warning("CHAT_UNANSWERED turn view failed (%s: %s) — not judged", type(e).__name__, e)
+        return None
+
+
+#: The rows the model's own history read takes (`ChatService._get_recent_messages(session_id, 20)`
+#: on both doors): every answer in it can shape this turn's reply. Pinned equal by a test.
+_UNANSWERED_HISTORY_ROWS = 20
+
+
+def _previous_turn_loader(supabase, session_id: str, before_iso: str):
+    """A lazy read of the history BEFORE this turn, for the unanswered check — called only when
+    the turn is actually judged; off the event loop. Answers a `PriorContext`:
+
+    * `web_built` — an assistant row in the model's history window carries
+      `rich_content.thinking.web_searched` (both doors store it on a turn whose web results were
+      delivered). This turn's reply may restate that answer, so the turn is not judged (Brave
+      §3(b)(xiii) bars evaluating an AI answer built on their results);
+    * `text` — the last exchange, the judge's context for a short follow-up ("and its margins?").
+
+    Fails CLOSED: a failed read or a row without the selected flag answers None, which the
+    decision reads as "unknown history" — not judged, charged."""
+
+    def _read() -> PriorContext:
+        res = (
+            supabase.table("chat_messages")
+            .select("role, content, web_searched:rich_content->thinking->web_searched")
+            .eq("session_id", session_id)
+            .lt("created_at", before_iso)
+            .order("created_at", desc=True)
+            .limit(_UNANSWERED_HISTORY_ROWS)
+            .execute()
+        )
+        data = getattr(res, "data", None) or []
+        if not isinstance(data, list):
+            raise ValueError("history read answered a non-list")
+        rows = [r for r in data if isinstance(r, dict)]
+        if len(rows) != len(data) or any("web_searched" not in r for r in rows):
+            # A shape drift (e.g. the JSON-path column missing) must never read as "no web turn".
+            raise ValueError("history rows without the web_searched column")
+        web_built = any(
+            r.get("role") == "assistant" and r.get("web_searched") not in (None, False)
+            for r in rows
+        )
+        lines = []
+        for r in reversed(rows[:2]):
+            text = r.get("content")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            who = "Cay AI" if r.get("role") == "assistant" else "User"
+            lines.append(f"{who}: {text.strip()[:600]}")
+        return PriorContext(text="\n".join(lines) or None, web_built=web_built)
+
+    async def _load() -> Optional[PriorContext]:
+        try:
+            return await asyncio.to_thread(_read)
+        except Exception as e:  # noqa: BLE001 — unknown history: the turn is not judged
+            logger.warning("CHAT_UNANSWERED history read failed for session=%s (%s: %s) — "
+                           "not judged", session_id, type(e).__name__, e)
+            return None
+
+    return _load
+
+
 def _object_citations(raw: Any) -> Optional[list]:
     """Keep only the dict elements of a stored `citations` list (None when nothing is left)."""
     if not isinstance(raw, list):
@@ -1359,7 +1518,8 @@ def _overlay_live_sources(message: dict, live: Optional[list]) -> dict:
 
 def _web_step_skipped(result: Any) -> bool:
     """`tool_step.skipped` for a `web_search` step: True when no search the user can be told about
-    ran — the fixed not-run outcomes (`daily_limit`, `disabled`, `unavailable`), the invalid-query
+    ran — the fixed not-run outcomes (`daily_limit`, `disabled`, `unavailable`, the market-data
+    `refused`, an automatic search `deferred` behind Caydex's own tools), the invalid-query
     refusal and a handler failure (a timeout's bare `{error}`). False when results were
     delivered, and for `no_results`: that search DID run, found nothing usable, and the answer
     says so. Never raises."""
@@ -1711,6 +1871,9 @@ async def send_chat_message(
 
         started = _time.monotonic()
         attach_base_card = await _should_attach_base_card(supabase, session.data, session_id)
+        # The budget's own instant, handed to the tool rounds so they settle before it (a round of
+        # 30 s tools used to run past the budget and cancel a turn with tool data in hand).
+        send_deadline = _time.monotonic() + settings.CHAT_SEND_BUDGET_SECONDS
         try:
             ai_result = await asyncio.wait_for(
                 chat_service.generate_response(
@@ -1729,6 +1892,10 @@ async def send_chat_message(
                     # The grounded asset's card once per session, on the first answer —
                     # the same rule as the stream door (see `_should_attach_base_card`).
                     attach_base_widget=attach_base_card,
+                    # The caller's plan: only the ownership tool reads it (congressional
+                    # disclosures, Pro and above); None / free / unknown stay locked.
+                    user_tier=user.get("tier"),
+                    deadline=send_deadline,
                 ),
                 timeout=settings.CHAT_SEND_BUDGET_SECONDS,
             )
@@ -1778,6 +1945,17 @@ async def send_chat_message(
                 session_id, ai_result.get("report_voice_key"), enforced, advice_flags,
                 clean_answer[:200],
             )
+        # Log-only numeric grounding audit (`CHAT_GROUNDING`): `generate_response` computed the
+        # counts off the loop (a web turn is a skip); this only logs them — before the
+        # code-written notes below, and never able to touch the answer.
+        try:
+            log_grounding_audit(
+                ai_result.get("grounding_audit"), door="send", session_id=session_id,
+                context_type=ctx_type,
+            )
+        except Exception as e:  # noqa: BLE001 — log-only
+            logger.warning("CHAT_GROUNDING (send) hook failed (%s: %s) — answer unaffected",
+                           type(e).__name__, e)
         # Disclaimer, gated on trade-action intent. The user's question is the primary
         # signal; `advice_directive` is OR'd in so a volunteered "you should buy it"
         # forces the line on even when the question itself was informational.
@@ -1791,6 +1969,8 @@ async def send_chat_message(
         ai_result["content"], _ = finalize_answer_notes(
             clean_answer, trade_intent=trade_intent, web_used=web_used,
             report_as_of=ai_result.get("report_as_of"),
+            # An automatic search (the user did not ask) is announced by code, in the caveat.
+            web_auto=ai_result.get("web_search_automatic") is True,
         )
 
         # Build the widget payload (if Gemini triggered the stock tool)
@@ -1891,8 +2071,48 @@ async def send_chat_message(
         elif ai_result.get("degraded"):
             logger.info("Chat send: cut answer built on web results stays charged (session %s)",
                         session_id)
-        # A charged turn earns this session one free follow-up (no-op after a refund).
-        quota.on_delivered()
+        # The unanswered check (2026-10-09), behind the ladder: its gates stop at every turn the
+        # ladder settled or deliberately kept charged (a cut web answer), so it can only refund a
+        # plain charge. Inline here — this door has no chips call to hide it behind. Judged only
+        # with enough of the send budget left for the previous-turn read, the judge's own timeout
+        # and the money section's grace (`send_door_min_seconds`, DERIVED from the settings: 11 s
+        # by default), and bounded so the whole decision ends by the budget's deadline
+        # (`send_door_timeout` keeps the grace back) — the reply must reach iOS before its 60 s
+        # ceiling. The ENFORCED answer, before the code-written notes. Never raises; fails closed.
+        unanswered_left = send_deadline - _time.monotonic()
+        unanswered_turn = _unanswered_turn(
+            door="send", quota=quota, user=user, question=msg, answer=clean_answer,
+            cache_hit=ai_result.get("tokens_used") == 0, starter_replay=False,
+            degraded=ai_result.get("degraded"), web_results_delivered=web_used,
+            web_unit_spent=ai_result.get("web_search_spent") is True,
+            send_budget_left=unanswered_left,
+        )
+        unanswered_judged = unanswered_skip_reason(unanswered_turn) is None
+        if not unanswered_judged:
+            # A charged turn earns this session one free follow-up (no-op after a refund).
+            quota.on_delivered()
+        try:
+            await asyncio.wait_for(
+                decide_unanswered_refund(
+                    unanswered_turn, quota=quota, gemini=getattr(chat_service, "gemini", None),
+                    user_id=user.get("id"), session_id=session_id,
+                    prior_turn_loader=_previous_turn_loader(supabase, session_id, now.isoformat()),
+                    # A judged turn's grant waits for the verdict (a refunded turn grants none):
+                    # the decision runs it once the settlement is final, however it ends.
+                    after_settle=quota.on_delivered if unanswered_judged else None,
+                ),
+                timeout=send_door_timeout(unanswered_left) if unanswered_judged else None,
+            )
+        except asyncio.TimeoutError:
+            # Cancelled at the deadline: a judge stops at once (charged); a money section already
+            # running was waited for (bounded) and recorded itself — read the quota, not a guess.
+            logger.warning(
+                "CHAT_UNANSWERED decision outran the send budget for session %s — %s", session_id,
+                "refunded" if quota.is_refunded
+                else "settled, no refund recorded" if quota.is_settled
+                else "not settled: charged unless its money section is still running (that "
+                     "section logs its own CHAT_UNANSWERED line)",
+            )
         # Settlement is final now → record it on the row so the response (and a later
         # history reload) can show the user they were not charged.
         _attach_turn_cost(supabase, assistant_row, quota)
@@ -2061,9 +2281,14 @@ async def stream_chat_message(
     # client-disconnect CancelledError the inner except-Exception guards miss). event_gen
     # flips it True right after the persist.
     delivered = False
+    # The unanswered check (2026-10-09): its decision task (cancelled by `_metered_stream`'s
+    # finally when the client leaves mid-check), and whether this turn passed its gates — a judged
+    # turn's free-follow-up grant is held by the decision until its settlement is final.
+    unanswered_task: Optional["asyncio.Future"] = None
+    unanswered_judged = False
 
     async def event_gen():
-        nonlocal delivered
+        nonlocal delivered, unanswered_task, unanswered_judged
         import time as _time
         from app.services.chat_service import ChatService, _chat_thinking_budget
         from app.integrations.gemini import (
@@ -2155,7 +2380,17 @@ async def stream_chat_message(
         # the turn runs ONE search; and whether web results actually reached this answer.
         # Bound before the try: the fallback and the persist block read them when prep raised.
         web_turn = None
+        # The turn's ONE web decision from prep, handed to the fallback when the stream holds no
+        # turn (no tier, shadow, or a dropped automatic search — `decision_without_web`): the
+        # fallback must neither re-decide (it could grant a search the stream dropped) nor re-log
+        # the turn (a second AUTO_WEB_SHADOW line per fallback). None when prep raised: then the
+        # fallback decides for the first time.
+        fallback_web_decision = None
         web_search_used = False
+        # Whether those results came from a search the user did NOT ask for (the automatic tier on
+        # an unasked turn, `WebSearchTurn.automatic`): the code-authored caveat then says why the
+        # answer cites the web.
+        web_search_automatic = False
         # Whether the turn's search kept a unit of the global cap — read from `web_turn`, or, when
         # prep raised (no `web_turn` here), from the fallback's own turn (`web_search_spent`).
         fallback_web_unit_spent = False
@@ -2167,6 +2402,15 @@ async def stream_chat_message(
         # A later `web_search` call on the same turn REPLAYS the one search (no second "Searching
         # the web…" flash): only the turn's first start is forwarded.
         web_start_sent = False
+        # Log-only numeric grounding audit (`CHAT_GROUNDING`). Bound before the try (the hook
+        # after it reads them when prep raised): the evidence seeded from prep plus the turn's
+        # non-web tool results, the asset class, whether the answer is a replay (cached deep
+        # dive / starter warm — nothing to audit), and the fallback's own audit when it ran.
+        grounding_evidence: Optional[GroundingEvidence] = None
+        grounding_asset: Optional[str] = None
+        grounding_replay: Optional[str] = None
+        fallback_grounding_audit: Optional[dict] = None
+        grounding_task = None
 
         try:
             # Multi-agent (Phase 3): a cheap router picks the specialist lens(es). Run it in PARALLEL
@@ -2229,14 +2473,41 @@ async def stream_chat_message(
                 prep, warmed = await asyncio.gather(prep_coro, _warm_if_ungrounded())
                 route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
 
-            # A web turn is answered in SINGLE mode, decided BEFORE the `routing` frame below
-            # promises any lenses: the synthesis merge is a tool-less pass over 1,200-char
-            # summaries that would strip the publisher/date attributions, and two specialists
-            # would each reach for the search.
+            # Decided BEFORE the `routing` frame below promises any lenses: the synthesis merge is
+            # a tool-less pass over 1,200-char summaries that would strip the publisher/date
+            # attributions, and two specialists would each reach for the search. So a turn the
+            # user ASKED to search (an explicit tier) is answered in SINGLE mode, and an
+            # AUTOMATIC web turn routed to a synthesis keeps its lenses and DROPS the web search
+            # (no tool, no claim, the no-web instructions prep built) — a synthesis turn carries
+            # the turn's single search or none, never one per specialist.
             web_turn = prep.get("web_turn")
-            if web_turn is not None:
+            fallback_web_decision = prep.get("web_decision")
+            web_tier = getattr(web_turn, "tier", None) if web_turn is not None else None
+            if web_turn is not None and web_tier != TIER_AUTO:
+                # An explicit tier (an unknown one reads as explicit: the conservative side).
                 route = single_lens_route(route)
+            elif web_turn is not None and route.get("mode") == "synthesize":
+                logger.info("AUTO_WEB_DROPPED reason=synthesis session=%s", session_id)
+                web_turn = None
+                # The fallback inherits the DROP: no search, no second decision, no second log.
+                fallback_web_decision = decision_without_web(fallback_web_decision)
+                prep = {
+                    **prep,
+                    "web_turn": None, "web_search_granted": False, "web_force_first": None,
+                    "web_search_mode": None,
+                    "system_instruction": prep.get("system_instruction_no_web")
+                    or prep["system_instruction"],
+                    "system_instruction_no_tools": prep.get("system_instruction_no_tools_no_web")
+                    or prep.get("system_instruction_no_tools"),
+                }
             report_as_of = prep.get("report_as_of")
+            # The grounding audit's starting evidence (never raises; a missing seed → empty).
+            grounding_evidence = GroundingEvidence.from_seed(prep.get("grounding_seed"))
+            grounding_asset = prep.get("asset_type")
+            grounding_replay = (
+                "cached" if prep.get("deep_dive_cached")
+                else "warm" if warmed is not None else None
+            )
 
             # The chip's verdict as soon as it is known, so "Grounded on Research Report"
             # is corrected while the answer streams rather than after it. Only for a type
@@ -2269,17 +2540,25 @@ async def stream_chat_message(
             asset_type = prep.get("asset_type") or "NORMAL"
             # Filtered to the tools that MEAN something for this asset class — not just
             # "equity three, plus the index one for INDEX". See `chat_tools._TOOLS_BY_ASSET_TYPE`.
-            # `web_search` joins both ONLY on a turn whose gate opened (`web_turn`).
-            tools = build_chat_tool_declarations(asset_type, web_search=web_turn is not None)
+            # `web_search` joins both ONLY on a turn whose gate opened (`web_turn`), declared with
+            # its tier's description (`web_search_mode`, which reads the granted tools: "news" only
+            # when round 1 is forced to Caydex's licensed news).
             # The HANDLER map is filtered too: the declarations decide what the model is
             # offered, but a handler left in the map for an undeclared tool would still
             # run if the model named it from memory (a second door around the class table).
             allowed = tools_for_asset_type(asset_type, web_search=web_turn is not None)
+            tools = build_chat_tool_declarations(
+                asset_type, web_search=web_turn is not None,
+                web_search_mode=web_search_mode(web_turn, allowed),
+            )
             handlers = {
                 name: fn
                 for name, fn in build_chat_tool_handlers(
                     chat_service, screen_symbol=stock_id, screen_asset_type=asset_type,
                     user_id=user["id"], web_turn=web_turn,
+                    # The caller's plan — the ownership tool's congressional gate (Pro and
+                    # above); None / free / unknown stay locked.
+                    user_tier=user.get("tier"),
                 ).items()
                 if name in allowed
             }
@@ -2387,9 +2666,14 @@ async def stream_chat_message(
                     # Correlates the GEMINI_USAGE line to a turn: without the route you
                     # cannot tell which lens (and so which model) served this answer.
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
-                    # A web turn (the gate saw an explicit ask) MUST search in round 1: the
-                    # prompt rule alone lost to the routed lens and to the headlines tool.
-                    force_first_tool=WEB_SEARCH_TOOL if web_turn is not None else None,
+                    # Round 1 of a web turn: an explicit ask MUST search (the prompt rule alone
+                    # lost to the routed lens and to the headlines tool); a news ask MUST call
+                    # Caydex's licensed headlines first (the search may follow); the automatic
+                    # tier is never forced (`chat_web_search_service.web_force_first`).
+                    force_first_tool=prep.get("web_force_first") if web_turn is not None else None,
+                    # Each round's tool names reach the turn before its handlers run, so an
+                    # automatic search called beside Caydex's own tools waits for their results.
+                    on_tool_round=web_turn.note_tool_round if web_turn is not None else None,
                 )
 
             async for kind, payload in _with_keepalive(
@@ -2409,9 +2693,16 @@ async def stream_chat_message(
                     # It does NOT mark the stream as started (no answer or reasoning text is on
                     # screen): a fallback after it sends no `reset`, and the fallback's `done`
                     # (which replaces the thinking card wholesale) settles the searching state.
+                    # An automatic search called beside one of Caydex's own tools is DEFERRED
+                    # (no search runs this round), so its start is not forwarded: the client must
+                    # not read "Searching the web…" for a round in which no search runs. The round
+                    # observer has already recorded this round's names, so `would_defer()` is
+                    # exact here; `web_start_sent` stays False and a real search in a later round
+                    # still announces itself (review 2026-10-09).
                     if (
                         isinstance(payload, dict) and payload.get("name") == WEB_SEARCH_TOOL
                         and not web_start_sent
+                        and not (web_turn is not None and web_turn.would_defer())
                     ):
                         web_start_sent = True
                         yield _sse("tool_start", {"name": WEB_SEARCH_TOOL})
@@ -2431,7 +2722,13 @@ async def stream_chat_message(
                     # exactly like the non-streaming door.
                     _res = payload.get("result")
                     _err = _res.get("error") if isinstance(_res, dict) else None
-                    tool_calls_seen += 1
+                    # A web search DEFERRED behind Caydex's own tools ran nothing — our own
+                    # scheduling, not a delivered result — so it is NEUTRAL for the refund gate:
+                    # counted, it made a turn whose every real tool failed upstream look partly
+                    # successful and charged it (review 2026-10-09). The send door applies the
+                    # same rule (`chat_service.generate_response`).
+                    if not (isinstance(_res, dict) and _res.get("deferred") is True):
+                        tool_calls_seen += 1
                     # Only an UPSTREAM failure (timeout, FMP/CoinGecko/Supabase error —
                     # tagged `upstream` at the source) counts toward the refund. A result
                     # the MODEL shaped — an invalid ticker, a symbol the provider does
@@ -2441,19 +2738,37 @@ async def stream_chat_message(
                     if _err and isinstance(_res, dict) and _res.get("upstream"):
                         tool_calls_failed += 1
                     _is_web = payload.get("name") == WEB_SEARCH_TOOL
+                    if grounding_evidence is not None and not _is_web:
+                        # Grounding-audit evidence: a NON-web tool result only — the audit
+                        # never measures an answer against web results (`add_tool_result`
+                        # also refuses one structurally). The frame carries the FULL handler
+                        # result; the model was handed `truncate_tool_result(...)` of it, so the
+                        # evidence is that same view — a pruned list tail the model never saw
+                        # must not ground a figure. Bounded walk; never raises.
+                        grounding_evidence.add_tool_result(
+                            payload.get("name"), truncate_tool_result(_res),
+                        )
                     _web_delivered = payload.get("name") == WEB_SEARCH_TOOL and web_results_delivered(_res)
                     if _web_delivered:
                         # Web results reached the model on this turn (a capped, empty or failed
                         # search never counts) — the caveat and the source pills key off it.
                         web_search_used = True
+                        web_search_automatic = getattr(web_turn, "automatic", False) is True
                     _step = {
                         "name": payload.get("name"), "args": payload.get("args"),
                         "error": str(_err)[:200] if _err else None,
                     }
                     if _is_web and _web_step_skipped(_res):
-                        # Capped / switched off / unavailable / refused: no search the user can
-                        # be told about, so the client claims no "Searching the web" progress.
+                        # Capped / switched off / unavailable / refused / deferred: no search the
+                        # user can be told about, so the client claims no "Searching the web"
+                        # progress.
                         _step["skipped"] = True
+                        if isinstance(_res, dict) and _res.get("status") == STATUS_DEFERRED:
+                            # Deferred behind Caydex's own tools: the real search may follow in a
+                            # later round, and its start must reach the client then. (A deferred
+                            # round's own start is no longer forwarded — `would_defer()` above —
+                            # so this is a belt-and-braces reset.)
+                            web_start_sent = False
                     yield _sse("tool_step", _step)
                     if _web_delivered and web_turn is not None:
                         # The turn's web pills (built by the service from the URLs the model
@@ -2616,6 +2931,13 @@ async def stream_chat_message(
             )
             used_fallback = True
             try:
+                # The turn deadline the fallback runs under (below), computed BEFORE the task so
+                # its tool rounds settle inside it too.
+                _fallback_deadline = max(
+                    _time.monotonic() + 5.0,
+                    min(started + _stream_budget_seconds(),
+                        _time.monotonic() + settings.CHAT_SEND_BUDGET_SECONDS),
+                )
                 _fallback_task = asyncio.ensure_future(chat_service.generate_response(
                     session_id=session_id,
                     user_message=user_message,
@@ -2631,18 +2953,18 @@ async def stream_chat_message(
                     user_id=user["id"],
                     # Same once-per-session card rule as the stream it replaces.
                     attach_base_widget=first_turn,
-                    # The SAME turn's web search: its outcome is replayed, never bought twice.
+                    # The SAME turn's web search: its outcome is replayed, never bought twice —
+                    # or, with no turn, the stream's own decision (never re-decided or re-logged).
                     web_turn=web_turn,
+                    web_decision=fallback_web_decision,
+                    # Same plan as the stream it replaces (the ownership tool's gate).
+                    user_tier=user.get("tier"),
+                    deadline=_fallback_deadline,
                 ))
                 # The fallback is one awaited call with tools inside it — nothing reaches
                 # the client until it returns, so heartbeat it the same way as the pump —
                 # under the SAME turn deadline: a pump that spent the budget must not be
                 # followed by a fallback that spends it again.
-                _fallback_deadline = max(
-                    _time.monotonic() + 5.0,
-                    min(started + _stream_budget_seconds(),
-                        _time.monotonic() + settings.CHAT_SEND_BUDGET_SECONDS),
-                )
                 try:
                     while True:
                         _remaining = _fallback_deadline - _time.monotonic()
@@ -2662,6 +2984,9 @@ async def stream_chat_message(
                     raise
                 ai_result = _fallback_task.result()
                 content = ai_result.get("content")
+                # The fallback answered this turn, so ITS audit (computed on its own instruction
+                # and tool results) is the one the grounding hook logs.
+                fallback_grounding_audit = ai_result.get("grounding_audit")
                 citations = ai_result.get("citations")
                 fb_widget = ai_result.get("widget")
                 widgets = [fb_widget] if fb_widget else []  # discard streamed widgets; fallback replaces
@@ -2692,6 +3017,7 @@ async def stream_chat_message(
                 # with its pills (the aborted stream's web pills are dropped unless the fallback
                 # used the results too) and its own report date.
                 web_search_used = bool(ai_result.get("web_search_used"))
+                web_search_automatic = ai_result.get("web_search_automatic") is True
                 fallback_web_unit_spent = ai_result.get("web_search_spent") is True
                 report_as_of = ai_result.get("report_as_of") or report_as_of
                 fb_base = _strip_web_pills(sources) if sources else _strip_web_pills(ai_result.get("sources"))
@@ -2736,12 +3062,39 @@ async def stream_chat_message(
         # answer is worse than a flag). The redacted `content` is what gets persisted
         # and carried in the authoritative `done` frame.
         content, enforced = enforce_answer(content)
+        # The unanswered check grades THIS text: enforced, and before the code-written notes
+        # below (`finalize_answer_notes`) — a fallback's own answer after a fallback.
+        unanswered_answer = content
         advice_flags = scan_answer(content)
         if enforced or advice_flags:
             sec_logger.warning(
                 "Chat guardrail (stream) session=%s persona=%s enforced=%r flags=%r: %r",
                 session_id, report_voice_key, enforced, advice_flags, content[:200],
             )
+
+        # Log-only numeric grounding audit (`CHAT_GROUNDING`), on the ENFORCED answer and
+        # BEFORE `finalize_answer_notes` (code-written notes are never audited). It runs as a
+        # background task (off the loop, in a worker thread) awaited only after the durable
+        # write below, so it can neither delay nor expose the persist, and it is handed
+        # `content` by value — it cannot change the answer. A fallback answer logs the
+        # fallback's own audit; a replay or a turn whose web results reached the model logs a
+        # skip (an answer is never measured against web results).
+        try:
+            grounding_task = start_grounding_audit(
+                content, grounding_evidence, door="stream", session_id=session_id,
+                asset_type=grounding_asset, context_type=ctx_type,
+                precomputed=(
+                    (fallback_grounding_audit or {"skipped": "no_audit"}) if used_fallback
+                    else None
+                ),
+                web_turn=web_search_used,
+                replay=None if used_fallback else grounding_replay,
+                fallback=used_fallback,
+            )
+        except Exception as e:  # noqa: BLE001 — log-only
+            logger.warning("CHAT_GROUNDING (stream) hook failed (%s: %s) — answer unaffected",
+                           type(e).__name__, e)
+            grounding_task = None
 
         # REASONING IS A SECOND OUTPUT CHANNEL and was never enforced. It is rendered in
         # the thinking card and carried in the `done` frame + the persisted turn, so an
@@ -2782,6 +3135,8 @@ async def stream_chat_message(
         content, _suffix = finalize_answer_notes(
             content, trade_intent=trade_intent, web_used=web_search_used,
             report_as_of=report_as_of,
+            # An automatic search (the user did not ask) is announced by code, in the caveat.
+            web_auto=web_search_automatic,
         )
         if _suffix and streamed_any and not used_fallback:
             yield _sse("token", {"delta": _suffix})
@@ -2881,8 +3236,28 @@ async def stream_chat_message(
                 # credit on a large share of turns every time the network is flaky. Only the
                 # fallback's OWN degraded marker (none of its live data) settles no-cost.
                 quota.settle_no_cost(f"chat_degraded_{degraded_reason}")
-            # A charged turn earns this session one free follow-up (no-op after a refund).
-            quota.on_delivered()
+            # The unanswered check's view of this turn, read AFTER the ladder: its gates stop at
+            # every turn the ladder settled or deliberately kept charged (a cut web answer, a
+            # starter replay), which makes it the `elif` behind the ladder. Pure; never raises.
+            # The fallback's own answer and web verdict after a fallback (never the aborted
+            # stream's tool counters).
+            unanswered_turn = _unanswered_turn(
+                door="stream_fallback" if used_fallback else "stream", quota=quota, user=user,
+                question=user_message, answer=unanswered_answer,
+                cache_hit=tokens_used == 0,
+                starter_replay=replayed_warm and not used_fallback,
+                degraded=degraded_reason, web_results_delivered=web_search_used,
+                web_unit_spent=(
+                    (web_turn is not None and web_turn.spent_a_unit()) or fallback_web_unit_spent
+                ),
+            )
+            # A turn the check will judge hands its free-follow-up grant to the decision, which
+            # runs it once the settlement is final (a refunded turn grants none) — however the
+            # decision ends, a cancellation included. Every other turn grants now, as before.
+            unanswered_judged = unanswered_skip_reason(unanswered_turn) is None
+            if not unanswered_judged:
+                # A charged turn earns this session one free follow-up (no-op after a refund).
+                quota.on_delivered()
             # Settlement is final → fold it into the SAME local `rich_content` the
             # suggestions step writes back below, or that write would clobber the key.
             rich_content = _attach_turn_cost(
@@ -2900,6 +3275,16 @@ async def stream_chat_message(
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
             })
             return
+
+        # The unanswered check (2026-10-09) starts now and runs BESIDE the bookkeeping and the
+        # chips call below, so a judged turn adds little or no wall time; it is settled before
+        # the `credits` frame. Mode off returns at once; a skipped turn logs one line.
+        unanswered_task = asyncio.ensure_future(decide_unanswered_refund(
+            unanswered_turn, quota=quota, gemini=getattr(chat_service, "gemini", None),
+            user_id=user.get("id"), session_id=session_id,
+            prior_turn_loader=_previous_turn_loader(supabase, session_id, now.isoformat()),
+            after_settle=quota.on_delivered if unanswered_judged else None,
+        ))
 
         # OUTSIDE the delivery-critical try on purpose. This is best-effort bookkeeping that
         # runs after the answer is durably stored, so it must never be able to turn a saved
@@ -2987,8 +3372,10 @@ async def stream_chat_message(
                     answer=strip_web_caveat(content),
                     context_type=ctx_type,
                     reference_id=ref_id,
-                    # A REPORT chat drops chips that would open the paid web search.
+                    # A REPORT chat — or any chat where every-chat search is open for this
+                    # caller — drops chips that would open the paid web search.
                     session_type=session_type,
+                    user_id=user["id"],
                 ))
                 _sugg_deadline = max(
                     _time.monotonic() + 5.0,
@@ -3051,6 +3438,55 @@ async def stream_chat_message(
             logger.warning("Chat suggestions step failed (%s: %s) — skipping", type(e).__name__, e)
             suggestions = None
 
+        # The unanswered verdict, settled BEFORE `credits` so the live frame and the stored row
+        # agree. Heartbeated like the chips call and bounded: a decision past its wait is
+        # cancelled — a judge stops at once (charged); a money section already in its worker
+        # thread completes as a unit and the decision waits for it (bounded), so this door waits
+        # `cancel_wait_seconds()` more and then reads the QUOTA, never a guess. Only a disconnect
+        # (a BaseException) leaves this block early — the decision is cancelled with it. The held
+        # free-follow-up grant is the decision's to release (`after_settle`), once its
+        # settlement is final, on every one of these paths.
+        if unanswered_task is not None:
+            _cov_deadline = _time.monotonic() + decision_wait_seconds()
+            try:
+                while not unanswered_task.done():
+                    _remaining = _cov_deadline - _time.monotonic()
+                    if _remaining <= 0:
+                        unanswered_task.cancel()
+                        await asyncio.wait({unanswered_task}, timeout=cancel_wait_seconds())
+                        logger.warning(
+                            "CHAT_UNANSWERED decision outran its wait for session %s — %s",
+                            session_id,
+                            "refunded" if quota.is_refunded
+                            else "settled, no refund recorded" if quota.is_settled
+                            else "not settled: charged unless its money section is still "
+                                 "running (that section logs its own CHAT_UNANSWERED line)",
+                        )
+                        break
+                    _done, _ = await asyncio.wait(
+                        {unanswered_task}, timeout=min(_keepalive_seconds(), _remaining)
+                    )
+                    if not _done:
+                        yield ": keepalive\n\n"
+            except BaseException:
+                unanswered_task.cancel()
+                raise
+            try:
+                # The gates passed, so the turn was unsettled when the check began: a refund now
+                # is the check's. Read off the quota — a decision cancelled while its money
+                # section ran still refunded.
+                if unanswered_judged and quota.is_refunded is True:
+                    # Re-record the settlement on the row, merged into the SAME local dict the
+                    # chips step wrote (or it would lose the chips).
+                    rich_content = await asyncio.to_thread(
+                        _attach_turn_cost, supabase, assistant_row, quota, rich_content,
+                    ) or rich_content
+            except Exception as e:  # noqa: BLE001 — the answer is persisted; never fail here
+                logger.warning(
+                    "CHAT_UNANSWERED post-verdict step failed for session %s (%s: %s)",
+                    session_id, type(e).__name__, e,
+                )
+
         # What this turn cost, and the balance it left behind. Emitted on the DELIVERED
         # path only, once, immediately before `done`. Shipped iOS builds ignore an unknown
         # frame (`default: continue`), so this is additive in both directions.
@@ -3066,6 +3502,13 @@ async def stream_chat_message(
             done_message = _overlay_live_sources(done_message, live_sources)
         yield _sse("done", {"message": done_message})
 
+        # The grounding audit's line, given a short grace AFTER `done` — never in front of it:
+        # the task is strongly held (`_PENDING`) and logs whether or not it is awaited, so this
+        # only keeps the line inside the request's lifetime, and a busy worker pool can no
+        # longer add up to SETTLE_SECONDS to the user-visible `done` (iOS finalises the turn on
+        # `done`, not on the stream's end). Never cancels the task and never raises.
+        await settle_grounding_audit(grounding_task)
+
     async def _metered_stream():
         # Wrap event_gen so a client disconnect (CancelledError/GeneratorExit) — which the
         # inner except-Exception guards miss — still refunds the turn exactly once. No-op if
@@ -3076,6 +3519,13 @@ async def stream_chat_message(
         finally:
             if not delivered:
                 quota.refund_once("chat_stream_cancelled")
+            # A disconnect while the unanswered check runs: stop it — the turn stays charged
+            # unless its money section had started, which completes as a unit in its worker
+            # thread and logs itself. The held free-follow-up grant is released by the decision
+            # (`after_settle`) once its settlement is final: in its own `finally` here, or from
+            # that worker thread — never before a refund can land.
+            if unanswered_task is not None and not unanswered_task.done():
+                unanswered_task.cancel()
 
     return StreamingResponse(
         _metered_stream(),
@@ -3162,7 +3612,13 @@ async def get_chat_history(
     # user row" is exact rather than a guess.
     replayed: List[ChatMessageResponse] = []
     last_question = ""
-    drop_web_chips = _drops_web_search_chips(session.data)
+    # A report chat, or a chat where every-chat search is open for THIS caller (their consent
+    # header on this request): a stored web-ask chip must not reopen a paid search one tap away.
+    drop_web_chips = _drops_web_search_chips(session.data) or web_chips_dropped(
+        (session.data or {}).get("session_type") if isinstance(session.data, dict) else None,
+        (session.data or {}).get("context_type") if isinstance(session.data, dict) else None,
+        user.get("id") if isinstance(user, dict) else None,
+    )
     for row in rows:
         if row.get("role") == "user":
             last_question = row.get("content") or ""

@@ -18,10 +18,15 @@ What is refused, and therefore dropped:
   * analyst consensus / ratings / upgrades — the analyst package is unlicensed and the
     prompt tells the model to say so.
 
-In a REPORT chat (``drop_web_search=True``) a chip that reads as an explicit web-search ask
-— "Any recent news on AVGO?", "What's the latest news?" — is dropped as well
-(`chat_intent.is_web_search_intent`): report chat offers its paid web search on an explicit
-ask ONLY, never one tap away on a chip the product wrote (owner decision, 2026-10-02).
+Web-search chips (`chat_intent.web_ask_kind`), in two cases:
+  * where a web search IS open on an ask (``drop_web_search=True``: a REPORT chat, or any chat
+    where every-chat search is open for this caller — `chat_web_search_service.web_chips_dropped`)
+    every web-ask chip goes — "Any recent news on AVGO?", "Can you verify the margin?": a paid
+    search is offered on the user's own ask, never one tap away on a chip the product wrote (owner
+    decision, 2026-10-02);
+  * everywhere else, a chip that asks to SEARCH THE WEB ("Search the web for the DOJ case",
+    "Google it") goes too: no web search answers it there, so it is a dead end. A news or verify
+    chip stays — Caydex's licensed headlines and data answer it.
 
 What is deliberately KEPT, because the same brief made it answerable: outlook framed
 as scenarios ("What's next for tech?", "what could drive it higher?"), venue questions
@@ -37,7 +42,7 @@ import logging
 import re
 from typing import Any, Iterable, List
 
-from app.services.chat_intent import is_trade_intent, is_web_search_intent
+from app.services.chat_intent import WEB_ASK_EXPLICIT, is_trade_intent, web_ask_kind
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +91,15 @@ _UNANSWERABLE_CHIP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A web-ask chip that only a web search can answer: it names the search itself (search, google,
+# browse, look it up, online, the internet / web, websites). Read only on a chip `web_ask_kind`
+# already classified as an explicit ask, so "web" alone ("Amazon Web Services") never reaches it.
+_SEARCH_THE_WEB_CHIP_RE = re.compile(
+    r"\b(?:search\w*|google|brows(?:e|ing)|look\s+(?:(?:it|this|that)\s+)?up|online|internet|"
+    r"web\s*sites?|the\s+web|web\s+search)\b",
+    re.IGNORECASE,
+)
+
 # The model, stored rows and iOS smart quotes emit the typographic apostrophe; the
 # patterns above are written with the ASCII one, so the text is folded before matching.
 _APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
@@ -113,7 +127,9 @@ _EDUCATIONAL_FRAME_RE = re.compile(
 def is_answerable_chip(text: Any, *, drop_web_search: bool = False) -> bool:
     """True when a chip is a question the chat will answer rather than decline.
 
-    `drop_web_search` (a REPORT chat): a chip that would open the paid web search is refused."""
+    `drop_web_search` (a report chat, or a chat where every-chat search is open for the caller):
+    a chip that would open the paid web search is refused. Without it, a chip that asks to search
+    the web is refused too — nothing would answer it."""
     if not isinstance(text, str):
         return False
     t = text.strip().translate(_APOSTROPHES)
@@ -121,7 +137,10 @@ def is_answerable_chip(text: Any, *, drop_web_search: bool = False) -> bool:
         return False
     if _UNANSWERABLE_CHIP_RE.search(t):
         return False
-    if drop_web_search and is_web_search_intent(t):
+    kind = web_ask_kind(t)
+    if kind is not None and drop_web_search:
+        return False
+    if kind == WEB_ASK_EXPLICIT and _SEARCH_THE_WEB_CHIP_RE.search(t):
         return False
     if _EDUCATIONAL_FRAME_RE.search(t):
         return True

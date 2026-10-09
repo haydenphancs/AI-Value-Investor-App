@@ -147,7 +147,15 @@ _LABELLED_TOOLS = (
     "explain_price_move",
     "web_search",
     "check_ownership_filings",
+    # 2026-10-09 (1.01 Phase B): labelled on iOS AHEAD of the backend tools (Phase A wave 2), so
+    # the build that ships first never renders them as a de-snake-cased identifier.
+    "check_company_financials",
+    "check_asset_profile",
 )
+
+# Tools that answer from Caydex's own cached data. Their labels must never claim a web search —
+# the "Searching the web" status is reserved for the one tool that does search the web.
+_CAYDEX_DATA_TOOLS = ("check_ownership_filings", "check_company_financials", "check_asset_profile")
 
 
 @pytest.mark.parametrize("tool", _LABELLED_TOOLS)
@@ -178,6 +186,29 @@ def _case_line(body: str, tool: str) -> str:
     return lines[0]
 
 
+@pytest.mark.parametrize("tool", _CAYDEX_DATA_TOOLS)
+def test_caydex_data_tool_labels_never_claim_the_web(tool):
+    body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
+    line = _case_line(body, tool)
+    label = re.search(r'return "([^"]+)"', line)
+    assert label, f"{tool}'s case does not return a literal label: {line!r}"
+    text = label.group(1)
+    assert "web" not in text.lower() and "search" not in text.lower(), (
+        f"{tool} reads Caydex's own data, but its label says {text!r}"
+    )
+    assert text[:1].isupper() and not text.endswith((".", "…")), (
+        f"{text!r} does not match the label style (sentence case, no trailing punctuation)"
+    )
+
+
+def test_the_new_labels_match_the_existing_style():
+    """Matched against the shipped style: a gerund phrase ("Checking ownership filings",
+    "Scanning recent news"), never the de-snake-cased fallback ("Check company financials")."""
+    body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
+    assert 'return "Checking company financials"' in _case_line(body, "check_company_financials")
+    assert 'return "Looking up key facts"' in _case_line(body, "check_asset_profile")
+
+
 def test_explain_price_move_still_reads_digging_deeper():
     """`explain_price_move` answers only from deterministic attribution and the ticker's cached
     news — its paid web-search tier was retired on 2026-10-02 — so it must never claim a web
@@ -195,7 +226,9 @@ def test_only_the_explicit_web_search_tool_says_searching_the_web():
     explicit-request-only `web_search` tool, and the owner asked for a visible "Searching the
     web…" status while it runs. So the phrase is now allowed in exactly ONE place: the
     `web_search` case. Never on `explain_price_move` (above), never in `default:` (which would
-    put it on every unknown tool)."""
+    put it on every unknown tool). Since 2026-10-09 that tool also runs in any chat and
+    automatically (consent v3); the label is still true, because it renders only for a search
+    that actually started."""
     body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
     line = _case_line(body, "web_search")
     assert 'return "Searching the web"' in line
@@ -214,3 +247,31 @@ def test_the_label_scan_is_not_vacuous():
     assert len(body) > 200
     assert "switch name" in body
     assert "//" not in body, "comments must be stripped before asserting"
+
+
+def test_the_financials_tool_reads_truthfully_on_builds_without_its_label():
+    """1.0 and the first 1.01 builds have no `case "check_company_financials"`: their `default:`
+    de-snake-cases the name. The backend name was chosen so that fallback is still a true,
+    verb-first progress line — replicate the Swift default exactly and pin the words."""
+    from app.services.agents.chat_tools import FINANCIALS_TOOL
+
+    body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
+    default = body[body.index("default:"):]
+    assert 'replacingOccurrences(of: "_", with: " ")' in default
+    assert "prefix(1).uppercased()" in default
+    words = FINANCIALS_TOOL.replace("_", " ")
+    assert words[:1].upper() + words[1:] == "Check company financials"
+
+
+def test_the_profile_tool_reads_truthfully_on_builds_without_its_label():
+    """Same as the financials tool: shipped builds without `case "check_asset_profile"` render
+    the de-snake-cased name — "Check asset profile", a true, verb-first progress line. Replicates
+    the Swift default exactly (asserted above) and pins the words."""
+    from app.services.agents.chat_tools import PROFILE_TOOL
+
+    body = _braced(_stripped(_VIEWMODEL), "static func thinkingLabel(forTool name: String)")
+    default = body[body.index("default:"):]
+    assert 'replacingOccurrences(of: "_", with: " ")' in default
+    assert "prefix(1).uppercased()" in default
+    words = PROFILE_TOOL.replace("_", " ")
+    assert words[:1].upper() + words[1:] == "Check asset profile"

@@ -560,3 +560,63 @@ def test_finalize_answer_notes_requires_every_keyword():
         cs.finalize_answer_notes("x", trade_intent=False, web_used=True)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         cs.finalize_answer_notes("x", False, True, None)  # type: ignore[misc]
+
+
+# ── the automatic-search caveat (2026-10-08) ─────────────────────────────────
+#
+# A search the user did NOT ask for is announced by code: `WEB_CAVEAT_AUTO_LEAD` opens the caveat
+# (the report-date sentence kept where it applies), and a model-written copy of it is stripped on
+# every turn like the lead, wherever it sits.
+
+_AUTO = cs.WEB_CAVEAT_AUTO_LEAD
+
+
+def test_the_automatic_caveat_leads_with_why_and_keeps_the_report_date():
+    assert _AUTO == "Cay AI searched the web because Caydex's data did not cover this."
+    assert cs.web_caveat_line(None, automatic=True) == f"{_AUTO} {_LEAD}"
+    assert cs.web_caveat_line("2026-09-22", automatic=True) == f"{_AUTO} {_DATED}"
+    for not_true in (False, None, 1, "yes"):
+        assert cs.web_caveat_line(None, automatic=not_true) == _LEAD, not_true
+
+
+def test_finalize_appends_the_automatic_caveat_only_on_a_delivered_automatic_turn():
+    final, suffix = cs.finalize_answer_notes("Answer.", trade_intent=False, web_used=True,
+                                             report_as_of=None, web_auto=True)
+    assert final == f"Answer.\n\n{_AUTO} {_LEAD}" and suffix == f"\n\n{_AUTO} {_LEAD}"
+    final, _ = cs.finalize_answer_notes("Answer.", trade_intent=False, web_used=False,
+                                        report_as_of=None, web_auto=True)
+    assert final == "Answer.", "no results reached the answer: no caveat at all"
+    final, _ = cs.finalize_answer_notes("Answer.", trade_intent=False, web_used=True, report_as_of=None)
+    assert _AUTO not in final, "an asked search never says it was automatic"
+
+
+@pytest.mark.parametrize("copy", [
+    f"\n\n{_AUTO}",
+    f"\n\n{_AUTO} {_LEAD}",
+    f"\n\n- {_AUTO} {_LEAD}",
+    f"\n\n**{_AUTO}**\n{_LEAD}",
+    f"\n\n{_AUTO}\n{_LEAD}\nYour report reflects data as of Sep 22, 2026.",
+    f"\n\n> {_AUTO.upper()}",
+])
+def test_a_model_written_automatic_caveat_is_stripped(copy):
+    out = cs.strip_web_caveat("The answer." + copy)
+    assert out.strip() == "The answer.", repr(out)
+    assert cs.strip_web_caveat(out) == out
+
+
+def test_an_automatic_caveat_glued_to_a_prose_line_is_cut():
+    out = cs.strip_web_caveat(f"A suit was filed on Tuesday. {_AUTO} {_LEAD}")
+    assert out == "A suit was filed on Tuesday."
+
+
+def test_finalize_never_doubles_the_automatic_caveat():
+    text = f"Answer.\n\n{_AUTO} {_LEAD}"
+    final, _ = cs.finalize_answer_notes(text, trade_intent=False, web_used=True, report_as_of=None,
+                                        web_auto=True)
+    assert final.count(_AUTO) == 1 and final.count(_LEAD) == 1
+
+
+def test_prose_that_merely_mentions_a_search_is_kept():
+    for text in ("Cay AI searched the archives.", "We searched the web of suppliers because of costs.",
+                 "Analysts said Cay AI searched widely."):
+        assert cs.strip_web_caveat(text) is text

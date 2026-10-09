@@ -135,7 +135,7 @@ struct ReportRevenueEngineSection: View {
                 Spacer()
 
                 // Revenue amount
-                Text(segment.formattedRevenue)
+                Text(data.formattedRevenue(for: segment))
                     .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
@@ -227,6 +227,16 @@ struct ReportRevenueEngineSection: View {
     ScrollView {
         ReportRevenueEngineSection(
             data: ReportRevenueEngineData.sampleGross
+        )
+        .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Non-USD filer — currency code") {
+    ScrollView {
+        ReportRevenueEngineSection(
+            data: ReportRevenueEngineData.sampleForeignCurrency
         )
         .padding()
     }

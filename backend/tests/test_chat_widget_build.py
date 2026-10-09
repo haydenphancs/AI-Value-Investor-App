@@ -404,3 +404,36 @@ def test_build_prompt_missing_chunk_text_key_absent_is_empty():
     prompt = ChatService._build_prompt("q", "", [{"section_title": "S"}])
     assert "None" not in prompt
     assert "RELEVANT CONTEXT" in prompt
+
+
+# ── the quote card states its TRADING currency (final review 2026-10-09) ──────
+
+
+@pytest.mark.parametrize("raw,expected", [("USD", "USD"), ("eur", "EUR"), (" jpy ", "JPY"),
+                                          (None, None), ("", None), ("US$", None), (5, None)])
+def test_build_widget_carries_a_real_currency_code_or_none(raw, expected):
+    w = ChatService._build_stock_widget("AAPL", {"price": 10.0}, [], 0, None, currency=raw)
+    assert w["currency"] == expected
+
+
+def test_build_widget_default_currency_is_unknown_never_usd():
+    assert ChatService._build_stock_widget("AAPL", {"price": 10.0}, [], 0, None)["currency"] is None
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({"symbol": "ASML", "price": 612.4, "currency": "EUR"}, "EUR"),
+    ({"symbol": "AAPL", "price": 230.0, "currency": "USD"}, "USD"),
+])
+def test_the_profile_quote_carries_its_trading_currency(row, expected):
+    from app.services.price_service import PriceService
+    assert PriceService._from_profile(dict(row))["currency"] == expected
+
+
+@pytest.mark.parametrize("bad", [None, "", "N/A", "USDT", 7])
+def test_an_unknown_profile_currency_leaves_the_key_out(bad):
+    """The fixed quote key set is unchanged when the code is unknown (like `yearLow`)."""
+    from app.services.price_service import PriceService
+    row = {"symbol": "AAPL", "price": 230.0}
+    if bad is not None:
+        row["currency"] = bad
+    assert "currency" not in PriceService._from_profile(row)

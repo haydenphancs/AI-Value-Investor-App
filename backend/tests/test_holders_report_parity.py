@@ -446,3 +446,127 @@ def _today_str() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# ── ONE insider roster: Holders Top 10 = report Key Management = chat (2026-10-08) ──────
+#
+# The Top 10 sheet and Key Management used the first raw Form 4 row per name (an RSU line
+# read 984,380 for CRWV's Venturo) while chat stated 302,526 Class A shares held directly.
+# All three now read `roster_from_holdings` over the same chained balances.
+
+_CRWV = "0001769628"
+_VENTURO = ("Venturo Brian M", "0002058067", "director, officer: Chief Strategy Officer")
+
+
+def _f4(traded, filed, *, tx, ad, shares, owned, own="D", price=0.0,
+        security="Class A Common Stock", who=_VENTURO, company=_CRWV):
+    name, cik, title = who
+    return {
+        "symbol": "CRWV", "companyCik": company, "reportingName": name, "reportingCik": cik,
+        "typeOfOwner": title, "transactionType": tx, "acquisitionOrDisposition": ad,
+        "securitiesTransacted": shares, "price": price, "securitiesOwned": owned,
+        "directOrIndirect": own, "securityName": security, "formType": "4",
+        "transactionDate": traded, "filingDate": filed,
+    }
+
+
+def _venturo_rows():
+    return [
+        _f4("2026-09-30", "2026-10-02", tx="M-Exempt", ad="D", shares=109380, owned=984380,
+            security="Restricted Stock Units"),
+        _f4("2026-09-30", "2026-10-02", tx="M-Exempt", ad="A", shares=17391, owned=368142),
+        _f4("2026-09-30", "2026-10-02", tx="M-Exempt", ad="A", shares=109380, owned=350751),
+        _f4("2026-09-30", "2026-10-02", tx="S-Sale", ad="D", shares=65616, owned=302526, price=87.69),
+    ]
+
+
+def _holdings_schema(rows):
+    from app.schemas.holders import InsiderHoldingsSchema
+    from app.services._insider_holdings import insider_holdings_from_rows
+
+    built = insider_holdings_from_rows(rows)
+    built.pop("rows_skipped", None)
+    return InsiderHoldingsSchema(**built)
+
+
+class _Out:
+    """The slice of `CollectedTickerData` `_key_management_roster` reads."""
+
+    def __init__(self, holders_response=None, insider_unavailable=False):
+        self.ticker = "CRWV"
+        self.holders_response = holders_response
+        self.insider_unavailable = insider_unavailable
+
+
+def test_holders_top_10_report_key_management_and_chat_state_the_same_share_count():
+    from app.schemas.holders import OwnershipDetailSchema
+    from app.services._insider_holdings import roster_from_holdings
+    from app.services.agents.ticker_report_data_collector import (
+        _build_key_management,
+        _key_management_roster,
+    )
+    from app.services.chat_ownership_tool import _holding_text
+
+    holdings = _holdings_schema(_venturo_rows())
+    resp = HoldersResponse(symbol="CRWV",
+                           ownership_detail=OwnershipDetailSchema(insider_holdings=holdings))
+    # Holders tab
+    top = HoldersService._build_top_insiders(
+        HoldersService.__new__(HoldersService), roster_from_holdings(holdings),
+        current_price=100.0, outstanding_shares=1e8)
+    assert top[0].value_in_millions == round(302526 * 100.0 / 1e6, 1)
+    assert top[0].percent_ownership == round(302526 / 1e8 * 100, 4)
+    # report (from the holders object, and from the collection's own rows — same number)
+    for out in (_Out(resp), _Out(None)):
+        km = _build_key_management(
+            _key_management_roster(out, _venturo_rows(), _CRWV), {"ceo": "x"},
+            current_price=100.0, shares_outstanding=1e8)
+        officer = next(o for o in km["officers"] if o["name"] == "Brian M. Venturo")
+        assert officer["ownership"] == "303K"
+        assert officer["ownership_value"] == "$30.3M"
+        assert officer["percent_owned"] == round(302526 / 1e8 * 100, 6)
+    # chat
+    direct = [h for h in holdings.insiders[0].holdings if h.held == "direct"][0]
+    assert _holding_text(direct).startswith("Class A Common Stock held directly: 302,526 shares")
+
+
+def test_key_management_lists_an_ambiguous_officer_as_unknown_never_zero():
+    from app.services.agents.ticker_report_data_collector import (
+        _build_key_management,
+        _key_management_roster,
+    )
+
+    cycle = [  # a same-day cycle: 241,371 or 303,871 — undecidable
+        _f4("2026-09-18", "2026-09-22", tx="C-Conversion", ad="A", shares=62500, owned=303871),
+        _f4("2026-09-18", "2026-09-22", tx="G-Gift", ad="D", shares=62500, owned=241371),
+    ]
+    km = _build_key_management(_key_management_roster(_Out(None), cycle, _CRWV), {},
+                               current_price=100.0, shares_outstanding=1e8)
+    officer = km["officers"][0]
+    assert officer["name"] == "Brian M. Venturo"
+    assert officer["ownership"] == "—" and officer["ownership_value"] == "—"
+    assert officer["percent_owned"] is None
+
+
+def test_key_management_never_falls_back_to_the_raw_roster():
+    from app.services.agents.ticker_report_data_collector import _key_management_roster
+
+    assert _key_management_roster(_Out(None, insider_unavailable=True), _venturo_rows(), _CRWV) == []
+    other = _f4("2026-09-29", "2026-09-30", tx="P-Purchase", ad="A", shares=10, owned=9e8,
+                company="0000797468", who=("OTHER CO", "0000000009", "10 percent owner"))
+    # No issuer CIK and rows naming two issuers: cannot be told apart → withheld.
+    assert _key_management_roster(_Out(None), _venturo_rows() + [other], None) == []
+    # With the issuer CIK the rows were already filtered by `prepare_insider_rows`.
+    assert _key_management_roster(_Out(None), _venturo_rows(), _CRWV)[0]["numberOfShares"] == 302526
+
+
+def test_a_roster_defect_degrades_key_management_to_its_ceo_row(monkeypatch, caplog):
+    from app.services.agents import ticker_report_data_collector as col
+
+    def _boom(*a, **k):
+        raise ValueError("synthetic")
+    monkeypatch.setattr(col, "insider_holdings_from_rows", _boom)
+    assert col._key_management_roster(_Out(None), _venturo_rows(), _CRWV) == []
+    assert "roster derivation FAILED" in caplog.text
+    km = col._build_key_management([], {"ceo": "Michael Intrator"})
+    assert km["officers"][0]["title"] == "CEO"

@@ -428,6 +428,29 @@ def test_market_overview_widget_matches_ios_required_keys():
         _assert_keys_subset({"title", "signal"}, macro, "macro item")
 
 
+def test_market_overview_widget_additive_fields_keep_the_ios_contract():
+    """2026-10-08: `forward_pe_known` (False unless a real forward multiple exists) and
+    `macro_indicators_basis` ride the card additively. The iOS-required keys are unchanged,
+    `forward_pe` stays a non-null float (iOS decodes a non-optional Double), and a LEGACY stored
+    card without either key still decodes."""
+    payload = _market_widget_payload()
+    assert payload["forward_pe_known"] is False and payload["macro_indicators_basis"] is None
+    assert isinstance(payload["forward_pe"], float)
+    _assert_required_non_null(payload, _MARKET_WIDGET_REQUIRED, "market_overview widget (new)")
+
+    legacy = {k: v for k, v in payload.items()
+              if k not in ("forward_pe_known", "macro_indicators_basis")}
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "market",
+        "created_at": "2026-06-28T00:00:00.000000+00:00",
+        "rich_content": {"widget": legacy},
+    }
+    widget = _row_to_message(row).model_dump()["widget"]
+    _assert_keys_subset(_MARKET_WIDGET_REQUIRED, widget, "legacy market_overview widget")
+    # The new keys are not iOS-required (shipped builds never read them).
+    assert not ({"forward_pe_known", "macro_indicators_basis"} & _MARKET_WIDGET_REQUIRED)
+
+
 def test_multi_widget_list_and_legacy_fallback():
     """Phase 2 multi-widget contract. `rich_content.widgets` is a LIST of widget payloads; the
     single `widget` stays for back-compat. A Phase-2 row exposes the full list AND mirrors the

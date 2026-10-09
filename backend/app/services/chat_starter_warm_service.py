@@ -483,6 +483,9 @@ async def _warm_one(question: str, day: str) -> bool:
             reference_id=None,
             reader_lens=None,
             user_id=None,
+            # No date line: the row is replayed to every caller for the rest of the ET day,
+            # and a stamped minute would read as "now" hours later.
+            include_today_line=False,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(

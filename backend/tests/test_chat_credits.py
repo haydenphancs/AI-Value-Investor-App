@@ -574,3 +574,60 @@ def test_a_degenerate_window_charges_too(monkeypatch, window):
     quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
     assert err is None and quota.outcome == "charged"
     budget.claim_free_followup.assert_not_called()
+
+
+# ── the unanswered refund (owner decision 2026-10-09): SILENT, but recorded ──────────
+#
+# `chat_answer_coverage` settles a turn whose reply did not answer the main question with
+# `settle_no_cost("chat_unanswered")`. Shipped iOS renders the badge only for a non-empty label
+# and refreshes the balance on outcome "refunded" — so the payload is "refunded" with NO label.
+
+_SILENT = {"outcome": "refunded", "credits": 0, "reason": "chat_unanswered", "label": None}
+
+
+def test_an_unanswered_refund_is_unlabelled_but_persisted(monkeypatch):
+    credit = _patch_credit(monkeypatch)
+    credit.refund_ledgered.return_value = {"outcome": "refunded", "refunded": 1, "spendable": 79}
+    svc = _patch_followup(monkeypatch, claim_returns=False)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.settle_no_cost("chat_unanswered")
+    kwargs = credit.refund_ledgered.call_args.kwargs
+    assert kwargs["reason"] == "chat_unanswered" and kwargs["ref_id"].startswith("sess-1:")
+    assert quota.outcome == "refunded" and quota.charged == 0
+    assert quota.is_settled is True and quota.is_refunded is True
+    assert quota.cost_payload() == _SILENT, "persisted so a reload agrees with the live frame"
+    assert quota.cost_frame() == {**_SILENT, "balance": 79}
+    quota.on_delivered()
+    svc.grant_free_followup.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", [None, {"outcome": "no_matching_debit"},
+                                     {"outcome": "capped_to_zero", "refunded": 0}, {}])
+def test_an_unanswered_refund_the_ledger_did_not_prove_is_a_plain_charge(monkeypatch, outcome):
+    credit = _patch_credit(monkeypatch)
+    credit.refund_ledgered.return_value = outcome
+    _patch_followup(monkeypatch, claim_returns=False)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.settle_no_cost("chat_unanswered")
+    assert quota.outcome == "charged" and quota.is_refunded is False and quota.is_settled is True
+    assert quota.cost_payload() is None
+    assert quota.cost_frame()["label"] is None and quota.cost_frame()["reason"] is None
+
+
+def test_an_unanswered_free_or_guest_turn_moves_nothing(monkeypatch):
+    credit = _patch_credit(monkeypatch)
+    _patch_followup(monkeypatch, claim_returns=True)
+    free, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    free.settle_no_cost("chat_unanswered")
+    assert free.outcome == "free_followup" and free.cost_payload()["label"] == "Free follow-up"
+    _patch_budget(monkeypatch)
+    guest, _ = chat._claim_chat_quota(GUEST, "install-1", session_id="sess-2")
+    guest.settle_no_cost("chat_unanswered")
+    credit.refund_ledgered.assert_not_called()
+    assert guest.cost_payload() is None
+
+
+def test_a_fresh_quota_reads_unsettled_and_unrefunded(monkeypatch):
+    _patch_credit(monkeypatch)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    assert quota.is_settled is False and quota.is_refunded is False and quota.outcome == "charged"

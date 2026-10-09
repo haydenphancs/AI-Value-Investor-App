@@ -143,6 +143,11 @@ def test_block_forbids_narrating_the_source(order: int):
     assert "never say where an answer came from" in block
     for banned in ("caydex", "the guide", "according to"):
         assert banned in block, f"the forbidden-phrase list must still name {banned!r}"
+    # Final review 2026-10-09: scoped to the STUDY GUIDE — a web result (an explicit search may
+    # run in a book chat) keeps its publisher and date, and "Caydex's data here does not include
+    # it" stays sayable: the bare word "Caydex" is no longer on the banned list.
+    assert "except a web result, which keeps its publisher and date" in block
+    assert "\"caydex's guide\"" in block and "\"caydex\"," not in block
 
 
 @pytest.mark.parametrize("order", _ORDERS)

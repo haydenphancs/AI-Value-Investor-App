@@ -127,9 +127,30 @@ def test_persist_never_raises_on_db_error():
 # ── _widget_grounding_line (P0-B) ───────────────────────────────────────────
 
 def _widget(**kw):
-    base = {"widget_type": "stock_chart", "ticker": "AAPL", "current_price": 189.12}
+    # A US listing whose quote states its trading currency (`PriceService._from_profile`).
+    base = {"widget_type": "stock_chart", "ticker": "AAPL", "current_price": 189.12, "currency": "USD"}
     base.update(kw)
     return base
+
+
+# ── the LIVE QUOTE line names the quote's trading currency (final review 2026-10-09) ──
+
+def test_widget_line_names_a_non_usd_trading_currency_never_dollars():
+    line = ChatService._widget_grounding_line(
+        _widget(ticker="ASML", current_price=612.4, currency="EUR", change=1.2, change_percent=0.2,
+                day_high=615.0, day_low=600.0))
+    assert "ASML 612.40 EUR" in line and "day range 600.00–615.00 EUR" in line
+    assert "$" not in line
+
+
+@pytest.mark.parametrize("ccy", [None, "", "US$", "N/A", 5, "usdt"])
+def test_widget_line_with_an_unknown_currency_asserts_no_dollars(ccy):
+    line = ChatService._widget_grounding_line(_widget(currency=ccy, day_high=190.0, day_low=186.5))
+    assert line is not None and "AAPL 189.12" in line and "$" not in line
+
+
+def test_widget_line_lower_case_usd_is_still_dollars():
+    assert "AAPL $189.12" in ChatService._widget_grounding_line(_widget(currency=" usd "))
 
 
 def test_widget_line_happy_path():
@@ -190,7 +211,7 @@ def test_widget_line_penny_boundary_still_two_decimals():
 def test_widget_line_price_only_when_change_missing():
     # A quote with only a price still produces a valid line (no crash on missing fields).
     line = ChatService._widget_grounding_line(
-        {"widget_type": "stock_chart", "ticker": "AAPL", "current_price": 189.12}
+        {"widget_type": "stock_chart", "ticker": "AAPL", "current_price": 189.12, "currency": "USD"}
     )
     assert line is not None
     assert "$189.12" in line

@@ -30,12 +30,31 @@ struct Top10OwnersSheet: View {
                     LazyVStack(spacing: AppSpacing.sm) {
                         switch selectedTab {
                         case .institutions:
-                            ForEach(data.institutions) { institution in
-                                Top10InstitutionRow(institution: institution)
+                            if data.institutions.isEmpty {
+                                ChartUnavailableView(
+                                    message: "Institutional holders aren't available for this company right now.",
+                                    systemImage: "building.columns"
+                                )
+                                .padding(.top, AppSpacing.xxl)
+                            } else {
+                                ForEach(data.institutions) { institution in
+                                    Top10InstitutionRow(institution: institution)
+                                }
                             }
                         case .insiders:
-                            ForEach(data.insiders) { insider in
-                                Top10InsiderRow(insider: insider)
+                            // The server sends an EMPTY list when it cannot read each insider's
+                            // holding from their latest Form 4 (2026-10-09) — never the raw
+                            // first-row roster, which could show an RSU line as shares held.
+                            if data.insiders.isEmpty {
+                                ChartUnavailableView(
+                                    message: "Insider holdings aren't available for this company right now.",
+                                    systemImage: "person.2"
+                                )
+                                .padding(.top, AppSpacing.xxl)
+                            } else {
+                                ForEach(data.insiders) { insider in
+                                    Top10InsiderRow(insider: insider)
+                                }
                             }
                         }
                     }

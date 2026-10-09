@@ -765,6 +765,11 @@ async def get_stock_quote(ticker: str):
         income_q = results[1] if not isinstance(results[1], Exception) else []
         shares_float = results[2] if not isinstance(results[2], Exception) else {}
         profile = results[3] if not isinstance(results[3], Exception) else {}
+        failed = [f"{name} ({type(r).__name__}: {r})"
+                  for name, r in zip(("quote", "income_quarterly", "shares_float", "profile"), results)
+                  if isinstance(r, Exception)]
+        if failed:
+            logger.warning("Stock quote for %s degraded — failed legs: %s", ticker, "; ".join(failed))
 
         if not quote:
             raise HTTPException(status_code=404, detail=f"Quote for {ticker} not found")
@@ -781,20 +786,18 @@ async def get_stock_quote(ticker: str):
         if "change_percentage" in response and "changes_percentage" not in response:
             response["changes_percentage"] = response["change_percentage"]
 
-        # EPS (TTM): sum diluted EPS from last 4 quarterly income statements
-        price = quote.get("price")
-        if isinstance(income_q, list) and len(income_q) >= 4:
-            try:
-                ttm_eps = sum(
-                    float(q.get("epsDiluted") or q.get("eps") or 0)
-                    for q in income_q[:4]
-                )
-                if ttm_eps > 0:
-                    response["eps"] = round(ttm_eps, 2)
-                    if price and float(price) > 0:
-                        response["pe"] = round(float(price) / ttm_eps, 2)
-            except (ValueError, TypeError):
-                pass
+        # EPS / P/E (TTM): the Overview's helpers, never price ÷ EPS in another currency
+        # (TSM read 1.04 for ~29.6: a USD price over TWD EPS). Rules and owner decisions:
+        # `stock_overview_service.quote_eps_pe`. Best effort — the price is what this poll
+        # is for, so a failure here omits the two keys rather than failing the quote.
+        try:
+            response.update(await get_stock_overview_service().quote_valuation(
+                ticker, price=quote.get("price"), quote=quote, profile=profile,
+                income_quarterly=income_q,
+            ))
+        except Exception as e:
+            logger.warning("Stock quote EPS/P/E failed for %s — both omitted: %s: %s",
+                           ticker, type(e).__name__, e, exc_info=True)
 
         if response.get("shares_outstanding") is None and isinstance(shares_float, dict):
             out = shares_float.get("outstandingShares")

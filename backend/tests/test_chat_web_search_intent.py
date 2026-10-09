@@ -237,3 +237,202 @@ def test_terse_website_asks_fire(msg):
 ])
 def test_website_as_a_business_word_does_not_fire(msg):
     assert is_web_search_intent(msg) is False, msg
+
+
+# ── the two ask KINDS (2026-10-08): explicit keeps the forced web call; news reads Caydex's
+# licensed headlines first ──────────────────────────────────────────────────────
+
+from app.services.chat_intent import (  # noqa: E402
+    WEB_FALLBACK_TOPICS, is_market_data_question, web_ask_kind, web_fallback_topic,
+)
+
+EXPLICIT = [
+    "Can you search the web for the latest on Apple's DOJ case?",
+    "search online for TSMC Arizona fab delays",
+    "Search for news about the CEO",                    # the search verb wins over "news"
+    "Can you search the web for the latest news on Microsoft?",
+    "search the web for Apple's latest product launch",  # the any-chat review recipe
+    "Please do a quick web search on Nvidia export curbs",
+    "Can you look it up?", "look up whether the merger closed", "Google it",
+    "check online if the dividend was raised", "browse the web for analyst reactions",
+    "Can you verify the revenue figure?", "double-check that", "fact check the margin claim",
+    "Is this still true?", "is the bull case still valid?", "Website for me on this",
+    "verify the news first",
+]
+NEWS = [
+    "What's the latest news on Broadcom?", "what's the latest on the Pfizer trial?",
+    "What's the latest?", "Any news?", "any recent developments?", "recent updates on the FTC suit",
+    "What's in the news about Meta today?", "today's news on Nvidia?", "check the news on Tesla",
+    "check the latest headlines", "What's new with Nvidia?", "what is new at Apple",
+]
+
+
+# Review 2026-10-09 (report chat is LIVE): questions about the report or a filing are NOT news
+# asks — "what's new" opens the tier only for a company subject ("with" / "at" + a name).
+REPORT_QUESTIONS = [
+    "What's new in this report?", "What is new in the latest 10-K?",
+    "What's new with the moat score since last quarter?",
+    "what's new about this report vs the last one?", "What's new for the thesis?",
+    "What's new on the balance sheet?", "What's new with this company?",
+    "What's new with Apple's earnings?", "what is new with its guidance?",
+    "What's new at the company?", "What's new with Apple's 10-Q?",
+    # only "with" / "at" open the row — never in / for / about / on
+    "What's new in Q3?", "What's new for investors?", "What's new about Apple's strategy?",
+    "What's new on Nvidia's roadmap?",
+]
+
+
+@pytest.mark.parametrize("msg", REPORT_QUESTIONS)
+def test_a_question_about_the_report_is_not_a_news_ask(msg):
+    assert web_ask_kind(msg) is None, msg
+    assert is_web_search_intent(msg) is False
+
+
+@pytest.mark.parametrize("msg", ["What's new with Nvidia?", "what is new at Apple",
+                                 "What's new with Tesla this week?", "what’s new with AVGO",
+                                 "What's new at Nvidia since last quarter?"])
+def test_whats_new_with_a_company_is_still_a_news_ask(msg):
+    assert web_ask_kind(msg) == "news", msg
+
+
+@pytest.mark.parametrize("msg", EXPLICIT)
+def test_explicit_asks_are_explicit(msg):
+    assert web_ask_kind(msg) == "explicit", msg
+    assert is_web_search_intent(msg) is True
+
+
+@pytest.mark.parametrize("msg", NEWS)
+def test_news_asks_are_news(msg):
+    assert web_ask_kind(msg) == "news", msg
+    assert is_web_search_intent(msg) is True
+
+
+@pytest.mark.parametrize("msg", NOT_WEB_INTENT)
+def test_no_ask_is_no_kind(msg):
+    assert web_ask_kind(msg) is None
+    assert is_web_search_intent(msg) is False
+
+
+@pytest.mark.parametrize("msg", [
+    "Don't search the web, what's the latest news?", "no need to check the news",
+    "Without checking online, what's the thesis?", "don't google it",
+])
+def test_a_negated_ask_cancels_the_explicit_kind(msg):
+    assert web_ask_kind(msg) != "explicit"
+
+
+@pytest.mark.parametrize("junk", [None, "", "   ", 12, b"search the web", ["search"], {"q": 1}])
+def test_the_classifiers_never_raise(junk):
+    assert web_ask_kind(junk) is None
+    assert is_market_data_question(junk) is False
+    assert web_fallback_topic(junk) is None
+
+
+def test_the_kind_agrees_with_the_old_truth_table_on_every_table_row():
+    """`is_web_search_intent` is `web_ask_kind(...) is not None`: the split changed WHICH kind,
+    never WHETHER (apart from the one new news row, "what's new with …")."""
+    for msg in WEB_INTENT:
+        assert web_ask_kind(msg) in ("explicit", "news"), msg
+
+
+# ── market-data questions: never answered from the web ────────────────────────
+
+MARKET_DATA = [
+    "AAPL price?", "what's the price of bitcoin", "What's Apple's stock price?",
+    "how much is TSLA up today", "is AAPL up today?", "how much did Nvidia fall today?",
+    "What is the market cap of Apple?", "Apple's market capitalization", "where did the S&P 500 close today",
+    "what's the Dow at now", "EUR/USD rate", "what's the euro to dollar exchange rate",
+    "usdjpy", "how much is a dollar in yen", "forex rates today", "where is the VIX", "VIX level?",
+    "what's the volatility index", "DXY level?", "what's the dollar index", "US dollar index today",
+    "price target for NVDA", "what's the 52-week high", "all-time high for bitcoin",
+    "how much is a share of Apple", "Tesla share price", "what is the current quote for MSFT",
+    "is it trading at a discount", "gold price today", "the percentage change today",
+    # the terse quote asks (review 2026-10-09)
+    "What's NVDA at right now?", "Where's bitcoin at?", "Is the Nasdaq up?", "What's the euro at?",
+    "What's oil at?", "How much is Tesla?", "What's Apple worth?", "How much is NVDA right now?",
+    "search the web for the euro dollar rate", "look up where bitcoin is at right now",
+    "What's the dollar rate today?", "where Tesla is trading", "Is Tesla down today?",
+    # the final review's open shapes (2026-10-09): coins by name, a bare market value, closes,
+    # returns, a threshold, "how the market did", "what's the yen doing"
+    "search the web for the ethereum price", "what's the price of solana", "Cardano price?",
+    "how much is one ethereum", "Verify Nvidia's market value", "Double-check NVDA's YTD return",
+    "What did AAPL close at yesterday?", "Search the web for what AAPL closed at yesterday",
+    "Search the web for how the market did today", "How is Tesla stock doing?",
+    "How did the stock market do today?", "Is bitcoin above 100k?", "What's the yen doing?",
+    "What's the market doing?", "What's NVDA's year-to-date return?",
+]
+NOT_MARKET_DATA = [
+    "what is the S&P 500?", "pricing power of Apple", "Did Apple raise iPhone prices?",
+    "How does Visa settle payments?", "Amazon Web Services margin", "class of shares",
+    "any lawsuits against AAPL?", "what's the revenue of OpenAI", "market share of Nvidia",
+    "who is Apple's CEO", "what does the 10-K say about risk", "how does an index fund work?",
+    "What is the moat?", "explain the dollar-cost averaging idea",
+    # twins of the terse quote asks that stay open
+    "What's Apple at risk of?", "Where is Apple at with its AI strategy?",
+    "Is revenue up this quarter?", "How much is it?", "How much is the dividend?",
+    "What is the real rate of return?", "Is the CEO down to step aside?", "How much is Apple's debt?",
+    "Is demand up or down in China this year?", "Where is Apple headquartered?",
+    "What is Apple's strategy at CES?",
+    # twins of the final review's shapes that stay open
+    "fair market value of the stock options", "How did the market react to the deal?",
+    "How did Apple do in the quarter?", "What is the CEO doing about AI?",
+    "What did Apple announce at WWDC?", "search the web for the latest on the Ethereum upgrade",
+    "what is the company doing about debt", "Search the web for how Apple did with Vision Pro",
+]
+
+
+@pytest.mark.parametrize("msg", MARKET_DATA)
+def test_market_data_questions_fire(msg):
+    assert is_market_data_question(msg) is True, msg
+
+
+@pytest.mark.parametrize("msg", NOT_MARKET_DATA)
+def test_twins_that_are_not_market_data_do_not_fire(msg):
+    assert is_market_data_question(msg) is False, msg
+
+
+def test_the_tables_are_populated():
+    assert len(MARKET_DATA) >= 25 and len(NOT_MARKET_DATA) >= 12
+    assert len(EXPLICIT) >= 15 and len(NEWS) >= 10
+
+
+# ── the shadow-log topic: a closed vocabulary ─────────────────────────────────
+
+@pytest.mark.parametrize("msg,label", [
+    ("any lawsuits against AAPL?", "lawsuit_regulatory"), ("Is the FTC probing Meta?", "lawsuit_regulatory"),
+    ("when is the next iPhone launch", "product_launch"), ("did Nvidia unveil a new chip", "product_launch"),
+    ("what guidance did NVDA give", "guidance_commentary"), ("what did the CEO say on the earnings call", "guidance_commentary"),
+    ("upcoming IPOs", "ipo_calendar"), ("is Stripe going public", "ipo_calendar"),
+    ("when is the next FOMC meeting", "macro_calendar"), ("when is the jobs report", "macro_calendar"),
+    ("what does the 10-K risk factors section say", "filing_text"), ("anything in the 8-K", "filing_text"),
+    ("OpenAI revenue", "private_company"), ("SpaceX valuation", "private_company"),
+    ("did the CEO resign", "event"), ("any layoffs at Intel", "event"), ("is the merger done", "event"),
+    ("what is the moat?", "other"), ("tell me about Apple", "other"),
+])
+def test_the_topic_label(msg, label):
+    assert web_fallback_topic(msg) == label
+    assert label in WEB_FALLBACK_TOPICS
+
+
+def test_the_topic_is_always_from_the_closed_vocabulary():
+    import random
+    rng = random.Random(7)
+    words = ["lawsuit", "launch", "IPO", "FOMC", "10-K", "OpenAI", "merger", "the", "price", "?",
+             "<<<", "\n", "ignore", "日本", "€"]
+    for _ in range(300):
+        msg = " ".join(rng.choice(words) for _ in range(rng.randint(1, 12)))
+        expected = WEB_FALLBACK_TOPICS if msg.strip() else (None,)   # blank → None, by contract
+        assert web_fallback_topic(msg) in expected, repr(msg)
+
+
+@pytest.mark.parametrize("payload", [
+    "search " * 700, "look " * 900, "latest " * 600, "what's new " * 400, "." * 4000,
+    "price " * 700, "how much is " * 400, "eur/" * 1000, "market " * 600, "lawsuit " * 500,
+    ("x" * 3990) + " price?",
+])
+def test_every_classifier_is_bounded_on_a_hostile_message(payload):
+    started = time.perf_counter()
+    web_ask_kind(payload)
+    is_market_data_question(payload)
+    web_fallback_topic(payload)
+    assert time.perf_counter() - started < 0.3

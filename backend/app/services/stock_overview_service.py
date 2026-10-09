@@ -63,6 +63,7 @@ from app.services.market_movers_service import get_market_movers_service
 # The close-cycle boundary every close-aligned cache in the app shares (weekday 18:00 ET).
 # Bound at MODULE level, like index/etf/commodity, so a test can freeze this module's clock.
 from app.services.ticker_report_cache import current_close_cycle_start
+from app.utils.currency import currency_code
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,14 @@ def _without_live_price(bundle: Any) -> Any:
     return stripped
 
 
+def _bundle_needs_provider_pe(bundle: Any) -> bool:
+    """Does this fundamentals bundle's filer need FMP's TTM multiple (`provider_pe_needed`)?"""
+    if not isinstance(bundle, dict):
+        return False
+    return provider_pe_needed(bundle.get("profile"), bundle.get("income_quarterly"),
+                              bundle.get("income_annual"))
+
+
 def _fundamentals_mem_get(key: str) -> Optional[Dict[str, Any]]:
     """Tier-1 read for the fundamentals bundle: the 1h ceiling, plus a MISS (and eviction)
     once the close cycle turns."""
@@ -257,6 +266,465 @@ def _pct(value: Optional[float], decimals: int = 2) -> str:
     if value is None:
         return "—"
     return f"{value:.{decimals}f}%"
+
+
+def profile_country_fields(raw_profile: Any) -> Dict[str, Any]:
+    """``country`` and ``is_adr`` from the RAW FMP profile for the formatted
+    `company_profile_cache` write (JSONB — no schema change). Ask Cay AI's ownership tool
+    reads them to say a foreign issuer may be exempt from Form 4. Like `fund_flags`, only a
+    real value is copied — a failed profile fetch writes nothing rather than a False or an
+    empty country a reader would trust. Pure."""
+    if not isinstance(raw_profile, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    country = raw_profile.get("country")
+    if isinstance(country, str) and country.strip():
+        out["country"] = country.strip()[:60]
+    if isinstance(raw_profile.get("isAdr"), bool):
+        out["is_adr"] = raw_profile["isAdr"]
+    return out
+
+
+_DISPLAY_NAME_MAX = 160
+_DISPLAY_IMAGE_MAX = 500
+
+
+def profile_display_fields(raw_profile: Any) -> Dict[str, str]:
+    """``companyName`` and ``image`` (the logo URL) from the RAW FMP profile, for the shared
+    `company_profile_cache` write. `whale_service` reads both for its holdings' names and logos
+    and trusts the row for 7 days by its ``cached_at``; the merge keeps whatever the row holds,
+    so a writer that RE-STAMPS the row carries today's values rather than leave a week-old write's
+    under a fresh stamp (2026-10-09 review). Only a real, non-empty string is copied (an image
+    only when it is an http(s) URL; both length-capped): a failed fetch writes nothing and the
+    merge keeps the row's own. Neither key makes the row read as a raw profile (that needs a
+    ``symbol`` / ``ipoDate`` / ``fullTimeEmployees``, which this write never carries). Pure."""
+    if not isinstance(raw_profile, dict):
+        return {}
+    out: Dict[str, str] = {}
+    name = raw_profile.get("companyName")
+    if isinstance(name, str) and name.strip():
+        out["companyName"] = name.strip()[:_DISPLAY_NAME_MAX]
+    image = raw_profile.get("image")
+    if isinstance(image, str):
+        image = image.strip()
+        if image.lower().startswith(("https://", "http://")) and len(image) <= _DISPLAY_IMAGE_MAX:
+            out["image"] = image
+    return out
+
+
+def short_percent_of_float(
+    short_interest: Any, float_shares: Any, key_metrics: Any = None,
+) -> Optional[float]:
+    """Short interest as a % of the public float — the Key Stats "Short % of Float" rule, in
+    one place so Ask Cay AI's ownership tool states the figure the screen shows. Pure.
+
+    1. ``shares_short`` (FINRA / Nasdaq) ÷ ``float_shares`` × 100, rounded to 2 dp, when both
+       are positive;
+    2. else the source's own pre-computed ``short_percent_of_float``;
+    3. else FMP key metrics' ``shortPercentOutstanding`` / ``shortPercentFloat`` (a fraction
+       below 1 is scaled to a percent) — rarely present on the stable API.
+    None when none applies. Same behaviour as the inline block it replaced (2026-10-08).
+    """
+    si = short_interest if isinstance(short_interest, dict) else {}
+    short_pct_val = None
+
+    # Primary: compute from sharesShort (FINRA/Nasdaq) / floatShares (FMP)
+    shares_short = si.get("shares_short")
+    if shares_short and shares_short > 0 and float_shares and float_shares > 0:
+        short_pct_val = round((shares_short / float_shares) * 100, 2)
+
+    # Fallback 1: a source-supplied pre-computed short_percent_of_float
+    if short_pct_val is None:
+        short_pct_val = si.get("short_percent_of_float")
+
+    # Fallback 2: try FMP key_metrics (rarely available on stable API)
+    if short_pct_val is None:
+        km = key_metrics[0] if key_metrics else {}
+        raw = km.get("shortPercentOutstanding") or km.get("shortPercentFloat")
+        if raw is not None:
+            try:
+                sp = float(raw)
+                short_pct_val = sp * 100 if sp < 1 else sp
+            except (ValueError, TypeError):
+                pass
+    return short_pct_val
+
+
+# ── Key facts for Ask Cay AI (`StockOverviewService.get_key_facts`) ──────────
+#
+# What the Key Stats card prints when it does not know a figure. A key fact never carries one
+# as a VALUE: a model reading "Short % of Float: N/A" may say "N/A" is the figure, or worse, 0.
+_KEY_FACTS_PLACEHOLDERS = frozenset({"—", "-", "N/A", "n/a", ""})
+# The live trading day: the screen merges the session bars into Open / Day High / Day Low, so
+# a quote-only copy here could disagree with it — and the chat's price tool owns the live day.
+_KEY_FACTS_INTRADAY = frozenset({
+    "Open", "Previous Close", "Day High", "Day Low", "Volume", "Avg. Volume (3M)",
+})
+# Rows that need the live price; withheld (→ unavailable) when the quote did not load. Market
+# Cap and the 52-week range included (final review 2026-10-09): with no quote they fell back to
+# the cached bundle profile's `marketCap` / `range` (up to a close cycle old) and were served as
+# current Key Stats under a basis saying the price-based rows were missing — the Overview refuses
+# a priceless build, so the screen never shows them in this state.
+_KEY_FACTS_NEEDS_PRICE = ("Market Cap", "52-Week High", "52-Week Low", "P/E (TTM)", "P/E (FWD)",
+                          "Dividends")
+_KEY_FACTS_SHORT_WAIT = 3.0
+# Strong references to short-interest reads that outlived their wait (they finish and warm the
+# integration's cache); a bare `ensure_future` result may be garbage-collected mid-flight.
+_key_facts_side_tasks: set = set()
+
+# ── One fundamentals build per ticker at a time (CLAUDE.md invariant 4, 2026-10-08) ──────────
+#
+# `_get_fundamentals` had no in-flight dedup, and a cold build is ~15 FMP calls (a daily history
+# from 1900 for the stock AND for SPY among them). The overview, Ask Cay AI's financials tool
+# (`get_key_facts`, which several sections of one chat round read at once) and a second viewer
+# of the same cold ticker each started their own. A build is a Task held here until it finishes;
+# a caller that goes away (a closed screen, a cancelled chat turn) never cancels it — it
+# finishes and fills both cache tiers for the next reader.
+_fundamentals_inflight: Dict[str, "asyncio.Task"] = {}
+# The quote endpoint's `ratios-ttm` fetches still running (`_quote_pe_ratios`): one per ticker,
+# however many viewers poll it.
+_quote_pe_ratios_inflight: Dict[str, "asyncio.Task"] = {}
+# FMP's TTM multiple is a daily figure: one hour, like the fundamentals bundle's Tier 1.
+_QUOTE_PE_RATIOS_TTL = 3600
+# The Overview's `company_profile_cache` writes still running (`get_overview`), held strongly so
+# a request cancelled mid-flight never leaves its write to the garbage collector.
+_profile_write_tasks: set = set()
+
+
+def _profile_write_settled(task: "asyncio.Future") -> None:
+    """Release a settled profile write; log one that raised (the method itself never should)."""
+    _profile_write_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        exc = task.exception()
+        logger.warning("Company profile write task failed: %s: %s", type(exc).__name__, exc)
+
+
+def _awaitable_here(task: "asyncio.Task") -> bool:
+    """A running task this event loop can await — never one a closed loop left behind."""
+    try:
+        return not task.done() and task.get_loop() is asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+
+
+def _fundamentals_build_done(ticker: str, task: "asyncio.Task") -> None:
+    """Clear the in-flight slot and log a failed build — the failure is also raised to every
+    caller still waiting, but one that nobody awaits any more must still leave a trace."""
+    if _fundamentals_inflight.get(ticker) is task:
+        _fundamentals_inflight.pop(ticker, None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Fundamentals build failed for %s: %s: %s", ticker,
+                       type(exc).__name__, exc, exc_info=(type(exc), exc, exc.__traceback__))
+
+
+def _quote_pe_ratios_done(ticker: str, task: "asyncio.Task") -> None:
+    """Clear the quote's `ratios-ttm` in-flight slot (the fetch logs its own failures)."""
+    if _quote_pe_ratios_inflight.get(ticker) is task:
+        _quote_pe_ratios_inflight.pop(ticker, None)
+
+
+def _currency_code(raw: Any) -> Optional[str]:
+    """A 3-letter ISO currency code ('USD', 'TWD'), upper-cased — or None. Never a guess.
+
+    The ONE shared rule (`app.utils.currency.currency_code`). This copy used to upper-case
+    BEFORE its ASCII check, so "ßU" read as the code "SSU" here and as unknown in the report."""
+    return currency_code(raw)
+
+
+def _newest_row(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The statement row with the latest period-end ``date`` (FMP sends newest first, but the
+    order is not trusted); ``{}`` for no rows. A row with no date sorts oldest."""
+    dated = [r for r in rows if isinstance(r, dict)]
+    if not dated:
+        return {}
+    return max(dated, key=lambda r: str(r.get("date") or ""))
+
+
+def _statement_number(row: Dict[str, Any], key: str) -> Optional[float]:
+    """A finite statement figure, or None — never a bool, a string or NaN/inf read as data."""
+    value = row.get(key)
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if math.isfinite(f) else None
+
+
+def _balance_sheet_totals(balance_annual: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The newest annual balance sheet's debt and cash totals, or None when there is none.
+
+    ONE net-debt definition, FMP's own (final review 2026-10-09): total debt minus cash and cash
+    EQUIVALENTS — short-term investments are not deducted. Net debt is the statement's ``netDebt``
+    (FMP computes it that way: AAPL FY2024 106.63B − 29.94B = 76.69B); only when that is absent is
+    it ``totalDebt − cashAndCashEquivalents``, and only when both are known. The old fallback
+    subtracted cash PLUS short-term investments, so the same field meant two things across
+    companies, and the block showed three figures that did not add up. Cash and cash equivalents
+    and cash plus short-term investments are each carried under their OWN key, only when FMP
+    reports that line (cash equivalents are never shown under the short-term-investments label).
+    A missing figure is omitted — never 0 (a company with no reported debt line is "not
+    reported", not debt-free).
+    """
+    row = _newest_row(balance_annual)
+    if not row:
+        return None
+    total_debt = _statement_number(row, "totalDebt")
+    cash_eq = _statement_number(row, "cashAndCashEquivalents")
+    cash_sti = _statement_number(row, "cashAndShortTermInvestments")
+    net_debt = _statement_number(row, "netDebt")
+    if net_debt is None and total_debt is not None and cash_eq is not None:
+        net_debt = total_debt - cash_eq
+    figures = {
+        "total_debt": total_debt,
+        "cash_and_cash_equivalents": cash_eq,
+        "cash_and_short_term_investments": cash_sti,
+        "net_debt": net_debt,
+    }
+    out: Dict[str, Any] = {k: v for k, v in figures.items() if v is not None}
+    if not out:
+        return None
+    date = row.get("date")
+    out["period_end"] = date[:10] if isinstance(date, str) and date.strip() else None
+    fiscal_year = row.get("fiscalYear") or row.get("calendarYear")
+    if isinstance(fiscal_year, (str, int)) and not isinstance(fiscal_year, bool) and str(fiscal_year).strip():
+        out["fiscal_year"] = str(fiscal_year).strip()[:8]
+    out["reported_currency"] = _currency_code(row.get("reportedCurrency"))
+    return out
+
+
+# ── Key Stats: TTM EPS and the P/E basis (2026-10-09) ─────────────────────────
+#
+# Two defects in the same two rows, measured on recorded FMP answers
+# (tests/fixtures/key_stats_pe/fmp_2026_10_09.json):
+#
+#   1. CURRENCY. The price is in the TRADING currency (USD for an ADR); TTM EPS comes from the
+#      statements, in the REPORTING currency. TSM: $452.69 ÷ 434.95 TWD printed "1.04" against
+#      a true ~29.6 (BABA 3.74 vs 23.5, HDB 0.14, TM 0.05; ASML / SAP ~11% off, plausible enough
+#      to go unnoticed). FMP's `ratios-ttm` P/E is currency-consistent — it converts the market
+#      cap into the reporting currency (TSM: 66.13T TWD ÷ TTM net income) — so a filer whose two
+#      currencies differ is served THAT multiple (owner decision 2026-10-09). A price is never
+#      converted. ADR share ratios need nothing: FMP's statement EPS is already per ADS on all
+#      11 ADRs sampled (market cap ÷ price ÷ diluted shares = 0.97–1.01; TSM 1 ADS = 5 shares).
+#   2. CADENCE. "Sum the last four quarterly rows" is two YEARS for a half-year filer: BHP's
+#      `period=quarter` rows are half-years six months apart, so EPS (TTM) read 7.44 for 3.88
+#      and P/E 11.5 for ~21.9.
+
+# The P/E basis Key Stats used (also `get_key_facts`' ``pe_basis``).
+PE_BASIS_LIVE = "live"                       # live price ÷ TTM EPS, one currency
+PE_BASIS_PROVIDER = "provider_ttm"           # FMP's TTM multiple: the two currencies differ
+PE_BASIS_UNCONFIRMED = "currency_unconfirmed"  # statements' currency known, the price's not
+# Days between consecutive period ends: a quarter (52/53-week calendars and transition stubs
+# included) and a half-year. Anything else — a missing period, a duplicate — is no TTM.
+_QUARTER_GAP_DAYS = (45, 135)
+_HALF_YEAR_GAP_DAYS = (150, 215)
+# How far FMP's own TTM EPS may sit from ours before its multiple is refused (same sign
+# required). Sampled ADRs agree within 0.3-7%; a different period, an ordinary-share basis
+# or another currency is far outside it (EUR/USD alone is ~10%: the sign and period are what
+# this proves, the currency is FMP's own consistency).
+_PROVIDER_EPS_TOLERANCE = 0.15
+# The `ratios-ttm` fields the bundle keeps (no absolute price — never persist one).
+_PROVIDER_PE_FIELDS = ("priceToEarningsRatioTTM", "netIncomePerShareTTM")
+
+
+def _utc_today_iso() -> str:
+    """Today's UTC date, ISO — the "not yet ended" line for the forward estimate (a seam)."""
+    return datetime.now(tz=timezone.utc).date().isoformat()
+
+
+def _period_end(row: Dict[str, Any]) -> Optional[datetime]:
+    raw = row.get("date")
+    if not isinstance(raw, str) or len(raw) < 10:
+        return None
+    try:
+        return datetime.strptime(raw[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _eps_value(row: Dict[str, Any]) -> Optional[float]:
+    """`epsDiluted`, else `eps` — PRESENCE, not truthiness: a break-even 0.0 is a value."""
+    val = row.get("epsDiluted")
+    if val is None:
+        val = row.get("eps")
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        f = float(val)
+    except (ValueError, TypeError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _ttm_rows(income_quarterly: Any) -> Optional[List[Dict[str, Any]]]:
+    """The `period=quarter` statement rows that make up the trailing twelve months, or None.
+
+    Every row dated (FMP always dates them): newest first; four rows 45-135 days apart → those
+    four; else, when the newest three are 150-215 days apart (a half-year filer) → the newest
+    two; else None — a gap or a duplicate is never summed into a "TTM". A row without a
+    parseable date leaves no cadence to check: the first four as given (the shape before dates
+    were read). Pure.
+    """
+    rows = [r for r in income_quarterly if isinstance(r, dict)] if isinstance(income_quarterly, list) else []
+    ends = [_period_end(r) for r in rows]
+    if any(e is None for e in ends):
+        return rows[:4] if len(rows) >= 4 else None
+    paired = sorted(zip(ends, rows), key=lambda p: p[0], reverse=True)
+    gaps = [(a[0] - b[0]).days for a, b in zip(paired, paired[1:])]
+    if len(paired) >= 4 and all(_QUARTER_GAP_DAYS[0] <= g <= _QUARTER_GAP_DAYS[1] for g in gaps[:3]):
+        return [r for _, r in paired[:4]]
+    if len(paired) >= 3 and all(_HALF_YEAR_GAP_DAYS[0] <= g <= _HALF_YEAR_GAP_DAYS[1] for g in gaps[:2]):
+        return [r for _, r in paired[:2]]
+    return None
+
+
+def _ttm_eps(income_quarterly: Any, symbol: Optional[str] = None) -> Optional[float]:
+    """Trailing-twelve-month diluted EPS from the statements (`_ttm_rows`), rounded to cents —
+    or None. A NEGATIVE EPS IS DATA, NOT A MISSING VALUE (a loss-maker's most important number).
+    None when a row has no EPS, the sum is not finite, or the rows carry two currencies."""
+    rows = _ttm_rows(income_quarterly)
+    if rows is None:
+        if isinstance(income_quarterly, list) and len(income_quarterly) >= 4:
+            logger.warning("[eps-ttm-cadence] %s: the quarterly statement rows are not four "
+                           "quarters or two half-years in a row — EPS (TTM) reads as unknown",
+                           symbol or "?")
+        return None
+    codes = {c for c in (_currency_code(r.get("reportedCurrency")) for r in rows) if c}
+    if len(codes) > 1:
+        logger.warning("[eps-ttm-mixed-currency] %s: TTM rows report in %s — never summed",
+                       symbol or "?", ", ".join(sorted(codes)))
+        return None
+    values = [_eps_value(r) for r in rows]
+    if any(v is None for v in values):
+        return None
+    total = sum(values)
+    return round(total, 2) if math.isfinite(total) else None
+
+
+def key_stats_currencies(
+    profile: Any, quote: Any, income_quarterly: Any, income_annual: Any = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """``(trading, statements)``: the currency the price is in (the profile's, else the
+    quote's) and the one the EPS rows are in (the newest quarterly statement's, else the newest
+    annual one's). Either is None when absent — never assumed USD. Pure."""
+    profile = profile if isinstance(profile, dict) else {}
+    quote = quote if isinstance(quote, dict) else {}
+    trading = _currency_code(profile.get("currency")) or _currency_code(quote.get("currency"))
+    statements = None
+    for rows in (income_quarterly, income_annual):
+        if isinstance(rows, list):
+            statements = _currency_code(_newest_row(rows).get("reportedCurrency"))
+            if statements:
+                break
+    return trading, statements
+
+
+def pe_basis(trading: Optional[str], statements: Optional[str]) -> str:
+    """Which P/E Key Stats may show. One currency (or the statements' unknown — the behaviour
+    before currencies were read) → the live multiple; two KNOWN currencies → FMP's TTM
+    multiple; statements known but the price's currency not → none (it cannot be checked)."""
+    if statements is None or statements == trading:
+        return PE_BASIS_LIVE
+    return PE_BASIS_UNCONFIRMED if trading is None else PE_BASIS_PROVIDER
+
+
+def provider_pe_needed(profile: Any, income_quarterly: Any, income_annual: Any) -> bool:
+    """Does this bundle need FMP's `ratios-ttm` multiple (its two currencies differ)? Pure."""
+    trading, statements = key_stats_currencies(profile, None, income_quarterly, income_annual)
+    return pe_basis(trading, statements) == PE_BASIS_PROVIDER
+
+
+def _provider_pe_fields(raw: Any) -> Dict[str, float]:
+    """The finite `_PROVIDER_PE_FIELDS` of a `ratios-ttm` answer's first row ({} for none)."""
+    row = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], dict) else {}
+    out: Dict[str, float] = {}
+    for key in _PROVIDER_PE_FIELDS:
+        value = _statement_number(row, key)
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _provider_pe(ratios_ttm: Any, eps: Optional[float]) -> Optional[Tuple[float, float]]:
+    """``(pe, price_in_reporting_currency)`` from FMP's TTM multiple — only when FMP's own TTM
+    EPS agrees with ours (same sign, within `_PROVIDER_EPS_TOLERANCE`), the proof that the
+    multiple is on the EPS basis shown beside it. None otherwise, or with no EPS of ours to
+    check it against. The price is FMP's (P/E × its EPS), at FMP's daily timestamp. Pure."""
+    if not isinstance(ratios_ttm, dict) or eps is None or eps == 0:
+        return None
+    pe = _statement_number(ratios_ttm, "priceToEarningsRatioTTM")
+    nips = _statement_number(ratios_ttm, "netIncomePerShareTTM")
+    if pe is None or nips is None or pe == 0 or nips == 0:
+        return None
+    if (pe > 0) != (nips > 0) or (nips > 0) != (eps > 0):
+        return None
+    if abs(nips - eps) / abs(eps) > _PROVIDER_EPS_TOLERANCE:
+        return None
+    price = pe * nips
+    return (pe, price) if math.isfinite(price) and price > 0 else None
+
+
+def _finite_multiple(value: float) -> Optional[float]:
+    """A multiple rounded to cents, or None when the division overflowed (a near-zero
+    denominator) — `_fmt_ratio` would otherwise print "inf"."""
+    return round(value, 2) if math.isfinite(value) else None
+
+
+# ── The quote endpoint's EPS / P/E (2026-10-09) ───────────────────────────────
+#
+# GET /stocks/{t}/quote (polled every ~15 s; its `eps` / `pe` feed the detail screen's FALLBACK
+# Key Stats when the Overview fails, TickerDetailViewModel) summed the four newest quarterly
+# EPS rows itself and divided the live price by them: the same two defects as above — TSM
+# "1.04", BHP two years of earnings — plus `ttm_eps > 0`, which dropped a loss-maker's EPS.
+# It now reads the same helpers (`_ttm_eps`, `key_stats_currencies`, `pe_basis`). What
+# differs is what that fallback prints: EPS bare, with no currency code, and P/E only when
+# > 0. Owner decisions 2026-10-09: a filer whose currencies differ gets FMP's TTM multiple
+# (`StockOverviewService.quote_valuation`, one cached `ratios-ttm` call) and no EPS; a
+# negative or 0.00 EPS is sent, with no P/E.
+
+
+def quote_eps_pe(
+    price: Any, eps: Optional[float], basis: str, ratios_ttm: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    """The ``eps`` / ``pe`` keys GET /stocks/{t}/quote may send — a key is absent, never a
+    guess. Pure.
+
+    One currency (`PE_BASIS_LIVE`): ``eps`` whatever its sign (0.00 included), and ``pe`` =
+    price ÷ eps only for a positive EPS and price. Two currencies (`PE_BASIS_PROVIDER`): ``pe``
+    = FMP's TTM multiple when it checks out against our EPS (`_provider_pe`) and is positive;
+    no ``eps`` — the fallback prints it bare, and 434.95 TWD beside a $ price reads as dollars.
+    The price's currency unknown (`PE_BASIS_UNCONFIRMED`): neither.
+    """
+    out: Dict[str, float] = {}
+    if eps is None or not math.isfinite(eps):
+        return out
+    if basis == PE_BASIS_LIVE:
+        out["eps"] = eps
+        p = None if isinstance(price, bool) else _finite(price)
+        if eps > 0 and p is not None and p > 0:
+            pe = _finite_multiple(p / eps)
+            if pe is not None:
+                out["pe"] = pe
+    elif basis == PE_BASIS_PROVIDER and eps > 0:
+        provider = _provider_pe(ratios_ttm, eps)
+        if provider is not None and provider[0] > 0:
+            pe = _finite_multiple(provider[0])
+            if pe is not None:
+                out["pe"] = pe
+    return out
+
+
+def _nearest_forward_eps(analyst_est: Any, today_iso: str) -> Optional[float]:
+    """The analysts' EPS for the nearest fiscal year not yet ended — or None (0 is FMP's
+    absent). A NEGATIVE estimate is a real forecast loss (MRNA 2027: -4.90)."""
+    if not isinstance(analyst_est, list):
+        return None
+    future = [e for e in analyst_est
+              if isinstance(e, dict) and isinstance(e.get("date"), str) and e["date"] >= today_iso]
+    if not future:
+        return None
+    nearest = min(future, key=lambda e: e["date"])
+    return _safe_float(nearest, "epsAvg") or _safe_float(nearest, "estimatedEpsAvg") or None
 
 
 def fund_flags(raw_profile: Any) -> Dict[str, bool]:
@@ -732,33 +1200,113 @@ class StockOverviewService:
             ipo_price_data=ipo_price_data,
         )
 
-        # Cache the formatted profile for chat AI context. Same write, same best-effort
-        # semantics (the method swallows and warns), just off the event loop — see the
-        # note where it used to live, inside the synchronous `_build_full_response`.
-        await asyncio.to_thread(
-            self._upsert_company_profile_db,
-            ticker,
-            {
-                "description": response.company_profile.description,
-                "ceo": response.company_profile.ceo,
-                "founded": response.company_profile.founded,
-                "employees": response.company_profile.employees,
-                "headquarters": response.company_profile.headquarters,
-                "website": response.company_profile.website,
-                "sector": response.sector_industry.sector,
-                "industry": response.sector_industry.industry,
-                "sector_performance": response.sector_industry.sector_performance,
-                "industry_rank": response.sector_industry.industry_rank,
-                **fund_flags(fundamentals.get("profile")),
-            },
-        )
+        # Cache the formatted profile for chat AI context: a read-merge-write of the shared
+        # row (`_upsert_company_profile_db`), off the event loop — see the note where it used
+        # to live, inside the synchronous `_build_full_response`. Only from a REAL profile:
+        # with none, every field is a placeholder ("N/A"), and writing those over the row
+        # would erase a CEO / sector another writer stored. Started here and awaited after the
+        # related tickers, so its two round trips overlap that fetch instead of adding to it.
+        profile_write: Optional["asyncio.Future"] = None
+        raw_profile = fundamentals.get("profile")
+        if isinstance(raw_profile, dict) and raw_profile:
+            profile_write = asyncio.ensure_future(asyncio.to_thread(
+                self._upsert_company_profile_db,
+                ticker,
+                {
+                    "description": response.company_profile.description,
+                    "ceo": response.company_profile.ceo,
+                    "founded": response.company_profile.founded,
+                    "employees": response.company_profile.employees,
+                    "headquarters": response.company_profile.headquarters,
+                    "website": response.company_profile.website,
+                    "sector": response.sector_industry.sector,
+                    "industry": response.sector_industry.industry,
+                    "sector_performance": response.sector_industry.sector_performance,
+                    "industry_rank": response.sector_industry.industry_rank,
+                    **fund_flags(fundamentals.get("profile")),
+                    **profile_country_fields(fundamentals.get("profile")),
+                    **profile_display_fields(fundamentals.get("profile")),
+                },
+            ))
+            # Held strongly until it settles: a viewer who leaves mid-request (this coroutine
+            # cancelled at the await below) must not orphan the write to the garbage collector.
+            _profile_write_tasks.add(profile_write)
+            profile_write.add_done_callback(_profile_write_settled)
+        else:
+            logger.info("Company profile for %s not cached: the fundamentals carry no profile "
+                        "(nothing real to write over the shared row)", ticker)
 
         # Related tickers (async call, uses its own caching)
         response.related_tickers = await self._build_related_tickers(ticker)
+        if profile_write is not None:
+            # The write never raises (it logs), but a failure here must never fail the screen.
+            try:
+                await asyncio.shield(profile_write)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — best effort; the method logs its own
+                logger.warning("Company profile write for %s raised: %s: %s", ticker,
+                               type(e).__name__, e)
 
         # Cache full response for 120s (volatile freshness)
         _cache_set(overview_key, response)
         return response
+
+    # ── The quote endpoint's EPS / P/E ─────────────────────────────
+
+    async def quote_valuation(
+        self, ticker: str, *, price: Any, quote: Any, profile: Any, income_quarterly: Any,
+    ) -> Dict[str, float]:
+        """The ``eps`` / ``pe`` for GET /stocks/{t}/quote (`quote_eps_pe`), from the rows that
+        endpoint already fetched. `ratios-ttm` is read only for a filer whose currencies differ
+        AND whose EPS is positive (a loss-maker gets no P/E either way). Never raises on an
+        upstream failure: the price is what the poll is for, so a failed leg omits ``pe``."""
+        trading_ccy, statement_ccy = key_stats_currencies(profile, quote, income_quarterly)
+        basis = pe_basis(trading_ccy, statement_ccy)
+        eps = _ttm_eps(income_quarterly, ticker)
+        ratios = None
+        if basis == PE_BASIS_PROVIDER and eps is not None and eps > 0:
+            ratios = await self._quote_pe_ratios(ticker)
+        out = quote_eps_pe(price, eps, basis, ratios)
+        if basis != PE_BASIS_LIVE:
+            # INFO, not WARNING: this is the designed outcome for every poll of such a filer
+            # (~15 s). The fetch failure and the Overview's own EPS mismatch log at WARNING.
+            logger.info("[quote-pe-basis] %s: statements in %s, price in %s (%s) — eps omitted, "
+                        "pe %s", ticker, statement_ccy, trading_ccy or "unknown", basis,
+                        "from FMP's TTM multiple" if "pe" in out else "omitted")
+        return out
+
+    async def _quote_pe_ratios(self, ticker: str) -> Optional[Dict[str, float]]:
+        """FMP's TTM multiple for the quote (`_provider_pe_fields`), or None when the leg
+        failed. In-memory only (`_QUOTE_PE_RATIOS_TTL`), one fetch per ticker at a time: a
+        single cheap call whose Overview copy the fundamentals bundle already persists, so it
+        gets no Supabase tier. FMP's answered empty list is cached ({}); a failure is not."""
+        key = f"quote_pe_ratios:{ticker}"
+        hit = _cache_get(key, ttl=_QUOTE_PE_RATIOS_TTL)
+        if hit is not None:
+            return hit
+        running = _quote_pe_ratios_inflight.get(ticker)
+        if running is not None and _awaitable_here(running):
+            return await asyncio.shield(running)
+        task = asyncio.ensure_future(self._fetch_quote_pe_ratios(ticker, key))
+        _quote_pe_ratios_inflight[ticker] = task
+        task.add_done_callback(lambda t, ticker=ticker: _quote_pe_ratios_done(ticker, t))
+        return await asyncio.shield(task)
+
+    async def _fetch_quote_pe_ratios(self, ticker: str, key: str) -> Optional[Dict[str, float]]:
+        try:
+            raw = await self.fmp.get_ratios_ttm(ticker)
+        except Exception as e:
+            logger.warning("[quote-pe-provider-leg] ratios-ttm failed for %s (%s: %s) — the quote "
+                           "omits pe; not cached", ticker, type(e).__name__, e)
+            return None
+        if not isinstance(raw, list):
+            logger.warning("[quote-pe-provider-leg] ratios-ttm for %s answered a %s, not a list "
+                           "— the quote omits pe; not cached", ticker, type(raw).__name__)
+            return None
+        fields = _provider_pe_fields(raw)
+        _cache_set(key, fields)
+        return fields
 
     # ── Fundamentals: 24h Supabase + 1h in-memory ─────────────────
 
@@ -770,6 +1318,9 @@ class StockOverviewService:
           Miss:   parallel FMP calls → cache in both tiers
         Both TTLs are ceilings: the bundle carries the daily price history, so either tier
         is also a MISS once the close cycle turns (`_bundle_is_current`).
+
+        Concurrent callers for the same ticker share ONE build past Tier 1
+        (`_fundamentals_inflight`); a caller that goes away never cancels it.
         """
         mem_key = f"fundamentals:{ticker}"
 
@@ -779,12 +1330,29 @@ class StockOverviewService:
             logger.debug(f"Fundamentals in-memory HIT for {ticker}")
             return cached
 
+        # In-flight dedup: Tier 2 and the FMP fan-out run once per ticker at a time.
+        running = _fundamentals_inflight.get(ticker)
+        if running is not None and _awaitable_here(running):
+            logger.info("Fundamentals in-flight JOIN for %s", ticker)
+            return await asyncio.shield(running)
+        task = asyncio.ensure_future(self._load_fundamentals(ticker, mem_key))
+        _fundamentals_inflight[ticker] = task
+        task.add_done_callback(lambda t, ticker=ticker: _fundamentals_build_done(ticker, t))
+        return await asyncio.shield(task)
+
+    async def _load_fundamentals(self, ticker: str, mem_key: str) -> Dict[str, Any]:
+        """Tier 2, then the FMP fan-out — the body behind `_get_fundamentals`'s in-flight slot."""
         # Tier 2: Supabase
         # `to_thread`: the Supabase SDK is SYNCHRONOUS (app/database.py), Railway runs a
         # single uvicorn worker, and this call sits on the cold /overview path — so run
         # on the loop it stalls every OTHER in-flight request, including the
         # /overview/core "fast paint" the detail screen fires alongside it.
         db_data = await asyncio.to_thread(self._check_fundamentals_db, ticker)
+        if db_data is not None and _bundle_needs_provider_pe(db_data) and "ratios_ttm" not in db_data:
+            # Written before the bundle carried FMP's TTM multiple (2026-10-09): rebuilt once,
+            # or a foreign filer's P/E would read "—" until the row aged out.
+            logger.info("Fundamentals tier-2 row for %s predates ratios_ttm — rebuilding", ticker)
+            db_data = None
         if db_data is not None:
             # Stripped on READ too: a row written before the live price fields were kept
             # out of the tier still carries them until its 24 h ceiling / close cycle.
@@ -833,6 +1401,9 @@ class StockOverviewService:
             "profile": profile_ok,
             "stock_historical": bool(data.get("stock_historical")),
             "key_metrics": key_metrics_ok or fund_waived,
+            # A foreign filer's P/E IS this leg (`_fetch_fundamentals`): a failed one would pin
+            # "—" for the whole TTL. An answered empty list is FMP's answer and is cached.
+            "ratios_ttm": "ratios_ttm" in answered_lists or not _bundle_needs_provider_pe(data),
         }
         missing = [k for k, ok in essential.items() if not ok]
         if fund_waived and not missing:
@@ -947,6 +1518,28 @@ class StockOverviewService:
             name for name, i in list_slices.items() if isinstance(results[i], list)
         )
 
+        # FMP's TTM P/E, fetched ONLY for a filer whose statements are in another currency
+        # than its price (TSM: TWD vs USD) — the Key Stats P/E for exactly those
+        # (`_build_key_statistics`; owner decision 2026-10-09). After the gather because the
+        # two currencies come from it: one more round trip on those cold builds only. Kept
+        # trimmed (`_PROVIDER_PE_FIELDS`, no absolute price). A failed leg is NOT an answer:
+        # `_load_fundamentals` refuses to cache that bundle, so P/E is retried next view.
+        ratios_ttm: Dict[str, float] = {}
+        if provider_pe_needed(_safe(0), _list(9), _list(3)):
+            try:
+                raw_ratios = await self.fmp.get_ratios_ttm(ticker)
+            except Exception as e:
+                logger.warning("[pe-provider-leg] ratios-ttm failed for %s (%s: %s) — P/E reads "
+                               "'—' and this bundle is not cached", ticker, type(e).__name__, e)
+                raw_ratios = None
+            if isinstance(raw_ratios, list):
+                answered_lists = answered_lists | {"ratios_ttm"}
+                ratios_ttm = _provider_pe_fields(raw_ratios)
+            elif raw_ratios is not None:
+                logger.warning("[pe-provider-leg] ratios-ttm for %s answered a %s, not a list — "
+                               "P/E reads '—' and this bundle is not cached",
+                               ticker, type(raw_ratios).__name__)
+
         return {
             "profile": _safe(0),
             "key_metrics": _list(1),
@@ -963,6 +1556,7 @@ class StockOverviewService:
             "stock_historical": stock_hist,
             "spy_historical": spy_hist,
             "industry_perf": _list(13),
+            "ratios_ttm": ratios_ttm,
             _SETTLED_THROUGH_KEY: settled_through,
             _ANSWERED_LISTS_KEY: answered_lists,
         }
@@ -1053,23 +1647,237 @@ class StockOverviewService:
             return None
 
     def _upsert_company_profile_db(self, ticker: str, data: Dict[str, Any]) -> None:
-        """Upsert formatted company profile into Supabase cache."""
+        """READ-MERGE-WRITE of the formatted company profile into the SHARED
+        `company_profile_cache` row. SYNC (the caller runs it in a thread); best effort,
+        never raises.
+
+        The row has other writers: `company_facts_service` adds its ``facts`` and
+        ``key_executives`` blocks, `whale_service` stores the raw profile (logo, name, fund
+        flags). This write used to REPLACE the row whole, so every detail view dropped those
+        blocks and the next chat question about the ticker re-fetched a profile and its
+        executives upstream (2026-10-08 review). Now the row is re-read and the Overview's
+        keys are laid over it by `company_facts_service.merge_profile_row` — the same rules
+        that writer uses: every other key kept, a raw profile's price fields and duplicated
+        identity fields (head count, IPO date, city / state, exchange, currency, ADR flag)
+        dropped — a fresh `cached_at` would re-date them, and kept they made the row read as
+        whale's raw profile, whose old head count beat this write's fresh one — and the daily
+        keys replaced by this write's own. Whale's name and logo are refreshed by this write
+        (`profile_display_fields`), not carried stale.
+
+        A failed READ skips the write (logged): a blind write would drop exactly the blocks
+        this merge exists to keep, and the next detail view tries again. Read-merge-write is
+        not atomic — a write landing between this read and this write is lost, and its writer
+        re-fetches on its next read."""
+        from app.services.company_facts_service import merge_profile_row
+
+        table = "company_profile_cache"
         try:
-            self.supabase.table("company_profile_cache").upsert(
-                {
-                    "ticker": ticker,
-                    "profile_json": data,
-                    "cached_at": datetime.now(timezone.utc).isoformat(),
-                },
+            res = (
+                self.supabase.table(table)
+                .select("profile_json, cached_at")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(res, "data", None) or []
+        except Exception as e:
+            logger.warning(
+                "Company profile NOT cached for %s: the row read failed (%s: %s) — a blind "
+                "write would drop the blocks the other writers keep", ticker,
+                type(e).__name__, e,
+            )
+            return
+        base = rows[0] if rows and isinstance(rows[0], dict) else None
+        now = datetime.now(timezone.utc)
+        try:
+            merged = merge_profile_row(base, data, now=now)
+            self.supabase.table(table).upsert(
+                {"ticker": ticker, "profile_json": merged, "cached_at": now.isoformat()},
                 on_conflict="ticker",
             ).execute()
-            logger.info(f"Company profile cached in Supabase for {ticker}")
+            logger.info("Company profile cached in Supabase for %s (merged over %s)", ticker,
+                        "the existing row" if base else "no row")
         except Exception as e:
-            logger.warning(f"Company profile upsert failed for {ticker}: {e}")
+            logger.warning("Company profile upsert failed for %s: %s: %s", ticker,
+                           type(e).__name__, e)
 
     def get_cached_company_profile(self, ticker: str) -> Optional[Dict[str, Any]]:
         """Public accessor for other services (e.g. chat) to read cached profile."""
         return self._check_company_profile_db(ticker.upper())
+
+    # ── Key facts for Ask Cay AI (2026-10-08) ─────────────────────
+
+    async def get_key_facts(self, ticker: str) -> Dict[str, Any]:
+        """The Overview's Key Stats for `ticker`, for Ask Cay AI's financials tool — built by
+        the SAME `_build_key_statistics` from the SAME fundamentals bundle and live quote, so a
+        row reads byte-for-byte what the screen shows. Never re-derives a figure.
+
+        Returns::
+
+            {"ticker", "company_name", "rows": {label: value}, "unavailable": [label, ...],
+             "live_price_ok", "statement_currency", "price_currency", "pe_basis", "is_fund",
+             "country"?, "is_adr"?, "balance_sheet": {...} | None,
+             "short_interest_settlement_date", "degraded": [slice, ...]}
+
+        * ``degraded`` names the fundamentals slices that came back empty for a company that
+          always has them ("profile", "key_metrics", "quarterly_income", "balance_sheet") — the
+          caller says "did not load", never "none reported". Empty for a fund.
+
+        * ``rows`` holds only real values. A placeholder the screen prints for "unknown"
+          ('—', 'N/A', empty) goes to ``unavailable`` — never a value a model could quote.
+          The live trading day (`_KEY_FACTS_INTRADAY`) is left out: the screen merges the
+          session bars into those rows, and the price tool owns the live day.
+        * A failed or priceless quote serves the fundamentals-only rows with
+          ``live_price_ok=False``: the price-dependent rows (P/E (TTM), P/E (FWD), and a
+          payer's Dividends, which `_build_key_statistics` would otherwise print as "None"
+          with no price) go to ``unavailable``. It never raises for the quote — unlike the
+          full overview, which refuses a priceless build.
+        * ``statement_currency`` is the newest annual income statement's ``reportedCurrency``
+          (else the balance sheet's), ``price_currency`` the profile's trading currency (else
+          the live quote's); None when absent or not a 3-letter code — never assumed USD.
+        * ``pe_basis`` is how the P/E rows were made (`pe_basis`): ``"live"`` (live price ÷ TTM
+          EPS, one currency), ``"provider_ttm"`` (the statements are in another currency than
+          the price: FMP's TTM multiple at its daily close, and EPS (TTM) carries its code) or
+          ``"currency_unconfirmed"`` (no P/E: the price's currency is unknown).
+        * ``balance_sheet`` is the newest annual balance sheet's totals (total debt, cash and
+          short-term investments, net debt) with its period end; a missing or non-finite
+          figure is omitted, never 0.
+
+        Raises only what the fundamentals read raises (it folds upstream failures itself);
+        the caller degrades that one block.
+        """
+        sym = (ticker or "").strip().upper()
+        fundamentals, quote = await asyncio.gather(
+            self._get_fundamentals(sym),
+            price_source(self).get_quote(sym),
+            return_exceptions=True,
+        )
+        if isinstance(fundamentals, BaseException):
+            logger.warning("key facts: fundamentals failed for %s: %s: %s",
+                           sym, type(fundamentals).__name__, fundamentals)
+            raise fundamentals
+        fund = fundamentals if isinstance(fundamentals, dict) else {}
+        if isinstance(quote, BaseException):
+            logger.warning("key facts: live quote failed for %s (%s: %s) — fundamentals-only rows",
+                           sym, type(quote).__name__, quote)
+            quote = {}
+        quote = quote if isinstance(quote, dict) else {}
+        live_price_ok = _safe_float(quote, "price") > 0
+        if not live_price_ok:
+            # A cached bundle's profile carries no price (`_without_live_price`), so a priceless
+            # quote must not borrow one: every price-dependent row is withheld below instead.
+            quote = {}
+
+        profile = fund.get("profile") if isinstance(fund.get("profile"), dict) else {}
+        short_interest = fund.get("short_interest")
+        if not short_interest:
+            # The overview fills the same gap the same way (`get_overview`); bounded here, and
+            # a read still running keeps going behind its own cache.
+            short_interest = await self._key_facts_short_interest(sym)
+        short_interest = short_interest if isinstance(short_interest, dict) else {}
+
+        def _rows_of(name: str) -> List[Dict]:
+            rows = fund.get(name)
+            return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+        price = (_safe_float(quote, "price") or _safe_float(profile, "price")) if live_price_ok else 0.0
+        _flat, groups = self._build_key_statistics(
+            quote, profile, _rows_of("key_metrics"), _rows_of("analyst_est"), price,
+            shares_float_data=fund.get("shares_float") if isinstance(fund.get("shares_float"), dict) else {},
+            inst_ownership_data=fund.get("inst_ownership"),
+            income_quarterly=_rows_of("income_quarterly"),
+            short_interest=short_interest,
+            income_annual=_rows_of("income_annual"),
+            ratios_ttm=fund.get("ratios_ttm") if isinstance(fund.get("ratios_ttm"), dict) else None,
+        )
+
+        pays_dividend =(_safe_float(profile, "lastDiv") or _safe_float(profile, "lastDividend")) > 0
+        withheld = set() if live_price_ok else set(_KEY_FACTS_NEEDS_PRICE)
+        if not live_price_ok and not pays_dividend:
+            withheld.discard("Dividends")      # "None" (pays none) needs no price
+        rows: Dict[str, str] = {}
+        unavailable: List[str] = []
+        for group in groups:
+            for item in group.statistics:
+                label = item.label
+                if label in _KEY_FACTS_INTRADAY or label in rows or label in unavailable:
+                    continue
+                value = item.value if isinstance(item.value, str) else ""
+                if label in withheld or value.strip() in _KEY_FACTS_PLACEHOLDERS:
+                    unavailable.append(label)
+                else:
+                    rows[label] = value
+
+        income_annual = _rows_of("income_annual")
+        balance_annual = _rows_of("balance_annual")
+        # Which slices came back EMPTY. `_get_fundamentals` folds an FMP failure into an empty
+        # slice (and serves that bundle uncached), and a cached bundle can still hold an empty
+        # non-essential slice from a leg that failed when it was built — so an empty slice a
+        # listed company always has is "did not load", never "the company has none". A fund
+        # has no statements by nature and is never marked.
+        degraded: List[str] = []
+        if not profile:
+            degraded.append("profile")
+        if not profile_is_fund(profile):
+            if not _rows_of("key_metrics"):
+                degraded.append("key_metrics")
+            if not _rows_of("income_quarterly"):
+                degraded.append("quarterly_income")
+            if not balance_annual:
+                degraded.append("balance_sheet")
+        if degraded:
+            logger.info("key facts for %s served with empty slices: %s", sym, ", ".join(degraded))
+        statement_currency = (
+            _currency_code(_newest_row(income_annual).get("reportedCurrency"))
+            or _currency_code(_newest_row(balance_annual).get("reportedCurrency"))
+        )
+        # The same two currencies the Key Stats builder read (the quote's only when the profile
+        # has none), so `pe_basis` names the P/E the rows above were built with.
+        trading_currency, eps_currency = key_stats_currencies(
+            profile, quote, _rows_of("income_quarterly"), income_annual)
+        settlement = short_interest.get("settlement_date")
+        name = profile.get("companyName")
+        out: Dict[str, Any] = {
+            "ticker": sym,
+            "company_name": name.strip()[:120] if isinstance(name, str) and name.strip() else None,
+            "rows": rows,
+            "unavailable": unavailable,
+            "live_price_ok": live_price_ok,
+            "statement_currency": statement_currency,
+            "price_currency": trading_currency,
+            "pe_basis": pe_basis(trading_currency, eps_currency),
+            "is_fund": profile_is_fund(profile),
+            "balance_sheet": _balance_sheet_totals(balance_annual),
+            "short_interest_settlement_date": (
+                settlement[:10] if isinstance(settlement, str) and settlement.strip() else None),
+            "degraded": degraded,
+        }
+        out.update(profile_country_fields(profile))
+        return out
+
+    async def _key_facts_short_interest(self, sym: str) -> Dict[str, Any]:
+        """The exchange-reported short interest through its own cache, waited on for at most
+        `_KEY_FACTS_SHORT_WAIT` seconds. A read still running keeps going (held in
+        `_key_facts_side_tasks`) and warms the cache; its failure is logged. Never raises."""
+        task = asyncio.ensure_future(get_short_interest(sym))
+        _key_facts_side_tasks.add(task)
+
+        def _done(t: "asyncio.Task") -> None:
+            _key_facts_side_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("key facts: short interest read failed for %s: %s: %s",
+                               sym, type(t.exception()).__name__, t.exception())
+
+        task.add_done_callback(_done)
+        await asyncio.wait({task}, timeout=_KEY_FACTS_SHORT_WAIT)
+        if not task.done():
+            logger.info("key facts: short interest for %s still loading after %.1fs — "
+                        "its rows read as unavailable", sym, _KEY_FACTS_SHORT_WAIT)
+            return {}
+        if task.cancelled() or task.exception() is not None:
+            return {}
+        result = task.result()
+        return result if isinstance(result, dict) else {}
 
     # ── Volatile: live intraday data (120s response-level cache) ──
 
@@ -1341,6 +2149,8 @@ class StockOverviewService:
             inst_ownership_data=inst_ownership,
             income_quarterly=income_quarterly,
             short_interest=short_interest,
+            income_annual=income_annual,
+            ratios_ttm=fund.get("ratios_ttm"),
         )
 
         # Performance periods
@@ -1410,7 +2220,14 @@ class StockOverviewService:
         shares_float_data: Dict = None, inst_ownership_data=None,
         income_quarterly: List[Dict] = None,
         short_interest: Dict = None,
+        income_annual: List[Dict] = None,
+        ratios_ttm: Dict = None,
     ) -> Tuple[List[KeyStatisticItem], List[KeyStatisticsGroupResponse]]:
+        """The Overview's Key Stats rows, flat and in their four groups.
+
+        ``income_annual`` (the statements' currency when the quarterly rows carry none) and
+        ``ratios_ttm`` (the bundle's trimmed FMP TTM multiple, `_provider_pe_fields`) decide
+        the P/E rows for a filer whose statements are in another currency than its price."""
         open_val = _safe_float(quote, "open")
         prev_close = _safe_float(quote, "previousClose")
         day_high = _safe_float(quote, "dayHigh")
@@ -1441,7 +2258,7 @@ class StockOverviewService:
         shares_out = (_safe_float(quote, "sharesOutstanding")
                       or _safe_float(shares_float_data or {}, "outstandingShares"))
 
-        # ── EPS (TTM): sum diluted EPS from last 4 quarterly income statements ──
+        # ── EPS (TTM): the statement rows covering the trailing twelve months ──
         #
         # ⚠️ A NEGATIVE EPS IS DATA, NOT A MISSING VALUE. This used to end in
         # `if ttm_eps > 0`, so a loss-making company had its EPS computed correctly from
@@ -1451,44 +2268,20 @@ class StockOverviewService:
         # and it applied to EVERY loss-maker: measured on one basket, 8 of 10 tickers,
         # including PLUG, which that same tester holds. For a company losing money, "we
         # lose $7.98 a share" is the single most important number on the screen.
-        eps = None
-        pe = None
-        if income_quarterly and len(income_quarterly) >= 4:
-            try:
-                eps_vals = []
-                for q in income_quarterly[:4]:
-                    # Presence, not truthiness. `q.get("epsDiluted") or q.get("eps")`
-                    # discards a BREAK-EVEN quarter: a real 0.0 is falsy, so it fell
-                    # through to `eps`, and when that key was absent the quarter was
-                    # dropped entirely — taking the whole TTM sum with it (four values
-                    # are required below). Same family as the negative-EPS bug this
-                    # block exists to fix: a number treated as an absence.
-                    val = q.get("epsDiluted")
-                    if val is None:
-                        val = q.get("eps")
-                    if val is not None:
-                        eps_vals.append(float(val))
-                if len(eps_vals) == 4:
-                    ttm_eps = sum(eps_vals)
-                    if math.isfinite(ttm_eps):
-                        eps = round(ttm_eps, 2)
-            except (ValueError, TypeError):
-                pass
-
-        # Fallback: try quote fields, then key_metrics earningsYield.
         #
-        # `is None`, NOT `not eps`: a genuine EPS of exactly 0.00 (a break-even company)
-        # is falsy, and the old test sent it down the fallback path to be overwritten by
-        # whatever the quote happened to hold.
-        if eps is None:
-            eps = _finite(quote.get("eps"))
-        if eps is None and price and price > 0:
-            km_latest = key_metrics[0] if key_metrics else {}
-            earnings_yield = _finite(km_latest.get("earningsYield"))
-            # Negative yield allowed through for the same reason as the EPS above — it is
-            # the loss, expressed differently. Zero is excluded: it is FMP's "absent".
-            if earnings_yield:
-                eps = round(earnings_yield * price, 2)
+        # The rows are four quarters, or two half-years for a half-year filer (`_ttm_rows`:
+        # BHP's four "quarterly" rows were two YEARS of earnings), each read by presence,
+        # not truthiness (`_eps_value`: a break-even 0.0 quarter used to drop the whole sum).
+        # Which currency each figure is in decides the P/E below — see the "Key Stats: TTM
+        # EPS and the P/E basis" block at the top of the module.
+        symbol = profile.get("symbol") if isinstance(profile, dict) else None
+        trading_ccy, statement_ccy = key_stats_currencies(
+            profile, quote, income_quarterly, income_annual)
+        basis = pe_basis(trading_ccy, statement_ccy)
+        eps = _ttm_eps(income_quarterly, symbol)
+        fwd_eps = _nearest_forward_eps(analyst_est, _utc_today_iso())
+        pe = None
+        pe_fwd = None
 
         # ── Why there are TWO P/E values on this screen ────────────────────
         #
@@ -1520,35 +2313,69 @@ class StockOverviewService:
         # computing this P/E from a price up to 24 hours old. Only the request
         # that fetched the bundle falls back to its seconds-old profile price.
         #
-        # ── P/E (TTM): price / EPS ──
+        # ── P/E (TTM): price / EPS — the price and the statements share a currency ──
         #
         # Computed for a NEGATIVE eps too, so the formatter can tell "undefined because
         # the company loses money" ("Neg.") from "we don't have it" ("—"). The old
         # `eps > 0` guard destroyed that distinction three lines before it was needed.
         # `eps != 0` guards the division, not the sign.
-        if eps and price and price > 0:
-            pe = round(price / eps, 2)
-
-        # ── Forward P/E: use nearest future fiscal year estimate ──
-        pe_fwd = None
-        if analyst_est and price and price > 0:
-            today_str = datetime.now(tz=timezone.utc).date().isoformat()
-            # Sort by date ascending to find nearest future year
-            future_ests = []
-            for est in analyst_est:
-                if isinstance(est, dict):
-                    est_date = est.get("date") or ""
-                    if est_date >= today_str:
-                        future_ests.append(est)
-            # Pick the nearest future estimate
-            if future_ests:
-                future_ests.sort(key=lambda x: x.get("date") or "")
-                nearest = future_ests[0]
-                fwd_eps = _safe_float(nearest, "epsAvg") or _safe_float(nearest, "estimatedEpsAvg")
-                # Negative forward EPS is a real analyst estimate, not a gap: MRNA's
-                # nearest future year (2027) is -4.90. Let the formatter render "Neg.".
+        if basis == PE_BASIS_LIVE:
+            # Fallback: try quote fields, then key_metrics earningsYield.
+            #
+            # `is None`, NOT `not eps`: a genuine EPS of exactly 0.00 (a break-even company)
+            # is falsy, and the old test sent it down the fallback path to be overwritten by
+            # whatever the quote happened to hold.
+            if eps is None:
+                eps = _finite(quote.get("eps"))
+            if eps is None and price and price > 0:
+                km_latest = key_metrics[0] if key_metrics and isinstance(key_metrics[0], dict) else {}
+                earnings_yield = _finite(km_latest.get("earningsYield"))
+                # Negative yield allowed through for the same reason as the EPS above — it is
+                # the loss, expressed differently. Zero is excluded: it is FMP's "absent".
+                if earnings_yield:
+                    eps = round(earnings_yield * price, 2)
+            if eps and price and price > 0:
+                pe = _finite_multiple(price / eps)
+            # ── Forward P/E: the nearest fiscal year not yet ended ──
+            # Negative forward EPS is a real analyst estimate, not a gap: MRNA's nearest
+            # future year (2027) is -4.90. Let the formatter render "Neg.".
+            if fwd_eps and price and price > 0:
+                pe_fwd = _finite_multiple(price / fwd_eps)
+        else:
+            # ── The statements are in another currency than the price ──
+            #
+            # Never price ÷ EPS. No trading-currency fallback either: the quote's EPS and
+            # earnings yield × price are in the price's currency, while EPS (TTM) is shown in
+            # the statements' (labelled with its code below). FMP's TTM multiple instead,
+            # checked against our EPS (`_provider_pe`) — the same multiple the Price card
+            # shows, priced at FMP's daily timestamp, not the live quote.
+            provider = _provider_pe(ratios_ttm, eps) if basis == PE_BASIS_PROVIDER else None
+            if provider is not None:
+                provider_pe, provider_price = provider
+                pe = _finite_multiple(provider_pe)
+                # Forward: FMP's price (reporting currency) ÷ the analysts' EPS for the
+                # nearest year, which FMP gives in the reporting currency too (TSM 2026:
+                # 538.40 TWD per ADS), so the currency cancels. One timestamp for both rows.
                 if fwd_eps:
-                    pe_fwd = round(price / fwd_eps, 2)
+                    pe_fwd = _finite_multiple(provider_price / fwd_eps)
+            else:
+                if basis == PE_BASIS_UNCONFIRMED:
+                    reason = "the price's currency is unknown"
+                elif eps is None:
+                    reason = "no TTM EPS to check FMP's multiple against"
+                elif not ratios_ttm:
+                    reason = "no FMP TTM multiple in the bundle"
+                else:
+                    reason = "FMP's TTM EPS does not match ours"
+                logger.warning("[pe-withheld] %s: statements in %s, price in %s — P/E (TTM) and "
+                               "P/E (FWD) read '—': %s", symbol or "?", statement_ccy,
+                               trading_ccy or "unknown", reason)
+
+        # EPS (TTM) as shown: a statement figure in another currency than the price carries
+        # its code ("TWD 434.95") — on a USD screen a bare 434.95 reads as dollars.
+        eps_shown = "—"
+        if eps is not None:
+            eps_shown = f"{eps:.2f}" if basis == PE_BASIS_LIVE else f"{statement_ccy} {eps:.2f}"
 
         # Ownership from shares-float and institutional ownership endpoints
         shares_float_data = shares_float_data or {}
@@ -1608,7 +2435,7 @@ class StockOverviewService:
             KeyStatisticItem(label="P/E (TTM)", value=_fmt_ratio(pe)),
             KeyStatisticItem(label="P/E (FWD)", value=_fmt_ratio(pe_fwd)),
             # `is not None`, not truthiness: a break-even company's 0.00 is a real EPS.
-            KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps is not None else "—"),
+            KeyStatisticItem(label="EPS (TTM)", value=eps_shown),
             KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
         ]
@@ -1639,35 +2466,15 @@ class StockOverviewService:
             KeyStatisticItem(label="P/E (TTM)", value=_fmt_ratio(pe)),
             KeyStatisticItem(label="P/E (FWD)", value=_fmt_ratio(pe_fwd)),
             # `is not None`, not truthiness: a break-even company's 0.00 is a real EPS.
-            KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps is not None else "—"),
+            KeyStatisticItem(label="EPS (TTM)", value=eps_shown),
             KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
         ])
 
         # Ownership group
-        # Short % of Float: compute from sharesShort / floatShares when possible
+        # Short % of Float: one rule, shared with Ask Cay AI's ownership tool.
         short_interest = short_interest or {}
-        short_pct_val = None
-
-        # Primary: compute from sharesShort (FINRA/Nasdaq) / floatShares (FMP)
-        shares_short = short_interest.get("shares_short")
-        if shares_short and shares_short > 0 and float_shares_val and float_shares_val > 0:
-            short_pct_val = round((shares_short / float_shares_val) * 100, 2)
-
-        # Fallback 1: a source-supplied pre-computed short_percent_of_float
-        if short_pct_val is None:
-            short_pct_val = short_interest.get("short_percent_of_float")
-
-        # Fallback 2: try FMP key_metrics (rarely available on stable API)
-        if short_pct_val is None:
-            km = key_metrics[0] if key_metrics else {}
-            raw = km.get("shortPercentOutstanding") or km.get("shortPercentFloat")
-            if raw is not None:
-                try:
-                    sp = float(raw)
-                    short_pct_val = sp * 100 if sp < 1 else sp
-                except (ValueError, TypeError):
-                    pass
+        short_pct_val = short_percent_of_float(short_interest, float_shares_val, key_metrics)
 
         short_pct_str = f"{short_pct_val:.2f}%" if short_pct_val is not None else "N/A"
 

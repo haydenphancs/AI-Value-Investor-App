@@ -1493,9 +1493,17 @@ class ChatViewModel: ObservableObject {
         // Who owns the stock (2026-10-05): each insider's shares after their latest Form 4 and
         // the 13F institutional holders, read from the Holders data — never the web.
         case "check_ownership_filings":           return "Checking ownership filings"
-        // Report chat's live web search (owner decision, 2026-10-02). The server declares this
-        // tool only on a turn that asked for a web search and passed its gate, and a skipped
-        // step never reaches this label, so the words are true wherever they render.
+        // A company's reported figures (2026-10-09): statements, margins, balance sheet,
+        // earnings dates and results, analyst estimates, valuation, segments, dividends and
+        // splits, read from Caydex's own cached data — never the web.
+        case "check_company_financials":          return "Checking company financials"
+        // Profile facts for a stock, fund or coin (2026-10-09): the company, its executives and
+        // peers, a fund's facts, a coin's supply — Caydex's own data, never the web.
+        case "check_asset_profile":               return "Looking up key facts"
+        // The live web search (owner decisions 2026-10-02 and 2026-10-08): in any chat, when the
+        // user asks and, behind the consent-v3 gate, automatically when Caydex's own data cannot
+        // answer. A skipped step never reaches this label, so the words are true wherever they
+        // render.
         case "web_search":                        return "Searching the web"
         default:
             let words = name.replacingOccurrences(of: "_", with: " ")

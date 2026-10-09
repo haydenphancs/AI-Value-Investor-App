@@ -82,3 +82,22 @@ def test_this_file_reads_the_declared_default_not_the_environment():
             os.environ.pop(key, None)
         else:
             os.environ[key] = original
+
+
+# The web search beyond report chat (2026-10-08). Its legal copy (consent v3) is written, but
+# turning it on is a staged owner decision (PLAN switch order: Brave's storage confirmation, the
+# legal pages live, every-chat, shadow, then on) — never a code default. Declared defaults only,
+# for the reason this file's docstring gives.
+_WEB_MUST_SHIP_CLOSED = {
+    "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED": False,
+    "CHAT_AUTO_WEB_SEARCH_MODE": "off",
+}
+
+
+def test_the_web_search_switches_ship_closed():
+    for name, closed in _WEB_MUST_SHIP_CLOSED.items():
+        assert name in Settings.model_fields, f"{name} vanished — this guarantee is silently gone"
+        default = Settings.model_fields[name].default
+        assert default == closed and type(default) is type(closed), (
+            f"{name} declares {default!r}; it must ship {closed!r} and be flipped on Railway"
+        )

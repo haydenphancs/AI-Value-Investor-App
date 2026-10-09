@@ -522,6 +522,9 @@ struct RevenueEngineDTO: Codable {
     /// Millions, positive: intersegment sales a GROSS segment stack includes and
     /// consolidation removes. Optional: set only for a gross stack, absent on older reports.
     let intersegmentEliminations: Double?
+    /// ISO 4217 code every figure above is reported in ("TWD" for a 20-F filer), never
+    /// converted. Optional: absent on reports cached before 2026-10-08, nil when unknown.
+    let reportingCurrency: String?
 
     enum CodingKeys: String, CodingKey {
         case segments
@@ -530,6 +533,7 @@ struct RevenueEngineDTO: Codable {
         case period
         case analysisNote = "analysis_note"
         case intersegmentEliminations = "intersegment_eliminations"
+        case reportingCurrency = "reporting_currency"
     }
 }
 
@@ -1006,7 +1010,8 @@ extension TickerReportAPIResponse {
             revenueUnit: revenueEngine.revenueUnit,
             period: revenueEngine.period,
             analysisNote: revenueEngine.analysisNote,
-            intersegmentEliminations: revenueEngine.intersegmentEliminations
+            intersegmentEliminations: revenueEngine.intersegmentEliminations,
+            reportingCurrency: ReportRevenueEngineData.currencyCode(revenueEngine.reportingCurrency)
         )
 
         // Moat & Competition

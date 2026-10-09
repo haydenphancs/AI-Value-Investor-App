@@ -23,7 +23,9 @@ import Combine
 final class AIConsentStore: ObservableObject {
     static let shared = AIConsentStore()
 
-    private enum Keys {
+    // `nonisolated` so `acceptedVersionForRequests` can read the keys off the main actor (the
+    // project defaults every type to MainActor isolation). They are immutable string constants.
+    nonisolated private enum Keys {
         static let granted = "ai_processing_consent_granted"
         static let grantedAt = "ai_processing_consent_granted_at"
         /// Which version of the consent TEXT the user accepted (`currentVersion`).
@@ -37,7 +39,27 @@ final class AIConsentStore: ObservableObject {
     ///   2 — 1.1: adds report chat's web search (Brave), whose query is derived from the message.
     ///       Without this, everyone who tapped Allow on 1.0 would reach the search on 1.1
     ///       having never seen the row that discloses it.
-    static let currentVersion = 2
+    ///   3 — 1.01 (final build, 2026-10-09): web search in ANY chat, both when the user asks and
+    ///       automatically when Caydex's own data cannot answer. The backend opens those two flows
+    ///       only for a caller whose `X-AI-Consent-Version` header (below) is at least 3, so a
+    ///       v1/v2 consent — which described report chat and an explicit ask only — never meets them.
+    static let currentVersion = 3
+
+    /// The consent-text version this install has ACCEPTED, for the `X-AI-Consent-Version`
+    /// request header — nil while no consent is held (never granted, withdrawn, or dropped when a
+    /// session ended), so the header is omitted rather than claiming a consent nobody gave.
+    ///
+    /// The accepted version, not `currentVersion`: a v2 grant on this build reports 2, and the
+    /// server keeps the newer flows closed for it. Same reading as `init` (a grant with no stored
+    /// version is the original text, 1).
+    ///
+    /// `nonisolated` and read straight from `UserDefaults` (thread-safe) because `APIClient` is an
+    /// actor and builds every request off the main actor; it must not touch the @Published state.
+    nonisolated static func acceptedVersionForRequests(defaults: UserDefaults = .standard) -> Int? {
+        guard defaults.bool(forKey: Keys.granted) else { return nil }
+        let accepted = (defaults.object(forKey: Keys.version) as? Int) ?? 1
+        return accepted > 0 ? accepted : nil
+    }
 
     /// True once the user has explicitly allowed sending chat content for AI processing,
     /// under the CURRENT consent text.

@@ -788,7 +788,8 @@ def test_the_ai_consent_scan_is_not_vacuous(client):
         )
 
 
-# ── Report chat's web search (2026-10-02): privacy disclosure + the provider's flow-down ──
+# ── Web search (2026-10-02; every chat + automatic since 2026-10-09): privacy disclosure + the
+#    provider's flow-down ──
 #
 # A query DERIVED from what the user typed now goes to a second third-party service (Brave
 # Search), and Brave's terms (§4(c)) require that end users be bound by restrictions like its
@@ -796,33 +797,87 @@ def test_the_ai_consent_scan_is_not_vacuous(client):
 # an AI. Both promises live in three copies each (served HTML, documents/legal, the Swift
 # mirror) — the authored copy is pinned byte-equal above, so the website and the in-app mirror
 # are asserted here, the same shape as the AI-consent clauses.
+#
+# 2026-10-09 (owner decision 2026-10-08): search runs in ANY chat, when asked AND automatically
+# when Caydex's own data cannot answer; signed-in only, limited per day; results are third-party,
+# may be wrong, and are not Caydex's view. Every claim is one CODE enforces, or is worded as what
+# it is: "instructed not to use web search for prices" (a model instruction — the tool
+# descriptions, pinned below — not a code gate, so never "it never searches for prices"); the
+# query is described by example ("such as"), because the model writes it; and the removal
+# sentence is `sanitize_web_query` (pinned below). The copy keeps a CONSENT
+# clause because it also covers the 1.0 and earlier 1.01 builds: the backend opens every-chat and
+# automatic search only for an `X-AI-Consent-Version` of 3+, so a reader who never accepted the
+# new sheet still gets at most the old report-chat, explicit-ask search.
 
 _WEB_SEARCH_CLAUSES = {
     "privacy": (
         "PrivacyPolicyView.swift",
         [
-            "only when you are chatting about a research report and ask cay ai to search the web",
+            "web search in chat: in any chat, cay ai may run a web search when you ask it to search the web",
+            "and automatically when caydex\u2019s own data cannot answer your question",
+            "cay ai is instructed not to use web search for prices or other market data",
             "a short search query that cay ai writes from your question",
+            "such as the company or its ticker, the topic, and a time period",
             "is sent to our web search provider",
+            "amounts, percentages, links, and email addresses are removed from the query before it is sent",
             "are never sent with it",
+            "web search is available only while you are signed in",
+            "limited to a set number of searches per day",
             "is shown with the answer but is not kept",
             "we keep no other copy of the search results",
             "a temporary in-memory copy for a few minutes",
-            "brave software (web search, only when you ask cay ai to search the web in a report chat",
+            "they may be outdated or wrong, they are not caydex\u2019s view",
+            # The consent clause: true for every build the website copy covers.
+            "searching in any chat, and searching without being asked, happen only after you have "
+            "allowed ai chat on a permission screen that describes them",
+            "until then, cay ai searches the web only in a chat about a research report, and only "
+            "when you ask",
+            "brave software (web search in cay ai chat, as described above)",
         ],
     ),
     "terms": (
         "TermsOfUseView.swift",
         [
             "web search results.",
+            "when cay ai searches the web \u2014 because you asked it to, or automatically because "
+            "caydex\u2019s own data could not answer your question",
             "web pages found by our third-party web search provider",
+            "each shown with its publisher and, when known, its date",
             "third-party content that we do not control or verify",
+            "they do not reflect caydex\u2019s views",
+            "they may be outdated, inaccurate, or incomplete",
             "only for your own personal, non-commercial use",
             "you may not scrape, copy, store, cache, resell, or redistribute them",
             "build, train, or improve any artificial intelligence or machine learning model",
         ],
     ),
 }
+
+# Wording the 2026-10-09 behaviour makes FALSE: search is no longer report-chat-only, nor
+# ask-only. Each must be gone from every copy — a one-way "new clause present" check would pass
+# with the old restriction still standing beside it, publishing two contradictory promises.
+_STALE_WEB_SEARCH_CLAIMS = (
+    "web search in report chat",
+    "only when you are chatting about a research report",
+    "only when you ask cay ai to search the web in a report chat",
+    "when you ask cay ai to search the web in a report chat",
+    "search the web in a report chat",
+)
+
+_WEB_SEARCH_COPIES = [
+    _SERVED / "privacy.html",
+    _SERVED / "terms.html",
+    _IOS_SCREENS_DIR / "PrivacyPolicyView.swift",
+    _IOS_SCREENS_DIR / "TermsOfUseView.swift",
+    _IOS_SCREENS_DIR / "AIDataConsentView.swift",
+]
+
+
+def _copy_prose(path: Path) -> str:
+    """Normalised user-facing prose of one copy: tag-stripped HTML, or the Swift literals."""
+    if path.suffix == ".swift":
+        return _normalized_prose(_swift_user_facing_strings(path), strip_tags=False)
+    return _normalized_prose(_prose_only(path), strip_tags=True)
 
 
 @pytest.mark.parametrize("doc", sorted(_WEB_SEARCH_CLAUSES))
@@ -862,10 +917,154 @@ def test_the_not_kept_promise_matches_the_shipped_persistence_switch():
 def test_the_consent_sheet_discloses_the_web_search_query_without_naming_the_vendor():
     path = _IOS_SCREENS_DIR / "AIDataConsentView.swift"
     prose = _normalized_prose(_swift_user_facing_strings(path), strip_tags=False)
-    assert "search the web in a report chat, a short search query" in prose
-    assert "goes to a web search provider" in prose
-    for vendor in ("brave", "google", "gemini", "bing"):
+    # Both triggers — the ask AND the automatic search — in every chat, or a v3 consent does not
+    # cover what the server opens for it (App Review 5.1.2(i)).
+    assert "in any chat, when you ask cay ai to search the web" in prose
+    assert "or when caydex's own data can't answer your question" in prose
+    assert "a short search query (such as the company, its ticker and the topic) goes to a web search provider" in prose
+    assert "amounts, percentages and email addresses are removed from it" in prose
+    # This text ships in the binary (a deploy cannot correct it), so it makes no promise about
+    # prices: that rule is a model instruction, which only the Privacy Policy states — as one.
+    assert "price" not in prose, "the consent sheet promises something about prices no code enforces"
+    for vendor in ("brave", "google", "gemini", "bing", "openai"):
         assert vendor not in prose, vendor
+
+
+@pytest.mark.parametrize("path", _WEB_SEARCH_COPIES, ids=lambda p: p.name)
+def test_no_copy_still_limits_web_search_to_an_explicit_report_chat_ask(path):
+    """The other direction (2026-10-09). A copy that still says "only when you ask, in a report
+    chat" beside the new every-chat clause publishes two contradictory promises — and the old one
+    is the one a reader relies on to say no search happened without their asking."""
+    prose = _copy_prose(path)
+    for claim in _STALE_WEB_SEARCH_CLAIMS:
+        assert claim not in prose, f"{path.name} still says {claim!r}, which is no longer true"
+
+
+# Promises the code does NOT enforce, which an earlier 2026-10-09 draft made flatly. The query is
+# MODEL output (it can name a second company, or anything the user typed), and "never for prices"
+# is an instruction to the model, checked by no code before the search runs. A privacy policy
+# that states them as facts is false the first time the model strays.
+_UNENFORCED_WEB_SEARCH_CLAIMS = (
+    "never searches the web for prices",
+    "never searches the web for market data",
+    "naming only the company",
+    "names only the company",
+    "the query never includes",
+    "never figures or your personal details",
+)
+
+
+@pytest.mark.parametrize("path", _WEB_SEARCH_COPIES, ids=lambda p: p.name)
+def test_no_copy_states_an_unenforced_web_search_promise_as_fact(path):
+    prose = _copy_prose(path)
+    for claim in _UNENFORCED_WEB_SEARCH_CLAIMS:
+        assert claim not in prose, f"{path.name} says {claim!r}, which no code enforces"
+
+
+def test_the_instructed_not_for_prices_claim_matches_both_model_facing_descriptions():
+    """Privacy §3 says Cay AI is INSTRUCTED not to use web search for prices or other market data.
+    The instruction lives in two model-facing texts — the tool declaration and the capability line
+    in the system prompt — and each must still SAY it (the phrase, not merely the word "prices",
+    which "use it for prices" would also contain)."""
+    from app.services.agents.chat_tools import TOOL_CAPABILITIES, TOOL_DESCRIPTIONS, WEB_SEARCH_TOOL
+
+    body = _normalized_prose((_SERVED / "privacy.html").read_text(encoding="utf-8"), strip_tags=True)
+    assert "cay ai is instructed not to use web search for prices or other market data" in body
+    declaration = " ".join(TOOL_DESCRIPTIONS[WEB_SEARCH_TOOL].lower().split())
+    capability = " ".join(TOOL_CAPABILITIES[WEB_SEARCH_TOOL].lower().split())
+    assert "never use this for prices, quotes, price changes or other market data" in declaration, (
+        "the web_search declaration no longer tells the model to keep prices off the web"
+    )
+    assert "never for prices, quotes or market data" in capability, (
+        "the web_search capability line no longer tells the model to keep prices off the web"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw, dropped_tokens, absent_text, kept_tokens",
+    [
+        ("Apple revenue $391 billion 25% margin 1,234 jane.doe@example.com https://example.com/x 2025 Q3",
+         ("$391", "391", "billion", "25%", "25", "1,234"), ("@", "example.com", "http", "$", "%"),
+         ("Apple", "2025", "Q3")),
+        ("Tesla 4.5 percent 12.3bn 900 jane@x.co www.tsla.com 10-K",
+         ("4.5", "percent", "12.3bn", "900"), ("@", "jane", "tsla.com"), ("Tesla", "10-K")),
+        ("NVDA lawsuit 1e9 \u20ac5,000 \u00a3300 \u00a540 -7% +12% 0.5",
+         ("1e9", "5,000", "300", "40", "-7%", "7", "+12%", "12", "0.5"), ("\u20ac", "\u00a3", "\u00a5", "%"),
+         ("NVDA", "lawsuit")),
+    ],
+)
+def test_the_query_removal_claim_matches_the_sanitizer(raw, dropped_tokens, absent_text, kept_tokens):
+    """Privacy §3 and the consent sheet say amounts, percentages, links and email addresses are
+    removed from the query before it is sent. `sanitize_web_query` is the one choke point every
+    query passes on its way to the provider (`run_web_search`); a year, a quarter and an SEC
+    form stay, as the copy's "time period" says."""
+    from app.services.chat_web_search_service import sanitize_web_query
+
+    out = sanitize_web_query(raw)
+    assert out is not None, raw
+    tokens = out.split()
+    for gone in dropped_tokens:
+        assert gone not in tokens, f"{gone!r} survived: {out!r}"
+    for text in absent_text:
+        assert text not in out, f"{text!r} survived: {out!r}"
+    for kept in kept_tokens:
+        assert kept in tokens, f"{kept!r} was dropped: {out!r}"
+
+
+@pytest.mark.parametrize("raw", [None, 42, "", "   ", "$391 25% 1,234", "jane@example.com https://x.com"])
+def test_a_query_with_nothing_left_after_removal_is_never_sent(raw):
+    """Degraded input: nothing searchable left → None (no search), never an empty or raw query."""
+    from app.services.chat_web_search_service import sanitize_web_query
+
+    assert sanitize_web_query(raw) is None
+
+
+def test_the_published_effective_date_is_never_in_the_future():
+    """A policy dated ahead of today tells a reader it took effect on a day that has not come.
+    UTC is the reference: the served page is the same for every reader, and the backend's day
+    rolls over in UTC. Monotonic — once true it stays true."""
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    for doc in ("privacy", "terms"):
+        for path in (_SERVED / f"{doc}.html", _BACKEND.parent / "documents" / "legal" / f"{doc}.html"):
+            dates = re.findall(r"Last updated:\s*([A-Z][a-z]+ \d{1,2}, \d{4})", path.read_text(encoding="utf-8"))
+            assert len(dates) == 1, f"{path}: expected one 'Last updated' line, found {dates}"
+            stated = datetime.strptime(dates[0], "%B %d, %Y").date()
+            assert stated <= today, f"{path.name} is dated {stated}, after today ({today} UTC)"
+
+
+def test_the_stale_claim_scan_is_not_vacuous():
+    """Guard against the guard: every copy is real prose that DOES discuss web search, and the
+    stale phrases would be caught if planted — so an empty haystack cannot pass the test above."""
+    for path in _WEB_SEARCH_COPIES:
+        prose = _copy_prose(path)
+        assert len(prose) > 1500, f"{path.name} scan returned {len(prose)} chars"
+        assert "web search" in prose, f"{path.name} scan lost the web-search copy"
+    planted = _normalized_prose(
+        "<p><strong>Web search in report chat:</strong> only when you are chatting about a "
+        "research report</p>", strip_tags=True,
+    )
+    assert any(claim in planted for claim in _STALE_WEB_SEARCH_CLAIMS)
+
+
+def test_the_consent_clause_matches_the_consent_version_that_opens_the_new_flows():
+    """The copy promises every-chat and automatic search only after a permission screen that
+    describes them. That screen is consent v3 (`AIConsentStore.currentVersion`), and the app sends
+    the ACCEPTED version as `X-AI-Consent-Version` so the server can hold the line. If the version
+    or the header went away, the consent clause on all three copies would be unenforceable."""
+    store = (_BACKEND.parent / "frontend" / "ios" / "ios" / "Core" / "Services"
+             / "AIConsentStore.swift").read_text(encoding="utf-8")
+    code = "\n".join(l for l in store.splitlines() if not l.lstrip().startswith("//"))
+    match = re.search(r"static let currentVersion\s*=\s*(\d+)", code)
+    assert match and int(match.group(1)) >= 3, "consent v3 is what discloses every-chat search"
+    client = (_BACKEND.parent / "frontend" / "ios" / "ios" / "Core" / "Services"
+              / "APIClient.swift").read_text(encoding="utf-8")
+    client_code = "\n".join("" if l.lstrip().startswith("//") else re.sub(r"\s//.*$", "", l)
+                            for l in client.splitlines())
+    assert 'request.setValue(String(consentVersion), forHTTPHeaderField: "X-AI-Consent-Version")' in client_code
+    body = _normalized_prose((_SERVED / "privacy.html").read_text(encoding="utf-8"), strip_tags=True)
+    assert "allowed ai chat on a permission screen that describes them" in body
 
 
 def test_the_summary_box_covers_the_web_search_on_both_sides(client):
@@ -878,3 +1077,28 @@ def test_the_summary_box_covers_the_web_search_on_both_sides(client):
     for haystack, name in ((web, "/privacy"), (swift, "PrivacyPolicyView.swift")):
         assert "your identity is not sent to the ai or to our web search provider" in haystack, name
         assert "not transmitted with your message or with a web search" in haystack, name
+
+
+def test_the_instructed_not_for_prices_claim_holds_for_every_web_tier_text():
+    """Since 2026-10-08 the web tool is declared with its TIER's text (an explicit ask, a news ask,
+    the automatic fallback). Privacy §3's "instructed not to use web search for prices or other
+    market data" must hold for whichever one the model reads."""
+    from app.services.agents.chat_tools import (
+        WEB_SEARCH_MODES, WEB_SEARCH_TIER_CAPABILITIES, WEB_SEARCH_TIER_DESCRIPTIONS,
+    )
+    assert set(WEB_SEARCH_MODES) == set(WEB_SEARCH_TIER_DESCRIPTIONS) == set(WEB_SEARCH_TIER_CAPABILITIES)
+    for mode in WEB_SEARCH_MODES:
+        declaration = " ".join(WEB_SEARCH_TIER_DESCRIPTIONS[mode].lower().split())
+        capability = " ".join(WEB_SEARCH_TIER_CAPABILITIES[mode].lower().split())
+        assert "never use this for prices, quotes, price changes or other market data" in declaration, mode
+        assert "never for prices, quotes or market data" in capability, mode
+
+
+def test_the_consent_clause_is_enforced_by_the_backend_gate():
+    """The copy says every-chat and automatic search happen only after the permission screen that
+    describes them (consent v3). The backend's floor for those tiers must be at least that version,
+    and a lower value must fail the deploy rather than quietly open them."""
+    from app.config import Settings
+    field = Settings.model_fields["CHAT_WEB_SEARCH_MIN_CONSENT_VERSION"]
+    assert field.default >= 3
+    assert any(getattr(m, "ge", None) is not None and m.ge >= 3 for m in field.metadata)

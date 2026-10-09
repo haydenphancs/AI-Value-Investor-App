@@ -1364,6 +1364,152 @@ class CryptoService:
             chart_data=[],
         )
 
+    async def get_coin_facts(self, symbol: str) -> Dict[str, Any]:
+        """A coin's supply facts plus the market-wide Crypto Fear & Greed reading, for a
+        reader that is not the crypto screen (Ask Cay AI's asset-profile tool).
+
+        Sources, both already cached for the screen: `_get_coin_fundamentals` (two-tier, price
+        half re-hydrated live) for circulating / total / max supply, fully diluted valuation
+        and market-cap rank; `alternative_me.get_fear_greed_index(limit=30)` — the SAME limit
+        the gauge endpoint asks for, because that module caches whatever it fetched and a
+        `limit=1` read would leave the gauge one entry for 15 minutes. Never `get_crypto_detail`
+        (its snapshot step calls Gemini) and no price.
+
+        Each leg degrades on its own: a failed Fear & Greed read drops only that block.
+        Max supply keeps the screen's three states: a cap, "no maximum supply" ONLY when that
+        absence was measured (a curated profile, or an explicit null from the source), else
+        unavailable. NaN / inf / bool / non-positive values are omitted, never 0. Never raises.
+        """
+        from app.services.coingecko_adapter import crypto_base_symbol
+
+        base = crypto_base_symbol(symbol) if isinstance(symbol, str) else ""
+        if not base or len(base) > 15 or not base.replace("-", "").isalnum():
+            return {"available": False, "error": "no coin symbol supplied"}
+
+        def _pos(value: Any) -> Optional[float]:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                return None
+            return f if math.isfinite(f) and f > 0 else None
+
+        def _usd(md: Dict[str, Any], field: str) -> Optional[float]:
+            sub = md.get(field)
+            if isinstance(sub, dict):
+                return _pos(sub.get("usd"))
+            return _pos(sub)   # a bare float (a `/coins/markets`-shaped value)
+
+        def _money(value: float) -> str:
+            for div, unit in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+                if value >= div:
+                    return f"USD {value / div:.2f}{unit}"
+            return f"USD {value:,.0f}"
+
+        async def _fear_greed() -> Dict[str, Any]:
+            from app.integrations.alternative_me import get_fear_greed_index
+
+            entries = await get_fear_greed_index(limit=30)
+            first = entries[0] if isinstance(entries, list) and entries else None
+            if not isinstance(first, dict):
+                raise ValueError("no Fear & Greed entry")
+            value = int(str(first.get("value", "")).strip())
+            if not 0 <= value <= 100:
+                raise ValueError("Fear & Greed value out of range")
+            block: Dict[str, Any] = {
+                "value": value,
+                "scale": "0 (extreme fear) to 100 (extreme greed)",
+                "source": "Crypto Fear & Greed Index by Alternative.me",
+                "scope": "the crypto market as a whole, not this coin",
+            }
+            label = first.get("value_classification")
+            if isinstance(label, str) and label.strip():
+                block["classification"] = label.strip()[:40]
+            try:
+                ts = int(str(first.get("timestamp", "")).strip())
+                block["as_of"] = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+            return block
+
+        coin_res, fg_res = await asyncio.gather(
+            self._get_coin_fundamentals(base), _fear_greed(), return_exceptions=True,
+        )
+        out: Dict[str, Any] = {"symbol": base}
+        unavailable: List[str] = []
+        profile_meta = _CRYPTO_PROFILES.get(base, {})
+
+        coin_ok = isinstance(coin_res, dict) and bool(coin_res)
+        if isinstance(coin_res, BaseException):
+            logger.warning("coin facts: fundamentals failed for %s: %s: %s",
+                           base, type(coin_res).__name__, coin_res)
+        md = coin_res.get("market_data") if coin_ok else None
+        md = md if isinstance(md, dict) else {}
+
+        name = profile_meta.get("name")
+        if not name and coin_ok and isinstance(coin_res.get("name"), str):
+            name = coin_res["name"].strip()[:80] or None
+        if name:
+            out["name"] = name
+
+        if coin_ok:
+            circ = _pos(md.get("circulating_supply"))
+            total = _pos(md.get("total_supply"))
+            max_cg = _pos(md.get("max_supply"))
+            max_supply = max_cg or _pos(profile_meta.get("max_supply"))
+            max_known = base in _CRYPTO_PROFILES or "max_supply" in md
+            if circ is not None:
+                out["circulating_supply"] = _fmt_supply(circ, base)
+            else:
+                unavailable.append("circulating supply")
+            if total is not None:
+                out["total_supply"] = _fmt_supply(total, base)
+            else:
+                unavailable.append("total supply")
+            if max_supply is not None:
+                out["max_supply"] = _fmt_supply(max_supply, base)
+            elif max_known:
+                out["max_supply"] = "no maximum supply (no hard cap)"
+            else:
+                unavailable.append("max supply")
+            fdv = _usd(md, "fully_diluted_valuation")
+            if fdv is not None:
+                out["fully_diluted_valuation"] = _money(fdv)
+                stamp = md.get("last_updated")
+                if isinstance(stamp, str) and len(stamp) >= 10:
+                    out["fully_diluted_valuation_as_of"] = stamp[:16].replace("T", " ") + " UTC"
+            else:
+                unavailable.append("fully diluted valuation")
+            rank = coin_res.get("market_cap_rank", md.get("market_cap_rank"))
+            if isinstance(rank, (int, float)) and not isinstance(rank, bool) \
+                    and math.isfinite(float(rank)) and 1 <= rank <= 100_000:
+                out["market_cap_rank"] = int(rank)
+            else:
+                unavailable.append("market-cap rank")
+        else:
+            unavailable.append("supply and valuation figures")
+
+        if isinstance(fg_res, BaseException):
+            logger.warning("coin facts: Fear & Greed unavailable: %s: %s",
+                           type(fg_res).__name__, fg_res)
+            unavailable.append("Crypto Fear & Greed Index")
+        else:
+            out["crypto_fear_greed"] = fg_res
+
+        if unavailable:
+            out["unavailable"] = unavailable
+        coin_status = ("ok" if coin_ok else
+                       "failed" if isinstance(coin_res, BaseException) else "not_found")
+        out["coin_status"] = coin_status
+        out["available"] = coin_ok
+        if not coin_ok:
+            out["error"] = ("coin data could not be loaded right now" if coin_status == "failed"
+                            else "no coin data found for this symbol")
+            if coin_status == "failed" and "crypto_fear_greed" not in out:
+                out["upstream"] = True
+        return out
+
     async def get_crypto_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> CryptoDetailResponse:

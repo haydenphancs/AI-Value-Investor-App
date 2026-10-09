@@ -42,6 +42,16 @@ def _budget_day() -> str:
     return datetime.now(_BUDGET_TZ).date().isoformat()
 
 
+def budget_day() -> str:
+    """Today's budget-day key (ET, ISO date) — the day every `chat_usage_budget` row is keyed on.
+
+    Public for in-process latches that must roll over at exactly the same midnight as the rows
+    they mirror (the web search's automatic-tier exhaustion latch, `chat_web_search_service`):
+    a latch on a different clock would either keep a refilled bucket closed or reopen a full one.
+    """
+    return _budget_day()
+
+
 class ChatBudgetService:
     def __init__(self):
         self.supabase = get_supabase()

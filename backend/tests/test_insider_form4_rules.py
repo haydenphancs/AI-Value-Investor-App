@@ -665,8 +665,9 @@ async def test_holders_counts_nyax_through_the_real_build_and_persists_it():
     assert "Yair Nechmad" in names
     await _drain()
     # v3 (2026-10-05): the row also carries the chat-only `ownership_detail`; v4 and v5
-    # (2026-10-07) compute it by the final and round-5 reviews' rules.
-    assert svc.supabase.upserts and svc.supabase.upserts[0]["response_json"]["payload_version"] == 5
+    # (2026-10-07) compute it by the final and round-5 reviews' rules; v6 (2026-10-08) ranks
+    # the Top 10 Insiders from those holdings (one roster with chat and the report).
+    assert svc.supabase.upserts and svc.supabase.upserts[0]["response_json"]["payload_version"] == 6
     # a 5-minute hit reports the same (clean) status
     assert (await svc.get_holders_with_status("NYAX"))[1] == []
 
@@ -801,16 +802,24 @@ async def test_the_holders_list_is_windowed_to_the_last_12_months():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_roster_keeps_the_build_out_of_the_24h_tier():
+async def test_a_failed_roster_is_logged_and_no_longer_blocks_the_24h_tier(caplog):
+    """Since 2026-10-08 the roster only supplies the activity list's titles (the Top 10 sheet
+    reads `roster_from_holdings`) and each activity falls back to its own row's role — so a
+    failed roster is a WARNING, not a degraded build refused the 24h tier."""
     class _NoRoster(_FMP):
         async def get_insider_roster(self, t):
             return EmptyAfterFailure("roster 429")
 
     svc = _wired(_NoRoster(_nyax_rows(), summary={"cik": NYAX_CIK}))
-    _, degraded = await svc.get_holders_with_status("NYAX")
-    assert degraded == ["Insider roster"]
+    resp, degraded = await svc.get_holders_with_status("NYAX")
+    assert degraded == []
+    assert "[holders-roster] Insider roster fetch failed for NYAX" in caplog.text
+    by_name = {a.name: a.title for a in resp.recent_activities.insider_activities.activities}
+    # Each activity's title falls back to its OWN row's role (the "officer:" tag stripped).
+    assert by_name["Yair Nechmad"] == "CEO, Co Founder & Chairman", by_name
+    assert by_name["Sagit Manor"] == "CFO", by_name
     await _drain()
-    assert svc.supabase.upserts == []
+    assert len(svc.supabase.upserts) == 1
 
 
 @pytest.mark.asyncio
@@ -829,15 +838,63 @@ async def test_an_unusable_summary_cik_falls_through_to_the_profile():
     assert names == {"Yair Nechmad", "David Ben-avi", "Sagit Manor"}   # the CIK-777 row dropped
 
 
-def test_a_failed_roster_blocks_the_report_caches_and_not_entitled_does_not():
-    out = _out()
-    out.insider_roster = []
-    _settle_pass1_result(out, "insider_roster", EmptyAfterFailure("429"), [], "NYAX")
-    assert out.insider_roster == [] and out.degraded_sections == ["insider_roster:fetch_failed"]
+def test_the_report_no_longer_fetches_the_roster_and_not_entitled_does_not_degrade():
+    """Key Management reads `roster_from_holdings` (2026-10-08): the collector neither fetches
+    FMP's roster nor lets its failure keep the collection out of the shared caches."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(trdc)))
+    called = {n.func.attr for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert "get_insider_roster" not in called
+    fields = {f.name for f in __import__("dataclasses").fields(trdc.CollectedTickerData)}
+    assert "insider_roster" not in fields
+    strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+               and isinstance(n.value, str)}
+    assert "insider_roster:fetch_failed" not in strings
 
     out = _out()
     _settle_pass1_result(out, "insider_trades", FMPNotEntitledException("x"), [], "NYAX")
     assert out.insider_unavailable is False and out.degraded_sections == []
+
+
+def test_an_old_collection_blob_with_the_roster_deserializes_without_it():
+    """Wave-2 R1 re-verified (2026-10-08) that nothing reads the collection's roster any more
+    (report sections, prompts, `ticker_data_cache`, tests), so the field stays REMOVED rather
+    than kept as an empty default. Pinned here: deserializing a blob written before the removal
+    never crashes and never resurrects `insider_roster` onto the dataclass.
+
+    What this does NOT claim: that such a collection should still be SERVED. Its Key
+    Management came from the raw roster (the 984,380 RSU line, not `roster_from_holdings`) and
+    its Revenue Engine has no `reporting_currency`, and `collect()` restores both as stored. A
+    blob is served only while `is_cache_fresh` passes, so `CACHE_SCHEMA_FLOOR` — bumped to the
+    push instant in the commit that ships A4 + R1 — is what retires that content, not this
+    test (last assertion: a row cached before the floor is never fresh)."""
+    import dataclasses
+    from datetime import timedelta
+
+    from app.services.ticker_data_cache import _deserialize, _serialize
+    from app.services.ticker_report_cache import CACHE_SCHEMA_FLOOR, is_cache_fresh
+
+    out = trdc.CollectedTickerData(ticker="NYAX", persona_key="warren_buffett")
+    out.profile = {"companyName": "Nayax", "cik": NYAX_CIK}
+    out.computed = {"current_price": 30.0}
+    blob = _serialize(out)
+    assert blob is not None and "insider_roster" not in blob
+    blob["insider_roster"] = [
+        {"owner": "VENTURO BRIAN", "numberOfShares": 984380, "typeOfOwner": "officer: CSO"},
+        "junk", None,
+    ]
+    back = _deserialize(blob, {f.name for f in dataclasses.fields(trdc.CollectedTickerData)})
+    assert back is not None
+    assert not hasattr(back, "insider_roster")
+    assert "insider_roster" not in vars(back)
+    assert back.degraded_sections == []
+    # The floor, not the deserializer, decides whether an old row is served.
+    assert is_cache_fresh(CACHE_SCHEMA_FLOOR - timedelta(seconds=1),
+                          now=CACHE_SCHEMA_FLOOR + timedelta(minutes=1)) is False
 
 
 # ── the Overview ownership snapshot ─────────────────────────────────────────────────

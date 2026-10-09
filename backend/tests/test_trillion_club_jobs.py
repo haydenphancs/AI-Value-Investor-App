@@ -1277,7 +1277,9 @@ def test_discovery_inserts_unknown_confirmed_symbols_unpublished(caplog):
     assert s["discovery"]["unconfirmed"] == ["DIPPED"]
     warned = [r for r in caplog.records if "trillion club DISCOVERED" in r.getMessage()]
     assert len(warned) == 2 and all("UNPUBLISHED" in r.getMessage() for r in warned)
-    assert s["ok"] is True and fmp.calls["screener"][0]["market_cap_more_than"] == 900_000_000_000
+    # No server-side cap filter (it hides null-server-cap rows); the floor is the rows' own cap.
+    assert s["ok"] is True and "market_cap_more_than" not in fmp.calls["screener"][0]
+    assert fmp.calls["screener"][0]["limit"] == 10_000
     assert fmp.calls["screener"][0]["is_etf"] is False and fmp.calls["screener"][0]["is_fund"] is False
 
 

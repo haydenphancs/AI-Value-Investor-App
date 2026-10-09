@@ -1,6 +1,6 @@
 #!/bin/bash
-# Capture the App Store screenshot set — with labelled SAMPLE market data where a screen shows
-# prices — on the 6.9" simulator. One launch per shot, no taps.
+# Capture the App Store screenshot set — with SAMPLE market data on FICTIONAL companies where a
+# screen shows prices — on the 6.9" simulator. One launch per shot, no taps.
 #
 #   ./frontend/ios/scripts/capture-store-screenshots.sh                  # newest Debug sim build
 #   ./frontend/ios/scripts/capture-store-screenshots.sh <path/to/ios.app>
@@ -9,9 +9,11 @@
 # WHY: the market-data licence permits no public display of prices, % moves or price charts,
 # and the App Store listing is public (.claude/rules/marketing.md §1 "Screenshots"). 1.0 shipped
 # real prices in three of its five screenshots. Every screen that shows those figures is
-# captured in the DEBUG-only StoreScreenshotMode (sample values + a visible "Sample data"
-# label); the others are captured with the mode OFF. See
-# frontend/ios/ios/Core/Utilities/StoreScreenshotMode.swift.
+# captured in the DEBUG-only StoreScreenshotMode: invented values on FICTIONAL companies, each
+# checked against FMP's full stock list — the rule's "or on a fictional ticker" branch, so no
+# "Sample data" label (owner, 2026-10-08). The label is opt-in (CAYDEX_STORE_SHOT_LABEL=1) and
+# REQUIRED again if a real ticker ever returns to the fixtures. The other screens are captured
+# with the mode OFF. See frontend/ios/ios/Core/Utilities/StoreScreenshotMode.swift.
 #
 # NEEDS
 #   • a DEBUG simulator build — Xcode ⌘B or the canonical build in CLAUDE.md. This script never
@@ -65,6 +67,31 @@ if ! find "$APP" -maxdepth 1 -type f \( -name "$EXE" -o -name '*.dylib' \) -exec
   echo "✗ $APP does not contain StoreScreenshotMode (a Release, stale or foreign build) — rebuild Debug" >&2
   exit 1
 fi
+
+# …and the build must be NEWER than the screenshot sources. A Debug build made before a fixture
+# change passes the check above but serves the OLD fixtures — before 2026-10-08 that meant a LIVE
+# Updates feed (an AI brief with real index % moves, headlines naming real people) in the Updates shot.
+# The code lives in the main executable or, in a Debug build, <Exe>.debug.dylib: take the newer.
+BUILT=0
+BUILT_BIN=""
+for bin in "$APP/$EXE" "$APP/$EXE.debug.dylib"; do
+  [ -f "$bin" ] || continue
+  mtime="$(stat -f %m "$bin")"
+  if [ "$mtime" -gt "$BUILT" ]; then BUILT="$mtime"; BUILT_BIN="$bin"; fi
+done
+for src in "$REPO"/frontend/ios/ios/Core/Utilities/StoreScreenshot*.swift; do
+  if [ "$(stat -f %m "$src")" -gt "$BUILT" ]; then
+    echo "✗ $(basename "$src") changed after this build — rebuild Debug first" >&2
+    exit 1
+  fi
+done
+# Any other Swift change after the build only warns: the frames would show the OLD screens.
+# (No `| head` here: under pipefail its SIGPIPE to find would end the whole run.)
+NEWER="$(find "$REPO/frontend/ios/ios" -name '*.swift' -newer "$BUILT_BIN" 2>/dev/null || true)"
+if [ -n "$NEWER" ]; then
+  echo "⚠ $(printf '%s\n' "$NEWER" | wc -l | tr -d ' ') Swift file(s) changed after this build — the frames show the build, not the source:" >&2
+  printf '%s\n' "$NEWER" | sed -n '1,5p' | sed 's/^/    /' >&2
+fi
 echo "▸ app:    $APP ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist") ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")))"
 echo "▸ device: $DEVICE"
 echo "▸ out:    $OUT"
@@ -89,31 +116,41 @@ xcrun simctl status_bar "$DEVICE" override --time "9:41" \
 xcrun simctl install "$DEVICE" "$APP"
 mkdir -p "$OUT"
 
-# shot <file-name> <tab> <sample-mode 1|0>
+# shot <file-name> <tab> <sample-mode 1|0> [app launch arguments…]
 shot() {
   local name="$1" tab="$2" sample="$3"
+  shift 3
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then return 0; fi
   CURRENT_SHOT="$name"
   xcrun simctl terminate "$DEVICE" "$BUNDLE" 2>/dev/null || true
   SIMCTL_CHILD_CAYDEX_STORE_SHOT="$sample" \
   SIMCTL_CHILD_CAYDEX_STORE_SHOT_TAB="$tab" \
   SIMCTL_CHILD_CAYDEX_QUOTE_WEEK=off \
-    xcrun simctl launch "$DEVICE" "$BUNDLE" >/dev/null
+    xcrun simctl launch "$DEVICE" "$BUNDLE" "$@" >/dev/null
   sleep "$SETTLE"
   xcrun simctl io "$DEVICE" screenshot --type=png "$OUT/$name.png" >/dev/null 2>&1
   echo "✓ $name  ($(sips -g pixelWidth -g pixelHeight "$OUT/$name.png" | awk '/pixel/ {printf "%s ", $2}'))"
 }
 
+# The listing shows the screenshots in the order they are uploaded, and the files sort by their
+# number — so the shots follow the app's own tab bar: Home, Updates, Research, Tracking, Wiser
+# (owner, 2026-10-08; `HomeTab`'s case order, pinned by tests/test_ios_store_screenshot_mode_debug_only.py).
 shot 01-home      home     1   # sample market strip, holdings, movers; signals locked
-shot 02-research  research 0   # persona picker — no market data
-shot 03-tracking  tracking 1   # sample watchlist rows (prices, % moves, sparklines)
-shot 04-wiser     wiser    0   # Investor Journey + Money Moves — check article titles
-# NO Updates shot (adversarial review 2026-10-06, HIGH): only its chips are sample — the Market
-# Insights card is a LIVE AI brief seeded with real index % moves, and live headlines can name
-# politicians. Never add it back without canning the whole feed.
+# The Updates shot is safe ONLY because every Updates read is canned (2026-10-08): tabs, the feed
+# (Insights card + headlines) and the News Tone trend — StoreScreenshotFixtures. Its live Insights
+# card is an AI brief seeded with real index % moves and live headlines can name real people
+# (adversarial review 2026-10-06), so never drop one of those fixtures while this shot exists
+# (tests/test_ios_store_screenshot_mode_debug_only.py pins it).
+# The News Tone chart opens on the window last TAPPED on this device (UserDefaults
+# `caydex_updates_trend_window`). The launch argument pins 30D for this one process: the argument
+# domain outranks the stored value and is never written back, so the device keeps its own pick.
+shot 02-updates   updates  1  -caydex_updates_trend_window month   # sample Insights, News Tone 30D, headlines
+shot 03-research  research 0   # persona picker — no market data
+shot 04-tracking  tracking 1   # sample watchlist rows (prices, % moves, sparklines)
+shot 05-wiser     wiser    0   # Investor Journey + Money Moves — check article titles
 #
-# Only the screens above are safe in sample mode: the "Sample data" label also sits over any
-# screen opened by a TAP (a ticker cover shows LIVE prices under it), so never tap in a run.
+# Only the tab roots above are sample. A screen opened by a TAP (a ticker cover) shows LIVE
+# prices, and with the label off nothing on screen marks it — so never tap in a run.
 
 CURRENT_SHOT="(done)"
 echo "Done. Review every frame in $OUT before uploading."

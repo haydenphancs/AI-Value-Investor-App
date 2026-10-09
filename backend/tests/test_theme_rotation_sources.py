@@ -187,8 +187,9 @@ async def test_universe_single_short_page_stops_after_one_call_with_the_exact_fi
     assert counter.calls == 1
     assert len(fmp.screener_calls) == 1
     kw = fmp.screener_calls[0]
+    # No `market_cap_more_than`: FMP hides null-server-cap rows behind it (2026-10-08); the
+    # $300M floor is applied to the rows' own cap (test_screener_null_server_cap_callers.py).
     assert kw == {
-        "market_cap_more_than": 300_000_000,
         "exchange": "NASDAQ,NYSE,AMEX",
         "actively_trading": True,
         "is_fund": False,
@@ -224,10 +225,12 @@ async def test_universe_full_page_then_empty_page_is_complete_not_an_error():
 @pytest.mark.asyncio
 async def test_universe_uppercases_strips_and_dedupes_symbols_across_pages():
     page0 = _screener_rows(SCREENER_PAGE_LIMIT - 2)
-    page0 += [{"symbol": " nvda "}, {"symbol": "Amd"}]
+    page0 += [{"symbol": " nvda ", "marketCap": 4e12}, {"symbol": "Amd", "marketCap": 3e11}]
     # page 1 overlaps page 0 (FMP pages can shift while being walked) and repeats a symbol
     # in a different case.
-    page1 = _screener_rows(10) + [{"symbol": "NVDA"}, {"symbol": "amd"}, {"symbol": "tsm"}]
+    page1 = _screener_rows(10) + [{"symbol": "NVDA", "marketCap": 4e12},
+                                  {"symbol": "amd", "marketCap": 3e11},
+                                  {"symbol": "tsm", "marketCap": 1e12}]
     fmp = FakeFMP(screener_pages=[page0, page1])
     rows = await load_universe(fmp, CallCounter())
     assert "NVDA" in rows and "AMD" in rows and "TSM" in rows
@@ -348,7 +351,7 @@ async def test_universe_through_the_real_client_sends_the_exact_query(monkeypatc
     rows = await load_universe(client, CallCounter())
     assert len(rows) == SCREENER_PAGE_LIMIT + 5
     assert sent[0] == ("company-screener", {
-        "limit": SCREENER_PAGE_LIMIT, "marketCapMoreThan": 300_000_000,
+        "limit": SCREENER_PAGE_LIMIT,
         "exchange": "NASDAQ,NYSE,AMEX", "isActivelyTrading": "true",
         "isFund": "false", "isEtf": "false",
     })

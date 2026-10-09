@@ -29,7 +29,7 @@ import app.api.v1.endpoints.portfolios as pf
 import app.api.v1.endpoints.tracking as tr
 
 _USER = "u-1"
-_PID = "p1"
+_PID = "c0ffee00-0000-4000-8000-000000000001"   # a real UUID: `_get_portfolio_or_404` 404s anything else
 
 
 class _Q:

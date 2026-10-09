@@ -31,10 +31,15 @@ from app.integrations.fmp_entitlements import is_blocked_symbol
 logger = logging.getLogger(__name__)
 
 SCREENER_EXCHANGES = ("NASDAQ", "NYSE", "AMEX")
+# Applied to each row's OWN marketCap in `load_universe`, never sent as `marketCapMoreThan`
+# (2026-10-08): FMP filters on a server-side cap and HIDES every row where that cap is null,
+# whatever cap the row carries — VYLR ($48.6B, Agricultural Inputs), VMRK ($22.5B), SKYD
+# ($10.1B), LYNX ($1.4B, Aerospace & Defense)… could never become a theme candidate
+# (`service._candidate_pool` screens outsiders on this universe).
 SCREENER_MIN_MARKET_CAP = 300_000_000
 SCREENER_PAGE_LIMIT = 10_000              # FMP's hard per-page ceiling
 SCREENER_MAX_PAGES = 5
-MIN_UNIVERSE_ROWS = 2_000                 # ~3,500+ US names clear $300M; far fewer = broken
+MIN_UNIVERSE_ROWS = 2_000                 # 3,565 US names cleared $300M (2026-10-08); far fewer = broken
 MAX_FAILURE_FRACTION = 0.20
 MAX_ETF_FAILURE_FRACTION = 0.5
 HISTORY_LOOKBACK_DAYS = 200               # covers 126 sessions (6 months) with holidays
@@ -75,9 +80,12 @@ class CallCounter:
 async def load_universe(fmp: FMPClient, counter: CallCounter) -> Dict[str, dict]:
     """Every actively-trading US common stock above $300M, keyed by symbol.
 
+    The screener is asked for EVERY cap (6,073 rows, one page, on 2026-10-08) and the $300M
+    floor is read off each row's own `marketCap`: a row with none (missing, zero, NaN) or
+    under the floor is skipped and does not count toward `MIN_UNIVERSE_ROWS`.
+
     Paged until a short page — FMP silently caps a page at 10,000 rows, so a single call
-    can LOOK complete while missing the tail (same sweep shape as
-    `price_service._fetch_universe_pages`). An empty FIRST page is impossible in practice
+    can LOOK complete while missing the tail. An empty FIRST page is impossible in practice
     and is a failure, not "no stocks".
     """
     rows: Dict[str, dict] = {}
@@ -86,8 +94,7 @@ async def load_universe(fmp: FMPClient, counter: CallCounter) -> Dict[str, dict]
         counter.add()
         try:
             batch = await fmp.get_company_screener(
-                market_cap_more_than=SCREENER_MIN_MARKET_CAP, exchange=exchanges,
-                actively_trading=True, is_fund=False, is_etf=False,
+                exchange=exchanges, actively_trading=True, is_fund=False, is_etf=False,
                 limit=SCREENER_PAGE_LIMIT, page=page,
             )
         except Exception as e:
@@ -99,8 +106,12 @@ async def load_universe(fmp: FMPClient, counter: CallCounter) -> Dict[str, dict]
             break
         for row in batch:
             sym = row.get("symbol") if isinstance(row, dict) else None
-            if isinstance(sym, str) and sym.strip():
-                rows[sym.strip().upper()] = row
+            if not (isinstance(sym, str) and sym.strip()):
+                continue
+            cap = _finite(row.get("marketCap"))
+            if cap is None or cap < SCREENER_MIN_MARKET_CAP:
+                continue
+            rows[sym.strip().upper()] = row
         if len(batch) < SCREENER_PAGE_LIMIT:
             break
     else:

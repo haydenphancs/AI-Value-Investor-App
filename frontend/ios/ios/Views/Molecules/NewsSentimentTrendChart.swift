@@ -12,9 +12,9 @@
 //
 //  Honest labelling: these are the headlines Cay AI SCORED for this feed (the feed's recent
 //  window, refreshed through the trading day), not every article published. The card counts
-//  "headlines", never "all news"; the legend row says how far back the scored headlines on
-//  file go ("since Jul 1" from the backend's `tracking_since`, "120+ days" once that reaches
-//  the log's retention edge); and the chart never extrapolates a day it was not given.
+//  "headlines", never "all news"; when the bars cannot fill the window, the legend row says
+//  how far back the scored headlines on file go ("since Jul 1", from the backend's
+//  `tracking_since`); and the chart never extrapolates a day it was not given.
 //
 //  No "Ask" button and no "Headlines Cay AI scored" footer (owner, TestFlight 1.0 (11)): a
 //  question about tone is asked from the Insights card above, whose chat is grounded on every
@@ -242,8 +242,13 @@ struct NewsSentimentTrendChart: View {
         AxisMarks(values: axisDates) { value in
             // The newest 30D tick is today, one day from the axis end: a label starting there
             // ran into the trailing y-axis column and was cut to "S". Anchoring that one label
-            // at its trailing edge keeps it inside the plot. 7D labels are centred in their
-            // day slot (narrow weekday names); 90D drops month ticks near the end instead.
+            // at its trailing edge keeps it inside the plot. 90D drops month ticks near the
+            // end instead.
+            //
+            // 7D ticks sit at each day's NOON (`axisDatesUnsorted`), and `.top` centres the
+            // weekday under its bar. Never `centered: true` there: a centred label sits between
+            // its tick and the NEXT one, today's tick has no next one, and Charts dropped
+            // today's label — the newest bar had no day under it (review 2026-10-08).
             //
             // Greedy collision resolution with today's tick placed FIRST: at large Dynamic
             // Type, on a 375 pt phone or in a locale with longer month names, the trailing
@@ -251,8 +256,8 @@ struct NewsSentimentTrendChart: View {
             // dropped — never today's.
             AxisValueLabel(
                 format: axisFormat,
-                centered: trend.window == .week,
-                anchor: isTrailingTick(value.index, of: value.count) ? .topTrailing : nil,
+                centered: false,
+                anchor: labelAnchor(value.index, of: value.count),
                 collisionResolution: .greedy(
                     priority: value.index == value.count - 1 ? 1 : 0,
                     minimumSpacing: 4
@@ -263,14 +268,19 @@ struct NewsSentimentTrendChart: View {
         }
     }
 
+    private func labelAnchor(_ index: Int, of count: Int) -> UnitPoint? {
+        if trend.window == .week { return .top }
+        return isTrailingTick(index, of: count) ? .topTrailing : nil
+    }
+
     private func isTrailingTick(_ index: Int, of count: Int) -> Bool {
         trend.window == .month && count > 0 && index == count - 1
     }
 
     /// Explicit tick dates, counted back from today so the newest label is always today:
-    /// every day for 7D, weekly for 30D, and each month start for 90D. Returned OLDEST FIRST,
-    /// so `isTrailingTick`'s "last index" is today's tick — built newest-first, the trailing
-    /// anchor landed on the oldest label instead.
+    /// every day for 7D (at noon, the middle of the day's bar), weekly for 30D, and each
+    /// month start for 90D. Returned OLDEST FIRST, so `isTrailingTick`'s "last index" is
+    /// today's tick — built newest-first, the trailing anchor landed on the oldest label instead.
     private var axisDates: [Date] {
         axisDatesUnsorted.sorted()
     }
@@ -283,6 +293,7 @@ struct NewsSentimentTrendChart: View {
         case .week:
             return (0..<7).compactMap { cal.date(byAdding: .day, value: -$0, to: today) }
                 .filter { $0 >= lower }
+                .compactMap { cal.date(bySettingHour: 12, minute: 0, second: 0, of: $0) }
         case .month:
             return stride(from: 0, through: 28, by: 7)
                 .compactMap { cal.date(byAdding: .day, value: -$0, to: today) }
@@ -387,23 +398,22 @@ struct NewsSentimentTrendChart: View {
             .foregroundColor(AppColors.textMuted)
     }
 
-    /// How far back this feed's scored headlines go — a property of the SCOPE, so the same on
-    /// every window:
-    /// - "since Jul 1": the oldest scored day on file (`trackingSince`), which is the day
-    ///   scoring began while the history is younger than the backend log keeps;
-    /// - "120+ days" once it reaches that edge (`historyReachesRetentionEdge`): the sweep has
-    ///   dropped the first days, the date would drift forward daily, and only the bound is true;
-    /// - "filling in 90 days…" while the history is still being built.
-    /// nil when the backend sent no date — never a date guessed from the bars, which on 7D
-    /// would claim a week-old start for a feed scored since July.
+    /// Shown ONLY when the chart is incomplete (owner, 2026-10-08: "120+ days" beside the
+    /// 7D/30D/90D picker read like the chart's period):
+    /// - "filling in 90 days…" while the history is still being built;
+    /// - "since Sep 26" when the feed has FEWER scored days than the selected window
+    ///   (`trackedDays() < window.days`), so the bars cannot fill it. The date is the oldest
+    ///   scored day on file (`trackingSince`), and a history shorter than any window is younger
+    ///   than the backend's retention edge, so it is the day scoring began;
+    /// - nil otherwise: the window is fully covered and there is nothing to explain.
+    /// Never a date guessed from the bars, which on 7D would claim a week-old start for a feed
+    /// scored since July.
     private var coverageText: String? {
         if trend.isBuildingHistory && !trend.days.isEmpty {
             return "filling in 90 days…"
         }
         guard let since = trend.trackingSince else { return nil }
-        if trend.historyReachesRetentionEdge() {
-            return "\(SentimentTrend.retentionDays)+ days"
-        }
+        guard trend.trackedDays() < trend.window.days else { return nil }
         return "since \(Self.shortDate(since))"
     }
 

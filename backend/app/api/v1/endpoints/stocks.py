@@ -82,7 +82,7 @@ from app.dependencies import (
     MarketFanoutRateLimit,
 )
 from app.services.ticker_data_cache import warm_ticker_collection
-from app.services.price_service import price_source
+from app.services.price_service import price_source, profile_change_is_current
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +564,13 @@ async def get_stock_details(ticker: str):
 
         if not profile:
             raise HTTPException(status_code=404, detail=f"Stock {ticker} not found")
+
+        # The rule every quote follows (`price_service.profile_change_is_current`): an
+        # inactive listing's change is a PAST session's move. This route is the detail
+        # screen's fallback when /overview fails, so it must not bring the stale move back.
+        # None decodes as nil and the header shows no change.
+        if not profile_change_is_current(profile):
+            profile = {**profile, "change": None, "changePercentage": None}
 
         response = normalize_fmp_response(profile)
 

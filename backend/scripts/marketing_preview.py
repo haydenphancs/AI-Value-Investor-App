@@ -116,8 +116,9 @@ _SPEECH_WORDS_PER_SECOND = 2.23
 _LINE_PAUSE_SECONDS = 0.28
 _DISCLAIMER_CARD_SECONDS = 4.0
 _STUDY_OPENER_RE = re.compile(r"^\W{0,5}(?:understand|learn|discover|master|explore|find)\b", re.IGNORECASE)
-_YES_NO_RE = re.compile(r"^\W{0,5}(?:(?:is|are|was|were|can|could|do|does|did|will|would|should|has|have|had)"
-                        r"(?:n['\u2019]t)?|won['\u2019]t)\b[^?]{0,200}\?", re.IGNORECASE)
+#: An auxiliary verb, plain or with a contracted "not" ("is", "isn't", "won't").
+_AUX = r"(?:(?:is|are|was|were|can|could|do|does|did|will|would|should|has|have|had)(?:n['\u2019]t)?|won['\u2019]t)"
+_YES_NO_RE = re.compile(r"^\W{0,5}" + _AUX + r"\b[^?]{0,200}\?", re.IGNORECASE)
 #: One leading label ("Apple's Services: …", "Myth: …") — the counters read what follows it too
 #: (review 2026-10-07: "Apple's Services: a hidden problem for investors?" was counted as no yes/no).
 _LABEL_RE = re.compile(r"^[^?:]{1,60}:\s*")
@@ -126,12 +127,16 @@ _WH_WORD_RE = re.compile(r"\b(?:how|why|what|who|whom|whose|which|when|where)\b"
 #: A label that opens on a wh-word is the question's own stem ("What matters more: subscribers or
 #: profit?" asks what), never a label to read past.
 _WH_OPENER_RE = re.compile(r"^\W{0,5}(?:how|why|what|who|whom|whose|which|when|where)\b", re.IGNORECASE)
-#: A yes/no question after a subordinate clause: a comma clause that opens on an auxiliary and runs to
-#: the "?" ("When Netflix raised prices, did subscribers leave?") — never after a wh-word that a comma
-#: follows, which opens a wh-question with an insert ("Why, after years of growth, did Netflix stall?").
-_WH_INSERT_RE = re.compile(r"^\W{0,5}(?:how|why|what|who|whom|whose|which|when|where)\s*,", re.IGNORECASE)
-_AUX_CLAUSE_RE = re.compile(r",\s+(?:and\s+|but\s+|so\s+)?(?:is|are|was|were|can|could|do|does|did|will|would|"
-                            r"should|has|have|had)\b[^,?]*\?", re.IGNORECASE)
+#: A yes/no question after a subordinate clause: a comma clause that opens on an auxiliary, plain or
+#: contracted, and runs to the "?" ("When Netflix raised prices, did subscribers leave?", "Costco knows
+#: why it wins, doesn't it?").
+_AUX_CLAUSE_RE = re.compile(r",\s+(?:and\s+|but\s+|so\s+)?" + _AUX + r"\b[^,?]*\?", re.IGNORECASE)
+#: A DIRECT wh-question — its wh-word followed by a comma or an auxiliary ("Why, after years of growth,
+#: did…", "Why does Costco, a warehouse club, have…") — is yes/no only through a comma clause that a
+#: conjunction leads into a second question ("What is a moat, and does Costco have one?").
+_DIRECT_WH_RE = re.compile(r"^\W{0,5}(?:(?:so|and|but)\s+)?(?:how|why|what|who|whom|whose|which|when|where)"
+                           r"\s*(?:,|" + _AUX + r"\b)", re.IGNORECASE)
+_CONJ_AUX_CLAUSE_RE = re.compile(r",\s+(?:and|but|so)\s+" + _AUX + r"\b[^,?]*\?", re.IGNORECASE)
 _WHO_WINS_RE = re.compile(r"\bwho\b[^?]{0,80}\b(?:win|wins|won|winning)\b", re.IGNORECASE)
 #: A digit or a number word — "no one" / "no-one" is nobody, not a number (review 2026-10-07; the hook's
 #: whitespace is collapsed first, `_package_shape`).
@@ -159,21 +164,31 @@ def _unlabelled(text: str) -> str:
     return _LABEL_RE.sub("", text or "", count=1)
 
 
+def _first_question(view: str) -> str:
+    """The first sentence of `view` when it asks something, else "" — an auxiliary opener counts only in
+    the sentence that asks ("Don't panic. What drives prices?" asks what)."""
+    parts = compliance.sentences(view)
+    return parts[0] if parts and "?" in parts[0] else ""
+
+
 def is_yes_no_question(text: str) -> bool:
-    """A yes/no question, as the prompt bans it from hooks and titles. One that opens on an auxiliary
-    (`_YES_NO_RE`, with or without one leading label) is one. A label that opens on a wh-word is the
-    question's own stem ("What matters more: subscribers or profit?" asks what). Otherwise EVERY
-    question is read with only its own sentence (`compliance.sentences`, which keeps "Mr." and "vs."
-    whole): it is yes/no when it opens on an auxiliary ("…when prices rose. Can it recover?"), when a
-    comma clause opening on one runs to its "?" ("When Netflix raised prices, did subscribers
-    leave?"), or when it holds no wh-word at all ("Profitable yet broke?", "Apple's Services: a hidden
-    problem for investors?"). A question that asks how, why, what, who, which, when or where ("Software
-    or steel: who wins the car race?", 'Beyond the obvious: ask "and then what?"') is not one; a
-    verbless one holding a subordinate "when" is a known miss."""
+    """A yes/no question, as the prompt bans it from hooks and titles. A first question that opens on an
+    auxiliary, plain or contracted ("Isn't…"), is one — with or without one leading label. A label that
+    opens on a wh-word is the question's own stem ("What matters more: subscribers or profit?" asks
+    what). Otherwise EVERY question is read with only its own sentence (`compliance.sentences`, which
+    keeps "Mr." and "vs." whole): it is yes/no when it opens on an auxiliary ("…when prices rose. Can
+    it recover?"), when a comma clause opening on one runs to its "?" ("When Netflix raised prices, did
+    subscribers leave?" — after a DIRECT wh-question only a clause a conjunction leads: "What is a moat,
+    and does Costco have one?"), or when it holds no wh-word at all ("Profitable yet broke?", "Apple's
+    Services: a hidden problem for investors?"). A question that asks how, why, what, who, which, when
+    or where is not one ("Software or steel: who wins the car race?", "Why does Costco, a warehouse
+    club, have such loyal members?"). Known misses: a verbless question holding a subordinate "when" is
+    not counted; one whose SUBJECT opens on a wh-word and carries an insert ("Which company, Apple or
+    Microsoft, has the wider moat?") is."""
     text = " ".join((text or "").split())
     rest = _unlabelled(text)
     label = text[: len(text) - len(rest)]
-    if _YES_NO_RE.search(text) or _YES_NO_RE.search(rest):
+    if _YES_NO_RE.search(_first_question(text)) or _YES_NO_RE.search(_first_question(rest)):
         return True
     if label and _WH_OPENER_RE.search(label):
         return False
@@ -181,7 +196,8 @@ def is_yes_no_question(text: str) -> bool:
         if "?" not in sentence:
             continue
         asked = sentence[: sentence.rindex("?") + 1]
-        if _YES_NO_RE.search(asked) or (_AUX_CLAUSE_RE.search(asked) and not _WH_INSERT_RE.search(asked)):
+        clause = _CONJ_AUX_CLAUSE_RE if _DIRECT_WH_RE.search(asked) else _AUX_CLAUSE_RE
+        if _YES_NO_RE.search(asked) or clause.search(asked):
             return True
         if re.search(r"[A-Za-z]", asked) and _WH_WORD_RE.search(asked) is None:
             return True

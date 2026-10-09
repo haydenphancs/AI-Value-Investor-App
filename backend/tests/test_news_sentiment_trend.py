@@ -1051,7 +1051,7 @@ def test_the_retention_edge_is_the_sweeps_own_cutoff(days_ago, edge):
         assert phrase == (f"; oldest scored headline on file: {trend._fmt_day(since)} "
                           "(the log keeps 120 days)")
     assert trend.since_phrase(None, TODAY) == ""
-    assert trend.RETENTION_DAYS == 120, "the phrases above (and the app's '120+ days') say 120"
+    assert trend.RETENTION_DAYS == 120, "the phrases above say 120 (the app's card no longer names it: owner, 2026-10-08)"
 
 
 @pytest.mark.asyncio

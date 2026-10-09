@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import OSLog
 
 @MainActor
 class TrackingViewModel: ObservableObject {
@@ -15,7 +16,12 @@ class TrackingViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let apiClient: APIClient
     let portfolioStore: PortfolioStore
+    /// This account's last live Holdings answer on THIS device (`TrackingSnapshot.swift`).
+    /// Assigned once, in `init`, from the shared instance — memory-only in DEBUG screenshot mode.
+    private let snapshotStore: TrackingSnapshotStore
     private var priceRefreshTask: Task<Void, Never>?
+
+    nonisolated private static let log = Logger(subsystem: "com.phan.caydex", category: "tracking")
 
     // MARK: - Published Properties
 
@@ -63,6 +69,80 @@ class TrackingViewModel: ObservableObject {
     /// True only when the insights call failed for connectivity reasons — used
     /// to decide whether to fall back to the on-device estimate.
     @Published var portfolioInsightsLoadFailed: Bool = false
+
+    /// Where the Portfolio Insights answer stands. Three honest outcomes plus "not asked yet":
+    /// unknown is NOT "too few holdings" (a known server `null`) and neither is a failure — the
+    /// card used to show the first-run "Enter shares… Set up" call to action for all three.
+    enum PortfolioInsightsPhase: Equatable {
+        /// Nothing asked for this identity yet. The INITIAL value: a never-activated hidden tab
+        /// must mount no spinner.
+        case idle
+        /// A request for the current token is on the wire — set when one starts, and always
+        /// moved on by its own completion (published, or dropped back to `.idle`).
+        case resolving
+        /// The server answered for `portfolioInsightsPortfolioId`: a score, or nil.
+        case known
+        /// The request failed (see `portfolioInsightsLoadFailed` for the network case).
+        case failed
+    }
+    @Published private(set) var portfolioInsightsPhase: PortfolioInsightsPhase = .idle {
+        didSet {
+            // The carried snapshot answer stands in ONLY while a request is on the wire.
+            if portfolioInsightsPhase != .resolving { insightsCarriedFromSnapshot = nil }
+        }
+    }
+    /// The group `portfolioInsights` / the phase describe. A score is only ever shown for the
+    /// group it was computed for.
+    private var portfolioInsightsPortfolioId: String?
+    /// The snapshot's kept insights answer, carried across the snapshot → live swap while the
+    /// live request for the SAME group is still on the wire. The rows usually go live a moment
+    /// before the score: without this the card collapsed to its "Loading…" spinner and then
+    /// re-expanded — two height changes below the rows on every such open. It is the rule a
+    /// pull-to-refresh of one group already follows (`markPortfolioInsightsResolving`): the
+    /// last answer stays up until the new one lands. Dropped once the phase leaves `.resolving`.
+    private var insightsCarriedFromSnapshot: (portfolioId: String, score: DiversificationScore?)?
+    /// Bumped by every insights request and by an identity change; an answer whose token is no
+    /// longer current is dropped (a newer request, or another identity, owns the card now).
+    private var insightsRequestToken = 0
+
+    // MARK: Device snapshot (display-only)
+
+    /// The last live Holdings answer read back from this device for this account, painted
+    /// labelled "Updated <time>" until THIS process's own live answer lands.
+    ///
+    /// ⚠️ DISPLAY-ONLY. Never written into `PortfolioStore` (its whole-list PUTs would delete
+    /// what the user added since), never `trackedAssets`, never the alerts or the search star,
+    /// and it never latches `hasLoadedOnce`. Rows, group name and score come from it
+    /// all-or-nothing (`presentedSnapshot`), so live prices never sit beside snapshot
+    /// membership.
+    @Published private(set) var snapshotSeed: TrackingSnapshot? {
+        didSet {
+            if snapshotSeed == nil {
+                snapshotSeedSavedAt = nil
+                seededEpoch = nil
+                seedShownAt = nil
+            }
+        }
+    }
+    /// When the seeded snapshot was saved (set with the seed, cleared with it).
+    private var snapshotSeedSavedAt: Date?
+    /// The store's epoch when the seed was taken. A seed whose store has since been re-bound,
+    /// cleared or purged belongs to a binding that no longer holds — dropped at the next prepare.
+    private var seededEpoch: Int?
+    /// When the seed reached the screen, for the snapshot → live log line.
+    private var seedShownAt: Date?
+
+    /// THIS identity's feed has answered live in this process (the 30 s poll keeps it true;
+    /// only a refusal or an identity change clears it).
+    @Published private(set) var hasLiveFeed = false
+    /// The first load got past its phase 1 for this identity — before that, an empty list says
+    /// "not loaded yet", never "No tickers yet".
+    @Published private(set) var hasAttemptedLoad = false
+    /// The exact bytes of the last live `GET /tracking/assets`, for the snapshot save.
+    private var lastLiveFeedBody: Data?
+    /// Bumped by every identity change. A load (or a feed answer) that started under the
+    /// previous identity publishes nothing and latches nothing.
+    private var loadGeneration = 0
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
@@ -189,6 +269,9 @@ class TrackingViewModel: ObservableObject {
         // crosses the isolation boundary at the call site. Resolve here
         // instead — this initializer is itself @MainActor.
         self.portfolioStore = portfolioStore ?? PortfolioStore.shared
+        // The one reference to the shared snapshot store. Nothing is read here: the file is
+        // read lazily by `prepareSnapshot()` from the tab's `.task`, after Home has painted.
+        self.snapshotStore = TrackingSnapshotStore.shared
         self.isInsightsEnabled = UserDefaults.standard.bool(forKey: Self.insightsEnabledKey)
 
         // Restore persisted sort preferences. Sort lives on the VM so it
@@ -265,6 +348,16 @@ class TrackingViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
+        // A server-confirmed portfolio write (here, in a sheet, or the search star) makes the
+        // saved Holdings snapshot describe something the user no longer has — another group's
+        // rows and score, a removed ticker. Drop it; the next live load saves a fresh one.
+        // Synchronous (no `receive(on:)`): the purge's epoch bump must land before any save
+        // that could still be pending in this run-loop turn.
+        self.portfolioStore.$confirmedMutationCount
+            .dropFirst()
+            .sink { [weak self] _ in self?.discardSnapshotAfterConfirmedEdit() }
+            .store(in: &cancellables)
+
         // Deliberately NO load here — same rule as `UpdatesViewModel.init`.
         //
         // `ContentView` opacity-mounts all five tabs in one ZStack, so this initializer runs
@@ -291,14 +384,111 @@ class TrackingViewModel: ObservableObject {
             // process, silently. Restarting here is safe — the timer cancels any prior
             // task before arming a new one.
             startPriceRefreshTimer()
+            // A first load that FAILED (feed or /portfolios) is retried once per activation —
+            // never from the timer, never while the session is unarmed.
+            retryFailedLoadIfNeeded()
             return
         }
+        let generation = loadGeneration
         await loadData()
-        // Latch only on a genuine completion. `.task(id:)` cancels its body when the tab
-        // switches away, and latching there would leave the tab permanently empty.
-        guard !Task.isCancelled else { return }
+        // Latch on the LOAD finishing for this identity, not on the awaiting `.task` surviving.
+        // The load runs in a ViewModel-owned task that a tab-away does not cancel, so the old
+        // `Task.isCancelled` latch threw a COMPLETED load away and the next activation re-ran
+        // all five requests. An identity change in between owns the latch instead.
+        guard generation == loadGeneration else { return }
         hasLoadedOnce = true
+        // …but the poll is never armed behind a tab that is no longer on screen: the `.task`
+        // teardown has already stopped it, and nothing would stop it again.
+        guard !Task.isCancelled else { return }
         startPriceRefreshTimer()
+    }
+
+    /// Re-run a first load that failed, on a later activation. Keyed on what the screen is
+    /// MISSING: a feed that is live but had one failed 30 s poll is the poll's job, not a reason
+    /// to re-issue five requests.
+    private func retryFailedLoadIfNeeded() {
+        guard !hasLiveHoldings else { return }
+        // A refusal is deterministic until the session heals (the root's auth-status heal
+        // reloads then), and a load already running will settle the question itself.
+        guard !assetsRequiresSignIn, !assetsIsReconnecting, loadTask == nil else { return }
+        let feedFailed = assetsErrorMessage != nil
+        let portfoliosFailed = portfolioStore.loadErrorMessage != nil && !portfolioStore.hasLiveData
+        guard feedFailed || portfoliosFailed else { return }
+        Self.log.info("tracking: retrying a failed first load on activation")
+        Task { [weak self] in await self?.loadData() }
+    }
+
+    // MARK: - Device snapshot
+
+    /// Read this account's saved Holdings from disk (once per binding) and, if nothing live is
+    /// on screen yet, show it. Disk only — never a request — so the hidden tab may run it.
+    /// Called from both branches of the tab's `.task(id: isActiveTab)` and from
+    /// `handleIdentityChange` (after its clears, above its active-tab gate).
+    func prepareSnapshot() async {
+        expireSnapshotIfStale()
+        await snapshotStore.prepare(apiClient: apiClient)
+        dropSeedIfEpochMoved()
+        seedFromSnapshot()
+    }
+
+    /// Show the saved snapshot — display state ONLY. The precondition is the first statement:
+    /// nothing live for this identity yet, not gated, and the snapshot is about the group this
+    /// device has active (another group's rows under this group's header would be false).
+    private func seedFromSnapshot() {
+        guard snapshotSeed == nil, !hasLiveHoldings, trackedAssets.isEmpty,
+              !assetsRequiresSignIn, !assetsIsReconnecting,
+              let snapshot = snapshotStore.snapshotForDisplay(),
+              snapshot.payload.activePortfolioId == portfolioStore.activePortfolioId else { return }
+        snapshotSeedSavedAt = snapshot.savedAt
+        seededEpoch = snapshotStore.epoch
+        seedShownAt = Date()
+        snapshotSeed = snapshot.payload
+        let age: TimeInterval = Date().timeIntervalSince(snapshot.savedAt)
+        let ageSeconds: Int = age.isFinite ? Int(max(0, min(age, 31_536_000))) : 0
+        let rowCount: Int = snapshot.payload.holdingsRows.count
+        Self.log.info("tracking: showing the saved snapshot — \(ageSeconds, privacy: .public) s old, \(rowCount, privacy: .public) holdings")
+    }
+
+    /// A seed taken under a store binding that has since moved (another account bound, the
+    /// session ended, a purge) is not this binding's answer any more.
+    private func dropSeedIfEpochMoved() {
+        guard snapshotSeed != nil, let seeded = seededEpoch, seeded != snapshotStore.epoch else { return }
+        snapshotSeed = nil
+        Self.log.info("tracking: dropped a snapshot seed from a previous store binding")
+    }
+
+    /// Drop an on-screen snapshot that aged past the 96 h display window (the app sat in the
+    /// background, or every live load since launch failed). Live data is never touched.
+    func expireSnapshotIfStale(now: Date = Date()) {
+        guard snapshotSeed != nil, let savedAt = snapshotSeedSavedAt,
+              !AccountSnapshotPolicy.isDisplayable(savedAt: savedAt, now: now) else { return }
+        snapshotSeed = nil
+        Self.log.info("tracking: the on-screen snapshot aged out of its display window")
+    }
+
+    /// A server-confirmed portfolio write: the saved file AND the seed on screen describe what
+    /// the user no longer has. The seed goes too — it can be on screen while the write lands
+    /// (feed failed, `/portfolios` live, so the edit entry points are open), and a removed
+    /// ticker left in Holdings beside the "Updated <time>" label reads as a failed removal. The
+    /// screen falls back to the live list (or the feed's own error with its Retry).
+    private func discardSnapshotAfterConfirmedEdit() {
+        snapshotStore.purgeCache()
+        // The snapshot's score, carried across the swap, was computed for the pre-edit group.
+        insightsCarriedFromSnapshot = nil
+        guard snapshotSeed != nil else { return }
+        snapshotSeed = nil
+        Self.log.info("tracking: a confirmed portfolio edit dropped the on-screen snapshot")
+    }
+
+    /// A removal the server confirmed ELSEWHERE (a detail screen, Updates › Manage Assets): the
+    /// saved file still lists the ticker, so it goes — the next cold launch must not paint it
+    /// back (the next live load saves a fresh one). The seed on screen was patched by the
+    /// caller and stays: this purge is the one epoch move it is excused from, and only when
+    /// the seed was current for the binding just before it.
+    private func purgeSnapshotAfterRemovalElsewhere() {
+        let seedWasCurrent: Bool = snapshotSeed != nil && seededEpoch == snapshotStore.epoch
+        snapshotStore.purgeCache()
+        if seedWasCurrent { seededEpoch = snapshotStore.epoch }
     }
 
     deinit {
@@ -309,21 +499,84 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Computed Properties
 
-    /// Tickers in the active portfolio, uppercased Set for O(1) membership.
+    /// Tickers in the LIVE active portfolio, uppercased Set for O(1) membership. Alerts read
+    /// this and stay live-only: a snapshot never scopes them.
     private var activeTickerSet: Set<String> {
         Set(portfolioStore.activePortfolio?.tickers.map { $0.uppercased() } ?? [])
     }
 
-    /// Active portfolio's tickers in their stored order — used for `.dateAdded`
-    /// sort, which now means "order in the portfolio" (the portfolio is the
-    /// closest analogue to the old "added at" concept).
-    private var activeTickerOrder: [String] {
-        (portfolioStore.activePortfolio?.tickers ?? []).map { $0.uppercased() }
+    // MARK: Live or snapshot — all or nothing
+
+    /// Both halves of THIS identity's Holdings answered live: the feed and `/portfolios`.
+    var hasLiveHoldings: Bool { hasLiveFeed && portfolioStore.hasLiveData }
+
+    /// The saved snapshot, when it is what the screen should draw: nothing live yet, not gated,
+    /// inside the display window, and about the group this device has active. A group switch
+    /// (or a live `/portfolios` naming another active group) hides it at once.
+    var presentedSnapshot: TrackingSnapshot? {
+        guard let seed = snapshotSeed, let savedAt = snapshotSeedSavedAt,
+              !hasLiveHoldings, !assetsRequiresSignIn, !assetsIsReconnecting,
+              seed.activePortfolioId == portfolioStore.activePortfolioId,
+              AccountSnapshotPolicy.isDisplayable(savedAt: savedAt, now: Date()) else { return nil }
+        return seed
+    }
+
+    var isShowingSnapshot: Bool { presentedSnapshot != nil }
+
+    /// When the presented snapshot was saved; nil whenever live data (or nothing) is shown.
+    var snapshotSavedAt: Date? { presentedSnapshot == nil ? nil : snapshotSeedSavedAt }
+
+    /// "Updated 4:02 PM" / "Updated Sep 28, 4:02 PM" — the one shared wording source.
+    var snapshotUpdatedLabel: String? {
+        guard let savedAt = snapshotSavedAt else { return nil }
+        return AccountSnapshotPolicy.updatedLabel(savedAt: savedAt)
+    }
+
+    /// The group the screen describes: the snapshot's while it is presented, else the live one.
+    var presentedPortfolio: Portfolio? {
+        if let seed = presentedSnapshot { return seed.activePortfolio }
+        return portfolioStore.activePortfolio
+    }
+
+    /// Group and holdings edits need a LIVE `/portfolios` list (every write is built from it).
+    var canEditPortfolio: Bool { portfolioStore.hasLiveData }
+
+    /// Row actions (swipe / long-press remove) need live rows too: a snapshot row's membership
+    /// is not the store's.
+    var canEditHoldings: Bool { portfolioStore.hasLiveData && !isShowingSnapshot }
+
+    /// The Holdings failure to show: the feed's, or — with no live list at all — `/portfolios`'.
+    var holdingsErrorMessage: String? {
+        if let feedError = assetsErrorMessage { return feedError }
+        return portfolioStore.hasLiveData ? nil : portfolioStore.loadErrorMessage
+    }
+
+    /// A load (or pull-to-refresh) is on the wire for the Holdings list.
+    var isRefreshingHoldings: Bool { isLoading || isRefreshing || portfolioStore.isLoading }
+
+    /// The snapshot is on screen and the refresh behind it has finished without replacing it.
+    var snapshotRefreshFailed: Bool {
+        isShowingSnapshot && !isRefreshingHoldings && holdingsErrorMessage != nil
+    }
+
+    /// The copy a blocked edit reports (auth.md §6: nothing is ever silent).
+    static let portfolioStillLoadingMessage = "Your portfolio is still loading — try again in a moment."
+
+    private func reportPortfolioStillLoading(action: String) {
+        AppActions.shared.reportMutationFailure(
+            APIError.unknown(message: Self.portfolioStillLoadingMessage), action: action
+        )
     }
 
     var filteredAssets: [TrackedAsset] {
-        let active = activeTickerSet
-        var assets = trackedAssets.filter { active.contains($0.ticker.uppercased()) }
+        let seed: TrackingSnapshot? = presentedSnapshot
+        let portfolio: Portfolio? = seed != nil ? seed?.activePortfolio : portfolioStore.activePortfolio
+        // The group's tickers in their stored order — `.dateAdded` means "order in the
+        // portfolio", the closest analogue to the old "added at" concept.
+        let order: [String] = (portfolio?.tickers ?? []).map { $0.uppercased() }
+        let active = Set(order)
+        let source: [TrackedAsset] = seed?.assets ?? trackedAssets
+        var assets = source.filter { active.contains($0.ticker.uppercased()) }
 
         // Apply search filter
         if !searchText.isEmpty {
@@ -358,8 +611,7 @@ class TrackingViewModel: ObservableObject {
                 }
             }
         case .dateAdded:
-            // "Date added" now means position in the active portfolio.
-            let order = activeTickerOrder
+            // "Date added" now means position in the active portfolio (`order` above).
             // first-wins rather than `uniqueKeysWithValues:`, which TRAPS on a duplicate
             // key. A repeated ticker in `order` would crash the sort; the earliest
             // position is the right one to keep.
@@ -544,7 +796,9 @@ class TrackingViewModel: ObservableObject {
     /// portfolio or it has no tickers — the score itself is also nil in
     /// those cases, so the caption simply hides with the card.
     var portfolioInsightsCoverageNote: String? {
-        guard let active = portfolioStore.activePortfolio,
+        // The group the screen describes — the snapshot's while it is presented, so the
+        // caption counts the same group the (snapshot's) score was computed for.
+        guard let active = presentedPortfolio,
               !active.items.isEmpty else { return nil }
         // Prefer what was SCORED. The client-side `isHolding` count includes a shares-only
         // row the server could not price (stored value 0 → dropped before weighting), so
@@ -567,7 +821,7 @@ class TrackingViewModel: ObservableObject {
     var portfolioInsightsHint: String? {
         guard let score = displayedDiversificationScore,
               let scored = score.holdingsCount,
-              let active = portfolioStore.activePortfolio else { return nil }
+              let active = presentedPortfolio else { return nil }
         // Same clamp as the coverage note: the scored count is the last server answer.
         return DiversificationHint.make(
             scoredHoldings: min(scored, active.items.count),
@@ -582,7 +836,7 @@ class TrackingViewModel: ObservableObject {
     /// `DiversificationThresholds.minimumHoldings`, the score is nil and we want
     /// to tell them why instead of showing the blank first-run empty state.
     var enteredHoldingsCount: Int {
-        portfolioStore.activePortfolio?.items.filter { $0.isHolding }.count ?? 0
+        presentedPortfolio?.items.filter { $0.isHolding }.count ?? 0
     }
 
     var filteredWhaleActivities: [WhaleActivity] {
@@ -621,15 +875,32 @@ class TrackingViewModel: ObservableObject {
             // instantly without ever loading. That is a silently skipped refresh —
             // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
-            self.loadTask = nil
+            //
+            // Not when cancelled: `handleIdentityChange` cancels this task and clears the slot
+            // itself, and the next identity's load may already be registered there.
+            if !Task.isCancelled { self.loadTask = nil }
         }
         loadTask = task
         await task.value
     }
 
     private func performLoad() async {
+        let generation = loadGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer { if generation == loadGeneration { isLoading = false } }
+
+        // Captured BEFORE the first request (an `async let` starts its request): a purge after a
+        // confirmed edit, a re-bind or a session end while this load is in flight voids the save.
+        let snapshotEpoch = snapshotStore.epoch
+
+        // INSIGHTS start beside phase 1, for the group this device last had active (the
+        // UserDefaults hint) — and are never awaited before the gate below closes. A stale hint
+        // is fenced by request token and group id, and refetched for the live group.
+        insightsRequestToken &+= 1
+        let earlyInsightsToken = insightsRequestToken
+        let hintedPortfolioId = portfolioStore.activePortfolioId
+        markPortfolioInsightsResolving(for: hintedPortfolioId)
+        async let earlyInsights: InsightsFetch = fetchPortfolioInsights(for: hintedPortfolioId)
 
         // PHASE 1 — only what the Assets tab actually draws.
         //
@@ -639,14 +910,26 @@ class TrackingViewModel: ObservableObject {
         // against production: feed 0.21s, portfolios 0.42s, whales 0.13s + 0.10s, then a
         // SEQUENTIAL insights hop on top — ~0.6–1.0s of gate for ~0.4s of needed data.
         async let feedTask: Bool = loadTrackingFeed()
-        async let portfoliosTask: () = portfolioStore.loadPortfolios()
+        async let portfoliosTask: Bool = portfolioStore.loadPortfolios()
 
-        let (feedSucceeded, _) = await (feedTask, portfoliosTask)
+        let (feedSucceeded, portfoliosSucceeded) = await (feedTask, portfoliosTask)
+        // BOTH halves live, for THIS identity. Anything less writes nothing back and saves
+        // nothing: a purge from a list that is not live deletes what the user added since.
+        let bothLive = feedSucceeded && portfoliosSucceeded && generation == loadGeneration
+
+        // The snapshot's inputs, captured NOW — every one from THIS load, before the purge or any
+        // other suspension lets a poll, a swipe or a reconcile move them.
+        let capturedAt = Date()
+        let capturedFeedBody = lastLiveFeedBody
+        let capturedPortfoliosBody = portfolioStore.lastLiveBody
+        let capturedActiveId = portfolioStore.activePortfolioId
+        let capturedAssets = trackedAssets
+        let capturedPortfolios = portfolioStore.portfolios
 
         // Drop tickers from any portfolio that no longer exist on the master
-        // watchlist (e.g. removed on another device). Only purge when the
-        // feed call actually succeeded — otherwise we'd wipe real tickers
-        // off portfolios on a transient network failure.
+        // watchlist (e.g. removed on another device). Only when BOTH halves of this load
+        // succeeded live — otherwise we'd wipe real tickers off portfolios on a transient
+        // network failure, or rewrite membership the server never sent this session.
         //
         // The allow-set is unioned with anything the user just added: the feed is
         // cached server-side for 30s, so a refresh fired immediately after an add
@@ -654,14 +937,20 @@ class TrackingViewModel: ObservableObject {
         // like an orphan and be deleted again — the add silently undoing itself.
         // (The backend now invalidates that cache on write too; this is the
         // client-side belt to that braces.) `purgeTickers` additionally refuses an
-        // empty allow-set outright — see PortfolioStore.
-        if feedSucceeded {
+        // empty allow-set and a store with no live answer outright — see PortfolioStore.
+        var purged = false
+        if bothLive {
             var allowed = Set(trackedAssets.map(\.ticker))
             for pending in recentlyAddedTickers.values {
                 allowed.formUnion(pending)
             }
-            await portfolioStore.purgeTickers(notIn: allowed)
+            purged = await portfolioStore.purgeTickers(notIn: allowed)
         }
+
+        // A load that left under the previous identity publishes nothing more.
+        guard generation == loadGeneration else { return }
+        if bothLive { replaceSnapshotWithLiveHoldings() }
+        hasAttemptedLoad = true
 
         // The Assets tab is renderable from here. Closing the gate now is the whole point:
         // everything below is drawn by other surfaces and must not hold this one.
@@ -675,49 +964,262 @@ class TrackingViewModel: ObservableObject {
         // Not detached: `loadIfNeeded()` latches `hasLoadedOnce` on this function returning,
         // and `refresh()` drives pull-to-refresh's spinner from it. Fire-and-forget here would
         // latch "loaded" before the data existed and end the refresh gesture early.
-        //
-        // Insights is now concurrent with the whales rather than queued behind them — it only
-        // ever needed `portfolioStore.activePortfolioId`, which the awaited portfolios call
-        // above has already set. That removes a whole round trip from the tail.
         async let whalesTask: () = loadWhaleData()
-        async let insightsTask: () = loadPortfolioInsights()
-        _ = await (whalesTask, insightsTask)
+
+        // The early insights answer counts only for the group that is active NOW; a hint that
+        // named another group (or a purge that changed membership) refetches for the live one.
+        let early = await earlyInsights
+        var settled: InsightsFetch? = publishPortfolioInsights(early, token: earlyInsightsToken) ? early : nil
+        if purged || (settled == nil && earlyInsightsToken == insightsRequestToken) {
+            settled = await requestPortfolioInsights()
+        }
+
+        // ONE save, after a LIVE answer from both halves of this load, never from a failure
+        // path and never from the poll. A purge that wrote means the bodies are already stale.
+        if bothLive, !purged, generation == loadGeneration,
+           let feedBody = capturedFeedBody, let portfoliosBody = capturedPortfoliosBody {
+            var insightsBody: Data?
+            var insights: TrackingSnapshot.Insights = .unknown
+            if case .answered(let portfolioId, let score, let body)? = settled, portfolioId == capturedActiveId {
+                insightsBody = body
+                insights = .known(score)
+            }
+            var parts: [String: Data] = [:]
+            parts[TrackingSnapshot.assetsPart] = feedBody
+            parts[TrackingSnapshot.portfoliosPart] = portfoliosBody
+            parts[TrackingSnapshot.activePart] = TrackingSnapshot.activePartBody(capturedActiveId)
+            if let insightsBody { parts[TrackingSnapshot.insightsPart] = insightsBody }
+            let payload = TrackingSnapshot(
+                assets: capturedAssets, portfolios: capturedPortfolios,
+                activePortfolioId: capturedActiveId, insights: insights
+            )
+            snapshotStore.save(parts: parts, payload: payload, savedAt: capturedAt, epoch: snapshotEpoch)
+        }
+
+        _ = await whalesTask
+    }
+
+    /// Both live halves landed: the labelled snapshot steps aside for them.
+    private func replaceSnapshotWithLiveHoldings() {
+        guard snapshotSeed != nil else { return }
+        var shownMillis = 0
+        if let shownAt = seedShownAt {
+            let elapsed: TimeInterval = Date().timeIntervalSince(shownAt) * 1000
+            shownMillis = elapsed.isFinite ? Int(max(0, min(elapsed, 86_400_000))) : 0
+        }
+        // The score for this group is usually still on the wire: its kept answer stays on the
+        // card until the live one lands (the phase's didSet drops it then).
+        if portfolioInsightsPhase == .resolving, let kept = keptSeedInsightsForLiveGroup {
+            insightsCarriedFromSnapshot = kept
+        }
+        snapshotSeed = nil
+        Self.log.info("tracking: live holdings replaced the snapshot after \(shownMillis, privacy: .public) ms")
+    }
+
+    // MARK: - Portfolio Insights
+
+    /// One insights request's outcome, before it is allowed onto the card.
+    private enum InsightsFetch {
+        case answered(portfolioId: String, score: DiversificationScore?, body: Data)
+        case failed(portfolioId: String, network: Bool, cancelled: Bool, detail: String)
+        case noPortfolio
+    }
+
+    /// The request alone — it publishes nothing. `requestReturningBody` is `request<T>` plus
+    /// the exact bytes, so the answer can ride in the Holdings snapshot.
+    private func fetchPortfolioInsights(for portfolioId: String?) async -> InsightsFetch {
+        guard let portfolioId else { return .noPortfolio }
+        do {
+            let (dto, body) = try await apiClient.requestReturningBody(
+                endpoint: .getPortfolioInsightsForPortfolio(id: portfolioId),
+                responseType: PortfolioInsightsDTO?.self
+            )
+            return .answered(portfolioId: portfolioId, score: dto?.toDiversificationScore(), body: body)
+        } catch {
+            var network = false
+            if let apiError = error as? APIError, case .networkError = apiError {
+                network = true
+            }
+            let cancelled = AppError.from(error).isCancellation
+            return .failed(
+                portfolioId: portfolioId, network: network, cancelled: cancelled,
+                detail: "\(type(of: error)): \(error)"
+            )
+        }
+    }
+
+    /// Put an answer on the card — only if its request is still the current one AND it is
+    /// about the group that is active now. Returns whether it was published.
+    private func publishPortfolioInsights(_ fetch: InsightsFetch, token: Int) -> Bool {
+        guard token == insightsRequestToken else { return false }
+        switch fetch {
+        case .noPortfolio:
+            guard portfolioStore.activePortfolioId == nil else { return false }
+            portfolioInsights = nil
+            portfolioInsightsLoadFailed = false
+            portfolioInsightsPortfolioId = nil
+            // "No group" is an answer only when a LIVE /portfolios said so; with no live list it
+            // is still unknown (the card then shows the /portfolios failure, never "Set up").
+            portfolioInsightsPhase = portfolioStore.hasLiveData ? .known : .idle
+            return true
+        case .answered(let portfolioId, let score, _):
+            guard portfolioId == portfolioStore.activePortfolioId else { return false }
+            portfolioInsights = score
+            portfolioInsightsLoadFailed = false
+            portfolioInsightsPortfolioId = portfolioId
+            portfolioInsightsPhase = .known
+            return true
+        case .failed(let portfolioId, let network, let cancelled, let detail):
+            guard !cancelled, portfolioId == portfolioStore.activePortfolioId else { return false }
+            portfolioInsights = nil
+            portfolioInsightsLoadFailed = network
+            portfolioInsightsPortfolioId = portfolioId
+            portfolioInsightsPhase = .failed
+            Self.log.warning("tracking: portfolio insights failed — \(detail, privacy: .public)")
+            return true
+        }
+    }
+
+    /// Ask for the active group's score now. Every caller of `loadPortfolioInsights()` lands
+    /// here. Returns the outcome when it was published.
+    @discardableResult
+    private func requestPortfolioInsights() async -> InsightsFetch? {
+        insightsRequestToken &+= 1
+        let token = insightsRequestToken
+        let portfolioId = portfolioStore.activePortfolioId
+        markPortfolioInsightsResolving(for: portfolioId)
+        let fetch = await fetchPortfolioInsights(for: portfolioId)
+        if publishPortfolioInsights(fetch, token: token) { return fetch }
+        // Still the current request but not publishable (the group moved under it, or it was
+        // cancelled): nothing is in flight for the card any more, so it is not "resolving".
+        if token == insightsRequestToken, portfolioInsightsPhase == .resolving {
+            portfolioInsightsPhase = .idle
+        }
+        return nil
     }
 
     /// Fetch the server-computed diversification health score for the active
     /// portfolio. On a genuine connectivity failure we flag it so the UI can
     /// fall back to the on-device estimate; a `null` body (fewer than the
-    /// minimum holdings) just clears the score.
+    /// minimum holdings) is a KNOWN answer, never shown as a failure.
     func loadPortfolioInsights() async {
-        guard let portfolioId = portfolioStore.activePortfolioId else {
-            portfolioInsights = nil
-            portfolioInsightsLoadFailed = false
-            return
+        _ = await requestPortfolioInsights()
+    }
+
+    /// A request is starting for `portfolioId`. Another group's score never stays on screen
+    /// for this one; a refresh of the SAME group keeps its answer up until the new one lands
+    /// (no spinner flash on every pull-to-refresh).
+    private func markPortfolioInsightsResolving(for portfolioId: String?) {
+        // A request about another group retires the carried snapshot answer for good.
+        if let carried = insightsCarriedFromSnapshot, carried.portfolioId != portfolioId {
+            insightsCarriedFromSnapshot = nil
         }
-        do {
-            let dto = try await apiClient.request(
-                endpoint: .getPortfolioInsightsForPortfolio(id: portfolioId),
-                responseType: PortfolioInsightsDTO?.self
-            )
-            portfolioInsights = dto?.toDiversificationScore()
-            portfolioInsightsLoadFailed = false
-        } catch {
+        if portfolioId == portfolioInsightsPortfolioId, portfolioInsightsPhase == .known { return }
+        if portfolioId != portfolioInsightsPortfolioId {
             portfolioInsights = nil
-            if let apiError = error as? APIError, case .networkError = apiError {
-                portfolioInsightsLoadFailed = true
-            } else {
-                portfolioInsightsLoadFailed = false
+            portfolioInsightsLoadFailed = false
+        }
+        portfolioInsightsPhase = .resolving
+    }
+
+    /// The insights card's Retry. Reloads `/portfolios` first when the list itself never
+    /// arrived — a score needs to know which group it is for.
+    func retryPortfolioInsights() {
+        guard !portfolioInsightsIsGated else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if !self.portfolioStore.hasLiveData {
+                _ = await self.portfolioStore.loadPortfolios()
             }
-            print("[TrackingVM] ❌ Portfolio insights failed: \(error)")
+            await self.loadPortfolioInsights()
         }
+    }
+
+    /// The account gate is up for Holdings: the card shows a neutral line, no spinner, no
+    /// Retry (a retry would re-send a request the client refuses before it leaves the device).
+    var portfolioInsightsIsGated: Bool { assetsRequiresSignIn || assetsIsReconnecting }
+
+    /// What the card may treat as ANSWERED: whether the answer is known, and the score.
+    /// While the snapshot is presented, a live score counts only for the snapshot's own group;
+    /// otherwise the snapshot's kept answer (if it kept one) stands in.
+    private var presentedInsightsAnswer: (known: Bool, score: DiversificationScore?) {
+        if portfolioInsightsIsGated { return (false, nil) }
+        if let seed = presentedSnapshot {
+            let sameGroup = portfolioInsightsPortfolioId == seed.activePortfolioId
+            if portfolioInsightsPhase == .known, sameGroup {
+                return (true, portfolioInsights)
+            }
+            // This session asked about the snapshot's group and FAILED: say so (with a Retry)
+            // rather than keep presenting the kept score as if the refresh had worked.
+            if portfolioInsightsPhase == .failed, sameGroup {
+                return (false, nil)
+            }
+            return (seed.insightsKnown, seed.insightsScore)
+        }
+        let liveGroup = portfolioStore.activePortfolioId
+        if portfolioInsightsPhase == .known, portfolioInsightsPortfolioId == liveGroup {
+            return (true, portfolioInsights)
+        }
+        // The snapshot → live swap: the rows went live a moment before the score. The kept
+        // answer for the SAME group stays up while that group's request is on the wire — from
+        // the seed itself in the turns before `performLoad` replaces it, then from the carry.
+        if portfolioInsightsPhase == .resolving,
+           let kept = keptSeedInsightsForLiveGroup ?? insightsCarriedFromSnapshot,
+           kept.portfolioId == liveGroup {
+            return (true, kept.score)
+        }
+        // A CONNECTIVITY failure falls back to the on-device estimate (live data only).
+        if portfolioInsightsPhase == .failed, portfolioInsightsLoadFailed,
+           portfolioInsightsPortfolioId == liveGroup,
+           let estimate = portfolioDiversificationScore {
+            return (true, estimate)
+        }
+        return (false, nil)
+    }
+
+    /// The seed's kept insights answer, when the seed is about the LIVE active group, inside its
+    /// display window, and kept a known answer — and only while a load is running, i.e. the one
+    /// about to replace the seed. (A seed left behind by a live list that arrived some other way,
+    /// such as the insights card's Retry, must not stand in for a later request.)
+    private var keptSeedInsightsForLiveGroup: (portfolioId: String, score: DiversificationScore?)? {
+        guard loadTask != nil, let seed = snapshotSeed, seed.insightsKnown,
+              let groupId = seed.activePortfolioId, groupId == portfolioStore.activePortfolioId,
+              let savedAt = snapshotSeedSavedAt,
+              AccountSnapshotPolicy.isDisplayable(savedAt: savedAt, now: Date()) else { return nil }
+        return (portfolioId: groupId, score: seed.insightsScore)
     }
 
     /// What the Portfolio Insights card renders: the server score when present,
     /// the on-device estimate only when the server call failed for connectivity.
     var displayedDiversificationScore: DiversificationScore? {
-        if let server = portfolioInsights { return server }
-        if portfolioInsightsLoadFailed { return portfolioDiversificationScore }
-        return nil
+        presentedInsightsAnswer.score
+    }
+
+    /// The answer could not be had — the insights request failed, or there is no live group
+    /// list to ask about. Never the first-run "Set up" card.
+    var portfolioInsightsDidFail: Bool {
+        guard !portfolioInsightsIsGated, !presentedInsightsAnswer.known else { return false }
+        if portfolioInsightsPhase == .failed { return true }
+        return presentedPortfolio == nil && !portfolioStore.hasLiveData && portfolioStore.loadErrorMessage != nil
+    }
+
+    /// Not known yet and not failed: the card says so (no call to action).
+    var portfolioInsightsIsResolving: Bool {
+        guard !portfolioInsightsIsGated, !presentedInsightsAnswer.known else { return false }
+        return !portfolioInsightsDidFail
+    }
+
+    /// The spinner, only while something is actually on the wire — a hidden tab that never
+    /// loaded mounts no ProgressView.
+    var portfolioInsightsShowsProgress: Bool {
+        guard portfolioInsightsIsResolving else { return false }
+        return portfolioInsightsPhase == .resolving || isLoading || portfolioStore.isLoading
+    }
+
+    /// Opening the toggle auto-opens the config sheet only over a KNOWN empty answer — never
+    /// while the answer is unknown, failed or gated — and only when edits can land.
+    var shouldAutoOpenPortfolioConfig: Bool {
+        presentedInsightsAnswer.known && displayedDiversificationScore == nil && canEditPortfolio
     }
 
     @discardableResult
@@ -735,20 +1237,31 @@ class TrackingViewModel: ObservableObject {
         // ordering as load-bearing). That guard therefore refused a request that would have
         // succeeded, and showed "Reconnecting…" to a user whose token was already on the wire.
         // Calling and classifying costs nothing extra — the refusal never leaves the device.
+        //
+        // Fenced by identity generation: an answer to a request that left under the previous
+        // identity publishes nothing (and so can never reach the snapshot save either).
+        let generation = loadGeneration
         do {
-            let feed = try await apiClient.request(
+            let (feed, body) = try await apiClient.requestReturningBody(
                 endpoint: .getTrackingAssets,
                 responseType: TrackingFeedResponse.self
             )
+            guard generation == loadGeneration else { return false }
             self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
             self.alerts = feed.alerts.map { $0.toAppAlert() }
+            self.lastLiveFeedBody = body
+            self.hasLiveFeed = true
             self.assetsErrorMessage = nil
             self.assetsRequiresSignIn = false
             self.assetsIsReconnecting = false
             print("[TrackingVM] ✅ Loaded \(feed.assets.count) assets, \(feed.alerts.count) alerts from API")
             return true
         } catch {
+            guard generation == loadGeneration else { return false }
             let appError = AppError.from(error)
+            // A cancelled request is nobody's failure: it used to land below as
+            // `assetsErrorMessage = ""` (a cancelled poll after a tab-away).
+            if appError.isCancellation { return false }
             print("[TrackingVM] ❌ Tracking feed failed: \(appError.title): \(error)")
             // Surface it. A silent empty list reads as "you own nothing", which is
             // a different (and wrong) statement about the user's own money.
@@ -764,6 +1277,13 @@ class TrackingViewModel: ObservableObject {
                 self.trackedAssets = []
                 self.alerts = []
                 self.assetsErrorMessage = nil
+                // The saved snapshot comes down too, and stays down: stored holdings never sit
+                // over an account gate (the seed's precondition refuses while it is up). The
+                // FILE is kept — a refusal also happens in a restore race; real session ends
+                // delete it through `clearForEndedSession`.
+                self.snapshotSeed = nil
+                self.hasLiveFeed = false
+                self.lastLiveFeedBody = nil
                 let reconnecting = AppActions.shared.isRestoringSession
                 self.assetsIsReconnecting = reconnecting
                 self.assetsRequiresSignIn = !reconnecting
@@ -867,6 +1387,9 @@ class TrackingViewModel: ObservableObject {
         // But SAY SO: an unexplained empty roster reads as "we track nobody".
         if let lastError {
             let appError = AppError.from(lastError)
+            // An identity change cancels the load this ran in: nobody is waiting, and the
+            // cancellation is not a roster failure to put on screen (it used to set "").
+            if appError.isCancellation { return }
             if case .signInRequired = appError {
                 // ALL FOUR roster arrays, as one unit — the four the success path writes. The
                 // first version cleared only `trackedWhales` and `allPopularWhales` (the one the
@@ -1012,6 +1535,18 @@ class TrackingViewModel: ObservableObject {
         // Own writes already reload this tab (`addTickerFromSearch` → `refresh()`,
         // `removeAssetFromAll` patches + reloads); they post only for Home and Updates.
         guard change.source != .tracking else { return }
+        // A removal made elsewhere comes off a snapshot on screen at once too — display state
+        // only (the seed is never written anywhere), and even before this tab's first load.
+        if !change.added, let seed = snapshotSeed {
+            snapshotSeed = Self.removingRow(of: change.ticker, from: seed)
+        }
+        // …and off the saved FILE, even in a session where this tab was never opened: the next
+        // cold launch would otherwise paint the removed ticker back as a holding. An add is not
+        // purged — the snapshot cannot draw it, and a file missing a newer ticker is the
+        // ordinary, labelled staleness the next live load replaces.
+        if !change.added {
+            purgeSnapshotAfterRemovalElsewhere()
+        }
         guard hasLoadedOnce || loadTask != nil else { return }
         let ticker = change.ticker.uppercased()
 
@@ -1053,6 +1588,16 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
+    /// `seed` without `ticker`'s row (uppercased match, like Holdings' membership rule).
+    private static func removingRow(of ticker: String, from seed: TrackingSnapshot) -> TrackingSnapshot {
+        let removed = ticker.uppercased()
+        let kept: [TrackedAsset] = seed.assets.filter { $0.ticker.uppercased() != removed }
+        return TrackingSnapshot(
+            assets: kept, portfolios: seed.portfolios,
+            activePortfolioId: seed.activePortfolioId, insights: seed.insights
+        )
+    }
+
     func refresh() async {
         isRefreshing = true
         await loadData()
@@ -1070,10 +1615,30 @@ class TrackingViewModel: ObservableObject {
     /// Cleared before the fetch so the previous account's positions are never on screen while
     /// the new load is in flight.
     func handleIdentityChange(isActiveTab: Bool) async {
+        // The previous identity's load is CANCELLED and fenced, never joined: its answers were
+        // asked for by someone else, and a joined old load would publish nothing (the feed is
+        // generation-fenced) and then latch an empty tab as loaded.
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        loadTask?.cancel()
+        loadTask = nil
+        isLoading = false
         // CLEAR FIRST, UNCONDITIONALLY — before the `isActiveTab` gate below. The reload is
         // deferred for a hidden tab, but the previous account's data must not survive in this
         // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         trackedAssets = []
+        alerts = []
+        hasLiveFeed = false
+        lastLiveFeedBody = nil
+        snapshotSeed = nil
+        hasAttemptedLoad = false
+        // The insights card is identity-scoped too: the previous account's score, and any
+        // answer still in flight for it (the token bump drops that on arrival).
+        insightsRequestToken &+= 1
+        portfolioInsights = nil
+        portfolioInsightsLoadFailed = false
+        portfolioInsightsPortfolioId = nil
+        portfolioInsightsPhase = .idle
         assetsErrorMessage = nil
         // Cleared with the rest, ABOVE the gate: a latched "sign in" from a load that raced
         // session restore is exactly what this reload exists to heal.
@@ -1108,6 +1673,12 @@ class TrackingViewModel: ObservableObject {
         watchlistMarkerQueue.removeAll()
         recentlyAddedTickers.removeAll()
 
+        // Re-seed for the NEW identity, still above the gate (a disk read, never a request).
+        // AppState re-bound or cleared the snapshot store synchronously before publishing the
+        // identity, so another account's file can never paint here — and the view renders
+        // snapshot rows only while this tab is on screen.
+        await prepareSnapshot()
+
         // Fetch only if the user is actually looking at this tab. Clearing above resets
         // `hasLoadedOnce`, so `.task(id: isActiveTab)` re-loads on the next activation.
         //
@@ -1117,7 +1688,8 @@ class TrackingViewModel: ObservableObject {
         guard isActiveTab else { return }
 
         await loadData()
-        if !Task.isCancelled { hasLoadedOnce = true }
+        // Latched on THIS identity's load completing — a newer identity change owns it otherwise.
+        if generation == loadGeneration { hasLoadedOnce = true }
         // The timer is keyed to whoever is signed in now; restart it against their assets.
         startPriceRefreshTimer()
     }
@@ -1207,6 +1779,12 @@ class TrackingViewModel: ObservableObject {
     /// untouched. Use `removeAssetFromAll` for the long-press path that
     /// fully removes the ticker.
     func removeAsset(_ asset: TrackedAsset) {
+        // A snapshot row (or a store with no live list) has no membership this device may
+        // write: the store would no-op silently. Say so instead (auth.md §6).
+        guard canEditHoldings else {
+            reportPortfolioStillLoading(action: "remove \(asset.ticker) from this portfolio")
+            return
+        }
         Task {
             do {
                 try await portfolioStore.removeTicker(asset.ticker)
@@ -1249,14 +1827,21 @@ class TrackingViewModel: ObservableObject {
 
         Task { @MainActor in
             // Self-heal: if the user taps the star before portfolios have
-            // loaded (or the initial load silently failed — e.g. backend
+            // loaded (or the initial load failed — e.g. backend
             // missing the new endpoint), try reloading once and create a
             // default "Holdings" portfolio if the list is still empty.
             // Without this the tap looks like a dead button.
-            if portfolioStore.activePortfolioId == nil {
-                print("[TrackingVM] ⚠️ No active portfolio for \(symbol); attempting recovery…")
-                await portfolioStore.loadPortfolios()
-                if portfolioStore.portfolios.isEmpty {
+            //
+            // Keyed on a LIVE list, not only on a nil active id: after a FAILED `/portfolios` the
+            // id still holds this device's remembered hint, a group the store does not hold —
+            // `addTicker` then returned without a word and the star emptied again.
+            if !portfolioStore.hasLiveData || portfolioStore.activePortfolioId == nil {
+                print("[TrackingVM] ⚠️ No live active portfolio for \(symbol); attempting recovery…")
+                let loaded = await portfolioStore.loadPortfolios()
+                // Only a LIVE answer that says "no groups" may mint the default one. After a
+                // FAILED load an empty list proves nothing, and creating "Holdings" then would
+                // add a duplicate beside the group the server already has.
+                if loaded && portfolioStore.portfolios.isEmpty {
                     do {
                         _ = try await portfolioStore.createPortfolio(named: "Holdings")
                         print("[TrackingVM] ✅ Created default Holdings portfolio")
@@ -1271,8 +1856,14 @@ class TrackingViewModel: ObservableObject {
                 }
             }
 
-            guard let portfolioId = portfolioStore.activePortfolioId else {
-                print("[TrackingVM] ❌ Still no active portfolio after recovery; aborting add for \(symbol)")
+            // Before the optimistic marker and before any request: a group no LIVE list holds
+            // takes no write (`addTicker` would no-op silently), so the star must not fill for it.
+            guard portfolioStore.hasLiveData, let portfolioId = portfolioStore.activePortfolioId else {
+                print("[TrackingVM] ❌ Still no live active portfolio after recovery; aborting add for \(symbol)")
+                // The star was tapped; a silent return reads as a dead button (auth.md §6).
+                AppActions.shared.reportMutationFailure(
+                    APIError.unknown(message: Self.portfolioStillLoadingMessage), action: "add \(symbol)"
+                )
                 return
             }
             // Capture the portfolio at this point — if the user switches mid-
@@ -1321,6 +1912,10 @@ class TrackingViewModel: ObservableObject {
     /// Long-press "Remove from all portfolios": removes the ticker from every
     /// portfolio it belongs to AND from the master watchlist.
     func removeAssetFromAll(_ asset: TrackedAsset) {
+        guard canEditHoldings else {
+            reportPortfolioStillLoading(action: "remove \(asset.ticker) from your watchlist")
+            return
+        }
         // Optimistic UI removal from the underlying asset list — the swipe
         // animation looks broken if the row sticks around while the network
         // request flies.
@@ -1364,14 +1959,27 @@ class TrackingViewModel: ObservableObject {
     }
 
     func openNewPortfolioSheet() {
+        // Group edits are built from the live list; without one the sheet would act on nothing.
+        guard canEditPortfolio else {
+            reportPortfolioStillLoading(action: "create a portfolio")
+            return
+        }
         showNewPortfolioSheet = true
     }
 
     func openEditPortfolioSheet() {
+        guard canEditPortfolio else {
+            reportPortfolioStillLoading(action: "edit your portfolios")
+            return
+        }
         showEditPortfolioSheet = true
     }
 
     func openManageTickersSheet() {
+        guard canEditPortfolio else {
+            reportPortfolioStillLoading(action: "manage this portfolio's tickers")
+            return
+        }
         showManageTickersSheet = true
     }
 
@@ -1396,6 +2004,12 @@ class TrackingViewModel: ObservableObject {
     // MARK: - Portfolio Insights Actions
 
     func openPortfolioConfigSheet() {
+        // The config sheet edits the LIVE active group's holdings; with no live list it would
+        // open on nothing (or on a snapshot group the store does not hold).
+        guard canEditPortfolio else {
+            reportPortfolioStillLoading(action: "edit your holdings")
+            return
+        }
         showPortfolioConfigSheet = true
     }
 
@@ -1408,6 +2022,9 @@ class TrackingViewModel: ObservableObject {
     /// the row stays in the portfolio but stops counting toward the
     /// diversification score.
     func savePortfolioHoldings(_ items: [HoldingUpdateItem]) async throws {
+        guard canEditPortfolio else {
+            throw APIError.unknown(message: Self.portfolioStillLoadingMessage)
+        }
         guard let portfolioId = portfolioStore.activePortfolioId else {
             throw APIError.unknown(message: "No active portfolio selected.")
         }

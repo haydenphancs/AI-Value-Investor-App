@@ -200,6 +200,58 @@ class _MarketCacheUnreadable(Exception):
     nothing (`NewsCacheService.get_market_news`)."""
 
 
+class _MarketPageLeaderCancelled(RuntimeError):
+    """The request leading a shared page-0 Market read went away before the read answered.
+
+    Internal to this service. `CancelledError` is a BaseException: handed to the joiners
+    as-is (what `_deduped` does) it reaches `get_updates_feed` as a bare 500 with no
+    `error_code` — one client tapping away would fail every other client's first open. The
+    leader settles the shared future with THIS instead, and a joiner that receives it runs
+    the read itself (`NewsCacheService._market_page_zero`), as `get_tracking_feed` does.
+    """
+
+
+class _MarketPageMemo:
+    """Process-local memory of page 0 of the shared Market feed (2026-10-08).
+
+    Page 0 is identical for every user and was re-read (~100 rows, `select("*")`) on every
+    Updates open. Touched only on the event-loop thread (a worker thread posts its
+    invalidation through `call_soon_threadsafe`), so it needs no lock; coherent because the
+    web service runs ONE uvicorn worker (`tests/test_deploy_command_parity.py`).
+
+    * ``pages`` — ``limit -> (valid_until_monotonic, rows, has_more)``. ``limit`` is 1..50
+      (the endpoint's bound), so the map is bounded by construction.
+    * ``generation`` — bumped by EVERY write of Market rows; a read keeps its page only when
+      the generation it started under is still current (`_market_page_memo_put`).
+    * ``inflight`` — ``limit -> future`` of the page-0 read being led right now. Its result is
+      ``(read, generation the read started under)``.
+    """
+
+    __slots__ = ("generation", "pages", "inflight")
+
+    def __init__(self) -> None:
+        self.generation = 0
+        self.pages: Dict[int, Tuple[float, List[Dict[str, Any]], bool]] = {}
+        self.inflight: Dict[int, asyncio.Future] = {}
+
+
+def _row_expiry(value: Any) -> Optional[datetime]:
+    """A cache row's ``expires_at`` as an aware UTC instant, or None when unreadable.
+
+    `timestamptz` always comes back with its offset; a naive value is read as UTC, which is
+    the clock `_get_cached`'s `gte("expires_at", now)` filter compares against."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def article_external_id(raw: Dict[str, Any], index: int) -> str:
     """The cache's identity for one FMP article: url, else title, else a positional
     placeholder, capped at 500 chars. ONE definition, shared by the cache writer and the
@@ -588,8 +640,7 @@ class NewsCacheService:
             logger.info(f"No FMP news found for index {symbol} (tickers={news_tickers})")
             return []
         # Off-thread: the synchronous batch upsert would otherwise block the loop.
-        return await asyncio.to_thread(
-            self._build_and_cache_rows,
+        return await self._write_rows_off_loop(
             symbol, raw_articles, limit, symbol, f"index {symbol}",
         )
 
@@ -622,22 +673,20 @@ class NewsCacheService:
         straight from FMP (`_market_read_only_page` — nothing written, nothing judged)
         and a deeper page ends the paging. Only a page 0 that READ an empty cache takes
         the cold fetch.
+
+        PAGE 0 HAS A 60-SECOND MEMORY (2026-10-08, `_market_page_zero`): it is the same for
+        every user. Only a non-empty page READ from the cache is remembered — never an empty
+        (cold) page, the read-only page or a failed read — and every write of Market rows
+        drops it. Deeper pages are always read.
         """
         # Sync SDK — keep it off the event loop. This is the Updates screen's
         # default tab, so it is the hottest read in the feature.
-        page: Optional[List[Dict[str, Any]]] = None
-        has_more = False
-        for attempt in (1, 2):
-            try:
-                page, has_more = await asyncio.to_thread(
-                    self._get_cached_market_page, limit, offset
-                )
-                break
-            except _MarketCacheUnreadable as e:
-                logger.warning(
-                    "Market feed read failed (offset=%d, attempt %d/2): %s", offset,
-                    attempt, e,
-                )
+        if offset == 0:
+            read = await self._market_page_zero(limit)
+        else:
+            read = await self._read_market_page(limit, offset)
+        page: Optional[List[Dict[str, Any]]]
+        page, has_more = read if read is not None else (None, False)
         if page is None:
             if offset > 0:
                 logger.warning(
@@ -671,6 +720,245 @@ class NewsCacheService:
 
         # Dedup concurrent misses: one FMP fetch, N awaiters.
         return await self._deduped(MARKET_SCOPE, lambda: self._fetch_market_news(limit))
+
+    # ── Private: page 0 of the Market feed, read once per minute ──────
+
+    #: How long a page-0 read is remembered. Also bounded by the page's own rows: never past
+    #: the earliest `expires_at` among them (`_market_page_memo_put`).
+    _MARKET_PAGE_MEMO_TTL_SECONDS = 60.0
+    #: How many times a joiner re-reads because a Market write landed while the read it
+    #: joined was running. Writes come in bursts (one per enriched row), so this is a bound,
+    #: not a loop that waits for quiet.
+    _MARKET_PAGE_MAX_REJOINS = 2
+    #: The longest one page-0 open spends waiting on reads OTHER requests lead (review
+    #: 2026-10-08): one stalled Supabase read must not hold every open that misses the
+    #: memory. Well above the ~100 ms p50 read; past it the joiner reads on its own.
+    _MARKET_PAGE_JOIN_WAIT_SECONDS = 3.0
+
+    def _market_memo(self) -> _MarketPageMemo:
+        """The page-0 memory, created on first use. Not in `__init__`: hermetic tests build
+        this service with `object.__new__`, and a missing attribute must not break them."""
+        memo = self.__dict__.get("_market_page_memo")
+        if memo is None:
+            memo = _MarketPageMemo()
+            self.__dict__["_market_page_memo"] = memo
+        return memo
+
+    def _market_page_memo_get(self, limit: int) -> Optional[Tuple[List[Dict[str, Any]], bool]]:
+        """``(rows, has_more)`` from memory — a deep copy, so a caller cannot edit what the
+        next caller is served — or None (absent, or past its `valid_until`)."""
+        memo = self._market_memo()
+        entry = memo.pages.get(limit)
+        if entry is None:
+            return None
+        valid_until, rows, has_more = entry
+        if time.monotonic() >= valid_until:
+            memo.pages.pop(limit, None)
+            return None
+        return copy.deepcopy(rows), has_more
+
+    def _market_page_memo_put(
+        self, limit: int, page: List[Dict[str, Any]], has_more: bool, generation: int,
+    ) -> bool:
+        """Remember a page-0 read. Returns whether it was kept.
+
+        Kept ONLY when it is a real, non-empty page AND no Market write landed since the read
+        began (``generation`` was captured before its first `to_thread`), and only until the
+        earliest `expires_at` among its rows: a served row that expires drops out of every
+        LIVE read, so serving it from memory past that instant would shift the client's next
+        page (read live) one story left — a skipped story."""
+        memo = self._market_memo()
+        if not page:
+            return False                 # empty is the cold path's question, never an answer
+        if generation != memo.generation:
+            logger.info(
+                "Market news memory: page 0 (limit=%d) was read across a Market write — "
+                "served once, not kept", limit,
+            )
+            return False
+        expiries = [_row_expiry(row.get("expires_at")) for row in page]
+        if any(e is None for e in expiries):
+            logger.warning(
+                "Market news memory: a page-0 row (limit=%d) has no readable expires_at — "
+                "not kept", limit,
+            )
+            return False
+        ttl = min(
+            float(self._MARKET_PAGE_MEMO_TTL_SECONDS),
+            (min(expiries) - datetime.now(timezone.utc)).total_seconds(),
+        )
+        if ttl <= 0:
+            return False
+        memo.pages[limit] = (time.monotonic() + ttl, copy.deepcopy(page), has_more)
+        return True
+
+    def _invalidate_market_page_memo(self, reason: str) -> None:
+        """Forget page 0 and fence out any read already running. Event-loop thread only."""
+        memo = self._market_memo()
+        memo.generation += 1
+        dropped = len(memo.pages)
+        memo.pages.clear()
+        if dropped:
+            logger.info("Market news memory dropped (%s): %d page(s)", reason, dropped)
+
+    def _post_market_page_invalidation(
+        self, loop: asyncio.AbstractEventLoop, reason: str,
+    ) -> None:
+        """From a WORKER thread, after its write finished: invalidate on the event loop.
+
+        Needed besides the awaiting coroutine's own `finally`: when that coroutine is
+        cancelled (a client disconnect on the cold path, a deploy), its `finally` runs at
+        once while the thread is still writing, so a reader could remember the pre-commit
+        page for a minute. This runs after the commit (or the failure)."""
+        try:
+            loop.call_soon_threadsafe(self._invalidate_market_page_memo, reason)
+        except RuntimeError as e:
+            # The loop is closed (process shutdown): nothing can be reading on it any more.
+            logger.warning(
+                "Market news memory: event loop closed before the %s finished (%s) — "
+                "dropping the memory from the worker thread", reason, e,
+            )
+            self._invalidate_market_page_memo(reason)
+
+    async def _market_write_off_loop(self, reason: str, fn, *args, **kwargs):
+        """Run a blocking write that touches MARKET rows in a worker thread, dropping the
+        page-0 memory twice: from the thread once the write has finished, and here on the
+        way out (also on cancellation). The only way async code writes Market rows."""
+        loop = asyncio.get_running_loop()
+
+        def _write_then_post():
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._post_market_page_invalidation(loop, reason)
+
+        try:
+            return await asyncio.to_thread(_write_then_post)
+        finally:
+            self._invalidate_market_page_memo(reason)
+
+    async def _write_rows_off_loop(self, cache_key: str, *args, **kwargs):
+        """`_build_and_cache_rows` in a worker thread — the ONE way async code calls it
+        (`tests/test_market_news_relevance_wiring.py` pins that structurally). A Market
+        write also drops the page-0 memory (`_market_write_off_loop`)."""
+        build = self._build_and_cache_rows
+        if cache_key == MARKET_SCOPE:
+            return await self._market_write_off_loop(
+                "Market row write", build, cache_key, *args, **kwargs
+            )
+        return await asyncio.to_thread(build, cache_key, *args, **kwargs)
+
+    async def _read_market_page(
+        self, limit: int, offset: int, *, memoize: bool = False,
+    ) -> Optional[Tuple[List[Dict[str, Any]], bool]]:
+        """One Market page read from the cache, retried once: ``(page, has_more)``, or None
+        when both attempts failed (`_MarketCacheUnreadable`). With ``memoize`` a successful
+        read is offered to the page-0 memory under the generation captured BEFORE the first
+        read began, so a write that lands during either attempt keeps it out."""
+        generation = self._market_memo().generation
+        for attempt in (1, 2):
+            try:
+                page, has_more = await asyncio.to_thread(
+                    self._get_cached_market_page, limit, offset
+                )
+            except _MarketCacheUnreadable as e:
+                logger.warning(
+                    "Market feed read failed (offset=%d, attempt %d/2): %s", offset,
+                    attempt, e,
+                )
+                continue
+            if memoize:
+                self._market_page_memo_put(limit, page, has_more, generation)
+            return page, has_more
+        return None
+
+    async def _market_page_zero(
+        self, limit: int,
+    ) -> Optional[Tuple[List[Dict[str, Any]], bool]]:
+        """Page 0 of the Market feed: memory, else join the read in flight, else lead one.
+
+        A DEDICATED in-flight future, not `_deduped`: a cancelled leader settles it with
+        `_MarketPageLeaderCancelled` and every joiner takes over (loops and reads itself),
+        so one client's disconnect never reaches another client as a cancellation. A
+        joiner whose leader read across a Market write reads again (bounded), so a request
+        that arrives after a write is never served what the cache held before it.
+
+        JOINING IS BOUNDED: all the joins of one call share `_MARKET_PAGE_JOIN_WAIT_SECONDS`.
+        Past it the caller reads on its own and does NOT remember that read — the read it
+        gave up on still runs, and its leader may still remember it."""
+        memo = self._market_memo()
+        loop = asyncio.get_running_loop()
+        join_started = loop.time()
+        join_deadline = join_started + float(self._MARKET_PAGE_JOIN_WAIT_SECONDS)
+        rejoins = 0
+        while True:
+            hit = self._market_page_memo_get(limit)
+            if hit is not None:
+                logger.info(
+                    "Market news memory HIT (limit=%d): %d articles", limit, len(hit[0]),
+                )
+                return hit
+            inflight = memo.inflight.get(limit)
+            if inflight is None:
+                break
+            try:
+                # `shield`: a joiner that is itself cancelled, or that stops waiting at the
+                # deadline, must not cancel the read the leader and every other joiner are
+                # waiting on (`wait_for` cancels what it waits on when it times out).
+                read, started_under = await asyncio.wait_for(
+                    asyncio.shield(inflight), timeout=max(join_deadline - loop.time(), 0.0),
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Market page-0 join (scope=%s, limit=%d): the shared read is still "
+                    "running after %.1f s — reading on its own, not remembered",
+                    MARKET_SCOPE, limit, loop.time() - join_started,
+                )
+                return await self._read_market_page(limit, 0)
+            except _MarketPageLeaderCancelled:
+                logger.info(
+                    "Market page-0 read (limit=%d): its leader went away — taking over",
+                    limit,
+                )
+                continue
+            if started_under != memo.generation and rejoins < self._MARKET_PAGE_MAX_REJOINS:
+                rejoins += 1
+                continue
+            return read
+
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        started_under = memo.generation
+        memo.inflight[limit] = fut
+        try:
+            read = await self._read_market_page(limit, 0, memoize=True)
+            if not fut.done():
+                fut.set_result((read, started_under))
+            return read
+        except asyncio.CancelledError:
+            # BaseException: it skips the arm below. Never hand it to the joiners (a bare
+            # 500 for them) — settle with an error they recover from by reading themselves.
+            if not fut.done():
+                if _has_waiters(fut):
+                    fut.set_exception(
+                        _MarketPageLeaderCancelled(f"page-0 read (limit={limit}) cancelled")
+                    )
+                    fut.exception()          # mark retrieved: the joiners take over
+                else:
+                    fut.cancel()
+            raise
+        except BaseException as e:
+            # A real failure of the read (it already retries `_MarketCacheUnreadable` and
+            # answers None, so this is unexpected): the joiners get the same error, which the
+            # endpoint maps to a typed APIErrorResponse.
+            if not fut.done():
+                if _has_waiters(fut):
+                    fail_shared_future(fut, e)
+                else:
+                    fut.cancel()
+            raise
+        finally:
+            if memo.inflight.get(limit) is fut:
+                memo.inflight.pop(limit, None)
 
     #: Cache rows read per round trip when paging the Market feed, as a multiple of the
     #: market stories still needed: hidden single-company rows mean N market stories span
@@ -889,8 +1177,7 @@ class NewsCacheService:
                 budget_seconds=self._MARKET_CLASSIFY_BUDGET_COLD_SECONDS,
                 batch_size=self._MARKET_INGEST_BATCH_COLD,
             )
-            written = await asyncio.to_thread(
-                self._build_and_cache_rows,
+            written = await self._write_rows_off_loop(
                 MARKET_SCOPE, raw_articles, limit,
                 # No fallback ticker: a general market story with no FMP `symbol`
                 # genuinely relates to nothing in particular. Stamping it with
@@ -1690,8 +1977,14 @@ class NewsCacheService:
             row.update(update_data)
             newly_enriched.append(self._format_single_row(row))
 
-            # Queue concurrent DB update
-            update_tasks.append(self._update_enrichment_row(row["id"], update_data))
+            # Queue concurrent DB update. A MARKET row's update also drops the shared
+            # page-0 memory (`_market_write_off_loop`); no other scope has one.
+            if ticker == MARKET_SCOPE:
+                update_tasks.append(
+                    self._update_enrichment_row(row["id"], update_data, scope=MARKET_SCOPE)
+                )
+            else:
+                update_tasks.append(self._update_enrichment_row(row["id"], update_data))
             update_indices.append(i)
 
         # Keep a history of the labels (migration 180) — the ONE place a live label is
@@ -1737,7 +2030,9 @@ class NewsCacheService:
         )
         return enriched_response + newly_enriched
 
-    async def _update_enrichment_row(self, row_id: str, update_data: dict):
+    async def _update_enrichment_row(
+        self, row_id: str, update_data: dict, *, scope: Optional[str] = None,
+    ):
         """Update a single enrichment row in Supabase.
 
         Off-thread: the Supabase SDK is synchronous, so with the body inline this
@@ -1745,12 +2040,18 @@ class NewsCacheService:
         purely decorative. 25-50 enrichment writes ran strictly serially AND
         parked the event loop for the whole batch, stalling every other request
         on the instance each time someone opened a news feed.
+
+        ``scope=MARKET_SCOPE`` (the Market's rows): the write also drops the shared
+        page-0 memory, from the worker thread once the UPDATE has finished.
         """
         def _do() -> None:
             self.supabase.table("ticker_news_cache").update(
                 update_data
             ).eq("id", row_id).execute()
 
+        if scope == MARKET_SCOPE:
+            await self._market_write_off_loop("Market enrichment update", _do)
+            return
         await asyncio.to_thread(_do)
 
     # ── Private: Ticker parsing helper ──────────────────────────────────
@@ -1812,8 +2113,7 @@ class NewsCacheService:
             return []
         # Off-thread: the synchronous batch upsert would otherwise block the loop
         # on this request path (the market path already offloads it).
-        return await asyncio.to_thread(
-            self._build_and_cache_rows,
+        return await self._write_rows_off_loop(
             ticker, raw_articles, limit, ticker, ticker,
         )
 
@@ -2303,8 +2603,7 @@ class NewsCacheService:
         # Off-thread: the Supabase SDK is synchronous, and this upserts up to 30
         # rows for each of ~200 scopes per news pass — on the event loop that
         # stalls every other in-flight request on this instance.
-        written = await asyncio.to_thread(
-            self._build_and_cache_rows,
+        written = await self._write_rows_off_loop(
             scope, raw, limit, fallback, f"{scope} (refresh)", True, enrichments,
             existing,
         )
@@ -2537,7 +2836,8 @@ class NewsCacheService:
         try:
             # A table-wide DELETE is the slowest statement this service issues;
             # on the loop it stalls every concurrent request for its duration.
-            await asyncio.to_thread(_delete)
+            # It deletes Market rows too, so it drops the page-0 memory as well.
+            await self._market_write_off_loop("expired-row cleanup", _delete)
             logger.info("Cleaned up expired news cache entries")
         except Exception as e:
             logger.error(f"Cache cleanup failed: {e}")

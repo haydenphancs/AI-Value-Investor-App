@@ -365,7 +365,9 @@ def test_a_misconfigured_store_url_falls_back_and_logs_error_once(
         assert r.headers["location"] == "/"
     page = client.get("/")
     assert page.status_code == 200
-    assert "Caydex for iPhone" in page.text and "Coming soon" not in page.text   # no availability claim
+    # no availability claim — matched as a WHOLE text node: "Caydex for iPhone" is also the tail of the
+    # store buttons ("Get Caydex for iPhone"), which a regression here must not pass for
+    assert re.search(r">\s*Caydex for iPhone\s*<", page.text) and "Coming soon" not in page.text
     assert "apple-itunes-app" not in page.text
     errors = [rec for rec in caplog.records
               if rec.name == _LOGGER and rec.levelno == logging.ERROR
@@ -448,7 +450,7 @@ def test_the_preorder_flag_alone_claims_nothing(client, preorder, monkeypatch, c
     monkeypatch.setattr(settings, "MARKETING_APP_STORE_URL", url)
     assert smart_link.store_state() == "prelaunch"
     page = client.get("/").text
-    assert "Caydex for iPhone" in page and "Coming soon" not in page
+    assert re.search(r">\s*Caydex for iPhone\s*<", page) and "Coming soon" not in page
     assert "Pre-order" not in page and "Get Caydex" not in page
     assert "apple-itunes-app" not in page
     r = _go(client, "/go/tiktok")

@@ -4803,6 +4803,7 @@ def test_an_upload_post_send_of_unknown_outcome_makes_the_upload_count_a_floor()
     # frozenset lookup used to raise TypeError and take the whole digest down), never counted, never a floor
     for junk in (["unknown"], {"unknown": 1}, 7, None, True):
         odd = [_post("threads", "queued", meta={"publish": {"state": junk, "upload_post": dict(sent)}}),
+               _post("linkedin", "failed", meta={"publish": {"state": junk, "upload_post": dict(sent)}}),
                _post("youtube", junk if not isinstance(junk, (list, dict)) else "queued",
                      meta={"publish": {"state": junk}})]
         s = _cost_summary(posts=base + odd)

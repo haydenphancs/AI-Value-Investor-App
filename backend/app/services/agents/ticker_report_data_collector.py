@@ -58,7 +58,11 @@ from app.services.sector_benchmark_lookup import (
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
 from app.utils.peer_wording import peer_worded_metric_name
 from app.services.financials_metric_gate import (
+    CURRENT_RATIO,
     GATED_METRICS,
+    INTEREST_COVERAGE,
+    QUICK_RATIO,
+    company_metric_applicable,
     comparable_peer_metrics,
     excluded_from_industry_median,
     is_mixed_lender_industry,
@@ -2578,6 +2582,11 @@ class TickerReportDataCollector:
                 "debt_equity", "current_ratio", "interest_coverage",
             ):
                 c[k] = None
+        # FMP's raw current ratio / interest coverage feed the model's context only
+        # (`build_financial_context`). Where the cards omit the row — a bank's, insurer's or
+        # lender's meaningless ratio, WU's curated withheld rows — the value is dropped here
+        # too, so no reader of `computed` can hand the model a number the report hides.
+        _drop_gated_context_values(out, c)
 
         # Earnings Yield = 1/PE * 100. None for negative or zero PE — a
         # negative E/Y from negative earnings is meaningless and would
@@ -9709,6 +9718,106 @@ def get_collector() -> TickerReportDataCollector:
     return _collector
 
 
+# ── The financials gate on the model's context (2026-10-09) ──────────
+#
+# The cards omit a bank's, insurer's, broker-dealer's, asset manager's or lender's current
+# ratio, quick ratio and interest coverage (meaningless for them), and WU's three rows on
+# every card (`CURATED_WITHHELD_ROWS`: FMP's figures are made up). The model's context must
+# agree, or Stage A / Stage B write "a current ratio of 3.75" or "weak interest coverage"
+# beside cards that deliberately show neither.
+
+#: `computed` key → the gate's metric, for the liquidity / coverage values `_compute_metrics`
+#: derives from FMP's raw ratios (there is no raw quick ratio in `computed`).
+_CONTEXT_GATED_KEYS: Tuple[Tuple[str, str], ...] = (
+    ("current_ratio", CURRENT_RATIO),
+    ("interest_coverage", INTEREST_COVERAGE),
+)
+
+#: Every gated row, in the order the context names it, with its prose name.
+_CONTEXT_GATED_NAMES: Tuple[Tuple[str, str], ...] = (
+    (CURRENT_RATIO, "current ratio"),
+    (QUICK_RATIO, "quick ratio"),
+    (INTEREST_COVERAGE, "interest coverage"),
+)
+
+_GATE_NOT_MEANINGFUL = "not_meaningful"
+_GATE_WITHHELD = "withheld"
+
+
+def _context_gated_rows(out: Any) -> Dict[str, str]:
+    """``{metric: "not_meaningful" | "withheld"}`` for every `GATED_METRICS` row this
+    company's cards omit — the answer `company_metric_applicable` gives the Health Check,
+    the snapshot cards and the drill-down lines, from the ticker, the profile's industry and
+    pass 2's company verdict (`out.non_lender_member`: False — gated — for a collection pass
+    2 never judged). "withheld" = a curated per-company fact (`withheld_company_rows`: WU);
+    "not_meaningful" = the industry gate. ``{}`` for a company that keeps every row, and for
+    an unknown industry (the gate keeps rows there). Pure (no logging)."""
+    ticker = getattr(out, "ticker", None)
+    profile = getattr(out, "profile", None)
+    industry = profile.get("industry") if isinstance(profile, dict) else None
+    network = getattr(out, "non_lender_member", False) is True
+    withheld = withheld_company_rows(ticker)
+    rows: Dict[str, str] = {}
+    for metric, _name in _CONTEXT_GATED_NAMES:
+        if metric in withheld:
+            rows[metric] = _GATE_WITHHELD
+        elif not company_metric_applicable(metric, industry, network=network, ticker=ticker):
+            rows[metric] = _GATE_NOT_MEANINGFUL
+    return rows
+
+
+def _drop_gated_context_values(out: Any, c: Dict[str, Any]) -> None:
+    """`_compute_metrics`' half of the gate: every `_CONTEXT_GATED_KEYS` value the cards
+    omit becomes None in ``c``; one INFO line names those that held a number."""
+    gated = _context_gated_rows(out)
+    dropped: List[str] = []
+    for key, metric in _CONTEXT_GATED_KEYS:
+        if metric in gated:
+            if c.get(key) is not None:
+                dropped.append(f"{key}[{gated[metric]}]")
+            c[key] = None
+    if dropped:
+        profile = getattr(out, "profile", None)
+        logger.info(
+            "[report-context-gate] ticker=%s industry=%r step=compute_metrics: dropped %s "
+            "from the model context — the cards omit these rows (financials_metric_gate)",
+            getattr(out, "ticker", None),
+            profile.get("industry") if isinstance(profile, dict) else None,
+            ", ".join(dropped),
+        )
+
+
+def _gated_context_lines(gated: Dict[str, str]) -> List[str]:
+    """The evidence lines that STATE the gate where a number would be — one per kind,
+    naming every row the cards omit; ``[]`` when nothing is gated. Stated, not just left
+    out: silence invites the model to recall a figure (the analyst-consensus lesson).
+    Digit-free by design — `CURATED_WITHHELD_ROWS`' reasons quote the made-up figures, so
+    they are never printed here."""
+    lines: List[str] = []
+    for kind in (_GATE_NOT_MEANINGFUL, _GATE_WITHHELD):
+        names = [name for metric, name in _CONTEXT_GATED_NAMES if gated.get(metric) == kind]
+        if not names:
+            continue
+        one = len(names) == 1
+        listed = names[0] if one else f"{', '.join(names[:-1])} and {names[-1]}"
+        if kind == _GATE_NOT_MEANINGFUL:
+            verdict = (
+                "NOT MEANINGFUL for a company in this industry — its funding and balance "
+                f"sheet make {'this ratio' if one else 'these ratios'} say nothing about its "
+                "health"
+            )
+        else:
+            verdict = (
+                "NOT AVAILABLE for this company — the available figures do not match the "
+                "company's own filings"
+            )
+        lines.append(
+            f"{listed[0].upper()}{listed[1:]}: {verdict}; omitted from every card. Do not "
+            f"cite, estimate, compute or recall {'it' if one else 'them'}."
+        )
+    return lines
+
+
 # ── Shared evidence/context builder for AI prompts ────────────────────
 
 
@@ -9783,7 +9892,20 @@ def build_financial_context(out: CollectedTickerData) -> str:
     parts.append(f"Operating Margin: {_fmt_pct_or_na(c.get('operating_margin'))}")
     parts.append(f"ROE: {_fmt_pct_or_na(c.get('roe'))}")
     parts.append(f"D/E: {_fmt_or_na(c.get('debt_equity'))}")
-    parts.append(f"Current Ratio: {_fmt_or_na(c.get('current_ratio'))}")
+    # The gate is re-decided HERE, not trusted from `computed`: a collection cached before
+    # `_compute_metrics` dropped the gated values still carries FMP's raw ratio.
+    gated = _context_gated_rows(out)
+    if CURRENT_RATIO not in gated:
+        parts.append(f"Current Ratio: {_fmt_or_na(c.get('current_ratio'))}")
+    gated_lines = _gated_context_lines(gated)
+    if gated_lines:
+        parts.extend(gated_lines)
+        logger.info(
+            "[report-context-gate] ticker=%s industry=%r step=financial_context: stated %s "
+            "instead of a number (the cards omit these rows)",
+            out.ticker, (profile or {}).get("industry"),
+            ", ".join(f"{metric}[{kind}]" for metric, kind in sorted(gated.items())),
+        )
     if settings.DCF_ENABLED:
         # The PUBLISHED Caydex Fair Value Estimate, worded exactly as the card shows it, with
         # the wording rule — never a bare "fair value" + "upside" (hard rules 3-4,

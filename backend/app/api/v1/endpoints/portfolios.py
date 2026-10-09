@@ -47,6 +47,7 @@ from app.utils.supabase_async import sb_exec
 from app.utils.postgrest_paging import fetch_all_rows
 import asyncio
 import math
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +183,9 @@ def _read_watchlist_seed_rows(supabase: Client, user_id: str) -> List[Dict[str, 
     return rows
 
 
-def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResponse]:
-    """Return all of the user's portfolios with their items, ordered by sort_order."""
-    rows = (
+def _read_portfolio_rows(supabase: Client, user_id: str) -> List[Dict[str, Any]]:
+    """The user's `portfolios` rows, ordered by sort_order. Unpaged: one row per group."""
+    return (
         supabase.table("portfolios")
         .select("*")
         .eq("user_id", user_id)
@@ -193,36 +194,293 @@ def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResp
         .data
         or []
     )
-    if not rows:
-        return []
 
-    portfolio_ids = [r["id"] for r in rows]
+
+def _read_items_for(
+    supabase: Client, user_id: str, portfolio_ids: List[Any]
+) -> List[Dict[str, Any]]:
+    """Every `portfolio_items` row of these groups — the serial path's items read."""
     # PAGED. PostgREST clamps every answer to ~1,000 rows: a user whose groups held more
     # got a silently truncated GET, `PortfolioStore` took it as the truth, and the next
     # `PUT /tickers` (a whole-list replace) DELETED the rows it never saw. Page on the
     # unique id, then order by position in Python — `position` is unique only per group.
-    item_rows = fetch_all_rows(
+    return fetch_all_rows(
         lambda: supabase.table("portfolio_items")
         .select("id,portfolio_id,ticker,position,shares,market_value")
         .in_("portfolio_id", portfolio_ids),
         order_by="id",
         what=f"portfolio_items for user={user_id}",
     )
-    item_rows.sort(key=lambda r: (str(r.get("portfolio_id")), int(r.get("position") or 0)))
 
-    by_portfolio: dict[str, List[PortfolioItemResponse]] = {
-        pid: [] for pid in portfolio_ids
-    }
-    for item in item_rows:
-        by_portfolio[item["portfolio_id"]].append(
+
+def _assemble_portfolios(
+    rows: List[Dict[str, Any]], item_rows: List[Dict[str, Any]], user_id: str
+) -> List[PortfolioResponse]:
+    """Group item rows under their portfolio rows; groups keep `rows`' sort_order.
+
+    Items come out in `position` order per group — the order the iOS whole-list
+    `PUT /tickers` writes back, so it must survive whichever read produced the rows.
+
+    An item whose group is not in `rows` is SKIPPED with one WARNING. The serial read can
+    never produce one (it asks for exactly these groups), but the concurrent read takes the
+    two tables in separate statements, so a group created between them can arrive with
+    its items and without its row. Indexing it used to be a KeyError → a 500 on the
+    endpoint every client calls at launch.
+    """
+    by_portfolio: Dict[str, List[PortfolioItemResponse]] = {str(r["id"]): [] for r in rows}
+    ordered = sorted(
+        item_rows, key=lambda r: (str(r.get("portfolio_id")), int(r.get("position") or 0))
+    )
+    orphans = 0
+    for item in ordered:
+        bucket = by_portfolio.get(str(item.get("portfolio_id")))
+        if bucket is None:
+            orphans += 1
+            continue
+        bucket.append(
             PortfolioItemResponse(
                 ticker=item["ticker"],
                 shares=item.get("shares"),
                 market_value=item.get("market_value"),
             )
         )
+    if orphans:
+        logger.warning(
+            "GET /portfolios: skipped %d portfolio_items row(s) for user=%s whose group "
+            "was not in the portfolios read (a group created or deleted between the two "
+            "reads) — the next read picks them up",
+            orphans, user_id,
+        )
+    return [_row_to_portfolio(r, by_portfolio.get(str(r["id"]), [])) for r in rows]
 
-    return [_row_to_portfolio(r, by_portfolio.get(r["id"], [])) for r in rows]
+
+def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResponse]:
+    """Return all of the user's portfolios with their items, ordered by sort_order.
+
+    The SERIAL read (groups, then their items), used by every caller except the first
+    read of `GET /portfolios` — see `_fetch_user_portfolios_concurrent`.
+    """
+    rows = _read_portfolio_rows(supabase, user_id)
+    if not rows:
+        return []
+    item_rows = _read_items_for(supabase, user_id, [r["id"] for r in rows])
+    return _assemble_portfolios(rows, item_rows, user_id)
+
+
+# ── GET /portfolios: the two reads in parallel ──────────────────────
+
+#: The joined items read. `portfolios!inner(user_id)` embeds each item's owning group and
+#: makes it an INNER join, so `.eq("portfolios.user_id", …)` filters the ITEMS, not just
+#: the embed. Without `!inner` the same filter only nulls the embed and every user's items
+#: come back — which is why each page is checked (`_check_joined_page_owner`).
+_JOINED_ITEMS_SELECT = "id,portfolio_id,ticker,position,shares,market_value,portfolios!inner(user_id)"
+
+
+class _JoinedItemsNotOwnerScoped(RuntimeError):
+    """A joined-read page held a row that is not provably the caller's (null embed or
+    another user's group): the `!inner` filter was not applied as written."""
+
+
+def _owner_key(user_id: Any) -> str:
+    """Case-insensitive uuid comparison key (PostgREST answers lowercase)."""
+    return str(user_id).strip().lower()
+
+
+def _check_joined_page_owner(batch: Any, user_key: str, what: str, start: int) -> None:
+    """Raise `_JoinedItemsNotOwnerScoped` unless every row on this page embeds the caller.
+
+    Null-embed-safe: a missing / null / non-object `portfolios` embed is UNVERIFIABLE and
+    counts as foreign — it is exactly what a dropped `!inner` produces.
+    """
+    foreign = unverifiable = 0
+    for row in batch or []:
+        embed = row.get("portfolios") if isinstance(row, dict) else None
+        owner = embed.get("user_id") if isinstance(embed, dict) else None
+        if owner is None:
+            unverifiable += 1
+        elif _owner_key(owner) != user_key:
+            foreign += 1
+    if foreign or unverifiable:
+        raise _JoinedItemsNotOwnerScoped(
+            f"{what}: the page at offset {start} held {foreign} row(s) of another user's "
+            f"group and {unverifiable} with no owner embed"
+        )
+
+
+class _OwnerCheckedPage:
+    """One page's query, checked for ownership as it executes.
+
+    `fetch_all_rows` stays the one paging implementation; this wrapper only adds the check
+    to each page's `.execute()`, so a filter PostgREST did not apply aborts the read on the
+    FIRST page (one ~1,000-row read) instead of paging every user's items up to the
+    200-page backstop. It implements exactly what `fetch_all_rows` calls
+    (`.order().range().execute()`); anything else raises AttributeError, which the caller
+    treats like any other failed joined read — the serial fallback, never a 500.
+    """
+
+    def __init__(self, query: Any, user_key: str, what: str):
+        self._query, self._user_key, self._what = query, user_key, what
+        self._start = 0
+
+    def order(self, *args: Any, **kwargs: Any) -> "_OwnerCheckedPage":
+        self._query = self._query.order(*args, **kwargs)
+        return self
+
+    def range(self, start: int, end: int) -> "_OwnerCheckedPage":
+        self._query = self._query.range(start, end)
+        self._start = start
+        return self
+
+    def execute(self) -> Any:
+        response = self._query.execute()
+        _check_joined_page_owner(
+            getattr(response, "data", None), self._user_key, self._what, self._start
+        )
+        return response
+
+
+def _read_user_item_rows_joined(supabase: Client, user_id: str) -> List[Dict[str, Any]]:
+    """Every `portfolio_items` row in any of the user's groups, in ONE paged read that
+    needs no group ids — so it can run alongside the `portfolios` read.
+
+    PAGED to completion like the serial read: iOS adopts this GET as the truth and its
+    whole-list `PUT /tickers` deletes the rows it never saw.
+    """
+    user_key = _owner_key(user_id)
+    what = f"joined portfolio_items for user={user_id}"
+    return fetch_all_rows(
+        lambda: _OwnerCheckedPage(
+            supabase.table("portfolio_items")
+            .select(_JOINED_ITEMS_SELECT)
+            .eq("portfolios.user_id", user_id),
+            user_key,
+            what,
+        ),
+        order_by="id",
+        what=what,
+    )
+
+
+async def _fetch_user_portfolios_concurrent(
+    supabase: Client, user_id: str
+) -> List[PortfolioResponse]:
+    """`_fetch_user_portfolios` with the two reads in parallel — the first read of
+    `GET /portfolios` only (two serial hops were most of its latency on the Holdings gate).
+
+    Degrades to TODAY's answer, never to a wrong one:
+      * the `portfolios` read fails → re-raise. Never [], which would SEED a duplicate
+        default group;
+      * no groups → [] (the caller seeds, as before) — a failed joined read is still
+        LOGGED first: it is the only signal that the `!inner` filter was not applied;
+      * the joined items read fails, or any page is not provably the caller's →
+        the serial items read for the rows ALREADY read (one extra hop, logged);
+      * a group in the rows that got NO item from the joined read → the serial items read
+        for exactly those groups (the TOP-UP, below);
+      * an item whose group is not in the rows → skipped with a WARNING.
+    No cache: every call reads both tables.
+    """
+    rows_result, joined_result = await asyncio.gather(
+        asyncio.to_thread(_read_portfolio_rows, supabase, user_id),
+        asyncio.to_thread(_read_user_item_rows_joined, supabase, user_id),
+        return_exceptions=True,
+    )
+    # BaseException, not Exception: a CancelledError is a BaseException and must
+    # propagate as itself, never be mistaken for rows or for a failed read to fall back on.
+    if isinstance(rows_result, BaseException):
+        if isinstance(rows_result, Exception):
+            logger.warning(
+                "GET /portfolios: portfolios read failed for user=%s (%s: %s) — "
+                "re-raising (an empty answer would seed a duplicate group)",
+                user_id, type(rows_result).__name__, rows_result,
+            )
+        raise rows_result
+    rows: List[Dict[str, Any]] = rows_result
+    # Before the empty-rows return: a BaseException in the joined read must never be
+    # mistaken for "no groups" and seed either.
+    if isinstance(joined_result, BaseException) and not isinstance(joined_result, Exception):
+        raise joined_result
+    if not rows:
+        # Nothing to serve, so the joined answer is not needed — but its failure is the
+        # only trace that the `!inner` filter was not applied; never drop it unlogged.
+        if isinstance(joined_result, _JoinedItemsNotOwnerScoped):
+            logger.error(
+                "GET /portfolios: !inner filter not applied for user=%s (%s) — "
+                "no groups, seeding",
+                user_id, joined_result,
+            )
+        elif isinstance(joined_result, Exception):
+            logger.warning(
+                "GET /portfolios: joined items read failed for user=%s (%s: %s) — "
+                "no groups, seeding",
+                user_id, type(joined_result).__name__, joined_result,
+            )
+        return []
+
+    if isinstance(joined_result, _JoinedItemsNotOwnerScoped):
+        logger.error(
+            "GET /portfolios: !inner filter not applied for user=%s (%s) — "
+            "serial fallback; no foreign row is served",
+            user_id, joined_result,
+        )
+        joined_result = None
+    elif isinstance(joined_result, Exception):
+        logger.warning(
+            "GET /portfolios: joined items read failed for user=%s (%s: %s) — "
+            "serial fallback",
+            user_id, type(joined_result).__name__, joined_result,
+        )
+        joined_result = None
+
+    if joined_result is None:
+        item_rows = await asyncio.to_thread(
+            _read_items_for, supabase, user_id, [r["id"] for r in rows]
+        )
+    else:
+        item_rows = await _top_up_groups_without_items(supabase, user_id, rows, joined_result)
+    return await asyncio.to_thread(_assemble_portfolios, rows, item_rows, user_id)
+
+
+async def _top_up_groups_without_items(
+    supabase: Client,
+    user_id: str,
+    rows: List[Dict[str, Any]],
+    joined_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """`joined_rows` plus the serial items read for every group in `rows` that got NONE.
+
+    The two concurrent reads are two snapshots. A group whose ownership moves to this user
+    between them — `POST /users/me/claim-guest-data` UPDATEs `portfolios.user_id` — can be
+    in the rows while the joined read (taken first) holds none of its items. Served like
+    that, it is a group with ZERO items: iOS adopts this GET as the truth, and its next
+    whole-list `PUT /tickers` DELETES the real items. So a group with no joined item is
+    re-read by id (`_read_items_for`: paged, the same read the serial path makes; the ids
+    come from the user-filtered rows). A legitimately empty group costs one extra hop —
+    the serial path's cost — never a wrong answer. Only groups with NO item are re-read:
+    the top-up cannot duplicate a row the joined read already returned.
+
+    A failed top-up RAISES (as the serial path's items read does): serving the group empty
+    is exactly the data loss this exists to prevent.
+    """
+    with_items = {str(r.get("portfolio_id")) for r in joined_rows}
+    missing = [r["id"] for r in rows if str(r["id"]) not in with_items]
+    if not missing:
+        return joined_rows
+    try:
+        topped = await asyncio.to_thread(_read_items_for, supabase, user_id, missing)
+    except Exception as e:
+        logger.warning(
+            "GET /portfolios: top-up items read for %d group(s) failed for user=%s "
+            "(%s: %s) — re-raising (an empty group would let a whole-list PUT delete "
+            "its items)",
+            len(missing), user_id, type(e).__name__, e,
+        )
+        raise
+    logger.info(
+        "GET /portfolios: topped up %d group(s) with no item in the joined read for "
+        "user=%s — the serial read found %d item(s)",
+        len(missing), user_id, len(topped),
+    )
+    return list(joined_rows) + list(topped)
 
 
 def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
@@ -433,8 +691,32 @@ def _backfill_lone_empty_portfolio(supabase: Client, user_id: str, portfolios):
         return portfolios
 
 
+# The canonical 8-4-4-4-12 form the server issues. Stricter than `uuid.UUID()`, which also
+# takes `urn:uuid:…`, and Postgres rejects that form with the same 22P02.
+_PORTFOLIO_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _is_portfolio_id(portfolio_id: Any) -> bool:
+    """`portfolios.id` is a Postgres `uuid`. Anything else can name no row."""
+    return isinstance(portfolio_id, str) and _PORTFOLIO_ID_RE.fullmatch(portfolio_id) is not None
+
+
 def _get_portfolio_or_404(supabase: Client, user_id: str, portfolio_id: str) -> dict:
-    """Fetch a portfolio row scoped to user_id; raise 404 if missing."""
+    """Fetch a portfolio row scoped to user_id; raise 404 if missing.
+
+    A non-UUID id is answered 404 BEFORE the query. PostgREST otherwise sends it to Postgres,
+    whose uuid cast fails (22P02) and surfaced as an unhandled 500. Seen 2026-10-08:
+    a DEBUG build's store-screenshot sample id `store-shot-sample` reached production as
+    `GET /portfolios/store-shot-sample/insights`. Every `/{portfolio_id}` route goes through here.
+    """
+    if not _is_portfolio_id(portfolio_id):
+        logger.warning(
+            "portfolios: non-UUID portfolio id %r from user=%s — answering 404",
+            str(portfolio_id)[:64], user_id,
+        )
+        raise HTTPException(status_code=404, detail="Portfolio not found")
     result = (
         supabase.table("portfolios")
         .select("*")
@@ -507,7 +789,9 @@ async def list_portfolios(
     Lazy-seeds a default "Holdings" portfolio on first call so the iOS client
     never has to special-case the empty state.
     """
-    portfolios = (await asyncio.to_thread(_fetch_user_portfolios, supabase, user["id"]))
+    # The groups and their items in parallel (one hop, not two). The re-fetches below stay
+    # on the serial read: they are off the common path.
+    portfolios = await _fetch_user_portfolios_concurrent(supabase, user["id"])
     if not portfolios:
         (await asyncio.to_thread(_seed_default_portfolio, supabase, user["id"]))
         portfolios = (await asyncio.to_thread(_fetch_user_portfolios, supabase, user["id"]))

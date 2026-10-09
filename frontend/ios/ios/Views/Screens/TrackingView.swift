@@ -382,11 +382,27 @@ struct TrackingContentViewWithBinding: View {
             // `stopPriceRefreshTimer()` had no caller anywhere, so the poll ran for the
             // life of the process: re-fetching `/tracking/assets` every 30 s from every
             // other tab, in the background, and after sign-out.
+            //
+            // Both branches then read this account's saved Holdings from DISK (never the
+            // network), so the first frame after the tap already has rows. The hidden tab does
+            // not draw them (`AssetsTabContent` renders snapshot rows only while active).
             guard isActiveTab else {
                 viewModel.stopPriceRefreshTimer()
+                await viewModel.prepareSnapshot()
                 return
             }
+            await viewModel.prepareSnapshot()
+            // A quick tab-away during the disk read cancels this run; never start a load from
+            // a cancelled one.
+            guard !Task.isCancelled else { return }
             await viewModel.loadIfNeeded()
+        }
+        // A snapshot on screen that aged past its 96 h window while the app sat in the
+        // background comes down on return, whichever tab is showing.
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+        ) { _ in
+            viewModel.expireSnapshotIfStale()
         }
     }
 
@@ -405,6 +421,10 @@ struct AssetsTabContent: View {
     @ObservedObject var viewModel: TrackingViewModel
     /// Read for one thing: raising the sign-in prompt from the account-gate state below.
     @Environment(\.appState) private var appState
+    /// The saved snapshot's rows are drawn only while this tab is on screen. `ContentView`
+    /// flips this in the same update as the tab's opacity, so the first visible frame after
+    /// the tap already has them — and a hidden tab never builds that List at launch.
+    @Environment(\.isActiveTab) private var isActiveTab
 
     // Which custom header popup (portfolio switcher / sort+manage) is open.
     // Hosted here, above the list, via an anchor-preference overlay so the
@@ -467,22 +487,27 @@ struct AssetsTabContent: View {
                         // 32pt WIDER than the rows replacing them, so the list snapped inward
                         // on load — the exact jump this skeleton exists to prevent.
                         .padding(.horizontal, AppSpacing.lg)
+                } else if viewModel.filteredAssets.isEmpty && !viewModel.hasAttemptedLoad {
+                    // Never loaded yet (the hidden tab before its first activation, and the
+                    // frame or two after a tap before the load starts): this says "loading",
+                    // never "No tickers yet", and it does not animate in a hidden tab.
+                    TrackedAssetsSkeleton(isAnimated: false)
+                        .padding(.horizontal, AppSpacing.lg)
                 } else if viewModel.filteredAssets.isEmpty {
+                    // The feed's failure, or a failed /portfolios with no live list — never a
+                    // silent "No tickers yet" over holdings that simply did not load.
                     AssetsPlaceholderCard(
-                        errorMessage: viewModel.assetsErrorMessage,
+                        errorMessage: viewModel.holdingsErrorMessage,
                         isLoading: viewModel.isLoading,
                         onRetry: { Task { await viewModel.refresh() } },
                         onAdd: { viewModel.addNewAsset() }
                     )
+                } else if isActiveTab || !viewModel.isShowingSnapshot {
+                    holdingsList
                 } else {
-                    AssetsListSection(
-                        assets: viewModel.filteredAssets,
-                        onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
-                        onRemoveAsset: { asset in viewModel.removeAsset(asset) },
-                        onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) },
-                        changeDisplayMode: viewModel.changeDisplayMode,
-                        onToggleChangeDisplay: { viewModel.toggleChangeDisplayMode() }
-                    )
+                    // Hidden tab, snapshot rows: a static stand-in until the tab is shown.
+                    TrackedAssetsSkeleton(isAnimated: false)
+                        .padding(.horizontal, AppSpacing.lg)
                 }
 
                 // "Alerts & Upcoming Events" used to render HERE. It moved to the Alerts
@@ -490,15 +515,11 @@ struct AssetsTabContent: View {
                 // It is still fed by `viewModel.filteredAlerts`, and its detail sheet still
                 // hangs off `viewModel.selectedAlert` on this screen.
 
-                // Portfolio Insights — computed locally from the active portfolio.
-                PortfolioInsightsSection(
-                    score: viewModel.displayedDiversificationScore,
-                    coverageNote: viewModel.portfolioInsightsCoverageNote,
-                    hint: viewModel.portfolioInsightsHint,
-                    enteredHoldingsCount: viewModel.enteredHoldingsCount,
-                    isEnabled: $viewModel.isInsightsEnabled,
-                    onConfigureTapped: { viewModel.openPortfolioConfigSheet() }
-                )
+                // Portfolio Insights — computed locally from the active portfolio. Like the
+                // rows, a snapshot's score is drawn only while this tab is on screen.
+                if isActiveTab || !viewModel.isShowingSnapshot {
+                    insightsSection
+                }
 
                 // Bottom spacing for tab bar
                 Spacer()
@@ -508,6 +529,11 @@ struct AssetsTabContent: View {
         .refreshable {
             await viewModel.refresh()
         }
+        // The tab bar switches tabs inside `withAnimation`, and a hidden tab draws a static
+        // skeleton in place of snapshot rows: without this the activation swap is cross-faded
+        // over 0.2 s, so the first frame after a tap shows the skeleton bleeding through the
+        // rows. The tab's own fade (ContentView's opacity) is an ancestor and is unaffected.
+        .transaction(value: isActiveTab) { $0.animation = nil }
         // Floating header popups (portfolio switcher + sort/manage). Anchored
         // to each trigger's bounds and drawn above the scroll content.
         .overlayPreferenceValue(PortfolioHeaderMenuAnchorKey.self) { anchors in
@@ -521,12 +547,45 @@ struct AssetsTabContent: View {
             }
         }
         // Auto-open the config sheet the first time the user enables the
-        // section without any holding data — saves them a tap.
+        // section without any holding data — saves them a tap. Only over a KNOWN empty
+        // answer: an unknown, failed or gated one would open a sheet about nothing.
         .onChange(of: viewModel.isInsightsEnabled) { _, isOn in
-            if isOn && viewModel.displayedDiversificationScore == nil {
+            if isOn && viewModel.shouldAutoOpenPortfolioConfig {
                 viewModel.openPortfolioConfigSheet()
             }
         }
+    }
+
+    /// The Holdings rows — live, or the labelled snapshot's. Swipe-remove only on live rows.
+    private var holdingsList: some View {
+        AssetsListSection(
+            assets: viewModel.filteredAssets,
+            onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
+            onRemoveAsset: { asset in viewModel.removeAsset(asset) },
+            onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) },
+            changeDisplayMode: viewModel.changeDisplayMode,
+            onToggleChangeDisplay: { viewModel.toggleChangeDisplayMode() },
+            allowsRemoval: viewModel.canEditHoldings
+        )
+    }
+
+    /// Portfolio Insights with its honest states: answered, loading, failed (Retry), or the
+    /// account gate's neutral line — never "Set up" for an answer that is not known.
+    private var insightsSection: some View {
+        PortfolioInsightsSection(
+            score: viewModel.displayedDiversificationScore,
+            coverageNote: viewModel.portfolioInsightsCoverageNote,
+            hint: viewModel.portfolioInsightsHint,
+            enteredHoldingsCount: viewModel.enteredHoldingsCount,
+            isResolving: viewModel.portfolioInsightsIsResolving,
+            showsProgress: viewModel.portfolioInsightsShowsProgress,
+            didFail: viewModel.portfolioInsightsDidFail,
+            isGated: viewModel.portfolioInsightsIsGated,
+            configureEnabled: viewModel.canEditPortfolio,
+            isEnabled: $viewModel.isInsightsEnabled,
+            onConfigureTapped: { viewModel.openPortfolioConfigSheet() },
+            onRetry: { viewModel.retryPortfolioInsights() }
+        )
     }
 }
 

@@ -37,7 +37,8 @@
 2. **New-filer probe**: ``institutional-ownership/dates`` for every CIK of every US member.
    A company the registry calls a non-filer that now lists a recent 13F logs a WARNING —
    ``use_13f`` is NEVER switched on by code.
-3. **Discovery**: the company screener at ≥ $900B (NASDAQ/NYSE, no ETFs or funds), each
+3. **Discovery**: the company screener (NASDAQ/NYSE, no ETFs or funds, every cap — the
+   ≥ $900B floor is read off each row's own cap, see ``DISCOVERY_MIN_CAP_USD``), each
    unknown symbol confirmed by ``market-capitalization-batch`` (a second source; both are
    discovery-only figures, never displayed). A confirmed unknown is inserted UNPUBLISHED
    with a WARNING. Nothing reaches Home without the owner. "Unknown" is judged against the
@@ -100,11 +101,18 @@ REHASH_WINDOW_DAYS = 365
 STALE_ERROR_AFTER = timedelta(days=3)
 #: WARNING when a hand-entered cap (Aramco, Samsung) is older than this.
 MANUAL_CAP_WARN_DAYS = 45
-#: Discovery screen floor (the club line is $1T; the screen looks a little below it).
+#: Discovery floor (the club line is $1T; the screen looks a little below it). Applied to
+#: each row's OWN ``marketCap`` in ``_screen_rows``, never sent as ``marketCapMoreThan``
+#: (2026-10-08): FMP filters on a server-side cap and HIDES every row where that cap is null,
+#: whatever cap the row carries (VMRK $22.5B, VYLR $48.6B, SKYD $10.1B) — the shape a
+#: just-listed mega-cap or a merger successor takes, exactly what discovery exists to find.
 DISCOVERY_MIN_CAP_USD = 900_000_000_000
 DISCOVERY_EXCHANGES = ("NASDAQ", "NYSE")
-#: The ≥ $900B screen is ~20 rows; hitting this ceiling means truncation — logged.
-DISCOVERY_SCREEN_LIMIT = 200
+#: So the screen is the whole NASDAQ/NYSE common-stock market (5,825 rows on 2026-10-08) in
+#: one call at FMP's 10,000-row page ceiling. A full page is logged at ERROR, not failed: the
+#: screener answers largest cap first, by each row's OWN cap (probed: all 5,825 rows in order,
+#: no inversion, VMRK 581st), so a cut page loses the smallest caps, never a $900B one.
+DISCOVERY_SCREEN_LIMIT = 10_000
 #: A non-filer's 13F only counts as "started filing" when its newest quarter is recent.
 NEW_FILER_RECENT_DAYS = 400
 #: Card kinds that say "this company does not file 13Fs".
@@ -981,23 +989,26 @@ async def _discovery_stage(companies: Sequence[Company], registry_rows: Sequence
     summary["discovery"] = stage
     try:
         rows = await fmp.get_company_screener(
-            market_cap_more_than=DISCOVERY_MIN_CAP_USD, exchange=",".join(DISCOVERY_EXCHANGES),
-            actively_trading=True, is_fund=False, is_etf=False, limit=DISCOVERY_SCREEN_LIMIT,
+            exchange=",".join(DISCOVERY_EXCHANGES), actively_trading=True, is_fund=False,
+            is_etf=False, limit=DISCOVERY_SCREEN_LIMIT,
         )
     except Exception as e:
         logger.warning("trillion club discovery: screener failed (%s: %s)", type(e).__name__, e)
         _fail(summary, stage, f"discovery screener: {type(e).__name__}: {e}")
         return
     if not isinstance(rows, list) or not rows:
-        # ~15 companies clear $900B; an empty screen is FMP failing, not "none left".
-        logger.warning("trillion club discovery: the ≥$900B screen came back empty — treated "
-                       "as a failure, not as 'no companies'")
+        # ~5,800 listings, ~15 of them over $900B; an empty screen is FMP failing, not
+        # "none left".
+        logger.warning("trillion club discovery: the screen came back empty — treated as a "
+                       "failure, not as 'no companies'")
         _fail(summary, stage, "discovery screener: empty result")
         return
     stage["screened"] = len(rows)
     if len(rows) >= DISCOVERY_SCREEN_LIMIT:
-        logger.warning("trillion club discovery: the screen hit its %d-row ceiling — some "
-                       "candidates may be missing", DISCOVERY_SCREEN_LIMIT)
+        logger.error("trillion club discovery: the screen filled its %d-row page — the "
+                     "smallest listings are cut (the screener answers largest cap first, so no "
+                     "$900B candidate should be); split the screen by exchange",
+                     DISCOVERY_SCREEN_LIMIT)
     # RAW rows: a row the parser skipped (e.g. cap_symbol '' after a Studio edit) is still
     # that company, and re-inserting it under a new slug would duplicate it.
     known = registry_symbols(registry_rows) | {s for c in companies for s in c.symbols}

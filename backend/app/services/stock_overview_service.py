@@ -58,7 +58,7 @@ from app.utils.market_hours import (
 )
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import profile_is_fund, uses_coingecko_price
-from app.services.price_service import price_source
+from app.services.price_service import price_source, profile_change_is_current
 from app.services.market_movers_service import get_market_movers_service
 # The close-cycle boundary every close-aligned cache in the app shares (weekday 18:00 ET).
 # Bound at MODULE level, like index/etf/commodity, so a test can freeze this module's clock.
@@ -1122,10 +1122,12 @@ class StockOverviewService:
         # real 0.0 change and surfaced the staler profile's nonzero %, contradicting
         # the (correctly 0.0) price_change. (Fallback key was also wrong: stable
         # profile exposes "change", not "changes".)
-        raw_change = _first_present_or_none((quote, "change"), (profile, "change"))
+        # An inactive listing's profile change is a PAST session's (`profile_change_is_current`).
+        profile_change = profile if profile_change_is_current(profile) else {}
+        raw_change = _first_present_or_none((quote, "change"), (profile_change, "change"))
         raw_pct = _first_present_or_none(
             (quote, "changePercentage"), (quote, "changesPercentage"),
-            (profile, "changePercentage"), (profile, "changesPercentage"),
+            (profile_change, "changePercentage"), (profile_change, "changesPercentage"),
         )
         # `is not None`, never truthiness: an explicit 0.0 is a KNOWN flat day. Only
         # a change absent from EVERY source is unknown — `/stable/profile` answers
@@ -1291,10 +1293,12 @@ class StockOverviewService:
         # real 0.0 change and surfaced the staler profile's nonzero %, contradicting
         # the (correctly 0.0) price_change. (Fallback key was also wrong: stable
         # profile exposes "change", not "changes".)
-        raw_change = _first_present_or_none((quote, "change"), (profile, "change"))
+        # An inactive listing's profile change is a PAST session's (`profile_change_is_current`).
+        profile_change = profile if profile_change_is_current(profile) else {}
+        raw_change = _first_present_or_none((quote, "change"), (profile_change, "change"))
         raw_pct = _first_present_or_none(
             (quote, "changePercentage"), (quote, "changesPercentage"),
-            (profile, "changePercentage"), (profile, "changesPercentage"),
+            (profile_change, "changePercentage"), (profile_change, "changesPercentage"),
         )
         # `is not None`, never truthiness: an explicit 0.0 is a KNOWN flat day. Only
         # a change absent from EVERY source is unknown — `/stable/profile` answers

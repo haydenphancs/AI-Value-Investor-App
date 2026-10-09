@@ -54,6 +54,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -119,10 +120,14 @@ class _RateLimiter:
 # ── Ticker universe ──────────────────────────────────────────────────
 
 
-# Screener pulls a broad pool of REAL US stocks; we then rank + cap to top_n.
-# floor 0 returns ~5.8k actively-traded, non-fund/non-ETF US-listed names.
-_SCREENER_MIN_MARKET_CAP = 0
-_SCREENER_LIMIT = 30000
+# Screener pulls a broad pool of REAL US stocks; we then rank + cap to top_n. NO
+# `marketCapMoreThan`, not even 0 (2026-10-08): FMP applies it to a server-side cap and HIDES
+# every row where that cap is null, whatever cap the row carries — 666 US listings (ETFs
+# included) at `> 0`, among them VMRK ($22.5B), VYLR ($48.6B) and SKYD ($10.1B), each inside
+# any sensible top_n. Without it: 6,073 actively-traded, non-fund/non-ETF US-listed names, in
+# one call. FMP serves at most 10,000 rows a call whatever `limit` says
+# (`FMPClient.get_company_screener`).
+_SCREENER_LIMIT = 10_000
 
 
 async def _screener_stock_caps(fmp: FMPClient) -> Dict[str, float]:
@@ -140,7 +145,6 @@ async def _screener_stock_caps(fmp: FMPClient) -> Dict[str, float]:
             "isFund": "false",
             "isActivelyTrading": "true",
             "exchange": "NASDAQ,NYSE,AMEX",
-            "marketCapMoreThan": _SCREENER_MIN_MARKET_CAP,
             "limit": _SCREENER_LIMIT,
         })
         rows = rows if isinstance(rows, list) else []
@@ -149,12 +153,30 @@ async def _screener_stock_caps(fmp: FMPClient) -> Dict[str, float]:
             "company-screener failed (%s) — falling back to industry_universe.json", exc
         )
         return {}
+    if len(rows) >= _SCREENER_LIMIT:
+        # The screener answers largest cap first, so a cut page loses the smallest names —
+        # harmless for a top_n far below it, but a watchlist name among them is not unioned.
+        logger.warning(
+            "company-screener filled its %d-row page — the smallest listings are missing "
+            "from the stock pool", _SCREENER_LIMIT,
+        )
     caps: Dict[str, float] = {}
     for r in rows:
-        sym = (r.get("symbol") or "").upper().strip()
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("symbol") or "").upper().strip()
         if sym and _TICKER_RE.match(sym):
-            caps[sym] = float(r.get("marketCap") or 0.0)
+            caps[sym] = _rank_cap(r.get("marketCap"))
     return caps
+
+
+def _rank_cap(value: Any) -> float:
+    """A row's cap for RANKING: a real finite number, else 0.0 (ranked last). With no server
+    floor a NaN / string / bool cap now reaches here, and a NaN key scrambles `sorted`."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    out = float(value)
+    return out if math.isfinite(out) else 0.0
 
 
 def _json_stock_caps() -> Dict[str, float]:

@@ -146,7 +146,9 @@ def test_the_portfolio_switch_has_the_epoch_check_too():
     assert "let epoch = identityEpoch" in body
     assert body.index("let epoch = identityEpoch") < body.index("activatePortfolio(id: id)")
     assert body.count("guard epoch == identityEpoch else { return }") == 2
-    assert body.index("guard epoch == identityEpoch else { return }") < body.index("UserDefaults.standard.set")
+    # The device-global write goes through `storeActiveIdHint` (it skips the write in DEBUG
+    # store-screenshot mode); the epoch guard must still precede it.
+    assert body.index("guard epoch == identityEpoch else { return }") < body.index("Self.storeActiveIdHint(id)")
 
 
 # ── the two lifecycle leaks ─────────────────────────────────────────────────────────

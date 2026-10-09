@@ -47,6 +47,12 @@ from app.api.v1.endpoints import watchlist as wl
 
 _USER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _USER_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+# Real UUIDs: `_get_portfolio_or_404` answers 404 for a non-UUID id before any query, so a
+# fake id like "p-a1" would pass the 404 tests below through that guard, not the branch
+# each one is about.
+_PA1 = "a1a1a1a1-0000-4000-8000-000000000001"
+_PA2 = "a2a2a2a2-0000-4000-8000-000000000002"
+_PB1 = "b1b1b1b1-0000-4000-8000-000000000003"
 
 
 class _R:
@@ -135,14 +141,14 @@ def _two_user_store():
     then A's inactive one, then A's active one. Do not "tidy" this into per-user order."""
     return {
         "portfolios": [
-            _group("p-b1", _USER_B, "Holdings", active=True),   # wrong row if user_id dropped
-            _group("p-a2", _USER_A, "Tech", active=False),      # wrong row if is_active dropped
-            _group("p-a1", _USER_A, "Holdings", active=True),   # the row A should get
+            _group(_PB1, _USER_B, "Holdings", active=True),   # wrong row if user_id dropped
+            _group(_PA2, _USER_A, "Tech", active=False),      # wrong row if is_active dropped
+            _group(_PA1, _USER_A, "Holdings", active=True),   # the row A should get
         ],
         "portfolio_items": [
-            {"portfolio_id": "p-a1", "ticker": "AAPL", "position": 0},
-            {"portfolio_id": "p-a2", "ticker": "ORCL", "position": 0},
-            {"portfolio_id": "p-b1", "ticker": "NVDA", "position": 0},
+            {"portfolio_id": _PA1, "ticker": "AAPL", "position": 0},
+            {"portfolio_id": _PA2, "ticker": "ORCL", "position": 0},
+            {"portfolio_id": _PB1, "ticker": "NVDA", "position": 0},
         ],
     }
 
@@ -150,8 +156,8 @@ def _two_user_store():
 # ── 1. _get_portfolio_or_404 — the ownership check every /{portfolio_id} route relies on ─
 
 def test_the_owner_gets_their_row():
-    row = pf._get_portfolio_or_404(_SB(), _USER_A, "p-a1")
-    assert row["id"] == "p-a1" and row["user_id"] == _USER_A
+    row = pf._get_portfolio_or_404(_SB(), _USER_A, _PA1)
+    assert row["id"] == _PA1 and row["user_id"] == _USER_A
 
 
 def test_another_user_gets_404_not_the_row():
@@ -161,13 +167,18 @@ def test_another_user_gets_404_not_the_row():
     404, not 403: "not yours" and "not there" must be indistinguishable, or the response
     confirms to a stranger that the id exists — and the detail must not carry the row."""
     with pytest.raises(HTTPException) as exc:
-        pf._get_portfolio_or_404(_SB(), _USER_B, "p-a1")
+        pf._get_portfolio_or_404(_SB(), _USER_B, _PA1)
     assert exc.value.status_code == 404
     assert _USER_A not in str(exc.value.detail)
     assert "Holdings" not in str(exc.value.detail)
 
 
-@pytest.mark.parametrize("portfolio_id", ["p-zzz", "", "not-a-uuid", "p-a1 "])
+@pytest.mark.parametrize(
+    "portfolio_id",
+    # The last is a well-formed UUID with no row: it reaches the query, so the
+    # `not result.data` branch stays covered past the UUID guard.
+    ["p-zzz", "", "not-a-uuid", "p-a1 ", "dddddddd-0000-4000-8000-00000000dead"],
+)
 def test_a_missing_or_garbage_id_is_404(portfolio_id):
     """`if not result.data` must be the branch — not `result.data[0]` on an empty list."""
     with pytest.raises(HTTPException) as exc:
@@ -179,7 +190,7 @@ def test_a_missing_user_id_is_not_a_wildcard():
     """A degraded identity dict (`user.get("id")` → None) must match nothing. The fake
     answers "no row"; live PostgREST rejects the literal outright. Either way: not a row."""
     with pytest.raises(HTTPException) as exc:
-        pf._get_portfolio_or_404(_SB(), None, "p-a1")
+        pf._get_portfolio_or_404(_SB(), None, _PA1)
     assert exc.value.status_code == 404
 
 
@@ -188,7 +199,7 @@ def test_a_null_body_is_404_not_a_crash():
     → 500, and a 500 on a guard is exactly the kind that tempts a "just catch it" patch —
     which is the fail-open this file exists to prevent."""
     with pytest.raises(HTTPException) as exc:
-        pf._get_portfolio_or_404(_SB(null_on={"portfolios"}), _USER_A, "p-a1")
+        pf._get_portfolio_or_404(_SB(null_on={"portfolios"}), _USER_A, _PA1)
     assert exc.value.status_code == 404
 
 
@@ -197,7 +208,7 @@ def test_a_transport_fault_propagates_rather_than_yielding_a_row():
     `portfolio_id` alone (module docstring); a fault swallowed into `{}` or `None` lets the
     route go on to mutate holdings it never verified it owns."""
     with pytest.raises(RuntimeError):
-        pf._get_portfolio_or_404(_SB(raise_on={"portfolios"}), _USER_A, "p-a1")
+        pf._get_portfolio_or_404(_SB(raise_on={"portfolios"}), _USER_A, _PA1)
 
 
 def test_the_lookup_is_scoped_on_the_wire_not_in_python():
@@ -205,12 +216,12 @@ def test_the_lookup_is_scoped_on_the_wire_not_in_python():
     client-side would still return the right dict — and pass the two-user tests — while
     shipping another account's data across the wire. Both predicates, on the ONE query."""
     sb = _SB()
-    pf._get_portfolio_or_404(sb, _USER_A, "p-a1")
+    pf._get_portfolio_or_404(sb, _USER_A, _PA1)
     assert len(sb.queries) == 1
     table, filters = sb.queries[0]
     assert table == "portfolios"
     assert ("user_id", _USER_A) in filters
-    assert ("id", "p-a1") in filters
+    assert ("id", _PA1) in filters
 
 
 # ── 2. _name_taken — the same predicate asked a different question ───────────
@@ -234,19 +245,19 @@ def test_a_name_only_another_user_holds_is_free():
 
 def test_a_rename_may_keep_its_own_name():
     """Changing only the case of p-a2 ("Tech" → "TECH") collides with nothing but itself."""
-    assert pf._name_taken(_SB(), _USER_A, "TECH", exclude_id="p-a2") is False
+    assert pf._name_taken(_SB(), _USER_A, "TECH", exclude_id=_PA2) is False
 
 
 def test_exclude_id_exempts_that_one_row_only():
     """Renaming p-a1 to "Tech" still collides with p-a2. `exclude_id` means "ignore the row
     being renamed", not "ignore conflicts"."""
-    assert pf._name_taken(_SB(), _USER_A, "Tech", exclude_id="p-a1") is True
+    assert pf._name_taken(_SB(), _USER_A, "Tech", exclude_id=_PA1) is True
 
 
 def test_excluding_another_users_row_unlocks_nothing():
     """B passing A's id as exclude_id: the scan is already scoped to B, so p-a1 was never a
     candidate and B's own "Holdings" still conflicts."""
-    assert pf._name_taken(_SB(), _USER_B, "Holdings", exclude_id="p-a1") is True
+    assert pf._name_taken(_SB(), _USER_B, "Holdings", exclude_id=_PA1) is True
 
 
 @pytest.mark.parametrize(
@@ -351,7 +362,7 @@ def test_both_reads_carry_the_right_predicates():
     groups = sb.filters_for("portfolios")
     assert ("user_id", _USER_A) in groups and ("is_active", True) in groups
     items = sb.filters_for("portfolio_items")
-    assert ("portfolio_id", "p-a1") in items and ("ticker", "AAPL") in items
+    assert ("portfolio_id", _PA1) in items and ("ticker", "AAPL") in items
 
 
 # ── 4. Every /{portfolio_id} route actually calls the guard ──────────────────

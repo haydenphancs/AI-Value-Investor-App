@@ -19,7 +19,7 @@ import logging
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.services.chart_helper import (
     FULL_SPAN,
-    fetch_chart_data,
+    fetch_sparkline_bars,
     intraday_span,
     sparkline_precision,
     _finite_or_none,
@@ -62,6 +62,7 @@ from app.services._earnings_common import (
 from app.config import settings
 from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
+from app.utils.market_hours import ET
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,175 @@ def _downsample(values: List[float], target: int) -> List[float]:
     return [values[i] for i in idxs]
 
 
+# ── Market-wide earnings calendar (process-wide, Tier 1 only) ─────────
+#
+# `_get_earnings_alerts` used to download the WHOLE market's 15-day `earnings-calendar`
+# (~430 KB, thousands of rows) on every feed build — every cold open and every 30 s
+# poll of every user — to keep the handful of rows on that user's watchlist. The window
+# is the same for everyone, so one answer serves every build for 30 minutes.
+#
+# Tier 1 only, by design: the window moves daily and the rows are a pure function of the
+# upstream, so a Supabase tier would only add a round trip to a 30-minute memo.
+#
+# * ONE slot, so the memory is bounded (one calendar), keyed on the CLIENT object, the
+#   window and the time. Keying on the client keeps a test's fake from being served
+#   another fake's rows, and the slot holds the client strongly, so an `is` check can
+#   never match a recycled object.
+# * Never stores `[]` (a cached empty reads exactly like "nobody reports this fortnight"
+#   — the FMP deep-check lesson), a non-list answer, or a failure.
+# * `_earnings_calendar_inflight` dedups concurrent misses. A joiner is shielded, and a
+#   joiner whose leader was CANCELLED (a client disconnect) takes over the download
+#   rather than serving its own user a feed with no earnings alerts.
+# * Coherent only within one process — the deploy runs exactly one uvicorn worker
+#   (`tests/test_deploy_command_parity.py`).
+EARNINGS_CALENDAR_TTL = 1800
+# FMP's SILENT row cap on `earnings-calendar`: a larger answer is cut, NEWEST dates kept,
+# so today's and tomorrow's rows — the ones the alert most needs — are the ones dropped.
+# Same number as `earnings_window_service._TRUNCATION_ROWS`.
+_EARNINGS_TRUNCATION_ROWS = 4000
+# (client, from_date, to_date, monotonic stored-at, rows) or None.
+_earnings_calendar_slot: Optional[Tuple[Any, str, str, float, List[Dict[str, Any]]]] = None
+# (id(client), from_date, to_date) -> the leader's future. `id()` is safe here: the
+# leader's frame holds the client until its `finally` has removed the entry.
+_earnings_calendar_inflight: Dict[Tuple[int, str, str], asyncio.Future] = {}
+# The ET day the truncation ERROR was last raised for. A 15-day window exceeds the cap on
+# every fetch during earnings season, so an ERROR every 30 minutes for weeks would bury
+# the Sentry issue; it is raised once per process per ET day and logged at WARNING after.
+_earnings_truncation_error_day: Optional[date] = None
+
+
+def reset_earnings_calendar_cache() -> None:
+    """Drop the memoised calendar, the in-flight map and the truncation latch (tests)."""
+    global _earnings_calendar_slot, _earnings_truncation_error_day
+    _earnings_calendar_slot = None
+    _earnings_calendar_inflight.clear()
+    _earnings_truncation_error_day = None
+
+
+def _et_today() -> date:
+    """Today's ET calendar date. A function so tests can move the day."""
+    return datetime.now(ET).date()
+
+
+def _log_earnings_truncation(row_count: int, from_date: str, to_date: str) -> None:
+    """ERROR once per process per ET day when the calendar hit FMP's silent row cap."""
+    global _earnings_truncation_error_day
+    if row_count < _EARNINGS_TRUNCATION_ROWS:
+        return
+    day = _et_today()
+    if _earnings_truncation_error_day != day:
+        _earnings_truncation_error_day = day
+        logger.error(
+            "[Tracking] earnings calendar %s..%s returned %d rows — at FMP's silent cap "
+            "(%d), so it is probably TRUNCATED (newest dates kept): today's and "
+            "tomorrow's earnings alerts may be missing. Logged at ERROR once per ET day.",
+            from_date, to_date, row_count, _EARNINGS_TRUNCATION_ROWS,
+        )
+    else:
+        logger.warning(
+            "[Tracking] earnings calendar %s..%s returned %d rows — still at FMP's "
+            "silent cap (%d), probably truncated (already reported at ERROR today)",
+            from_date, to_date, row_count, _EARNINGS_TRUNCATION_ROWS,
+        )
+
+
+async def _cached_earnings_calendar(
+    fmp: Any, from_date: str, to_date: str
+) -> List[Dict[str, Any]]:
+    """The market-wide calendar for ``from_date..to_date``: memo → join → fetch.
+
+    Raises what the upstream raises (and `TypeError` for a non-list answer); the caller
+    degrades. The returned list is SHARED with every other caller — read it, never
+    mutate it.
+    """
+    global _earnings_calendar_slot
+    key = (id(fmp), from_date, to_date)
+    while True:
+        slot = _earnings_calendar_slot
+        if (
+            slot is not None
+            and slot[0] is fmp
+            and slot[1] == from_date
+            and slot[2] == to_date
+            and _time.monotonic() - slot[3] < EARNINGS_CALENDAR_TTL
+        ):
+            logger.debug(
+                "[Tracking] earnings calendar %s..%s served from memory (%d rows)",
+                from_date, to_date, len(slot[4]),
+            )
+            return slot[4]
+        inflight = _earnings_calendar_inflight.get(key)
+        if inflight is None:
+            break
+        try:
+            # `shield`: a joiner that is itself cancelled must not cancel the download
+            # every other caller is waiting on.
+            return await asyncio.shield(inflight)
+        except _InflightLeaderCancelled:
+            # The leader's request went away mid-download. Take over instead of serving
+            # this user a feed with no earnings alerts for someone else's disconnect.
+            # The leader's `finally` has already removed its entry; dropping it here too
+            # (identity-checked) guarantees this loop makes progress regardless.
+            if _earnings_calendar_inflight.get(key) is inflight:
+                _earnings_calendar_inflight.pop(key, None)
+            logger.info(
+                "[Tracking] earnings calendar %s..%s: leader cancelled — a joiner takes "
+                "over the download", from_date, to_date,
+            )
+            continue
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _earnings_calendar_inflight[key] = fut
+    started = _time.monotonic()
+    try:
+        rows = await fmp.get_earnings_calendar(from_date=from_date, to_date=to_date)
+        if not isinstance(rows, list):
+            raise TypeError(
+                f"earnings calendar {from_date}..{to_date} returned "
+                f"{type(rows).__name__}, not a list"
+            )
+        elapsed_ms = (_time.monotonic() - started) * 1000.0
+        if rows:
+            _log_earnings_truncation(len(rows), from_date, to_date)
+            _earnings_calendar_slot = (fmp, from_date, to_date, _time.monotonic(), rows)
+            logger.info(
+                "[Tracking] earnings calendar %s..%s fetched: %d rows in %.0f ms — "
+                "memoised for %d s",
+                from_date, to_date, len(rows), elapsed_ms, EARNINGS_CALENDAR_TTL,
+            )
+        else:
+            logger.warning(
+                "[Tracking] earnings calendar %s..%s returned NO rows in %.0f ms%s — "
+                "served, NOT memoised (an empty answer cannot be told apart from a "
+                "degraded one, so the next build asks again)",
+                from_date, to_date, elapsed_ms,
+                " (marked as a failed fetch)" if getattr(rows, "fetch_failed", False) else "",
+            )
+        if not fut.done():
+            fut.set_result(rows)
+        return rows
+    except asyncio.CancelledError:
+        # BaseException — it skips the arm below. Hand joiners an exception they recover
+        # from (they take over), or they would hang for the life of the process.
+        if not fut.done():
+            fut.set_exception(
+                _InflightLeaderCancelled("earnings calendar leader cancelled")
+            )
+            fut.exception()  # mark retrieved: with no joiner nobody ever reads it
+        raise
+    except BaseException as e:
+        if not fut.done():
+            fut.set_exception(e)
+            # Mark retrieved (see `get_tracking_feed`): the leader re-raises `e` itself,
+            # and with no joiner the stored copy would be logged as never retrieved.
+            fut.exception()
+        raise
+    finally:
+        if _earnings_calendar_inflight.get(key) is fut:
+            _earnings_calendar_inflight.pop(key, None)
+
+
 # ── Service ─────────────────────────────────────────────────────────
 
 
@@ -595,7 +765,18 @@ class TrackingService:
         # Read from the SHARED `company_profile_cache` for the same reason
         # `widget_movers_service._industries` does: it is ticker-keyed, already warm,
         # and gives every user the same answer for the same stock.
-        await self._backfill_classification(user_id, watchlist)
+        #
+        # It runs INSIDE the gather below (its 7th, last member), not before it: awaited
+        # serially it put one ~100 ms Supabase read in front of every build while any
+        # equity/ETF row lacked a sector (common for ETFs). That is safe because
+        #   * it only MUTATES `sector`/`country` on the watchlist dicts, which nothing in
+        #     the gather reads — `tickers`, `asset_types` and `fanout` are computed above
+        #     from `ticker`/`asset_type`, fields it never writes;
+        #   * the merge (step 3) runs after the gather has finished, so it still serves
+        #     the healed values on this request;
+        #   * its write-back is still awaited inside it, so nothing is left detached;
+        #   * a raise lands in `results[6]` and is logged as `sector_backfill` below —
+        #     it never costs the feed (it also catches its own failures).
 
         # 2. Fetch data concurrently.
         #
@@ -610,7 +791,11 @@ class TrackingService:
         whale_task = self._get_whale_trade_alerts(tickers)
         analyst_task = self._get_analyst_rating_alerts(tickers)
         insider_task = self._get_insider_transaction_alerts(fanout, asset_types)
+        backfill_task = self._backfill_classification(user_id, watchlist)
 
+        # ⚠️ Positions are load-bearing: results[0..5] are unpacked by index below and
+        # `section_names` is indexed by position. A new member goes LAST, with its name
+        # appended to `section_names`.
         results = await asyncio.gather(
             quotes_task,
             sparklines_task,
@@ -618,6 +803,7 @@ class TrackingService:
             whale_task,
             analyst_task,
             insider_task,
+            backfill_task,
             return_exceptions=True,
         )
 
@@ -647,10 +833,19 @@ class TrackingService:
             "whale_trade_alerts",
             "analyst_rating_alerts",
             "insider_transaction_alerts",
+            # results[6]: its value is ignored (it heals the watchlist dicts in place);
+            # the name is what keeps a raise from turning into an IndexError here.
+            "sector_backfill",
         ]
         for idx, res in enumerate(results):
             if isinstance(res, BaseException):
-                logger.error("[Tracking] %s failed: %s", section_names[idx], res)
+                # exc_info=res: the gather result keeps its __traceback__, so the
+                # section's own stack reaches the log (diagnosable with no repro).
+                logger.error(
+                    "[Tracking] %s failed for user %s: %s: %s",
+                    section_names[idx], user_id, type(res).__name__, res,
+                    exc_info=res,
+                )
 
         alerts: List[AlertResponse] = (
             earnings_alerts + whale_alerts + analyst_alerts + insider_alerts
@@ -985,8 +1180,11 @@ class TrackingService:
                         crypto_base_symbol(ticker), 1, intraday=True
                     )
                 else:
-                    bars = await fetch_chart_data(
-                        self.fmp, ticker, "1D", extended_hours=extended_hours
+                    # The last 2-3 sessions only (`chart_helper.sparkline_window`):
+                    # the detail chart's 1D fetch adds a 7-day indicator warm-up
+                    # this card never draws, ~3x the bars per ticker for nothing.
+                    bars = await fetch_sparkline_bars(
+                        self.fmp, ticker, extended_hours=extended_hours
                     )
                 if not bars:
                     # Honest empty — never fabricate. iOS SparklineView draws
@@ -995,8 +1193,8 @@ class TrackingService:
                     return (ticker, [], *FULL_SPAN)
 
                 # Keep only the most recent trading day — mirrors the iOS
-                # TradingDayHelper.filterToLatestDay step, so the multi-day
-                # warm-up bars don't fold several sessions into one mini-chart.
+                # TradingDayHelper.filterToLatestDay step, so the 2-3 sessions
+                # of the fetch window don't fold into one mini-chart.
                 last_day = str(bars[-1].get("date", ""))[:10]  # "YYYY-MM-DD"
                 day_bars = [
                     b for b in bars if str(b.get("date", "")).startswith(last_day)
@@ -1057,9 +1255,9 @@ class TrackingService:
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             future = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
-            calendar = await self.fmp.get_earnings_calendar(
-                from_date=today, to_date=future
-            )
+            # Memoised market-wide for 30 min (`_cached_earnings_calendar`); the rows are
+            # shared with every other build, so this loop only reads them.
+            calendar = await _cached_earnings_calendar(self.fmp, today, future)
             if not calendar:
                 return []
 
@@ -1067,63 +1265,87 @@ class TrackingService:
             alerts: List[AlertResponse] = []
 
             for entry in calendar:
-                symbol = (entry.get("symbol") or "").upper()
-                if symbol not in ticker_set:
+                # One malformed row must not cost every alert: the answer is memoised
+                # for 30 min, so an `AttributeError` here would blank every user's
+                # earnings alerts for that long.
+                if not isinstance(entry, dict):
                     continue
+                # A malformed DICT row (a non-str field, anything that raises below)
+                # costs only that row — never the whole section. The memo would keep an
+                # all-or-nothing failure for 30 min.
+                symbol = "?"
+                try:
+                    symbol = str(entry.get("symbol") or "").upper()
+                    if symbol not in ticker_set:
+                        continue
 
-                # Parse date for day/month
-                date_str = entry.get("date", "")
-                day = None
-                month = None
-                if date_str:
-                    try:
-                        dt = datetime.strptime(date_str, "%Y-%m-%d")
-                        day = dt.day
-                        month = dt.strftime("%b").upper()
-                    except ValueError:
-                        pass
+                    # Parse date for day/month. A non-str date is treated as absent
+                    # (strptime would raise TypeError, which `except ValueError` misses).
+                    date_str = entry.get("date")
+                    day = None
+                    month = None
+                    if isinstance(date_str, str) and date_str:
+                        try:
+                            dt = datetime.strptime(date_str, "%Y-%m-%d")
+                            day = dt.day
+                            month = dt.strftime("%b").upper()
+                        except ValueError:
+                            pass
 
-                # Determine report time (shared parser keeps this in sync
-                # with the Financials Earnings section's next_earnings_date).
-                timing_token = parse_fmp_timing(entry.get("time"))
-                report_time = alert_report_time(timing_token)
+                    # Determine report time (shared parser keeps this in sync
+                    # with the Financials Earnings section's next_earnings_date).
+                    timing_token = parse_fmp_timing(entry.get("time"))
+                    report_time = alert_report_time(timing_token)
 
-                # Consensus numbers — emitted as structured fields so the
-                # iOS detail view shows "EPS Est: $X | Rev Est: $YB" in the
-                # Consensus row without repeating the sentence.
-                # Same NaN trap as the insider bucket below: `float("nan")` does not
-                # raise, so the try/except lets it through into `AlertResponse`, and the
-                # feed 500s at serialization. `_finite_or_none` returns None for
-                # NaN/Inf/non-numeric alike, and both fields are Optional on the wire, so
-                # an unknown consensus renders as absent rather than as a fabricated 0.
-                eps_est = _finite_or_none(entry.get("epsEstimated"))
-                rev_est = _finite_or_none(entry.get("revenueEstimated"))
+                    # Consensus numbers — emitted as structured fields so the
+                    # iOS detail view shows "EPS Est: $X | Rev Est: $YB" in the
+                    # Consensus row without repeating the sentence.
+                    # Same NaN trap as the insider bucket below: `float("nan")` does not
+                    # raise, so the try/except lets it through into `AlertResponse`, and
+                    # the feed 500s at serialization. `_finite_or_none` returns None for
+                    # NaN/Inf/non-numeric alike, and both fields are Optional on the
+                    # wire, so an unknown consensus renders as absent rather than as a
+                    # fabricated 0.
+                    eps_est = _finite_or_none(entry.get("epsEstimated"))
+                    rev_est = _finite_or_none(entry.get("revenueEstimated"))
 
-                # One-line description for the card. iOS rebuilds its own
-                # version for the alert card, but keep a sane fallback here.
-                date_phrase = f"on {month} {day}" if day and month else ""
-                sentence = timing_sentence(timing_token)
-                pieces = [f"{symbol} reports earnings"]
-                if date_phrase:
-                    pieces.append(date_phrase)
-                if sentence:
-                    pieces.append(sentence)
-                full_desc = " ".join(pieces) + "."
+                    # One-line description for the card. iOS rebuilds its own
+                    # version for the alert card, but keep a sane fallback here.
+                    date_phrase = f"on {month} {day}" if day and month else ""
+                    sentence = timing_sentence(timing_token)
+                    pieces = [f"{symbol} reports earnings"]
+                    if date_phrase:
+                        pieces.append(date_phrase)
+                    if sentence:
+                        pieces.append(sentence)
+                    full_desc = " ".join(pieces) + "."
 
-                alerts.append(
-                    AlertResponse(
-                        type="earnings",
-                        ticker=symbol,
-                        company_name=entry.get("companyName") or symbol,
-                        title="Earnings Alert",
-                        description=full_desc,
-                        day=day,
-                        month=month,
-                        report_time=report_time,
-                        eps_estimate=eps_est,
-                        revenue_estimate=rev_est,
+                    # Only a real string names the company; anything else (a number, a
+                    # dict) would fail AlertResponse validation, so it falls back to the
+                    # symbol like a missing name does.
+                    raw_name = entry.get("companyName")
+                    company_name = raw_name if isinstance(raw_name, str) and raw_name else symbol
+
+                    alerts.append(
+                        AlertResponse(
+                            type="earnings",
+                            ticker=symbol,
+                            company_name=company_name,
+                            title="Earnings Alert",
+                            description=full_desc,
+                            day=day,
+                            month=month,
+                            report_time=report_time,
+                            eps_estimate=eps_est,
+                            revenue_estimate=rev_est,
+                        )
                     )
-                )
+                except Exception as e:
+                    logger.warning(
+                        "[Tracking] earnings row skipped for %s: %s: %s",
+                        symbol, type(e).__name__, e,
+                    )
+                    continue
 
             return alerts
 

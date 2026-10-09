@@ -844,9 +844,9 @@ struct SentimentTrend: Equatable {
     /// Oldest first.
     let days: [SentimentTrendDay]
     /// The OLDEST ET day this scope has a scored headline on file (not just in this window). The
-    /// backend log keeps `retentionDays`, and nothing records a scope's first day beyond that:
-    /// this is the day scoring began only until the history reaches that edge
-    /// (`historyReachesRetentionEdge`); after it, just the oldest day still kept.
+    /// backend log keeps `retentionDays`, so past that edge it is just the oldest day still kept;
+    /// the card shows it only for a history SHORTER than the selected window, which is always
+    /// younger than the edge — so a date the card shows is the day scoring began.
     let trackingSince: Date?
     /// A `var` with a default so the memberwise init (previews) keeps compiling.
     var historyStatus: SentimentHistoryStatus? = nil
@@ -856,21 +856,9 @@ struct SentimentTrend: Equatable {
     /// Below this many tracked days the chart opens on 7D rather than a mostly empty 30D.
     static let shortHistoryDays = 7
     /// How many ET days the backend's label log keeps (`RETENTION_DAYS`, test-pinned equal).
+    /// Every window is shorter (the widest is 90), which is why the card's "since" date — shown
+    /// only while a window is not yet filled — is always the real first day of scoring.
     static let retentionDays = 120
-
-    /// True when `trackingSince` sits at — or past — the log's retention edge. The backend
-    /// sweep deletes days before `today − retentionDays`, so a scope whose oldest kept day is
-    /// that old has lost (or loses at the next sweep) its first days, and the date moves
-    /// forward every day: the card then says "120+ days", never a "since" date that would
-    /// pass for the start of scoring. Same rule as the backend's `at_retention_edge`.
-    func historyReachesRetentionEdge(
-        today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
-    ) -> Bool {
-        guard let since = trackingSince,
-              let edge = calendar.date(byAdding: .day, value: -Self.retentionDays,
-                                       to: calendar.startOfDay(for: today)) else { return false }
-        return calendar.startOfDay(for: since) <= edge
-    }
 
     var isBuildingHistory: Bool { historyStatus == .building }
 

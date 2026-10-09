@@ -28,6 +28,9 @@
 import Foundation
 import Combine
 import SwiftUI
+import OSLog
+
+nonisolated private let portfolioStoreLog = Logger(subsystem: "com.phan.caydex", category: "portfolio-store")
 
 @MainActor
 final class PortfolioStore: ObservableObject {
@@ -40,12 +43,71 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var portfolios: [Portfolio] = []
     @Published private(set) var activePortfolioId: String?
     @Published private(set) var isLoading: Bool = false
+    /// "A load was ATTEMPTED for this session" — latched in `performLoad`'s defer even when the
+    /// load failed, so it can never mean "the store holds usable data". `hasLiveData` does.
     @Published private(set) var hasLoadedOnce: Bool = false
+
+    /// True only once a `GET /portfolios` answer was PUBLISHED for the current session in THIS
+    /// process. The data-loss guard: every whole-list PUT (`purgeTickers` → `setTickers`) and
+    /// every edit entry point on Tracking requires it, so nothing is ever written back from a
+    /// list the server did not just hand us. Reset with the session (`reset()`), never by a
+    /// later failed load (the published rows stay live).
+    @Published private(set) var hasLiveData: Bool = false
+
+    /// User-facing copy (mapped through `AppError`) for the LAST load's failure, nil on success,
+    /// on a typed sign-in refusal (the Tracking feed's account gate speaks for the screen) and on
+    /// a cancellation. Without it a failed `/portfolios` with a good feed rendered a silent
+    /// "No tickers yet" — a false statement about the user's own holdings.
+    @Published private(set) var loadErrorMessage: String?
+
+    /// The exact bytes of the last `GET /portfolios` answer this store PUBLISHED, for the
+    /// Tracking on-device snapshot (`TrackingSnapshot`). nil until a live load lands and after
+    /// `reset()`. Read only right after the load that set it; never a source of rows.
+    private(set) var lastLiveBody: Data?
+
+    /// Bumped after EVERY server-confirmed write — membership (`syncTickers`, which the sheets'
+    /// `setTickers` / `removeTicker` and the search star's `addTicker` go through), holdings,
+    /// create, rename, delete, reorder and the active-group switch. `TrackingViewModel` purges
+    /// the saved Holdings snapshot on it, so the next cold launch never paints a group, a
+    /// membership or a score the user has since changed. A counter rather than a notification
+    /// so a subscriber reads it like any other published state.
+    @Published private(set) var confirmedMutationCount: Int = 0
 
     // MARK: - Private
 
     private let apiClient: APIClient
     private static let activeIdKey = "TrackingView.activePortfolioId"
+
+    /// The cold-start hint: the group whose insights load before `GET /portfolios` answers.
+    /// Only a UUID can be a group id (`portfolios.id` is `uuid`), so anything else is dropped
+    /// here instead of sent. The server cast it and answered 500 (22P02).
+    private static func readActiveIdHint() -> String? {
+        guard let stored = UserDefaults.standard.string(forKey: activeIdKey) else { return nil }
+        guard UUID(uuidString: stored) != nil else {
+            portfolioStoreLog.warning("dropping a non-UUID active-group hint")
+            UserDefaults.standard.removeObject(forKey: activeIdKey)
+            return nil
+        }
+        return stored
+    }
+
+    /// Every write of the hint goes through here (nil removes it).
+    private static func storeActiveIdHint(_ id: String?) {
+        #if DEBUG
+        // Store-screenshot mode answers GET /portfolios with a sample group whose id is
+        // "store-shot-sample". Saving it put that id in the REAL hint, and the next normal
+        // launch sent it to production: GET /portfolios/store-shot-sample/insights → 500
+        // (Sentry, 2026-10-08). The mode never WRITES the hint; the session-end removal
+        // (nil, `reset()`) still runs, since a session's device-global keys must not
+        // outlive it (auth.md §7).
+        if StoreScreenshotMode.isOn, id != nil { return }
+        #endif
+        if let id {
+            UserDefaults.standard.set(id, forKey: activeIdKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: activeIdKey)
+        }
+    }
 
     /// Posted whenever the ACTIVE GROUP changes identity or name.
     ///
@@ -113,7 +175,7 @@ final class PortfolioStore: ObservableObject {
 
     private init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
-        self.activePortfolioId = UserDefaults.standard.string(forKey: Self.activeIdKey)
+        self.activePortfolioId = Self.readActiveIdHint()
     }
 
     // MARK: - Loading
@@ -124,16 +186,21 @@ final class PortfolioStore: ObservableObject {
     /// `hasLoadedOnce` were published but never consulted here — so a launch that fired
     /// `TrackingViewModel.loadData()` and the identity-change reload issued two identical
     /// `GET /portfolios` calls whose responses then raced to assign `self.portfolios`.
-    private var loadTask: Task<Void, Never>?
+    private var loadTask: Task<Bool, Never>?
 
-    func loadPortfolios() async {
+    /// Load (or join the running load of) `GET /portfolios`.
+    ///
+    /// - Returns: true only when THIS load (or the one joined) published a live answer for the
+    ///   current session. Callers that write anything back — the Tracking purge, the default
+    ///   group the search star may create — act only on `true`.
+    @discardableResult
+    func loadPortfolios() async -> Bool {
         if let running = loadTask, !running.isCancelled {
-            await running.value
-            return
+            return await running.value
         }
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.performLoad()
+        let task = Task { [weak self] () -> Bool in
+            guard let self else { return false }
+            let published = await self.performLoad()
             // Cleared HERE, as the task's own last act, rather than after `await
             // task.value` below. Between a task finishing and its awaiting caller
             // being resumed, a THIRD caller can run and observe a completed-but-still
@@ -141,17 +208,21 @@ final class PortfolioStore: ObservableObject {
             // instantly without ever loading. That is a silently skipped refresh —
             // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
-            self.loadTask = nil
+            //
+            // Not when cancelled: `reset()` cancels this task and clears the slot itself, and a
+            // newer load may already be registered there by the time this one unwinds.
+            if !Task.isCancelled { self.loadTask = nil }
+            return published
         }
         loadTask = task
-        await task.value
+        return await task.value
     }
 
     /// Bumped by `reset()`. A load that started under the previous session refuses to
     /// publish, because cancellation cannot un-finish a request that already resolved.
     private var identityEpoch = 0
 
-    private func performLoad() async {
+    private func performLoad() async -> Bool {
         // Captured BEFORE the request. `reset()` bumps it, so a load issued under the
         // previous session cannot publish that session's rows after sign-out.
         let epoch = identityEpoch
@@ -165,7 +236,9 @@ final class PortfolioStore: ObservableObject {
         }
 
         do {
-            let response = try await apiClient.request(
+            // `requestReturningBody`: the same transport, refusal gate, 401 refresh and GET-only
+            // 5xx retry as `request<T>`, plus the exact bytes for the Tracking snapshot.
+            let (response, body) = try await apiClient.requestReturningBody(
                 endpoint: .getPortfolios,
                 responseType: PortfolioListResponseDTO.self
             )
@@ -176,7 +249,7 @@ final class PortfolioStore: ObservableObject {
             // `reset()` exists to stop.
             guard epoch == identityEpoch else {
                 print("[PortfolioStore] ↩︎ discarding a load from an ended session")
-                return
+                return false
             }
             let loaded = response.portfolios
                 .map { $0.toPortfolio() }
@@ -189,13 +262,35 @@ final class PortfolioStore: ObservableObject {
             // cold-start hint for the window before the first successful load.
             if let serverActive = loaded.first(where: \.isActive) {
                 activePortfolioId = serverActive.id
-                UserDefaults.standard.set(serverActive.id, forKey: Self.activeIdKey)
+                Self.storeActiveIdHint(serverActive.id)
             } else {
                 ensureActiveSelection()
             }
+            // Only AFTER the rows above are published: this is the live signal every
+            // write-back path keys on.
+            lastLiveBody = body
+            loadErrorMessage = nil
+            hasLiveData = true
             print("[PortfolioStore] ✅ Loaded \(loaded.count) portfolios from API")
+            return true
         } catch {
-            print("[PortfolioStore] ❌ Load failed: \(error)")
+            guard epoch == identityEpoch else { return false }
+            let appError = AppError.from(error)
+            // Nobody is waiting for a cancelled load; it says nothing about the server.
+            if appError.isCancellation { return false }
+            if case .signInRequired = appError {
+                // A refusal before any I/O: the Tracking feed's own refusal raises the account
+                // gate for the screen, and a "Couldn't load" over it would offer a Retry the
+                // client refuses before it leaves the device.
+                loadErrorMessage = nil
+                return false
+            }
+            // Never a silent empty store: the screen renders this instead of "No tickers yet".
+            // The rows already published (if any) stay live — only the message changes.
+            loadErrorMessage = appError.message
+            let detail = "\(type(of: error)): \(error)"
+            portfolioStoreLog.warning("GET /portfolios failed — \(detail, privacy: .public)")
+            return false
         }
     }
 
@@ -230,7 +325,8 @@ final class PortfolioStore: ObservableObject {
                 responseType: PortfolioDTO.self
             )
             guard epoch == identityEpoch else { return }
-            UserDefaults.standard.set(id, forKey: Self.activeIdKey)
+            Self.storeActiveIdHint(id)
+            confirmedMutationCount &+= 1
             // Only AFTER the server confirms. Announcing optimistically would make Home
             // and Updates re-fetch against the OLD server state and cache the old group
             // again, right before the revert below puts the UI back.
@@ -274,7 +370,11 @@ final class PortfolioStore: ObservableObject {
         portfolios = []
         activePortfolioId = nil
         hasLoadedOnce = false
-        UserDefaults.standard.removeObject(forKey: Self.activeIdKey)
+        // The next session has proven nothing yet: no write-back until ITS first live load.
+        hasLiveData = false
+        loadErrorMessage = nil
+        lastLiveBody = nil
+        Self.storeActiveIdHint(nil)
     }
 
     private func ensureActiveSelection() {
@@ -284,7 +384,7 @@ final class PortfolioStore: ObservableObject {
         }
         if let first = portfolios.first {
             activePortfolioId = first.id
-            UserDefaults.standard.set(first.id, forKey: Self.activeIdKey)
+            Self.storeActiveIdHint(first.id)
         } else {
             activePortfolioId = nil
         }
@@ -301,6 +401,7 @@ final class PortfolioStore: ObservableObject {
         let new = dto.toPortfolio()
         portfolios.append(new)
         portfolios.sort { $0.sortOrder < $1.sortOrder }
+        confirmedMutationCount &+= 1
         // The server deliberately does NOT auto-activate a new group — doing it there
         // would move Home and Updates as a side effect of an action that only said "make
         // a new list". Switching is the CLIENT's call, and here the user just created it,
@@ -320,6 +421,7 @@ final class PortfolioStore: ObservableObject {
         if let index = portfolios.firstIndex(where: { $0.id == id }) {
             portfolios[index] = updated
         }
+        confirmedMutationCount &+= 1
         // Renaming the ACTIVE group changes the header Home renders and the title of the
         // Updates manage sheet, both server-supplied. Without this they keep the old name
         // for up to 5 minutes / the rest of the session respectively.
@@ -333,6 +435,7 @@ final class PortfolioStore: ObservableObject {
         let wasActive = activePortfolioId == id
         try await apiClient.request(endpoint: .deletePortfolio(id: id))
         portfolios.removeAll { $0.id == id }
+        confirmedMutationCount &+= 1
         if wasActive {
             // The SERVER already promoted a replacement (`ensure_active_portfolio`, called
             // from `delete_portfolio`). Re-read rather than guessing locally: the two used
@@ -365,6 +468,7 @@ final class PortfolioStore: ObservableObject {
             portfolios = previous
             throw error
         }
+        confirmedMutationCount &+= 1
     }
 
     // MARK: - Ticker membership (optimistic)
@@ -483,7 +587,20 @@ final class PortfolioStore: ObservableObject {
     /// Drop tickers from every portfolio that no longer exist on the master
     /// watchlist (e.g. removed from another device). Idempotent — only fires
     /// the per-portfolio sync if something actually changed.
-    func purgeTickers(notIn allowed: Set<String>) async {
+    ///
+    /// - Returns: true when at least one per-portfolio `setTickers` was attempted (the
+    ///   membership, and so the diversification score, may have changed).
+    @discardableResult
+    func purgeTickers(notIn allowed: Set<String>) async -> Bool {
+        // NEVER purge from a list the server did not hand us in THIS session. `setTickers` is a
+        // whole-list PUT built from `portfolios`; membership that is not live (nothing loaded
+        // yet, or only a failed load) would delete what the user added since — hand-entered
+        // shares included. The Tracking snapshot is display-only and never reaches this list,
+        // and this guard is the store-side half of that rule.
+        guard hasLiveData else {
+            portfolioStoreLog.warning("purge refused — no live GET /portfolios answer in this session")
+            return false
+        }
         // NEVER purge against an empty allow-set. A total-wipe delta INFERRED from
         // a feed response is never trustworthy: the tracking feed returns an empty
         // asset list both when the watchlist is genuinely empty AND (historically)
@@ -494,12 +611,14 @@ final class PortfolioStore: ObservableObject {
         // removeTickerFromAllPortfolios paths, which are per-ticker and intentional.
         guard !allowed.isEmpty else {
             print("[PortfolioStore] ⚠️ Skipping purge: empty allow-set (degraded or empty feed) — refusing to clear \(portfolios.count) portfolio(s)")
-            return
+            return false
         }
+        var attempted = false
         for portfolio in portfolios {
             let upperAllowed = Set(allowed.map { $0.uppercased() })
             let filteredTickers = portfolio.tickers.filter { upperAllowed.contains($0) }
             if filteredTickers != portfolio.tickers {
+                attempted = true
                 do {
                     try await setTickers(filteredTickers, in: portfolio.id)
                 } catch {
@@ -507,6 +626,7 @@ final class PortfolioStore: ObservableObject {
                 }
             }
         }
+        return attempted
     }
 
     // MARK: - Per-portfolio holdings (shares / market_value)
@@ -525,6 +645,7 @@ final class PortfolioStore: ObservableObject {
         if let index = portfolios.firstIndex(where: { $0.id == portfolioId }) {
             portfolios[index] = updated
         }
+        confirmedMutationCount &+= 1
         return updated
     }
 
@@ -543,6 +664,9 @@ final class PortfolioStore: ObservableObject {
             // returns the canonical per-portfolio holdings).
             portfolios[index].items = serverTruth.items
         }
+        // Every membership write lands here (add / remove / reorder / purge, and the Edit and
+        // Manage Tickers sheets that call the store directly), so one bump covers them all.
+        confirmedMutationCount &+= 1
         // The Home Screen Holdings tile is built server-side from the ACTIVE group, and an
         // add / remove / reorder posts neither `activeGroupDidChange` nor (from Tracking's
         // Edit sheet) a watchlist change — so without this the tile kept the old holdings

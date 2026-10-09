@@ -13,7 +13,7 @@ from app.integrations.fmp import FMPClient
 from app.services.asset_class import uses_coingecko_price
 
 logger = logging.getLogger(__name__)
-from app.utils.market_hours import ET, US_MARKET_EARLY_CLOSES
+from app.utils.market_hours import ET, US_MARKET_EARLY_CLOSES, previous_trading_day
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
@@ -591,27 +591,9 @@ async def fetch_chart_data(
             pass
 
     if resolved_interval in INTRADAY_INTERVALS:
-        # `extended` MUST reach the FMP call: the endpoint serves the regular session
-        # only unless asked (see `FMPClient.get_intraday_prices`). Skipping the
-        # regular-hours filter below is not enough on its own — that was the whole
-        # defect behind the inert Extended Hours toggle (TestFlight, build 1.0 (8)).
-        intraday_kwargs: Dict[str, Any] = {
-            "interval": resolved_interval,
-            "from_date": from_date,
-            "to_date": to_date,
-        }
-        if extended_hours:
-            intraday_kwargs["extended"] = True
-        raw = await fmp.get_intraday_prices(symbol, **intraday_kwargs)
-        if isinstance(raw, list):
-            raw.sort(key=lambda p: p.get("date") or "")
-            prices = _normalize_prices(raw)
-            if not extended_hours:
-                # Belt and braces: FMP should already have omitted these, but a
-                # pre/after-hours bar that slips through would clamp to the chart edge.
-                prices = _filter_regular_hours(prices)
-            return prices
-        return []
+        return await _fetch_intraday_bars(
+            fmp, symbol, resolved_interval, from_date, to_date, extended_hours
+        )
 
     elif resolved_interval in AGGREGATED_INTERVALS:
         if range_code == "ALL":
@@ -629,6 +611,99 @@ async def fetch_chart_data(
             raw = await fmp.get_historical_prices(symbol, from_date, to_date)
             historical = _parse_historical(raw)
         return _normalize_prices(historical)
+
+
+async def _fetch_intraday_bars(
+    fmp: FMPClient,
+    symbol: str,
+    interval: str,
+    from_date: Optional[str],
+    to_date: str,
+    extended_hours: bool,
+) -> List[Dict[str, Any]]:
+    """One FMP intraday read, normalised: oldest first, regular session unless asked.
+
+    Shared by the detail chart (`fetch_chart_data`, which widens ``from_date`` by its
+    indicator warm-up) and the holdings-card sparkline (`fetch_sparkline_bars`, which
+    does not). Extracted unchanged from `fetch_chart_data`'s intraday branch, so both
+    paths forward ``extended`` and filter the same way. A non-list answer is ``[]``.
+    """
+    # `extended` MUST reach the FMP call: the endpoint serves the regular session
+    # only unless asked (see `FMPClient.get_intraday_prices`). Skipping the
+    # regular-hours filter below is not enough on its own — that was the whole
+    # defect behind the inert Extended Hours toggle (TestFlight, build 1.0 (8)).
+    intraday_kwargs: Dict[str, Any] = {
+        "interval": interval,
+        "from_date": from_date,
+        "to_date": to_date,
+    }
+    if extended_hours:
+        intraday_kwargs["extended"] = True
+    raw = await fmp.get_intraday_prices(symbol, **intraday_kwargs)
+    if isinstance(raw, list):
+        raw.sort(key=lambda p: p.get("date") or "")
+        prices = _normalize_prices(raw)
+        if not extended_hours:
+            # Belt and braces: FMP should already have omitted these, but a
+            # pre/after-hours bar that slips through would clamp to the chart edge.
+            prices = _filter_regular_hours(prices)
+        return prices
+    return []
+
+
+# ── Holdings-card sparkline (Tracking) ─────────────────────────────────────────
+
+#: The bar size the holdings card draws — the same 5-minute series as the 1D detail chart
+#: one tap away (`DEFAULT_INTERVALS["1D"]`).
+SPARKLINE_INTERVAL = DEFAULT_INTERVALS["1D"]
+
+
+def sparkline_window(today: date_type) -> Tuple[str, str]:
+    """``(from_date, to_date)`` ISO strings for one holdings-card sparkline fetch.
+
+    ``today`` is the ET calendar date. The window starts TWO trading days back, not one:
+
+    * pre-market on a trading day there are no bars for ``today`` yet, so the card draws
+      the previous session — one hop reaches it;
+    * a closure the calendar does not know (``US_MARKET_HOLIDAYS`` plus the closures the
+      close ingest learned) makes that one hop land on a day with no bars at all, and the
+      card would go blank; the second hop still reaches a real session.
+
+    Weekends and known holidays are stepped over by `previous_trading_day`, so the window
+    is 2-3 sessions (~150-230 regular-session five-minute bars) instead of the 10
+    calendar days `fetch_chart_data("1D")` asks for (3 days plus a 7-day indicator
+    warm-up the card never draws). The caller keeps only the newest day, as before.
+    """
+    start = previous_trading_day(previous_trading_day(today))
+    return start.isoformat(), today.isoformat()
+
+
+async def fetch_sparkline_bars(
+    fmp: FMPClient,
+    symbol: str,
+    *,
+    extended_hours: bool = False,
+    today: Optional[date_type] = None,
+) -> List[Dict[str, Any]]:
+    """The 5-minute bars behind one holdings-card sparkline: no indicator warm-up.
+
+    Same rows, order and session filter as ``fetch_chart_data(fmp, symbol, "1D", ...)``
+    over a shorter window (`sparkline_window`). ``today`` defaults to the ET date now; it
+    is a parameter so tests can pin a calendar day.
+
+    The crypto gate is the one `fetch_chart_data` applies (FMP 402s every crypto pair),
+    so a coin that reaches this function is served from CoinGecko, never from FMP.
+    """
+    if uses_coingecko_price(symbol) and str(
+        getattr(settings, "CRYPTO_PRICE_SOURCE", "coingecko") or ""
+    ).lower() != "fmp":
+        return await _fetch_crypto_chart_data(symbol, "1D", SPARKLINE_INTERVAL)
+
+    day = today if today is not None else datetime.now(ET).date()
+    from_date, to_date = sparkline_window(day)
+    return await _fetch_intraday_bars(
+        fmp, symbol, SPARKLINE_INTERVAL, from_date, to_date, extended_hours
+    )
 
 
 def _filter_regular_hours(prices: List[Dict]) -> List[Dict]:

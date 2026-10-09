@@ -677,6 +677,27 @@ def test_each_hook_counter_reads_the_shape_it_names(counter, text, hit):
     # …and only the contracted opener tells these from a wh-question (a later wh-word would veto them)
     ("Isn't that why Netflix stalled?", True),
     ("Don't investors know what they own?", True),
+    # final round follow-ups (2026-10-08): an insert after the SUBJECT of a direct wh-question…
+    ("Why does Costco, a warehouse club, have such loyal members?", False),
+    ("What did Netflix, of all companies, do right?", False),
+    # …a conjunction-led second question after one…
+    ("What is a moat, and does Costco have one?", True),
+    # …a contracted auxiliary in a comma clause or a tag…
+    ("When Netflix raised prices, didn't subscribers leave?", True),
+    ("Costco knows why it wins, doesn't it?", True),
+    # …an auxiliary opener counts only in the sentence that asks…
+    ("Don't panic. What drives prices?", False),
+    ("Is it real: what makes a moat?", True),
+    # …a labelled auxiliary question beats a wh-label; a conjunction lead-in; a curly contraction…
+    ("What changed: can Netflix keep growing?", True),
+    ("Netflix grew when prices rose, but can it last?", True),
+    ("Isn’t that why Netflix stalled?", True),
+    # …and every wh-word, in a question and as a label's opener
+    ("When did Netflix change course?", False),
+    ("Where does Costco's profit come from?", False),
+    ("Which costs matter most?", False),
+    ("Why it matters: subscribers or profit?", False),
+    ("Whose moat is wider: Visa's or Mastercard's?", False),
 ])
 def test_a_yes_no_question_is_read_through_a_label_and_without_an_auxiliary(text, hit):
     """The gate "0 yes/no hooks" counted only a hook OPENING on an auxiliary, so a labelled or

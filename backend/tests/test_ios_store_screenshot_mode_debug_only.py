@@ -1,8 +1,8 @@
 """The App Store screenshot mode must never reach an App Store build.
 
 `StoreScreenshotMode` (frontend/ios/ios/Core/Utilities/StoreScreenshotMode.swift) swaps live
-market data for labelled SAMPLE values and answers some API calls with fixtures, so the
-listing's screenshots never show a real price (the market-data licence forbids public price
+market data for SAMPLE values on fictional companies and answers some API calls with fixtures, so
+the listing's screenshots never show a real price (the market-data licence forbids public price
 display — .claude/rules/marketing.md §1). In a shipped build the same code would show users
 invented prices, so all of it lives behind `#if DEBUG`: both files in full, and every call
 site. This scan pins that.
@@ -63,6 +63,23 @@ def _unguarded_references(src: str) -> List[Tuple[int, str]]:
 
 def _swift_files() -> List[Path]:
     return sorted(p for p in _IOS.rglob("*.swift") if "/build/" not in str(p))
+
+
+def _block_after(src: str, anchor: str) -> str:
+    """The brace-balanced block that opens at the first `{` after `anchor` (pass source with
+    comments already stripped)."""
+    start = src.find(anchor)
+    assert start != -1, f"{anchor!r} not found — this scan has drifted"
+    open_brace = src.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_brace:i + 1]
+    raise AssertionError(f"unbalanced braces after {anchor!r}")
 
 
 def test_both_files_are_debug_only_from_first_line_to_last():
@@ -141,6 +158,29 @@ def test_the_capture_script_refuses_a_build_without_the_screenshot_mode():
     assert "debug.dylib" in _CAPTURE_SCRIPT.read_text() or "*.dylib" in code
 
 
+def test_the_capture_script_refuses_a_build_older_than_the_screenshot_sources():
+    """Review 2026-10-08: the mode check above passes for ANY Debug build with the mode, so a
+    build from before a fixture change captured the old fixtures — before 2026-10-08, a LIVE
+    Updates feed. The code binary (the executable or its .debug.dylib, whichever is newer) must
+    be newer than every StoreScreenshot*.swift, or the run stops before the first shot."""
+    code = _script_code()
+    assert re.search(r'for bin in "\$APP/\$EXE" "\$APP/\$EXE\.debug\.dylib"; do', code)
+    loop = code[code.index('for src in "$REPO"/frontend/ios/ios/Core/Utilities/StoreScreenshot*.swift; do'):]
+    loop = loop[: loop.index("\ndone") + 5]
+    assert '[ "$(stat -f %m "$src")" -gt "$BUILT" ]' in loop
+    assert "exit 1" in loop
+    # It runs before anything touches the simulator.
+    assert code.index("StoreScreenshot*.swift") < code.index("xcrun simctl boot")
+
+
+def test_the_capture_script_never_pipes_into_head():
+    """`set -o pipefail` + `| head` = a SIGPIPE exit status for the producer once head stops
+    reading, and `set -e` then ends the whole run — on a long list, never on a short one."""
+    code = _script_code()
+    assert re.search(r"^set -euo pipefail$", code, re.M)
+    assert not re.search(r"\|\s*head\b", code), "use sed -n '1,Np' on a captured variable instead"
+
+
 def test_the_capture_script_always_clears_the_status_bar():
     code = _script_code()
     assert re.search(r"^trap cleanup EXIT$", code, re.M)
@@ -161,3 +201,158 @@ def test_the_scanner_catches_an_unguarded_reference():
     assert _unguarded_references(bare) != []
     assert _unguarded_references(commented) == []
     assert _unguarded_references(nested) == []
+
+
+# ── The Updates shot (2026-10-08) ──────────────────────────────────────────────────────────
+# Dropped on 2026-10-06 (adversarial review, HIGH): only its chips were sample — the Insights
+# card is a LIVE AI brief seeded with real index % moves, and live headlines can name real
+# people. It is back ONLY because every Updates read is now answered by a fixture.
+
+_SCRIPT = _IOS / "scripts" / "capture-store-screenshots.sh"
+
+
+def _shots() -> List[Tuple[str, str, str]]:
+    """(name, tab, sample) for every `shot` line of the capture script, comments stripped."""
+    out: List[Tuple[str, str, str]] = []
+    for line in _SCRIPT.read_text(encoding="utf-8").splitlines():
+        code = line.split("#", 1)[0].strip()
+        match = re.fullmatch(r"shot\s+(\S+)\s+(\S+)\s+([01])(?:\s+\S.*)?", code)
+        if match:
+            out.append((match.group(1), match.group(2), match.group(3)))
+    return out
+
+
+def _home_tabs() -> List[Tuple[str, str]]:
+    """(case name, raw value) of every `HomeTab` case, in declaration order: the tab bar's order."""
+    models = _strip_comments((_IOS / "ios" / "Models" / "HomeModels.swift").read_text(encoding="utf-8"))
+    return re.findall(r'^\s*case (\w+) = "([^"]+)"', _block_after(models, "enum HomeTab: String, CaseIterable"), re.M)
+
+
+def test_the_shots_follow_the_apps_tab_bar_order():
+    """Owner, 2026-10-08: the listing shows the screenshots in the order users see the app —
+    Home, Updates, Research, Tracking, Wiser. App Store Connect keeps the upload order and the
+    files sort by their number, so each shot is numbered by its tab's place in `HomeTab` (the tab
+    bar's own order, read here rather than typed out). Its tab argument must also be what
+    `StoreScreenshotMode.startTab` matches — the raw value, lowercased — or the shot silently
+    captures the default tab under another tab's file name."""
+    tabs = _home_tabs()
+    assert len(tabs) == 5, f"parsed {tabs} — this scan has drifted"
+    shots = _shots()
+    assert [tab for _, tab, _ in shots] == [raw.lower() for _, raw in tabs], (
+        f"shots {[(name, tab) for name, tab, _ in shots]} do not follow the tab bar {tabs}"
+    )
+    expected = [f"{index:02d}-{raw.lower()}" for index, (_, raw) in enumerate(tabs, start=1)]
+    assert [name for name, _, _ in shots] == expected
+    mode = _strip_comments(_MODE_FILE.read_text(encoding="utf-8"))
+    assert "HomeTab.allCases.first { $0.rawValue.lowercased() == name }" in mode
+
+
+def test_an_updates_shot_runs_only_with_every_updates_read_canned():
+    shots = _shots()
+    assert len(shots) >= 4, f"parsed only {shots} — the scan would be vacuous"
+    updates = [shot for shot in shots if shot[1] == "updates"]
+    assert updates, "the 1.01 set has an Updates shot (02-updates)"
+    assert all(sample == "1" for _, _, sample in updates), "an Updates shot must run in sample mode"
+    src = _strip_comments(_FIXTURE_FILE.read_text(encoding="utf-8"))
+    mode = _strip_comments(_MODE_FILE.read_text(encoding="utf-8"))
+    assert "URLProtocol.registerClass(StoreShotURLProtocol.self)" in mode
+    assert re.search(r"canInit\(with request: URLRequest\) -> Bool \{\s*route\(for: request\) != nil\s*\}", src)
+    # The matcher must RETURN its route (review 2026-10-08: a matcher whose branch returns nil
+    # still passed a text-only check, and that read would have gone to the live backend)…
+    router = _block_after(src, "private static func route(for request: URLRequest) -> Route?")
+    loader = _block_after(src, "override func startLoading()")
+    for path, case, builder in (
+        ("/api/v1/updates/tabs", "updatesTabs", "updatesTabsJSON"),
+        ("/api/v1/updates/feed", "updatesFeed", "updatesFeedJSON"),
+        ("/api/v1/updates/sentiment-trend", "sentimentTrend", "sentimentTrendJSON"),
+    ):
+        branch = _block_after(router, f'if path.hasSuffix("{path}")')
+        assert re.search(rf"\breturn \.{case}\b", branch), f"{path} is not canned: the Updates shot would show live data"
+        assert "return nil" not in branch, f"{path} can fall through to the live backend"
+        # …and the loader must answer that route with its fixture.
+        assert re.search(rf"case \.{case}\b[^:]*:\s*body = StoreShotFixtures\.{builder}\(", loader), (
+            f".{case} is not answered with {builder}"
+        )
+
+
+def test_the_sample_updates_text_carries_no_figure():
+    """No digit, % or $ in the sample outlets, headlines, summaries, Insights bullets or Insights
+    headline: the FMP rule forbids public price display, and a sample % reads as a real move.
+    Every string literal counts, however short ("Oil fell 3%." is 12 characters), and the floor
+    comes from what was parsed, so trimming the sample feed never trips it."""
+    src = _strip_comments(_FIXTURE_FILE.read_text(encoding="utf-8"))
+    block = src[src.index("static let sampleSources"):src.index("static func updatesFeedJSON(")]
+    stories = block.count("StoreShotStory(headline:")
+    array = block[block.index("static let sampleInsightBullets"):]
+    bullets = re.findall(r'"([^"]*)"', array[array.index("= ["):array.index("\n    ]")])
+    texts = re.findall(r'"([^"]*)"', block)
+    texts += re.findall(r'insight\["headline"\] = "([^"]*)"', src)
+    assert stories >= 1 and bullets, f"parsed {stories} stories and {len(bullets)} bullets — the scan would be vacuous"
+    assert len(texts) >= 2 * stories + len(bullets) + 1, f"parsed only {len(texts)} sample strings"
+    for text in texts:
+        assert not re.search(r"[0-9%$]", text), text
+
+
+def test_the_sample_home_borrows_no_real_theme_or_company():
+    """Review 2026-10-08: the sample Home borrowed `MockHomeRepository.themes` (invented % moves
+    on Caydex's real theme names) and `.trillionClub` (real companies' filing figures). Below
+    the fold today, but with no label either one could pass for real the day a layout change
+    brings it into the frame. Both stay EMPTY (the sections hide); the one mock still borrowed
+    is the locked signals list, which carries no symbol and no leader."""
+    src = _strip_comments(_FIXTURE_FILE.read_text(encoding="utf-8"))
+    dashboard = _block_after(src, "static var dashboard: HomeDashboardData")
+    assert re.search(r"\bthemes: \[\]", dashboard)
+    assert re.search(r"\btrillionClub: \.empty\b", dashboard)
+    borrowed = set(re.findall(r"MockHomeRepository\.(\w+)", src))
+    assert borrowed == {"lockedSignals"}, f"the sample Home borrows {sorted(borrowed)} from the mocks"
+    home = _strip_comments((_IOS / "ios" / "Core" / "Repositories" / "HomeRepository.swift").read_text(encoding="utf-8"))
+    locked = home[home.index("static let lockedSignals"):]
+    locked = locked[: locked.index("\n    }\n") + 6]
+    assert 'topSymbol: String(repeating: "•"' in locked
+    assert "leaders: []" in locked and "isLocked: true" in locked
+
+
+# ── Fictional companies, no label (owner, 2026-10-08) ──────────────────────────────────────
+# The rule (marketing.md §1): sample prices "labelled 'Sample data' or on a fictional ticker".
+# The owner chose NO label, so every ticker that carries a price, a % move or a chart in the
+# fixtures must be FICTIONAL. Each one below was checked against FMP's full stock list
+# (/stable/stock-list, 93,922 symbols, 2026-10-08): the symbol does not exist, and the name's
+# first word appears in no real company's name. Check a NEW ticker the same way before adding it
+# here — or turn the label back on (`StoreScreenshotMode.showsLabel`).
+_VERIFIED_FICTIONAL = {
+    "NRWD", "QLVN", "TRVK", "BRVX", "HLVA",                    # holdings: Home, Tracking, Updates chips
+    "QVX5", "TLVR", "BRN3", "KSV2", "ARLX", "VYNC",            # Home market strip
+    "ZEPX", "KLRO", "VNTQ", "PXLR", "DRVA",                    # movers: gainers
+    "GLNT", "FNRX", "ALVQ", "BLNX", "SKVR",                    # movers: losers
+    "NVLQ", "TMRX", "WVLN", "JXTA", "LMRQ",                    # heavy volume
+    "HPRV", "YLDX", "RQVN", "FLXQ", "MRVQ",                    # short interest
+}
+
+
+def _fixture_tickers() -> set:
+    src = _strip_comments(_FIXTURE_FILE.read_text(encoding="utf-8"))
+    tickers = set(re.findall(r'symbol: "([A-Z0-9.\-]+)"', src))
+    tickers |= set(re.findall(r'pulseItem\("[^"]*", "([A-Z0-9.\-]+)"', src))
+    tickers |= set(re.findall(r'entry\(\d+, "([A-Z0-9.\-]+)"', src))
+    return tickers
+
+
+def test_every_priced_company_in_the_fixtures_is_fictional():
+    import json
+
+    tickers = _fixture_tickers()
+    assert len(tickers) >= 25, f"parsed only {sorted(tickers)} — the scan would be vacuous"
+    unverified = sorted(tickers - _VERIFIED_FICTIONAL)
+    assert not unverified, f"not verified fictional (check FMP's stock list first): {unverified}"
+    # Offline cross-check against the repo's own US universe (a subset of the real listings).
+    universe = json.loads((_IOS.parent.parent / "backend" / "data" / "benchmark_universe.json").read_text())
+    real = {t.split(".")[0] for row in universe["industries"] for t in row.get("tickers", [])}
+    assert len(real) > 1000
+    assert not (tickers & real), sorted(tickers & real)
+
+
+def test_the_sample_data_label_is_opt_in():
+    """Off by default since the companies are fictional; CAYDEX_STORE_SHOT_LABEL=1 draws it."""
+    src = _strip_comments(_MODE_FILE.read_text(encoding="utf-8"))
+    assert 'environment["CAYDEX_STORE_SHOT_LABEL"] == "1"' in src
+    assert "guard isOn, showsLabel, labelWindow == nil" in src

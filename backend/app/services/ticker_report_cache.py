@@ -268,7 +268,16 @@ TABLE_NAME = "ticker_report_cache"
 #     Pushed after the 18:00 ET close, so only tonight's handful of cached reports rebuild. The
 #     full suite ran on the exported commit tree BEFORE this literal was written; commit and
 #     push followed at once.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 8, 23, 40, 0, tzinfo=timezone.utc)
+# 2026-10-09 (01:22 UTC = 2026-10-08 21:22 ET): bumped for the report's MODEL-context gate
+#     (`_context_gated_rows` / `build_financial_context`, the same evening): a cached collection
+#     still holds FMP's raw current ratio / interest coverage for a gated financial or WU, and
+#     a cached report's text may quote it. Ships in the one commit of every session's finished
+#     work (Texas Stock Exchange listings, the null-cap screener fix, Updates/Tracking instant
+#     paint, the 1.01 leftovers, marketing tooling — none of those changes report content).
+#     This ONE bump supersedes every instant above. After the 18:00 ET close: only the cached
+#     reports since the 23:40 UTC floor rebuild. The full suite ran on the exported tree BEFORE
+#     this literal was written; commit and push followed at once.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 9, 1, 22, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

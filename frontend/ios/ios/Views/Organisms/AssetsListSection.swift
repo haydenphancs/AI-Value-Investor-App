@@ -27,6 +27,10 @@ struct AssetsListSection: View {
     /// row's price block switches all of them, which is what makes the column comparable.
     var changeDisplayMode: ChangeDisplayMode = .percent
     var onToggleChangeDisplay: (() -> Void)?
+    /// False while the rows are a saved snapshot (or no live portfolio list has loaded): the
+    /// swipe-to-remove action is not offered, because the store holds no membership it could
+    /// write. The long-press item stays and its handler explains why it cannot act yet.
+    var allowsRemoval: Bool = true
 
     // A `List` has no intrinsic height inside the outer ScrollView's LazyVStack,
     // so the section must size itself explicitly. Instead of a magic per-row
@@ -55,10 +59,13 @@ struct AssetsListSection: View {
                         onToggleChangeDisplay: onToggleChangeDisplay
                     )
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) {
-                            onRemoveAsset?(asset)
-                        } label: {
-                            Image(systemName: "trash.fill")
+                        if allowsRemoval {
+                            Button(role: .destructive) {
+                                onRemoveAsset?(asset)
+                            } label: {
+                                Image(systemName: "trash.fill")
+                            }
+                            .accessibilityLabel("Remove \(asset.ticker) from this portfolio")
                         }
                     }
                     .contextMenu {

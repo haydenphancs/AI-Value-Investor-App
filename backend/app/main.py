@@ -925,6 +925,18 @@ async def _run_close_snapshot_loop():
                     "in service", type(e).__name__, e,
                 )
 
+            # Held symbols FMP stopped pricing (a move, delisting or rename): read-only,
+            # once per new session, an ERROR for the owner. Best-effort like the rebuild.
+            try:
+                from app.services.unpriced_holdings_service import report_unpriced_holdings
+
+                await report_unpriced_holdings()
+            except Exception as e:
+                logger.warning(
+                    "Unpriced-holdings report failed (%s: %s)", type(e).__name__, e,
+                    exc_info=True,
+                )
+
             if written == 0:
                 # Expected on a market holiday (batch-eod has no rows for a non-session
                 # date) — the previous snapshot stays valid, because the last real close

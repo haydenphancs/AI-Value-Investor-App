@@ -40,37 +40,129 @@ struct PortfolioHeaderMenuAnchorKey: PreferenceKey {
 struct PortfolioHeaderBar: View {
     @ObservedObject var viewModel: TrackingViewModel
     @Binding var activeMenu: PortfolioHeaderMenu?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
+        // At accessibility text sizes the higher-priority picker takes the row and would squeeze
+        // "Updated <time>" — the only on-screen sign that the rows are not live — down to "U…".
+        // There it gets a line of its own, under the picker.
+        if dynamicTypeSize.isAccessibilitySize, let label = viewModel.snapshotUpdatedLabel {
+            stackedLayout(label)
+        } else {
+            rowLayout
+        }
+    }
+
+    private var rowLayout: some View {
         HStack(spacing: AppSpacing.md) {
             portfolioPicker
-            Spacer()
+                .layoutPriority(1)
+            Spacer(minLength: AppSpacing.xs)
+            // Same row as the picker, so nothing below moves when live data replaces it.
+            if let label = viewModel.snapshotUpdatedLabel {
+                snapshotStatus(label)
+            }
             optionsButton
+        }
+        .padding(.horizontal, AppSpacing.lg)
+    }
+
+    private func stackedLayout(_ label: String) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            HStack(spacing: AppSpacing.md) {
+                portfolioPicker
+                    .layoutPriority(1)
+                Spacer(minLength: AppSpacing.xs)
+                optionsButton
+            }
+            snapshotStatus(label)
         }
         .padding(.horizontal, AppSpacing.lg)
     }
 
     // MARK: - Left: portfolio switcher trigger
 
+    /// Read-only while the rows are a saved snapshot and no live group list has arrived: the
+    /// switcher could only list groups the store does not have.
+    private var pickerIsReadOnly: Bool {
+        viewModel.isShowingSnapshot && !viewModel.canEditPortfolio
+    }
+
     private var portfolioPicker: some View {
         Button {
             toggle(.portfolio)
         } label: {
             HStack(spacing: AppSpacing.xs) {
-                Text(viewModel.portfolioStore.activePortfolio?.name ?? "Holdings")
+                // The group the rows below describe — the snapshot's while it is shown.
+                Text(viewModel.presentedPortfolio?.name ?? "Holdings")
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
-                Image(systemName: "chevron.down")
-                    .font(AppTypography.iconXS).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textSecondary)
-                    .rotationEffect(.degrees(activeMenu == .portfolio ? 180 : 0))
+                if !pickerIsReadOnly {
+                    Image(systemName: "chevron.down")
+                        .font(AppTypography.iconXS).fontWeight(.semibold)
+                        .foregroundColor(AppColors.textSecondary)
+                        .rotationEffect(.degrees(activeMenu == .portfolio ? 180 : 0))
+                }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(pickerIsReadOnly)
         .anchorPreference(key: PortfolioHeaderMenuAnchorKey.self, value: .bounds) {
             [.portfolio: $0]
+        }
+    }
+
+    // MARK: - Snapshot status ("Updated <time>")
+
+    /// The saved snapshot's age, a mini spinner while the live load runs, and — once that
+    /// load has failed — "Couldn't refresh" with a Retry. Snapshot prices must never pass for
+    /// live ones, so this shows whenever a snapshot is on screen.
+    @ViewBuilder
+    private func snapshotStatus(_ label: String) -> some View {
+        if viewModel.snapshotRefreshFailed {
+            Button {
+                Task { await viewModel.refresh() }
+            } label: {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(label)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    HStack(spacing: AppSpacing.xxs) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(AppTypography.iconXS)
+                        Text("Couldn't refresh · Retry")
+                            .font(AppTypography.caption)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
+                }
+                .padding(.vertical, AppSpacing.xxs)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Couldn't refresh. \(label).")
+            .accessibilityHint("Retries loading your holdings")
+        } else {
+            HStack(spacing: AppSpacing.xxs) {
+                if viewModel.isRefreshingHoldings {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "clock")
+                        .font(AppTypography.iconXS)
+                }
+                Text(label)
+                    .font(AppTypography.caption)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .foregroundColor(AppColors.textSecondary)
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -161,11 +253,18 @@ struct PortfolioHeaderMenuOverlay: View {
                 PortfolioMenuDivider()
             }
 
-            PortfolioMenuRow(title: "New Portfolio", systemImage: "plus") {
+            // Group edits are built from the LIVE list: disabled until it has arrived.
+            PortfolioMenuRow(
+                title: "New Portfolio", systemImage: "plus",
+                isDisabled: !viewModel.canEditPortfolio
+            ) {
                 viewModel.openNewPortfolioSheet()
                 activeMenu = nil
             }
-            PortfolioMenuRow(title: "Edit Portfolios", systemImage: "pencil") {
+            PortfolioMenuRow(
+                title: "Edit Portfolios", systemImage: "pencil",
+                isDisabled: !viewModel.canEditPortfolio
+            ) {
                 viewModel.openEditPortfolioSheet()
                 activeMenu = nil
             }

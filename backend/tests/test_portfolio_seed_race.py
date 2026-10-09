@@ -371,7 +371,13 @@ async def test_list_portfolios_does_not_500_on_a_seed_race(monkeypatch):
         fetches["n"] += 1
         return [] if fetches["n"] == 1 else [winner]   # empty, then the winner's row
 
+    async def _fetch_concurrent(_sb, _uid):
+        # The route's FIRST read is the parallel one (2026-10-08); the re-fetch after
+        # seeding stays serial. Both count into the same `fetches`.
+        return _fetch(_sb, _uid)
+
     monkeypatch.setattr(pf, "_fetch_user_portfolios", _fetch)
+    monkeypatch.setattr(pf, "_fetch_user_portfolios_concurrent", _fetch_concurrent)
 
     result = await pf.list_portfolios(user={"id": "u1"}, supabase=sb)
 

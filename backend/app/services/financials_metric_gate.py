@@ -16,7 +16,10 @@ One shared source, used by every place that must agree:
     then no drill-down read at all for a listed non-lender member) — asks
     `peer_median_comparable` / `comparable_peer_metrics` before its benchmark read;
   * `industry_benchmark_service` (which companies' values the sector aggregate pools, and
-    which members a mixed industry's own median leaves out).
+    which members a mixed industry's own median leaves out);
+  * the report collector's MODEL context (`_context_gated_rows`, via
+    `company_metric_applicable`): a gated or withheld row reaches Stage A / Stage B as a
+    stated "not meaningful" / "not available" line, never as a number.
 
 Matched on FMP's /stable `industry` string, case- and dash-insensitively ("Banks—Regional"
 from the older feed is "Banks - Regional"). An unknown or empty industry keeps every row.

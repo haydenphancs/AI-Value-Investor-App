@@ -476,3 +476,171 @@ def test_the_overview_write_merges_the_fund_flags():
     write = src[src.index("self._upsert_company_profile_db,"):]
     write = write[:write.index("        )\n")]
     assert '**fund_flags(fundamentals.get("profile")),' in write
+
+
+# ── the three reads overlap (2026-10-08 first-paint pass) ────────────────────────
+#
+# Metadata, quotes and the ETF lookup each need only the ticker list, so they run in ONE
+# gather. The ETF lookup is asked about a shape-based SUPERSET of the final stock set and its
+# answer is intersected with that set, so a stored non-stock class is never relabelled.
+
+def _overlap_probe():
+    state = {"live": 0, "max": 0}
+
+    async def _enter():
+        state["live"] += 1
+        state["max"] = max(state["max"], state["live"])
+        await asyncio.sleep(0.02)
+        state["live"] -= 1
+
+    return state, _enter
+
+
+@pytest.mark.asyncio
+async def test_metadata_quotes_and_the_etf_lookup_run_together(monkeypatch):
+    """Serial awaits peak at one live read; the gather peaks at three."""
+    state, _enter = _overlap_probe()
+
+    async def _meta(_uid, tickers):
+        await _enter()
+        return {t: {"company_name": f"{t} Inc."} for t in tickers}
+
+    class _FMP:
+        async def get_batch_quotes_bulk(self, symbols):
+            await _enter()
+            return [{"symbol": s, "changePercentage": 1.0} for s in symbols]
+
+    async def _etfs(tickers):
+        await _enter()
+        return set()
+
+    _patch(monkeypatch, group=_group(["ORCL", "SPY"]))
+    monkeypatch.setattr(up, "fetch_ticker_metadata", _meta)
+    monkeypatch.setattr(up, "fetch_etf_tickers", _etfs)
+    monkeypatch.setattr(up, "price_source", lambda owner=None: PriceFromFMPFake(_FMP()))
+
+    resp = await up.get_updates_tabs(user=_user("pro"))
+
+    assert state["max"] == 3, f"the three reads did not overlap (peak {state['max']})"
+    assert [t.company_name for t in resp.tabs[1:]] == ["ORCL Inc.", "SPY Inc."]
+    assert all(t.change_percent == 1.0 for t in resp.tabs[1:])
+
+
+@pytest.mark.asyncio
+async def test_a_superset_etf_answer_never_relabels_a_stored_non_stock_class(monkeypatch):
+    """XYZ is stock-SHAPED, so the overlapped lookup asks about it before its stored class is
+    known. The profile cache says ETF; the stored 'index' must still win."""
+    asked = []
+
+    async def _meta(_uid, tickers):
+        return {
+            "SPY": {"company_name": "SPDR S&P 500", "asset_type": "Stock"},   # legacy default
+            "XYZ": {"company_name": "Some index", "asset_type": "index"},
+        }
+
+    async def _etfs(tickers):
+        asked.extend(tickers)
+        return {"SPY", "XYZ"} & set(tickers)
+
+    _patch(monkeypatch, group=_group(["SPY", "XYZ", "ORCL"]))
+    monkeypatch.setattr(up, "fetch_ticker_metadata", _meta)
+    monkeypatch.setattr(up, "fetch_etf_tickers", _etfs)
+
+    resp = await up.get_updates_tabs(user=_user("max"))
+    classes = {t.scope: t.asset_type for t in resp.tabs if not t.is_market_tab}
+
+    assert "XYZ" in asked, "anti-vacuity: the superset really did ask about XYZ"
+    assert classes == {"SPY": "etf", "XYZ": "index", "ORCL": "stock"}
+
+
+@pytest.mark.asyncio
+async def test_the_watchlist_fallback_asks_only_about_stored_stock_rows(monkeypatch):
+    """On the fallback path the stored classes are known before the gather: a trusted
+    'crypto' row is never looked up, even though the bare symbol is stock-shaped."""
+    asked = []
+
+    async def _etfs(tickers):
+        asked.extend(tickers)
+        return set()
+
+    _patch(monkeypatch, group=None,
+           watchlist=[{"ticker": "SPY", "asset_type": "Stock"},
+                      {"ticker": "BTC", "asset_type": "crypto"}])
+    monkeypatch.setattr(up, "fetch_etf_tickers", _etfs)
+
+    resp = await up.get_updates_tabs(user=_user("max"))
+
+    assert asked == ["SPY"]
+    classes = {t.scope: t.asset_type for t in resp.tabs if not t.is_market_tab}
+    assert classes == {"SPY": "stock", "BTC": "crypto"}
+
+
+@pytest.mark.asyncio
+async def test_a_raising_metadata_leg_still_renders_every_pill(monkeypatch, caplog):
+    """`fetch_ticker_metadata` never raises today; if it ever does, the pills still render as
+    bare symbols (as on a failed read) with their change %, and the leg is named in the log."""
+    async def _boom(_uid, tickers):
+        raise RuntimeError("metadata exploded")
+
+    _patch(monkeypatch, group=_group(["ORCL", "PLUG"]))
+    monkeypatch.setattr(up, "fetch_ticker_metadata", _boom)
+
+    with caplog.at_level("WARNING", logger=up.logger.name):
+        resp = await up.get_updates_tabs(user=_user("pro"))
+
+    pills = [t for t in resp.tabs if not t.is_market_tab]
+    assert [p.scope for p in pills] == ["ORCL", "PLUG"]
+    assert all(p.company_name is None for p in pills)
+    assert all(p.change_percent == 1.0 for p in pills)
+    assert "metadata leg raised" in caplog.text and _USER in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_raising_etf_leg_keeps_the_stored_classes(monkeypatch, caplog):
+    async def _boom(tickers):
+        raise RuntimeError("profile cache exploded")
+
+    async def _meta(_uid, tickers):
+        return {"GLD": {"asset_type": "etf"}, "SPY": {"asset_type": "Stock"}}
+
+    _patch(monkeypatch, group=_group(["SPY", "GLD", "ETHUSD"]))
+    monkeypatch.setattr(up, "fetch_ticker_metadata", _meta)
+    monkeypatch.setattr(up, "fetch_etf_tickers", _boom)
+
+    with caplog.at_level("WARNING", logger=up.logger.name):
+        resp = await up.get_updates_tabs(user=_user("max"))
+
+    classes = {t.scope: t.asset_type for t in resp.tabs if not t.is_market_tab}
+    assert classes == {"SPY": "stock", "GLD": "etf", "ETHUSD": "crypto"}
+    assert all(t.change_percent == 1.0 for t in resp.tabs[1:])
+    assert "ETF lookup leg raised" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leg_is_re_raised_never_degraded(monkeypatch):
+    """A leg that ends cancelled comes back from the gather as a CancelledError VALUE; turning
+    it into "no ETFs" would answer a request that is being torn down."""
+    async def _cancelled(tickers):
+        raise asyncio.CancelledError()
+
+    _patch(monkeypatch, group=_group(["SPY"]))
+    monkeypatch.setattr(up, "fetch_etf_tickers", _cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await up.get_updates_tabs(user=_user("max"))
+
+
+@pytest.mark.asyncio
+async def test_no_stock_like_pill_means_no_etf_lookup_at_all(monkeypatch):
+    called = []
+
+    async def _etfs(tickers):
+        called.append(list(tickers))
+        return set()
+
+    _patch(monkeypatch, group=_group(["BTCUSD", "^GSPC"]))
+    monkeypatch.setattr(up, "fetch_etf_tickers", _etfs)
+    resp = await up.get_updates_tabs(user=_user("max"))
+    assert called == []
+    assert {t.scope: t.asset_type for t in resp.tabs[1:]} == {"BTCUSD": "crypto",
+                                                              "^GSPC": "index"}

@@ -20,6 +20,16 @@ Deliberately NOT fixed by prefetching at launch: `project_launch_fanout_and_anal
 established "clear eagerly, fetch lazily" and names Tracking as the five-request tab, and
 `test_ios_launch_cost_guards.py` pins it. This change adds no launch requests.
 
+REVISED 2026-10-08 (instant paint for Holdings, plan Part 4/5). Portfolio Insights now STARTS
+beside phase 1 (`async let earlyInsights`, from the group the device last had active) so its card
+resolves with the rows instead of ~0.9 s after them — but it is still never AWAITED before the
+gate closes. The ordering test below therefore pins START ≠ AWAIT: the `async let` precedes the
+phase-1 await, and every `await earlyInsights` / `requestPortfolioInsights(` follows the
+non-defer `isLoading = false`. Whales still never gate `isLoading`. The never-loaded branch is a
+STATIC skeleton (`TrackedAssetsSkeleton(isAnimated: false)`), placed before the placeholder, so a
+tab that has not loaded yet never reads "No tickers yet". The snapshot / store invariants of the
+same change are pinned in `test_ios_tracking_instant_paint_guards.py`.
+
 Per `.claude/rules/testing.md` §3 and `project_source_scan_guard_vacuity`, every scan here is
 comment-stripped, brace-bounded, and was mutation-tested by hand.
 """
@@ -106,6 +116,22 @@ def test_loading_is_not_mistaken_for_an_empty_portfolio():
     # Anti-vacuity: the genuinely-empty path must still exist.
     assert "AssetsPlaceholderCard(" in block, "the empty/error placeholder is gone entirely"
 
+    # Before the first load has even STARTED (the hidden tab, and the frame or two after a tap)
+    # `isLoading` is still false — that window must read as loading too, and statically (a
+    # shimmer would animate for the whole session in a tab that is always mounted).
+    never = block.find("viewModel.filteredAssets.isEmpty && !viewModel.hasAttemptedLoad {")
+    assert never != -1, (
+        "the never-loaded branch is gone — before the first load starts, an empty list falls "
+        "through to 'No tickers yet'"
+    )
+    branch = block[never: block.index("} else", never)]
+    assert "TrackedAssetsSkeleton(isAnimated: false)" in branch, (
+        "the never-loaded branch no longer renders the STATIC skeleton"
+    )
+    assert never < block.index("AssetsPlaceholderCard("), (
+        "the never-loaded branch sits after the placeholder, so the placeholder wins first"
+    )
+
 
 # ── 2. The gate covers only what the Assets tab draws ──────────────────────────
 
@@ -127,20 +153,35 @@ def test_the_loading_gate_closes_before_the_whale_calls():
 
     close = body.find("isLoading = false")
     whales = body.find("loadWhaleData()")
-    insights = body.find("loadPortfolioInsights()")
+    phase1 = body.find("await (feedTask, portfoliosTask)")
+    early_start = body.find("async let earlyInsights")
 
     assert close != -1, "performLoad no longer closes the loading gate explicitly"
     assert whales != -1, "scan drifted — performLoad no longer loads whale data"
-    assert insights != -1, "scan drifted — performLoad no longer loads portfolio insights"
+    assert phase1 != -1, "scan drifted — performLoad no longer awaits phase 1 as one pair"
+    assert early_start != -1, (
+        "performLoad no longer STARTS insights beside phase 1 — the card resolves a whole round "
+        "trip after the rows again"
+    )
 
     assert close < whales, (
         "performLoad holds `isLoading` across the whale calls again. AssetsTabContent renders no "
         "whale state, so this makes the visible tab wait on two responses it never draws."
     )
-    assert close < insights, (
-        "performLoad holds `isLoading` across the portfolio-insights call again — a SEQUENTIAL "
-        "round trip on the end of the gate, which is where most of the extra second came from."
+    # START before phase 1 (concurrent), AWAIT only after the gate (never holds it).
+    assert early_start < phase1, (
+        "the insights request starts after phase 1 again — serial, a round trip on the tail"
     )
+    awaits = [m.start() for m in re.finditer(r"await earlyInsights\b|requestPortfolioInsights\(", body)]
+    assert any(body[a:a + 5] == "await" for a in awaits), (
+        "scan drifted — performLoad never awaits the early insights request"
+    )
+    for at in awaits:
+        assert close < at, (
+            "performLoad waits on portfolio insights BEFORE closing the loading gate — a "
+            "round trip the Assets list never draws now holds it (the extra second this file "
+            "exists to keep out)"
+        )
 
 
 def test_whales_have_their_own_loading_flag():

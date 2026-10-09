@@ -309,7 +309,9 @@ def test_a_short_history_opens_on_7d_and_every_window_is_cut_from_the_90d_answer
 def test_the_last_30d_label_is_anchored_inside_the_plot():
     chart = _read(CHART)
     axis = _decl_block(chart, "private var xAxis: some AxisContent")
-    assert "anchor: isTrailingTick(value.index, of: value.count) ? .topTrailing : nil" in axis
+    assert "anchor: labelAnchor(value.index, of: value.count)" in axis
+    anchor = _decl_block(chart, "private func labelAnchor(")
+    assert "return isTrailingTick(index, of: count) ? .topTrailing : nil" in anchor
     trailing = _decl_block(chart, "private func isTrailingTick(")
     assert "trend.window == .month" in trailing and "index == count - 1" in trailing
     dates = _decl_block(chart, "private var axisDates: [Date]")
@@ -410,6 +412,24 @@ def test_todays_axis_label_wins_a_collision():
     axis = _decl_block(_read(CHART), "private var xAxis: some AxisContent")
     assert "collisionResolution: .greedy(" in axis
     assert "priority: value.index == value.count - 1 ? 1 : 0" in axis
+
+
+def test_todays_7d_label_is_centred_on_its_bar_not_between_ticks():
+    """Review 2026-10-08: on 7D the newest bar (today) had no weekday under it. Each label was
+    `centered: true`, which places it BETWEEN its tick and the next one, and today's tick has
+    no next one, so Charts dropped it. Now each 7D tick sits at the day's noon (the middle of
+    its `unit: .day` bar) and `.top` centres the label on that tick, so no label depends on a
+    neighbour."""
+    chart = _read(CHART)
+    axis = _decl_block(chart, "private var xAxis: some AxisContent")
+    assert "centered: false" in axis
+    assert not re.search(r"centered:(?!\s*false\b)", axis), "no centred label on any window"
+    anchor = _decl_block(chart, "private func labelAnchor(")
+    assert "if trend.window == .week { return .top }" in anchor
+    unsorted = _decl_block(chart, "private var axisDatesUnsorted: [Date]")
+    week = unsorted[unsorted.index("case .week:"):unsorted.index("case .month:")]
+    assert "bySettingHour: 12, minute: 0, second: 0" in week, "7D ticks at each day's noon"
+    assert "(0..<7)" in week and "value: -$0, to: today" in week, "still today and the six days before"
 
 
 def test_the_chat_is_told_the_window_the_chart_is_drawing():
@@ -540,22 +560,24 @@ def test_the_since_date_sits_right_aligned_on_the_legend_row():
                          _strip_comments(chart))
 
 
-def test_the_since_label_states_only_what_the_log_supports():
-    """Review 2026-10-06: `tracking_since` is the OLDEST label still on file (the backend sweep
-    keeps RETENTION_DAYS; nothing records a scope's first day beyond it). Past that edge a
-    "since" date moves forward daily while reading like the day scoring began, so the label
-    says "120+ days" there — the same rule as the chat's `since_phrase`."""
-    text = _decl_block(_read(CHART), "private var coverageText: String?")
-    edge = text.index("if trend.historyReachesRetentionEdge() {")
-    assert edge < text.index('return "since \\(Self.shortDate(since))"'), "the edge is checked first"
-    assert 'return "\\(SentimentTrend.retentionDays)+ days"' in text[edge:text.index("return \"since")]
+def test_the_coverage_label_shows_only_when_the_chart_is_incomplete():
+    """Owner, 2026-10-08: "120+ days" beside the 7D/30D/90D picker read like the chart's period.
+    The label now appears only when the selected window cannot be filled — while the history is
+    being built, or when the feed has FEWER scored days than the window ("since Sep 26"). A fully
+    covered window shows nothing, and the "N+ days" wording is gone."""
+    chart = _read(CHART)
+    code = _strip_comments(_decl_block(chart, "private var coverageText: String?"))
+    gate = "guard trend.trackedDays() < trend.window.days else { return nil }"
+    assert gate in code
+    assert code.index(gate) < code.index('return "since \\(Self.shortDate(since))"'), "gate before the date"
+    assert 'return "filling in 90 days…"' in code, "the building state still explains itself"
+    assert "+ days" not in _strip_comments(chart)
+    assert "historyReachesRetentionEdge" not in _strip_comments(chart)
+    # Why a shown "since" date is always the real first day: every window is shorter than the
+    # backend's retention, so a history younger than a window is younger than the edge too.
     models = _read(MODELS)
-    rule = _decl_block(models, "func historyReachesRetentionEdge(")
-    assert "value: -Self.retentionDays" in rule and "to: calendar.startOfDay(for: today)" in rule
-    # `<=`, like the backend's `at_retention_edge`: the sweep deletes days BEFORE the cutoff.
-    assert "return calendar.startOfDay(for: since) <= edge" in rule
-    signature = models.split("func historyReachesRetentionEdge(")[1][:200]
-    assert "today: Date = SentimentTrendDayParser.etToday()" in signature
     kept = re.findall(r"static let retentionDays = (\d+)",
                       _decl_block(models, "struct SentimentTrend: Equatable"))
     assert kept == [str(RETENTION_DAYS)], f"the app's retention ({kept}) must equal the backend's"
+    windows = [int(d) for d in re.findall(r"case \.\w+: return (\d+)", _decl_block(models, "var days: Int {"))]
+    assert windows and max(windows) < RETENTION_DAYS, windows

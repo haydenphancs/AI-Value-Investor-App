@@ -18,9 +18,24 @@
 //  rendered as real market data. Nothing here may fall back to sample data on
 //  failure — an honest empty state is the correct degraded behaviour.
 //
+//  INSTANT FIRST PAINT (2026-10-08). Two things put rows on the first visible frame:
+//    1. The on-device snapshot (`UpdatesFeedSnapshot`, `AccountSnapshotStore`): the last LIVE
+//       Market feed, first page, of THIS account, at most 96 h old. `prepareSnapshot()` reads
+//       it from disk at tab mount (never a request) and seeds DISPLAY state only, labelled
+//       "News · Updated <time>"; the live load replaces it in place. It is not live data:
+//       it never enters `feedCache`, never latches `hasLoadedOnce`, never selects a chip and
+//       is never enriched (a paid call) — and the view renders it only on the active tab.
+//    2. The first open fetches the Market feed BESIDE /updates/tabs, not after it: the Market
+//       scope needs nothing from /tabs.
+//  The first load belongs to the ViewModel (`initialLoadTask`), so leaving the tab mid-load no
+//  longer cancels it, and AI enrichment runs detached (`enrichTask`), so a load or a
+//  pull-to-refresh ends when the rows paint, not after the model answers. A load that finishes
+//  behind another tab starts no paid work until the tab is on screen (`deferredPostPaint`).
+//
 
 import Foundation
 import Combine
+import OSLog
 
 @MainActor
 final class UpdatesViewModel: ObservableObject {
@@ -55,7 +70,9 @@ final class UpdatesViewModel: ObservableObject {
     var effectiveFilterOptions: NewsFilterOptions {
         filterOptions.restrictingSources(to: availableSources)
     }
-    @Published var isLoading: Bool = false
+    /// Starts TRUE: until the first load decides otherwise, the honest first frame is the
+    /// skeleton (or the snapshot), never the empty state's "No recent stories".
+    @Published var isLoading: Bool = true
     @Published var isRefreshing: Bool = false
     @Published var error: String?
     /// Errors from watchlist writes (Manage Assets). Kept SEPARATE from `error`:
@@ -78,6 +95,38 @@ final class UpdatesViewModel: ObservableObject {
     /// A credential is stored but not armed yet: "Reconnecting…", never the sign-in prompt
     /// (auth.md §5).
     @Published private(set) var isReconnecting: Bool = false
+
+    // MARK: - On-device snapshot
+
+    /// When the rows on screen were SAVED, while they are the on-device snapshot rather than a
+    /// live answer. nil once any live (or in-memory cached) feed paints, and whenever the
+    /// snapshot is dropped. The header reads "News · Updated <time>" while it is set.
+    @Published private(set) var snapshotSavedAt: Date?
+    /// A live or cached feed of THIS identity has painted. Until then a snapshot may be seeded;
+    /// after it, never again (a seed would overwrite a live answer).
+    @Published private(set) var hasShownFeed = false
+
+    /// "Updated 4:02 PM" / "Updated Sep 28, 4:02 PM" while a snapshot is on screen. One wording
+    /// source for every tab (`AccountSnapshotPolicy.updatedLabel`).
+    var snapshotUpdatedLabel: String? {
+        snapshotSavedAt.map { AccountSnapshotPolicy.updatedLabel(savedAt: $0) }
+    }
+
+    /// The live refresh of an on-screen snapshot failed (not a refusal): keep the stories, say
+    /// so beside them. The gate flags are checked HERE so the view's `body` never names them
+    /// (the account-gate tests read the branch order from their first mention there), and a
+    /// saved filter that hides every snapshot row gets the full error state instead.
+    var showsSnapshotRefreshFailure: Bool {
+        snapshotSavedAt != nil && error != nil && !requiresSignIn && !isReconnecting && !groupedNews.isEmpty
+    }
+
+    /// True for an Insights card that came from the snapshot. "Ask Cay AI" is withheld from it
+    /// (on the card and in its detail sheet): the chat is grounded on the server's CURRENT card,
+    /// which may not hold the bullet the user is reading, and the first send costs a credit.
+    func isSnapshotInsight(_ summary: NewsInsightSummary) -> Bool {
+        guard let seeded = snapshotInsightID else { return false }
+        return summary.id == seeded
+    }
 
     // MARK: - Active group + plan gate
 
@@ -144,14 +193,53 @@ final class UpdatesViewModel: ObservableObject {
     )] = [:]
 
     private let apiClient: APIClient
+    /// This account's on-device snapshot. Always `UpdatesFeedSnapshotStore.shared`, assigned
+    /// once in `init`; memory-only in the DEBUG screenshot mode (the store's own init).
+    private let snapshotStore: UpdatesFeedSnapshotStore
+    /// The store epoch the snapshot on screen was seeded under. A seed whose epoch has moved
+    /// (another owner bound, a session end, Clear Cache) is dropped at the next prepare —
+    /// the first identity resolution of a launch fires no `handleIdentityChange`.
+    private var seededEpoch: Int?
+    /// When the snapshot was put on screen, for the snapshot → live log line only.
+    private var seededAt: Date?
+    /// The id of the Insights card built from the snapshot (see `isSnapshotInsight`).
+    private var snapshotInsightID: UUID?
     private var hasLoadedOnce = false
-    /// Re-entrancy guard: `.task(id:)` can re-fire before the previous body ends.
-    private var isLoadingInitial = false
+    /// The first load, owned HERE rather than by the view's `.task`: a tab-away cancels only
+    /// the view's wait, never the request on the wire, and the next activation joins it.
+    /// Cancelled only by `handleIdentityChange`.
+    private var initialLoadTask: Task<Void, Never>?
+    /// Which `initialLoadTask` is current, so a finished task never clears a newer one.
+    private var initialLoadID: UUID?
+    /// The post-paint AI enrichment of the visible rows. Detached so a load (and a
+    /// pull-to-refresh) ends when the rows paint, not when the model answers. Cancelled on a
+    /// scope change and on an identity change; the merge keeps its own scope + token check.
+    private var enrichTask: Task<Void, Never>?
+    /// Bumped by every identity change. /updates/tabs answers carry no load token, so a late
+    /// one that left under the previous identity is dropped on this instead.
+    private var identityGeneration = 0
+    /// The chips came from a live /updates/tabs answer for this identity. Until then the strip
+    /// holds at most the Market fallback chip, which a failed /tabs may replace.
+    private var tabsAreLive = false
+    /// The chip that was selected when the identity changed. A same-account session heal
+    /// clears the selection with everything else; this lets `loadTabs` select it again.
+    private var pendingScope: String?
+    /// The snapshot store's epoch when the selected scope's feed load started, i.e. which
+    /// account made the selection. The store bumps its epoch on every sign-out, account switch
+    /// and purge, so `handleIdentityChange` keeps the chip only while this still matches — the
+    /// ended session's chip never decides the next account's first screen (auth.md §7).
+    private var selectionEpoch: Int?
+    /// Post-paint work (the paid enrichment, the Insights re-poll) of a load that finished while
+    /// the tab was HIDDEN — the first load now outlives a tab-away. Started by
+    /// `setTabActive(true)` if that load is still the one on screen; never for a hidden tab.
+    private var deferredPostPaint: (scope: String, token: UUID, pollInsight: Bool)?
     /// Guards against a stale in-flight response overwriting a newer tab's data.
     private var loadToken = UUID()
     /// Scope whose feed request is currently in flight, for duplicate-request dedup.
     private var inFlightScope: String?
     private var refreshPollTask: Task<Void, Never>?
+
+    nonisolated private static let log = Logger(subsystem: "com.phan.caydex", category: "updates")
 
     private let feedLimit = 50
 
@@ -250,6 +338,7 @@ final class UpdatesViewModel: ObservableObject {
 
     init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
+        self.snapshotStore = UpdatesFeedSnapshotStore.shared
         // The saved News filter, through the wrapper so `didSet` neither re-saves it nor
         // regroups an empty feed. Applied when the first feed load calls `applyFiltersAndGroup`.
         _filterOptions = Published(initialValue: NewsFilterOptions.loadSaved())
@@ -258,6 +347,8 @@ final class UpdatesViewModel: ObservableObject {
         // launch for all five tabs (see ContentView), so loading in init would
         // fire network calls for a screen the user may never open. The view
         // calls `loadIfNeeded()` when the tab first becomes active.
+        // No snapshot seed either: the store has not read its file yet (that is
+        // `prepareSnapshot()`, from the view's `.task`, after Home has painted).
     }
 
     /// Adopt the device's saved news-tone window as the user's pick, or auto mode when none is
@@ -272,33 +363,168 @@ final class UpdatesViewModel: ObservableObject {
     deinit {
         refreshPollTask?.cancel(); appearWorkTask?.cancel()
         trendTask?.cancel(); trendPollTask?.cancel()
+        enrichTask?.cancel(); initialLoadTask?.cancel()
+    }
+
+    // MARK: - Snapshot lifecycle
+
+    /// Read this account's snapshot from disk (once per binding; never a request) and paint it
+    /// if nothing live is on screen yet. Called from the view's `.task(id: isActiveTab)` on BOTH
+    /// the hidden and the active run, and from `handleIdentityChange` after its clears.
+    func prepareSnapshot() async {
+        expireSnapshotIfStale()
+        await snapshotStore.prepare(apiClient: apiClient)
+        dropSeedIfEpochMoved()
+        seedFromSnapshot()
+    }
+
+    /// Put the snapshot on screen — DISPLAY state only. Never `feedCache` (its cached branch
+    /// skips the network, so the live load would never run), never the pagination state, the
+    /// load latch, the token or the in-flight scope, never the selection (its `.onChange` would
+    /// fetch for a hidden tab), never the plan state, and never a task.
+    private func seedFromSnapshot() {
+        guard !hasShownFeed, allNewsArticles.isEmpty, snapshotSavedAt == nil,
+              !requiresSignIn, !isReconnecting,
+              (selectedTab?.scope ?? pendingScope ?? UpdatesScope.market) == UpdatesScope.market,
+              let snapshot = snapshotStore.snapshotForDisplay() else { return }
+        let feed = snapshot.payload.feed
+        let articles = dedupedByApiID((feed.articles ?? []).compactMap { NewsArticle(dto: $0) })
+        guard !articles.isEmpty else { return }
+        allNewsArticles = articles
+        let card = Self.snapshotInsight(feed.insight)
+        insightSummary = card
+        snapshotInsightID = card?.id
+        // The Market chip only — the snapshot keeps no /tabs body (a stale `is_locked` could
+        // open a feed the plan now locks). The live /tabs answer replaces it.
+        if filterTabs.isEmpty && !tabsAreLive {
+            filterTabs = [Self.marketTabFallback]
+        }
+        snapshotSavedAt = snapshot.savedAt
+        seededEpoch = snapshotStore.epoch
+        seededAt = Date()
+        applyFiltersAndGroup()
+        let ageSeconds = Self.wholeSeconds(Date().timeIntervalSince(snapshot.savedAt))
+        let rowCount = articles.count
+        let hasCard = card != nil
+        Self.log.info("updates: snapshot painted — \(ageSeconds, privacy: .public) s old, \(rowCount, privacy: .public) stories, insight card: \(hasCard, privacy: .public)")
+    }
+
+    /// The snapshot's Insights card, or nil. A card whose `generated_at` does not parse would
+    /// read "Updated just now" on a days-old summary, so it is dropped; the rest are forced
+    /// stale ("· checking for updates") because "· up to date" was the server's claim at save
+    /// time, not now.
+    private static func snapshotInsight(_ dto: AIInsightCardDTO?) -> NewsInsightSummary? {
+        guard let dto, UpdatesDateParser.parse(dto.generatedAt) != nil,
+              var card = NewsInsightSummary(dto: dto) else { return nil }
+        card.isStale = true
+        card.isRefreshing = false
+        return card
+    }
+
+    /// Take the snapshot off screen. A no-op while live rows are showing.
+    private func dropSnapshot() {
+        guard snapshotSavedAt != nil else { return }
+        snapshotSavedAt = nil
+        seededEpoch = nil
+        seededAt = nil
+        allNewsArticles = []
+        insightSummary = nil
+        applyFiltersAndGroup()
+    }
+
+    /// The store changed hands (or was purged) since the seed: what is on screen may be another
+    /// account's, so it goes before anything is re-seeded.
+    private func dropSeedIfEpochMoved() {
+        guard snapshotSavedAt != nil, let seeded = seededEpoch, seeded != snapshotStore.epoch else { return }
+        Self.log.info("updates: snapshot dropped — the account snapshot store changed since it was painted")
+        dropSnapshot()
+    }
+
+    /// Drop an on-screen snapshot that has aged past the 96 h display window (the app sat in
+    /// the background, or every live load failed). A no-op for live rows.
+    func expireSnapshotIfStale(now: Date = Date()) {
+        guard let savedAt = snapshotSavedAt,
+              !AccountSnapshotPolicy.isDisplayable(savedAt: savedAt, now: now) else { return }
+        Self.log.info("updates: snapshot dropped — past its display window")
+        dropSnapshot()
+    }
+
+    /// Log values only: whole seconds / milliseconds, clamped so a wild clock cannot trap.
+    nonisolated private static func wholeSeconds(_ interval: TimeInterval) -> Int {
+        guard interval.isFinite else { return 0 }
+        return Int(max(min(interval, 31_536_000), -31_536_000))
+    }
+
+    nonisolated private static func wholeMillis(since start: Date) -> Int {
+        let millis = Date().timeIntervalSince(start) * 1000
+        guard millis.isFinite, millis > 0 else { return 0 }
+        return Int(min(millis, 86_400_000))
     }
 
     // MARK: - Lifecycle
 
-    /// Called when the Updates tab becomes visible. Idempotent.
+    /// Called when the Updates tab becomes visible. Idempotent, and JOINS a first load already
+    /// running instead of starting another.
     func loadIfNeeded() async {
-        guard !hasLoadedOnce, !isLoadingInitial else { return }
-        isLoadingInitial = true
-        defer { isLoadingInitial = false }
-        await loadInitialData()
-        // Latch on genuine completion — INCLUDING a legitimately empty scope —
-        // but never on cancellation. `.task(id:)` cancels its body when the tab
-        // switches away, which leaves `error == nil` and empty articles; the old
-        // `!allNewsArticles.isEmpty` guard avoided latching there but also
-        // re-fetched tabs+feed on every reactivation of a genuinely empty scope.
-        // `Task.isCancelled` distinguishes "interrupted" from "empty result".
-        if !Task.isCancelled && error == nil { hasLoadedOnce = true }
+        expireSnapshotIfStale()
+        guard !hasLoadedOnce else { return }
+        if let running = initialLoadTask {
+            await running.value
+            return
+        }
+        let id = UUID()
+        initialLoadID = id
+        // Owned by the ViewModel: the view's `.task` is cancelled when the tab switches away,
+        // and that must not cancel the request on the wire (the return visit used to pay
+        // /tabs + /feed again). So `Task.isCancelled` inside here is true ONLY for an identity
+        // change, which cancels this task itself.
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadInitialData()
+            // Latch on a genuine LIVE completion — including a legitimately empty scope — but
+            // never on an identity cancellation, an error, or a snapshot still on screen (its
+            // live load failed, so the next activation must try again).
+            if !Task.isCancelled, self.error == nil, self.snapshotSavedAt == nil {
+                self.hasLoadedOnce = true
+            }
+            if self.initialLoadID == id {
+                self.initialLoadTask = nil
+                self.initialLoadID = nil
+            }
+        }
+        initialLoadTask = task
+        await task.value
     }
 
     private func loadInitialData() async {
+        let generation = identityGeneration
         isLoading = true
         error = nil
-        await loadTabs()
-        if let tab = selectedTab {
-            await loadFeed(for: tab, force: false)
+        let effectiveScope = selectedTab?.scope ?? pendingScope ?? UpdatesScope.market
+        if effectiveScope == UpdatesScope.market {
+            // The Market feed needs nothing from /tabs, so both leave together. All three lines
+            // run in ONE main-actor turn: `loadFeed` claims `inFlightScope` before its first
+            // suspension, so the `.onChange(of: selectedTab)` → `selectTab` this assignment
+            // triggers finds the load in flight and skips. When /tabs lands it re-selects an
+            // EQUAL-scope tab, which fires no `.onChange`.
+            let market = selectedTab ?? filterTabs.first(where: { $0.isMarketTab }) ?? Self.marketTabFallback
+            selectedTab = market
+            async let tabs: Void = loadTabs()
+            await loadFeed(for: market, force: false)
+            await tabs
+        } else {
+            // A ticker scope is never fetched before /tabs confirms it: /updates/feed has no
+            // server-side plan gate, only /tabs says which tickers this plan may open.
+            await loadTabs()
+            if let tab = selectedTab {
+                await loadFeed(for: tab, force: false)
+            }
         }
-        isLoading = false
+        // Not over another load that owns the skeleton now (a chip tap, a refresh), and not
+        // after an identity change (its handler set `isLoading = true` for the next identity).
+        if generation == identityGeneration, inFlightScope == nil {
+            isLoading = false
+        }
     }
 
     func refresh() async {
@@ -351,6 +577,63 @@ final class UpdatesViewModel: ObservableObject {
         trendPollAttempt = 0
         trendPollExhausted = false
         stalledScopes.removeAll()
+
+        // The feed itself, the chips, the plan state and every in-flight load belong to the
+        // previous identity too — all cleared HERE, above the gate, so a hidden tab holds none
+        // of them (with a snapshot store that would be a cross-account leak, not untidy state).
+        //
+        // The selected chip first: a same-account session heal clears the selection with the
+        // rest, and `loadTabs` selects it again from this (re-checked against the new answer).
+        // Only for the SAME account: AppState bumps the store's epoch before it publishes a
+        // sign-out or an account switch, so a moved epoch drops the stash — the ended session's
+        // chip must not pick the next account's first feed. The stash wins over the selection:
+        // while it is set no live /tabs has answered, so the selection can only be the Market
+        // fallback a refused /tabs picked during the restoring window, never the user's choice.
+        pendingScope = selectionEpoch == snapshotStore.epoch ? (pendingScope ?? selectedTab?.scope) : nil
+        // Fences every answer of the previous identity: the bumped generation drops a late
+        // /tabs, the new token drops every feed, page, enrich and insight re-poll answer, and
+        // `inFlightScope` is cleared by hand because the old load's `defer` no longer can.
+        identityGeneration &+= 1
+        initialLoadTask?.cancel()
+        initialLoadTask = nil
+        initialLoadID = nil
+        loadToken = UUID()
+        inFlightScope = nil
+        enrichTask?.cancel()
+        enrichTask = nil
+        deferredPostPaint = nil
+        refreshPollTask?.cancel()
+        refreshPollTask = nil
+        appearWorkTask?.cancel()
+        appearWorkTask = nil
+        isEnriching = false
+        summarizingIDs.removeAll()
+        feedCache.removeAll()
+        allNewsArticles = []
+        newsArticles = []
+        groupedNews = []
+        insightSummary = nil
+        loadedOffset = 0
+        hasMorePages = false
+        isLoadingMore = false
+        // `selectedTab = nil` is the one selection reset that fires no load (its `.onChange`
+        // ignores nil); selecting Market here would fetch for a HIDDEN tab.
+        filterTabs = []
+        selectedTab = nil
+        tabsAreLive = false
+        groupName = nil
+        lockedTickerCount = 0
+        tierRequiredForMoreTickers = nil
+        snapshotSavedAt = nil
+        seededEpoch = nil
+        seededAt = nil
+        snapshotInsightID = nil
+        hasShownFeed = false
+        error = nil
+        // The next identity's first frame is its skeleton (or its snapshot), never "No recent
+        // stories" from a cleared list.
+        isLoading = true
+
         // The News filter is NOT a device preference like the window: a filter on a device-global
         // key would open the next account's feed already narrowed (auth.md §7), so
         // `AppState.discardDataForEndedSession()` removes it from the store when a session ends.
@@ -361,17 +644,17 @@ final class UpdatesViewModel: ObservableObject {
         filterOptions = NewsFilterOptions.loadSaved()
         isRereadingSavedFilter = false
 
+        // Then the NEW identity's own snapshot, above the gate too, so a hidden tab is ready.
+        // AppState re-binds or clears the store before it publishes the identity change, so a
+        // different account finds nothing here and a same-account heal repaints its own.
+        await prepareSnapshot()
+
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
         guard isActiveTab else { return }
-        await loadTabs()
-        if let tab = selectedTab {
-            // `force: true` — the per-scope article cache was populated under the previous
-            // identity, and `reloadForActiveGroupChange`'s reasoning (articles are unaffected
-            // by group membership) does NOT hold here: watchlist scopes differ per account.
-            await loadFeed(for: tab, force: true)
-        }
-        hasLoadedOnce = true
+        // The same first load as a first open (parallel Market start, the success-only latch);
+        // the cache was cleared above, so nothing of the previous identity is served from it.
+        await loadIfNeeded()
     }
 
     /// A watchlist row was added or removed elsewhere. Only when this tab has already
@@ -467,16 +750,26 @@ final class UpdatesViewModel: ObservableObject {
     // MARK: - Tabs
 
     private func loadTabs() async {
-        // Remember the selection by SCOPE. The old code rebuilt tabs with fresh
-        // UUIDs and reset selection to `.first`, so every refresh yanked the
-        // user back to the Market tab.
-        let previousScope = selectedTab?.scope
+        // /tabs carries no load token, so an answer that left under the previous identity is
+        // recognised by this instead (it would put that account's chips on screen).
+        let generation = identityGeneration
 
         do {
             let response: UpdatesTabsResponse = try await apiClient.request(
                 endpoint: .getUpdatesTabs,
                 responseType: UpdatesTabsResponse.self
             )
+            guard generation == identityGeneration else {
+                print("⏭️ UpdatesVM: Discarding /updates/tabs from a previous identity")
+                return
+            }
+            // Remember the selection by SCOPE, read NOW rather than when the request left: the
+            // Market chip is tappable while /tabs is in flight (it starts beside the feed), and a
+            // chip picked meanwhile must not be yanked back when this lands. `pendingScope` is
+            // the chip selected before an identity change cleared the selection (a same-account
+            // heal keeps it; for another account `openableTabs` re-checks it below).
+            let previousScope = selectedTab?.scope ?? pendingScope
+            pendingScope = nil
             let tabs = response.tabs.map { NewsFilterTab(dto: $0) }
             // Group + plan state travels with the pills, so it is applied even on the
             // empty-tabs path below — otherwise a Free user whose group is entirely
@@ -486,24 +779,31 @@ final class UpdatesViewModel: ObservableObject {
             tierRequiredForMoreTickers = response.tierRequired
             guard !tabs.isEmpty else {
                 print("⚠️ UpdatesVM: /updates/tabs returned no tabs")
-                if filterTabs.isEmpty { filterTabs = [Self.marketTabFallback] }
+                if filterTabs.isEmpty || !tabsAreLive { filterTabs = [Self.marketTabFallback] }
                 selectedTab = selectedTab ?? filterTabs.first
                 return
             }
             filterTabs = tabs
+            tabsAreLive = true
             // Selection can only land on a tab whose feed the plan actually allows —
             // otherwise a downgrade would leave the user parked on a locked scope with no
             // chip to navigate away from.
             selectedTab = openableTabs.first { $0.scope == previousScope } ?? openableTabs.first
             print("✅ UpdatesVM: Loaded \(tabs.count) tabs (selected: \(selectedTab?.scope ?? "none"), locked: \(lockedTickerCount))")
         } catch {
+            guard generation == identityGeneration else { return }
             let appError = AppError.from(error)
+            // Nobody is waiting for a cancelled request; it says nothing about the chips.
+            guard !appError.isCancellation else { return }
             print("⚠️ UpdatesVM: Failed to load tabs: \(appError.message)")
             // The Market feed is still usable without the watchlist pills, so
-            // degrade to a single tab rather than showing an empty screen.
-            if filterTabs.isEmpty {
-                filterTabs = [Self.marketTabFallback]
-                selectedTab = filterTabs.first
+            // degrade to a single tab rather than showing an empty screen. Keyed on the
+            // SELECTION and on live chips, not on an empty strip: a strip holding only the
+            // seeded Market chip (no live /tabs yet) must still get a selection here, or no
+            // feed load would ever start.
+            if selectedTab == nil || !tabsAreLive {
+                if !tabsAreLive { filterTabs = [Self.marketTabFallback] }
+                selectedTab = filterTabs.first(where: { $0.isMarketTab }) ?? Self.marketTabFallback
             }
         }
     }
@@ -549,6 +849,8 @@ final class UpdatesViewModel: ObservableObject {
         let token = UUID()
         loadToken = token
         inFlightScope = scope
+        // Which account this selection belongs to (see `selectionEpoch`).
+        selectionEpoch = snapshotStore.epoch
         // The news-tone chart loads beside the feed, never in front of it: its own task,
         // its own staleness check, and a failure only hides the chart.
         startTrendLoad(scope: scope, force: force)
@@ -561,6 +863,10 @@ final class UpdatesViewModel: ObservableObject {
         // refers to the previous feed, and the token check would discard it anyway.
         appearWorkTask?.cancel()
         appearWorkTask = nil
+        // Same for the outgoing feed's detached enrichment (state hygiene: the server still
+        // finishes a request it already received; the merge would be dropped on the token).
+        enrichTask?.cancel()
+        enrichTask = nil
         // Reset the enrichment throttle for the incoming tab. `isEnriching` is a
         // shared Bool; if the OUTGOING tab's enrich POST (seconds long) is still
         // in flight, the new tab's initial + debounced enrichment would both
@@ -585,6 +891,10 @@ final class UpdatesViewModel: ObservableObject {
             isReconnecting = false
             allNewsArticles = cached.articles
             insightSummary = cached.insight
+            // A cached feed is this session's live answer, never the snapshot (the snapshot
+            // never enters `feedCache`), so the label goes with it.
+            snapshotSavedAt = nil
+            hasShownFeed = true
             loadedOffset = cached.offset
             hasMorePages = cached.hasMore
             isLoadingMore = false
@@ -596,19 +906,24 @@ final class UpdatesViewModel: ObservableObject {
             print("✅ UpdatesVM: Served \(cached.articles.count) articles for \(scope) from memory")
             // Still enrich: a cached scope whose first enrich pass failed (or was
             // cut short) would otherwise keep its sentiment badges hidden until a
-            // manual pull-to-refresh.
+            // manual pull-to-refresh. (Deferred to the next activation on a hidden tab.)
             if allNewsArticles.contains(where: { !$0.aiProcessed && $0.isEnrichable }) {
-                await enrichVisibleWindow(around: 0, scope: scope, token: token)
+                startPostPaintWork(scope: scope, token: token, pollInsight: false)
             }
             return
         }
 
         // Clear immediately so the previous tab's news never shows under the new
-        // tab's title while the request is in flight.
-        allNewsArticles = []
-        newsArticles = []
-        groupedNews = []
-        insightSummary = nil
+        // tab's title while the request is in flight — EXCEPT the Market snapshot under a
+        // Market load: it stays on screen (no skeleton flash) and the answer replaces it in
+        // one turn below. The snapshot is always Market, so any other scope clears it.
+        if snapshotSavedAt == nil || scope != UpdatesScope.market {
+            snapshotSavedAt = nil
+            allNewsArticles = []
+            newsArticles = []
+            groupedNews = []
+            insightSummary = nil
+        }
         isLoading = true
         error = nil
         // Reset pagination with the feed. Carrying the previous tab's offset
@@ -618,11 +933,17 @@ final class UpdatesViewModel: ObservableObject {
         hasMorePages = false
         isLoadingMore = false
 
+        // Captured BEFORE the request: a store that changed hands while it was in flight
+        // refuses the save, so one account's answer is never filed under the next.
+        let snapshotEpoch = snapshotStore.epoch
         do {
-            let response: UpdatesFeedResponse = try await apiClient.request(
+            // The exact response bytes come back too: the snapshot keeps them verbatim and
+            // re-decodes them through this same DTO at the next launch.
+            let (response, body) = try await apiClient.requestReturningBody(
                 endpoint: .getUpdatesFeed(scope: scope, limit: feedLimit),
                 responseType: UpdatesFeedResponse.self
             )
+            let fetchedAt = Date()
             guard loadToken == token else {
                 print("⏭️ UpdatesVM: Discarding stale feed response for \(scope)")
                 // The newer load owns isLoading now — do NOT clear it here, or
@@ -643,8 +964,15 @@ final class UpdatesViewModel: ObservableObject {
                 print("⚠️ UpdatesVM: Dropped \(dropped)/\(dtos.count) unrenderable/duplicate articles for \(scope)")
             }
 
+            // ONE turn: the snapshot rows (if any) are replaced by the live ones with no
+            // skeleton between, and the rows keep their identity (`stableID` = the server id).
             allNewsArticles = articles
             insightSummary = response.insight.flatMap { NewsInsightSummary(dto: $0) }
+            let replacedSnapshotSavedAt = snapshotSavedAt
+            let replacedSnapshotSeededAt = seededAt
+            snapshotSavedAt = nil
+            seededAt = nil
+            hasShownFeed = true
             applyFiltersAndGroup()
             // Page off what was REQUESTED, not what rendered: `dtos.count` may
             // exceed `articles.count` when rows are unrenderable, and paging off
@@ -661,29 +989,48 @@ final class UpdatesViewModel: ObservableObject {
             requiresSignIn = false
             isReconnecting = false
 
+            // The snapshot for the next cold launch: a LIVE Market first page with stories,
+            // the bytes exactly as received, dated when they were received. The store refuses
+            // it if the account changed while the request was in flight (the epoch).
+            if scope == UpdatesScope.market, !articles.isEmpty {
+                snapshotStore.save(
+                    parts: [UpdatesFeedSnapshot.feedPart: body],
+                    payload: UpdatesFeedSnapshot(feed: response),
+                    savedAt: fetchedAt,
+                    epoch: snapshotEpoch
+                )
+            }
+
             print("""
             ✅ UpdatesVM: Loaded \(articles.count) articles for \(scope) \
             (cached: \(response.cached ?? false), \
             insight: \(insightSummary.map { $0.isAIGenerated ? "ai" : "fallback" } ?? "none"))
             """)
+            if let replacedSnapshotSavedAt, let replacedSnapshotSeededAt {
+                let onScreenMillis = Self.wholeMillis(since: replacedSnapshotSeededAt)
+                let snapshotAgeSeconds = Self.wholeSeconds(fetchedAt.timeIntervalSince(replacedSnapshotSavedAt))
+                Self.log.info("updates: live feed replaced the snapshot after \(onScreenMillis, privacy: .public) ms on screen (snapshot was \(snapshotAgeSeconds, privacy: .public) s old)")
+            }
 
-            await enrichVisibleWindow(around: 0, scope: scope, token: token)
-            scheduleInsightPollIfNeeded(scope: scope, token: token)
+            // Detached: this load (and a pull-to-refresh) ends HERE, when the rows paint. A load
+            // that finished behind another tab waits for the next activation instead.
+            startPostPaintWork(scope: scope, token: token, pollInsight: true)
         } catch is CancellationError {
-            // Tab switched away mid-flight. Not a failure — show nothing.
+            // Not a failure — show nothing. Only for THIS load: a load the identity handler
+            // cancelled must not clear the next identity's skeleton.
+            if loadToken != token { return }
             isLoading = false
             return
         } catch {
             guard loadToken == token else { return }
-            if (error as? URLError)?.code == .cancelled {
-                // Same as above: URLSession surfaces task cancellation as
-                // URLError.cancelled, whose message is the literal "cancelled".
-                // Rendering that as "Couldn't load the news / cancelled" blamed
-                // the network for the user's own tab switch.
+            let appError = AppError.from(error)
+            if appError.isCancellation {
+                // URLSession surfaces task cancellation as URLError.cancelled (often nested in
+                // the API error), whose message is the literal "cancelled". Rendering that as
+                // "Couldn't load the news / cancelled" blamed the network for a tab switch.
                 isLoading = false
                 return
             }
-            let appError = AppError.from(error)
             // The account gate is decided HERE, from the typed refusal — see the note at the
             // top of this function for why not from `auth.status`.
             if case .signInRequired = appError {
@@ -691,10 +1038,15 @@ final class UpdatesViewModel: ObservableObject {
                 isReconnecting = reconnecting
                 requiresSignIn = !reconnecting
                 self.error = nil
+                // No stored stories under the account gate (owner decision 1).
+                dropSnapshot()
             } else {
                 self.error = appError.message
                 requiresSignIn = false
                 isReconnecting = false
+                // A snapshot on screen STAYS (the view says the refresh failed beside it),
+                // still bounded by its display window.
+                expireSnapshotIfStale()
             }
             isLoading = false
             // NO sample-data fallback. Fabricated headlines here would render as
@@ -716,6 +1068,14 @@ final class UpdatesViewModel: ObservableObject {
         } else if let trend = sentimentTrend, trend.isBuildingHistory,
                   trend.scope == selectedTab?.scope {
             startTrendLoad(scope: trend.scope, force: true)
+        }
+        // A load that painted while the tab was hidden starts its post-paint work now — only if
+        // it is still the load on screen (a newer load, or an identity change, owns the token).
+        if active, let pending = deferredPostPaint {
+            deferredPostPaint = nil
+            if pending.token == loadToken, pending.scope == selectedTab?.scope {
+                startPostPaintWork(scope: pending.scope, token: pending.token, pollInsight: pending.pollInsight)
+            }
         }
     }
 
@@ -864,6 +1224,10 @@ final class UpdatesViewModel: ObservableObject {
         guard let index = newsArticles.firstIndex(where: { $0.id == article.id })
         else { return }
         lastAppearedIndex = index
+        // A row built behind another tab (this tab is opacity-mounted, so a load that finished
+        // after a tab-away still builds its rows) is not a reader: no paid enrichment, no page.
+        // The next activation enriches the top of the feed (`deferredPostPaint`).
+        guard isTabActive else { return }
         // DEBOUNCE: a burst of onAppear callbacks (fast scroll, or the reflow after
         // an enrichment merge / paginated append) collapses into ONE pass. Without
         // this, every callback spawned a task that ran a full regroup + maybe a
@@ -949,6 +1313,9 @@ final class UpdatesViewModel: ObservableObject {
     /// the fix for "scrolled-to cards have no sentiment/summary": enrichment now
     /// follows the scroll position instead of always draining the top of the list.
     private func enrichVisibleWindow(around index: Int, scope: String, token: UUID) async {
+        // Never a paid enrich for snapshot rows: the live page replaces them within a few
+        // hundred ms. (The on-tap `summarizeArticle` stays allowed — a tap is intent.)
+        guard snapshotSavedAt == nil else { return }
         guard !isEnriching else { return }
         let list = newsArticles
         guard !list.isEmpty, index >= 0, index < list.count else { return }
@@ -962,6 +1329,32 @@ final class UpdatesViewModel: ObservableObject {
         isEnriching = true
         defer { isEnriching = false }
         await requestEnrichment(ids: Array(ids), scope: scope, token: token, source: "window")
+    }
+
+    /// Everything a load starts once its rows have painted: the enrichment of the top of the
+    /// feed (a paid call) and, for a network answer, the Insights re-poll. On a HIDDEN tab
+    /// nothing starts — the first load now finishes after a tab-away, and enriching 20 rows
+    /// nobody sees (plus two /feed re-polls) is exactly the spend `articleDidAppear` exists to
+    /// avoid. It is recorded instead, and `setTabActive(true)` starts it if still current.
+    private func startPostPaintWork(scope: String, token: UUID, pollInsight: Bool) {
+        guard isTabActive else {
+            deferredPostPaint = (scope: scope, token: token, pollInsight: pollInsight)
+            return
+        }
+        deferredPostPaint = nil
+        startEnrichment(scope: scope, token: token)
+        if pollInsight {
+            scheduleInsightPollIfNeeded(scope: scope, token: token)
+        }
+    }
+
+    /// The post-paint enrichment of the top of the feed, as a tracked task instead of an
+    /// `await` inside the load: the load returns at paint. Replaces any previous one.
+    private func startEnrichment(scope: String, token: UUID) {
+        enrichTask?.cancel()
+        enrichTask = Task { [weak self] in
+            await self?.enrichVisibleWindow(around: 0, scope: scope, token: token)
+        }
     }
 
     /// On-demand summary for a single tapped card. High-intent, so it bypasses the
@@ -1000,7 +1393,10 @@ final class UpdatesViewModel: ObservableObject {
             let merged = mergeEnrichment(response, scope: scope)
             print("✅ UpdatesVM: Enriched \(merged)/\(ids.count) articles for \(scope) (\(source))")
         } catch {
-            print("⚠️ UpdatesVM: Enrichment (\(source)) failed for \(scope): \(AppError.from(error).message)")
+            let appError = AppError.from(error)
+            // A cancelled enrich (scope or identity change) is not a failure worth a log line.
+            if appError.isCancellation { return }
+            print("⚠️ UpdatesVM: Enrichment (\(source)) failed for \(scope): \(appError.message)")
         }
     }
 
@@ -1029,7 +1425,11 @@ final class UpdatesViewModel: ObservableObject {
         }
         if merged > 0 {
             applyFiltersAndGroup()
-            feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
+            // Snapshot rows (a tap-summarised one) never enter the cache: its cached branch
+            // would serve them later as this session's live feed.
+            if snapshotSavedAt == nil {
+                feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
+            }
         }
         return merged
     }

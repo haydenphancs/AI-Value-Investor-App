@@ -94,7 +94,7 @@ def test_downsample_indices_strictly_ascending_and_unique():
     assert len(set(out)) == len(out)
 
 
-# ═══════════════════ sparkline data path (fetch_chart_data faked) ═════════
+# ═════════════════ sparkline data path (fetch_sparkline_bars faked) ═══════
 
 
 def _bar(date: str, close: float) -> dict:
@@ -104,23 +104,23 @@ def _bar(date: str, close: float) -> dict:
 def _stub_both_bar_sources(monkeypatch, bars_fn):
     """Stub the FMP *and* CoinGecko bar sources, and report the resolved flag.
 
-    ⚠️ Crypto no longer flows through `fetch_chart_data`. Phase 5 routes it to
+    ⚠️ Crypto does not flow through `fetch_sparkline_bars`. Phase 5 routes it to
     CoinGecko (`_cg_history`), because FMP 402s every pair — so a test that stubs
-    only `fetch_chart_data` lets a crypto ticker reach the real network, where the
+    only `fetch_sparkline_bars` lets a crypto ticker reach the real network, where the
     hermetic guard raises and `_get_all_sparklines`' `except` swallows it into an
     empty series. That reads as "the sparkline is empty", not as "the stub missed".
 
     `extended_hours` is still resolved and still drives the SPAN and the CACHE KEY on
     both paths; only the fetch moved. It is observed here at `_sparkline_cache_set`,
     which every successful path calls with the resolved flag, rather than at
-    `fetch_chart_data` — which crypto no longer reaches, and which receives the pair
+    `fetch_sparkline_bars` — which crypto does not reach, and which receives the pair
     symbol while `_cg_history` receives the bare base ("BTC", not "BTCUSD").
 
     Returns the dict of {ticker: resolved_extended_hours}.
     """
     seen: dict[str, bool] = {}
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return bars_fn(extended_hours)
 
     async def fake_cg_history(self, symbol, days, *, intraday=False):
@@ -135,7 +135,7 @@ def _stub_both_bar_sources(monkeypatch, bars_fn):
         return (real_set(ticker, sparkline, extended_hours, span)
                 if span is not None else real_set(ticker, sparkline, extended_hours))
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     monkeypatch.setattr(
         "app.services.crypto_service.CryptoService._cg_history", fake_cg_history
     )
@@ -154,7 +154,7 @@ def _closes(sparklines: dict, ticker: str) -> list:
 async def test_sparkline_keeps_only_latest_trading_day(monkeypatch):
     tsvc._sparkline_cache.clear()
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         # Two sessions — the mini-chart must fold to the latest one only.
         return [
             _bar("2026-07-08 09:30:00", 10.0),
@@ -164,7 +164,7 @@ async def test_sparkline_keeps_only_latest_trading_day(monkeypatch):
             _bar("2026-07-09 16:00:00", 22.0),
         ]
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
     assert _closes(out, "ORCL") == [20.0, 21.0, 22.0]   # only 2026-07-09 bars, rounded
@@ -174,10 +174,10 @@ async def test_sparkline_keeps_only_latest_trading_day(monkeypatch):
 async def test_sparkline_single_point_day_returns_empty(monkeypatch):
     tsvc._sparkline_cache.clear()
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return [_bar("2026-07-09 09:30:00", 20.0)]  # only one bar in latest day
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
     # <2 closes → honest empty at FULL span, never a 1-point chart.
@@ -188,10 +188,10 @@ async def test_sparkline_single_point_day_returns_empty(monkeypatch):
 async def test_sparkline_empty_bars_returns_empty(monkeypatch):
     tsvc._sparkline_cache.clear()
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
     assert out["ORCL"] == ([], 0.0, 1.0)
@@ -204,7 +204,7 @@ async def test_crypto_sparkline_bars_come_from_coingecko_not_fmp(monkeypatch):
     That helper stubs both sources with identical bars so the extended-hours tests stay
     source-agnostic. The cost is that reverting the crypto branch leaves every one of
     them green, which was verified by hand. This test is the other half: FMP 402s every
-    crypto pair, so a crypto ticker reaching `fetch_chart_data` means an empty sparkline
+    crypto pair, so a crypto ticker reaching `fetch_sparkline_bars` means an empty sparkline
     beside a live price in production.
     """
     tsvc._sparkline_cache.clear()
@@ -212,7 +212,7 @@ async def test_crypto_sparkline_bars_come_from_coingecko_not_fmp(monkeypatch):
     cg_calls: list[str] = []
     bars = [_bar("2026-07-09 09:30:00", 1.0), _bar("2026-07-09 12:00:00", 2.0)]
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         fmp_calls.append(ticker)
         return bars
 
@@ -222,7 +222,7 @@ async def test_crypto_sparkline_bars_come_from_coingecko_not_fmp(monkeypatch):
         assert days == 1, "1D tile must ask for one day, not a 7-day series"
         return bars
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     monkeypatch.setattr(
         "app.services.crypto_service.CryptoService._cg_history", fake_cg_history
     )
@@ -318,11 +318,11 @@ async def test_change_percent_reads_plural_key_for_non_stock(monkeypatch):
     }
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
 
-    # BTCUSD does NOT take the `fetch_chart_data` branch — `_get_all_sparklines` routes
+    # BTCUSD does NOT take the `fetch_sparkline_bars` branch — `_get_all_sparklines` routes
     # a coin to `crypto_service._cg_history` instead (see `_stub_both_bar_sources`), so
     # stubbing only the FMP side let this test reach the real CoinGecko. The guard
     # blocked it, `_fetch_one`'s `except` swallowed it into an empty sparkline, and the
@@ -359,9 +359,9 @@ async def test_change_percent_reads_singular_key_for_stock(monkeypatch):
     }
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
@@ -471,9 +471,9 @@ async def test_non_finite_quote_field_never_reaches_the_wire(monkeypatch, bad):
     }
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
@@ -506,9 +506,9 @@ async def test_non_finite_stored_holding_fields_are_dropped(monkeypatch):
     quotes = {"ORCL": {"symbol": "ORCL", "price": 144.27, "changePercentage": 1.0}}
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
@@ -535,9 +535,9 @@ async def test_barely_negative_change_never_serializes_as_signed_zero(monkeypatc
     quotes = {"ORCL": {"symbol": "ORCL", "price": 144.27, "changePercentage": raw}}
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
@@ -623,10 +623,10 @@ async def test_sparkline_span_marks_a_partial_session_as_partial(monkeypatch):
     """
     tsvc._sparkline_cache.clear()
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return [_bar("2026-08-13 09:30:00", 100.0), _bar("2026-08-13 12:15:00", 101.0)]
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     out = await TrackingService()._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
 
     _series, lo, hi = out["ORCL"]
@@ -665,14 +665,14 @@ async def test_sparkline_span_ignores_bars_whose_close_was_dropped(monkeypatch):
     """
     tsvc._sparkline_cache.clear()
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return [
             _bar("2026-08-13 09:30:00", 100.0),
             _bar("2026-08-13 12:15:00", 101.0),
             _bar("2026-08-13 15:55:00", float("nan")),   # dropped from the series
         ]
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     out = await TrackingService()._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
 
     series, _lo, hi = out["ORCL"]
@@ -688,11 +688,11 @@ async def test_sparkline_span_survives_a_cache_round_trip(monkeypatch):
     tsvc._sparkline_cache.clear()
     calls = {"n": 0}
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         calls["n"] += 1
         return [_bar("2026-08-13 09:30:00", 100.0), _bar("2026-08-13 12:15:00", 101.0)]
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     svc = TrackingService()
     cold = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
     warm = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
@@ -708,10 +708,10 @@ async def test_sparkline_failure_degrades_to_full_span_not_zero_width(monkeypatc
     used to render fine render worse."""
     tsvc._sparkline_cache.clear()
 
-    async def boom(fmp, ticker, rng, extended_hours=False):
+    async def boom(fmp, ticker, extended_hours=False):
         raise RuntimeError("FMP down")
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", boom)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", boom)
     out = await TrackingService()._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
     assert out["ORCL"] == ([], 0.0, 1.0)
 
@@ -726,10 +726,10 @@ async def test_sub_dollar_sparkline_is_not_flattened_to_one_level(monkeypatch):
     tsvc._sparkline_cache.clear()
     closes = [0.2015, 0.2021, 0.2033, 0.2028, 0.2044, 0.2049, 0.2037]
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return [_bar(f"2026-07-09 10:{i:02d}:00", c) for i, c in enumerate(closes)]
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["PENNY"], {"PENNY": "stock"})
 
@@ -744,13 +744,13 @@ async def test_large_price_sparkline_stays_at_two_decimals(monkeypatch):
     """Precision scales to magnitude — normal equities must not gain noise digits."""
     tsvc._sparkline_cache.clear()
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return [
             _bar("2026-07-09 10:00:00", 144.2712),
             _bar("2026-07-09 10:05:00", 144.9988),
         ]
 
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
     assert _closes(out, "ORCL") == [144.27, 145.0]
@@ -770,9 +770,9 @@ async def test_feed_with_zero_resolved_quotes_is_not_cached(monkeypatch):
     watchlist = [{"ticker": "ORCL", "company_name": "Oracle"}]
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         return []
-    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(tsvc, "fetch_sparkline_bars", fake_fetch)
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP({})           # every quote unresolved

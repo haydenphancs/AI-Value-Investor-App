@@ -1,5 +1,26 @@
 # App Store screenshots — Caydex
 
+## ▶ Current set: `6.9-v2/` (version 1.01) — upload these, in this order
+
+Captured 2026-10-08 by `frontend/ios/scripts/capture-store-screenshots.sh` (never by hand). The
+order is the app's own tab bar, which is what users see first: App Store Connect keeps the order
+you set, and with no app preview the first three are also the ones search results show.
+
+| # | File | Screen | What it shows |
+|---|---|---|---|
+| 1 | `6.9-v2/01-home.png` | Home | Sample market strip, watchlist and Daily Scanners on fictional companies; App-Exclusive Signals locked |
+| 2 | `6.9-v2/02-updates.png` | Updates | Sample Insights card and News Tone chart (30D); every Updates read canned |
+| 3 | `6.9-v2/03-research.png` | Research | The persona picker — investing styles, no real investor named |
+| 4 | `6.9-v2/04-tracking.png` | Tracking | Sample watchlist on fictional companies |
+| 5 | `6.9-v2/05-wiser.png` | Wiser | Investor Journey + Money Moves (live article titles: re-check them on every re-shoot) |
+
+Every price, % move and chart is invented and sits on a FICTIONAL company (no "Sample data" label,
+owner 2026-10-08). `backend/tests/test_ios_store_screenshot_mode_debug_only.py` pins the fixtures,
+the fictional tickers and this order. Everything below documents the **1.0 set** (`6.9/`), which
+showed real prices — never upload it again.
+
+## The 1.0 set (`6.9/`, 2026-08-20)
+
 Captured 2026-08-20 from **iPhone 17 Pro Max**, simulator UDID
 `3C473C18-1FB5-417F-836B-3D0EFDFB7026`, at **1320 × 2868** — the 6.9" App Store size.
 Status bar overridden to the 9:41 marketing convention (`simctl status_bar override`).

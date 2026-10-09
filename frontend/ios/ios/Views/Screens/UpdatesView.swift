@@ -13,6 +13,10 @@ struct UpdatesView: View {
     /// five tabs alive and toggles opacity, so `.onAppear` fires once at launch
     /// for every tab — this is the only reliable "became visible" signal.
     @Environment(\.isActiveTab) private var isActiveTab
+    /// Read for the snapshot-failure notice's wording only (see `snapshotRefreshFailureMessage`).
+    /// `.dynamicTypeSize(...)` would be inert there: `AppTypography` scales through
+    /// `UIFontMetrics`, which reads the process-wide category, not this environment value.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var viewModel = UpdatesViewModel()
     @Binding var selectedTab: HomeTab
     @State private var showManageAssetsSheet = false
@@ -68,11 +72,28 @@ struct UpdatesView: View {
                     // The EFFECTIVE filter, not the saved one: a saved publisher this feed
                     // does not carry is not narrowing anything, and counting it would show
                     // "1 filter" over a list nothing is filtering.
+                    //
+                    // While the rows are the on-device snapshot it reads "News · Updated <time>"
+                    // instead: nothing on screen is live yet.
                     LiveNewsHeader(
                         filterLabel: viewModel.effectiveFilterOptions.chipLabel,
                         hasActiveFilters: viewModel.effectiveFilterOptions.hasActiveFilters,
+                        snapshotStatusText: viewModel.snapshotUpdatedLabel,
                         onFilterTapped: handleFilterTapped
                     )
+
+                    // The live refresh of a snapshot failed: the stories stay, and this says so
+                    // beside them. Outside the LazyVStack (a non-section child there can resize
+                    // in place). The gate flags live inside `showsSnapshotRefreshFailure`, so
+                    // `body` never names them before the account-gate chain below.
+                    if viewModel.showsSnapshotRefreshFailure {
+                        InlineRetryNotice(
+                            message: snapshotRefreshFailureMessage,
+                            onRetry: { Task { await viewModel.refresh() } }
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.bottom, AppSpacing.sm)
+                    }
 
                     // NOTE: the "Filter news…" keyword bar used to sit here, between the
                     // Live News header and the timeline. It was removed by request — the
@@ -98,15 +119,31 @@ struct UpdatesView: View {
                         LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                             // Insights Summary Card (scrollable, non-section child).
                             // Tapping it opens the sources screen when the card
-                            // carries sources.
-                            if let summary = viewModel.insightSummary {
-                                InsightsSummaryCard(
-                                    summary: summary,
-                                    onOpenSources: { insightSources = summary },
-                                    onAskCay: { openUpdatesChat(focus: .card) }
-                                )
+                            // carries sources. A snapshot card is drawn on the ACTIVE tab
+                            // only, and offers no "Ask Cay AI": that chat is grounded on the
+                            // server's current card, not this saved one, and a send costs a
+                            // credit.
+                            //
+                            // The snapshot card keeps the pill's SLOT (`askCayPillReserve`, below
+                            // the card): without it the live card grew by the pill row the moment
+                            // it replaced the snapshot, dropping every story while the user read.
+                            // `.id(summary.id)`: a new card is a remove + insert, never an in-place
+                            // resize of a LazyVStack child (the 100%-CPU layout hang).
+                            if let summary = viewModel.insightSummary,
+                               isActiveTab || viewModel.snapshotSavedAt == nil {
+                                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                                    InsightsSummaryCard(
+                                        summary: summary,
+                                        onOpenSources: { insightSources = summary },
+                                        onAskCay: viewModel.snapshotSavedAt == nil ? { openUpdatesChat(focus: .card) } : nil
+                                    )
+                                    if viewModel.snapshotSavedAt != nil {
+                                        askCayPillReserve
+                                    }
+                                }
                                 .padding(.horizontal, AppSpacing.lg)
                                 .padding(.vertical, AppSpacing.sm)
+                                .id(summary.id)
                             }
 
                             // News-tone chart — a plain child of THIS LazyVStack, like the
@@ -171,6 +208,11 @@ struct UpdatesView: View {
                     .refreshable {
                         await viewModel.refresh()
                     }
+                    // The tab bar switches tabs inside `withAnimation`, and the snapshot rows
+                    // are gated on `isActiveTab`: without this the gate's swap is cross-faded
+                    // over 0.2 s, so the first frame after a tap is half-blank. The tab's own
+                    // fade (ContentView's opacity) is an ancestor and is unaffected.
+                    .transaction(value: isActiveTab) { $0.animation = nil }
 
                     // Tab Bar
                     CustomTabBar(selectedTab: $selectedTab)
@@ -180,8 +222,23 @@ struct UpdatesView: View {
             .task(id: isActiveTab) {
                 // Before the guard: the news-tone "Building…" re-checks pause while hidden.
                 viewModel.setTabActive(isActiveTab)
+                // Also before the guard, on the hidden run too: the on-device snapshot is read
+                // from disk (never a request) so the first visible frame after a tap already
+                // has rows. The rows themselves render only once the tab is active.
+                await viewModel.prepareSnapshot()
                 guard isActiveTab else { return }
+                // A quick tab-away during the read cancels this run; do not start a load then.
+                guard !Task.isCancelled else { return }
                 await viewModel.loadIfNeeded()
+            }
+            // A snapshot that aged past its display window while the app was in the background
+            // comes down first, whichever tab is showing (Home's rule).
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIApplication.didBecomeActiveNotification
+                )
+            ) { _ in
+                viewModel.expireSnapshotIfStale()
             }
             // `loadIfNeeded()` early-returns on `hasLoadedOnce`, which latches on the first
             // successful load and is never reset — and this screen is opacity-mounted, so the
@@ -314,10 +371,15 @@ struct UpdatesView: View {
             // Tapping the Insights card opens its sources (summary + tappable
             // source stories).
             .sheet(item: $insightSources, onDismiss: presentPendingChat) { summary in
-                InsightsDetailView(
-                    summary: summary,
-                    onAskCay: { pendingChatFocus = .card }
-                )
+                // The snapshot card's sheet offers no "Ask Cay AI" either (see the card above).
+                if viewModel.isSnapshotInsight(summary) {
+                    InsightsDetailView(summary: summary)
+                } else {
+                    InsightsDetailView(
+                        summary: summary,
+                        onAskCay: { pendingChatFocus = .card }
+                    )
+                }
             }
             .aiChatCover(isPresented: $showUpdatesChat, viewModel: updatesChat)
         }
@@ -333,12 +395,45 @@ struct UpdatesView: View {
     ///
     /// Kept OUT of `body` on purpose: `test_ios_account_gate_state` reads the gate's branch
     /// order from the first mention of each flag in `body`.
+    ///
+    /// Also waits for the first live feed of the identity (`hasShownFeed`): drawn over the
+    /// skeleton, the chart was pushed down when the Insights card landed above it — one shift
+    /// instead of two. A pull-to-refresh keeps it (the flag stays set). Over SNAPSHOT rows it
+    /// may draw once the snapshot has an Insights card: the live card replaces that card in the
+    /// same slot (the pill's slot is reserved), so the chart is not pushed down, and its own
+    /// arrival — it is a live answer — is not stacked onto the row swap's transaction.
     private var visibleTrend: SentimentTrend? {
         guard let trend = viewModel.sentimentTrend,
+              viewModel.hasShownFeed || (viewModel.snapshotSavedAt != nil && viewModel.insightSummary != nil),
               !viewModel.isReconnecting, !viewModel.requiresSignIn,
               trend.scope == viewModel.selectedTab?.scope,
               trend.hasEnoughHistory() || trend.isBuildingHistory else { return nil }
         return trend
+    }
+
+    // MARK: - Snapshot card slot + failure notice
+
+    /// The height of the Insights card's "Ask Cay AI" row, held under a SNAPSHOT card, which
+    /// offers no Ask Cay. It is the same pill with the same title (its height follows Dynamic
+    /// Type exactly as the real one does), spaced by the card's own `AppSpacing.md`, so the
+    /// snapshot slot is as tall as the live card that replaces it. Invisible and inert: hidden,
+    /// disabled, outside hit-testing and VoiceOver — a layout spacer, never a control.
+    private var askCayPillReserve: some View {
+        AskCayAIPill(title: "Ask Cay AI about this", action: {})
+            .hidden()
+            .disabled(true)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    /// The snapshot-failure notice sits above the ScrollView, so it never scrolls away. At
+    /// accessibility text sizes the full sentence wrapped into a band of 300+ pt on a small
+    /// phone, so there it says only what failed; the header's "News · Updated <time>" already
+    /// says the stories are from the last visit.
+    private var snapshotRefreshFailureMessage: String {
+        dynamicTypeSize.isAccessibilitySize
+            ? "Couldn't refresh the news."
+            : "Couldn't refresh the news. These stories are from your last visit."
     }
 
     // MARK: - Ask Cay AI
@@ -384,38 +479,57 @@ struct UpdatesView: View {
     /// from pinning these section headers. Rows stay lazy, so `.onAppear` fires
     /// only near the viewport — preserving the "reader position" signal that
     /// drives paging and visible-window AI enrichment.
+    ///
+    /// Snapshot rows are built on the ACTIVE tab only. This tab is opacity-mounted at launch,
+    /// and every row's thumbnail is an `AsyncImage` that loads as soon as it is built — a
+    /// hidden snapshot would fetch publisher images for a tab nobody opened. `isActiveTab`
+    /// flips in the same update as the opacity, so the first visible frame still has rows.
+    /// Live rows render as before.
     @ViewBuilder
     private func newsSections() -> some View {
-        ForEach(viewModel.groupedNews) { group in
-            Section {
-                ForEach(Array(group.articles.enumerated()), id: \.element.stableID) { index, article in
-                    TimelineRow(
-                        article: article,
-                        isFirst: index == 0,
-                        isLast: index == group.articles.count - 1,
-                        onOpenLink: { openArticle(article) },
-                        onRequestSummary: { viewModel.summarizeArticle(article) },
-                        isSummarizing: viewModel.summarizingIDs.contains(article.apiId)
-                    )
-                    .padding(.horizontal, AppSpacing.lg)
-                    .onAppear { viewModel.articleDidAppear(article) }
+        if isActiveTab || viewModel.snapshotSavedAt == nil {
+            ForEach(viewModel.groupedNews) { group in
+                Section {
+                    ForEach(Array(group.articles.enumerated()), id: \.element.stableID) { index, article in
+                        TimelineRow(
+                            article: article,
+                            isFirst: index == 0,
+                            isLast: index == group.articles.count - 1,
+                            onOpenLink: { openArticle(article) },
+                            onRequestSummary: { viewModel.summarizeArticle(article) },
+                            isSummarizing: viewModel.summarizingIDs.contains(article.apiId)
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .onAppear { viewModel.articleDidAppear(article) }
+                    }
+                } header: {
+                    NewsSectionHeader(title: group.sectionTitle)
                 }
-            } header: {
-                NewsSectionHeader(title: group.sectionTitle)
             }
         }
     }
 
     // MARK: - States
 
+    /// The shimmer only while the tab is ON SCREEN. `isLoading` starts true, and each shimmer
+    /// card runs a `repeatForever` animation from `onAppear`, which fires for this hidden,
+    /// opacity-mounted tab too — five infinite animations behind Home for a tab never opened.
+    /// A tap flips `isActiveTab` in the same update, so the first visible frame shimmers.
+    @ViewBuilder
     private var loadingSkeleton: some View {
-        VStack(spacing: AppSpacing.md) {
-            ForEach(0..<5, id: \.self) { _ in
-                TickerNewsShimmerCard()
+        if isActiveTab {
+            VStack(spacing: AppSpacing.md) {
+                ForEach(0..<5, id: \.self) { _ in
+                    TickerNewsShimmerCard()
+                }
             }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.sm)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading news")
+        } else {
+            Color.clear.frame(height: 1)
         }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.top, AppSpacing.sm)
     }
 
     private func errorState(_ message: String) -> some View {

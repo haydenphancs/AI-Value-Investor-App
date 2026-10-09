@@ -22,6 +22,9 @@ from fastapi import HTTPException
 import app.api.v1.endpoints.portfolios as pf
 
 _SRC = pathlib.Path(pf.__file__).read_text(encoding="utf-8")
+# A real UUID: `_get_portfolio_or_404` answers 404 for a non-UUID id before any query,
+# which would stop these calls before the code under test runs.
+_PID = "c0ffee00-0000-4000-8000-0000000000a1"
 
 
 def _fn(name: str):
@@ -55,7 +58,7 @@ class _Q:
         if self._payload is not None:
             self.writes.append((self.table_name, getattr(self, "_ticker", None), self._payload))
             return type("R", (), {"data": [{"ticker": getattr(self, "_ticker", None)}]})()
-        return type("R", (), {"data": [{"id": "p1", "user_id": "u1", "name": "Holdings",
+        return type("R", (), {"data": [{"id": _PID, "user_id": "u1", "name": "Holdings",
                                         "sort_order": 0, "is_active": True,
                                         "created_at": "2026-01-01T00:00:00+00:00",
                                         "updated_at": "2026-01-01T00:00:00+00:00"}]})()
@@ -78,7 +81,7 @@ async def test_a_rejected_payload_writes_nothing(monkeypatch):
     ])
     with pytest.raises(HTTPException) as info:
         await pf.set_portfolio_holdings(
-            "p1", req, user={"id": "u1"}, supabase=sb,
+            _PID, req, user={"id": "u1"}, supabase=sb,
         )
     assert info.value.status_code == 400
     assert "MSFT" in str(info.value.detail)
@@ -97,7 +100,7 @@ async def test_a_fully_valid_payload_still_writes_every_row(monkeypatch):
         pf.HoldingItem(ticker="AAPL", shares=10.0, market_value=1900.0),
         pf.HoldingItem(ticker="MSFT", shares=5.0, market_value=2100.0),
     ])
-    await pf.set_portfolio_holdings("p1", req, user={"id": "u1"}, supabase=sb)
+    await pf.set_portfolio_holdings(_PID, req, user={"id": "u1"}, supabase=sb)
     written = [t for tbl, t, _v in sb.writes if tbl == "portfolio_items"]
     assert written == ["AAPL", "MSFT"], written
 
@@ -157,7 +160,7 @@ async def test_a_transient_failure_mid_loop_replays_the_whole_loop_not_half(monk
         pf.HoldingItem(ticker="MSFT", shares=5.0, market_value=2100.0),
         pf.HoldingItem(ticker="NVDA", shares=1.0, market_value=900.0),
     ])
-    await pf.set_portfolio_holdings("p1", req, user={"id": "u1"}, supabase=sb)
+    await pf.set_portfolio_holdings(_PID, req, user={"id": "u1"}, supabase=sb)
     written = [t for tbl, t, _v in sb.writes if tbl == "portfolio_items"]
     # First attempt wrote AAPL then died on MSFT; the replay wrote all three again.
     assert written == ["AAPL", "AAPL", "MSFT", "NVDA"], written

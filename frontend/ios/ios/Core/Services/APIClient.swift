@@ -485,10 +485,13 @@ actor APIClient {
 
     /// `request<T>` that ALSO hands back the exact response bytes it decoded.
     ///
-    /// For the one caller that keeps a response verbatim: Home's on-device snapshot
-    /// (`HomeDashboardSnapshotStore`). It stores the raw body because `HomeDashboardData` holds
-    /// `Color`s and is not Codable — re-mapping the bytes through the same decode-safe DTOs is
-    /// what lets a newer build read an older file, or reject it cleanly.
+    /// For the callers that keep a response verbatim — the on-device snapshots: Home's
+    /// (`HomeDashboardSnapshotStore`, the dashboard body) and the Updates and Tracking ones
+    /// (`AccountSnapshotStore`: the Market feed body; the tracking assets and portfolios
+    /// bodies). They store the raw body, not a re-encoded model — `HomeDashboardData` holds
+    /// `Color`s and is not Codable, and several DTOs have hand-written tolerant decoders — and
+    /// re-mapping the bytes through the same decode-safe DTOs (`decodeBody`) is what lets a
+    /// newer build read an older file, or reject it cleanly.
     ///
     /// Built on `downloadData`, so it shares that transport's `buildRequest` gate (an unarmed
     /// call on a `.signInRequired` route is refused before any I/O, typed), the 401 →

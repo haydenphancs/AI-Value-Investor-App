@@ -985,6 +985,9 @@ def test_a_failed_read_never_rewrites_a_served_rows_verdict(labels):
     page0 = asyncio.run(svc.get_market_news(limit=50, offset=0))          # client A
     flip = {r["headline"] for r in rows[:3]}
     svc.gemini = _Model(lambda t: "company" if t in flip else "market")    # disagrees
+    # Page 0 is remembered for a minute (section 14); forget it so the blip below lands on
+    # a page-0 READ, which is what this reproduction is about.
+    svc._invalidate_market_page_memo("test: the next page-0 call must read")
     svc.supabase.fail_reads = 1                                           # one blip
     asyncio.run(svc.get_market_news(limit=50, offset=0))                  # someone else
     page1 = asyncio.run(svc.get_market_news(limit=50, offset=len(page0["articles"])))
@@ -1557,3 +1560,940 @@ def test_the_cold_read_back_keeps_its_order_on_the_us_spring_forward_night(label
     assert [a["headline"] for a in env["articles"]] == [
         _market(i)["headline"] if i % 2 == 0 else f"Stocks take {i}" for i in range(40)
     ], "page 0 is out of order"
+
+
+# ── 14. Page 0 is remembered for a minute — and forgotten on every Market write ──
+#
+# 2026-10-08 first-paint pass. Page 0 of the Market feed is identical for every user, so it
+# is kept in memory for up to 60 s (`NewsCacheService._market_page_zero`). The three review
+# fixes it ships with, each pinned below:
+#   (i)   its own in-flight future: a cancelled leader settles it with
+#         `_MarketPageLeaderCancelled` and the joiners TAKE OVER — never a CancelledError
+#         handed to another client (which `get_updates_feed` would answer as a bare 500);
+#   (ii)  a page is kept only until the earliest `expires_at` among its rows;
+#   (iii) a generation fence captured before the read, bumped by EVERY Market write — the
+#         refresh, the cold fetch, enrichment, cleanup — from the worker thread once the
+#         write has finished as well as on the coroutine's way out.
+
+import ast as _ast
+import inspect as _inspect
+import threading
+from typing import Callable as _Callable
+
+
+def _count_page_reads(svc, *, before=None, after=None):
+    """Count (and optionally hold) the real Market page reads, in the worker thread."""
+    real = svc._get_cached_market_page
+    calls = []
+
+    def _read(limit, offset):
+        calls.append((limit, offset))
+        if before is not None:
+            before(len(calls))
+        out = real(limit, offset)
+        if after is not None:
+            after(len(calls))
+        return out
+
+    svc._get_cached_market_page = _read
+    return calls
+
+
+def _page0(svc, limit=50):
+    return asyncio.run(svc.get_market_news(limit=limit, offset=0))
+
+
+def test_a_second_page_zero_read_within_the_minute_is_a_memory_hit():
+    rows = [_market(i) for i in range(30)]
+    svc = _service(rows)
+    reads = _count_page_reads(svc)
+
+    first, second = _page0(svc), _page0(svc)
+
+    assert len(reads) == 1, "page 0 was read twice inside its minute"
+    assert [a["id"] for a in second["articles"]] == [a["id"] for a in first["articles"]]
+    assert second["cached"] is True and second["has_more"] is first["has_more"]
+    assert isinstance(second["cache_age_seconds"], int)
+
+
+def test_deeper_pages_are_never_remembered():
+    svc = _service([_market(i) for i in range(80)])
+    reads = _count_page_reads(svc)
+    for _ in range(2):
+        asyncio.run(svc.get_market_news(limit=30, offset=30))
+    assert reads == [(30, 30), (30, 30)]
+    assert not svc._market_memo().pages
+
+
+def test_each_limit_is_its_own_entry():
+    svc = _service([_market(i) for i in range(30)])
+    reads = _count_page_reads(svc)
+    a, b = _page0(svc, limit=10), _page0(svc, limit=20)
+    assert len(reads) == 2 and len(a["articles"]) == 10 and len(b["articles"]) == 20
+
+
+def test_the_refresh_drops_the_memory_and_the_new_row_shows(labels):
+    svc = _service([_market(i) for i in range(1, 20)])
+    reads = _count_page_reads(svc)
+    _page0(svc)
+    _stub_raw(svc, [_raw(0, "Fed signals a pause")])
+    svc.gemini = _Model(lambda t: "market")
+
+    asyncio.run(svc.refresh_scope_news(MARKET_SCOPE))
+    env = _page0(svc)
+
+    assert len(reads) == 2, "a Market refresh did not drop page 0's memory"
+    assert env["articles"][0]["headline"] == "Fed signals a pause"
+
+
+def test_a_ticker_write_keeps_the_market_memory(labels):
+    svc = _service([_market(i) for i in range(20)])
+    reads = _count_page_reads(svc)
+    _page0(svc)
+
+    class _FMP:
+        async def get_stock_news(self, ticker=None, limit=10, from_date=None, to_date=None,
+                                 page=0):
+            return [_raw(0, "Oracle beats on cloud", symbol="ORCL")]
+
+    svc.fmp = _FMP()
+    asyncio.run(svc.refresh_scope_news("ORCL"))
+    _page0(svc)
+    assert len(reads) == 1, "a TICKER write dropped the Market memory"
+
+
+def test_enriching_market_rows_drops_the_memory(labels):
+    rows = [_unjudged(i) for i in range(5)]
+    svc = _service(rows)
+    reads = _count_page_reads(svc)
+    before = _page0(svc)
+    assert not any(a["ai_processed"] for a in before["articles"])
+
+    svc.gemini = _Model(lambda t: "market")
+    asyncio.run(svc.enrich_articles(MARKET_SCOPE, [r["id"] for r in rows]))
+    after = _page0(svc)
+
+    assert len(reads) == 2, "an enrichment UPDATE did not drop page 0's memory"
+    assert all(a["ai_processed"] and a["summary_bullets"] for a in after["articles"])
+
+
+class _DeletingQuery(_Query):
+    def delete(self, returning=None):
+        self._mode = "delete"
+        return self
+
+    def lt(self, col, value):
+        self._filters.append((col, "lt", value))
+        return self
+
+    def execute(self):
+        if self._mode != "delete":
+            return super().execute()
+        db = self._db
+        db.calls.append(("delete", tuple((c, o) for c, o, _ in self._filters)))
+        [(col, _op, value)] = self._filters
+        db.rows = [r for r in db.rows if not ((r.get(col) or "") < value)]
+        return _Result([])
+
+
+class _DeletingDB(_DB):
+    def table(self, name):
+        assert name == "ticker_news_cache"
+        return _DeletingQuery(self)
+
+
+def test_the_expired_row_cleanup_drops_the_memory():
+    stale = _market(99)
+    stale["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    svc = _service()
+    svc.supabase = _DeletingDB([_market(i) for i in range(10)] + [stale])
+    reads = _count_page_reads(svc)
+    _page0(svc)
+
+    asyncio.run(svc.cleanup_expired_cache())
+    _page0(svc)
+
+    assert stale["id"] not in {r["id"] for r in svc.supabase.rows}, "the fake delete ran"
+    assert len(reads) == 2, "the cleanup DELETE did not drop page 0's memory"
+
+
+def test_a_failing_cleanup_still_drops_the_memory(caplog):
+    """`_DB` has no `.delete`, so the cleanup raises inside its thread — the memory is still
+    dropped (the attempt may have deleted something), and the failure is logged."""
+    svc = _service([_market(i) for i in range(10)])
+    reads = _count_page_reads(svc)
+    _page0(svc)
+    asyncio.run(svc.cleanup_expired_cache())
+    _page0(svc)
+    assert len(reads) == 2
+    assert "Cache cleanup failed" in caplog.text
+
+
+def test_an_empty_cache_is_never_remembered():
+    svc = _service()
+    reads = _count_page_reads(svc)
+
+    async def _nothing(limit, from_date=None):
+        return []
+
+    svc._fetch_market_raw = _nothing
+    for _ in range(2):
+        assert _page0(svc)["articles"] == []
+    assert len(reads) == 2 and not svc._market_memo().pages
+
+
+def test_the_read_only_page_is_never_remembered(labels):
+    svc = _service([_market(i) for i in range(10)])
+    svc.supabase.fail_reads = 2                       # the read and its retry
+    _stub_raw(svc, [_raw(0, "Fed holds rates")])
+    reads = _count_page_reads(svc)
+
+    degraded = _page0(svc)
+    healthy = _page0(svc)
+
+    assert all(a["id"].startswith("raw_") for a in degraded["articles"])
+    assert len(reads) == 3, "the second call must READ the cache, not replay the fallback"
+    assert [a["id"] for a in healthy["articles"]] == [_market(i)["id"] for i in range(10)]
+
+
+def test_a_zero_ttl_never_remembers(monkeypatch):
+    monkeypatch.setattr(NewsCacheService, "_MARKET_PAGE_MEMO_TTL_SECONDS", 0)
+    svc = _service([_market(i) for i in range(10)])
+    reads = _count_page_reads(svc)
+    _page0(svc)
+    _page0(svc)
+    assert len(reads) == 2
+
+
+def test_a_page_is_forgotten_when_its_first_row_expires():
+    """(ii) A row that expires drops out of every LIVE read; served from memory past that
+    instant, the client's next page (read live) would shift one story left — a skip."""
+    soon = _market(0)
+    soon["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=0.8)).isoformat()
+    svc = _service([soon] + [_market(i) for i in range(1, 10)])
+    reads = _count_page_reads(svc)
+
+    first = _page0(svc)
+    _page0(svc)
+    assert len(reads) == 1, "anti-vacuity: inside the window it IS a memory hit"
+    assert first["articles"][0]["id"] == soon["id"]
+
+    time.sleep(0.9)
+    after = _page0(svc)
+    assert len(reads) == 2, "the page outlived its earliest expires_at"
+    assert soon["id"] not in {a["id"] for a in after["articles"]}
+
+
+def test_a_page_with_an_unreadable_expiry_is_never_remembered(caplog):
+    odd = _market(0)
+    odd["expires_at"] = "9999-99-99 not a time"     # passes the fake's string filter
+    svc = _service([odd] + [_market(i) for i in range(1, 5)])
+    reads = _count_page_reads(svc)
+    _page0(svc)
+    _page0(svc)
+    assert len(reads) == 2
+    assert "no readable expires_at" in caplog.text
+
+
+def test_a_caller_cannot_edit_what_the_next_caller_is_served():
+    rows = [_market(i) for i in range(5)]
+    for r in rows:
+        r["summary_bullets"] = ["A.", "B."]          # a list, as some writers store it
+    svc = _service(rows)
+    first = _page0(svc)
+    second = _page0(svc)                             # from memory
+    first["articles"][0]["summary_bullets"].append("EDITED")
+    second["articles"][0]["summary_bullets"].append("EDITED")
+    second["articles"][0]["headline"] = "EDITED"
+    third = _page0(svc)
+    assert third["articles"][0]["summary_bullets"] == ["A.", "B."]
+    assert third["articles"][0]["headline"] == rows[0]["headline"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_page_zero_callers_share_one_read():
+    svc = _service([_market(i) for i in range(20)])
+    reads = _count_page_reads(svc, before=lambda n: time.sleep(0.05))
+    envs = await asyncio.gather(*(svc.get_market_news(limit=50, offset=0) for _ in range(5)))
+    assert len(reads) == 1
+    assert len({tuple(a["id"] for a in e["articles"]) for e in envs}) == 1
+    assert svc._market_memo().inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_crossed_a_market_write_is_served_once_but_not_kept():
+    """(iii) The fence is captured BEFORE the read: a write that lands while it runs keeps
+    the (possibly pre-write) page out of the memory."""
+    svc = _service([_market(i) for i in range(10)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _hold(n):
+        if n == 1:
+            entered.set()
+            release.wait(5)
+
+    reads = _count_page_reads(svc, after=_hold)
+    task = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        svc._invalidate_market_page_memo("test: a write landed mid-read")
+    finally:
+        release.set()
+    env = await task
+
+    assert len(env["articles"]) == 10, "the caller is still served"
+    assert not svc._market_memo().pages, "a read across a write was remembered"
+    await svc.get_market_news(limit=50, offset=0)
+    assert len(reads) == 2
+
+
+class _BlockingUpsertDB(_DB):
+    """A write outage of a special kind: the upsert thread is held until released."""
+
+    def __init__(self, rows=()):
+        super().__init__(rows)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def upsert(self, payload, kw):
+        self.entered.set()
+        self.release.wait(5)
+        return super().upsert(payload, kw)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_write_drops_the_memory_again_when_its_thread_commits(labels):
+    """The review's race: the refresh is cancelled mid-upsert, so the coroutine's `finally`
+    drops the memory while the thread is still writing. A reader then remembers the
+    PRE-commit page. The thread's own invalidation, posted after the commit, must drop it."""
+    svc = _service()
+    svc.supabase = _BlockingUpsertDB([_market(i) for i in range(1, 10)])
+    reads = _count_page_reads(svc)
+    _stub_raw(svc, [_raw(0, "Fed signals a pause")])
+    svc.gemini = _Model(lambda t: "market")
+
+    writer = asyncio.create_task(svc.refresh_scope_news(MARKET_SCOPE))
+    try:
+        assert await asyncio.to_thread(svc.supabase.entered.wait, 5)
+        writer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+
+        stale = await svc.get_market_news(limit=50, offset=0)
+        assert "Fed signals a pause" not in {a["headline"] for a in stale["articles"]}
+        assert svc._market_memo().pages, "anti-vacuity: the pre-commit page WAS remembered"
+    finally:
+        svc.supabase.release.set()
+
+    for _ in range(200):                      # the thread commits, then posts its drop
+        if not svc._market_memo().pages:
+            break
+        await asyncio.sleep(0.01)
+    fresh = await svc.get_market_news(limit=50, offset=0)
+    assert len(reads) == 2, "the committed write never dropped the pre-commit page"
+    assert fresh["articles"][0]["headline"] == "Fed signals a pause"
+
+
+class _NoCardInsightsQuiet(_NoCardInsights):
+    def build_fallback_card(self, scope, corpus):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_never_fails_its_parked_joiners(monkeypatch):
+    """(i) Two clients join a page-0 read; the client leading it taps away. Through
+    `_deduped` the joiners would receive its CancelledError — a bare 500 from
+    `get_updates_feed`. They must take over and both get the page."""
+    svc = _service([_market(i) for i in range(12)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _hold(n):
+        if n == 1:
+            entered.set()
+            release.wait(5)
+
+    reads = _count_page_reads(svc, before=_hold)
+    monkeypatch.setattr(updates_endpoint, "get_news_cache_service", lambda: svc)
+    monkeypatch.setattr(updates_endpoint, "get_news_insight_service", _NoCardInsightsQuiet)
+
+    def _open():
+        return asyncio.create_task(
+            updates_endpoint.get_updates_feed(scope=MARKET_SCOPE, limit=50, offset=0)
+        )
+
+    leader = _open()
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        joiners = [_open(), _open()]
+        shared = svc._market_memo().inflight[50]
+        for _ in range(200):
+            if len(getattr(shared, "_callbacks", None) or ()) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        assert len(getattr(shared, "_callbacks", None) or ()) >= 2, \
+            "anti-vacuity: both joiners are parked"
+
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        answers = await asyncio.wait_for(asyncio.gather(*joiners), timeout=5)
+    finally:
+        release.set()
+
+    for resp in answers:
+        assert isinstance(resp, updates_endpoint.UpdatesFeedResponse), resp
+        assert [a.id for a in resp.articles] == [_market(i)["id"] for i in range(12)]
+    assert len(reads) == 2, "one joiner took over; the other joined it (or its memory)"
+    assert svc._market_memo().inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_joiner_never_cancels_the_shared_read():
+    """One joiner gives up; the leader AND the other joiner still get the one shared read
+    (unshielded, the first joiner's cancel would cancel the future the second waits on)."""
+    svc = _service([_market(i) for i in range(8)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _hold(n):
+        if n == 1:
+            entered.set()
+            release.wait(5)
+
+    reads = _count_page_reads(svc, before=_hold)
+    leader = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        quitter = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+        stayer = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+        await asyncio.sleep(0.02)
+        quitter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await quitter
+    finally:
+        release.set()
+    env, other = await leader, await asyncio.wait_for(stayer, timeout=5)
+    assert len(env["articles"]) == 8 and len(other["articles"]) == 8
+    assert len(reads) == 1
+    assert svc._market_memo().pages, "the leader's read was still remembered"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_with_no_joiner_leaves_nothing_behind():
+    svc = _service([_market(i) for i in range(8)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _hold(n):
+        if n == 1:
+            entered.set()
+            release.wait(5)
+
+    reads = _count_page_reads(svc, before=_hold)
+    leader = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+    finally:
+        release.set()
+    assert svc._market_memo().inflight == {}
+    env = await svc.get_market_news(limit=50, offset=0)
+    assert len(env["articles"]) == 8 and len(reads) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_whose_leader_read_across_a_write_reads_again():
+    """A request that arrives after a Market write must not be handed what the cache held
+    before it: the leader read the old rows, a write landed, the joiner reads again."""
+    svc = _service([_market(i) for i in range(1, 6)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _hold(n):
+        if n == 1:
+            entered.set()
+            release.wait(5)
+
+    reads = _count_page_reads(svc, after=_hold)
+    leader = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)       # the old rows are read
+        joiner = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+        await asyncio.sleep(0.02)
+        svc.supabase.rows.append(_market(0))                  # the write commits …
+        svc._invalidate_market_page_memo("test: a Market write")   # … and says so
+    finally:
+        release.set()
+    old, new = await leader, await joiner
+
+    assert _market(0)["id"] not in {a["id"] for a in old["articles"]}
+    assert new["articles"][0]["id"] == _market(0)["id"], "the joiner got the pre-write page"
+    assert len(reads) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failing_leader_hands_its_joiners_the_same_typed_failure():
+    """An unexpected error in the shared read (not a cache-read failure: those are retried
+    and degrade) reaches every joiner as that error — which the endpoint maps to an
+    APIErrorResponse — never as a hang."""
+    svc = _service([_market(i) for i in range(3)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _boom(limit, offset):
+        entered.set()
+        release.wait(5)
+        raise ValueError("a malformed row")
+
+    svc._get_cached_market_page = _boom
+    leader = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        joiner = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+        await asyncio.sleep(0.02)
+    finally:
+        release.set()
+    for task in (leader, joiner):
+        with pytest.raises(ValueError, match="a malformed row"):
+            await asyncio.wait_for(task, timeout=5)
+    assert svc._market_memo().inflight == {}
+
+
+def test_a_write_finishing_after_its_loop_closed_still_drops_the_memory(caplog):
+    """Shutdown: the worker thread cannot post to a closed loop — it drops the memory
+    itself (no reader can be on that loop any more) and says so."""
+    svc = _service([_market(i) for i in range(5)])
+    _page0(svc)
+    assert svc._market_memo().pages
+    before = svc._market_memo().generation
+    loop = asyncio.new_event_loop()
+    loop.close()
+    svc._post_market_page_invalidation(loop, "Market row write")
+    assert not svc._market_memo().pages
+    assert svc._market_memo().generation == before + 1
+    assert "event loop closed before the Market row write finished" in caplog.text
+
+
+def test_the_memory_exists_on_a_service_built_without_init():
+    """Hermetic tests build this service with `object.__new__`; the memory is created on
+    first use, never assumed."""
+    svc = object.__new__(NewsCacheService)
+    assert "_market_page_memo" not in svc.__dict__
+    memo = svc._market_memo()
+    assert memo is svc._market_memo() and memo.generation == 0 and memo.pages == {}
+
+
+# ── 14a. Joining the shared page-0 read is bounded ───────────────────────────
+#
+# Review 2026-10-08: a joiner waited on the shared read with no deadline, so ONE stalled
+# Supabase read held every page-0 open that missed the memory. All the joins of one call now
+# share `_MARKET_PAGE_JOIN_WAIT_SECONDS`; past it the caller reads on its own and does not
+# remember that read, while the read it left keeps running for its leader.
+
+import gc
+import logging
+
+
+def _record_unretrieved(loop):
+    """Route the loop's exception handler into a list — after proving it sees a "Future
+    exception was never retrieved" at all, so an empty list later is evidence."""
+    seen = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: seen.append(ctx))
+    probe = loop.create_future()
+    probe.set_exception(ValueError("probe"))
+    del probe
+    gc.collect()
+    assert any("never retrieved" in str(c.get("message", "")) for c in seen), \
+        "anti-vacuity: the recorder does not see an unretrieved future exception"
+    seen.clear()
+    return seen, previous
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leader_outcome", ["answers", "fails"])
+async def test_a_stalled_shared_read_cannot_hold_a_page_zero_joiner(monkeypatch, caplog,
+                                                                    leader_outcome):
+    """The leader's read stalls in its thread. A joiner answers within the bound from a
+    read of its own (not remembered); the shared read is NOT cancelled by it leaving, and
+    the leader's outcome — its page remembered, or its error — is untouched."""
+    monkeypatch.setattr(NewsCacheService, "_MARKET_PAGE_JOIN_WAIT_SECONDS", 0.25)
+    caplog.set_level(logging.WARNING, logger=ncs.__name__)
+    svc = _service([_market(i) for i in range(12)])
+    entered, release = threading.Event(), threading.Event()
+
+    def _stall(n):
+        if n == 1:                                   # only the leader's read stalls
+            entered.set()
+            release.wait(5)
+            if leader_outcome == "fails":
+                raise ValueError("a malformed row")
+
+    reads = _count_page_reads(svc, before=_stall)
+    loop = asyncio.get_running_loop()
+    seen, previous = _record_unretrieved(loop)
+    try:
+        leader = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            shared = svc._market_memo().inflight[50]
+            started = time.monotonic()
+            env = await asyncio.wait_for(svc.get_market_news(limit=50, offset=0), timeout=3)
+            waited = time.monotonic() - started
+
+            assert not leader.done(), "anti-vacuity: the leader's read is still stalled"
+            assert 0.2 <= waited < 2.5, f"the joiner answered after {waited:.2f} s"
+            assert [a["id"] for a in env["articles"]] == [_market(i)["id"] for i in range(12)]
+            assert reads == [(50, 0), (50, 0)], "the joiner did not read on its own"
+            assert not svc._market_memo().pages, "the joiner's own read was remembered"
+            assert not shared.done(), "the joiner that gave up cancelled the shared read"
+            joins = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and "Market page-0 join" in r.getMessage()]
+            assert len(joins) == 1, [r.getMessage() for r in caplog.records]
+            assert f"scope={MARKET_SCOPE}, limit=50" in joins[0].getMessage()
+            said = re.search(r"after (\d+\.\d) s", joins[0].getMessage())
+            assert said and float(said.group(1)) >= 0.2, joins[0].getMessage()
+        finally:
+            release.set()
+
+        if leader_outcome == "answers":
+            old = await asyncio.wait_for(leader, timeout=5)
+            assert [a["id"] for a in old["articles"]] == [_market(i)["id"] for i in range(12)]
+            assert 50 in svc._market_memo().pages, "the leader's read was no longer remembered"
+        else:
+            with pytest.raises(ValueError, match="a malformed row"):
+                await asyncio.wait_for(leader, timeout=5)
+            assert not svc._market_memo().pages
+        assert svc._market_memo().inflight == {}
+        del shared, leader
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not [c for c in seen if "never retrieved" in str(c.get("message", ""))], seen
+    finally:
+        loop.set_exception_handler(previous)
+
+
+@pytest.mark.asyncio
+async def test_rejoining_after_a_write_spends_the_same_join_budget(monkeypatch):
+    """The bound is per CALL, not per join: a joiner whose read crossed a Market write
+    rejoins (`_MARKET_PAGE_MAX_REJOINS`), and the next read it joins gets only what is left
+    of the budget. Per join, two joins would hold it ~0.85 s here; together they stop at
+    ~0.5 s."""
+    monkeypatch.setattr(NewsCacheService, "_MARKET_PAGE_JOIN_WAIT_SECONDS", 0.5)
+    svc = _service([_market(i) for i in range(4)])
+    reads = _count_page_reads(svc)
+    loop = asyncio.get_running_loop()
+    memo = svc._market_memo()
+    first, second = loop.create_future(), loop.create_future()
+    memo.inflight[50] = first                       # a read another request is leading
+    started = time.monotonic()
+    joiner = asyncio.create_task(svc.get_market_news(limit=50, offset=0))
+    try:
+        await asyncio.sleep(0.35)
+        assert not joiner.done(), "anti-vacuity: the caller joined the planted read"
+        stale = memo.generation
+        svc._invalidate_market_page_memo("test: a Market write landed mid-read")
+        memo.inflight[50] = second                  # the next read, which stalls
+        first.set_result((([_market(99)], False), stale))
+        env = await asyncio.wait_for(joiner, timeout=3)
+        waited = time.monotonic() - started
+    finally:
+        memo.inflight.pop(50, None)
+        second.cancel()
+
+    assert 0.45 <= waited < 0.75, f"the second join got a fresh budget ({waited:.2f} s)"
+    assert [a["id"] for a in env["articles"]] == [_market(i)["id"] for i in range(4)], \
+        "the caller was served the read that crossed the write"
+    assert len(reads) == 1 and not memo.pages
+
+
+# ── 14b. Structural: every write of `ticker_news_cache` drops the Market memory ──
+#
+# The behavioural tests above cover today's writers. These pin the SHAPE, so a writer
+# added tomorrow cannot skip the invalidation unnoticed (review: "the structural guard
+# covers only `_build_and_cache_rows`"). AST-based: comments and docstrings are not code.
+
+_WRITE_METHODS = {"update", "upsert", "delete", "insert"}
+_ALLOWED_WRITERS = {
+    "NewsCacheService._build_and_cache_rows",
+    "NewsCacheService._update_enrichment_row._do",
+    "NewsCacheService.cleanup_expired_cache._delete",
+}
+
+
+def _ncs_source() -> str:
+    return _inspect.getsource(ncs)
+
+
+def _qualified_defs(tree):
+    """Yield (qualified name, def node) for every function, nested ones included."""
+    def _walk(node, prefix):
+        for child in _ast.iter_child_nodes(node):
+            if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                name = f"{prefix}.{child.name}" if prefix else child.name
+                if not isinstance(child, _ast.ClassDef):
+                    yield name, child
+                yield from _walk(child, name)
+            else:
+                yield from _walk(child, prefix)
+    yield from _walk(tree, "")
+
+
+def _own_nodes(fn):
+    """The nodes of `fn` itself, not of the functions nested inside it."""
+    stack = list(_ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)):
+            stack.extend(_ast.iter_child_nodes(node))
+
+
+def _method(tree, name):
+    for qual, fn in _qualified_defs(tree):
+        if qual == f"NewsCacheService.{name}":
+            return fn
+    raise AssertionError(f"NewsCacheService.{name} is gone — this guard has drifted")
+
+
+def _is_self_call(node, attr):
+    return (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+            and node.func.attr == attr and isinstance(node.func.value, _ast.Name)
+            and node.func.value.id == "self")
+
+
+def _writes_the_news_table(call) -> bool:
+    if not (isinstance(call.func, _ast.Attribute) and call.func.attr in _WRITE_METHODS):
+        return False
+    node = call.func.value
+    while isinstance(node, (_ast.Call, _ast.Attribute)):
+        if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+                and node.func.attr == "table" and node.args
+                and isinstance(node.args[0], _ast.Constant)
+                and node.args[0].value == "ticker_news_cache"):
+            return True
+        node = node.func if isinstance(node, _ast.Call) else node.value
+    return False
+
+
+def _guard_every_table_write_is_allow_listed(src):
+    tree = _ast.parse(src)
+    found = set()
+    for qual, fn in _qualified_defs(tree):
+        if any(isinstance(n, _ast.Call) and _writes_the_news_table(n) for n in _own_nodes(fn)):
+            found.add(qual)
+    assert found == _ALLOWED_WRITERS, (
+        f"ticker_news_cache is written from {sorted(found)}; only {sorted(_ALLOWED_WRITERS)} "
+        f"are known to drop the Market page-0 memory — route a new writer through "
+        f"`_market_write_off_loop` and list it here"
+    )
+
+
+def _guard_rows_are_written_only_through_the_helper(src):
+    tree = _ast.parse(src)
+    homes = [
+        qual for qual, fn in _qualified_defs(tree) for n in _own_nodes(fn)
+        if isinstance(n, _ast.Attribute) and n.attr == "_build_and_cache_rows"
+        and isinstance(n.ctx, _ast.Load)
+    ]
+    assert homes, "anti-vacuity: `_build_and_cache_rows` is referenced nowhere"
+    assert set(homes) == {"NewsCacheService._write_rows_off_loop"}, (
+        f"`_build_and_cache_rows` is reached outside `_write_rows_off_loop`: {sorted(homes)}"
+    )
+    helper = _method(tree, "_write_rows_off_loop")
+    assert any(isinstance(n, _ast.Compare) and isinstance(n.left, _ast.Name)
+               and n.left.id == "cache_key" and isinstance(n.ops[0], _ast.Eq)
+               and isinstance(n.comparators[0], _ast.Name)
+               and n.comparators[0].id == "MARKET_SCOPE" for n in _own_nodes(helper)), \
+        "`_write_rows_off_loop` no longer singles out the Market's rows"
+    assert any(_is_self_call(n, "_market_write_off_loop") for n in _own_nodes(helper)), \
+        "a Market row write no longer goes through `_market_write_off_loop`"
+
+
+def _passes_to_wrapper(fn, arg_name) -> bool:
+    return any(
+        _is_self_call(n, "_market_write_off_loop")
+        and any(isinstance(a, _ast.Name) and a.id == arg_name for a in n.args)
+        for n in _own_nodes(fn)
+    )
+
+
+def _guard_enrichment_and_cleanup_go_through_the_wrapper(src):
+    tree = _ast.parse(src)
+    assert _passes_to_wrapper(_method(tree, "_update_enrichment_row"), "_do"), \
+        "a Market enrichment UPDATE no longer drops the memory"
+    cleanup = _method(tree, "cleanup_expired_cache")
+    assert _passes_to_wrapper(cleanup, "_delete"), "the cleanup DELETE no longer drops the memory"
+    callers = {
+        qual for qual, fn in _qualified_defs(tree) for n in _own_nodes(fn)
+        if _is_self_call(n, "_update_enrichment_row")
+    }
+    assert callers == {"NewsCacheService._enrich_articles_uncached"}, (
+        f"`_update_enrichment_row` gained a caller ({sorted(callers)}) that this guard has "
+        f"not checked passes scope=MARKET_SCOPE for Market rows"
+    )
+    enrich = _method(tree, "_enrich_articles_uncached")
+    assert any(
+        _is_self_call(n, "_update_enrichment_row")
+        and any(k.arg == "scope" and isinstance(k.value, _ast.Name)
+                and k.value.id == "MARKET_SCOPE" for k in n.keywords)
+        for n in _own_nodes(enrich)
+    ), "Market rows are enriched without scope=MARKET_SCOPE — their UPDATE keeps the memory"
+
+
+def _finally_calls(try_node, attr) -> bool:
+    return any(_is_self_call(n, attr) for stmt in try_node.finalbody for n in _ast.walk(stmt))
+
+
+def _guard_the_wrapper_drops_after_the_thread_and_on_exit(src):
+    tree = _ast.parse(src)
+    wrapper = _method(tree, "_market_write_off_loop")
+    inner = [n for n in _ast.walk(wrapper) if isinstance(n, _ast.FunctionDef)]
+    assert inner, "the worker-thread function is gone"
+    assert any(isinstance(t, _ast.Try) and _finally_calls(t, "_post_market_page_invalidation")
+               for t in _ast.walk(inner[0])), \
+        "the worker thread no longer drops the memory once its write has finished"
+    assert any(isinstance(t, _ast.Try) and _finally_calls(t, "_invalidate_market_page_memo")
+               for t in _own_nodes(wrapper)), \
+        "the awaiting coroutine no longer drops the memory on its way out"
+
+
+def _guard_page_zero_has_its_own_takeover_future(src):
+    tree = _ast.parse(src)
+    market = _method(tree, "get_market_news")
+    assert any(_is_self_call(n, "_market_page_zero") for n in _own_nodes(market)), \
+        "page 0 no longer goes through `_market_page_zero`"
+    zero = _method(tree, "_market_page_zero")
+    assert not any(_is_self_call(n, "_deduped") for n in _ast.walk(zero)), \
+        "page 0 joins through `_deduped`, which hands a cancelled leader's CancelledError on"
+    handlers = [n for n in _ast.walk(zero) if isinstance(n, _ast.ExceptHandler)]
+    takeover = [h for h in handlers if isinstance(h.type, _ast.Name)
+                and h.type.id == "_MarketPageLeaderCancelled"]
+    assert takeover and any(isinstance(s, _ast.Continue) for s in takeover[0].body), \
+        "a joiner of a cancelled leader no longer takes over"
+    cancel = [h for h in handlers if isinstance(h.type, _ast.Attribute)
+              and h.type.attr == "CancelledError"]
+    assert cancel and any(
+        isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+        and n.func.id == "_MarketPageLeaderCancelled"
+        for n in _ast.walk(cancel[0])
+    ), "a cancelled leader no longer settles its joiners with `_MarketPageLeaderCancelled`"
+
+
+def _guard_the_fence_is_captured_before_the_read(src):
+    tree = _ast.parse(src)
+    read = _method(tree, "_read_market_page")
+    fence = [n.lineno for n in _ast.walk(read) if isinstance(n, _ast.Assign)
+             and any(isinstance(t, _ast.Name) and t.id == "generation" for t in n.targets)]
+    first_read = [n.lineno for n in _ast.walk(read) if isinstance(n, _ast.Call)
+                  and isinstance(n.func, _ast.Attribute) and n.func.attr == "to_thread"]
+    retry_loop = [n.lineno for n in _ast.walk(read) if isinstance(n, _ast.For)]
+    assert fence and first_read and retry_loop, "anti-vacuity: the fence or the read is gone"
+    assert max(fence) < min(retry_loop + first_read), (
+        "the generation is captured after the read began (or again per attempt) — a write "
+        "during the first attempt would be missed"
+    )
+
+
+GUARDS: dict = {
+    "allow_listed_writers": _guard_every_table_write_is_allow_listed,
+    "rows_through_the_helper": _guard_rows_are_written_only_through_the_helper,
+    "enrichment_and_cleanup": _guard_enrichment_and_cleanup_go_through_the_wrapper,
+    "wrapper_drops_twice": _guard_the_wrapper_drops_after_the_thread_and_on_exit,
+    "takeover_future": _guard_page_zero_has_its_own_takeover_future,
+    "fence_before_read": _guard_the_fence_is_captured_before_the_read,
+}
+
+
+@pytest.mark.parametrize("name", sorted(GUARDS))
+def test_memory_guard_holds_on_the_real_source(name):
+    GUARDS[name](_ncs_source())
+
+
+def _replace(old: str, new: str) -> _Callable[[str], str]:
+    def mutate(src: str) -> str:
+        assert src.count(old) == 1, f"mutation anchor not unique ({src.count(old)}): {old!r}"
+        return src.replace(old, new)
+    return mutate
+
+
+_NEW_WRITER = '''
+
+    def _sneaky_writer(self):
+        self.supabase.table("ticker_news_cache").upsert([]).execute()
+'''
+
+MUTATIONS = [
+    ("new-upsert-site", "allow_listed_writers",
+     _replace("\n\n# ── Singleton", _NEW_WRITER + "\n\n# ── Singleton")),
+    ("direct-build-call", "rows_through_the_helper",
+     _replace("        written = await self._write_rows_off_loop(\n            scope, raw,",
+              "        written = await asyncio.to_thread(\n            self._build_and_cache_rows,"
+              "\n            scope, raw,")),
+    ("market-rows-not-singled-out", "rows_through_the_helper",
+     _replace("        if cache_key == MARKET_SCOPE:\n            return await self._market_write_off_loop(",
+              "        if cache_key == 'never':\n            return await self._market_write_off_loop(")),
+    ("market-update-unwrapped", "enrichment_and_cleanup",
+     _replace('await self._market_write_off_loop("Market enrichment update", _do)',
+              "await asyncio.to_thread(_do)")),
+    ("cleanup-not-invalidating", "enrichment_and_cleanup",
+     _replace('await self._market_write_off_loop("expired-row cleanup", _delete)',
+              "await asyncio.to_thread(_delete)")),
+    ("unwrapped-update-call", "enrichment_and_cleanup",
+     _replace("        if not raw:\n            return 0\n",
+              "        if not raw:\n            return 0\n"
+              "        await self._update_enrichment_row('id', {})\n")),
+    ("market-scope-keyword-dropped", "enrichment_and_cleanup",
+     _replace('self._update_enrichment_row(row["id"], update_data, scope=MARKET_SCOPE)',
+              'self._update_enrichment_row(row["id"], update_data)')),
+    ("no-thread-side-drop", "wrapper_drops_twice",
+     _replace("                self._post_market_page_invalidation(loop, reason)",
+              "                pass")),
+    ("no-exit-drop", "wrapper_drops_twice",
+     _replace("        try:\n            return await asyncio.to_thread(_write_then_post)\n"
+              "        finally:\n            self._invalidate_market_page_memo(reason)",
+              "        return await asyncio.to_thread(_write_then_post)")),
+    ("page-zero-via-deduped", "takeover_future",
+     _replace("            read = await self._market_page_zero(limit)",
+              "            read = await self._deduped(\n"
+              "                MARKET_SCOPE + '#page0',\n"
+              "                lambda: self._read_market_page(limit, 0, memoize=True),\n"
+              "            )")),
+    ("no-takeover", "takeover_future",
+     _replace("                    limit,\n                )\n                continue\n",
+              "                    limit,\n                )\n                raise\n")),
+    ("cancel-handed-on", "takeover_future",
+     _replace("                        _MarketPageLeaderCancelled(f\"page-0 read (limit={limit}) cancelled\")",
+              "                        asyncio.CancelledError()")),
+    ("fence-per-attempt", "fence_before_read",
+     _replace("        generation = self._market_memo().generation\n        for attempt in (1, 2):",
+              "        for attempt in (1, 2):\n            generation = self._market_memo().generation")),
+    ("fence-after-read", "fence_before_read",
+     _replace("            if memoize:\n                self._market_page_memo_put(",
+              "            generation = self._market_memo().generation\n"
+              "            if memoize:\n                self._market_page_memo_put(")),
+]
+
+
+@pytest.mark.parametrize("label,guard,mutate", MUTATIONS, ids=[m[0] for m in MUTATIONS])
+def test_every_memory_guard_kills_its_mutation(label, guard, mutate):
+    src = _ncs_source()
+    mutated = mutate(src)
+    assert mutated != src, f"mutation {label!r} changed nothing"
+    _ast.parse(mutated)                       # a mutation must still be valid Python
+    with pytest.raises(AssertionError):
+        GUARDS[guard](mutated)
+
+
+def test_every_memory_guard_has_a_mutation():
+    covered = {m[1] for m in MUTATIONS}
+    assert covered == set(GUARDS), f"guards with no mutation: {sorted(set(GUARDS) - covered)}"
+
+
+def test_a_writer_named_only_in_comments_does_not_satisfy_the_guards():
+    """The control: the AST sees code, not prose. A wrapper call that survives only in a
+    comment or a docstring must fail the guard it would otherwise satisfy."""
+    src = _ncs_source()
+    real = 'await self._market_write_off_loop("expired-row cleanup", _delete)'
+    prose = ('await asyncio.to_thread(_delete)  # ' + real + '\n'
+             '            """' + real + '"""')
+    with pytest.raises(AssertionError, match="cleanup DELETE"):
+        _guard_enrichment_and_cleanup_go_through_the_wrapper(src.replace(real, prose, 1))

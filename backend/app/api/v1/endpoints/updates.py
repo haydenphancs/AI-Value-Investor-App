@@ -217,27 +217,79 @@ async def get_updates_tabs(
     # regardless of how many symbols they cover. `_MAX_TABS` still bounds both.
     tickers = all_tickers[:_MAX_TABS]
 
-    if group is not None and tickers:
-        meta = await fetch_ticker_metadata(user_id, tickers)
-        rows = [{"ticker": t, **(meta.get(t) or {})} for t in tickers]
+    # ── Three independent reads, overlapped ──────────────────────────
+    # Display metadata, quotes and the ETF lookup each need only `tickers`, so they run in
+    # ONE gather instead of three serial round trips (each ~100 ms in prod, and a spike on
+    # one used to add to the others). Still one bounded query / call per leg.
+    #
+    # The ETF lookup cannot wait for the final classes (they depend on the metadata leg),
+    # so it is asked about a SUPERSET: every ticker that resolves to 'stock' from what is
+    # known NOW — the watchlist rows on the fallback path, the bare symbol on the group
+    # path. `resolve_asset_class` only answers 'stock' when the stored class is untrusted
+    # AND the symbol is stock-shaped, so the final stock set is a subset of this one, and
+    # the relabel below intersects with it: a stored index / commodity / crypto / etf is
+    # never relabelled. Never the quote's `isEtf` either — a missing flag reads False.
+    pre_by_ticker = {str(r["ticker"]).upper(): r for r in rows if r.get("ticker")}
+    etf_candidates = [
+        t for t in tickers
+        if resolve_asset_class(t, (pre_by_ticker.get(t) or {}).get("asset_type")) == "stock"
+    ]
 
-    quotes: Dict[str, Dict[str, Any]] = {}
-    try:
-        fmp = get_fmp_client()
-        # Watchlist tickers only — the Market pill carries no change %, so
-        # MARKET_INDEX_SYMBOL would be a quote nobody reads. `_bulk` returns []
-        # for an empty list, so a user with no watchlist skips the call entirely.
-        for q in await price_source().get_quotes_list(tickers):
-            sym = q.get("symbol")
-            if sym:
-                quotes[str(sym).upper()] = q
-    except Exception as e:
-        # Non-fatal: pills render without a change %, which iOS handles by
-        # hiding the label. A fabricated 0.0% would be worse than none.
+    async def _metadata() -> Optional[Dict[str, Dict[str, Any]]]:
+        if group is None or not tickers:
+            return None          # the fallback path already holds the watchlist rows
+        return await fetch_ticker_metadata(user_id, tickers)
+
+    async def _quotes() -> Dict[str, Dict[str, Any]]:
+        found: Dict[str, Dict[str, Any]] = {}
+        try:
+            fmp = get_fmp_client()
+            # Watchlist tickers only — the Market pill carries no change %, so
+            # MARKET_INDEX_SYMBOL would be a quote nobody reads. `_bulk` returns []
+            # for an empty list, so a user with no watchlist skips the call entirely.
+            for q in await price_source().get_quotes_list(tickers):
+                sym = q.get("symbol")
+                if sym:
+                    found[str(sym).upper()] = q
+        except Exception as e:
+            # Non-fatal: pills render without a change %, which iOS handles by
+            # hiding the label. A fabricated 0.0% would be worse than none.
+            logger.warning(
+                "Updates tabs: quote fetch failed (%s: %s) — rendering without change %%",
+                type(e).__name__, e,
+            )
+        return found
+
+    async def _etfs() -> set:
+        if not etf_candidates:
+            return set()
+        return await fetch_etf_tickers(etf_candidates)
+
+    meta_res, quotes_res, etf_res = await asyncio.gather(
+        _metadata(), _quotes(), _etfs(), return_exceptions=True,
+    )
+
+    def _settled(leg: str, result: Any, degraded: Any) -> Any:
+        """A leg's answer, or its degraded value when it raised. A cancellation (or any
+        other non-Exception BaseException) is re-raised, never degraded."""
+        if not isinstance(result, BaseException):
+            return result
+        if not isinstance(result, Exception):
+            raise result
+        # Every leg is best-effort today (each catches its own failure), so this is a
+        # defect in one of them — the pills still render, as they would on a failed read.
         logger.warning(
-            "Updates tabs: quote fetch failed (%s: %s) — rendering without change %%",
-            type(e).__name__, e,
+            "Updates tabs: %s leg raised for user=%s (%s: %s) — rendering without it",
+            leg, user_id, type(result).__name__, result,
         )
+        return degraded
+
+    meta = _settled("metadata", meta_res, None)
+    quotes: Dict[str, Dict[str, Any]] = _settled("quote", quotes_res, {})
+    etf_hits = _settled("ETF lookup", etf_res, set())
+
+    if group is not None and tickers:
+        rows = [{"ticker": t, **((meta or {}).get(t) or {})} for t in tickers]
 
     def _change(sym: str) -> Optional[float]:
         raw = (quotes.get(sym) or {}).get("changePercentage")
@@ -268,11 +320,10 @@ async def get_updates_tabs(
     classes = {t: resolve_asset_class(t, (by_ticker.get(t) or {}).get("asset_type")) for t in tickers}
     # A legacy ETF row still reads 'Stock' (the column's default, never rewritten): the
     # cached profile's `isEtf` upgrades it, so "Ask Cay AI" grounds a fund as a fund.
-    stock_like = [t for t, c in classes.items() if c == "stock"]
-    if stock_like:
-        for t in await fetch_etf_tickers(stock_like):
-            if t in classes:
-                classes[t] = "etf"
+    # Intersected with the FINAL stock set: the lookup was asked about a superset (above).
+    for t in etf_hits or ():
+        if classes.get(t) == "stock":
+            classes[t] = "etf"
     for t in tickers:
         row = by_ticker.get(t, {})
         tabs.append(
@@ -334,26 +385,51 @@ async def get_updates_feed(
     news = get_news_cache_service()
     insights = get_news_insight_service()
 
-    try:
+    async def _read_feed() -> Dict[str, Any]:
         if scope == MARKET_SCOPE:
-            feed = await news.get_market_news(limit=limit, offset=offset)
-        else:
-            # Crypto symbols go to FMP's `news/crypto`. Measured 2026-09-20: the
-            # two routes return the SAME rows for a pair symbol, so this is a
-            # contract choice (the crypto feed is the one documented to carry
-            # pairs), not a workaround — but the sweeper and the pre-warmer must
-            # route the same way, or one writer's rows would differ from the
-            # other's under the SAME cache key.
-            feed = await news.get_ticker_news(
-                scope, limit=limit, is_crypto=is_crypto_scope(scope),
-                offset=offset,
-            )
-    except Exception as e:
+            return await news.get_market_news(limit=limit, offset=offset)
+        # Crypto symbols go to FMP's `news/crypto`. Measured 2026-09-20: the
+        # two routes return the SAME rows for a pair symbol, so this is a
+        # contract choice (the crypto feed is the one documented to carry
+        # pairs), not a workaround — but the sweeper and the pre-warmer must
+        # route the same way, or one writer's rows would differ from the
+        # other's under the SAME cache key.
+        return await news.get_ticker_news(
+            scope, limit=limit, is_crypto=is_crypto_scope(scope),
+            offset=offset,
+        )
+
+    # Page 0 reads the Insights card BESIDE the timeline, not after it: the card read
+    # needs only the scope, and a card that misses its 5-minute memory tier is a Supabase
+    # round trip (~75-100 ms) that used to sit in series behind the news read. A gather,
+    # not a detached task: nothing outlives the request, and a request that goes away
+    # cancels both reads together (as it cancelled whichever one was running before).
+    # The cost is one wasted, parallel card read when the feed fails or is empty.
+    # Page > 0 never reads the card (see below).
+    reads = [_read_feed()]
+    if offset == 0:
+        reads.append(insights.get_cards([scope]))
+    results = await asyncio.gather(*reads, return_exceptions=True)
+    for res in results:
+        if isinstance(res, BaseException) and not isinstance(res, Exception):
+            raise res            # a cancellation is never turned into a response
+    feed = results[0]
+    cards_res = results[1] if len(results) > 1 else None
+
+    if isinstance(cards_res, Exception):
+        # An unavailable insight must never take down the timeline: logged here (whatever
+        # happens to the feed), and the card is simply left out below.
+        logger.warning(
+            "Updates insight read failed for scope=%s: %s: %s",
+            scope, type(cards_res).__name__, cards_res,
+        )
+
+    if isinstance(feed, Exception):
         logger.error(
             "Updates feed failed for scope=%s: %s: %s",
-            scope, type(e).__name__, e, exc_info=True,
+            scope, type(feed).__name__, feed, exc_info=feed,
         )
-        return error_response_from_exception(e, ticker=scope, step="updates_feed")
+        return error_response_from_exception(feed, ticker=scope, step="updates_feed")
 
     raw_articles = feed.get("articles") or []
     articles = [_to_article(a) for a in raw_articles]
@@ -394,9 +470,9 @@ async def get_updates_feed(
             # securities whose tickers collide with coin names.
             company_name=crypto_display_name(scope) if is_crypto_scope(scope) else None,
         )
-        if feed_recent:
+        if feed_recent and not isinstance(cards_res, Exception):
             try:
-                cards = await insights.get_cards([scope])
+                cards = cards_res or {}       # read above, beside the timeline
                 card = cards.get(scope)
                 if card is None:
                     # No AI card yet (cold scope, or the sweeper hasn't reached

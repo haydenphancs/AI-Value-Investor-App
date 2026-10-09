@@ -2,8 +2,9 @@
 
 Measured on the live screener sweep (>$50M, NASDAQ/NYSE/AMEX, actively trading): without
 `isFund=false` page 0 was 10,000 rows of which 3,719 were open-end funds (`GOLDX` = Gabelli
-Gold Fund, `isFund: true`, `volume: 0`, one NAV print a day) plus a second 1,648-row page;
-with it the whole universe is one 7,116-row page. The widget's prior-session WARNING named
+Gold Fund, `isFund: true`, `volume: 0`, one NAV print a day) plus a second 1,648-row page.
+(With it the sweep is now two one-page slices, companies and ETFs — 2026-10-08,
+`tests/test_screener_null_server_cap_callers.py`.) The widget's prior-session WARNING named
 GOLDX every cycle, and — worse — a watchlisted fund served through the `/stable/profile`
 fallback arrives UNSTAMPED (no `changeSession`), so without an explicit `isFund` refusal it
 would be RANKED, not dropped.
@@ -37,12 +38,14 @@ async def test_universe_sweep_asks_the_screener_to_exclude_funds(monkeypatch):
     class _FMP:
         async def get_company_screener(self, **kw):
             seen.append(kw)
-            return []
+            return [{"symbol": "AAPL", "price": 190.0, "marketCap": 3e12}]
 
     monkeypatch.setattr(ps_module, "get_fmp_client", lambda: _FMP())
     await PriceService()._fetch_universe_pages()
-    assert seen and seen[0].get("is_fund") is False, seen
-    assert seen[0].get("actively_trading") is True  # the existing filters stay
+    assert len(seen) == 2, seen                      # the company and ETF slices
+    for kw in seen:
+        assert kw.get("is_fund") is False, seen
+        assert kw.get("actively_trading") is True    # the existing filters stay
 
 
 @pytest.mark.asyncio

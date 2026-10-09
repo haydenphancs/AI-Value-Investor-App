@@ -38,6 +38,16 @@ and same-day symbol changes). It is held IN MEMORY only, on purpose — see
 ``get_active_listings``. Every data-dependent rule FAILS OPEN: an outage can bring a dead
 row back, never blank or 502 the search. The grammar rules need no data, so AVGOP and the
 preferreds stay hidden even then.
+
+What decides liveness is whether FMP PRICES the symbol, not why it left the list
+(2026-10-08). A symbol off the list that traded in the latest US session is live too
+(`_is_live` → `session_pricing`): FMP's flag says "inactive" for some trading securities,
+and no truly delisted symbol has a fresh traded close. The case behind it: Energy Transfer
+(ET), Dillard's (DDS) and USA Compression (USAC) moved from NYSE to the Texas Stock Exchange
+on 2026-10-05, and FMP carries no TXSE prices. Their EOD series stops at 10-05, so they are
+hidden from a name search (the exact ticker still opens), and they come back by themselves
+the first session FMP prices them, whatever the flag says. Do NOT add a curated allow-list:
+it would serve a price frozen at 10-05 as a live one.
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client
 from app.schemas.stock import StockSearchResult
+from app.services.session_pricing import priced_in_latest_session
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +303,13 @@ def _issuer_key(name: Optional[str]) -> str:
     return key if len(key) >= _MIN_ISSUER_KEY else ""
 
 
+def _is_live(sym: str, directory: Dict[str, str]) -> bool:
+    """On FMP's actively-trading list, or TRADED in the latest US session although the list
+    omits it (`session_pricing`). The registry is consulted only off the list, so a normal
+    keystroke never reaches it; cold or stale, it answers None and the list alone decides."""
+    return sym in directory or priced_in_latest_session(sym) is True
+
+
 def _is_root_twin(
     row: StockSearchResult,
     sym: str,
@@ -305,7 +323,11 @@ def _is_root_twin(
         # ⚠️ The base must be LIVE. JBT (dead) and JBTM (live) are both "JBT Marel
         # Corporation"; with a dead base allowed, typing "JBT" hid the company's only
         # live ticker — and during an outage every query did.
-        if base not in directory:
+        # A base live only by the priced-session registry may hide an OFF-list row, never a
+        # listed one: on a rename's first day the registry still holds the day before, when
+        # the dead old ticker (JBT) traded, while the list already carries the new one
+        # (JBTM). Letting that hide JBTM brought the JBT/JBTM bug back (review 2026-10-08).
+        if not (base in directory or (sym not in directory and _is_live(base, directory))):
             continue
         base_row = page.get(base)
         if base_row is not None and (base_row.exchange_short_name or "").upper() == exchange:
@@ -397,7 +419,7 @@ def refine_listings(
         sym = (r.symbol or "").upper()
         if sym != q:
             reason = _grammar_drop_reason(r, sym)
-            if reason is None and directory is not None and sym not in directory:
+            if reason is None and directory is not None and not _is_live(sym, directory):
                 reason = "inactive"
             if reason is not None:
                 dropped[reason] = dropped.get(reason, 0) + 1
@@ -446,7 +468,7 @@ def would_keep(
         return False
     if directory is None:
         return True
-    if sym not in directory:
+    if not _is_live(sym, directory):
         return False
     if _is_root_twin_candidate(row, sym, q):
         key = _issuer_key(row.name)
@@ -562,6 +584,21 @@ def get_active_listings() -> Optional[Dict[str, str]]:
         _cache.pop(_DIRECTORY_KEY, None)
     _schedule_refresh(now)
     return None
+
+
+def get_fresh_active_listings() -> Optional[Dict[str, str]]:
+    """`get_active_listings`, but None unless the held copy is within `_FRESH_TTL` (2 h).
+
+    For a caller that reads a symbol's ABSENCE as news (`unpriced_holdings_service`): the
+    stale copy search tolerates for up to 7 days can still list a symbol FMP has since
+    dropped. Never awaits; a cold or stale copy schedules the refresh (through
+    `get_active_listings`), so the caller's next cycle finds it fresh.
+    """
+    directory = get_active_listings()
+    entry = _cache.get(_DIRECTORY_KEY)
+    if directory is None or entry is None or time.time() - entry[0] > _FRESH_TTL:
+        return None
+    return directory
 
 
 def _schedule_refresh(now: float) -> None:

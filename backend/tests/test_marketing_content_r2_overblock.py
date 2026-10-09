@@ -405,7 +405,10 @@ CASE_STUDY_PROSE = (
     # …and of the final round's dash reading (2026-10-08): an en/em dash opens a clause, a hyphen never
     "The App Store—launched in 2008—changed how software was sold.",
     "Apple's services—the App Store, iCloud and Music—grew fast.",
-    "Pre-order demand was high; the long-term plan stayed.",
+    # a hyphen in front of an App Store clause is never a clause break (if it were, "pre. launching on the
+    # App Store" would read as a claim)
+    "Apple tested pre-launching on the App Store in 2008.",
+    "Apps were made widely-available on the App Store.",
     "Fans said the Marvel films felt tired.",
     "Decisions made by people, not AI, still matter.",
     "Buying high and selling low is the FOMO trap.",
@@ -480,6 +483,20 @@ def test_case_study_vocabulary_is_not_code_owned(text):
     ("Value investing basics—available on the App Store.", "brand_mention"),
     ("It will be available on the App Store.", "brand_mention"),
     ("We'll be live on the App Store.", "brand_mention"),
+    # final round follow-ups (2026-10-08): one row per alternative no other row pins
+    ("Go pre-order it on the App Store.", "brand_mention"),              # the pre-order verb with an object
+    ("So pre-order the app from the App Store.", "brand_mention"),
+    ("Coming soon to the iPhone App Store.", "brand_mention"),
+    ("Preorder it on the App Store.", "brand_mention"),
+    ("Arriving soon on the App Store.", "brand_mention"),
+    ("It's finally coming to the App Store.", "brand_mention"),
+    ("We're coming soon to the App Store.", "brand_mention"),
+    ("We'll be arriving on the App Store.", "brand_mention"),
+    ('"Coming soon to the App Store," the post said.', "brand_mention"),  # the opening-quote anchor
+    ("It's open for pre-orders on the App Store.", "brand_mention"),
+    ("It's up for pre-order on the App Store.", "brand_mention"),
+    ("Read the full lesson\nComing soon to the App Store", "brand_mention"),   # a single line break
+    ("Lessons on patience–coming soon to the App Store.", "brand_mention"),   # an en dash
     ("They sell buy signals.", "banned_phrase"),
     ("Get our signals every morning.", "banned_phrase"),
     ("NVIDIA stock is a compelling buy.", "class_b_evaluative"),

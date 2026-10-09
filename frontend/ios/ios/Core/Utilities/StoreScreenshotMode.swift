@@ -2,12 +2,15 @@
 //  StoreScreenshotMode.swift
 //  ios
 //
-//  DEBUG-ONLY. App Store screenshots with labelled SAMPLE market data.
+//  DEBUG-ONLY. App Store screenshots with SAMPLE market data on FICTIONAL companies.
 //
 //  Why: the market-data licence permits no public display of prices, % moves or price
 //  charts, and the App Store listing is public. A screen that shows them is captured with
-//  sample values and a visible "Sample data" label (.claude/rules/marketing.md §1,
-//  "Screenshots"; OWNER_TASKS §2.3 step 8). 1.0 shipped real prices in three of its five
+//  invented values, and the rule (.claude/rules/marketing.md §1, "Screenshots") requires them
+//  "labelled 'Sample data' or on a fictional ticker" so an invented price never passes for a
+//  real one. Since 2026-10-08 (owner: no label) every company the sample screens show is
+//  FICTIONAL — each ticker and name checked against FMP's full stock list (93,922 symbols) —
+//  so the label is OFF by default (`showsLabel`). 1.0 shipped real prices in three of its five
 //  screenshots — this mode exists so the next capture never has to.
 //
 //  The whole file sits inside `#if DEBUG`, as do its fixtures and every call site, so no
@@ -18,18 +21,21 @@
 //        xcrun simctl launch <device> com.phan.caydex
 //  `frontend/ios/scripts/capture-store-screenshots.sh` does that once per shot.
 //
-//  ⚠️ Only the tab ROOTS the capture script shoots are sample: Home, Tracking (and the Updates
-//  chips). The label window sits over EVERY screen, so a cover opened by a tap (a ticker screen)
-//  shows LIVE prices under "Sample data" — never tap during a capture. Creating a list in this
+//  ⚠️ Only the tab ROOTS the capture script shoots are sample: Home, Tracking and Updates. A cover
+//  opened by a tap (a ticker screen) shows LIVE prices, and with the label off nothing on screen
+//  says so — never tap during a capture. Creating a list in this
 //  mode echoes the sample group's id (a DEBUG-only quirk; relaunch without the mode afterwards).
 //
 //  What changes while it is on (everything else still talks to the real backend with the
 //  signed-in session):
 //   • Home renders `StoreShotHomeRepository` through an in-memory snapshot store, so the
 //     real saved dashboard never shows and nothing is written to disk.
-//   • `StoreShotURLProtocol` answers the Tracking and Updates-chip reads with fixtures and
+//   • `StoreShotURLProtocol` answers every Tracking and Updates read with fixtures — tracking
+//     assets, portfolios and their insights; Updates tabs, feed and sentiment-trend — and
 //     swallows the portfolio / watchlist / holdings writes they can trigger.
-//   • A non-interactive window draws "Sample data" above every screen, cover and sheet.
+//   • Only with `CAYDEX_STORE_SHOT_LABEL=1`: a non-interactive window draws "Sample data" above
+//     every screen. Off by default since the companies are fictional; REQUIRED again if a real
+//     ticker ever returns to the fixtures (tests/test_ios_store_screenshot_mode_debug_only.py).
 //
 
 #if DEBUG
@@ -39,6 +45,10 @@ import UIKit
 nonisolated enum StoreScreenshotMode {
     /// `CAYDEX_STORE_SHOT=1` in the launch environment.
     static let isOn: Bool = ProcessInfo.processInfo.environment["CAYDEX_STORE_SHOT"] == "1"
+
+    /// `CAYDEX_STORE_SHOT_LABEL=1` draws the "Sample data" label. Off by default (2026-10-08):
+    /// the sample screens show fictional companies, the rule's other branch.
+    static let showsLabel: Bool = ProcessInfo.processInfo.environment["CAYDEX_STORE_SHOT_LABEL"] == "1"
 
     /// `CAYDEX_STORE_SHOT_TAB` = home | updates | research | tracking | wiser.
     static let startTabName: String? =
@@ -68,7 +78,7 @@ extension StoreScreenshotMode {
     /// every full-screen cover and sheet, which an overlay on the root view cannot do, and
     /// with touches off it never intercepts a tap.
     @MainActor static func showLabelIfEnabled() {
-        guard isOn, labelWindow == nil else { return }
+        guard isOn, showsLabel, labelWindow == nil else { return }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
             print("📸 [StoreScreenshotMode] no window scene yet — label not shown")

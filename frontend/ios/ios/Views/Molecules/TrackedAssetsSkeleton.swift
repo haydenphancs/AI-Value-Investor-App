@@ -21,18 +21,31 @@ import SwiftUI
 struct TrackedAssetsSkeleton: View {
     /// Enough to fill the visible list area without implying a specific holdings count.
     var rowCount: Int = 4
+    /// The shimmer is a `repeatForever` animation started on appear. Off for the tab that has
+    /// never been opened (it is always mounted, hidden, for the whole session) — the static
+    /// rows say "loading" just as honestly at no cost.
+    var isAnimated: Bool = true
 
     var body: some View {
+        Group {
+            if isAnimated {
+                placeholderStack.shimmer()
+            } else {
+                placeholderStack
+            }
+        }
+        // One announcement for the whole block: VoiceOver reading four identical placeholder
+        // rows says nothing useful, and the real list replaces this within a second.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading your holdings")
+    }
+
+    private var placeholderStack: some View {
         VStack(spacing: AppSpacing.sm) {
             ForEach(0..<rowCount, id: \.self) { _ in
                 row
             }
         }
-        .shimmer()
-        // One announcement for the whole block: VoiceOver reading four identical placeholder
-        // rows says nothing useful, and the real list replaces this within a second.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Loading your holdings")
     }
 
     private var row: some View {
@@ -76,7 +89,10 @@ struct TrackedAssetsSkeleton: View {
 }
 
 #Preview {
-    TrackedAssetsSkeleton()
-        .padding(.horizontal, AppSpacing.lg)
-        .background(AppColors.background)
+    VStack(spacing: AppSpacing.xl) {
+        TrackedAssetsSkeleton()
+        TrackedAssetsSkeleton(rowCount: 2, isAnimated: false)
+    }
+    .padding(.horizontal, AppSpacing.lg)
+    .background(AppColors.background)
 }

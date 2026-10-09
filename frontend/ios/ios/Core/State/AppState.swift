@@ -335,6 +335,17 @@ final class AppState {
             WidgetRefreshService.shared.markCredentialReady()
             WidgetRefreshService.shared.refresh(identity: identityGeneration)
 
+            // Bind the Updates and Tracking snapshots to the stored account — bind only, no read
+            // and no await, so Home's first frame pays nothing for them. Each tab reads its file
+            // lazily at mount (`prepare`), after Home has painted. Bound HERE, before the restore,
+            // because `applyProfile`'s `bindOwner` (nil → this account) would otherwise delete
+            // the file before anything read it. No credential → both files are deleted.
+            // ⚠️ Spelled through `storedCredentialSubject()`, never the inline closure form Home's
+            // prime uses below: Home's guard mutates the FIRST copy of that expression.
+            let accountSnapshotOwner = storedCredentialSubject()
+            UpdatesFeedSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)
+            TrackingSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)
+
             // Load the stored account's last Home dashboard BEFORE the restore runs.
             //
             // ⚠️ ORDER. `performRestore` publishes `.restoring`, and that publish is what mounts
@@ -360,6 +371,13 @@ final class AppState {
     private func primeStoredCredential() async {
         guard let token = authService.getStoredToken() else { return }
         await apiClient.setAuthToken(token)
+    }
+
+    /// The stored access token's `sub` claim — WHOSE snapshots this device may show — or nil.
+    /// Read, never trusted for anything else (auth.md §8); it authenticates nothing.
+    private func storedCredentialSubject() -> String? {
+        guard let token = authService.getStoredToken() else { return nil }
+        return WidgetJWT.subject(of: token)
     }
 
     // MARK: - Session Healing
@@ -699,6 +717,9 @@ final class AppState {
         // `.authenticated`, so the Home reload that status triggers can only reseed THIS
         // account's snapshot. A different account drops the old one; the same one is a no-op.
         HomeDashboardSnapshotStore.shared.bindOwner(profile.id)
+        // The Updates and Tracking snapshots follow the same rule, at the same moment.
+        UpdatesFeedSnapshotStore.shared.bindOwner(profile.id)
+        TrackingSnapshotStore.shared.bindOwner(profile.id)
         // Push the tier to the audio engines. They are services, not views, so they cannot
         // read `@Environment(AppState.self)` — and the gate has to live at the engines
         // because Journey narrates from `.onAppear` with no button to guard. One assignment
@@ -823,6 +844,9 @@ final class AppState {
             // unbound, every save is refused for the rest of the process. Synchronous, before
             // any await, so a Home load started after this captures the post-rebind epoch.
             HomeDashboardSnapshotStore.shared.bindOwner(userId)
+            // Same trap for the Updates and Tracking snapshots: re-bound here, synchronously.
+            UpdatesFeedSnapshotStore.shared.bindOwner(userId)
+            TrackingSnapshotStore.shared.bindOwner(userId)
         }
         lastAuthenticatedUserId = userId
 
@@ -1280,6 +1304,10 @@ final class AppState {
         // Library/Caches, painted on the next cold launch. Unbinds and deletes; the store's
         // epoch fence also refuses a dashboard load that was still in flight.
         HomeDashboardSnapshotStore.shared.clearForEndedSession()
+        // The Updates and Tracking snapshots: the ended account's news feed, and its holdings
+        // with shares and values, in Library/Caches. Same rule as Home's: unbind and delete.
+        UpdatesFeedSnapshotStore.shared.clearForEndedSession()
+        TrackingSnapshotStore.shared.clearForEndedSession()
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access

@@ -494,8 +494,19 @@ class FMPClient:
         only when given, so existing callers are unchanged. Measured 2026-09-11 for the
         universe sweep (>$50M, NASDAQ/NYSE/AMEX, actively trading): WITHOUT `isFund=false`
         page 0 is 10,000 rows of which 3,719 are open-end mutual funds (GOLDX-style, one
-        NAV print a day, `volume: 0`) and a second 1,648-row page follows; WITH it the
-        whole universe fits in one 7,116-row page.
+        NAV print a day, `volume: 0`) and a second 1,648-row page follows. With it, on
+        2026-10-08: 7,037 rows above $50M, 10,180 at every cap (over one page) — 6,073
+        companies + 4,107 ETFs.
+
+        ⚠️ `market_cap_more_than` HIDES rows whose server-side cap is null, whatever
+        `marketCap` the row itself carries (2026-10-08: VMRK $22.5B, VYLR $48.6B, SKYD
+        $10.1B; 666 rows of that sweep at `marketCapMoreThan=0`). To floor companies, ask for every cap
+        and filter on the rows' own `marketCap` (`price_service._UNIVERSE_SLICES`,
+        `scripts/build_benchmark_universe.py`).
+
+        ⚠️ Paging is not a clean offset: page 1 of the 10,180-row sweep repeated 738 of
+        page 0's rows (2026-10-08), so a moved boundary can drop a row unseen. Prefer
+        filters that make each call one complete page.
 
         Replaces `batch-quote` ("Real-time Market Data", not purchased). Returns
         ``symbol, companyName, marketCap, sector, industry, beta, price, volume,
@@ -506,8 +517,9 @@ class FMPClient:
         previous close — see `price_service` and migration 157.
 
         ⚠️ Hard ceiling of 10,000 rows per call regardless of `limit` (verified:
-        limit=20000 and limit=50000 both return exactly 10,000). It DOES paginate, so a
-        universe larger than the ceiling must walk `page`.
+        limit=20000 and limit=50000 both return exactly 10,000). It DOES paginate (with
+        the caveat above), so a universe larger than the ceiling must be split by filter
+        or walk `page`.
         """
         params: Dict[str, Any] = {"limit": limit}
         if page:

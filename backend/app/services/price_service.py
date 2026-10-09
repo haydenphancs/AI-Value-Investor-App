@@ -59,6 +59,7 @@ from app.integrations.fmp import FMPRateLimitException, FMPUnavailableException,
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import detect_asset_class, uses_coingecko_price
+from app.services.session_pricing import change_is_current, publish_priced_session
 from app.utils.market_hours import (
     SESSION_CLOSED,
     SESSION_PREMARKET,
@@ -110,16 +111,37 @@ _CRYPTO_QUOTE_TTL = 60.0
 # rather than the 11.7 MB bulk endpoint.
 _CLOSES_TTL = 3600.0
 
-# `marketCapMoreThan` trims the long tail of shells and delisted husks that would otherwise
-# consume most of the 10,000-row ceiling. $50M keeps every symbol with a detail screen
-# while leaving ~2k rows of headroom under the cap.
+# The $50M floor trims the long tail of shells and delisted husks; $50M keeps every symbol
+# with a detail screen. For COMPANIES it is applied HERE, on each row's own `marketCap`,
+# never sent as `marketCapMoreThan` (2026-10-08): FMP applies that filter to a server-side
+# cap of its own and HIDES every row whose server-side cap is null, whatever cap the row
+# itself carries. Measured that day, 261 rows of $50M+ by their own cap were missing from
+# the >$50M sweep — VMRK (Vivmark Residential, the EQR + AVB merger, $22.5B), VYLR
+# ($48.6B), SKYD (Skydance, $10.1B), LYNX, ADIG… — so they could never be a Home mover or
+# Heavy Traffic row, were absent from the sector / industry averages and the widget, and
+# were priced only through the per-symbol profile fallback.
 _UNIVERSE_MIN_MARKET_CAP = 50_000_000
 _UNIVERSE_EXCHANGES = "NASDAQ,NYSE,AMEX"
 
 # `/stable/company-screener` hard-caps at 10,000 rows per call regardless of `limit`
-# (verified: limit=20000 and limit=50000 both return exactly 10,000). It DOES paginate.
+# (verified: limit=20000 and limit=50000 both return exactly 10,000).
 _SCREENER_PAGE_SIZE = 10_000
-_SCREENER_MAX_PAGES = 4
+
+# The sweep is two COMPLETE one-page calls (probe 2026-10-08), never a paged walk:
+#   * companies (`isEtf=false`) at EVERY cap, floored here: 6,073 rows;
+#   * ETFs (`isEtf=true`) above the floor SENT to FMP: 2,361 rows.
+# Not one all-cap call: that is 10,180 unique rows, over the page. Not paged either: page 1
+# of that sweep repeated 738 of page 0's rows — a moved page boundary, which can as easily
+# drop a row, and nothing on either page shows it. The ETF half keeps the server floor
+# because the contract is priced on bandwidth (`_UNIVERSE_CLOSED_TTL`) and all-cap ETFs are
+# 4,107 rows, while an ETF it hides costs no user anything: ETFs are excluded from every
+# ranking this universe feeds (`_is_quality_company`, `_group_performance`), and the quote
+# comes from `get_quotes`' profile fallback. The halves partition the sweep exactly (6,073
+# + 4,107 = 10,180; no row had a null `isEtf`, which both halves would hide).
+_UNIVERSE_SLICES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
+    ("companies", {"is_etf": False}),
+    ("etfs", {"is_etf": True, "market_cap_more_than": _UNIVERSE_MIN_MARKET_CAP}),
+)
 
 # A holiday is a weekday with no session, so the ingest asks the data rather than
 # carrying a calendar. Bounded so an upstream outage cannot spin: 5 steps covers the
@@ -369,6 +391,39 @@ def session_change_percent(
     return _finite(quote.get("changePercentage"))
 
 
+def profile_change_is_current(profile: Any, now: Optional[datetime] = None) -> bool:
+    """May a `/stable/profile` row's `change` / `changePercentage` be read as the CURRENT
+    session's move? No when FMP flags the listing `isActivelyTrading: false`.
+
+    The profile carries no session stamp, so `_session_stamp_is_current` fails open on it.
+    For an inactive listing FMP keeps serving the last session it priced. Measured
+    2026-10-08: Energy Transfer, Dillard's and USA Compression moved from NYSE to the Texas
+    Stock Exchange on 2026-10-05, and FMP has no TXSE prices. Their profiles still read
+    exchange NYSE, `isActivelyTrading: false`, with price and change frozen at the 10-05
+    close (no EOD row after 10-05, no intraday bar on 10-07 or 10-08). Since the screener
+    universe asks for actively trading rows only, every quote for them took this path,
+    and DDS's +6.30% from 10-05 read as "today's" move on Tracking, in the widget, the
+    detail header, the percent-move alerts and the insight sweeper's materiality gate.
+
+    Unknown beats a stale move labelled as today's. The flag is overruled only by
+    evidence that the symbol trades NOW (`session_pricing.change_is_current`): it traded
+    in the current session, or, while the registry is still a session behind, its price
+    has moved off that session's stored close. That covers FMP's wrong "inactive" flags,
+    and brings a moved listing's change back once FMP prices it again. A listing that
+    stopped trading TODAY traded yesterday, so "traded in the latest session" alone would
+    have shown its frozen move as today's (adversarial review, 2026-10-08). Without the
+    evidence (no trade, or a registry still cold after a restart) the change stays
+    unknown; the price is never withheld.
+    """
+    if not isinstance(profile, dict):
+        return True
+    flag = profile.get("isActivelyTrading")
+    inactive = flag is False or (isinstance(flag, str) and flag.strip().lower() == "false")
+    if not inactive:
+        return True
+    return change_is_current(profile.get("symbol"), profile.get("price"), now) is True
+
+
 def current_session_quote(
     quote: Dict[str, Any], now: Optional[datetime] = None
 ) -> Dict[str, Any]:
@@ -457,8 +512,11 @@ class PriceService:
         # A change without a price describes nothing: FMP reports `price: 0, change: 0`
         # for a halted/delisted listing, and shipping `change 0.0` beside `price None`
         # rendered "$0.00 +0.00%" on the profile path. Both stay None together.
-        change = _finite(row.get("change")) if price is not None else None
-        change_pct = _finite(row.get("changePercentage")) if price is not None else None
+        # An inactive listing's change is its LAST session's, not today's: see
+        # `profile_change_is_current`. The price stays (it is the last real print).
+        has_change = price is not None and profile_change_is_current(row)
+        change = _finite(row.get("change")) if has_change else None
+        change_pct = _finite(row.get("changePercentage")) if has_change else None
         # profile has no previousClose; it is exactly price - change when both are real.
         prev = price - change if (price is not None and change is not None) else None
         # `/stable/profile` carries the 52-week band as a "low-high" string, which is the only
@@ -1155,27 +1213,56 @@ class PriceService:
             _inflight.pop(key, None)
 
     async def _fetch_universe_pages(self) -> List[Dict[str, Any]]:
+        """The universe's rows: one page per `_UNIVERSE_SLICES` slice, in parallel, each
+        row kept only when its OWN `marketCap` clears `_UNIVERSE_MIN_MARKET_CAP`.
+
+        Both slices or nothing: a slice that fails or comes back empty raises, because half
+        a universe would rank Home's movers on half the market and send every symbol of the
+        other half through the per-symbol profile fallback — the fan-out `get_quotes`
+        refuses on a failed universe. A FULL page is logged at ERROR and served: it can
+        only cut the tail of one slice (those quotes take the profile fallback), and
+        blanking every equity quote over it would be worse.
+        """
         fmp = get_fmp_client()
-        rows: List[Dict[str, Any]] = []
-        for page in range(_SCREENER_MAX_PAGES):
-            batch = await fmp.get_company_screener(
-                market_cap_more_than=_UNIVERSE_MIN_MARKET_CAP,
+        batches = await asyncio.gather(*(
+            fmp.get_company_screener(
                 exchange=_UNIVERSE_EXCHANGES,
                 actively_trading=True,
                 # Open-end mutual funds are not a market universe: one NAV print a day,
                 # `volume: 0`, an AUM masquerading as `marketCap`. Without this filter the
                 # sweep carried 3,719 of them (GOLDX headed the widget's prior-session
-                # drop every cycle) across TWO pages; with it the whole >$50M universe is
-                # one 7,116-row page — one screener call per refresh instead of two.
+                # drop every cycle) and overflowed the 10,000-row page.
                 is_fund=False,
                 limit=_SCREENER_PAGE_SIZE,
-                page=page,
+                **filters,
             )
+            for _name, filters in _UNIVERSE_SLICES
+        ), return_exceptions=True)
+        rows: List[Dict[str, Any]] = []
+        for (name, _filters), batch in zip(_UNIVERSE_SLICES, batches):
+            if isinstance(batch, BaseException):
+                logger.warning("price_service: screener universe slice %r failed: %s: %s",
+                               name, type(batch).__name__, batch)
+                raise batch
             if not isinstance(batch, list) or not batch:
-                break
-            rows.extend(batch)
-            if len(batch) < _SCREENER_PAGE_SIZE:
-                break
+                logger.error("price_service: screener universe slice %r answered %s — the "
+                             "whole sweep fails rather than serve half a market",
+                             name, "[]" if isinstance(batch, list) else type(batch).__name__)
+                raise FMPUnavailableException(f"screener universe slice {name!r} returned no rows")
+            if len(batch) >= _SCREENER_PAGE_SIZE:
+                logger.error(
+                    "price_service: screener universe slice %r filled its %d-row page — rows "
+                    "past it are missing (their quotes take the profile fallback, and they "
+                    "drop out of movers); split `_UNIVERSE_SLICES` further",
+                    name, len(batch),
+                )
+            for row in batch:
+                if not isinstance(row, dict):
+                    continue
+                cap = _finite(row.get("marketCap"))
+                if cap is None or cap < _UNIVERSE_MIN_MARKET_CAP:
+                    continue
+                rows.append(row)
         return rows
 
     # ── previous closes ───────────────────────────────────────────────────────────
@@ -1272,6 +1359,17 @@ class PriceService:
         if not latest:
             logger.warning("price_service: no batch-eod session found to ingest")
             return 0
+        # Which symbols traded in this session (`session_pricing`), for search liveness and
+        # the inactive-profile change rule. Published BEFORE the write and its abort paths:
+        # a missing prior session or a coverage skip does not make these prices less real.
+        # Best effort: the registry only ADDS liveness, so it must never cost the ingest.
+        try:
+            publish_priced_session(latest_date, latest)
+        except Exception as e:
+            logger.warning(
+                "price_service: priced-session registry not updated for %s (%s: %s) — "
+                "readers keep FMP's flag", latest_date, type(e).__name__, e, exc_info=True,
+            )
 
         # The session before it. Walking back from `latest_date` rather than from today,
         # so a holiday run does not silently pair two non-adjacent sessions.

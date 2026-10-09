@@ -816,12 +816,18 @@ struct AppSettingsView: View {
         URLCache.shared.removeAllCachedResponses()
         LearnAudioCache.shared.purgeAll()
         StockRepository.shared.clearCache()
-        // The on-device Home snapshot. Its delete is queued behind any pending snapshot write
-        // (off the main thread), so the size is counted again once it has landed.
+        // The on-device Home, Updates and Tracking snapshots. Each delete is queued behind any
+        // pending write on that store's own disk tail (off the main thread), so the size is
+        // counted again only once ALL three have landed. Each purge keeps the account binding,
+        // so the next live load saves a fresh snapshot.
         let homeSnapshotPurge = HomeDashboardSnapshotStore.shared.purgeCache()
+        let updatesSnapshotPurge = UpdatesFeedSnapshotStore.shared.purgeCache()
+        let trackingSnapshotPurge = TrackingSnapshotStore.shared.purgeCache()
         calculateCacheSize()
         Task {
             await homeSnapshotPurge?.value
+            await updatesSnapshotPurge?.value
+            await trackingSnapshotPurge?.value
             calculateCacheSize()
         }
     }

@@ -38,11 +38,13 @@ def _clean_caches():
     ts._feed_inflight.clear()
     ts._sparkline_cache.clear()
     ts._insider_cache.clear()
+    ts.reset_earnings_calendar_cache()
     yield
     ts._feed_cache.clear()
     ts._feed_inflight.clear()
     ts._sparkline_cache.clear()
     ts._insider_cache.clear()
+    ts.reset_earnings_calendar_cache()
 
 
 # ── 1. in-flight dedup on the feed build ─────────────────────────────────────
@@ -368,7 +370,7 @@ def test_insider_cache_sweeps_at_the_threshold(monkeypatch):
 async def test_sparkline_fan_out_is_gated(monkeypatch):
     live = {"n": 0, "max": 0}
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         live["n"] += 1
         live["max"] = max(live["max"], live["n"])
         try:
@@ -377,7 +379,7 @@ async def test_sparkline_fan_out_is_gated(monkeypatch):
         finally:
             live["n"] -= 1
 
-    monkeypatch.setattr(ts, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(ts, "fetch_sparkline_bars", fake_fetch)
     out = await TrackingService()._get_all_sparklines([f"T{i}" for i in range(60)])
     assert len(out) == 60
     assert 0 < live["max"] <= ts._PER_TICKER_FANOUT_CONCURRENCY, live["max"]
@@ -388,10 +390,10 @@ async def test_sparkline_cache_hits_do_not_take_a_gate_slot(monkeypatch):
     """A cached ticker must answer without touching the upstream at all."""
     called = []
 
-    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+    async def fake_fetch(fmp, ticker, extended_hours=False):
         called.append(ticker); return []
 
-    monkeypatch.setattr(ts, "fetch_chart_data", fake_fetch)
+    monkeypatch.setattr(ts, "fetch_sparkline_bars", fake_fetch)
     ts._sparkline_cache_set("AAPL", [1.0, 2.0], False)
     out = await TrackingService()._get_all_sparklines(["AAPL", "MSFT"])
     assert called == ["MSFT"]
@@ -682,3 +684,248 @@ def test_the_generation_table_is_bounded_and_spares_in_flight_users(monkeypatch)
     assert ts._feed_generation["a"] == 2
     ts._feed_inflight.clear()
 
+
+
+# ── 6. the sector backfill runs INSIDE the feed gather (2026-10-08) ──────────
+#
+# It used to be awaited BEFORE the gather: one serial ~100 ms `company_profile_cache`
+# read in front of every build while any equity/ETF row lacked a sector. It is now the
+# gather's 7th, LAST member. These pin the three ways that move can go wrong: it still
+# runs serially, it is detached (so the merge reads the unhealed row), or a raise in it
+# takes the feed down (`section_names` too short → IndexError in the logging loop).
+
+
+_HEAL_WATCHLIST = [
+    {"id": 1, "ticker": "AAPL", "company_name": "Apple", "asset_type": "stock", "sector": None},
+    {"id": 2, "ticker": "SPY", "company_name": "SPDR S&P 500", "asset_type": "etf", "sector": None},
+]
+
+
+def _stub_sections(monkeypatch, *, backfill, quotes=None):
+    """Stub the six data sections and the backfill; the watchlist read stays REAL
+    (against `_FakeSupabase`), so the order watchlist → gather is exercised."""
+    async def _quotes(self, tickers):
+        if quotes is not None:
+            return await quotes(tickers)
+        return {t: {"symbol": t, "price": 10.0, "changePercentage": 1.0} for t in tickers}
+    async def _spark(self, tickers, asset_types=None): return {}
+    async def _earn(self, tickers): return []
+    async def _whale(self, tickers): return []
+    async def _analyst(self, tickers): return []
+    async def _insider(self, tickers, asset_types=None): return []
+    for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _spark),
+                     ("_get_earnings_alerts", _earn), ("_get_whale_trade_alerts", _whale),
+                     ("_get_analyst_rating_alerts", _analyst),
+                     ("_get_insider_transaction_alerts", _insider),
+                     ("_backfill_classification", backfill)]:
+        monkeypatch.setattr(TrackingService, name, fn)
+
+
+def _watchlist_copy():
+    return [dict(row) for row in _HEAL_WATCHLIST]
+
+
+@pytest.mark.asyncio
+async def test_the_sector_backfill_runs_inside_the_gather(monkeypatch):
+    """The backfill can only finish once the quotes section has STARTED. Awaited
+    before the gather (the old shape), it would wait for an event nothing sets yet,
+    time out, and the build would raise."""
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
+    quotes_started = asyncio.Event()
+    backfill_calls = []
+
+    async def _quotes(tickers):
+        quotes_started.set()
+        return {t: {"symbol": t, "price": 10.0, "changePercentage": 1.0} for t in tickers}
+
+    async def _backfill(self, user_id, watchlist):
+        backfill_calls.append(user_id)
+        await asyncio.wait_for(quotes_started.wait(), 1.0)
+        for item in watchlist:
+            item["sector"] = "Technology"
+
+    _stub_sections(monkeypatch, backfill=_backfill, quotes=_quotes)
+    feed = await TrackingService().get_tracking_feed("u-heal")
+
+    assert backfill_calls == ["u-heal"]
+    assert [a.sector for a in feed.assets] == ["Technology", "Technology"]
+
+
+@pytest.mark.asyncio
+async def test_the_merge_sees_a_late_heal(monkeypatch):
+    """The other sections answer at once; the heal lands later. The merge runs after
+    the WHOLE gather, so it still serves the healed value (a detached backfill would
+    not)."""
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
+
+    async def _backfill(self, user_id, watchlist):
+        await asyncio.sleep(0.02)
+        watchlist[0]["sector"] = "Technology"
+        watchlist[0]["country"] = "US"
+
+    _stub_sections(monkeypatch, backfill=_backfill)
+    feed = await TrackingService().get_tracking_feed("u-late-heal")
+
+    by_ticker = {a.ticker: a for a in feed.assets}
+    assert by_ticker["AAPL"].sector == "Technology"
+    assert by_ticker["AAPL"].country == "US"
+    assert by_ticker["SPY"].sector is None, "an unhealed row stays honestly null"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_backfill_does_not_cost_the_feed(monkeypatch, caplog):
+    """A raise lands in results[6]. Every row is still served (unclassified), the feed
+    is still cached, and the ERROR names the section and the user — without
+    `sector_backfill` in `section_names` the logging loop raised IndexError instead."""
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
+
+    async def _backfill(self, user_id, watchlist):
+        raise RuntimeError("profile cache exploded")
+
+    _stub_sections(monkeypatch, backfill=_backfill)
+    with caplog.at_level(logging.ERROR, logger=ts.logger.name):
+        feed = await TrackingService().get_tracking_feed("u-backfill-boom")
+
+    assert [a.ticker for a in feed.assets] == ["AAPL", "SPY"]
+    assert all(a.sector is None for a in feed.assets)
+    assert all(a.price_known for a in feed.assets), "the other sections are untouched"
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("sector_backfill" in m and "u-backfill-boom" in m and "RuntimeError" in m
+               for m in errors), errors
+    # The ERROR carries the section's own stack (the gather result keeps __traceback__),
+    # so a failure is diagnosable from the log alone.
+    section_errs = [r for r in caplog.records
+                    if r.levelno == logging.ERROR and "sector_backfill" in r.getMessage()]
+    assert len(section_errs) == 1
+    exc_info = section_errs[0].exc_info
+    assert exc_info and isinstance(exc_info[1], RuntimeError), exc_info
+    assert exc_info[2] is not None, "the traceback must reach the log record"
+    assert ts._feed_cache_get("u-backfill-boom") is feed, "a cosmetic failure must not stop caching"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_watchlist_still_raises_before_any_backfill(monkeypatch):
+    """The 503 path is unchanged: the read fails, nothing in the gather starts."""
+    class _Boom(_FakeTable):
+        def execute(self):
+            raise ValueError("column watchlist_items.bogus does not exist")
+
+    class _BoomSupabase:
+        def table(self, name):
+            return _Boom([])
+
+    monkeypatch.setattr(ts, "get_supabase", lambda: _BoomSupabase())
+    backfill_calls = []
+
+    async def _backfill(self, user_id, watchlist):
+        backfill_calls.append(user_id)
+
+    _stub_sections(monkeypatch, backfill=_backfill)
+    with pytest.raises(WatchlistUnavailableError):
+        await TrackingService().get_tracking_feed("u-unreadable")
+    assert backfill_calls == []
+    assert ts._feed_cache_get("u-unreadable") is None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_watchlist_never_starts_the_backfill(monkeypatch):
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase([]))
+    backfill_calls = []
+
+    async def _backfill(self, user_id, watchlist):
+        backfill_calls.append(user_id)
+
+    _stub_sections(monkeypatch, backfill=_backfill)
+    feed = await TrackingService().get_tracking_feed("u-empty")
+    assert feed.assets == [] and backfill_calls == []
+
+
+class _HealTable:
+    """watchlist read + `company_profile_cache` read + the write-back UPDATE."""
+
+    def __init__(self, sb, name):
+        self.sb, self.name = sb, name
+        self._patch = None
+        self._eqs: List[tuple] = []
+
+    def select(self, *a, **k): return self
+    def order(self, *a, **k): return self
+    def in_(self, *a, **k): return self
+    def limit(self, *a, **k): return self
+    def range(self, *a, **k): return self
+
+    def eq(self, col, val):
+        self._eqs.append((col, val))
+        return self
+
+    def update(self, patch):
+        self._patch = dict(patch)
+        return self
+
+    def execute(self):
+        if self._patch is not None:
+            self.sb.updates.append((self.name, self._patch, list(self._eqs)))
+            return type("R", (), {"data": []})()
+        if self.name == "watchlist_items":
+            return type("R", (), {"data": [dict(r) for r in self.sb.watchlist]})()
+        if self.name == "company_profile_cache":
+            self.sb.profile_reads += 1
+            return type("R", (), {"data": self.sb.profiles})()
+        return type("R", (), {"data": []})()
+
+
+class _HealSupabase:
+    def __init__(self, watchlist, profiles):
+        self.watchlist, self.profiles = watchlist, profiles
+        self.updates: List[tuple] = []
+        self.profile_reads = 0
+
+    def table(self, name):
+        return _HealTable(self, name)
+
+
+@pytest.mark.asyncio
+async def test_the_real_backfill_heals_and_writes_back_inside_the_gather(monkeypatch):
+    """Not stubbed: the real `_backfill_classification` reads the shared profile cache,
+    heals the row this request serves, and its write-back has LANDED by the time the
+    feed returns (it is awaited inside the gather, never detached)."""
+    sb = _HealSupabase(
+        _watchlist_copy(),
+        [{"ticker": "AAPL", "profile_json": {"sector": "Technology", "country": "US"}},
+         {"ticker": "SPY", "profile_json": {"sector": "N/A"}}],     # placeholder: not healed
+    )
+    monkeypatch.setattr(ts, "get_supabase", lambda: sb)
+    _stub_sections(monkeypatch, backfill=TrackingService._backfill_classification)
+
+    feed = await TrackingService().get_tracking_feed("u-real-heal")
+
+    by_ticker = {a.ticker: a for a in feed.assets}
+    assert by_ticker["AAPL"].sector == "Technology"
+    assert by_ticker["SPY"].sector is None
+    assert sb.profile_reads == 1
+    assert sb.updates == [
+        ("watchlist_items", {"sector": "Technology", "country": "US"},
+         [("user_id", "u-real-heal"), ("ticker", "AAPL")]),
+    ], sb.updates
+
+
+@pytest.mark.asyncio
+async def test_a_failed_profile_read_serves_rows_unclassified(monkeypatch, caplog):
+    """The backfill's own degrade path, now inside the gather: WARNING, rows served
+    null, no write-back, the feed intact."""
+    class _NoProfiles(_HealSupabase):
+        def table(self, name):
+            if name == "company_profile_cache":
+                raise ConnectionError("profile cache unreachable")
+            return super().table(name)
+
+    sb = _NoProfiles(_watchlist_copy(), [])
+    monkeypatch.setattr(ts, "get_supabase", lambda: sb)
+    _stub_sections(monkeypatch, backfill=TrackingService._backfill_classification)
+    with caplog.at_level(logging.WARNING, logger=ts.logger.name):
+        feed = await TrackingService().get_tracking_feed("u-no-profiles")
+
+    assert [a.sector for a in feed.assets] == [None, None]
+    assert sb.updates == []
+    assert any("sector backfill" in r.getMessage() and "ConnectionError" in r.getMessage()
+               for r in caplog.records if r.levelno == logging.WARNING)

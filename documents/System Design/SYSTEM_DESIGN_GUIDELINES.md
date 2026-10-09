@@ -273,7 +273,7 @@ class behind a wide protocol covering every detail-screen fetch. Four others
 pass-throughs holding no cache at all — verified: zero cache references between them.
 
 Its only dependency is `APIClient`. The flow is `getCached` → `apiClient.request` → `setCache` —
-a single in-memory tier — the repository itself writes nothing to disk (the four on-disk caches the app
+a single in-memory tier — the repository itself writes nothing to disk (the on-disk caches the app
 does have are named in §7.1 and are not its) — no protocol-per-collaborator, no injected cache or
 persistence manager. §7.1 and §7.2 describe the cache; §10 records that "offline support" is a cold-launch-empty
 in-memory cache and not offline support.
@@ -284,7 +284,10 @@ response bytes (`APIClient.requestReturningBody`), and the Home ViewModel hands 
 `Core/Repositories/HomeDashboardSnapshotStore.swift` after a successful live load. On the next
 cold launch the store maps the saved bytes back through the same decode-safe DTOs
 (`HomeRepository.dashboard(fromSnapshotBody:)`), so a newer build reads an older file or rejects it
-cleanly. The store's rules (owner, age, clearing) are in §7.1.
+cleanly. The store's rules (owner, age, clearing) are in §7.1. The Updates and Tracking snapshots
+(2026-10-08) sit in the same folder and work the same way with no repository at all: their
+ViewModels hand the exact live response bytes to
+`Core/Repositories/AccountSnapshotStore.swift::AccountSnapshotStore` (§7.1).
 
 The Jan 2026 decision to adopt the repository pattern is recorded in Appendix B and stands; what
 shipped is a much smaller version of it than that entry implies, which is why the shape is spelled
@@ -403,7 +406,10 @@ Three pieces keep every shared section warm:
   `SCANNER_PREWARM_INTERVAL_SECONDS` = 900 s, clamped to 60–1080 (1200), themes 480 s (600), signals
   2400 s (2700), Trillion 480 s (600). Inside a closed window (`session_phase` CLOSED at both the
   sweep and the read: 20:00–04:00 ET, weekends, holidays) equity prices cannot move, so the
-  screener universe — the one large FMP response, ~7,000 rows — lives 900 s and is rebuilt at
+  screener universe — the one large FMP response: two one-page calls, companies at every cap and
+  ETFs above $50M, ~8,400 rows (`price_service._UNIVERSE_SLICES`; the $50M company floor is
+  applied to each row's own cap, because FMP's `marketCapMoreThan` hides every row whose
+  server-side cap is null — VMRK, SKYD, 2026-10-08) — lives 900 s and is rebuilt at
   840 s (`price_service._UNIVERSE_CLOSED_TTL`; a sweep from another phase keeps the 60 s rule, so
   04:00 pre-market prices are never held back). That is ~1,180 sweeps a trading day and ~100 a
   closed day instead of ~1,700 every day. The pulse keeps its 40 s cadence and reads its prices
@@ -1015,11 +1021,13 @@ above the slowest server guard. There is still no `RetryPolicy` type.
 │  │                                                                       │    │
 │  │  Persistence: Keychain (tokens) + UserDefaults (preferences)          │    │
 │  │      ├── NO Core Data, NO SwiftData, NO NSCache, no local database   │    │
-│  │      └── FOUR on-disk caches, all re-creatable from the server:      │    │
+│  │      └── On-disk caches, all re-creatable from the server:           │    │
 │  │          URLCache.shared (128 MB, images), LearnAudioCache (400 MB   │    │
 │  │          narration, purged on sign-out), ReportPDFViewModel's PDFs,  │    │
-│  │          HomeDashboardSnapshotStore (the last Home dashboard, one    │    │
-│  │          account's, ≤ 96 h, deleted when the session ends)           │    │
+│  │          and the account snapshots — one account's each, ≤ 96 h,     │    │
+│  │          deleted when the session ends: HomeDashboardSnapshotStore   │    │
+│  │          (the last Home dashboard) and AccountSnapshotStore (the     │    │
+│  │          last Updates Market feed; the last Holdings)                │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -1092,7 +1100,47 @@ opened a 20–40 s window of 8 s requests every hour. Now:
 Serving an older map is honest: `price_service`'s `_snapshot_is_current` and `_pick_denominator`
 turn a row from too old a session into "change unknown", never a multi-session move.
 
-**iOS: the Home snapshot, the one on-disk cache that holds an account's data (2026-10-01).**
+**Tier 1 with no Tier 2, on purpose: the market-wide earnings calendar (2026-10-08).** The
+Tracking feed's earnings alerts used to download FMP's whole 15-day `earnings-calendar` (~430 KB,
+thousands of rows) on every feed build, to keep the few rows on one user's watchlist. The window
+is the same for everyone, so `tracking_service._cached_earnings_calendar` keeps ONE answer for
+30 min (`EARNINGS_CALENDAR_TTL`), keyed on the client object and the window, with an `_inflight`
+future: a joiner is shielded, and a joiner whose leader was cancelled takes the download over
+instead of serving a feed with no alerts. It never stores `[]` (indistinguishable from a degraded
+answer), a non-list answer or a failure. A Supabase tier would only add a round trip to a 30-min
+memo of a pure upstream function. Each fetch logs `earnings calendar … fetched: N rows in M ms`
+at INFO; an answer at FMP's silent 4,000-row cap is logged at ERROR once per ET day (WARNING
+after) — see §10. The same pass moved the feed's sector backfill into its main gather and fetches
+each holdings sparkline over two trading days (`chart_helper.fetch_sparkline_bars`), not the
+detail chart's ten calendar days.
+
+**Tier 1 with no Tier 2: page 0 of the shared Market news feed (2026-10-08).** Page 0 of
+`__MARKET__` is identical for every user and was re-read from `ticker_news_cache` on every
+Updates open. `news_cache_service.py` now remembers it per `limit` (1–50, so bounded) for 60 s,
+never past the earliest `expires_at` among its rows (a row that expires drops out of every live
+read, so serving it longer would shift the next, live page one story and skip one). Every write
+of Market rows bumps a generation and drops the memory; a read that started under an older
+generation is served to its leader but not kept (a joiner of it reads again, at most twice), and an
+empty page is never kept (empty is the cold path's question). Concurrent misses share one read
+through a dedicated in-flight future; a joiner whose leader went away takes over, and a joiner waits at most 3 s in all on reads other requests lead
+before reading on its own. A hit logs `Market news memory HIT`.
+
+Both memos are coherent only within one process; the web service runs exactly one uvicorn worker
+(`tests/test_deploy_command_parity.py`, and the "No Redis" row of §10).
+
+**Overlapped reads, no new cache: the Updates and Tracking first open (2026-10-08).**
+`GET /updates/tabs` runs its display-metadata, quote and ETF-lookup legs in one gather (the ETF
+lookup is asked about a superset of the final stock set, then intersected with it), and page 0 of
+`GET /updates/feed` reads the Insights card beside the timeline instead of after it.
+`GET /portfolios` reads the groups and, in parallel, every item of the caller's groups in one paged
+read (`portfolio_items` joined to `portfolios!inner(user_id)`). Each page is checked to hold only
+the caller's rows, so a filter PostgREST did not apply aborts on the first page; a failed or
+unverifiable joined read falls back to the serial items read (logged at WARNING; at ERROR when the
+`!inner` filter was not applied), and a group the joined read returned no items for is topped up
+with a serial read for exactly those groups. A failed groups read still raises rather than answer
+`[]`, which would seed a duplicate default group.
+
+**iOS: the on-disk account snapshots. Home's came first (2026-10-01).**
 `Core/Repositories/HomeDashboardSnapshotStore.swift` keeps the last good `GET /home/dashboard`
 response of the signed-in account, so a cold launch paints it at once. (TestFlight 1.0 (9),
 roaming: the first Home frame waited for launch, DNS + TCP + TLS, the server's gather and the
@@ -1136,6 +1184,63 @@ owner id and save time, because `HomeDashboardData` holds `Color`s and is not Co
 - **Not a gate.** It keeps the Pro signals exactly as the server sent them to this account (owner
   decision 2026-10-01); the server's redaction remains the gate. A load refused for want of an
   armed credential still blanks Home; it never reseeds from the snapshot.
+
+**iOS: the Updates and Tracking snapshots — Home's contract in one generic store (2026-10-08).**
+`Core/Repositories/AccountSnapshotStore.swift::AccountSnapshotStore` is the same contract made
+generic over a payload, so the first tap on either tab paints that account's last live answer
+instead of a skeleton (measured before: p50 1.08 s of server time behind the Updates skeleton,
+0.86 s behind Holdings). Home stays on its own class. Two payloads use it:
+
+- `Core/Repositories/UpdatesFeedSnapshot.swift::UpdatesFeedSnapshot` — one part, the exact
+  `GET /updates/feed` Market response, first page only, kept only with at least one story. The
+  `GET /updates/tabs` chips are NOT kept, nor is any ticker-scope feed: a stale `is_locked` could
+  open a ticker feed the plan now locks, and `GET /updates/feed` has no server plan gate.
+- `Core/Repositories/TrackingSnapshot.swift::TrackingSnapshot` — the exact `GET /tracking/assets`
+  and `GET /portfolios` bodies, the active portfolio id and, optionally, the
+  `GET /portfolios/{id}/insights` body, all from the SAME live load (Holdings is the feed filtered
+  by the active group's tickers). A live answer with no row in the active group deletes the file;
+  one where no row has a known price keeps the previous file. The insights `null` ("too few
+  holdings") is a known answer, kept apart from a missing or undecodable part.
+
+The rules, all in the store:
+
+- **Files.** One binary plist per payload under Library/Caches/UpdatesFeedSnapshot and
+  Library/Caches/TrackingSnapshot, written atomically with
+  `.completeFileProtectionUntilFirstUserAuthentication`: an envelope of schema version, owner id and
+  save time around the raw response bytes of each part, each part capped in size. The bytes decode
+  back through the live DTOs (`APIClient.decodeBody`), so an additive DTO change needs no schema
+  bump and a body that no longer decodes deletes the file.
+- **Bound at launch, read at tab mount.** `AppState.configure` binds the stored token's `sub`
+  (`bindLaunchOwner`) BEFORE Home's prime, with no read and no await, so Home's first frame pays
+  nothing; no stored credential deletes both files. Each tab reads its file in `prepare()` when it
+  mounts: disk only, never a request, single-flight, once per binding. Another owner, another
+  schema, an age past 96 h or a save more than 5 min in the future (`AccountSnapshotPolicy`, the
+  96 h pinned equal to Home's), a bad part or an undecodable body deletes the file with a WARNING;
+  a read that fails (before first unlock) keeps it for the next `prepare()`.
+- **Fenced writes.** A save needs the epoch captured before the request (bumped by any change of
+  account, a session end and a purge), a bound owner, a capture inside the window and no newer
+  snapshot in memory, and passes the payload's own keep rule. A prepare read that began before a
+  live answer was acted on never publishes over it (a live-answer generation). Every read, write
+  and delete runs in order on one detached task chain.
+- **Display only.** `UpdatesViewModel` and `TrackingViewModel` seed display state from it,
+  labelled "Updated <time>" (Home's wording, through `AccountSnapshotPolicy.updatedLabel`), and the
+  live load replaces it in place. It never enters `UpdatesViewModel.feedCache`, never counts as a
+  load, is never enriched (a paid call), and its portfolios are never written into `PortfolioStore`
+  (whose writes are whole-list PUTs: a snapshot's membership written back would delete what the
+  user added since). A hidden tab renders no snapshot rows, and no launch-time request was added.
+- **Cleared** by `AppState.discardDataForEndedSession()` (`.claude/rules/auth.md` §7), re-bound in
+  `applyProfile` and in the account-switch branch of `onAuthenticated`, and purged by Settings ›
+  Clear Cache; Tracking's file also goes on a server-confirmed portfolio edit. In DEBUG App Store
+  screenshot mode every instance is memory-only. Pinned by `tests/test_ios_account_snapshot_guards.py`,
+  `tests/test_ios_updates_instant_paint_guards.py` and `tests/test_ios_tracking_instant_paint_guards.py`.
+- **Not a gate**, like Home's: it keeps exactly what the server sent this account, for at most 96 h,
+  labelled with its real time.
+
+The first open changed with it: Updates sends `GET /updates/feed` for the Market scope beside
+`GET /updates/tabs` instead of after it (the Market scope needs nothing from the chips), its first
+load survives a tab-away, and AI enrichment runs detached from the load; Tracking starts Portfolio
+Insights beside the rows, and a failed `GET /portfolios` shows "Couldn't load your holdings" with
+Retry instead of an empty list.
 
 **What may go into Tier 2 — the rule the diagram cannot show.** Tier 2 holds only
 sections that **cannot contain a live price**. A live price belongs in Tier 1 or in no
@@ -1477,9 +1582,9 @@ whether any of it runs:
 | Loop | Cadence | Gate (default) |
 |---|---|---|
 | Home boot warm (one-shot, the first spawn): the movers close map + `warm_all()`, holding the deploy gate (§3.4) | once at boot; `GET /health/pdf` answers 503 until it ends or `HOME_BOOT_WARM_MAX_WAIT_SECONDS` (45 s) passes | — (0 = no gate; the warm still runs) |
-| close snapshot, then the movers close-map rebuild and swap (§7.1) | hourly, all day | — |
+| close snapshot (it also publishes the in-memory `session_pricing` registry: symbols that TRADED in the latest US session, with their closes. It overrules FMP's "inactive" flag for search liveness, and for the profile day change only when the registry holds the current session or the price has moved off its stored close), then the movers close-map rebuild and swap (§7.1), then the read-only unpriced-holdings report (once per new session: an ERROR naming held symbols FMP stopped pricing) | hourly, all day | — |
 | social snapshot | one per UTC day, hourly retry | — |
-| Home dashboard warmer: pulse, screener universe, scanners, themes, signals, Trillion, each rebuilt before its TTL (§3.4). FMP cost: in the regular session ~6 small sparkline calls a minute plus the universe sweeps (~1 a minute); outside it a pulse rebuild costs ~0 FMP chart calls (a finished session's bars are memoized), and in a closed window the universe lives 15 min | a tick every `HOME_WARM_TICK_SECONDS` (10 s), all hours; due at 40 s / 45 s (840 s in a closed window: overnight, weekends, holidays) / 900 s / 480 s / 2400 s / 480 s; starts once the boot warm opens the gate | `SCANNER_PREWARM_ENABLED` (on; off = it idles) |
+| Home dashboard warmer: pulse, screener universe, scanners, themes, signals, Trillion, each rebuilt before its TTL (§3.4). FMP cost: in the regular session ~6 small sparkline calls a minute plus the universe sweeps (~1 a minute, 2 calls each); outside it a pulse rebuild costs ~0 FMP chart calls (a finished session's bars are memoized), and in a closed window the universe lives 15 min | a tick every `HOME_WARM_TICK_SECONDS` (10 s), all hours; due at 40 s / 45 s (840 s in a closed window: overnight, weekends, holidays) / 900 s / 480 s / 2400 s / 480 s; starts once the boot warm opens the gate | `SCANNER_PREWARM_ENABLED` (on; off = it idles) |
 | news / report / index pre-warmers | 2 h / 1 h / 30 min | `*_PREWARM_ENABLED` (on) |
 | quarterly chain: dossier → competitor → IP → moat → industry benchmarks | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC, +30 min each | per-phase claim |
 | TTM benchmarks | Sunday 06:00 UTC | claim |
@@ -1548,7 +1653,11 @@ lenders only (`excluded_from_industry_median`, before the top-N cut). Per-compan
 gets wrong are withheld by hand (`CURATED_WITHHELD_ROWS`: WU files no current/non-current split and
 FMP's interest expense is not WU's, so its current ratio, quick ratio and interest coverage are never
 shown), and `REVIEWED_CREDIT_SERVICES_LENDERS` records the reviewed lenders: the universe builder
-names any member in neither set at WARNING. The builder itself (`scripts/build_benchmark_universe.py`,
+names any member in neither set at WARNING. The report's MODEL context follows the same
+per-company answer (2026-10-09): `_compute_metrics` drops a gated or withheld raw current ratio /
+interest coverage, and `build_financial_context` (Stage A, Stage B, the agentic phase) re-decides
+the gate on every build — a cached collection may still hold the raw value — and states the rows
+as not meaningful / not available, never as a number (`_context_gated_rows`). The builder itself (`scripts/build_benchmark_universe.py`,
 quarterly, by hand) applies the market-cap floor client-side — FMP's server-side cap filter hides
 real listings whose stored cap is null (VMRK, SKYD) — keeps one vote per set of statements (a paced
 `ratios-ttm` fingerprint per kept row: exact twins inside an industry keep the most liquid listing,
@@ -1765,19 +1874,23 @@ Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 | User profile | **In memory only** — `UserState.profile` | `public.users` (RLS) | Re-fetched from the backend each launch. Not persisted. |
 | Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
 | Last Home dashboard (Market Pulse, scanners, signals as served, themes, the watchlist strip — active group name, tickers and prices — and the Trillion group) | **On disk** since 2026-10-01: the raw `GET /home/dashboard` response under Library/Caches/HomeDashboard (`HomeDashboardSnapshotStore`), `.completeFileProtectionUntilFirstUserAuthentication`, never backed up | nothing new — built per request from the existing tables | The account's watchlist tickers and their prices now survive app termination. Owner-stamped with the stored token's `sub`, shown for at most 96 h, deleted at session end, on a change of account and by Settings › Clear Cache (§7.1). Pro signals are kept exactly as served; the server's redaction remains the gate. |
+| Last Updates Market feed (first page: headlines, publishers, links, the Insights card as served) | **On disk** since 2026-10-08: the raw `GET /updates/feed` Market page-0 response under Library/Caches/UpdatesFeedSnapshot (`Core/Repositories/UpdatesFeedSnapshot.swift::UpdatesFeedSnapshot` in `AccountSnapshotStore`), `.completeFileProtectionUntilFirstUserAuthentication`, never backed up | nothing new | Owner-stamped with the stored token's `sub`, shown for at most 96 h, display-only, deleted at session end, on a change of account and by Settings › Clear Cache (§7.1). Not the ticker chips and never a ticker-scope feed. |
+| Last Holdings (the watchlist feed with prices, every group with its tickers and shares, the active group id, Portfolio Insights) | **On disk** since 2026-10-08: the raw `GET /tracking/assets`, `GET /portfolios` and (optional) insights responses under Library/Caches/TrackingSnapshot (`Core/Repositories/TrackingSnapshot.swift::TrackingSnapshot` in `AccountSnapshotStore`), same protection | nothing new | The account's groups, holdings and share counts now survive app termination. Same owner, 96 h and clearing rules as the row above, plus a purge on a server-confirmed portfolio edit; never written back into `PortfolioStore` (§7.1). |
 | UI preferences | `UserDefaults` | `user_settings.preferences` (JSONB), remote-synced | Appearance, notification toggles, Learn progress. |
 | API keys | never present | environment variables | Never in code, never logged (`app/log_redaction.py`). |
 | Search picks (a tap on a search result) | `UserDefaults` `search.trending.counted.v1` — which tickers this device already sent this week (≤300 keys, cleared at session end) | `search_pick_daily` — an **anonymous** daily count per ticker; no user, device, IP or timestamp column (migration 179 — a precise timestamp on a count of 1 would match one access-log line, and its IP) | De-duplicated per account per ticker per 7 ET days on the device and again in server memory (HMAC digests under a per-process key, never persisted), keyed on the security CLASS (crypto vs the rest) because the SQL sums a symbol's stock/etf/fund rows. Chip names come from FMP's active list or the curated file, never from `watchlist_items.company_name` (client-writable). App Privacy: Search History, **not linked**. |
 | News-tone labels (the Updates chart) | Nothing persisted — the chart is fetched per view (5-min memory cache) | `news_sentiment_log` — Cay AI's bullish/bearish/neutral label per (feed scope, `md5(external_id)::uuid`) and the ET day the article was published (migration 180). No headline, URL, summary or publisher: migration 104 removed the last long-term copy of news text and this must not become a second one. Written once per article when it is enriched (first label wins), read through `news_sentiment_daily()`, swept after 120 days from the news pre-warmer loop. A per-ticker backfill (migration 181, `news_sentiment_backfill`) adds `source='backfill'` labels for the previous 90 days, once per ticker — never per user — and a nightly top-up keeps them complete (a window the model could not fully label is not recorded as covered; a failing ticker is retried once a day on its own `last_failed_at` clock, migration 182); the `model` column records which news model labelled each row | Not user data. Keeping derived labels beyond 24 h touches the open FMP data-handling items (`documents/legal/fmp-order-form-checklist.md`) — an owner decision recorded in OWNER_TASKS. |
 | Files (avatars, narration, PDFs, art) | `LearnAudioCache` on disk (narration, purged on sign-out); `URLCache` (images) | **Supabase Storage** — nine buckets: `user-avatars` private (short-lived signed URLs); `research-pdfs` private, readable only through the owner-checked `GET /research/reports/{id}/pdf` proxy, never a signed URL; the three narration buckets `journey-media`, `money-moves-media`, `book-media` private since migration 128 (signed by the Learn audio routes); `book-covers`, `journey-images`, `money-moves-images`, `home-theme-media` public | Bucket `public` flags are ROWS in `storage.buckets`, invisible in a `--schema-only` dump; their `storage.objects` policies are in the snapshot. |
 
-**No user DATA survives app termination except the Keychain, `UserDefaults` and Home's last
-dashboard.** Four on-disk caches do (`URLCache`, `LearnAudioCache`, exported PDFs and the Home
-snapshot — §7.1), and all are re-creatable from the server. The narration cache is purged by
+**No user DATA survives app termination except the Keychain, `UserDefaults` and the account
+snapshots (Home's last dashboard, the last Updates Market feed, the last Holdings).** The on-disk
+caches (`URLCache`, `LearnAudioCache`, exported PDFs and those snapshots — §7.1) are all
+re-creatable from the server. The narration cache is purged by
 `discardDataForEndedSession()` because two of the three
 narration families it holds (Books, Money Moves) are Pro/Max-gated — Journey narration is free but
 shares the store and goes with them. The Home snapshot is deleted there too, because it holds one
-account's watchlist and whatever signals that account's plan unlocked. There is no Core Data, no SwiftData, and no local database — see §7.1 and
+account's watchlist and whatever signals that account's plan unlocked, and so are the Updates and
+Tracking snapshots (one account's news feed; its groups, holdings and shares). There is no Core Data, no SwiftData, and no local database — see §7.1 and
 [iOS_ARCHITECTURE_GUIDE.md](../../frontend/ios/iOS_ARCHITECTURE_GUIDE.md) § Data Persistence, which
 states the same thing independently.
 
@@ -2677,6 +2790,7 @@ What follows is the set with no other home.
 | "At least 3" behind Trending searches is de-duplicated picks, not proven people | The counters store no identity by design, so the server cannot count distinct people. An account counts once per ticker per 7 ET days (device + in-memory de-dup, keyed on the security class), but the server's memory resets on every deploy: a client that bypasses the app's own de-dup, or a second device, can count again after a restart, and colluding accounts can reach the floor. The first minute after a deploy is also served without the active-listing directory (grammar rules only), cached as degraded. "Most added" is exact (distinct accounts over `watchlist_items`, onboarding's first 24 h and admins excluded). | The user chose anonymous counters over per-user rows (2026-09-26). Mitigations: sign-in, a 30/min pick limit, a 50/day per-account cap, active-listing validation, the floor inside SQL, and the server-side `blocked` list in `backend/data/search_trending_popular.json`. |
 | `monitorResearch(reportId:)` is dead | `TaskPollingManager` exposes it; nothing calls it | Recovery is the 5 s reports-list poll (§5.4). Delete or wire. |
 | The Tracking feed and the watchlist had no per-account bound | One scripted free account could star 2,000 tickers (a profile call each) and poll `GET /tracking/assets` — one insider call per ticker per build, plus a chart call every 2 min — for ~4,000–6,000 FMP requests a minute from one identity, surfacing `FMP_RATE_LIMITED` on every other user's screens (F15-3, 2026-09-17). Now: `WATCHLIST_MAX_ITEMS` on BOTH insert paths (`POST /watchlist` and `POST /tracking/holdings`), `TRACKING_FEED_MAX_TICKERS` on the per-ticker sparkline/insider passes (every row still renders), a per-user `_feed_inflight` future so two clients of one account share one build, a 16-wide semaphore on the per-ticker gathers, a 10-min tier-1 insider cache, and `StandardRateLimit` on `GET /tracking/assets` / `POST /watchlist`. The five market-data routers carry `MarketRateLimit` (300/min per account, token-keyed, no DB read) and the ~5-call-on-miss stock handlers `MarketFanoutRateLimit` (60/min) — S04-3. | Cost is metered per REQUEST, not per cache miss; a per-user token bucket consumed only on a Tier-1/Tier-2 miss would be tighter and is the next step if abuse appears. |
+| Tracking's earnings alerts can miss today's and tomorrow's earnings in season | `GET /tracking/assets` builds its earnings alerts from one market-wide 15-day `earnings-calendar` read (memoised 30 min, §7.1). FMP cuts that endpoint at 4,000 rows without saying so and keeps the NEWEST dates, so in earnings season the rows dropped are exactly the near-dated ones the alert most needs. Since 2026-10-08 `tracking_service` logs an answer at the cap at ERROR once per ET day (WARNING after) instead of nothing. | Recorded, not fixed: the fix is a per-day fetch (each day's call under the cap, memoised the same way) — an owner decision in OWNER_TASKS. The cap is the same number as `earnings_window_service._TRUNCATION_ROWS`. |
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |

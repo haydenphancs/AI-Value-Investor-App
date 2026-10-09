@@ -122,7 +122,7 @@ def test_every_credit_services_member_is_classified():
     """Every Credit Services member of the benchmark universe is a listed non-lender member
     OR a reviewed lender with a reason — never both, never neither — and every reviewed
     lender found in the universe sits under Credit Services (an entry FMP moved elsewhere
-    gets pruned). The universe builder is to WARN on the same gap (pending: not wired yet). Mutation: a new member left
+    gets pruned). The universe builder WARNs on the same gap (`_log_unreviewed_mixed_members`). Mutation: a new member left
     unclassified, or a ticker in both sets."""
     path = _DATA / "benchmark_universe.json"
     if not path.exists():

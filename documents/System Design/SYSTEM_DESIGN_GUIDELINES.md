@@ -1522,9 +1522,10 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   rule measured FMP's coverage (and the US-only roster), not maturity, so it is retired in both
   copies (`classify_lifecycle`, `_classify_lifecycle`), a stored row's phase is re-derived from its
   CAGR on read, and a broad dossier contributes no phase at all.
-- **Coverage is one NAICS argument per industry.** 85 of the 156 universe industries have an
-  industry-level source: Census AIES revenue for 84 (3- to 6-digit NAICS 2017 codes) and the BEA
-  rail series for Railroads, which the Economic Census does not cover. The other 66 show "—":
+- **Coverage is one NAICS argument per industry.** 85 of the 153 universe industries (the US-only
+  file of 2026-10-08) have an industry-level source: Census AIES revenue for 84 (3- to 6-digit
+  NAICS 2017 codes) and the BEA rail series for Railroads, which the Economic Census does not
+  cover. The other 68 show "—":
   mixed constituents, import-heavy markets that US
   plant shipments undercount, or AIES publishing mining and construction only at 3 digits.
   Every mapped Census code and allow-listed BEA series is pinned to a live-verified figure in

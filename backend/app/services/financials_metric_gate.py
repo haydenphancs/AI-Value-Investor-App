@@ -200,11 +200,11 @@ NON_LENDER_EVIDENCE: Mapping[str, str] = MappingProxyType({
 #: The 32 lender members of "Financial - Credit Services" in the benchmark universe
 #: (backend/data/benchmark_universe.json, reviewed 2026-10-09), each with why it is a
 #: lender. Informational: an unlisted member is gated whether or not it is here (the safe
-#: default). PENDING (2026-10-09): the universe builder is to WARN on a Credit Services
-#: member in neither this nor `NON_LENDER_MEMBERS`, so a new member is classified by a
-#: person, never by data — not wired yet (no builder code reads either set); until then
-#: only `test_every_credit_services_member_is_classified` checks it, and it SKIPS where
-#: the gitignored benchmark_universe.json is absent (CI). Disjoint from
+#: default). The universe builder WARNs on any Credit Services member in neither this nor
+#: `NON_LENDER_MEMBERS` (`scripts/build_benchmark_universe._log_unreviewed_mixed_members`),
+#: so a new member is classified by a person, never by data; locally,
+#: `test_every_credit_services_member_is_classified` checks the uploaded file too (it SKIPS
+#: where the gitignored benchmark_universe.json is absent, e.g. CI). Disjoint from
 #: `NON_LENDER_MEMBERS` (a test pins it).
 REVIEWED_CREDIT_SERVICES_LENDERS: Mapping[str, str] = MappingProxyType({
     "AXP": "American Express: card issuer with a loan book and deposits",

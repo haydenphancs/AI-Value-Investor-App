@@ -1223,9 +1223,9 @@ _GATE_REEXPORTS = (
 # HC-2): SPGI's interest coverage of ~20x read "well above sector average" against banks'
 # funding-cost coverage of ~1. AFTER the rebuild (`industry_benchmark_service` pools only
 # the industries where these metrics mean something) it is still no peer group: what is
-# left of Financial Services for these three metrics is shell companies, exchanges and
-# data vendors, real-estate developers (and insurance brokers, for interest coverage) —
-# a few dozen unrelated businesses, mostly shells and developers. So this guard does NOT
+# left of Financial Services for these three metrics is exchanges and data vendors plus a
+# shell company or two (and insurance brokers, for interest coverage) — on the US-only
+# universe of 2026-10-08 about a dozen unrelated businesses. So this guard does NOT
 # go away once the producer has rebuilt the rows. Such a cell is no comparison: absolute
 # heuristics, `peer_level` None. An INDUSTRY cell is the company's own peers and is kept
 # (an exchange is compared with exchanges once its industry has a mature cell); every

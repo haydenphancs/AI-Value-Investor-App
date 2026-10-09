@@ -3444,6 +3444,25 @@ Migration 089 exists because two of these were mixed once already.
 Report-ready is placed AFTER the conditional completion write and AFTER the
 `DegradedReportError` raise, so a refunded report can never notify.
 
+The whale phase reads `whale_trades` by `created_at`, so neither whale writer may ever
+RE-CREATE a row that survives a re-derivation: a 13F quarter is upserted in place and only
+the trades it no longer derives are deleted (`_prune_stale_13f_trades`, 13F groups only —
+two PTRs disclosed on one date share a congressional group). Both writers diff the SAME
+share positions (`_whale_common.thirteen_f_share_positions`: put/call and principal rows
+dropped, per-manager rows summed, a 13F-HR/A replacing its original) and build their
+holdings from them (`thirteen_f_holdings`, since 2026-10-09: a 13F values an option at its
+underlying shares, so options are never a holding, nor part of the portfolio figure or any
+allocation denominator). A filing is diffed ONLY with the ADJACENT previous quarter
+(`_whale_common.select_13f_comparison`, since 2026-10-09 — the Trillion-Dollar Club's
+`comparison` rule): when FMP lists no filing for the quarter before (Norges Bank files its
+Q1 and Q3 books under SEC confidential treatment) or there is no earlier filing at all,
+the quarter shows holdings only — no trades, change_percent not compared, summaries that
+say why — and a group an older derivation stored for it is deleted with its trades and the
+whale's active banner (`_clear_13f_trade_group`; delete only, so nothing re-announces).
+The snapshot's `raw_hash` carries `THIRTEEN_F_DIFF_VERSION` and that comparison basis, so a
+derivation fix — or FMP listing the missing quarter later — re-derives each fund's latest
+quarter in the next nightly sweep.
+
 ### 11.5 Quiet hours DEFER, they never drop
 
 A notification inside the window is claimed and parked (`push_state='deferred'`,

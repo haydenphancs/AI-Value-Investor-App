@@ -1226,8 +1226,14 @@ def test_the_whale_request_path_hands_the_differ_what_the_old_block_computed(mon
     ref_seam = _ScriptedActions(split_beh, flag_beh)
     ratios, unclassified, failed = asyncio.run(_ref_old_block(
         curr, prev or [], "2026-03-31" if prev is not None else None, "2026-06-30", ref_seam))
-    assert seen["split_ratios"] == ratios
-    assert seen["unclassified"] == unclassified
+    if prev is None:
+        # A first filing is NOT COMPARED since 2026-10-09 (owner decision): the differ is
+        # never reached, and the old block had nothing to look up either.
+        assert "split_ratios" not in seen and snap["trade_group"] is None
+        assert (ratios, unclassified, failed) == ({}, set(), set())
+    else:
+        assert seen["split_ratios"] == ratios
+        assert seen["unclassified"] == unclassified
     assert (snap["raw_hash"] is None) == bool(failed)
     assert svc.corporate_actions.log == ref_seam.log
 
@@ -1263,7 +1269,9 @@ def test_every_name_hydrate_whales_imports_from_whale_service_still_exists():
     tree = ast.parse(script.read_text())
     names = [a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
              and n.module == "app.services.whale_service" for a in n.names]
-    assert "_quarter_end_date" in names and "_find_previous_quarter" in names, "anti-vacuity"
+    # (`_find_previous_quarter` left this list on 2026-10-09: both writers pick quarters with
+    # `_whale_common.select_13f_comparison` now.)
+    assert "_quarter_end_date" in names and "_clear_13f_trade_group" in names, "anti-vacuity"
     missing = [n for n in names if not hasattr(wsvc, n)]
     assert missing == []
     assert callable(WhaleService._suspicious_split_tickers)

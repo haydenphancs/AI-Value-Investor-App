@@ -282,10 +282,14 @@ def test_every_corporate_action_call_runs_under_the_fmp_semaphore(monkeypatch):
 
 
 def test_a_first_filing_looks_nothing_up(monkeypatch):
+    # Since 2026-10-09 a first filing is NOT COMPARED (owner decision; the Trillion-Dollar
+    # Club's `first_filing`): the differ is never reached, so there is nothing to look up
+    # and no trade group (`tests/test_thirteen_f_gap_quarter.py`).
     acts = _Actions(splits={"NVDA": TEN_TO_ONE})
     ratios, unclassified, out = _run(monkeypatch, CURR_FWD, None, acts)
-    assert (ratios, unclassified) == ({}, set())
+    assert (ratios, unclassified) == (None, None)
     assert acts.split_calls == [] and acts.flag_calls == []
+    assert out["trade_group"] is None
     assert out["raw_hash"] is not None
 
 

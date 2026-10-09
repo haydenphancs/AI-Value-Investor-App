@@ -396,10 +396,12 @@ def test_the_stat_tiles_are_not_blanked_by_dormancy():
 # least six weeks old" and that bonds never appear on a 13F: both false.
 #
 # The wording matches `TrillionClubInfoSheet` (pinned in `test_ios_trillion_club_guards.py`
-# §7.9) EXCEPT that sheet's "we leave those out": the Trillion builder drops put/call and
-# PRN rows, but `whale_service._build_holdings` merges them into this figure, so the clause
-# would be false here — and so would defining the figure as "stock positions". If the whale
-# backend ever starts dropping those rows, change the copy AND this guard together.
+# §7.9). Until 2026-10-09 it had to differ from that sheet's "we leave those out": the whale
+# holdings builders summed put/call and PRN rows into this figure. They now return
+# `_whale_common.thirteen_f_holdings` — share positions only (owner decision 2026-10-09) — so
+# "we leave those out" and a "stock positions" definition are TRUE here too. The claim that
+# must never come back is the opposite one: that the figure counts options or convertible
+# notes. If the backend ever counts those rows again, change the copy AND this guard together.
 
 _SHEET_SECTION = re.compile(
     r'section\(\s*title:\s*(?P<title>"__S\d+__"|\w+)\s*,\s*'
@@ -416,9 +418,12 @@ _FALSE_13F_CLAIMS: List[Tuple[re.Pattern, str]] = [
      "a 13F called stocks-only (it lists some convertible notes and options)"),
     (re.compile(r"\bbonds?\b[^.]*\bnever\b|\bnever\b[^.]*\bbonds?\b", re.I),
      "bonds said never to appear (convertible notes do)"),
-    (re.compile(r"\bwe (?:leave|drop|exclude|remove|filter)\b", re.I),
-     "claims non-stock rows are left out — the whale figure keeps them"),
 ]
+
+# A sentence of the figure's own section that names options / convertible notes must be
+# saying they are LEFT OUT: since 2026-10-09 the figure is share positions only.
+_FIGURE_NON_STOCK = re.compile(r"\b(?:options?|convertible)", re.I)
+_EXCLUSION_CUE = re.compile(r"\b(?:left out|leaves? out|exclud\w*|without|not|never)\b|n't\b", re.I)
 
 
 def _sheet_sections(raw: str) -> Dict[str, str]:
@@ -463,8 +468,10 @@ def stats_sheet_13f_violations(raw: str) -> List[str]:
         out.append("the filing lag is not stated as a deadline ('up to' / 'within' 45 days)")
     if "convertible notes" not in leaves_out or not re.search(r"\boptions\b", leaves_out):
         out.append("the sheet no longer says a 13F lists some securities besides stocks")
-    if re.search(r"\bstock (?:positions|holdings)\b|\bstocks? only\b|\bequit(?:y|ies)\b", figure, re.I):
-        out.append("the figure is defined as stock-only, but it includes option / convertible rows")
+    for sentence in _sentences(figure):
+        if _FIGURE_NON_STOCK.search(sentence) and not _EXCLUSION_CUE.search(sentence):
+            out.append("the figure is said to count options / convertible notes — it is share "
+                       "positions only (2026-10-09)")
     return out
 
 
@@ -518,16 +525,30 @@ _NEW_TIMING = (
     # Bonds put back on the never-appears list.
     ('"cash, real estate and short positions never appear on "',
      '"cash, bonds, real estate and short positions never appear on "'),
-    # The Trillion sheet's clause copied over — true there, false for this figure.
-    ('"securities, such as convertible notes and options. "',
-     '"securities, such as convertible notes and options — we leave those out. "'),
     # Convertible notes dropped from the list.
     ('"securities, such as convertible notes and options. "', '"securities, such as options. "'),
-    # The figure redefined as stock positions again.
+    # The figure said to count options again (the pre-2026-10-09 backend truth).
     ('"It\'s the total value of the holdings this filer "',
-     '"It\'s the total value of this filer\'s U.S.-listed stock positions, as "'),
+     '"It\'s the total value, options included, of the holdings this filer "'),
+    ('"It\'s the total value of the holdings this filer "',
+     '"It\'s the total value of the stocks and convertible notes this filer "'),
     # A renamed section title must fail, not disarm the guard.
     ('title: "What a 13F leaves out"', 'title: "What 13F filings omit"'),
 ])
 def test_stats_sheet_guard_fires(old, new):
     assert stats_sheet_13f_violations(_swap_once(_stats_sheet_raw(), old, new))
+
+
+@pytest.mark.parametrize("old,new", [
+    # The Trillion sheet's clause — true for the whale figure too since 2026-10-09.
+    ('"securities, such as convertible notes and options. "',
+     '"securities, such as convertible notes and options — we leave those out. "'),
+    # The figure defined as stock positions.
+    ('"It\'s the total value of the holdings this filer "',
+     '"It\'s the total value of this filer\'s U.S.-listed stock positions, as "'),
+    # The exclusion said in the figure's own section.
+    ('"It\'s the total value of the holdings this filer "',
+     '"Options and convertible notes are left out. It\'s the total value of the holdings this filer "'),
+])
+def test_stats_sheet_accepts_the_share_only_wording(old, new):
+    assert stats_sheet_13f_violations(_swap_once(_stats_sheet_raw(), old, new)) == []

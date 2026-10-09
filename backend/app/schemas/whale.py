@@ -217,8 +217,10 @@ class WhaleProfileResponse(BaseModel):
     # absent key as fatal.
     #
     # Note the deliberate asymmetry with the stat tiles: `portfolio_value` and
-    # `ytd_return` stay honest NUMBERS even for a dormant filer — Burry's $1.37B really
-    # was his Q3 2025 book. The fix for a stale figure is disclosure, never deletion.
+    # `ytd_return` stay honest NUMBERS even for a dormant filer — Burry's Q3 2025 13F
+    # really was his last book (its share positions: the $1.37B once shown was mostly
+    # option notional, left out since 2026-10-09). The fix for a stale figure is
+    # disclosure, never deletion.
     activity_status: str = ""
     activity_label: str = ""
     # MAX(whale_trade_groups.date): newest 13F filing date or congressional disclosure.

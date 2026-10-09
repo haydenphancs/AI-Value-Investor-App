@@ -13,8 +13,6 @@ Design:
 """
 
 import asyncio
-import hashlib
-import json
 import math
 import time as _time
 import uuid
@@ -55,6 +53,15 @@ from app.services._whale_common import (
     ACTIVITY_UNKNOWN,
     snapshot_db_row,
     calc_13f_trade_dollars,
+    thirteen_f_book_value,
+    thirteen_f_holdings,
+    thirteen_f_raw_hash,
+    thirteen_f_share_positions,
+    thirteen_f_share_rows,
+    select_13f_comparison,
+    thirteen_f_dates_row_quarter,
+    uncompared_13f_behavior,
+    uncompared_13f_sentiment,
     AnnualReturn,
     compute_13f_cagr,
     compute_ticker_cagr,
@@ -99,6 +106,7 @@ from app.schemas.whale import (
     FollowResponse,
 )
 from app.utils.supabase_errors import retry_idempotent_async
+from app.utils.postgrest_paging import fetch_all_rows
 from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
@@ -1850,12 +1858,25 @@ class WhaleService:
             logger.warning("No 13F filing dates for CIK %s", cik)
             return await self._read_from_supabase(whale_id)
 
-        # Determine latest filing
-        latest = filing_dates[0]
-        year = int(latest.get("year") or latest.get("date", "2025")[:4])
-        quarter = int(latest.get("quarter", 1))
-        period = f"{year}-Q{quarter}"
-        filing_date = latest.get("date", f"{year}-{quarter * 3:02d}-30")
+        # The latest filing and what it is compared WITH — the ADJACENT previous quarter
+        # only, decided by `select_13f_comparison` (the nightly hydrator's rule too). The
+        # most recent EARLIER filing used to stand in for it, so a quarter FMP does not list
+        # (Norges Bank's confidential Q1 2026) booked six months of changes as Q2 trades.
+        selection = select_13f_comparison(filing_dates)
+        if selection is None:
+            logger.warning(
+                "13F filing dates for CIK %s name no usable quarter (%d row(s)) — serving "
+                "the stored snapshot", cik, len(filing_dates),
+            )
+            return await self._read_from_supabase(whale_id)
+        if selection.skipped_rows:
+            logger.warning(
+                "13F filing dates for CIK %s: skipped %d row(s) with no usable quarter",
+                cik, selection.skipped_rows,
+            )
+        year, quarter = selection.latest
+        period = selection.period
+        filing_date = selection.latest_date
 
         # Step 2: Check Supabase cache
         existing = (
@@ -1876,14 +1897,23 @@ class WhaleService:
                 whale_id, period, _DEGRADED_SNAPSHOT_RETRY_SECONDS,
             )
 
-        # Step 3: Fetch current + previous quarter concurrently
-        prev = _find_previous_quarter(filing_dates, year, quarter)
+        # Step 3: Fetch current + previous quarter concurrently. `prev` is the ADJACENT
+        # quarter, or None: a gap or a first filing is NOT COMPARED (owner decision
+        # 2026-10-09) — holdings only, no trades, no change_percent, and the summaries say
+        # why, exactly as the Trillion-Dollar Club reads a `gap` / `first_filing`.
+        prev = selection.previous
+        if not selection.compared:
+            logger.info(
+                "whale: whale_id=%s cik=%s period=%s has no adjacent previous quarter on "
+                "file (%s; newest older: %s) — holdings only: no trades, change_percent "
+                "not compared",
+                whale_id, cik, period, selection.comparison,
+                f"{selection.older[0]}-Q{selection.older[1]}" if selection.older else "none",
+            )
 
         current_task = self.fmp.get_institutional_holdings(cik, year, quarter)
         prev_task = (
-            self.fmp.get_institutional_holdings(
-                cik, int(prev["year"]), int(prev["quarter"])
-            )
+            self.fmp.get_institutional_holdings(cik, prev[0], prev[1])
             if prev
             else _noop_list()
         )
@@ -1951,31 +1981,42 @@ class WhaleService:
         # 402 `/splits` endpoint. It never raises for a lookup problem: a failed lookup
         # arms the magnitude backstop (`unclassified_tickers`) AND lands in
         # `lookup_failed_tickers`, which keeps `raw_hash` off the snapshot below.
-        prev_end = (
-            _quarter_end_date(int(prev["year"]), int(prev["quarter"]))
-            if prev else None
-        )
-        curr_end = _quarter_end_date(year, quarter)
-        (
-            split_ratios, unclassified_tickers, lookup_failed_tickers,
-        ) = await resolve_13f_split_adjustments(
-            current_raw, prev_raw, prev_end, curr_end,
-            actions=corporate_actions_source(self),
-            log_ctx=f"whale_id={whale_id} cik={cik} period={year}-Q{quarter}",
-        )
+        # Only a COMPARED quarter is diffed — and so only it needs the split block.
+        trade_group: Optional[Dict[str, Any]] = None
+        lookup_failed_tickers: Set[str] = set()
+        if prev:
+            prev_end = _quarter_end_date(prev[0], prev[1])
+            curr_end = _quarter_end_date(year, quarter)
+            (
+                split_ratios, unclassified_tickers, lookup_failed_tickers,
+            ) = await resolve_13f_split_adjustments(
+                # Split suspects from the SAME share positions the diff reads.
+                thirteen_f_share_rows(current_raw), thirteen_f_share_rows(prev_raw), prev_end, curr_end,
+                actions=corporate_actions_source(self),
+                log_ctx=f"whale_id={whale_id} cik={cik} period={year}-Q{quarter}",
+            )
 
-        trade_group = self._diff_quarters(
-            current_raw, prev_raw, filing_date, total_value, split_ratios,
-            unclassified_tickers,
-        )
-        behavior = self._generate_behavior_summary(trade_group, sector_data)
-        sentiment = self._generate_sentiment_summary(
-            holdings_data, trade_group, sector_data
-        )
+            trade_group = self._diff_quarters(
+                current_raw, prev_raw, filing_date, total_value, split_ratios,
+                unclassified_tickers,
+            )
+        if selection.compared:
+            behavior = self._generate_behavior_summary(trade_group, sector_data)
+            sentiment = self._generate_sentiment_summary(
+                holdings_data, trade_group, sector_data
+            )
+        else:
+            # The no-trades texts say "stable positioning with no significant changes" — a
+            # claim about a comparison that was never made. Shared with the hydrator.
+            behavior = uncompared_13f_behavior(sector_data)
+            sentiment = uncompared_13f_sentiment(holdings_data, sector_data, selection)
 
-        raw_hash: Optional[str] = hashlib.sha256(
-            json.dumps(current_raw, sort_keys=True, default=str).encode()
-        ).hexdigest()
+        # Raw filing + `THIRTEEN_F_DIFF_VERSION` + what it was compared with: a diff fix, or
+        # FMP listing the adjacent quarter later, re-derives already-stored quarters in the
+        # next sweep (the hydrator skips only on an EQUAL hash).
+        raw_hash: Optional[str] = thirteen_f_raw_hash(
+            current_raw, basis=selection.basis, previous_raw=prev_raw,
+        )
         if lookup_failed_tickers:
             # DEGRADED, not final. The backstop withheld rows because a lookup FAILED,
             # so this snapshot must not be hashed as "the answer for this raw filing":
@@ -2021,6 +2062,10 @@ class WhaleService:
             [trade_group] if trade_group else [],
             behavior, sentiment, total_value, perf_data_list,
             whale=whale,
+            prune_stale_trades=True,
+            # A quarter whose derivation wrote no trade group keeps none: a group stored
+            # for it is an older derivation's (before 2026-10-09, one diffed across a gap).
+            clear_13f_group_date=None if trade_group else filing_date,
         )
 
         return snapshot
@@ -2200,33 +2245,20 @@ class WhaleService:
             return None
         split_ratios = split_ratios or {}
 
-        # Build ticker maps
-        current_map: Dict[str, Dict] = {}
-        for h in current_raw:
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if not sym or sym == "--":
-                continue
-            current_map[sym] = {
-                "symbol": sym,
-                "name": h.get("securityName") or h.get("companyName") or sym,
-                "value": _finite_float(h.get("value")),
-                "shares": int(_finite_float(h.get("sharesNumber") or h.get("shares"))),
-            }
+        # SHARE positions, one per symbol (`_whale_common.thirteen_f_share_positions`):
+        # put/call and principal rows dropped, per-manager rows summed, a 13F-HR/A
+        # replacing its original. Keyed by symbol with the LAST raw row winning — as this
+        # was — a fund's put position or one manager's slice overwrote the stock's own
+        # share count, and the "trade" was the gap between two unrelated rows. The SAME
+        # helper feeds `hydrate_whales._diff_quarters`, so the two writers cannot drift.
+        current_map = thirteen_f_share_positions(current_raw)
+        prev_map = thirteen_f_share_positions(previous_raw)
 
-        prev_map: Dict[str, Dict] = {}
-        prev_total = 0.0
-        for h in previous_raw:
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if not sym or sym == "--":
-                continue
-            val = _finite_float(h.get("value"))
-            prev_map[sym] = {
-                "symbol": sym,
-                "name": h.get("securityName") or h.get("companyName") or sym,
-                "value": val,
-                "shares": int(_finite_float(h.get("sharesNumber") or h.get("shares"))),
-            }
-            prev_total += val
+        # Allocation denominators are the SHARE books, as the holdings' allocations are
+        # (`thirteen_f_holdings`): the previous quarter's here, the current one passed in by
+        # the caller as the holdings' total. Every row's value used to count, option
+        # notional included, so an options-heavy fund's weights read many times too small.
+        prev_total = thirteen_f_book_value(prev_map)
 
         if not current_map:
             return None
@@ -2694,56 +2726,19 @@ class WhaleService:
     def _build_holdings(
         self, raw_holdings: List[Dict]
     ) -> List[Dict[str, Any]]:
-        """Transform raw FMP 13F holdings into UI shape.
+        """Transform raw FMP 13F holdings into UI shape — SHARE positions only.
 
-        Dedups by RESOLVED ticker: FMP ``institutional-ownership/extract`` maps
-        several CUSIP rows (common + options, dual listings) onto ONE symbol.
-        Without merging, (a) the same issuer renders twice in Current Picks and
-        (b) the denormalized ``whale_holdings`` insert hits its
-        UNIQUE(whale_id, ticker) constraint and aborts the whole sync.
-
-        The denominator sums POSITIVE values only — a stray negative/zero FMP
-        value would otherwise deflate the total and push a legitimate holding's
-        allocation past 100, violating the ``numeric(7,4)`` / CHECK(0..100)
-        column. Non-finite FMP tokens (NaN/Inf) coerce to 0 via ``_finite_float``.
+        `_whale_common.thirteen_f_holdings`, the one implementation both writers share
+        (`hydrate_whales._build_13f_holdings` returns the same). Put/call rows and principal
+        (PRN) lines are out: a 13F reports an option at the value of its UNDERLYING shares,
+        so summing every row made a put (a bet against the stock) a large long "holding" and
+        inflated the portfolio figure and every allocation (owner decision 2026-10-09). Rows
+        still merge per RESOLVED ticker (several CUSIPs, one symbol), so the
+        ``whale_holdings`` UNIQUE(whale_id, ticker) insert cannot abort the sync, and the
+        denominator counts positive positions only, so allocation stays inside its
+        CHECK(0..100). NaN / Inf coerce to 0.
         """
-        merged: Dict[str, Dict[str, Any]] = {}
-        for h in raw_holdings:
-            val = _finite_float(h.get("value"))
-            if val <= 0:
-                continue
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if not sym or sym == "--":
-                continue
-            shares = _finite_float(h.get("sharesNumber") or h.get("shares"))
-            existing = merged.get(sym)
-            if existing:
-                existing["value"] += val
-                existing["shares"] += shares
-            else:
-                merged[sym] = {
-                    "ticker": sym,
-                    "company_name": (
-                        h.get("securityName") or h.get("companyName") or sym
-                    ),
-                    "logo_url": None,
-                    "allocation": 0.0,
-                    "change_percent": 0,
-                    "value": val,
-                    "shares": shares,
-                }
-
-        total = sum(h["value"] for h in merged.values())
-        if total <= 0:
-            return []
-
-        holdings = list(merged.values())
-        for h in holdings:
-            h["allocation"] = round(h["value"] / total * 100, 2)
-            h["shares"] = int(h["shares"])
-
-        holdings.sort(key=lambda x: x["value"], reverse=True)
-        return holdings
+        return thirteen_f_holdings(raw_holdings)
 
     def _build_sectors_from_industry(
         self, industry_data: List[Dict]
@@ -2804,26 +2799,29 @@ class WhaleService:
     ) -> List[Dict]:
         """Compute change_percent by comparing current vs previous quarter allocations.
 
+        The previous quarter is read as HOLDINGS (`thirteen_f_holdings`), exactly as the
+        nightly writer reads it (`hydrate_whales._build_13f_holdings`), so both writers store
+        the same figure. This used to take the LAST previous-quarter row per symbol — a
+        call row or one manager's slice stood in for the whole position — over a
+        denominator that also counted symbol-less rows; whichever writer derived a quarter
+        first was kept, so the stored change_percent depended on who got there first.
+
         ⚠️ Every arithmetic input here goes through ``_finite_float``, NOT bare
         ``float(x or 0)``. This was the one site in the 13F pipeline that did not, and
         the omission was load-bearing: ``float("nan") or 0`` yields ``nan`` (NaN is
-        truthy), so ``prev_total`` became NaN, ``prev_total <= 0`` evaluated **False**
-        (every NaN comparison does), and the guard below was bypassed. Every
-        ``change_percent`` then became NaN, reached ``WhaleHoldingResponse`` — whose
-        ``JSONResponse`` renders with ``allow_nan=False`` — and 500'd the entire whale
-        profile from inside the renderer, where the endpoint's own try/except cannot
-        reach it. Same failure shape as the holders-tab NaN outage.
+        truthy), so the previous total became NaN, its ``<= 0`` guard evaluated **False**
+        (every NaN comparison does), and every ``change_percent`` became NaN, reached
+        ``WhaleHoldingResponse`` — whose ``JSONResponse`` renders with ``allow_nan=False``
+        — and 500'd the entire whale profile from inside the renderer, where the
+        endpoint's own try/except cannot reach it. Same failure shape as the holders-tab
+        NaN outage. A previous quarter with no positive share position is no comparison
+        at all: the holdings are returned unchanged.
         """
-        prev_total = sum(_finite_float(h.get("value")) for h in prev_raw)
-        if not math.isfinite(prev_total) or prev_total <= 0:
+        prev_alloc: Dict[str, float] = {
+            h["ticker"]: h["allocation"] for h in thirteen_f_holdings(prev_raw)
+        }
+        if not prev_alloc:
             return holdings
-
-        prev_alloc: Dict[str, float] = {}
-        for h in prev_raw:
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if sym and sym != "--":
-                val = _finite_float(h.get("value"))
-                prev_alloc[sym] = val / prev_total * 100
 
         for h in holdings:
             prev_pct = _finite_float(prev_alloc.get(h.get("ticker")))
@@ -3414,6 +3412,9 @@ class WhaleService:
         total_value: float,
         perf_data: Any,
         whale: Optional[Dict] = None,
+        *,
+        prune_stale_trades: bool = False,
+        clear_13f_group_date: Optional[str] = None,
     ) -> None:
         """Write aggregated data into the existing whale_* tables.
 
@@ -3421,6 +3422,15 @@ class WhaleService:
         congressional disclosure filing. Each is upserted keyed by
         ``(whale_id, date)`` so re-running hydration on unchanged upstream data
         does NOT accumulate duplicate rows (the old daily-``now``-stamp bug).
+
+        ``prune_stale_trades`` (the 13F path only): after a group's upsert, delete its
+        trades that this derivation no longer contains (`_prune_stale_13f_trades`). A 13F
+        diff is ONE group per quarter holding the complete trade list; a congressional
+        group is not — two PTRs disclosed on one date share it — so congress never prunes.
+
+        ``clear_13f_group_date`` (the 13F path only, when the quarter's derivation wrote NO
+        group): the group stored for that date, its trades and the whale's active banner
+        are removed (`_clear_13f_trade_group`) — delete only, nothing re-created.
         """
         sb = get_supabase()
 
@@ -3626,6 +3636,26 @@ class WhaleService:
                 ]
                 if trade_rows:
                     (await asyncio.to_thread(_bulk_write_trades, sb, trade_rows))
+                    if prune_stale_trades:
+                        try:
+                            pruned = await asyncio.to_thread(
+                                _prune_stale_13f_trades, sb, tg_id, trade_rows
+                            )
+                            if pruned:
+                                logger.info(
+                                    "[sync] pruned %d stale 13F trade(s) whale_id=%s date=%s",
+                                    pruned, whale_id, trade_group["date"],
+                                )
+                        except Exception as prune_err:
+                            # Non-fatal: the upsert above already landed, so the group
+                            # is complete; only rows this derivation dropped survive, and
+                            # the Home card skips a contradictory BOUGHT/SOLD pair.
+                            logger.warning(
+                                "[sync] stale 13F trade prune failed whale_id=%s date=%s: "
+                                "%s: %s — rows the new derivation dropped stay until the "
+                                "next one", whale_id, trade_group["date"],
+                                type(prune_err).__name__, prune_err,
+                            )
             except Exception as tg_err:
                 logger.warning(
                     "whale_trade_group sync skipped (likely concurrent "
@@ -3634,6 +3664,28 @@ class WhaleService:
                     type(tg_err).__name__, tg_err,
                 )
                 continue
+
+        # 5. A 13F quarter with no trade group keeps none (see `_clear_13f_trade_group`).
+        if clear_13f_group_date:
+            try:
+                cleared, cleared_trades = await asyncio.to_thread(
+                    _clear_13f_trade_group, sb, whale_id, clear_13f_group_date
+                )
+                if cleared:
+                    logger.info(
+                        "[sync] removed %d stale 13F trade group(s) and %d trade(s) "
+                        "whale_id=%s date=%s — this quarter has no trades",
+                        cleared, cleared_trades, whale_id, clear_13f_group_date,
+                    )
+            except Exception as clear_err:
+                # Non-fatal, like the prune: the snapshot already landed; the stale group
+                # stays until the next derivation of this quarter (the nightly sweep's
+                # failure path resets its hash so that one retries).
+                logger.warning(
+                    "[sync] stale 13F trade group clear failed whale_id=%s date=%s: %s: %s "
+                    "— its rows stay until the next derivation",
+                    whale_id, clear_13f_group_date, type(clear_err).__name__, clear_err,
+                )
 
 
 # ── Module-Level Helpers ─────────────────────────────────────────────
@@ -3780,6 +3832,83 @@ def _normalize_sector_exposure(
             )
         )
     return out
+
+
+def _trade_key(row: Dict[str, Any]) -> Tuple[str, str, str]:
+    """The `whale_trades` upsert conflict key minus the group: (ticker, action, date)."""
+    return (str(row.get("ticker") or ""), str(row.get("action") or ""), str(row.get("date") or ""))
+
+
+def _prune_stale_13f_trades(sb, trade_group_id: str, rows: List[Dict[str, Any]]) -> int:
+    """Delete the 13F group's trades that the derivation just written no longer contains.
+
+    The writers UPSERT on `(trade_group_id, ticker, action, date)` and never deleted, so a
+    re-derivation of a quarter (a 13F-HR/A, a degraded retry, a diff fix) left every trade
+    it no longer produced in place — including a BOUGHT next to the new SOLD for the same
+    stock. Runs AFTER the upsert: a failure between the two leaves stale rows, never a hole.
+
+    Deliberately NOT delete-then-insert: a row whose key survives is updated in place by the
+    upsert and kept here, so its `id` and `created_at` stay — `smart_money_sender` reads
+    `whale_trades` by `created_at > cursor`, and re-created rows would re-notify every
+    follower of a quarter it already announced. Returns how many rows were deleted; raises
+    on a Supabase error (the caller decides how loud that is). 13F groups ONLY — see
+    `_sync_to_whale_tables(prune_stale_trades=...)`.
+    """
+    if not trade_group_id:
+        return 0
+    keep = {_trade_key(r) for r in rows}
+    existing = fetch_all_rows(
+        lambda: sb.table("whale_trades")
+        .select("id, ticker, action, date")
+        .eq("trade_group_id", trade_group_id),
+        order_by="id",
+        what=f"stale 13F trades of group {trade_group_id}",
+    )
+    stale = [e["id"] for e in existing if e.get("id") and _trade_key(e) not in keep]
+    for i in range(0, len(stale), 100):
+        sb.table("whale_trades").delete().in_("id", stale[i:i + 100]).execute()
+    return len(stale)
+
+
+def _clear_13f_trade_group(sb, whale_id: str, date: str) -> Tuple[int, int]:
+    """Remove the 13F trade group stored for ``(whale_id, date)``: its trades, then the group
+    row, then the whale's active "Large whale move" banner. Returns ``(groups, trades)``
+    deleted.
+
+    For a 13F quarter whose derivation produced NO trade group — no adjacent previous
+    quarter on file (`_whale_common.select_13f_comparison`), or no change worth a row —
+    whatever group is stored for it came from an older derivation (before 2026-10-09, one
+    diffed across a gap: six months of changes booked as one quarter) and would keep feeding
+    the profile cards, the activity feed and the Home card's adds. DELETE only: nothing is
+    re-created, so no `created_at` moves and `smart_money_sender` cannot re-announce.
+    Trades first, so a failure in between leaves an empty group (cleared again on the next
+    derivation), never orphaned trades. The banner — written only by
+    `hydrate_whales._maybe_generate_alert`, one active per whale, about the latest group —
+    goes with the group it described. 13F ONLY: two congressional disclosures share a
+    `(whale_id, date)` group. Raises on a Supabase error (the caller decides how loud).
+    """
+    if not whale_id or not date:
+        return 0, 0
+    rows = (
+        sb.table("whale_trade_groups")
+        .select("id")
+        .eq("whale_id", whale_id)
+        .eq("date", date)
+        .execute()
+    ).data or []
+    groups = trades = 0
+    for row in rows:
+        group_id = row.get("id") if isinstance(row, dict) else None
+        if not group_id:
+            continue
+        trades += _prune_stale_13f_trades(sb, str(group_id), [])   # keep nothing
+        sb.table("whale_trade_groups").delete().eq("id", group_id).eq("whale_id", whale_id).execute()
+        groups += 1
+    if groups:
+        sb.table("whale_alerts").update({"is_active": False}).eq(
+            "whale_id", whale_id
+        ).eq("is_active", True).execute()
+    return groups, trades
 
 
 def _bulk_write_trades(sb, rows: List[Dict[str, Any]]) -> None:
@@ -3981,14 +4110,20 @@ def _quarter_end_date(year: int, quarter: int) -> str:
 def _find_previous_quarter(
     filing_dates: List[Dict], year: int, quarter: int
 ) -> Optional[Dict]:
-    """Find the filing entry for the quarter before (year, quarter)."""
-    for fd in filing_dates:
-        fd_year = int(fd.get("year") or fd.get("date", "0000")[:4])
-        fd_quarter = int(fd.get("quarter", 0))
-        if fd_year == year and fd_quarter == quarter:
-            continue
-        if (fd_year < year) or (fd_year == year and fd_quarter < quarter):
-            return fd
+    """The dates entry for the ADJACENT quarter before (year, quarter), or None.
+
+    ⚠️ ADJACENT only. This returned the most recent EARLIER entry, so when FMP listed no
+    filing for the quarter before (Norges Bank's confidential 2026-Q1), 2026-Q2 was diffed
+    with 2025-Q4 and six months of changes were booked as Q2 trades (2026-10-09). The two
+    13F writers now decide with `_whale_common.select_13f_comparison`; this stays for the
+    read-only measurement scripts, so they pick what the writers diff. The returned entry
+    carries ``year`` / ``quarter`` as ints even when FMP's row named only a ``date``.
+    """
+    adjacent = (year - 1, 4) if quarter == 1 else (year, quarter - 1)
+    for fd in filing_dates if isinstance(filing_dates, (list, tuple)) else ():
+        parsed = thirteen_f_dates_row_quarter(fd)
+        if parsed is not None and parsed[0] == adjacent:
+            return {**fd, "year": adjacent[0], "quarter": adjacent[1]}
     return None
 
 

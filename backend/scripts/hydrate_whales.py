@@ -24,7 +24,6 @@ Usage:
 
 import asyncio
 import argparse
-import hashlib
 import json
 import logging
 import math
@@ -52,11 +51,11 @@ from app.integrations.gemini import GeminiClient  # noqa: E402
 from app.services.whale_service import (  # noqa: E402
     SIC_TO_SECTOR, SECTOR_COLORS, DEFAULT_SECTOR_COLOR, _map_sic_to_sector,
     _quarter_end_date,
-    # Byte-identical clones lived here; `_find_previous_quarter` sits on the
-    # quarter-selection path for BOTH 13F writers, and they upsert the same
-    # `whale_trade_groups` row — so a one-sided fix would have made them pick
+    # Byte-identical clones lived here; the quarter selection is shared by BOTH 13F
+    # writers (`_whale_common.select_13f_comparison`, imported below), and they upsert the
+    # same `whale_trade_groups` row — so a one-sided fix would have made them pick
     # DIFFERENT quarters for one whale and flip-flop the profile.
-    _find_previous_quarter, _noop_list,
+    _noop_list,
     # The SIGNED formatter, imported not re-implemented. The local copy here had no
     # unit roll-up (so $999,999,999 rendered "+$1000.0M" while the very same figure
     # rendered "+$1.00B" one screen away, via the service) and derived its sign from
@@ -68,6 +67,11 @@ from app.services.whale_service import (  # noqa: E402
     # aborts the whole whale's hydration and, because `raw_hash` never advances,
     # repeats on every run until FMP fixes the row.
     _finite_float,
+    # The 13F stale-trade prune: ONE implementation for both writers, keyed exactly like
+    # the `whale_trades` upsert conflict target.
+    _prune_stale_13f_trades,
+    # …and its whole-group twin, for a quarter whose derivation writes no group.
+    _clear_13f_trade_group,
 )
 from app.services.corporate_actions_service import corporate_actions_source  # noqa: E402
 # The 13F split block is CALLED, never re-implemented: the same helper
@@ -90,6 +94,14 @@ from app.services._whale_common import (  # noqa: E402
     format_amount_range,
     snapshot_db_row,
     calc_13f_trade_dollars,
+    thirteen_f_book_value,
+    thirteen_f_holdings,
+    thirteen_f_raw_hash,
+    thirteen_f_share_positions,
+    thirteen_f_share_rows,
+    select_13f_comparison,
+    uncompared_13f_behavior,
+    uncompared_13f_sentiment,
     resolve_congress_action,
     AnnualReturn,
     compute_13f_cagr,
@@ -382,8 +394,14 @@ class WhaleHydrator:
                     return
                 existing_logo_cache = existing.data[0].get("logo_cache") or {}
 
-        # Step 3: Calculate change_percent
-        holdings = self._calculate_change_percent(holdings, prev_holdings)
+        # A 13F quarter with no adjacent previous quarter on file (`_process_13f`).
+        uncompared = raw.get("uncompared")
+
+        # Step 3: Calculate change_percent — never against a quarter that was not compared:
+        # an empty previous book makes every holding's change its whole weight ("+12.3%"
+        # on everything), where the live profile path leaves 0.0.
+        if uncompared is None:
+            holdings = self._calculate_change_percent(holdings, prev_holdings)
 
         # Step 4: Enrich logos (batch)
         holdings, logo_cache = await self._enrich_logos(
@@ -395,10 +413,17 @@ class WhaleHydrator:
             if not sectors:
                 sectors = await self._enrich_sectors(holdings)
 
-        # Step 6: AI summaries (parallel)
-        behavior, sentiment = await self._generate_ai_summaries(
-            name, holdings, primary_group, sectors, is_congress=is_congress
-        )
+        # Step 6: AI summaries (parallel). None for a quarter that was not compared: the
+        # model would be told "no recent trades" and answer "stable positioning" — a claim
+        # about a comparison never made. The shared texts say why no change is shown, and
+        # match the live profile path's word for word.
+        if uncompared is not None:
+            behavior = uncompared_13f_behavior(sectors)
+            sentiment = uncompared_13f_sentiment(holdings, sectors, uncompared)
+        else:
+            behavior, sentiment = await self._generate_ai_summaries(
+                name, holdings, primary_group, sectors, is_congress=is_congress
+            )
 
         # Step 7: Compute ytd_return + risk profile
         annual_return = await self._compute_ytd_return(
@@ -428,6 +453,10 @@ class WhaleHydrator:
             await self._persist(
                 whale_id, snapshot, annual_return, risk_profile,
                 associated_ticker=whale.get("associated_ticker"),
+                # 13F only: one group per quarter carrying the complete trade list. Two
+                # PTRs disclosed on one date share a congressional group, so pruning
+                # after the second would delete the first's rows.
+                prune_stale_trades=not is_congress,
             )
 
         self.stats["processed"] += 1
@@ -446,14 +475,38 @@ class WhaleHydrator:
             logger.warning("  No 13F filing dates for CIK %s", cik)
             return None
 
-        latest = filing_dates[0]
-        year = int(latest.get("year") or latest.get("date", "2025")[:4])
-        quarter = int(latest.get("quarter", 1))
-        period = f"{year}-Q{quarter}"
-        filing_date = latest.get("date", f"{year}-{quarter * 3:02d}-30")
+        # The latest filing and what it is compared WITH — the ADJACENT previous quarter
+        # only (`select_13f_comparison`, the live profile path's rule too). The most recent
+        # EARLIER filing used to stand in for it, so a quarter FMP does not list (Norges
+        # Bank's confidential Q1 2026) booked six months of changes as Q2 trades.
+        selection = select_13f_comparison(filing_dates)
+        if selection is None:
+            logger.warning(
+                "  13F filing dates for CIK %s name no usable quarter (%d row(s))",
+                cik, len(filing_dates),
+            )
+            return None
+        if selection.skipped_rows:
+            logger.warning(
+                "  13F filing dates for CIK %s: skipped %d row(s) with no usable quarter",
+                cik, selection.skipped_rows,
+            )
+        year, quarter = selection.latest
+        period = selection.period
+        filing_date = selection.latest_date
 
-        # Find previous quarter
-        prev_entry = _find_previous_quarter(filing_dates, year, quarter)
+        # The ADJACENT previous quarter, or None: a gap or a first filing is NOT COMPARED
+        # (owner decision 2026-10-09) — holdings only, no trades, no change_percent, and
+        # summaries that say why.
+        prev_entry = selection.previous
+        if not selection.compared:
+            logger.info(
+                "  whale_id=%s cik=%s period=%s has no adjacent previous quarter on file "
+                "(%s; newest older: %s) — holdings only: no trades, change_percent not "
+                "compared",
+                whale_id, cik, period, selection.comparison,
+                f"{selection.older[0]}-Q{selection.older[1]}" if selection.older else "none",
+            )
 
         # Fetch all data concurrently, THROTTLED.
         #
@@ -467,9 +520,7 @@ class WhaleHydrator:
                 return await coro
 
         prev_coro = (
-            self.fmp.get_institutional_holdings(
-                cik, int(prev_entry["year"]), int(prev_entry["quarter"])
-            )
+            self.fmp.get_institutional_holdings(cik, prev_entry[0], prev_entry[1])
             if prev_entry
             else _noop_list()
         )
@@ -513,7 +564,7 @@ class WhaleHydrator:
                 "  13F previous-quarter fetch returned no rows for CIK %s "
                 "(%s-Q%s) although a prior filing EXISTS — aborting this whale rather "
                 "than booking its entire book as new positions",
-                cik, prev_entry.get("year"), prev_entry.get("quarter"),
+                cik, prev_entry[0], prev_entry[1],
             )
             return None
 
@@ -533,29 +584,33 @@ class WhaleHydrator:
         # (`unclassified_tickers`) AND lands in `lookup_failed_tickers`, which keeps
         # `raw_hash` off the snapshot below. Pinned end to end by
         # `tests/test_hydrate_whales_splits_characterisation.py`.
-        prev_end = (
-            _quarter_end_date(int(prev_entry["year"]), int(prev_entry["quarter"]))
-            if prev_entry
-            else None
-        )
-        curr_end = _quarter_end_date(year, quarter)
-        (
-            split_ratios, unclassified_tickers, lookup_failed_tickers,
-        ) = await resolve_13f_split_adjustments(
-            current_raw, prev_raw, prev_end, curr_end,
-            actions=_ThrottledCorporateActions(corporate_actions_source(self), _throttled),
-            log_ctx=f"whale_id={whale_id} cik={cik} period={period}",
-        )
+        # Only a COMPARED quarter is diffed — and so only it needs the split block.
+        trade_group: Optional[Dict[str, Any]] = None
+        lookup_failed_tickers: Set[str] = set()
+        if prev_entry:
+            prev_end = _quarter_end_date(prev_entry[0], prev_entry[1])
+            curr_end = _quarter_end_date(year, quarter)
+            (
+                split_ratios, unclassified_tickers, lookup_failed_tickers,
+            ) = await resolve_13f_split_adjustments(
+                # Split suspects from the SAME share positions the diff reads.
+                thirteen_f_share_rows(current_raw), thirteen_f_share_rows(prev_raw), prev_end, curr_end,
+                actions=_ThrottledCorporateActions(corporate_actions_source(self), _throttled),
+                log_ctx=f"whale_id={whale_id} cik={cik} period={period}",
+            )
 
-        # Diff quarters for trade group
-        trade_group = self._diff_quarters(
-            current_raw, prev_raw, filing_date, total_value, split_ratios,
-            unclassified_tickers,
-        )
+            # Diff quarters for trade group
+            trade_group = self._diff_quarters(
+                current_raw, prev_raw, filing_date, total_value, split_ratios,
+                unclassified_tickers,
+            )
 
-        raw_hash: Optional[str] = hashlib.sha256(
-            json.dumps(current_raw, sort_keys=True, default=str).encode()
-        ).hexdigest()
+        # Raw filing + `THIRTEEN_F_DIFF_VERSION` + what it was compared with: a diff fix, or
+        # FMP listing the adjacent quarter later, re-derives already-stored quarters in the
+        # next sweep (the hydrator skips only on an EQUAL hash).
+        raw_hash: Optional[str] = thirteen_f_raw_hash(
+            current_raw, basis=selection.basis, previous_raw=prev_raw,
+        )
         if lookup_failed_tickers:
             # DEGRADED, not final: rows were withheld because a lookup FAILED. Hashing
             # this as the answer for the raw filing would make `_hydrate_one` skip it as
@@ -580,6 +635,9 @@ class WhaleHydrator:
             "perf_data_list": perf_data_list if isinstance(perf_data_list, list) else [],
             "filing_period": period,
             "filing_date": filing_date,
+            # None when the quarter WAS compared; else the selection the "not compared"
+            # summaries name (no change_percent, no model call — `_hydrate_one`).
+            "uncompared": None if selection.compared else selection,
         }
 
     # ── Congressional Processing ─────────────────────────────────────
@@ -656,52 +714,17 @@ class WhaleHydrator:
     def _build_13f_holdings(
         self, raw_holdings: List[Dict]
     ) -> List[Dict[str, Any]]:
-        """Transform raw FMP 13F data into normalized holdings.
+        """Transform raw FMP 13F data into normalized holdings — SHARE positions only.
 
-        Aggregates by ticker so multiple CUSIPs for the same symbol
-        (share classes, call/put option tranches) collapse into one
-        position. Without this, DB INSERT hits the UNIQUE(whale_id,
-        ticker) constraint and allocations double-count.
+        `_whale_common.thirteen_f_holdings`, the implementation `whale_service._build_holdings`
+        returns too. Put/call rows are out (a 13F values an option at its UNDERLYING's
+        shares, so they inflated `total_value` → `whales.portfolio_value` and every
+        allocation; owner decision 2026-10-09), and so are non-SH principal rows. Positions
+        still merge per ticker — several CUSIPs, one symbol — so the INSERT cannot hit the
+        UNIQUE(whale_id, ticker) constraint, and NaN / Inf coerce to 0 rather than reaching
+        a persisted column or `int()`.
         """
-        by_ticker: Dict[str, Dict[str, Any]] = {}
-        for h in raw_holdings:
-            # `_finite_float`, not bare `float()` — this feeds `total_value` and then
-            # `whales.portfolio_value`, so a NaN here reaches a persisted column. The
-            # diff path was hardened; this one was missed in the same pass.
-            val = _finite_float(h.get("value"))
-            if val <= 0:
-                continue
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if not sym or sym == "--":
-                continue
-            # int(float("nan")) raises ValueError, which aborts the whole whale.
-            shares = int(_finite_float(h.get("sharesNumber") or h.get("shares")))
-            name = h.get("securityName") or h.get("companyName") or sym
-
-            existing = by_ticker.get(sym)
-            if existing:
-                existing["value"] += val
-                existing["shares"] += shares
-            else:
-                by_ticker[sym] = {
-                    "ticker": sym,
-                    "company_name": name,
-                    "logo_url": None,
-                    "value": val,
-                    "shares": shares,
-                }
-
-        total = sum(h["value"] for h in by_ticker.values())
-        if total <= 0:
-            return []
-
-        holdings = list(by_ticker.values())
-        for h in holdings:
-            h["allocation"] = round(h["value"] / total * 100, 2)
-            h["change_percent"] = 0.0
-
-        holdings.sort(key=lambda x: x["value"], reverse=True)
-        return holdings
+        return thirteen_f_holdings(raw_holdings)
 
     def _aggregate_congressional(
         self, raw_trades: List[Dict], as_of_date: str
@@ -946,36 +969,17 @@ class WhaleHydrator:
         if not current_raw:
             return None
 
-        current_map: Dict[str, Dict] = {}
-        for h in current_raw:
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if not sym or sym == "--":
-                continue
-            current_map[sym] = {
-                "symbol": sym,
-                "name": h.get("securityName") or h.get("companyName") or sym,
-                "value": _finite_float(h.get("value")),
-                "shares": int(
-                    _finite_float(h.get("sharesNumber") or h.get("shares"))
-                ),
-            }
+        # SHARE positions, one per symbol — the SAME helper `whale_service._diff_quarters`
+        # reads (put/call and principal rows dropped, per-manager rows summed, a 13F-HR/A
+        # replacing its original). Last-row-wins by symbol let an option position or one
+        # manager's slice overwrite the stock's own share count.
+        current_map = thirteen_f_share_positions(current_raw)
+        prev_map = thirteen_f_share_positions(previous_raw)
 
-        prev_map: Dict[str, Dict] = {}
-        prev_total = 0.0
-        for h in previous_raw:
-            sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-            if not sym or sym == "--":
-                continue
-            val = _finite_float(h.get("value"))
-            prev_map[sym] = {
-                "symbol": sym,
-                "name": h.get("securityName") or h.get("companyName") or sym,
-                "value": val,
-                "shares": int(
-                    _finite_float(h.get("sharesNumber") or h.get("shares"))
-                ),
-            }
-            prev_total += val
+        # Allocation denominators are the SHARE books, as the holdings' allocations are
+        # (`thirteen_f_holdings`): the previous quarter's here, the current one passed in as
+        # the holdings' total. Every row's value used to count, option notional included.
+        prev_total = thirteen_f_book_value(prev_map)
 
         if not current_map:
             return None
@@ -1657,8 +1661,16 @@ class WhaleHydrator:
         annual_return: AnnualReturn,
         risk_profile: Optional[str] = None,
         associated_ticker: Optional[str] = None,
+        *,
+        prune_stale_trades: bool = False,
     ):
-        """Write to snapshot cache + denormalized tables."""
+        """Write to snapshot cache + denormalized tables.
+
+        ``prune_stale_trades`` (13F only): after a group's trades are upserted, the ones
+        this derivation no longer contains are deleted (`_prune_stale_13f_trades`). A
+        failed prune counts as a failed denormalized write, so 5b resets the hash and the
+        next run re-derives instead of skipping a quarter that still holds stale rows.
+        """
         sb = self.sb
 
         # 0. Invalidate whale_profile_cache so stale assembled JSON is cleared
@@ -1931,7 +1943,23 @@ class WhaleHydrator:
                 # written group instead of either skipping it or duplicating it.
                 # ONE write for up to 50 trades, per group. This was the single largest
                 # blocking loop in the nightly job.
-                self._upsert_trades(sb, whale_id, tg_id, tg.get("trades", [])[:50])
+                trades = tg.get("trades", [])[:50]
+                self._upsert_trades(sb, whale_id, tg_id, trades)
+                if prune_stale_trades and trades:
+                    try:
+                        pruned = _prune_stale_13f_trades(sb, tg_id, trades)
+                        if pruned:
+                            logger.info(
+                                "  Pruned %d stale 13F trade(s) whale_id=%s date=%s",
+                                pruned, whale_id, tg["date"],
+                            )
+                    except Exception as prune_err:
+                        denorm_ok = False
+                        logger.warning(
+                            "  Stale 13F trade prune failed whale_id=%s date=%s: %s: %s "
+                            "— raw_hash will be reset so the next run re-derives",
+                            whale_id, tg["date"], type(prune_err).__name__, prune_err,
+                        )
                 continue
             except Exception as e:
                 denorm_ok = False
@@ -1939,6 +1967,31 @@ class WhaleHydrator:
                 (logger.warning if _transient else logger.error)(
                     "  Failed to sync trade group: %s: %s",
                     type(e).__name__, e, exc_info=not _transient,
+                )
+
+        # 5a. A 13F quarter whose derivation wrote NO trade group keeps none: one stored for
+        # it came from an older derivation (before 2026-10-09, diffed across a gap). Delete
+        # only (`_clear_13f_trade_group`) — 13F only, like the prune; a failure resets the
+        # hash in 5b so the next run retries instead of skipping the quarter.
+        if prune_stale_trades and not any(tg and tg.get("date") for tg in groups) \
+                and snapshot.get("filing_date"):
+            try:
+                cleared, cleared_trades = _clear_13f_trade_group(
+                    sb, whale_id, str(snapshot["filing_date"])
+                )
+                if cleared:
+                    logger.info(
+                        "  Removed %d stale 13F trade group(s) and %d trade(s) whale_id=%s "
+                        "date=%s — this quarter has no trades",
+                        cleared, cleared_trades, whale_id, snapshot["filing_date"],
+                    )
+            except Exception as clear_err:
+                denorm_ok = False
+                logger.warning(
+                    "  Stale 13F trade group clear failed whale_id=%s date=%s: %s: %s — "
+                    "raw_hash will be reset so the next run retries",
+                    whale_id, snapshot.get("filing_date"),
+                    type(clear_err).__name__, clear_err,
                 )
 
         # 5b. If any denormalized write failed, clear the snapshot's raw_hash so

@@ -35,6 +35,13 @@ from app.utils.period_labels import (
     filing_period_display,
     latest_filed_13f_quarter,
 )
+# The one 13F comparison vocabulary ("quarter" / "gap" / "first_filing"), shared with the
+# Trillion-Dollar Club builder. A pydantic-only module, so importing it here cannot cycle.
+from app.schemas.trillion_club import (
+    COMPARISON_FIRST_FILING,
+    COMPARISON_GAP,
+    COMPARISON_QUARTER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +461,400 @@ def calc_13f_trade_dollars(
 
     action = "BOUGHT" if shares_change > 0 else "SOLD"
     return (action, amount)
+
+
+# ── 13F share positions: the ONE input both quarter diffs read ─────
+#
+# FMP's `institutional-ownership/extract` returns one row per 13F information-table entry,
+# so one stock can arrive as several rows:
+#   * put / call rows (`putCallShare`) carrying the UNDERLYING's symbol, share count and
+#     notional value — an option position, not shares the fund owns;
+#   * a principal-amount line (`sharesType` PRN: a convertible or bond);
+#   * the same CUSIP once per manager / investment discretion (a multi-manager filer lists
+#     one stock under several managers);
+#   * a 13F-HR/A amendment's rows next to the original filing's.
+# Both 13F diff writers (`whale_service._diff_quarters`, `hydrate_whales._diff_quarters`)
+# keyed these by symbol with the LAST row winning, so a fund's put position — or one
+# manager's slice — overwrote the stock's own share count, and the quarter's "trade" was the
+# difference between two unrelated rows. That fed `whale_trades`, the whale profiles' trade
+# cards and the Home Whale Accumulation card. Read the extract the way
+# `trillion_club.builder.normalize_rows` does instead, with one deliberate difference: a
+# MISSING `sharesType` is kept (older rows and the diff fixtures carry none, and dropping
+# them would turn every such position into an exit).
+#
+# The HOLDINGS read the same positions (`thirteen_f_holdings`; owner decision 2026-10-09).
+# Both holdings builders used to sum EVERY row per symbol, and a 13F reports an option at
+# the value of its UNDERLYING shares — so a put (a bet against the stock) showed as a large
+# long "holding", and an options-heavy book's "13F Equity Portfolio" figure, allocations,
+# change_percent, AI summaries and trade weights were mostly option notional. Measured with
+# `scripts/measure_13f_option_notional.py`.
+
+# Bumped whenever the 13F DERIVATION — the diff, and since v3 the holdings — gives a
+# different answer for the SAME raw filing. It is folded into `thirteen_f_raw_hash`, which
+# the nightly hydrator compares with the stored snapshot's to decide "already derived", so
+# a bump re-derives every fund's latest quarter once, in the next sweep, with no manual step.
+#   v2 (2026-10-09): option / principal rows dropped, per-manager rows summed, the latest
+#                    accession replaces a position (`thirteen_f_share_positions`).
+#   v3 (2026-10-09): holdings, the portfolio value, change_percent and the diffs' allocation
+#                    denominators read those share positions too (`thirteen_f_holdings`).
+#   v4 (2026-10-09): a quarter is diffed ONLY with the adjacent previous quarter; a gap or a
+#                    first filing writes no trades (`select_13f_comparison`), and the
+#                    comparison basis + the previous positions join the hash.
+THIRTEEN_F_DIFF_VERSION = 4
+
+
+def _finite_or_zero(value: Any) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
+
+
+def is_13f_non_share_row(row: Mapping[str, Any]) -> bool:
+    """True for an explicit put/call row or an explicit non-``SH`` (``PRN``) row.
+
+    A missing ``putCallShare`` / ``sharesType`` is NOT evidence of either: it is read as a
+    share row, exactly as before this rule existed."""
+    put_call = str(row.get("putCallShare") or "").strip().lower()
+    if put_call in ("put", "call"):
+        return True
+    shares_type = str(row.get("sharesType") or "").strip().upper()
+    return bool(shares_type) and shares_type != "SH"
+
+
+def thirteen_f_share_positions(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """``{SYMBOL: {"symbol", "name", "value", "shares"}}`` — one filing's SHARE positions.
+
+    * a non-dict row, or one with an empty / ``--`` symbol (``symbol``, else
+      ``tickercusip``), is skipped, as the diffs always did;
+    * an explicit Put/Call or non-``SH`` row is skipped (``is_13f_non_share_row``);
+    * within one accession, rows for the same position (its CUSIP, else its symbol) are
+      SUMMED — one row per manager / discretion;
+    * across accessions the LATEST accession wins per position (a 13F-HR/A restates it).
+      Accessions come from ``link`` / ``finalLink``; rows without one share a group keyed
+      by ``filingDate``, ordered oldest first;
+    * positions are then summed per symbol (two CUSIPs can resolve to one ticker).
+
+    ``value`` and ``shares`` coerce NaN / Inf / garbage to 0 (the diffs' ``_finite_float``
+    rule); ``shares`` is an ``int``; ``name`` is ``securityName`` → ``companyName`` → the
+    symbol, as before. Never raises on a malformed row.
+    """
+    # Imported here, not at module top: `trillion_club.rules` is pure and light, but this
+    # module is imported by nearly every whale/holders path and must stay cycle-free.
+    from app.services.trillion_club.rules import accession_from_link, normalize_cusip
+
+    groups: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    order: Dict[str, Tuple[str, str, str]] = {}
+    for r in raw if isinstance(raw, (list, tuple)) else ():
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("symbol") or r.get("tickercusip") or "").strip().upper()
+        if not sym or sym == "--":
+            continue
+        if is_13f_non_share_row(r):
+            continue
+        accession = accession_from_link(r.get("link")) or accession_from_link(r.get("finalLink"))
+        filed = str(r.get("filingDate") or "")[:10]
+        key = accession or f"~unknown:{filed}"
+        rank = (filed, str(r.get("acceptedDate") or ""), accession or "")
+        order[key] = rank if key not in order else min(order[key], rank)
+        position = normalize_cusip(r.get("securityCusip")) or f"sym:{sym}"
+        value = _finite_or_zero(r.get("value"))
+        shares = _finite_or_zero(r.get("sharesNumber") or r.get("shares"))
+        bucket = groups.setdefault(key, {})
+        seen = bucket.get(position)
+        if seen is None:
+            bucket[position] = {
+                "symbol": sym,
+                "name": r.get("securityName") or r.get("companyName") or sym,
+                "value": value,
+                "shares": shares,
+            }
+        else:
+            seen["value"] += value
+            seen["shares"] += shares
+            if seen["name"] == sym:
+                # A later row may carry the issuer name the first one lacked.
+                seen["name"] = r.get("securityName") or r.get("companyName") or sym
+
+    latest: Dict[str, Dict[str, Any]] = {}
+    for key in sorted(order, key=lambda k: order[k]):   # oldest first: a later accession overwrites
+        latest.update(groups[key])
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for pos in latest.values():
+        cur = out.get(pos["symbol"])
+        if cur is None:
+            out[pos["symbol"]] = dict(pos)
+        else:
+            cur["value"] += pos["value"]
+            cur["shares"] += pos["shares"]
+    for pos in out.values():
+        pos["shares"] = int(pos["shares"])
+    return out
+
+
+def thirteen_f_holdings(raw: Any) -> List[Dict[str, Any]]:
+    """One 13F filing's HOLDINGS: its share positions (`thirteen_f_share_positions`) with a
+    positive value, one row per symbol, largest first (ties by ticker).
+
+    Each row: ``ticker``, ``company_name``, ``logo_url`` (None — enrichment fills it),
+    ``value``, ``shares``, ``allocation`` (% of the SHARE book, 2 dp) and ``change_percent``
+    (0.0 — each writer sets it against the previous quarter). ``[]`` when no position has a
+    positive value. Put/call and non-``SH`` rows are never part of a holding, its value or
+    any allocation denominator; one row per symbol keeps `whale_holdings`' UNIQUE(whale_id,
+    ticker), and a position cannot go negative, so allocation stays inside its 0..100 CHECK.
+    Both holdings builders (`whale_service._build_holdings`,
+    `hydrate_whales._build_13f_holdings`) return exactly this.
+    """
+    positions = [p for p in thirteen_f_share_positions(raw).values() if p["value"] > 0]
+    total = sum(p["value"] for p in positions)
+    if total <= 0:
+        return []
+    holdings = [
+        {
+            "ticker": p["symbol"],
+            "company_name": p["name"],
+            "logo_url": None,
+            "value": p["value"],
+            "shares": p["shares"],
+            "allocation": round(p["value"] / total * 100, 2),
+            "change_percent": 0.0,
+        }
+        for p in positions
+    ]
+    holdings.sort(key=lambda h: (-h["value"], h["ticker"]))
+    return holdings
+
+
+def thirteen_f_book_value(positions: Mapping[str, Mapping[str, Any]]) -> float:
+    """The allocation denominator for a ``thirteen_f_share_positions`` map: the sum of its
+    POSITIVE positions — the same total `thirteen_f_holdings` divides by, so a diff's
+    ``previous_allocation`` / ``new_allocation`` match the holdings' allocations."""
+    return sum(p["value"] for p in positions.values() if p["value"] > 0)
+
+
+def thirteen_f_share_rows(raw: Any) -> List[Dict[str, Any]]:
+    """``thirteen_f_share_positions`` as a row list (``symbol`` / ``value`` / ``shares``) for
+    the split resolver (`thirteen_f_splits.resolve_13f_split_adjustments`), which must pick
+    its split SUSPECTS from the same positions the diff then restates — a put row or one
+    manager's slice would otherwise decide which tickers get a split lookup."""
+    return list(thirteen_f_share_positions(raw).values())
+
+
+def thirteen_f_raw_hash(
+    raw: Any, *, basis: Optional[str] = None, previous_raw: Any = None,
+) -> str:
+    """The 13F snapshot's ``raw_hash``: the raw extract AND ``THIRTEEN_F_DIFF_VERSION`` —
+    plus, from the writers, what the quarter was compared WITH.
+
+    Both 13F writers stamp it; the hydrator skips a quarter whose stored hash is equal.
+    Folding the version in is what makes a diff fix reach rows that were already derived.
+    ``basis`` (``ThirteenFComparison.basis``) and the previous quarter's share positions
+    make it re-derive when the comparison changes under an unchanged extract: FMP listing
+    the adjacent quarter later (a confidential book disclosed, a late filing), or a
+    13F-HR/A restating the previous quarter. The positions, not the raw rows, so FMP's row
+    order and fields the diff never reads cannot churn the hash; values are whole dollars
+    (float sums can differ in the last bit by row order, and the diff's floor is $1,000)."""
+    payload = json.dumps(raw, sort_keys=True, default=str)
+    head = f"13f-diff-v{THIRTEEN_F_DIFF_VERSION}"
+    if basis is not None or previous_raw is not None:
+        prev = sorted(
+            (sym, int(p["shares"]), round(p["value"]))
+            for sym, p in thirteen_f_share_positions(previous_raw).items()
+        )
+        head += f"\nbasis={basis or ''}\nprevious={json.dumps(prev)}"
+    return hashlib.sha256(f"{head}\n{payload}".encode()).hexdigest()
+
+
+# ── 13F comparison: which quarter the latest filing is diffed WITH ──────────────────────
+#
+# A 13F is diffed ONLY with the ADJACENT previous quarter — the rule the Trillion-Dollar
+# Club builder already follows (`diff_13f_positions(comparison=...)`). Both whale writers
+# used `whale_service._find_previous_quarter`, which returned the most recent EARLIER entry
+# of FMP's `institutional-ownership/dates` list, so a quarter missing from that list booked
+# every share change across the hole as trades of the latest quarter. Found 2026-10-09:
+# Norges Bank files its Q1 and Q3 books under SEC confidential treatment
+# (`isConfidentialOmitted`, a near-empty public table) and discloses each about a year later
+# in a 13F-HR/A, so FMP lists neither while the Q2 / Q4 filing after it is the latest —
+# 2026-Q2 was diffed with 2025-Q4 and six months of changes went out as Q2 trades, pushes
+# and Home-card "adds". Owner decision 2026-10-09 (option A): a quarter with no adjacent
+# previous quarter on file — a gap, or a first filing — writes NO trades; its holdings are
+# shown, change_percent is not compared, and the summaries say so
+# (`uncompared_13f_behavior` / `uncompared_13f_sentiment`). Measured with
+# `scripts/measure_13f_quarter_gaps.py` (1 of 45 registry filers on 2026-10-09).
+
+_QUARTER_END_MMDD = {1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31"}
+
+
+def _previous_quarter(yq: Tuple[int, int]) -> Tuple[int, int]:
+    year, quarter = yq
+    return (year - 1, 4) if quarter == 1 else (year, quarter - 1)
+
+
+def _period_label(yq: Tuple[int, int]) -> str:
+    return f"{yq[0]}-Q{yq[1]}"
+
+
+def _quarter_end(yq: Tuple[int, int]) -> date:
+    month, day = (int(x) for x in _QUARTER_END_MMDD[yq[1]].split("-"))
+    return date(yq[0], month, day)
+
+
+def thirteen_f_dates_row_quarter(row: Any) -> Optional[Tuple[Tuple[int, int], str]]:
+    """One ``institutional-ownership/dates`` row → ``((year, quarter), date)``, or None.
+
+    ``year`` / ``quarter`` are FMP's own fields; a row missing them falls back to its
+    ``date`` (``YYYY-MM-DD``, the quarter END). The writers used to default a missing
+    quarter to 1 — a quarter nobody filed. ``date`` becomes the trade group's ``date`` (its
+    key, compared as ``YYYY-MM-DD`` text by its readers), so it is returned in exactly that
+    form — ``""`` when the row has none or it does not parse (``fromisoformat`` also takes
+    ``20260630``, which would sort apart from every dashed key). A bool is not a number
+    here. Never raises."""
+    if not isinstance(row, Mapping):
+        return None
+    parsed_date = _parse_iso_date(str(row.get("date") or "").strip()[:10])
+    filed = parsed_date.date().isoformat() if parsed_date is not None else ""
+    y, q = row.get("year"), row.get("quarter")
+    yq: Optional[Tuple[int, int]] = None
+    if not isinstance(y, bool) and not isinstance(q, bool):
+        try:
+            yq = (int(y), int(q))
+        except (TypeError, ValueError, OverflowError):
+            yq = None
+    if yq is None or yq[1] not in (1, 2, 3, 4) or not 1900 <= yq[0] <= 9998:
+        if parsed_date is None or not 1900 <= parsed_date.year <= 9998:
+            return None
+        yq = (parsed_date.year, (parsed_date.month - 1) // 3 + 1)
+    return yq, filed
+
+
+@dataclass(frozen=True)
+class ThirteenFComparison:
+    """What a 13F filer's latest quarter is compared with (`select_13f_comparison`)."""
+
+    latest: Tuple[int, int]                 # the newest quarter FMP lists
+    latest_date: str                        # its listed `date`, else the quarter's last day
+    comparison: str                         # COMPARISON_QUARTER | _GAP | _FIRST_FILING
+    previous: Optional[Tuple[int, int]]     # the ADJACENT quarter; set only for _QUARTER
+    older: Optional[Tuple[int, int]]        # the newest listed quarter before `latest`
+    skipped_rows: int = 0                   # dates rows with no usable quarter
+
+    @property
+    def compared(self) -> bool:
+        return self.comparison == COMPARISON_QUARTER
+
+    @property
+    def period(self) -> str:
+        """``"2026-Q2"`` — the `whale_filing_snapshots.filing_period` of the latest quarter."""
+        return _period_label(self.latest)
+
+    @property
+    def adjacent(self) -> Tuple[int, int]:
+        """The quarter before ``latest``, listed or not."""
+        return _previous_quarter(self.latest)
+
+    @property
+    def basis(self) -> str:
+        """What the derivation compared with, for `thirteen_f_raw_hash`: the hash changes
+        when FMP lists the adjacent quarter later, or a first filing gains an older one."""
+        if self.comparison == COMPARISON_QUARTER and self.previous is not None:
+            return f"{COMPARISON_QUARTER}:{_period_label(self.previous)}"
+        return self.comparison
+
+
+def select_13f_comparison(
+    filing_dates: Any, *, today: Optional[date] = None,
+) -> Optional[ThirteenFComparison]:
+    """Decide a filer's latest 13F quarter and what it is compared with, from FMP's
+    ``institutional-ownership/dates`` list. ``None`` when no row names a usable quarter.
+
+    * ``latest`` is the NEWEST listed quarter — never ``dates[0]`` on trust (the writers
+      used to take the list order as given). A quarter that has not ENDED by ``today``
+      (UTC) is skipped as unusable: no 13F can describe it, and under "newest wins" one
+      such row would otherwise stand in for the real latest filing;
+    * ``quarter`` when the ADJACENT previous quarter is listed — the only comparison that
+      may produce trades;
+    * ``gap`` when only older quarters are listed, ``first_filing`` when none is: both mean
+      NOT COMPARED (no trades, no change_percent), exactly as `diff_13f_positions` reads
+      them. Rows repeating a quarter keep the first listed ``date``.
+    """
+    today = today or datetime.now(timezone.utc).date()
+    listed: Dict[Tuple[int, int], str] = {}
+    skipped = 0
+    for row in filing_dates if isinstance(filing_dates, (list, tuple)) else ():
+        parsed = thirteen_f_dates_row_quarter(row)
+        if parsed is None or _quarter_end(parsed[0]) > today:
+            skipped += 1
+            continue
+        yq, filed = parsed
+        if not listed.get(yq):
+            listed[yq] = filed
+    if not listed:
+        return None
+    latest = max(listed)
+    adjacent = _previous_quarter(latest)
+    older = max((yq for yq in listed if yq < latest), default=None)
+    if adjacent in listed:
+        comparison, previous = COMPARISON_QUARTER, adjacent
+    else:
+        comparison = COMPARISON_GAP if older is not None else COMPARISON_FIRST_FILING
+        previous = None
+    latest_date = listed[latest] or f"{latest[0]}-{_QUARTER_END_MMDD[latest[1]]}"
+    return ThirteenFComparison(
+        latest=latest, latest_date=latest_date, comparison=comparison,
+        previous=previous, older=older, skipped_rows=skipped,
+    )
+
+
+def uncompared_13f_note(selection: ThirteenFComparison) -> str:
+    """Why a quarter's changes are not shown — the clause both writers' summaries end on."""
+    if selection.comparison == COMPARISON_GAP:
+        missing = filing_period_display(_period_label(selection.adjacent))
+        return f"no 13F holdings are on file for {missing}, the quarter before"
+    return "this is the first 13F on file"
+
+
+def uncompared_13f_behavior(sectors: Sequence[Mapping[str, Any]]) -> Dict[str, str]:
+    """``behavior_summary`` for a quarter that was NOT compared with the one before.
+
+    iOS renders "This whale is currently <action> <primaryFocus> and <secondaryAction>
+    <secondaryFocus>". The no-trades text ("Holding existing positions and Maintaining
+    portfolio allocation") claims nothing changed, which is false when nothing was
+    compared — this one describes the holdings only. "Holding" is a directionless verb,
+    so iOS paints it neutral."""
+    top = ""
+    if sectors and isinstance(sectors[0], Mapping):
+        top = str(sectors[0].get("name") or "").strip()
+    return {
+        "action": "Holding",
+        "primaryFocus": "its disclosed positions",
+        "secondaryAction": "Concentrated in",
+        "secondaryFocus": top.lower() if top else "various sectors",
+    }
+
+
+def uncompared_13f_sentiment(
+    holdings: Sequence[Mapping[str, Any]],
+    sectors: Sequence[Mapping[str, Any]],
+    selection: ThirteenFComparison,
+) -> str:
+    """``sentiment_text`` for a quarter that was NOT compared with the one before: the
+    holdings as filed, then why no change is shown — never "stable positioning with no
+    significant changes", which is a claim about a comparison that was not made. Shared
+    by both writers so the live profile and the nightly sweep store the same text (no
+    model call: there is no activity for one to describe)."""
+    tickers = ", ".join(
+        str(h.get("ticker")) for h in list(holdings)[:5]
+        if isinstance(h, Mapping) and h.get("ticker")
+    )
+    top = ""
+    if sectors and isinstance(sectors[0], Mapping):
+        top = str(sectors[0].get("name") or "").strip()
+    first = f"Portfolio concentrated in {top or 'various sectors'}"
+    first += f" with top positions in {tickers}." if tickers else "."
+    return f"{first} Changes since the previous quarter are not shown: {uncompared_13f_note(selection)}."
 
 
 def generate_trade_summary(

@@ -111,7 +111,10 @@ ONE_FOR_TEN = [{"date": "2026-05-04", "numerator": 1, "denominator": 10}]
 
 
 def _run(monkeypatch, curr, prev, actions):
-    """Drive `_process_13f_path`; return (split_ratios, unclassified, snapshot)."""
+    """Drive `_process_13f_path`; return (split_ratios, unclassified, snapshot).
+
+    `split_ratios` / `unclassified` are `None` when `_diff_quarters` was never reached (a
+    quarter with no adjacent previous quarter is not compared)."""
     seen: Dict[str, Any] = {}
     original = WhaleService._diff_quarters
 
@@ -140,7 +143,7 @@ def _run(monkeypatch, curr, prev, actions):
     svc.corporate_actions = actions
     snap = asyncio.run(svc._process_13f_path("whale-1", "0000000001"))
     wsvc._filing_dates_cache.clear()
-    return seen["split_ratios"], seen["unclassified"], snap
+    return seen.get("split_ratios"), seen.get("unclassified"), snap
 
 
 # A clean 10:1: 100k sh at $100 -> 1M sh at $10. AAPL is untouched throughout.
@@ -234,10 +237,14 @@ def test_suspects_over_the_cap_keep_their_raw_diff(monkeypatch):
 
 
 def test_a_first_filing_looks_nothing_up(monkeypatch):
+    # Since 2026-10-09 a first filing is NOT COMPARED (owner decision; the Trillion-Dollar
+    # Club's `first_filing`): the differ is never reached, so there is nothing to look up
+    # and no trade group (`tests/test_thirteen_f_gap_quarter.py`).
     acts = _Actions(splits={"NVDA": TEN_TO_ONE})
     ratios, unclassified, snap = _run(monkeypatch, CURR_FWD, None, acts)
-    assert (ratios, unclassified) == ({}, set())
+    assert (ratios, unclassified) == (None, None)
     assert acts.split_calls == [] and acts.flag_calls == []
+    assert snap["trade_group"] is None
     assert snap["raw_hash"] is not None
 
 

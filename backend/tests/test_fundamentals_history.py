@@ -391,7 +391,9 @@ def test_margins_fraction_to_percent_conversion():
     hist = _fundamentals_history_for_period([], [], [], [], ratios, {}, quarterly=False)
     assert dict(_series(hist, "gross_margin"))["2024"] == 46.9
     assert dict(_series(hist, "operating_margin"))["2024"] == 32.0
-    assert dict(_series(hist, "earnings_yield"))["2024"] == 2.8
+    # Since 2026-10-09 the yield is 100 / the period's P/E only — FMP's own `earningsYield`
+    # (net income ÷ market cap) is never read, so a period with no P/E has no yield.
+    assert dict(_series(hist, "earnings_yield"))["2024"] is None
 
 
 def test_negative_fcf_growth_passes_through():
@@ -481,7 +483,9 @@ def test_earnings_yield_company_series_falls_back_to_inverse_pe():
     assert dict(_series(hist, "earnings_yield")) == {"2024": 4.0, "2023": 5.0}
 
 
-def test_earnings_yield_prefers_real_field_over_pe():
+def test_earnings_yield_is_the_inverse_of_pe_never_fmps_field():
+    """2026-10-09 (the Price card's rule, payload v8): 100 / the period's P/E, even where FMP
+    sends its own `earningsYield` (net income ÷ market cap, which splits from 1/P/E)."""
     ratios = [
         {"calendarYear": "2024", "date": "2024-09-30",
          "earningsYield": 0.0279, "priceToEarningsRatio": 25.0},
@@ -489,11 +493,16 @@ def test_earnings_yield_prefers_real_field_over_pe():
          "earningsYield": 0.0331, "priceToEarningsRatio": 20.0},
     ]
     hist = _fundamentals_history_for_period([], [], [], [], ratios, {}, quarterly=False)
-    assert dict(_series(hist, "earnings_yield")) == {"2024": 2.8, "2023": 3.3}
+    assert dict(_series(hist, "earnings_yield")) == {"2024": 4.0, "2023": 5.0}
 
 
-def test_earnings_yield_gets_sector_line():
-    out = _out_with_sector({"earnings_yield": {"2024": 0.025, "2023": 0.030, "2022": 0.035}})
+def test_earnings_yield_gets_the_inverse_of_the_pe_peer_line():
+    """The peer line is 100 / the P/E median of the same period — never the stored
+    earnings_yield medians, which are ignored even when present."""
+    out = _out_with_sector({
+        "pe_ratio": {"2024": 40.0, "2023": 25.0, "2022": 20.0},
+        "earnings_yield": {"2024": 0.099, "2023": 0.099, "2022": 0.099},   # never read
+    })
     # earnings yield needs PE in ratios to produce a company series.
     out.ratios = [
         {"calendarYear": "2024", "date": "2024-09-30", "priceToEarningsRatio": 25.0},
@@ -502,8 +511,8 @@ def test_earnings_yield_gets_sector_line():
     ]
     hist = _build_fundamentals_history(out)
     assert "earnings_yield" in hist
-    # sector fraction ×100 (percent unit), aligned to company labels
-    assert [p["value"] for p in hist["earnings_yield"]["sector_annual"]] == [3.5, 3.0, 2.5]
+    # 100 / the P/E median, aligned to company labels (oldest first)
+    assert [p["value"] for p in hist["earnings_yield"]["sector_annual"]] == [5.0, 4.0, 2.5]
 
 
 def test_benchmark_earnings_yield_is_computed_as_fraction():

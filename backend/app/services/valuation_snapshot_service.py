@@ -38,6 +38,7 @@ from app.services.financials_metric_gate import (
 )
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
+from app.utils.earnings_yield import earnings_yield_text, parse_multiple
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,11 @@ _CACHE_TTL = 300  # 5 minutes
 #     (`_MIN_JUDGED_FOR_RATING`), else rating 0 with no `weighted_score` — the network-
 #     scoped rule; every other company is unchanged. A v6 row of V read "P/E (2.72x sector
 #     avg 11.7)" and 1/5 against lenders.
-_SNAPSHOT_PAYLOAD_VERSION = 7
+# 8 (2026-10-09, owner decision): Earnings Yield = 1 / the card's displayed P/E, compared with
+#     1 / the P/E median at the P/E cell's peer level; "N/A" with no positive P/E. It was FMP's
+#     net income ÷ market cap (C showed 8.09% beside P/E 13.75), which Ask Cay AI — deriving
+#     every yield from the P/E beside it — contradicted.
+_SNAPSHOT_PAYLOAD_VERSION = 8
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -720,8 +725,9 @@ class ValuationSnapshotService:
         network = resolve_payment_network(
             ticker, industry, None, source="valuation_snapshot",
         )
+        # No "earnings_yield": the card's yield row compares against 1 / the P/E median (v8).
         bench_metrics = comparable_peer_metrics(
-            ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield"],
+            ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda"],
             industry, network=network,
         )
 
@@ -850,6 +856,15 @@ def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:
 _MIN_JUDGED_FOR_RATING = 2
 
 
+# `build_price_snapshot._metric`'s "use the bench cell" default — None is a real override there
+# (the yield row with no usable P/E median prints no peer median).
+_FROM_BENCH = object()
+# How far FMP's own earnings yield may sit from the card's 1/P/E before the build logs it
+# (`[earnings-yield-source-gap]`, INFO): the gap is explained — net income ÷ current market cap
+# vs per-share earnings — but worth seeing in the logs.
+_EY_SOURCE_GAP_LOG = 0.05
+
+
 def build_price_snapshot(
     *,
     fr: Dict[str, Any],
@@ -944,8 +959,8 @@ def build_price_snapshot(
     #
     # The invariant this row MUST keep is narrower than "no price-derived
     # multiple" — every multiple here is price-derived at some timestamp, and
-    # `mcap` (price × shares) legitimately feeds the P/FCF, EV/EBITDA and
-    # earnings-yield fallbacks below. The rule is:
+    # `mcap` (price × shares) legitimately feeds the P/FCF and EV/EBITDA
+    # fallbacks below (not the earnings yield since payload v8: 1 / P/E). The rule is:
     #
     #     never read the LIVE-QUOTE endpoint, and never persist an ABSOLUTE
     #     price. Profile / key-metrics market cap is a slow, daily-cadence
@@ -1116,23 +1131,38 @@ def build_price_snapshot(
                 ticker, ev, ev_source, ebitda, ebitda_source,
             )
 
-    # Earnings Yield (decimal form, e.g. 0.0425 for 4.25%). Fallback chain:
-    #   1. ratios.earningsYield (TTM-suffixed first, then bare name)
-    #   2. key_metrics.earningsYield (TTM and legacy)
-    #   3. 1/PE  (matches the canonical formula)
-    #   4. netIncome / marketCap
-    ey = _first_valid(
+    # Earnings Yield = 1 / THIS card's displayed P/E (owner decision 2026-10-09, payload v8).
+    #
+    # It used to relay FMP's own yield first (the ratios-ttm keys never arrive on /stable, so
+    # key-metrics `earningsYieldTTM`), which is total TTM net income ÷ CURRENT market cap — not
+    # the per-share earnings the P/E above divides by. Where preferred dividends or a moving
+    # share count split the two, the card printed a P/E and a yield that do not invert (read-only
+    # probe 2026-10-09: C P/E 13.75 beside 8.09%, 1/13.75 = 7.27%; BA 1.62% vs 1.40%; CRM; GS),
+    # and Ask Cay AI — which derives every yield from the P/E beside it
+    # (`app.utils.earnings_yield`) — said 7.27% next to a screen saying 8.09%.
+    #
+    # Derived from the DISPLAYED (2-decimal) P/E with the same function chat uses, so for every
+    # positive P/E the card's text and chat's are byte-identical. No P/E, a zero or a negative
+    # one → "N/A": never a yield from another source beside "—" or "Neg." (the net income ÷
+    # market cap fallback put a positive fiscal-year yield next to a loss-maker's "Neg."); chat
+    # words a loss-maker's as "negative (TTM loss)" — the same meaning. FMP's own yield is read
+    # only to log how far it sits from 1/P/E. Unscored either way (see the row below).
+    pe_shown = _fmt_ratio(pe)
+    pe_display = parse_multiple(pe_shown)
+    ey: Optional[float] = (1.0 / pe_display) if pe_display is not None else None
+    ey_display = earnings_yield_text(pe_shown) if ey is not None else "N/A"
+    upstream_ey = _first_valid(
         _safe_float(fr, "earningsYieldTTM"),
         _safe_float(fr, "earningsYield"),
         _safe_float(km, "earningsYieldTTM"),
         _safe_float(km, "earningsYield"),
     )
-    if ey is None and pe is not None and pe > 0:
-        ey = round(1.0 / pe, 4)
-    if ey is None:
-        ni = _safe_float(inc, "netIncome")
-        if ni is not None and ni > 0 and mcap and mcap > 0:
-            ey = round(ni / mcap, 4)
+    if ey is not None and upstream_ey is not None and upstream_ey > 0 \
+            and abs(upstream_ey - ey) / ey > _EY_SOURCE_GAP_LOG:
+        logger.info(
+            "[earnings-yield-source-gap] %s: FMP's yield %.4f vs 1/P/E %.4f (P/E %s) — the card "
+            "shows 1/P/E", ticker, upstream_ey, ey, pe_shown,
+        )
 
     levels = bench_levels or {}
 
@@ -1145,6 +1175,15 @@ def build_price_snapshot(
     sector_pb = _median("pb_ratio")
     sector_pfcf = _median("pfcf_ratio")
     sector_ev = _median("ev_ebitda")
+    # The yield row's peer median is the P/E median inverted (owner decision 2026-10-09): the
+    # same cell, peer level and companies as the P/E row, so the two rows mirror each other
+    # exactly. The stored earnings-yield median is FMP's net income ÷ market cap, a few percent
+    # off the median 1/P/E where preferred dividends are common (banks).
+    usable_pe_median = _usable_median(sector_pe)
+    ey_median = (1.0 / usable_pe_median) if usable_pe_median is not None else None
+    ey_vs_median = ey if ey_display[:1].isdigit() else None
+    if ey_vs_median is not None and ey_median and round(ey_vs_median / ey_median, 2) <= 0:
+        ey_vs_median = None
 
     # Score each metric against sector median (lower = better). P/E keeps its absolute
     # bands as the no-peer fallback (they are P/E bands); the other four are scored
@@ -1193,8 +1232,11 @@ def build_price_snapshot(
             rating = 0
             weighted_score = None
 
-    def _metric(label, key, bench_key, value, display, score, pct=False):
-        ctx = (_sector_ctx_pct if pct else _sector_ctx)(value, _median(bench_key))
+    def _metric(label, key, bench_key, value, display, score, pct=False, median=_FROM_BENCH):
+        # `median` overrides the bench cell (the yield row passes 1 / the P/E median, None
+        # included); `bench_key` still names the cell whose peer level the label prints.
+        median = _median(bench_key) if median is _FROM_BENCH else median
+        ctx = (_sector_ctx_pct if pct else _sector_ctx)(value, median)
         # `peer_level` is the level of the median the label PRINTS — None when it prints none.
         level = levels.get(bench_key) if ctx else None
         return SnapshotMetricResponse(
@@ -1216,8 +1258,11 @@ def build_price_snapshot(
         # Earnings Yield: informational — not part of the composite
         # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
         # to keep historical ratings comparable. score=None → not a verdict driver.
-        _metric("Earnings Yield", "earnings_yield", "earnings_yield", ey, _fmt_pct(ey),
-                None, pct=True),
+        # 1 / the P/E row's value against 1 / the P/E row's median, at the P/E cell's peer
+        # level. A yield too small to print ("below 0.01%"), or one whose multiple would print
+        # "0.00x" (a P/E in the thousands), carries no "N.NNx" — only the median.
+        _metric("Earnings Yield", "earnings_yield", "pe_ratio", ey_vs_median, ey_display, None,
+                pct=True, median=ey_median),
     ]
 
     return SnapshotItemResponse(

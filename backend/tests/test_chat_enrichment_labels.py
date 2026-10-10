@@ -100,8 +100,8 @@ async def test_every_block_names_its_basis_and_build_date(monkeypatch):
         "Growth: Moderate (3/5). Revenue Growth: 6.1%.":
             " (Basis: latest fiscal year vs the prior fiscal year; as of Oct 7, 2026.)",
         "Price: Soft (2/5). P/E: 31.2.":
-            " (Basis: trailing-twelve-month multiples, priced when the card was built; "
-            "as of Oct 7, 2026.)",
+            " (Basis: trailing-twelve-month multiples, priced when the card was built, not the "
+            "live price; its Earnings Yield is 1 / its own P/E; as of Oct 7, 2026.)",
         "Financial Health: not rated (too few comparable metrics). Debt to Equity: 1.9.":
             " (Basis: latest quarterly balance sheet; interest coverage and the Altman "
             "Z-Score use trailing-twelve-month income; as of Oct 7, 2026.)",

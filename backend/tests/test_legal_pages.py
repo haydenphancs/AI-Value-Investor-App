@@ -293,9 +293,11 @@ def _swift_user_facing_strings(path: Path) -> str:
     So escapes are now matched AND decoded — `\u{201C}` becomes a real quote character, so an
     assertion can match prose as written rather than as escaped.
     """
-    import re
+    return _swift_literals_in(path.read_text(encoding="utf-8"))
 
-    text = path.read_text(encoding="utf-8")
+
+def _swift_literals_in(text: str) -> str:
+    """`_swift_user_facing_strings` over a piece of Swift source (e.g. one brace-bound section)."""
     # `(?:[^"\\\n]|\\.)` — an ordinary char, OR a backslash and whatever it escapes. That keeps
     # the literal's own closing quote unambiguous (`\"` is consumed by the second branch) while
     # no longer discarding the literal wholesale.
@@ -809,6 +811,16 @@ def test_the_ai_consent_scan_is_not_vacuous(client):
 # automatic search only for an `X-AI-Consent-Version` of 3+, so a reader who never accepted the
 # new sheet still gets at most the old report-chat, explicit-ask search.
 
+# What §3 says about the web source list (title, publisher, date, link). True only while
+# `CHAT_WEB_SOURCES_PERSIST` ships True: the turn's web pills go into the stored
+# `chat_messages.rich_content.sources`, come back with the history (`_row_to_message`), and go
+# with `DELETE /chat/sessions/{id}` or account deletion (`chat_sessions` in
+# `_UNLINKED_USER_TABLES`, `chat_messages` cascading). The pre-2026-10-09 wording, true only
+# while the default was False, is `_SOURCE_LIST_NOT_KEPT`.
+_SOURCE_LIST_SAVED = "is saved with the answer, so it appears again when you reopen the conversation"
+_SOURCE_LIST_DELETED = "it is deleted when you delete that conversation or your account"
+_SOURCE_LIST_NOT_KEPT = "is shown with the answer but is not kept"
+
 _WEB_SEARCH_CLAUSES = {
     "privacy": (
         "PrivacyPolicyView.swift",
@@ -823,7 +835,11 @@ _WEB_SEARCH_CLAUSES = {
             "are never sent with it",
             "web search is available only while you are signed in",
             "limited to a set number of searches per day",
-            "is shown with the answer but is not kept",
+            # The source-list sentence (`_SOURCE_LIST_SAVED` / `_SOURCE_LIST_DELETED`, or the old
+            # `_SOURCE_LIST_NOT_KEPT`) is NOT listed here: which one §3 must carry depends on
+            # `CHAT_WEB_SOURCES_PERSIST`'s default, so
+            # `test_the_source_list_promise_matches_the_shipped_persistence_switch` pins it in
+            # all three copies — and a rollback is then §3 plus the default, nothing else.
             "we keep no other copy of the search results",
             "a temporary in-memory copy for a few minutes",
             "they may be outdated or wrong, they are not caydex\u2019s view",
@@ -900,18 +916,127 @@ def test_the_in_app_mirror_states_the_web_search_clauses(doc):
         )
 
 
-def test_the_not_kept_promise_matches_the_shipped_persistence_switch():
-    """The policy says the web source list "is shown with the answer but is not kept". That is
-    true only while `CHAT_WEB_SOURCES_PERSIST` ships False — flipping the default without
-    rewriting §3 in all three copies would publish a false privacy statement."""
+_PRIVACY_COPIES = [
+    _SERVED / "privacy.html",
+    _AUTHORED / "privacy.html",
+    _IOS_SCREENS_DIR / "PrivacyPolicyView.swift",
+]
+
+
+def _privacy_ai_section(path: Path) -> str:
+    """§3 "AI Processing" of one privacy copy as normalised prose, COMMENTS REMOVED
+    (`_prose_only`) and BOUND to the section — from its heading to the next one — so the same
+    words in the summary or §6 cannot satisfy a §3 check, and neither can a code comment."""
+    text = _prose_only(path)  # lowercased
+    if path.suffix == ".swift":
+        start = text.index('heading: "ai processing"')
+        end = text.index("legalsection(", start)
+        return _normalized_prose(_swift_literals_in(text[start:end]), strip_tags=False)
+    start = text.index("<h2>3. ai processing</h2>")
+    end = text.index("<h2>", start + len("<h2>"))
+    return _normalized_prose(text[start:end], strip_tags=True)
+
+
+@pytest.mark.parametrize("path", _PRIVACY_COPIES, ids=lambda p: str(p.relative_to(_BACKEND.parent)))
+def test_the_source_list_promise_matches_the_shipped_persistence_switch(path):
+    """Privacy §3 says the web source list "is saved with the answer, so it appears again when you
+    reopen the conversation" and is deleted with the conversation or the account. That is true
+    only while `CHAT_WEB_SOURCES_PERSIST` ships True (owner decision 2026-10-09; on in production
+    since 2026-10-03). Both directions, in every copy: the "saved" sentence ⇔ default True, and the
+    old "not kept" wording ⇔ default False — exactly one of the two, so a copy can neither keep the
+    old promise beside the new one nor drop the subject altogether. Flipping the default back
+    without rewriting §3 in all three copies publishes a false privacy statement."""
     from app.config import Settings
 
-    body = _normalized_prose((_SERVED / "privacy.html").read_text(encoding="utf-8"), strip_tags=True)
-    if "is shown with the answer but is not kept" in body:
-        assert Settings.model_fields["CHAT_WEB_SOURCES_PERSIST"].default is False, (
-            "the web-source pills are stored by default now — rewrite Privacy §3 (served HTML, "
-            "documents/legal, PrivacyPolicyView.swift) before shipping that default"
+    if not path.is_file():
+        pytest.skip(f"{path} not present (expected outside the repo checkout)")
+    default = Settings.model_fields["CHAT_WEB_SOURCES_PERSIST"].default
+    assert isinstance(default, bool), f"CHAT_WEB_SOURCES_PERSIST default is {default!r}"
+    section = _privacy_ai_section(path)
+    saved = _SOURCE_LIST_SAVED in section
+    deleted = _SOURCE_LIST_DELETED in section
+    not_kept = _SOURCE_LIST_NOT_KEPT in section
+    assert saved is default and deleted is default, (
+        f"{path.name} §3 {'does not say' if default else 'says'} the source list is saved and "
+        f"deleted with the conversation, but CHAT_WEB_SOURCES_PERSIST ships {default} — rewrite §3 "
+        f"in the served HTML, documents/legal and PrivacyPolicyView.swift together with the default"
+    )
+    assert not_kept is (not default), (
+        f"{path.name} §3 {'still says' if default else 'no longer says'} the source list "
+        f"{_SOURCE_LIST_NOT_KEPT!r}, but CHAT_WEB_SOURCES_PERSIST ships {default}"
+    )
+
+
+def test_the_source_list_scan_is_bound_to_section_3(tmp_path):
+    """Guard against the guard: each extracted §3 is real prose about web search, and it stops at
+    the next heading (§4's provider list and §6's retention text are outside it), so the check
+    above reads §3 and only §3 — and a COMMENT quoting the promise is not the promise."""
+    for path in _PRIVACY_COPIES:
+        if not path.is_file():
+            continue
+        section = _privacy_ai_section(path)
+        assert len(section) > 1500, f"{path.name} §3 scan returned {len(section)} chars"
+        assert "web search in chat: in any chat" in section, f"{path.name} §3 lost the web-search copy"
+        assert "supabase" not in section, f"{path.name} §3 scan ran into §4"
+        assert "deleting your account removes your account record" not in section, (
+            f"{path.name} §3 scan ran into §6"
         )
+    # Planted copies: the promise only in a comment is invisible; the same words as copy are seen.
+    sentence = "The list of web sources it used " + _SOURCE_LIST_SAVED + "."
+    html = ("<h2>3. AI Processing</h2>\n<!-- {s} -->\n<p>Web search in chat: in any chat.</p>{p}\n"
+            "<h2>4. Service Providers</h2>\n<p>{s}</p>\n")
+    swift = ('LegalSection(\n    heading: "AI Processing",\n    paragraphs: [\n'
+             '        // "{s}"\n        "Web search in chat: in any chat."{p}\n    ]\n),\n'
+             'LegalSection(\n    heading: "Service Providers",\n    paragraphs: ["{s}"]\n)\n')
+    for name, template, copy in (("p.html", html, "\n<p>{s}</p>"),
+                                 ("P.swift", swift, ',\n        "{s}"')):
+        planted = tmp_path / name
+        planted.write_text(template.format(s=sentence, p=""), encoding="utf-8")
+        assert _SOURCE_LIST_SAVED not in _privacy_ai_section(planted), (
+            f"{name}: a comment, or the next section, satisfied the §3 check"
+        )
+        planted.write_text(template.format(s=sentence, p=copy.format(s=sentence)), encoding="utf-8")
+        assert _SOURCE_LIST_SAVED in _privacy_ai_section(planted), f"{name}: §3 copy went unseen"
+
+
+def test_the_source_list_claims_match_the_code():
+    """What §3 promises about the saved source list, checked against the code that keeps it:
+    stored in the assistant row's `rich_content.sources` when persistence is on, read back by the
+    history mapper (so a reopened chat shows it), and deleted with the conversation
+    (`DELETE /chat/sessions/{id}` deletes the session's messages) and with the account
+    (`chat_sessions` is purged; `chat_messages` cascades from it)."""
+    import inspect
+
+    from app.api.v1.endpoints import chat as chat_ep
+    from app.api.v1.endpoints.users import _UNLINKED_USER_TABLES
+
+    pill = {"kind": "web", "label": "Web", "detail": "Reuters", "title": "A title",
+            "url": "https://www.reuters.com/a/b", "published_at": "2026-09-30"}
+    base = {"label": "Cay research report", "detail": "AAPL"}
+
+    live, stored = chat_ep._turn_sources([base], [pill], persist=True)
+    assert stored == live == [base, pill]
+    rich = chat_ep._rich_content_for_turn({"stages": []}, None, stored)
+    assert rich["sources"] == [base, pill]
+    replay = chat_ep._row_to_message({
+        "id": "m1", "session_id": "s1", "role": "assistant", "content": "Answer.",
+        "rich_content": rich, "created_at": "2026-10-09T00:00:00+00:00",
+    })
+    assert replay.sources == [base, pill], "a reopened chat no longer shows the saved source list"
+
+    code = "\n".join(
+        line for line in inspect.getsource(chat_ep.delete_chat_session).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert re.search(r'table\(\s*"chat_messages"\s*\)\s*\.delete\(\)\s*\.eq\(\s*"session_id"', code), (
+        "deleting a conversation no longer deletes its messages (and their saved source lists)"
+    )
+    assert "chat_sessions" in _UNLINKED_USER_TABLES, "account deletion no longer purges chats"
+    snapshot = (_BACKEND / "database" / "schema_snapshot.sql").read_text(encoding="utf-8")
+    assert re.search(
+        r"chat_messages_session_id_fkey FOREIGN KEY \(session_id\) REFERENCES "
+        r"public\.chat_sessions\(id\) ON DELETE CASCADE", snapshot,
+    ), "chat_messages no longer cascades from chat_sessions — account deletion would leave them"
 
 
 def test_the_consent_sheet_discloses_the_web_search_query_without_naming_the_vendor():

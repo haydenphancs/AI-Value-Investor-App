@@ -171,8 +171,9 @@ enum RichContentType {
 ///   page's own metadata), plus `title`, `url` (https) and `published_at` ("YYYY-MM-DD" or null).
 ///   Older builds read it as a plain "Web · <publisher>" pill, which is why `label` stays "Web".
 ///
-/// Web pills are LIVE: by default the server does not store them, so a reopened chat shows the
-/// grounding pills and the card's "Web search" badge, not the links.
+/// Web pills: while the server's `CHAT_WEB_SOURCES_PERSIST` is on (the default since 2026-10-09)
+/// they are stored in `rich_content.sources` and come back when the chat is reopened; with it off
+/// they are live only, so a reopened chat shows the card's "Web search" badge, not the links.
 struct ChatSource: Codable, Identifiable, Sendable, Hashable {
     /// Grounding pills keep `label|detail` — the id every stored row already has, so reopening an
     /// old chat causes no ForEach churn. A web pill keys on its URL: the server sends one pill per

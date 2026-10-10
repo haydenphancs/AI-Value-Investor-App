@@ -11,7 +11,9 @@ Handlers take an svc argument (a ChatService) rather than importing it, to avoid
 
 import inspect
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+import re
+from datetime import date
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from google.genai import types
 
@@ -115,6 +117,106 @@ _SECTION_NOTE = (
     "That section is not one this tool has, so the summary is shown. Valid sections: "
     + ", ".join(FINANCIAL_SECTIONS) + "."
 )
+# Its optional `period` (2026-10-09, post-deploy eval `hallucination-bait`): "What was Apple's
+# exact total revenue in fiscal Q3 2019?" got "Caydex's data does not include it ... quarterly
+# figures go back to Q4 2024" — the tool lists only the newest 8 quarters, though the growth
+# cache holds ~16 fiscal years and ~80 fiscal quarters, so the model read the trim as the start
+# of the data, and the turn was refunded as unanswered. A CLOSED form like `section`: described
+# in the schema (no `enum`), parsed here (`normalize_period`) into a `FiscalPeriod` of two
+# integers, and NEVER echoed — the result names the period in its own canonical words
+# ("Q3 FY2019"), rebuilt from those integers.
+PERIOD_TOOLS = frozenset({FINANCIALS_TOOL})
+_PERIOD_MAX_CHARS = 32
+_PERIOD_MIN_YEAR = 1900
+_PERIOD_MAX_YEAR = 2199
+# Fixed text — NEVER an echo of the model's value, which is model output.
+_PERIOD_NOTE = (
+    "That period could not be read, so the latest periods are shown. A period is one fiscal "
+    "year (FY2019 or 2019) or one fiscal quarter (Q3 2019 or Q3 FY2019)."
+)
+_PERIOD_UNAPPLIED_NOTE = (
+    "The period could not be applied, so the latest periods are shown - never say an older "
+    "period is missing from Caydex's data."
+)
+
+
+class FiscalPeriod(NamedTuple):
+    """One of the company's own FISCAL periods: a fiscal year, or a quarter of one."""
+    year: int
+    quarter: Optional[int] = None     # 1-4; None = the whole fiscal year
+
+    @property
+    def label(self) -> str:
+        return f"Q{self.quarter} FY{self.year}" if self.quarter else f"FY{self.year}"
+
+
+def two_digit_year(yy: int, today_year: int) -> int:
+    """A two-digit year as a full one: up to ten years past this year is 20xx, else 19xx
+    ("'19" → 2019, "'30" → 2030, "'98" → 1998) — the latest such year, across a century turn
+    too."""
+    full = today_year - today_year % 100 + 100 + yy
+    while full > today_year + 10:
+        full -= 100
+    return full
+
+
+# The accepted forms, matched against the value upper-cased with every separator (spaces,
+# apostrophes, dashes, slashes, dots, commas) removed and "fiscal (year)" read as "FY". Digits
+# are ASCII only. A bare two-digit year is NOT a fiscal year ("19" alone is too ambiguous).
+_PERIOD_FORMS: Tuple[Tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"^(?:FY)?([0-9]{4})$"), "Y"),                          # 2019, FY2019
+    (re.compile(r"^FY([0-9]{2})$"), "Y"),                               # FY19, FY'19
+    (re.compile(r"^(?:FY)?Q([1-4])(?:FY)?([0-9]{4}|[0-9]{2})$"), "QY"),  # Q3 2019, Q3'19, Q3 FY2019
+    (re.compile(r"^([1-4])Q(?:FY)?([0-9]{4}|[0-9]{2})$"), "QY"),        # 3Q19, 3Q 2019
+    (re.compile(r"^(?:FY)?([0-9]{4}|[0-9]{2})Q([1-4])$"), "YQ"),        # 2019 Q3, FY2019 Q3, FY19Q3
+)
+_PERIOD_SEPARATORS_RE = re.compile(r"[\s'‘’`\-_/,.]+")
+_FISCAL_WORD_RE = re.compile(r"\bFISCAL(?:\s*YEAR)?")
+_OF_WORD_RE = re.compile(r"\bOF\b")
+
+
+def normalize_period(raw: Any) -> Tuple[Optional[FiscalPeriod], Optional[str]]:
+    """``(period, note)`` for the model's `period` argument. Only a string of at most 32
+    characters is read, in the `_PERIOD_FORMS` alone, with a year in 1900-2199 (a future one is
+    read: the tool says it is not reported yet). Omitted / blank → (None, None): the latest
+    periods. Anything else → (None, a fixed note giving the accepted forms). An already-parsed
+    `FiscalPeriod` in range is returned as it is. The raw value is never echoed. Never raises."""
+    if raw is None:
+        return None, None
+    if isinstance(raw, FiscalPeriod):
+        ok = (isinstance(raw.year, int) and not isinstance(raw.year, bool)
+              and _PERIOD_MIN_YEAR <= raw.year <= _PERIOD_MAX_YEAR
+              and (raw.quarter is None or (isinstance(raw.quarter, int)
+                                           and not isinstance(raw.quarter, bool)
+                                           and 1 <= raw.quarter <= 4)))
+        return (raw, None) if ok else (None, _PERIOD_NOTE)
+    if not isinstance(raw, str) or len(raw) > _PERIOD_MAX_CHARS:
+        return None, _PERIOD_NOTE
+    try:
+        text = str(raw).strip()
+        if not text:
+            return None, None
+        text = _OF_WORD_RE.sub(" ", _FISCAL_WORD_RE.sub("FY", text.upper()))
+        compact = _PERIOD_SEPARATORS_RE.sub("", text)
+        for pattern, order in _PERIOD_FORMS:
+            m = pattern.match(compact)
+            if m is None:
+                continue
+            if order == "Y":
+                year_text, quarter = m.group(1), None
+            elif order == "QY":
+                quarter, year_text = int(m.group(1)), m.group(2)
+            else:
+                year_text, quarter = m.group(1), int(m.group(2))
+            year = int(year_text)
+            if len(year_text) == 2:
+                year = two_digit_year(year, date.today().year)
+            if not (_PERIOD_MIN_YEAR <= year <= _PERIOD_MAX_YEAR):
+                return None, _PERIOD_NOTE
+            return FiscalPeriod(year, quarter), None
+    except Exception:  # noqa: BLE001 — an odd str subclass is refused, never a crash
+        return None, _PERIOD_NOTE
+    return None, _PERIOD_NOTE
 # What a ticker IS (`chat_profile_tool`, 2026-10-08): a company's CEO and key executives,
 # headcount, headquarters, listing date and peers; a fund's fee, assets, holdings and sector
 # weights; a coin's supply, fully diluted value and rank, plus the market-wide Crypto Fear &
@@ -342,7 +444,7 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "are as of each filing, not live."
     ),
     FINANCIALS_TOOL: (
-        "Look up a company's reported financial figures from Caydex's financial data. Optional "
+        "Look up a company's reported financial figures from Caydex's data. Optional "
         "`section` picks the depth: summary (the default: key stats, the latest fiscal year and "
         "quarter, margins, the last earnings result and the next report date, valuation "
         "multiples, and the balance sheet's debt and cash), growth (revenue, EPS, net income, "
@@ -355,9 +457,10 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "question about a company's revenue, earnings, EPS, margins, growth, cash flow, debt, "
         "cash, valuation multiples, fair value, dividends, splits, earnings dates or results, "
         "or analysts' revenue or EPS estimates, and never answer those figures from memory. "
-        "Every figure comes with its period (fiscal year, quarter or trailing twelve months), "
-        "its basis and its currency. It carries no analyst ratings and no price targets. Listed "
-        "companies only: not funds, coins, indexes or commodities."
+        "Only the latest periods are listed unless `period` names one (FY2019, Q3 2019): set it "
+        "for any older year or quarter. Every figure comes with its period, basis and currency. "
+        "It carries no analyst ratings and no price targets. Listed companies only: not funds, "
+        "coins, indexes or commodities."
     ),
     PROFILE_TOOL: (
         "Look up what a ticker is, from Caydex's licensed profile data. For a company: its "
@@ -568,24 +671,33 @@ def _declaration(name: str, web_search_mode: Optional[str] = None) -> types.Func
             ),
         )
     if name in _SECTION_ARG_TOOLS:
+        properties = {
+            "ticker": types.Schema(
+                type=types.Type.STRING,
+                description="The company's stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+            ),
+            "section": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Optional: which figures — one of " + ", ".join(FINANCIAL_SECTIONS)
+                    + ". Defaults to summary."
+                ),
+            ),
+        }
+        if name in PERIOD_TOOLS:
+            properties["period"] = types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Optional: one past fiscal period, for a question about a specific or older "
+                    "year or quarter — a fiscal year (FY2019) or a fiscal quarter (Q3 2019). "
+                    "Use it with summary, growth or margins. Without it only the latest periods "
+                    "are listed."
+                ),
+            )
         return types.FunctionDeclaration(
             name=name, description=description,
             parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "ticker": types.Schema(
-                        type=types.Type.STRING,
-                        description="The company's stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
-                    ),
-                    "section": types.Schema(
-                        type=types.Type.STRING,
-                        description=(
-                            "Optional: which figures — one of " + ", ".join(FINANCIAL_SECTIONS)
-                            + ". Defaults to summary."
-                        ),
-                    ),
-                },
-                required=["ticker"],
+                type=types.Type.OBJECT, properties=properties, required=["ticker"],
             ),
         )
     if name in KIND_TOOLS:
@@ -772,6 +884,11 @@ def capability_block(allowed: frozenset, *, web_search_mode: Optional[str] = Non
             + " — mean call check_company_financials (the summary first, a section for depth); "
             "give each figure with its period, basis and currency, and never answer them from "
             "memory. "
+            # The eval `hallucination-bait` (2026-10-09): the 8 newest quarters read as "the
+            # data goes back to Q4 2024", and fiscal Q3 2019 — cached — was called missing.
+            "For a specific or older fiscal year or quarter, pass its `period` (FY2019, Q3 "
+            "2019). Say a period is not in Caydex's data only when the result says so for "
+            "that period — never because the latest periods listed stop short of it. "
         )
     if OWNERSHIP_TOOL in allowed:
         # The TestFlight 1.0 (11) dead end: "how many shares does he own now?" was answered
@@ -1148,11 +1265,24 @@ def build_chat_tool_handlers(
         if sym is None:
             return _invalid(a)
         # Normalised BEFORE the service is called: the service only ever sees a member of
-        # `FINANCIAL_SECTIONS`, and the model's own value never reaches the result.
+        # `FINANCIAL_SECTIONS` (and a `FiscalPeriod` of two integers, or no period), and the
+        # model's own values never reach the result.
         section, note = normalize_section(a.get("section"))
-        result = await svc._fetch_financials_data(sym, section)
-        if note and isinstance(result, dict):
-            result = {**result, "section_note": note}
+        period, period_note = normalize_period(a.get("period"))
+        fetch = svc._fetch_financials_data
+        if period is not None and _accepts_keyword(fetch, "period"):
+            result = await fetch(sym, section, period=period)
+        else:
+            if period is not None:
+                logger.warning("chat tool %s: the financials fetch takes no period — serving the "
+                               "latest periods for %s", FINANCIALS_TOOL, sym)
+                period_note = _PERIOD_UNAPPLIED_NOTE
+            result = await fetch(sym, section)
+        if isinstance(result, dict):
+            if note:
+                result = {**result, "section_note": note}
+            if period_note:
+                result = {**result, "period_note": period_note}
         return result
 
     async def _ownership(args: Dict[str, Any]) -> Dict[str, Any]:

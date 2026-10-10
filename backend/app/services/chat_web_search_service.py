@@ -64,7 +64,8 @@ the turn settles `no_tools` and is refunded, as every other upstream tool failur
 free). A query that reads as market data is refused before any claim (`STATUS_REFUSED`).
 
 STORAGE (Brave's terms: transient storage only; no use of results to evaluate or train an AI):
-no Supabase tier, no cross-user cache — only a short per-user, in-process cache (an iOS re-POST of
+no Supabase tier here, no cross-user cache (the chat endpoint stores each answer's source pills in
+the user's own chat row while `CHAT_WEB_SOURCES_PERSIST` is on) — only a short per-user, in-process cache (an iOS re-POST of
 the same question must not pay twice) and the `_inflight` dedup. Logging is COUNTS ONLY: never the
 query, a title, a snippet or a host.
 

@@ -41,11 +41,15 @@ def test_one_url_policy_for_building_and_reading():
     assert ws.MAX_WEB_PILLS == cws.MAX_WEB_PILLS == 5
 
 
-def test_persistence_ships_off():
-    """Brave allows transient storage only; storing pills is a licence decision (OWNER_TASKS),
-    so the DECLARED default — not this machine's .env — must be False."""
+def test_persistence_ships_on():
+    """Owner decision 2026-10-09: no written storage confirmation from Brave is needed, and the
+    DECLARED default — not this machine's .env — matches production, where the pills have been
+    stored since 2026-10-03. Privacy §3 says the source list is saved; `tests/test_legal_pages.py`
+    ties that sentence to this default, so the two can only flip together. The off path stays
+    tested with the switch set explicitly (`_turn_sources(..., persist=False)` below, and the
+    stream-endpoint tests)."""
     assert "CHAT_WEB_SOURCES_PERSIST" in Settings.model_fields
-    assert Settings.model_fields["CHAT_WEB_SOURCES_PERSIST"].default is False
+    assert Settings.model_fields["CHAT_WEB_SOURCES_PERSIST"].default is True
 
 
 # ── is_web_pill / web_pill_host ─────────────────────────────────────────────

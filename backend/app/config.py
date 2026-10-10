@@ -852,16 +852,19 @@ class Settings(BaseSettings):
     # same query twice, must not pay twice). Never shared across users.
     CHAT_REPORT_WEB_SEARCH_CACHE_TTL_SECONDS: int = 120
     # Web source pills (`{kind:"web", label, detail, title, url, published_at}`) are shown LIVE —
-    # the re-sent `sources` frame and the `done` message — but NOT written into the stored
-    # `rich_content.sources` while this is False, because Brave's terms allow transient storage
-    # only (owner decision 2026-10-02: live only until Brave confirms storage rights in writing).
-    # `thinking.web_searched` (a flag, no result content) is stored either way. Turning it ON is
-    # a licence decision, not a code change: confirm storage on the live plan first
-    # (documents/OWNER_TASKS.md). ROLLBACK: set back to False — rows written while it was on
-    # keep their pills (history shows them); nothing new is stored. It covers the PILLS only: the
-    # answer text, `thinking.reasoning` and the session's rolling summary are stored as for any
-    # chat turn.
-    CHAT_WEB_SOURCES_PERSIST: bool = False
+    # the re-sent `sources` frame and the `done` message — and, while this is True, also written
+    # into the stored `rich_content.sources`, so a reopened chat shows them again; they go when the
+    # conversation (or the account) is deleted. Default True since 2026-10-09 to match production
+    # (on in Railway since 2026-10-03). Owner decision 2026-10-09: no written storage confirmation
+    # from Brave is needed (accepted risk — Brave's terms allow transient storage only). Privacy
+    # Policy §3 says the source list is saved; `tests/test_legal_pages.py` ties that sentence to
+    # this default, so flipping it back means rewriting §3 in all three copies first.
+    # `thinking.web_searched` (a flag, no result content) is stored either way. False = live only:
+    # nothing new is stored, and rows written while it was on keep their pills (history shows
+    # them). It covers the PILLS only: the answer text, `thinking.reasoning` and the session's
+    # rolling summary are stored as for any chat turn. The eval scripts force web search itself
+    # off (`CHAT_REPORT_WEB_SEARCH_ENABLED`), so an eval run produces no web pill to store.
+    CHAT_WEB_SOURCES_PERSIST: bool = True
 
     # ── Web search beyond report chat (owner decisions 2026-10-08, PLAN A8) ───────
     #

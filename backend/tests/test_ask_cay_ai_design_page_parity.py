@@ -206,13 +206,24 @@ def test_the_page_no_longer_carries_the_known_rot():
 
 def test_the_page_describes_the_web_search_wire_contract():
     """Report chat's web search (2026-10-02) added a frame and changed two: `tool_start` (web_search
-    only), `tool_step.skipped`, a second FULL `sources` frame, live-only pills and the caveat. The
-    page must say each, and each must exist in the code it describes."""
+    only), `tool_step.skipped`, a second FULL `sources` frame, the pill-persistence switch and the
+    caveat. The page must say each, and each must exist in the code it describes."""
+    from app.config import Settings
+
     block = _data_block()
     for claim in ("<code>tool_start {name}</code>", "<code>skipped: true</code>",
                   "FULL <code>sources</code> frame", "<code>CHAT_WEB_SOURCES_PERSIST</code>",
                   "<code>finalize_answer_notes</code>", "<code>thinking.web_searched: true</code>"):
         assert claim in block, f"the page no longer says {claim!r}"
+    # The page names the switch's default; it must be the one the code ships (on since 2026-10-09,
+    # matching production — the page said "off (the default" until then).
+    ships_on = Settings.model_fields["CHAT_WEB_SOURCES_PERSIST"].default is True
+    says_on = "<code>CHAT_WEB_SOURCES_PERSIST</code> is on (the default" in block
+    says_off = "<code>CHAT_WEB_SOURCES_PERSIST</code> is off (the default" in block
+    assert says_on is ships_on and says_off is (not ships_on), (
+        f"the page's stated CHAT_WEB_SOURCES_PERSIST default disagrees with config.py "
+        f"(ships {'on' if ships_on else 'off'})"
+    )
     src = _endpoint_src()
     assert re.search(r'_sse\(\s*"tool_start"', src)
     assert '_step["skipped"] = True' in src

@@ -254,14 +254,14 @@ async def test_vs_price_card_is_unrated_with_no_lookup(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_a_lenders_price_card_still_compares_and_rates(monkeypatch, caplog):
-    """AXP: all six asked, every label prints the median, the card is rated, and no
-    `[valuation-unrated]` line. Control for the network scope."""
+    """AXP: all five multiples asked (the yield compares against 1 / the P/E median since v8,
+    2026-10-09), every label prints a median, the card is rated, and no `[valuation-unrated]`
+    line. Control for the network scope."""
     lookup = _Recorder(value=12.0)
     svc = _val_svc(monkeypatch, "AXP", lookup)
     with caplog.at_level(logging.INFO, logger=vss.logger.name):
         snap, degraded = await svc._compute_with_status("AXP")
-    assert lookup.current == [["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda",
-                               "earnings_yield"]]
+    assert lookup.current == [["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda"]]
     assert degraded == [] and snap.rating > 0 and snap.weighted_score is not None
     assert all(m.peer_level == "industry" for m in snap.metrics), [
         (m.metric_key, m.peer_level) for m in snap.metrics]

@@ -606,8 +606,9 @@ def test_a_pre_deploy_v4_valuation_row_is_rebuilt():
     from app.config import settings
     import app.services.valuation_snapshot_service as vss
 
-    # 7 since 2026-10-09 (NET-4: a listed non-lender member's Price card is peer-free).
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 7
+    # 7 since 2026-10-09 (NET-4: a listed non-lender member's Price card is peer-free);
+    # 8 the same day (Earnings Yield = 1 / the card's displayed P/E).
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 8
     svc = vss.ValuationSnapshotService.__new__(vss.ValuationSnapshotService)
     row = {"category": "Price", "rating": 3, "full_report_available": True, "metrics": [],
            vss._DCF_SOURCE_KEY: bool(settings.DCF_ENABLED)}

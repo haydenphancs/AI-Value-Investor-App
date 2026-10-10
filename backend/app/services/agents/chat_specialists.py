@@ -39,17 +39,17 @@ _SPECIALISTS: Dict[str, ChatSpecialist] = {
         "valuation", "Valuation",
         "LENS: Answer through a VALUATION lens — is it cheap or expensive, and why? Anchor on "
         "P/E and the other multiples in your data (earnings yield and any others it gives, each "
-        "with its period), and what the multiple implies about expectations. Use a forward "
-        "multiple only if your data states one, and never read a 0 or a missing multiple as a "
-        "value. A fair-value figure is a model estimate, never a price target — never give a "
-        "price target, and do not anchor on analyst price targets. Pull the price tool you are "
-        "offered (on an index screen that is the market-overview tool, which carries the "
-        "index's P/E and earnings yield when they are known) and the analyst tool when it is "
-        "offered, for real numbers; if no analyst tool is offered, say Caydex has no analyst "
-        "ratings or price targets rather than recalling them; analysts' revenue and EPS "
-        "estimates, when your data or the estimates section of the financials tool you are "
-        "offered gives them, may be used, labelled as estimates and never as a rating, "
-        "recommendation or target. Don't drift into unrelated technicals or macro.",
+        "with its period and basis), and what the multiple implies about expectations. Use a "
+        "forward multiple only if your data states one, and never read a 0 or a missing multiple "
+        "as a value. A fair-value figure is a model estimate, never a price target — never give "
+        "a price target, and do not anchor on analyst price targets. Pull the price tool you are "
+        "offered (on an index screen that is the market-overview tool, which carries the index's "
+        "P/E and earnings yield when they are known) and the analyst tool when it is offered, "
+        "for real numbers; if no analyst tool is offered, say Caydex has no analyst ratings or "
+        "price targets rather than recalling them; analysts' revenue and EPS estimates, when "
+        "your data or the estimates section of the financials tool you are offered gives them, "
+        "may be used, labelled as estimates and never as a rating, recommendation or target. "
+        "Don't drift into unrelated technicals or macro.",
     ),
     "technicals": ChatSpecialist(
         "technicals", "Technicals",

@@ -296,7 +296,12 @@ def test_peer_level_is_set_exactly_when_the_name_prints_a_median():
     assert pfcf.name == "P/FCF (sector avg 30.0)" and pfcf.peer_level == "industry"
     ev = _m(snap, "ev_ebitda")
     assert ev.name == "EV/EBITDA" and ev.peer_level is None
-    assert _m(snap, "pb").peer_level is None and _m(snap, "earnings_yield").peer_level is None
+    assert _m(snap, "pb").peer_level is None
+    # v8 (2026-10-09): the yield row is 1 / the P/E row — against 1 / the P/E median, at the
+    # P/E cell's level (1/30 = 3.33% vs 1/25 = 4.00%; the multiple mirrors P/E's 1.20x).
+    ey = _m(snap, "earnings_yield")
+    assert (ey.name, ey.value, ey.peer_level) == (
+        "Earnings Yield (0.83x sector avg 4.00%)", "3.33%", "industry")
     for m in snap.metrics:
         # a level is only ever reported beside a printed median
         assert m.peer_level is None or "sector avg" in m.name, m
@@ -444,7 +449,8 @@ def test_valuation_cache_hit_keeps_the_original_build_time(monkeypatch):
     writer._upsert_supabase_cache("KO", built)
     (payload,) = writer.supabase.upserts
     # 7 (2026-10-09, NET-4): a listed non-lender member's Price card is peer-free.
-    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 7
+    # 8 (2026-10-09): Earnings Yield = 1 / the card's displayed P/E.
+    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 8
     assert payload["response_json"]["computed_at"] == "2026-10-07T10:00:00Z"
     assert payload["response_json"]["metrics"][0]["peer_level"] is None   # the key travels
 

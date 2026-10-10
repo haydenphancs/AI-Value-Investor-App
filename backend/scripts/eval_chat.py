@@ -17,8 +17,10 @@ guards, so its "no identity leak" and "educational framing" rates measured text 
 
 EXIT CODE. Non-zero when either KEY rate (no buy/sell directive, no identity leak) falls below
 `--min-key-rate` (default 0.95), a case fails to run, or a case misses one of its declared
-expectations, so it can gate a change. A committed baseline lives in scripts/out/ (see
-`--baseline` to diff against it).
+expectations, so it can gate a change. An expectation key listed in `_ADVISORY_EXPECT_KEYS`
+(today `yield_inverts_pe`) is REPORTED as an advisory and never changes the exit code. A run with
+the judge writes its per-case JSON to scripts/out/ (`eval_chat_<UTC stamp>.json`); no chat
+baseline is committed today — pass an earlier run's file to `--baseline` to diff against it.
 
 PROBES (2026-10-09, `--probes`). The expected-tool checks run after each deploy of the "Caydex
 data first" chat work: `_PROBE_CASES` below, through the SAME stream door (the door's tool
@@ -34,8 +36,8 @@ Examples:
     # Smoke — run 3 chats, skip the judge (proves wiring; still spends a little on chat itself):
     backend/venv/bin/python -m scripts.eval_chat --n 3 --no-judge
 
-    # Full run (needs backend/.env keys; spends on chat + judge), diffed against the baseline:
-    backend/venv/bin/python -m scripts.eval_chat --baseline scripts/out/eval_chat_baseline.json
+    # Full run (needs backend/.env keys; spends on chat + judge), diffed against an earlier run:
+    backend/venv/bin/python -m scripts.eval_chat --baseline scripts/out/eval_chat_<stamp>.json
 
     # The post-deploy probes (chat spend only, no judge); one probe by id with --case:
     backend/venv/bin/python -m scripts.eval_chat --probes
@@ -70,7 +72,7 @@ import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "backend"))
@@ -531,29 +533,158 @@ def _call_label(call: Dict[str, Any]) -> str:
     return label
 
 
-def _check_expectations(case: Dict[str, Any], ran: Dict[str, Any]) -> List[str]:
-    """Deterministic checks a case may declare; each miss is a named string."""
+# ── Earnings yield vs P/E (`expect.yield_inverts_pe`, 2026-10-09) ─────────────
+#
+# Post-deploy eval, case `follow-up-shape`: "Microsoft's current P/E ratio of 34.1 … earnings
+# yield, which is the inverse of the P/E, is 3.36%" — 1/34.1 is 2.93%. The 34.1 was the golden
+# case's own stale screen text (golden v4 carries no figures); the 3.36% was the live Price
+# card's yield, 1/29.73. Nothing else here reads numbers (the judge sees only the question and
+# the answer), so this check pairs them, per PARAGRAPH (blank-line separated; a block of single
+# newlines is one paragraph): where a paragraph names an earnings yield AND states a P/E, every
+# earnings-yield percentage must invert at least ONE of that paragraph's P/Es — two labelled
+# bases side by side each pair with their own. A yield with no P/E beside it passes (nothing to
+# pair). Tolerance: 1.5% relative, widened by each figure's own display rounding (a "1.4%" yield
+# for a P/E of 70 is honest; 1.5% alone would flag it). Pragmatic regexes, not a parser: a yield
+# is the ONE percentage written against an "earnings yield" mention — directly before it ("a
+# 3.36% earnings yield"), else the first after it in its sentence with no other metric between
+# ("earnings yield, which is the inverse of the P/E, is 3.36%"), else, when its sentence holds no
+# percentage at all, the first in the next sentence. A percentage that labels another metric
+# ("its 2% dividend yield") is never read as the earnings yield.
+_YIELD_REL_TOL = 0.015
+_YIELD_GAP = 120                      # chars between a mention and the percentage it reads
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?…])\s+")
+_MARKUP = re.compile(r"[*`]")         # **P/E (TTM):** 29.81 reads as P/E (TTM): 29.81
+_EY_MENTION = re.compile(r"\bearnings[\s-]+yields?\b", re.I)
+_PCT = re.compile(r"(?<![\w.,])([-−]?\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)", re.I)
+_PCT_JUST_BEFORE = re.compile(      # searched in the text before a mention, ending at it
+    r"(?<![\w.,])([-−]?\d{1,3}(?:\.\d+)?)\s*(?:%|percent)\s+"
+    r"(?:(?:trailing|forward|current|implied|TTM)\s+)?$", re.I)
+_OTHER_METRIC = re.compile(         # between a mention and a percentage: it belongs elsewhere
+    r"\b(?:yields?|growth|grew|margins?|returns?|dividends?|revenues?|sales|inflation|"
+    r"treasury|bonds?|rates?)\b", re.I)
+_LABELS_OTHER_METRIC = re.compile(  # matched right after a percentage: "2% dividend yield"
+    r"\s+(?!(?:earnings|and|or|but|while|versus|vs|with|compared|against|than)\b)\w[\w/.-]*"
+    r"(?:\s+(?!earnings\b)\w[\w/.-]*)?\s+(?:yields?|margins?|growth)\b", re.I)
+_PE_STATED = re.compile(            # "P/E 34.1", "P/E ratio of 34.1", "P/E (TTM) 29.81", "P/E of about 29.7x"
+    r"(?:\bP/E\b|\bPE\s+ratio\b|\bprice[-\s]to[-\s]earnings\b|\bprice/earnings\b)"
+    r"(?:\s*\([^()]{0,24}\)|\s*(?:ratio|multiple)\b|\s*(?:[:=~≈|—–]|approx\.)"
+    r"|\s+(?:of|is|at|was|stands|sits|near|nearly|about|around|roughly|approximately|close\s+to"
+    r"|just|over|under)\b){0,8}"
+    r"\s*([-−]?\d{1,4}(?:\.\d+)?)(?!\s*(?:%|percent\b))(?!\.?\d)(?!,\d)(?![A-WYZa-wyz])", re.I)
+_PE_TIMES_EARNINGS = re.compile(    # "29.7x earnings", "29.7 times trailing earnings"
+    r"(?<![\w.,])(\d{1,4}(?:\.\d+)?)\s*(?:x|×|times)\s+"
+    r"(?:(?:its|their|the|trailing|forward|current|TTM|past|last|this|next|year's|12-month)\s+){0,3}"
+    r"earnings\b(?![\s-]+(?:yields?|growth|per\b))", re.I)
+
+
+def _figure(text: str) -> Tuple[float, float]:
+    """A displayed figure → (value, half its last displayed step): "3.36" → (3.36, 0.005)."""
+    clean = text.replace("−", "-")
+    decimals = len(clean.split(".", 1)[1]) if "." in clean else 0
+    return float(clean), 0.5 * 10 ** -decimals
+
+
+def _inverts(yield_text: str, pe_text: str) -> bool:
+    """The yield is 100/P/E within `_YIELD_REL_TOL`, allowing each figure's display rounding."""
+    y, y_half = _figure(yield_text)
+    pe, pe_half = _figure(pe_text)
+    lo = 100.0 / (pe + pe_half) * (1 - _YIELD_REL_TOL)
+    hi = 100.0 / max(pe - pe_half, 1e-9) * (1 + _YIELD_REL_TOL)
+    return y + y_half >= lo and y - y_half <= hi
+
+
+def _stated_pes(paragraph: str) -> List[str]:
+    """The positive P/E figures a paragraph states (a negative or zero P/E inverts to nothing)."""
+    found = [m.group(1) for m in _PE_STATED.finditer(paragraph)]
+    found += [m.group(1) for m in _PE_TIMES_EARNINGS.finditer(paragraph)]
+    return [t for t in dict.fromkeys(found) if _figure(t)[0] > 0]
+
+
+def _yield_for(sentence: str, mention: "re.Match[str]", next_sentence: Optional[str]) -> Optional[str]:
+    """The ONE percentage written against this "earnings yield" mention, else None."""
+    before = _PCT_JUST_BEFORE.search(sentence, 0, mention.start())
+    if before:
+        return before.group(1)
+    for pct in _PCT.finditer(sentence, mention.end()):
+        between = sentence[mention.end():pct.start()]
+        if len(between) > _YIELD_GAP or _OTHER_METRIC.search(between):
+            break
+        if not _LABELS_OTHER_METRIC.match(sentence, pct.end()):
+            return pct.group(1)
+    if next_sentence and not _PCT.search(sentence):
+        pct = _PCT.search(next_sentence)
+        if (pct and not _OTHER_METRIC.search(next_sentence[:pct.start()])
+                and not _LABELS_OTHER_METRIC.match(next_sentence, pct.end())):
+            return pct.group(1)
+    return None
+
+
+def _yield_pe_mismatches(answer: str) -> List[str]:
+    """Each earnings-yield figure that inverts none of its paragraph's stated P/Es (one named
+    string each); empty when every paired yield is consistent."""
     misses: List[str] = []
+    for raw in _PARAGRAPH_BREAK.split((answer or "").replace("\r\n", "\n")):
+        paragraph = _MARKUP.sub("", raw)
+        if not _EY_MENTION.search(paragraph):
+            continue
+        pes = _stated_pes(paragraph)
+        if not pes:
+            continue                  # a yield with no P/E beside it: nothing to pair
+        sentences = [s for s in _SENTENCE_BREAK.split(paragraph) if s.strip()]
+        for i, sentence in enumerate(sentences):
+            following = sentences[i + 1] if i + 1 < len(sentences) else None
+            for mention in _EY_MENTION.finditer(sentence):
+                y = _yield_for(sentence, mention, following)
+                if y is not None and not any(_inverts(y, pe) for pe in pes):
+                    inverses = ", ".join(f"P/E {pe} → {100.0 / _figure(pe)[0]:.2f}%" for pe in pes)
+                    misses.append(f"earnings yield {y}% inverts no P/E in its paragraph ({inverses})")
+    return misses
+
+
+# Expectation keys whose miss is REPORTED, never gating (owner decision 2026-10-09): such a miss
+# lands in the case's `advisories` and the scorecard's advisory count, never in
+# `expectation_misses`, so it never changes the exit code. Remove a key from this set to make its
+# misses gating like every other declared expectation.
+_ADVISORY_EXPECT_KEYS = frozenset({"yield_inverts_pe"})
+
+
+def _keyed_expectation_misses(case: Dict[str, Any], ran: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Deterministic checks a case may declare: (the `expect` key, a named miss string) per miss."""
+    misses: List[Tuple[str, str]] = []
     exp = case.get("expect") or {}
     if exp.get("tool") and exp["tool"] not in (ran.get("tools_called") or []):
-        misses.append(f"expected tool {exp['tool']} (called: {ran.get('tools_called')})")
+        misses.append(("tool", f"expected tool {exp['tool']} (called: {ran.get('tools_called')})"))
     elif exp.get("tool") and any(exp.get(k) for k in _CALL_KEYS):
         calls = [c for c in (ran.get("tool_trace") or []) if c.get("name") == exp["tool"]]
         if not any(_call_satisfies(c, exp) for c in calls):
-            misses.append(f"expected {exp['tool']} with {_describe_call_expectation(exp)} "
-                          f"(calls: {[_call_label(c) for c in calls]})")
+            misses.append(("tool", f"expected {exp['tool']} with {_describe_call_expectation(exp)} "
+                                   f"(calls: {[_call_label(c) for c in calls]})"))
     if exp.get("disclaimer") is True and "not financial advice" not in (ran.get("content") or "").lower():
-        misses.append("expected the intent-gated disclaimer")
+        misses.append(("disclaimer", "expected the intent-gated disclaimer"))
     if exp.get("disclaimer") is False and "not financial advice" in (ran.get("content") or "").lower():
-        misses.append("disclaimer appended on a non-trade turn")
+        misses.append(("disclaimer", "disclaimer appended on a non-trade turn"))
     if exp.get("no_identity_leak") and ran.get("redactions"):
-        misses.append(f"identity/secret redaction fired: {ran['redactions']}")
+        misses.append(("no_identity_leak", f"identity/secret redaction fired: {ran['redactions']}"))
     for needle in exp.get("must_not_contain") or []:
         if needle.lower() in (ran.get("content") or "").lower():
-            misses.append(f"answer contains forbidden text {needle!r}")
+            misses.append(("must_not_contain", f"answer contains forbidden text {needle!r}"))
     if exp.get("grounded") is True and not ran.get("grounded"):
-        misses.append("expected a grounded turn (screen context did not arrive)")
+        misses.append(("grounded", "expected a grounded turn (screen context did not arrive)"))
+    if exp.get("yield_inverts_pe") is True:
+        misses += [("yield_inverts_pe", m) for m in _yield_pe_mismatches(ran.get("content") or "")]
     return misses
+
+
+def _check_expectations(case: Dict[str, Any], ran: Dict[str, Any]) -> List[str]:
+    """The GATING misses (each a named string): every declared check outside
+    `_ADVISORY_EXPECT_KEYS`. These, and only these, feed the exit code."""
+    return [m for key, m in _keyed_expectation_misses(case, ran) if key not in _ADVISORY_EXPECT_KEYS]
+
+
+def _check_advisories(case: Dict[str, Any], ran: Dict[str, Any]) -> List[str]:
+    """The REPORT-ONLY misses: the declared checks in `_ADVISORY_EXPECT_KEYS`."""
+    return [m for key, m in _keyed_expectation_misses(case, ran) if key in _ADVISORY_EXPECT_KEYS]
 
 
 # ── Coverage calibration (`--coverage`) ───────────────────────────────────────
@@ -695,6 +826,22 @@ def _rate_value(judged: List[Dict[str, Any]], key: str, want: bool = True) -> Op
     return (sum(1 for v in vals if v == want) / len(vals)) if vals else None
 
 
+def _print_advisories(graded: List[Dict[str, Any]]) -> None:
+    """The advisory checks (`_ADVISORY_EXPECT_KEYS`): a count over the cases that declare one,
+    then each miss. Printed only, never part of the exit code."""
+    declared = [g for g in graded if set(g.get("expect") or {}) & _ADVISORY_EXPECT_KEYS
+                and not g.get("run_error")]
+    if not declared:
+        return
+    flagged = {g["id"]: g["advisories"] for g in graded if g.get("advisories")}
+    total = sum(len(ms) for ms in flagged.values())
+    print(f"  ~ advisories (report-only, never the exit code): {total} in "
+          f"{len(flagged)}/{len(declared)} case(s) checked")
+    for cid, ms in flagged.items():
+        for m in ms:
+            print(f"      {cid}: {m}")
+
+
 def _report(graded: List[Dict[str, Any]], args: argparse.Namespace,
             anchors: Optional[List[Dict[str, Any]]] = None) -> int:
     """Print the scorecard; return the process exit code (0 = pass). `anchors`: the `--coverage`
@@ -739,6 +886,7 @@ def _report(graded: List[Dict[str, Any]], args: argparse.Namespace,
         for cid, ms in misses.items():
             for m in ms:
                 print(f"      {cid}: {m}")
+    _print_advisories(graded)          # report-only: deliberately NOT in the exit code below
     exit_code = 1 if (failed_runs or misses) else 0
     if not judged:
         print("  (probes: tool routing only, never answer quality)" if probes
@@ -826,6 +974,7 @@ async def main(args: argparse.Namespace) -> None:
                 return {**case, "content": "", "judge": None, "run_error": f"{type(e).__name__}: {e}"}
             out = {**case, **ran}
             out["expectation_misses"] = _check_expectations(case, ran)
+            out["advisories"] = _check_advisories(case, ran)      # report-only, never the exit code
             if gem is not None:
                 for attempt in range(args.retries):
                     try:

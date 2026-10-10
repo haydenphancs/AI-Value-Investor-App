@@ -42,6 +42,17 @@ currency; a missing currency is "not confirmed", never assumed US dollars). NaN,
 bools are omitted, never shown as 0; a negative figure keeps its sign. It trims itself below the
 tool-result cap (`_fit`: oldest periods first, `shortened` stamped) so the blind pruner never
 cuts it. No vendor is named anywhere in it (IDENTITY_RULE).
+
+OLDER PERIODS (2026-10-09, eval `hallucination-bait`). The growth and margins lists show only the
+newest periods, and read alone they said "the data goes back to Q4 2024" for a company whose
+cache holds ~16 fiscal years and ~80 quarters. So every growth and margins block carries
+`history` — the first and last fiscal year and quarter of the WHOLE cached series — and the
+optional `period` (`chat_tools.normalize_period`: one fiscal year or quarter, never echoed) reads
+that period's rows from the same series in the summary, growth and margins sections. An absent
+period is answered from the real series: before its first period ("starts at"), after its last
+(not reported yet / not ended yet / in the future) or a gap inside it — never "does not exist".
+Fiscal is not calendar: `fiscal_calendar` places the period against the calendar from the latest
+annual balance sheet's own period end (Apple's fiscal Q3 ends around June).
 """
 
 from __future__ import annotations
@@ -53,11 +64,18 @@ import logging
 import math
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from app.services.agents.chat_tools import FINANCIAL_SECTIONS, FINANCIALS_TOOL, normalize_section
+from app.services.agents.chat_tools import (
+    FINANCIAL_SECTIONS,
+    FINANCIALS_TOOL,
+    FiscalPeriod,
+    normalize_period,
+    normalize_section,
+    two_digit_year,
+)
 from app.services.asset_class import detect_asset_class
 from app.services.chat_security import neutralize_fences, normalize_text, sanitize_symbol
 
@@ -131,6 +149,10 @@ _SNAPSHOT_INCOMPLETE = ("Some of this card's inputs did not load in this build -
                         "missing was not loaded, never zero.")
 _KEY_STATS_NO_PRICE = (" The live price did not load, so Market Cap, the 52-week range, the P/E "
                        "ratios and a payer's dividend yield are not shown here.")
+# "On that multiple's own basis", never "the same price and EPS (TTM)": for a two-currency
+# filer the P/E (TTM) is the daily-close multiple and EPS (TTM) is in another currency.
+_KEY_STATS_EARNINGS_YIELD = (" earnings_yield is 1 / the P/E (TTM) shown here, on that "
+                             "multiple's own basis.")
 _GROWTH_BASIS = (
     "Fiscal years and fiscal quarters as filed, newest first. EPS is GAAP diluted EPS from the "
     "income statement. Free cash flow is operating cash flow minus capital expenditure. YoY "
@@ -161,11 +183,21 @@ _ESTIMATES_BASIS = (
     "rating or a price target. Fiscal years follow the company's own numbering, as in the "
     "growth section; trust each row's period end when naming the year."
 )
+# Two P/E bases reach chat: the card's (TTM, priced when the card was built — up to a day old)
+# and Key Stats' (the live price over EPS (TTM)). Each carries its OWN earnings yield, derived
+# from it (`app.utils.earnings_yield`): the eval of 2026-10-09 paired a P/E of 34.1 with the
+# card's 3.36% and called one the inverse of the other.
 _VALUATION_BASIS = (
-    "Multiples from the Price card, priced when the card was built (as_of), with the peer median "
-    "where shown; the Key Stats P/E uses the live price, so the two P/E figures can differ "
-    "slightly - never call that a contradiction."
+    "Multiples from the Price card: trailing twelve months, priced when the card was built "
+    "(as_of), not the live price, with the peer median where shown. The card's Earnings Yield is "
+    "1 / the card's own P/E. The Key Stats P/E (TTM) and its earnings_yield {key_stats}, so the "
+    "two P/E figures, and the two yields, can differ - never call that a contradiction, and "
+    "never pair a P/E from one with the yield from the other."
 )
+# How the Key Stats P/E was priced, for the sentence above — the same choice `_key_stats_block`
+# makes for its basis (two currencies → the daily-close multiple; anything else → live).
+_KEY_STATS_PE_LIVE = "use the live price"
+_KEY_STATS_PE_DAILY_CLOSE = "are priced at the latest daily close (see Key Stats' basis)"
 _SEGMENTS_BASIS = (
     "Revenue by business segment as reported for the fiscal year; shares are of reported "
     "revenue. Segments can add up to more than revenue when sales between segments are "
@@ -430,13 +462,15 @@ def _period_label(raw: Any) -> Optional[str]:
 
 
 def _period_key(label: str) -> Optional[Tuple[int, int]]:
+    """(fiscal year, quarter) of a period label — 9 for a whole fiscal year, so a year sorts
+    after its own quarters. A two-digit year is read with `chat_tools.two_digit_year`."""
     m = _ANNUAL_RE.match(label)
     if m:
         return int(m.group(1)), 9
     m = _QUARTER_RE.match(label)
     if m:
         year = int(m.group(2))
-        return (2000 + year if year < 100 else year), int(m.group(1))
+        return (two_digit_year(year, _today_et().year) if year < 100 else year), int(m.group(1))
     return None
 
 
@@ -544,7 +578,16 @@ def _key_stats_block(kf: Dict[str, Any], labels: Tuple[str, ...]) -> Optional[Di
     basis = (_KEY_STATS_BASIS_TWO_CURRENCIES if kf.get("pe_basis") == _PE_BASIS_TWO_CURRENCIES
              else _KEY_STATS_BASIS)
     basis += "" if kf.get("live_price_ok") is True else _KEY_STATS_NO_PRICE
+    # The earnings yield on THIS P/E's basis (not a Key Stats row, so beside the rows): the
+    # Price card's yield is 1 / the card's P/E, never this one's (`app.utils.earnings_yield`).
+    from app.utils.earnings_yield import NOT_AVAILABLE, earnings_yield_text
+
+    earnings_yield = earnings_yield_text(shown.get("P/E (TTM)"))
+    if earnings_yield != NOT_AVAILABLE:
+        basis += _KEY_STATS_EARNINGS_YIELD
     block: Dict[str, Any] = {"basis": basis, "rows": shown}
+    if earnings_yield != NOT_AVAILABLE:
+        block["earnings_yield"] = earnings_yield
     currency = _key_stats_currency(kf, shown)
     if currency:
         block["currency"] = currency
@@ -658,6 +701,14 @@ def _growth_block(resp: Any, kf: Optional[Dict[str, Any]], annual: int, quarterl
             raise _Incomplete(note)
         return None
     block["eps_basis"] = "GAAP diluted EPS (per share)"
+    # The periods held, from the WHOLE cached series: the rows above are only the newest, and
+    # read alone they said "the data goes back to Q4 2024" (eval `hallucination-bait`).
+    history = _history({
+        span: set().union(*(_keys_shown(_get(resp, f"{attr}_{span}"), _growth_shown, span, fmt)
+                            for _k, attr, fmt, _lk in _GROWTH_SERIES))
+        for span in ("annual", "quarterly")})
+    if history:
+        block["history"] = history
     return block
 
 
@@ -713,17 +764,341 @@ def _margins_block(resp: Any, annual: int, quarterly: int) -> Optional[Dict[str,
         block["incomplete"] = note
     if not any_rows and note:
         raise _Incomplete(note)
+    if any_rows:
+        history = _history({span: _keys_shown(_get(resp, span), _margin_shown, span)
+                            for span in ("annual", "quarterly")})
+        if history:
+            block["history"] = history
     return block if any_rows else None
 
 
-def _snapshot_metrics(snap: Any) -> Tuple[List[str], List[str]]:
+# ── A requested period (`period`, 2026-10-09) ───────────────────────────────────
+# The eval `hallucination-bait`: the newest 8 quarters read as "the data goes back to Q4 2024",
+# so fiscal Q3 2019 — in the cache — was called missing. Every growth and margins block now says
+# which periods Caydex holds (`history`, from the FULL cached series), and a `period` reads one
+# fiscal year or quarter from those same series. An absence names the REAL first / last period
+# of the series (never the trimmed list's), and a gap inside the range is a gap, never "missing".
+
+_PERIOD_SECTIONS = frozenset({"summary", "growth", "margins"})
+_PERIOD_SOURCES: Dict[str, Tuple[str, ...]] = {
+    "summary": ("key_facts", "growth", "margins"),
+    "growth": ("key_facts", "growth"),
+    "margins": ("key_facts", "margins"),
+}
+_PERIOD_ELSEWHERE = ("A period selects rows only in the summary, growth and margins sections, so "
+                     "this section is shown as usual.")
+_HISTORY_NOTE = ("`history` gives the fiscal years and quarters Caydex's data holds for this "
+                 "company; only the newest are listed above. For an older one call again with "
+                 "`period` (e.g. FY2019 or Q3 2019) - never say it is missing from Caydex's data "
+                 "unless that call says so.")
+_HISTORY_NOTE_PERIOD = ("`history` gives the fiscal years and quarters Caydex's data holds for "
+                        "this company. For another one call again with its `period` - never say "
+                        "a period is missing from Caydex's data unless a call for it says so.")
+_SPAN_WORDS = {"annual": "fiscal years", "quarterly": "fiscal quarters"}
+_SPAN_LEGS = {"annual": frozenset({"annual_income", "annual_cashflow"}),
+              "quarterly": frozenset({"quarterly_income", "quarterly_cashflow"})}
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August",
+           "September", "October", "November", "December")
+# How long after a period ends its figures may still be on the way (a foreign filer's annual
+# report can follow its year by about four months).
+_REPORTING_LAG_MONTHS = 6
+_QUARTERS_NOT_ANNUAL = ("The annual figures for {label} are not in Caydex's data, but its fiscal "
+                        "quarters are, listed under `quarters`. A sum of quarters is not a "
+                        "reported annual figure: say so if you add them.")
+
+
+def _key_name(key: Tuple[int, int]) -> str:
+    """'FY2019' / 'Q3 FY2019' for a `_period_key`."""
+    year, q = key
+    return f"FY{year}" if q == 9 else f"Q{q} FY{year}"
+
+
+def _span_of(period: FiscalPeriod) -> str:
+    return "quarterly" if period.quarter else "annual"
+
+
+def _target(period: FiscalPeriod) -> Tuple[int, int]:
+    return period.year, (period.quarter or 9)
+
+
+def _growth_shown(point: Any, fmt: Any) -> bool:
+    return fmt(_get(point, "value")) is not None
+
+
+def _margin_shown(point: Any, _fmt: Any = None) -> bool:
+    return any(_pct(_get(point, field), signed=False) is not None for _w, field in _MARGINS)
+
+
+def _keys_shown(points: Any, shown: Any, span: str, fmt: Any = None) -> set:
+    """The period keys of the rows a block would show — parsed labels of the span's kind with a
+    usable value — over the WHOLE cached series, never the trimmed list."""
+    keys = set()
+    for label, point in _newest_first(points):
+        key = _period_key(label)
+        if key is None or (key[1] == 9) != (span == "annual"):
+            continue
+        if shown(point, fmt):
+            keys.add(key)
+    return keys
+
+
+def _key_range(keys: set) -> str:
+    """'FY2010 to FY2025' (the real first and last), or 'FY2025 only'."""
+    first, last = min(keys), max(keys)
+    return f"{_key_name(first)} to {_key_name(last)}" if first != last else f"{_key_name(first)} only"
+
+
+def _history(keys_by_span: Dict[str, set]) -> Optional[Dict[str, str]]:
+    """{'fiscal_years': 'FY2010 to FY2025', 'fiscal_quarters': 'Q1 FY2006 to Q2 FY2026'} — the
+    periods a series holds (`_build` adds the `_HISTORY_NOTE` text once beside it)."""
+    out = {_SPAN_WORDS[span].replace(" ", "_"): _key_range(keys_by_span[span])
+           for span in ("annual", "quarterly") if keys_by_span.get(span)}
+    return out or None
+
+
+def _fiscal_year_end(kf: Optional[Dict[str, Any]]) -> Optional[Tuple[int, int, int, str]]:
+    """(the latest reported fiscal year, the calendar year and month it ended in, its period-end
+    date) from the key facts' annual balance sheet — a close on day 1-7 of a month is read as the
+    month before (a 52/53-week year ending 2026-01-03 is a December year end)."""
+    anchor = _fiscal_anchor(kf)
+    if anchor is None:
+        return None
+    fy, end = anchor
+    adj = end - timedelta(days=7)
+    return fy, adj.year, adj.month, end.isoformat()
+
+
+def _approx_end(period: FiscalPeriod, fye: Tuple[int, int, int, str]) -> Tuple[int, int]:
+    """(calendar year, month) the requested fiscal period most likely ended in, assuming the
+    fiscal year end has not moved: the anchor's end month shifted by whole years, less three
+    months per quarter before Q4."""
+    fy, end_year, end_month, _iso = fye
+    idx = (end_year + (period.year - fy)) * 12 + (end_month - 1)
+    if period.quarter:
+        idx -= 3 * (4 - period.quarter)
+    return idx // 12, idx % 12 + 1
+
+
+def _fiscal_calendar(kf: Optional[Dict[str, Any]], period: FiscalPeriod) -> str:
+    """How the company's fiscal periods sit against the calendar (Apple's fiscal Q3 ends in
+    June): read from the latest annual balance sheet's own period end, never assumed."""
+    fye = _fiscal_year_end(kf)
+    if fye is None:
+        return ("These are the company's own fiscal periods. Its fiscal year end is not confirmed "
+                "here, so they may not match calendar quarters or years: if the user means a "
+                "calendar period, say you are giving the fiscal one.")
+    fy, _year, month, iso = fye
+    if month == 12:
+        return (f"The company's fiscal year ends in December (FY{fy} ended {iso}), so its fiscal "
+                "quarters line up with calendar quarters.")
+    year, end_month = _approx_end(period, fye)
+    today = _today_et()
+    verb = "ends" if (year, end_month) >= (today.year, today.month) else "ended"
+    return (f"Fiscal, not calendar: the company's fiscal year ends in {_MONTHS[month - 1]} (FY{fy} "
+            f"ended {iso}), so {period.label} most likely {verb} around {_MONTHS[end_month - 1]} "
+            f"{year}. If the user means a calendar quarter or year, say which fiscal period you "
+            "are giving.")
+
+
+def _absence(period: FiscalPeriod, keys: set, other_keys: set,
+             kf: Optional[Dict[str, Any]]) -> str:
+    """Why `period` has no row, from the series' REAL first and last periods."""
+    span = _span_of(period)
+    other_span = "annual" if span == "quarterly" else "quarterly"
+    words = _SPAN_WORDS[span]
+    label = period.label
+    if not keys:
+        held = (f"; it holds {_SPAN_WORDS[other_span]} {_key_range(other_keys)}"
+                if other_keys else "")
+        return (f"Caydex's data holds no {words} for this company{held}. Never say the company "
+                f"did not report {label}, and never estimate it.")
+    first, last = min(keys), max(keys)
+    want = _target(period)
+    if want < first:
+        return (f"Caydex's data for this company starts at {_key_name(first)} ({words}), so "
+                f"{label} is earlier than Caydex's data goes. Say exactly that - never that the "
+                "company did not report it or that the figure does not exist.")
+    if want > last:
+        today = _today_et()
+        if period.year > today.year + 1:
+            return (f"{label} is in the future: the latest reported period in Caydex's data is "
+                    f"{_key_name(last)}. Never estimate or forecast it.")
+        fye = _fiscal_year_end(kf)
+        end = _approx_end(period, fye) if fye is not None else None
+        if end is not None and end >= (today.year, today.month):
+            return (f"{label} has most likely not ended yet (around {_MONTHS[end[1] - 1]} "
+                    f"{end[0]}): the latest reported period in Caydex's data is "
+                    f"{_key_name(last)}. Never estimate it.")
+        # Ended within the reporting lag (a 10-K can follow its year by ~3 months, a foreign
+        # filer's by ~4) — else the series simply ENDS there (an acquired or delisted company,
+        # a filer that stopped reporting) and "not reported yet" would be false.
+        months_ago = (today.year * 12 + today.month - (end[0] * 12 + end[1])) if end else None
+        if (months_ago is not None and months_ago <= _REPORTING_LAG_MONTHS) or (
+                end is None and period.year >= today.year - 1):
+            return (f"{label} is not in Caydex's data yet: the latest reported period is "
+                    f"{_key_name(last)}. It may not have been reported yet - never estimate it.")
+        return (f"Caydex's data for this company ends at {_key_name(last)} ({words}), so it "
+                f"holds nothing for {label}. Say exactly that - never that the company did not "
+                "report it, and never estimate it.")
+    before = max((k for k in keys if k < want), default=None)
+    after = min((k for k in keys if k > want), default=None)
+    nearest = " and ".join(_key_name(k) for k in (before, after) if k is not None)
+    return (f"Caydex's data has no row for {label}, although it holds {words} from "
+            f"{_key_name(first)} to {_key_name(last)}: a gap in the filed data (for example "
+            f"around a change of fiscal year end). The nearest periods it holds are {nearest}; "
+            f"never present either as {label}, and never estimate it.")
+
+
+def _failed_legs(degraded: Any) -> set:
+    return {d for d in degraded if isinstance(d, str)} if isinstance(degraded, (list, tuple)) else set()
+
+
+def _span_failed(degraded: Any, span: str) -> bool:
+    return bool(_failed_legs(degraded) & _SPAN_LEGS[span])
+
+
+# Which statement each growth series is read from (the service's `degraded` leg names).
+_SERIES_STATEMENT = {"revenue": "income", "eps": "income", "net_income": "income",
+                     "operating_income": "income", "free_cash_flow": "cashflow"}
+
+
+def _money_exact(value: Any) -> Optional[str]:
+    """`_money` plus the full amount as filed — one period's answer can carry it ("Apple's EXACT
+    revenue in fiscal Q3 2019"), where the rounded "53.81B" alone could not."""
+    short = _money(value)
+    f = _num(value)
+    if short is None or f is None or abs(f) < 1e4:
+        return short
+    return f"{short} ({f:,.0f} as reported)"
+
+
+def _growth_period_block(resp: Any, kf: Optional[Dict[str, Any]],
+                         period: FiscalPeriod) -> Optional[Dict[str, Any]]:
+    """`period`'s rows from the growth series (every cached period, not the trimmed list), or an
+    honest absence naming the series' real first and last periods."""
+    levels = _get(resp, "peer_group_levels")
+    levels = levels if isinstance(levels, dict) else {}
+    span = _span_of(period)
+    other_span = "annual" if span == "quarterly" else "quarterly"
+    want = _target(period)
+    keys = {"annual": set(), "quarterly": set()}
+    found: Dict[str, str] = {}
+    quarters: Dict[str, List[str]] = {}
+    for key, attr, fmt, level_key in _GROWTH_SERIES:
+        exact = _money_exact if fmt is _money else fmt
+        for s in ("annual", "quarterly"):
+            peer = _peer_word(levels.get(f"{level_key}_{s}"))
+            for label, point in _newest_first(_get(resp, f"{attr}_{s}")):
+                pk = _period_key(label)
+                if pk is None or (pk[1] == 9) != (s == "annual") or not _growth_shown(point, fmt):
+                    continue
+                keys[s].add(pk)
+                if s == span and pk == want:
+                    row = _growth_row(period.label, point, exact, peer)
+                    if row and key not in found:
+                        found[key] = row
+                elif span == "annual" and s == "quarterly" and pk[0] == period.year:
+                    row = _growth_row(_key_name(pk), point, exact, peer)
+                    if row:
+                        quarters.setdefault(key, []).append(row)
+    degraded = _get(resp, "degraded")
+    note = _degraded_note(degraded)
+    if not keys["annual"] and not keys["quarterly"]:
+        if note:
+            raise _Incomplete(note)
+        return None
+    block: Dict[str, Any] = {"basis": _GROWTH_BASIS, "period": period.label,
+                             "currency": _currency_label(kf)}
+    if found:
+        for key, _attr, _fmt, _lk in _GROWTH_SERIES:
+            if key in found:
+                block[key] = found[key]
+        # A series whose statement leg failed in this build did not load; any other one has no
+        # figure for this period in Caydex's data. Neither is ever zero.
+        failed = _failed_legs(degraded)
+        missing = [key for key, *_r in _GROWTH_SERIES if key not in found]
+        unloaded = [key for key in missing if f"{span}_{_SERIES_STATEMENT[key]}" in failed]
+        absent = [key for key in missing if key not in unloaded]
+        if unloaded:
+            block["not_loaded_in_this_build"] = unloaded
+        if absent:
+            block["not_in_data_for_this_period"] = absent
+        block["eps_basis"] = "GAAP diluted EPS (per share)"
+    elif _span_failed(degraded, span):
+        raise _Incomplete(f"{period.label}: {note}")
+    elif quarters:
+        block["note"] = _QUARTERS_NOT_ANNUAL.format(label=period.label)
+        block["quarters"] = quarters
+        block["eps_basis"] = "GAAP diluted EPS (per share)"
+    else:
+        block["not_in_data"] = _absence(period, keys[span], keys[other_span], kf)
+    if note:
+        block["incomplete"] = note
+    history = _history(keys)
+    if history:
+        block["history"] = history
+    return block
+
+
+def _margins_period_block(resp: Any, kf: Optional[Dict[str, Any]],
+                          period: FiscalPeriod) -> Optional[Dict[str, Any]]:
+    """`period`'s margins from the whole cached series, or an honest absence."""
+    levels = _get(resp, "peer_group_levels")
+    levels = levels if isinstance(levels, dict) else {}
+    fallback_level = _get(resp, "peer_group_level")
+    span = _span_of(period)
+    other_span = "annual" if span == "quarterly" else "quarterly"
+    want = _target(period)
+    keys = {"annual": set(), "quarterly": set()}
+    found: Optional[str] = None
+    quarters: List[str] = []
+    for s in ("annual", "quarterly"):
+        peers = _margin_peers(levels, s, fallback_level)
+        for label, point in _newest_first(_get(resp, s)):
+            pk = _period_key(label)
+            if pk is None or (pk[1] == 9) != (s == "annual") or not _margin_shown(point):
+                continue
+            keys[s].add(pk)
+            if s == span and pk == want and found is None:
+                found = _margin_row(period.label, point, peers)
+            elif span == "annual" and s == "quarterly" and pk[0] == period.year:
+                row = _margin_row(_key_name(pk), point, peers)
+                if row:
+                    quarters.append(row)
+    degraded = _get(resp, "degraded")
+    note = _degraded_note(degraded)
+    if not keys["annual"] and not keys["quarterly"]:
+        if note:
+            raise _Incomplete(note)
+        return None
+    block: Dict[str, Any] = {"basis": _MARGINS_BASIS, "period": period.label}
+    if found:
+        block["margins"] = found
+    elif _span_failed(degraded, span):
+        raise _Incomplete(f"{period.label}: {note}")
+    elif quarters:
+        block["note"] = _QUARTERS_NOT_ANNUAL.format(label=period.label)
+        block["quarters"] = quarters
+    else:
+        block["not_in_data"] = _absence(period, keys[span], keys[other_span], kf)
+    if note:
+        block["incomplete"] = note
+    history = _history(keys)
+    if history:
+        block["history"] = history
+    return block
+
+
+def _snapshot_metrics(snap: Any, ticker: Optional[str] = None) -> Tuple[List[str], List[str]]:
     """`("Name: value", ...)` from a snapshot card (peer-worded names), and the names whose value
-    is a placeholder."""
+    is a placeholder. A card's Earnings Yield is re-derived from the card's own P/E
+    (`with_derived_earnings_yield`) — the yield beside a P/E is always that P/E's inverse."""
+    from app.utils.earnings_yield import with_derived_earnings_yield
     from app.utils.peer_wording import peer_worded_metric_name
 
     shown: List[str] = []
     missing: List[str] = []
-    for metric in _get(snap, "metrics") or []:
+    for metric in with_derived_earnings_yield(_get(snap, "metrics") or [], ticker):
         view = SimpleNamespace(name=_get(metric, "name"), peer_level=_get(metric, "peer_level"))
         name = _text(peer_worded_metric_name(view), _NAME_MAX)
         value = _text(_get(metric, "value"), 32)
@@ -1025,13 +1400,15 @@ def _valuation_block(value: Any, kf: Optional[Dict[str, Any]] = None) -> Optiona
     """The Price card's multiples plus the fair value. A degraded multiples build with nothing to
     show (and no fair value) did not load; it never reads as "none"."""
     snap, degraded = _unwrap_status(value)
-    shown, missing = _snapshot_metrics(snap)
+    shown, missing = _snapshot_metrics(snap, (kf or {}).get("ticker"))
     fair = _fair_value(snap, kf)
     if not shown and not fair:
         if degraded:
             raise _Incomplete("the Price card's build was degraded: " + ", ".join(degraded[:4]))
         return None
-    block: Dict[str, Any] = {"basis": _VALUATION_BASIS}
+    priced = (_KEY_STATS_PE_DAILY_CLOSE
+              if (kf or {}).get("pe_basis") == _PE_BASIS_TWO_CURRENCIES else _KEY_STATS_PE_LIVE)
+    block: Dict[str, Any] = {"basis": _VALUATION_BASIS.format(key_stats=priced)}
     as_of = _text(_get(snap, "computed_at"), 24)
     if as_of:
         block["as_of"] = as_of
@@ -1308,11 +1685,11 @@ def _start_source(name: str, sym: str) -> "asyncio.Task":
     return task
 
 
-async def _gather_sources(sym: str, sec: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
-    """Run the section's sources together; wait at most `_block_wait()` for them. Returns the
+async def _gather_sources(sym: str, names: Tuple[str, ...]) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Run the named sources together; wait at most `_block_wait()` for them. Returns the
     loaded values and each source's status: "ok", "not_loaded" (still running — it keeps going
     and warms its cache) or "failed"."""
-    tasks = {name: _start_source(name, sym) for name in _SECTION_SOURCES[sec]}
+    tasks = {name: _start_source(name, sym) for name in names}
     await asyncio.wait(set(tasks.values()), timeout=max(0.0, _block_wait()))
     loaded: Dict[str, Any] = {}
     status: Dict[str, str] = {}
@@ -1331,7 +1708,12 @@ async def _gather_sources(sym: str, sec: str) -> Tuple[Dict[str, Any], Dict[str,
 
 # (result key, source, builder) per section. A builder takes (value, key facts) and returns a
 # block or None (nothing to show — answered).
-def _plan(sec: str) -> List[Tuple[str, str, Any]]:
+def _plan(sec: str, period: Optional[FiscalPeriod] = None) -> List[Tuple[str, str, Any]]:
+    if period is not None:
+        # One fiscal period, read from the whole cached series (`_PERIOD_SECTIONS` only).
+        growth = ("growth", "growth", lambda v, kf: _growth_period_block(v, kf, period))
+        margins = ("margins", "margins", lambda v, kf: _margins_period_block(v, kf, period))
+        return {"summary": [growth, margins], "growth": [growth], "margins": [margins]}[sec]
     summary_stats = lambda kf, _kf: _key_stats_block(kf, _SUMMARY_KEY_STATS)  # noqa: E731
     return {
         "summary": [
@@ -1368,10 +1750,12 @@ _NOTHING_REPORTED = ("no figures reported in Caydex's data for this company - ne
                      "as zero or as the company having none")
 
 
-async def _build(sym: str, sec: str) -> Dict[str, Any]:
-    """One section's result for `sym` (unfitted). Never raises."""
+async def _build(sym: str, sec: str, period: Optional[FiscalPeriod] = None) -> Dict[str, Any]:
+    """One section's result for `sym` (unfitted) — with `period` (only for `_PERIOD_SECTIONS`),
+    that one fiscal period's rows. Never raises."""
     try:
-        loaded, status = await _gather_sources(sym, sec)
+        sources = _SECTION_SOURCES[sec] if period is None else _PERIOD_SOURCES[sec]
+        loaded, status = await _gather_sources(sym, sources)
         kf = loaded.get("key_facts") if isinstance(loaded.get("key_facts"), dict) else None
         if kf is not None and kf.get("is_fund") is True:
             # Answered, not an outage: a fund has holdings, not company statements.
@@ -1390,10 +1774,14 @@ async def _build(sym: str, sec: str) -> Dict[str, Any]:
             "today": f"{_today_et().isoformat()} (US Eastern)",
             "currency": _currency_block(kf),
         }
+        if period is not None:
+            result["period"] = (f"{period.label}: the company's own fiscal "
+                                + ("quarter" if period.quarter else "year"))
+            result["fiscal_calendar"] = _fiscal_calendar(kf, period)
         unavailable: List[str] = []
         shown = 0
         upstream_missing = 0
-        for key, source, builder in _plan(sec):
+        for key, source, builder in _plan(sec, period):
             state = status.get(source)
             if state != "ok":
                 unavailable.append(f"{key}: {_NOT_LOADED if state == 'not_loaded' else _FAILED}")
@@ -1436,6 +1824,9 @@ async def _build(sym: str, sec: str) -> Dict[str, Any]:
             shown += 1
         if sec == "dividends":
             result["splits"] = _splits_text(loaded.get("splits"), status.get("splits", "failed"))
+        if any(isinstance(result.get(k), dict) and "history" in result[k]
+               for k in ("growth", "margins")):
+            result["older_periods"] = _HISTORY_NOTE if period is None else _HISTORY_NOTE_PERIOD
         if unavailable:
             result["unavailable"] = unavailable
         result["how_to_read"] = _HOW_TO_READ
@@ -1454,22 +1845,24 @@ async def _build(sym: str, sec: str) -> Dict[str, Any]:
 
         # The exception's class and text go to the LOG only: a class name carries a vendor
         # ("FMPRateLimitException") into model-facing text (final review 2026-10-09).
-        logger.warning("chat tool %s failed for %s/%s: %s: %s", FINANCIALS_TOOL, sym, sec,
+        logger.warning("chat tool %s failed for %s/%s%s: %s: %s", FINANCIALS_TOOL, sym, sec,
+                       f" {period.label}" if period is not None else "",
                        type(e).__name__, redact_secrets(str(e))[:300], exc_info=True)
         return {"ticker": sym, "section": sec, "upstream": True,
                 "error": _BUILD_FAILED,
                 "note": "Company financials could not be loaded right now; never say there are none."}
 
 
-def _inflight_build(sym: str, sec: str) -> "asyncio.Task":
-    """The running build for (sym, sec), or a new one. A caller that goes away (a cancelled turn,
-    the handler ceiling) never cancels it — it finishes and warms every cache it touched."""
-    key = (sym, sec)
+def _inflight_build(sym: str, sec: str, period: Optional[FiscalPeriod] = None) -> "asyncio.Task":
+    """The running build for (sym, sec[, period]), or a new one. A caller that goes away (a
+    cancelled turn, the handler ceiling) never cancels it — it finishes and warms every cache it
+    touched. A period build is keyed apart ("growth@Q3 FY2019"); it shares the SOURCE reads."""
+    key = (sym, sec if period is None else f"{sec}@{period.label}")
     task = _inflight.get(key)
     if task is not None and _on_this_loop(task):
-        logger.info("chat tool %s: joining the in-flight %s/%s build", FINANCIALS_TOOL, sym, sec)
+        logger.info("chat tool %s: joining the in-flight %s/%s build", FINANCIALS_TOOL, *key)
         return task
-    task = asyncio.ensure_future(_build(sym, sec))
+    task = asyncio.ensure_future(_build(sym, sec, period))
     _inflight[key] = task
 
     def _clear(t: "asyncio.Task", key: Tuple[str, str] = key) -> None:
@@ -1539,8 +1932,9 @@ def _fit(result: Dict[str, Any], budget: int) -> Dict[str, Any]:
             result["shortened"] = _SHORTENED
     if _size(result) > budget:
         # Last resort: the envelope alone.
-        keep = {k: result[k] for k in ("ticker", "resolved_as", "section", "today", "error",
-                                       "upstream", "note", "section_note") if k in result}
+        keep = {k: result[k] for k in ("ticker", "resolved_as", "section", "period", "today",
+                                       "error", "upstream", "note", "section_note", "period_note")
+                if k in result}
         keep["shortened"] = _SHORTENED
         result.clear()
         result.update(keep)
@@ -1587,18 +1981,28 @@ def _refusal(ticker: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     return sym, None
 
 
-async def fetch_company_financials(ticker: Any, section: Any = "summary") -> Dict[str, Any]:
+async def fetch_company_financials(ticker: Any, section: Any = "summary",
+                                   period: Any = None) -> Dict[str, Any]:
     """`section` of `ticker`'s reported figures (see the module docstring). `section` is
     normalised (`chat_tools.normalize_section`): an unknown value serves the summary with a
-    fixed note, never an echo. Never raises; every caller gets its own copy of the result."""
+    fixed note, never an echo. `period` (`chat_tools.normalize_period`: a `FiscalPeriod`, or the
+    model's raw text) picks one fiscal year or quarter in the summary, growth and margins
+    sections; an unreadable one serves the latest periods with a fixed note, and on any other
+    section the section is served as usual with a fixed note. Never raises; every caller gets
+    its own copy of the result."""
     try:
         sym, refusal = _refusal(ticker)
         if refusal is not None:
             return refusal
         sec, note = normalize_section(section)
-        result = copy.deepcopy(await asyncio.shield(_inflight_build(sym, sec)))
+        per, period_note = normalize_period(period)
+        if per is not None and sec not in _PERIOD_SECTIONS:
+            per, period_note = None, _PERIOD_ELSEWHERE
+        result = copy.deepcopy(await asyncio.shield(_inflight_build(sym, sec, per)))
         if note:
             result["section_note"] = note
+        if period_note:
+            result["period_note"] = period_note
         return _fit(result, _budget())
     except Exception as e:  # noqa: BLE001 — never raises (CancelledError is not an Exception)
         from app.log_redaction import redact_secrets

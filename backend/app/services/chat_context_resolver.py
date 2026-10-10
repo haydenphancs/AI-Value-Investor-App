@@ -37,6 +37,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 # A leaf module (stdlib only): the one rule for naming a metric's peer group to a model.
 from app.utils.peer_wording import peer_worded_metric_name
 from app.utils.currency import currency_code
+# Also a leaf module: a stored card's yield reaches the model only beside the P/E it inverts.
+from app.utils.earnings_yield import without_unpaired_yield
 
 logger = logging.getLogger(__name__)
 
@@ -1140,6 +1142,10 @@ def _fundamentals_figures(report: Dict[str, Any]) -> List[_FigSpec]:
         items: List[str] = []
         metrics = card.get("metrics")
         if isinstance(metrics, list):
+            # A stored Valuation card from before Price-card payload v8 (2026-10-09) can hold a
+            # yield that is not 1 / its P/E (C: 13.75 beside 8.09%). Left out, never re-derived:
+            # the report on screen shows the stored figure (`without_unpaired_yield`).
+            metrics = without_unpaired_yield(metrics, report.get("symbol"))
             for m in metrics[:_FIG_METRICS_MAX]:
                 item = _metric_item(m) if isinstance(m, dict) else None
                 if item:

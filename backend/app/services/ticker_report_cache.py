@@ -277,7 +277,15 @@ TABLE_NAME = "ticker_report_cache"
 #     This ONE bump supersedes every instant above. After the 18:00 ET close: only the cached
 #     reports since the 23:40 UTC floor rebuild. The full suite ran on the exported tree BEFORE
 #     this literal was written; commit and push followed at once.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 9, 1, 22, 0, tzinfo=timezone.utc)
+# 2026-10-10 (01:34 UTC = 2026-10-09 21:34 ET): bumped for the Cay AI release's report content —
+#     3fcc4909 (pushed 2026-10-09 22:10 UTC WITHOUT a bump, owner's choice) changed Key Management
+#     (the one insider roster), holders payload v6, `revenue_engine.reporting_currency` and the
+#     report-chat figures lead; this follow-up commit changes the Valuation card's Earnings Yield
+#     (Price card payload v8: 1 / its own P/E) and the report's Earnings Yield drill-down
+#     (100 / the period P/E; peer line 100 / the P/E median). This ONE bump supersedes every
+#     instant above. After the 18:00 ET close: only the cached reports since then rebuild. The full
+#     suite ran on the exact commit tree BEFORE this literal was written; commit and push followed.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 10, 1, 34, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

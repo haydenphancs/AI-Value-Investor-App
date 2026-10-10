@@ -294,7 +294,12 @@ from app.utils.peer_wording import peer_worded_metric_name as _peer_worded_metri
 _SNAPSHOT_BASIS = {
     "Profitability": "trailing twelve months, except a margin marked latest fiscal year",
     "Growth": "latest fiscal year vs the prior fiscal year",
-    "Price": "trailing-twelve-month multiples, priced when the card was built",
+    # Its Earnings Yield is 1 / its own P/E: the card prints it that way since payload v8, and
+    # `_get_snapshot_summary` re-derives it anyway (`app.utils.earnings_yield`, 2026-10-09) — a
+    # live P/E elsewhere in the chat is a different basis, and a yield paired across the two
+    # read as "the inverse of the P/E" while it was not.
+    "Price": ("trailing-twelve-month multiples, priced when the card was built, not the live "
+              "price; its Earnings Yield is 1 / its own P/E"),
     "Financial Health": ("latest quarterly balance sheet; interest coverage and the Altman "
                          "Z-Score use trailing-twelve-month income"),
     "Insiders & Ownership": "latest filings",
@@ -2511,12 +2516,18 @@ class ChatService:
 
         return await fetch_ownership(ticker, user_tier=user_tier)
 
-    async def _fetch_financials_data(self, ticker: str, section: str = "summary") -> Dict[str, Any]:
+    async def _fetch_financials_data(
+        self, ticker: str, section: str = "summary", period: Any = None,
+    ) -> Dict[str, Any]:
         """A company's reported figures for one `section` (`chat_financials_tool`): read
-        through the Financials / Overview services' own caches, never Gemini. Never raises."""
+        through the Financials / Overview services' own caches, never Gemini. `period` is the
+        handler's already-normalised `chat_tools.FiscalPeriod` (one fiscal year or quarter), or
+        None for the latest periods. Never raises."""
         from app.services.chat_financials_tool import fetch_company_financials
 
-        return await fetch_company_financials(ticker, section)
+        if period is None:
+            return await fetch_company_financials(ticker, section)
+        return await fetch_company_financials(ticker, section, period=period)
 
     # What `resolved_as` says when the profile tool answered without one (an outage, no profile
     # on file): the class the symbol was LOOKED UP as — never a claim about why nothing loaded
@@ -2895,6 +2906,7 @@ class ChatService:
             from app.services.valuation_snapshot_service import get_valuation_snapshot_service
             from app.services.health_snapshot_service import get_health_snapshot_service
             from app.services.ownership_snapshot_service import get_ownership_snapshot_service
+            from app.utils.earnings_yield import with_derived_earnings_yield
 
             results = await asyncio.gather(
                 get_profitability_snapshot_service().get_profitability_snapshot(ticker),
@@ -2926,9 +2938,11 @@ class ChatService:
                     missing.append(name)
                     continue
                 category = getattr(snap, "category", None) or name
+                # The Price card's Earnings Yield is shown as 1 / the card's own P/E, never the
+                # upstream yield (another endpoint, its own clock) — `app.utils.earnings_yield`.
                 metrics_str = ", ".join(
                     f"{_chat_metric_name(m)}: {m.value}{_profitability_row_basis(category, m)}"
-                    for m in snap.metrics
+                    for m in with_derived_earnings_yield(snap.metrics, ticker)
                 )
                 # What period the figures cover and when the card was built — so a TTM margin
                 # is never read beside the profit line's FY one unlabelled, and the card's P/E
@@ -3522,6 +3536,11 @@ class ChatService:
     # CAYDEX FIGURE ONLY but is never presented as Caydex's own estimate. The currency fallback
     # is scoped to financial statements: the quote tool states its trading currency, and a quote
     # answered "(currency not confirmed)" for a US stock was the result.
+    # Post-deploy eval 2026-10-09 (`follow-up-shape`): "P/E 34.1 (the screen's text) … earnings
+    # yield, the inverse of the P/E, is 3.36% (the card's, 1/29.73)". Every yield Caydex hands
+    # the model is now derived from the P/E beside it, or — a stored report's card, shown as
+    # stored — left out unless it inverts that P/E (`app.utils.earnings_yield`); the last
+    # sentence keeps the model from pairing across sources itself.
     _DATA_PRECEDENCE_RULE = (
         "\nCAYDEX DATA FIRST: The Caydex data blocks in this conversation and the results of "
         "Caydex's own data and news tools are Caydex's data, and they take precedence over "
@@ -3536,7 +3555,9 @@ class ChatService:
         "reporting currency is not stated, say it is not confirmed and never assume US dollars. "
         "When two Caydex figures for the same item carry different dates, the later-dated one is "
         "current. When two Caydex figures differ only by basis, name each basis rather than "
-        "calling either one wrong. "
+        "calling either one wrong. An earnings yield is the inverse of the P/E it was computed "
+        "from: pair each P/E only with its own yield, never with a yield from another source, "
+        "date or price. "
     )
     # ── Report grounding (TestFlight #57, 2026-09-26) ────────────────────────────
     # "Chat with the report" on AVGO: the report listed NVIDIA first; Cay AI answered "NVIDIA

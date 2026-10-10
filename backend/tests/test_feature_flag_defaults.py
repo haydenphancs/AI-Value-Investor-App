@@ -85,8 +85,8 @@ def test_this_file_reads_the_declared_default_not_the_environment():
 
 
 # The web search beyond report chat (2026-10-08). Its legal copy (consent v3) is written, but
-# turning it on is a staged owner decision (PLAN switch order: Brave's storage confirmation, the
-# legal pages live, every-chat, shadow, then on) — never a code default. Declared defaults only,
+# turning it on is a staged owner decision (switch order: the legal pages live, every-chat,
+# shadow, then on — no Brave confirmation step, owner 2026-10-09) — never a code default. Declared defaults only,
 # for the reason this file's docstring gives.
 _WEB_MUST_SHIP_CLOSED = {
     "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED": False,

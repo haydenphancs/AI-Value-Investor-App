@@ -3,8 +3,8 @@
 Owner decisions (2026-10-02): report chat may search the web, on explicit request only; the
 thinking card shows a visible "Searching the web…" status while the search runs and a small
 "Web search" badge on the finished answer; web source pills open the article in an IN-APP
-browser; the pills are LIVE (the server does not store them by default), so a reopened chat
-shows the badge but not the links.
+browser; the server stores the pills with the answer while `CHAT_WEB_SOURCES_PERSIST` is on (the
+default since 2026-10-09), so a reopened chat shows them again; with it off they are live only.
 
 Wire contract these scans pin (the server side is `chat_web_search_service` + the stream door):
 

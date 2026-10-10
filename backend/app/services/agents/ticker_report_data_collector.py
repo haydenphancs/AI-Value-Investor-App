@@ -3636,6 +3636,37 @@ def _pct_or_none(v: Any) -> Optional[float]:
     return round(n * 100, 1) if n is not None else None
 
 
+def _history_earnings_yield(pe_raw: Any) -> Optional[float]:
+    """A drill-down period's earnings yield, in percent: 100 / that period's P/E AS THE P/E
+    SERIES SHOWS IT (2 decimals) — the Price card's rule since payload v8 (owner decision
+    2026-10-09) — or None (an "undefined" point, never a fabricated 0) when the P/E is missing,
+    zero, negative, non-finite, or so large the yield would round to 0.00.
+
+    Never FMP's own `earningsYield`: where it is present it is net income ÷ market cap, not the
+    per-share earnings the P/E divides by, and the two split where preferred dividends or a
+    moving share count do (C: 8.09% beside P/E 13.75, whose inverse is 7.27%)."""
+    if isinstance(pe_raw, bool):         # float(True) is 1.0: a malformed row, not a P/E of 1
+        return None
+    pe = _positive_or_none(_num_or_none(pe_raw))
+    if pe is None or round(pe, 2) <= 0:
+        return None
+    ey = round(100.0 / round(pe, 2), 2)
+    return ey if ey > 0 else None
+
+
+def _reciprocal_peer_map(
+    medians: Dict[Tuple[int, Optional[int]], float],
+) -> Dict[Tuple[int, Optional[int]], float]:
+    """{period: 1 / P/E median} for each period with a usable P/E median (finite, positive at
+    two decimals) — the earnings-yield peer line as a fraction, like the card's 1 / the P/E
+    median. A period whose median is unusable gets no point."""
+    out: Dict[Tuple[int, Optional[int]], float] = {}
+    for period, median in medians.items():
+        if median is not None and math.isfinite(median) and round(median, 2) > 0:
+            out[period] = 1.0 / median
+    return out
+
+
 def _positive_or_none(v: Optional[float]) -> Optional[float]:
     """Return None for a non-positive value so the period renders as an
     "undefined" 0-line marker instead of a misleading negative bar. Used for:
@@ -5081,9 +5112,11 @@ _HISTORY_UNITS: Dict[str, str] = {
 }
 
 # history_key → sector_benchmarks `metric_name`, for the "*" (sector-compared)
-# metrics ONLY. Growth / earnings_yield / altman_z have no "*" and get no
-# sector line (altman_z isn't in the table anyway). Most names match; the
-# valuation multiples carry a `_ratio` suffix in the benchmark table.
+# metrics read straight from the table. Growth rates and altman_z have no "*" and
+# get no sector line (altman_z isn't in the table anyway); earnings_yield's line is
+# DERIVED as 100 / the pe_ratio line (`_RECIPROCAL_SECTOR_LINE_BY_HISTORY_KEY`
+# below), never read. Most names match; the valuation multiples carry a `_ratio`
+# suffix in the benchmark table.
 _SECTOR_METRIC_BY_HISTORY_KEY: Dict[str, str] = {
     "gross_margin": "gross_margin",
     "operating_margin": "operating_margin",
@@ -5099,10 +5132,16 @@ _SECTOR_METRIC_BY_HISTORY_KEY: Dict[str, str] = {
     "current_ratio": "current_ratio",
     "interest_coverage": "interest_coverage",
     "quick_ratio": "quick_ratio",
-    # Earnings yield IS sector-compared on the valuation card (the snapshot
-    # passes a sector median); the benchmark stores it as a decimal fraction,
-    # so it rides the percent-unit ×100 path like the margins.
-    "earnings_yield": "earnings_yield",
+}
+# history_key → the sector_benchmarks metric whose line it is the RECIPROCAL of. Earnings yield
+# is sector-compared on the valuation card, and since Price-card payload v8 (owner decision
+# 2026-10-09) that comparison is 1 / P/E against 1 / the P/E median. Its drill-down peer line is
+# the same: 100 / the P/E line of the same period and peer group (the injected TTM point
+# included), never the STORED earnings_yield medians (net income ÷ market cap — a few percent off
+# median 1/P/E where preferred dividends are common), which are no longer read. Withholding the
+# P/E line withholds this one with it. (Odd peer counts: median(1/P/E) = 1/median(P/E) exactly.)
+_RECIPROCAL_SECTOR_LINE_BY_HISTORY_KEY: Dict[str, str] = {
+    "earnings_yield": "pe_ratio",
 }
 _SECTOR_HISTORY_METRIC_NAMES = sorted(set(_SECTOR_METRIC_BY_HISTORY_KEY.values()))
 
@@ -5352,14 +5391,7 @@ def _fundamentals_history_for_period(
             add("gross_margin", label, _pct_or_none(rat.get("grossProfitMargin")))
             add("operating_margin", label, _pct_or_none(rat.get("operatingProfitMargin")))
             add("net_margin", label, _pct_or_none(rat.get("netProfitMargin")))
-            # Earnings yield: FMP's `earningsYield` is null across most of the
-            # history, so fall back to 1/PE (the canonical definition) — else
-            # the metric has no series and the chart never appears.
-            _pe_for_ey = _num_or_none(rat.get("priceToEarningsRatio"))
-            _ey = _pct_or_none(rat.get("earningsYield"))
-            if _ey is None and _pe_for_ey is not None and _pe_for_ey > 0:
-                _ey = round(100.0 / _pe_for_ey, 2)
-            add("earnings_yield", label, _ey)
+            add("earnings_yield", label, _history_earnings_yield(rat.get("priceToEarningsRatio")))
             # Price multiples are undefined when non-positive → None (renders as
             # an "undefined" red 0-line marker, like P/FCF / EV/EBITDA — not a
             # misleading negative bar). D/E etc. below are NOT gated.
@@ -5542,16 +5574,20 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
     qtr_keys = _period_calendar_keys(
         getattr(out, "income_q", []) or [], getattr(out, "ratios_q", []) or [], quarterly=True)
     for key, payload in result.items():
-        sector_name = _SECTOR_METRIC_BY_HISTORY_KEY.get(key)
+        reciprocal_of = _RECIPROCAL_SECTOR_LINE_BY_HISTORY_KEY.get(key)
+        sector_name = reciprocal_of or _SECTOR_METRIC_BY_HISTORY_KEY.get(key)
         if not sector_name:
             continue  # non-"*" metric → no sector line
         to_percent = _HISTORY_UNITS.get(key) == "percent"
+
+        def _peer_map(bench_by_metric: Dict[str, Any]) -> Dict[Tuple[int, Optional[int]], float]:
+            medians = _sector_period_map(bench_by_metric.get(sector_name, {}))
+            return _reciprocal_peer_map(medians) if reciprocal_of else medians
+
         sa, sa_has = _aligned_sector_series(
-            payload["annual"], ann_keys,
-            _sector_period_map(annual_bench.get(sector_name, {})), to_percent)
+            payload["annual"], ann_keys, _peer_map(annual_bench), to_percent)
         sq, sq_has = _aligned_sector_series(
-            payload["quarterly"], qtr_keys,
-            _sector_period_map(quarterly_bench.get(sector_name, {})), to_percent)
+            payload["quarterly"], qtr_keys, _peer_map(quarterly_bench), to_percent)
         if sa_has:
             payload["sector_annual"] = sa
             if annual_levels.get(sector_name) in ("industry", "sector"):

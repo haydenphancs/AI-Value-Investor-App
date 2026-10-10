@@ -97,9 +97,14 @@ Notes on the non-obvious ones:
 - **Report chat's web search adds NO data type** (2026-10-02). The query is derived from a chat
   message — already declared as Other User Content (linked, App Functionality) — and Brave
   Search processes it as our service provider, not for its own purposes or for tracking. No
-  `PrivacyInfo.xcprivacy` change. The search results and the source list are not kept with the
-  account while `CHAT_WEB_SOURCES_PERSIST` is off (the default); only the answer text and a
-  `web_searched` flag are stored with the conversation, like any chat turn.
+  `PrivacyInfo.xcprivacy` change. With `CHAT_WEB_SOURCES_PERSIST` on (the default since
+  2026-10-09; on in production since 2026-10-03) the answer text, a `web_searched` flag and the
+  source list (each source's title, publisher, date and link, in `rich_content.sources`) are
+  stored with the conversation like any chat turn, come back when it is reopened, and are deleted
+  with the conversation or the account — still Other User Content, so still no new data type
+  (owner decision 2026-10-09: no written storage confirmation from the provider is needed). The
+  search results themselves are not kept beyond a few-minute per-user in-memory cache. With the
+  switch off, the source list is shown live and not stored.
 
 ---
 
@@ -157,11 +162,14 @@ or email.
 - **Any new SDK** → check whether it ships its own privacy manifest and whether it adds a
   data type. Update `Package.resolved`, the manifest, `AcknowledgementsView`, and this file.
 - **`tracesSampleRate` raised above 0** → add Performance Data (see §3).
-- **The web search provider changes, or `CHAT_WEB_SOURCES_PERSIST` is turned on** → Privacy
-  Policy §3 (the "shown with the answer but is not kept" sentence) and §4 (the provider) in all
-  three copies (served HTML, `documents/legal/privacy.html`, `PrivacyPolicyView.swift`), the
-  consent row in `AIDataConsentView.swift`, and this file. `tests/test_legal_pages.py`
-  fails the build if the "not kept" sentence survives a persistence default flip.
+- **The web search provider changes, or `CHAT_WEB_SOURCES_PERSIST` is turned off** → Privacy
+  Policy §3 (the "saved with the answer, so it appears again when you reopen the conversation"
+  sentence) and §4 (the provider) in all three copies (served HTML,
+  `documents/legal/privacy.html`, `PrivacyPolicyView.swift`), the consent row in
+  `AIDataConsentView.swift`, and this file. `tests/test_legal_pages.py` fails the build unless
+  every copy's "saved" sentence and the switch's shipped default agree (the sentence ⇔ default
+  True). Turning it off on Railway alone also makes that sentence false for new turns — flip the
+  code default and §3 together, never the variable by itself.
 - **Review notes, §7 below** — "no unrestricted web access" is still true (web search is one
   bounded tool call per question with daily caps, never a browser: on an explicit ask in a
   report chat today, and — after consent v3, with the backend switches on — on an ask or

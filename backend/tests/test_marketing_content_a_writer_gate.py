@@ -39,6 +39,14 @@ def _usable(item: content_pool.ContentItem) -> List[str]:
     return out
 
 
+def image_post_of(sentences: List[str]) -> Dict[str, Any]:
+    """A clean `image_post` from an item's own usable fact sentences: a short title cut from the
+    seventh (the card-title shape) and the two first sentences that fit a paragraph."""
+    paras = [s for s in sentences[6:] if len(s) <= 200][:2]
+    assert len(paras) == 2, sentences
+    return {"title": " ".join(sentences[6].split()[:4]).rstrip(",.:;"), "paragraphs": paras}
+
+
 def _baseline(key: str) -> Tuple[content_pool.ContentItem, Dict[str, Any]]:
     item = content_pool.get_item(key)
     assert item is not None and item.eligible, key
@@ -57,6 +65,9 @@ def _baseline(key: str) -> Tuple[content_pool.ContentItem, Dict[str, Any]]:
             "facebook": " ".join(g[4:6]), "x": short, "threads": g[6], "bluesky": short,
             "linkedin": " ".join(g[:3]),
         },
+        # Drop 1: the post image's text is a required field (a package without it is valid but
+        # carries an image `schema` violation), so the clean baseline carries a clean one.
+        "image_post": image_post_of(g),
     }
     base = ws.validate_package(pkg, item, RUN_DATE)
     assert base.ok and not base.violations, (key, [(v.field, v.code, v.detail)

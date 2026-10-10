@@ -221,7 +221,9 @@ struct ThinkingProcessCard: View {
         .foregroundColor(AppColors.primaryBlue)
         .padding(.horizontal, AppSpacing.sm)
         .padding(.vertical, 3)
-        .background(Capsule().fill(AppColors.primaryBlue.opacity(0.12)))
+        // Opaque, not `primaryBlue.opacity(0.12)` (4.37:1 in light even on white —
+        // test_ios_theme_parity §6c). The blue stroke still draws the pill's edge.
+        .background(Capsule().fill(AppColors.cardBackgroundLight))
         .overlay(Capsule().stroke(AppColors.primaryBlue.opacity(0.28), lineWidth: 1))
     }
 
@@ -266,7 +268,9 @@ struct ThinkingProcessCard: View {
         .foregroundColor(AppColors.primaryBlue)
         .padding(.horizontal, AppSpacing.sm)
         .padding(.vertical, 3)
-        .background(Capsule().fill(AppColors.primaryBlue.opacity(0.12)))
+        // Opaque, not `primaryBlue.opacity(0.12)` (4.37:1 in light even on white —
+        // test_ios_theme_parity §6c). The blue stroke still draws the pill's edge.
+        .background(Capsule().fill(AppColors.cardBackgroundLight))
         .overlay(Capsule().stroke(AppColors.primaryBlue.opacity(0.28), lineWidth: 1))
     }
 }

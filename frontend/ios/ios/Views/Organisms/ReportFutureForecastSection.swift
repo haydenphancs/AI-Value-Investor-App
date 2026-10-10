@@ -94,8 +94,7 @@ struct ReportFutureForecastSection: View {
 
             ReportSentimentBadge(
                 text: guidance.rawValue,
-                textColor: guidance.color,
-                backgroundColor: guidance.backgroundColor
+                textColor: guidance.color
             )
 
             if let quote = forecast.guidanceQuote {

@@ -2,8 +2,12 @@
 //  TintedTagBadge.swift
 //  ios
 //
-//  Atom: a generic tinted capsule badge — colored text on a low-opacity tint of
-//  the same color, with an optional leading SF Symbol.
+//  Atom: a generic capsule badge — colored text on an OPAQUE `cardBackgroundLight`
+//  capsule, with an optional leading SF Symbol. It used to sit on a low-opacity
+//  tint of its own color, which no text token survives in light: `primaryBlue` on
+//  its own 12% tint is 4.37:1 even on a white card, and on `cardBackgroundLight`
+//  no alpha passes at all (test_ios_theme_parity §6c). Every text token is audited
+//  ≥ 4.5 on `cardBackgroundLight`, so any `color` a caller passes is safe here.
 //
 //  Generic over an arbitrary accent color (existing badge atoms like
 //  `SentimentBadge` / `ArticleTagPill` are locked to fixed palettes), so it
@@ -17,7 +21,6 @@ struct TintedTagBadge: View {
     let text: String
     let color: Color
     var systemImage: String? = nil
-    var backgroundOpacity: Double = 0.12
     var font: Font = AppTypography.captionEmphasis   // 11, semibold
     var tracking: CGFloat = 0
     /// Hard ceiling on how tall this badge can grow.
@@ -48,7 +51,7 @@ struct TintedTagBadge: View {
         .foregroundColor(color)
         .padding(.horizontal, 9)
         .padding(.vertical, 4)
-        .background(color.opacity(backgroundOpacity))
+        .background(AppColors.cardBackgroundLight)
         .clipShape(Capsule())
     }
 }
@@ -59,7 +62,6 @@ struct TintedTagBadge: View {
         TintedTagBadge(text: "Shorts", color: AppColors.neutral)
         TintedTagBadge(text: "CAYDEX", color: AppColors.accentCyan,
                        systemImage: AppSymbols.ai,
-                       backgroundOpacity: 0.14,
                        font: AppTypography.captionSmallEmphasis, tracking: 0.4)
         TintedTagBadge(text: "+3.4%", color: AppColors.bullish)
     }

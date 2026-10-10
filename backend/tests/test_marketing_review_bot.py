@@ -98,7 +98,7 @@ class FakeTelegram:
                     return httpx.Response(status, content=body)
                 return httpx.Response(status, json=body)
         self._next_id += 1
-        if method in ("sendMessage", "sendVideo", "editMessageText"):
+        if method in ("sendMessage", "sendVideo", "sendPhoto", "editMessageText"):
             return httpx.Response(200, json={"ok": True, "result": {
                 "message_id": self._next_id, "chat": {"id": payload.get("chat_id")},
                 "text": payload.get("text")}})
@@ -2052,3 +2052,390 @@ def test_a_retract_replay_whose_keyboard_is_already_in_place_sends_nothing_new(c
     _post_hook(client, _tap(pid, "d"))
     assert len(tg.of("editMessageReplyMarkup")) == 1 and tg.of("sendMessage") == []
     assert _answers(tg) == ["Confirm the delete"] and wakes == []
+
+
+# ── drop 1 review fixes (2026-10-09): compat:F3, bundles:RB-1, server:F1 (second guard) ──────────────
+#
+# Mutation-checked by hand on 2026-10-09 against a mutated COPY of review_service.py preloaded into
+# sys.modules: removing the MARKETING_X_IMAGES branch of `web_send_blocker` turned the two F3 tests red;
+# removing the `_offer_drop_reasons` calls turned the two RB-1 tests red; keeping every video member
+# whatever it carries (the pre-fix behaviour) turned the two left-out tests red, while the normal-day
+# test stayed green, as it must. Restored.
+
+
+def _x_image_post(**meta) -> Dict[str, Any]:
+    return {"id": str(uuid.uuid4()), "platform": "x", "format": "image", "caption": "Live words", "title": None,
+            "asset_ids": [], "metadata": {"dry_run": False, **meta}}
+
+
+_X_IMAGES_OFF = "MARKETING_X_IMAGES is off (X image posts are refused)"
+_X_IMAGES_OFF_BEFORE = "approving will mark X failed — reject it, or turn MARKETING_X_IMAGES on first"
+#: A bundle of two or more members carries "✂ drop", so only there is the remedy "drop X" (re-review r3).
+_X_IMAGES_OFF_BEFORE_DROP = "approving will mark X failed — ✂ drop X, or turn MARKETING_X_IMAGES on first"
+
+
+@pytest.mark.parametrize("platform, fmt, x_images, rehearsal, warned", [
+    ("x", "image", False, False, True),      # the publisher would refuse it → every review text warns
+    ("x", "image", True, False, False),      # the switch is on: it goes out
+    ("x", "text", False, False, False),      # a text X post never needs the switch
+    ("bluesky", "image", False, False, False),   # the switch is X's only
+    ("x", "image", False, True, False),      # a rehearsal row says DRY RUN already
+])
+def test_an_x_image_post_with_the_x_image_switch_off_warns_in_the_per_post_header(
+        configured, monkeypatch, platform, fmt, x_images, rehearsal, warned):
+    monkeypatch.setattr(settings, "MARKETING_X_IMAGES", x_images)
+    post = {**_x_image_post(), "platform": platform, "format": fmt}
+    if rehearsal:
+        post["metadata"] = {"dry_run": True}
+    assert rs.web_send_blocker(post) == (_X_IMAGES_OFF if warned else None)
+    header = rs.compose_post_text(post, "2026-10-09", []).split("\n\n", 1)[0]
+    expected = f"{platform.upper()} · {fmt} · run 2026-10-09" + (" · DRY RUN" if rehearsal else "")
+    if warned:   # r3: the failure and its remedy are said BEFORE the decision
+        expected += f" · ⚠️ {_X_IMAGES_OFF}: {_X_IMAGES_OFF_BEFORE}"
+    assert header == expected
+
+
+def test_an_x_image_post_with_the_x_image_switch_off_warns_in_the_bundle_decision_and_result(
+        configured, monkeypatch):
+    monkeypatch.setattr(settings, "MARKETING_X_IMAGES", False)
+    x_post = _x_image_post()
+    bluesky = {**_x_image_post(), "platform": "bluesky"}
+    text = rs.compose_bundle_decision_text("post", [x_post, bluesky], [], "2026-10-09", False, [])
+    assert f"⚠️ {_X_IMAGES_OFF}: {_X_IMAGES_OFF_BEFORE_DROP}" in text.split("\n")
+    assert "✂ drop = " in text      # the control the remedy names is really on this message
+    lines, blocked = rs.bundle_result_lines([{"outcome": "approved", "row": x_post},
+                                             {"outcome": "approved", "row": bluesky}])
+    assert blocked is True
+    assert lines == [f"• X (image): approved — ⚠️ {_X_IMAGES_OFF}: {_X_IMAGES_OFF_FAILS}",
+                     "• BLUESKY (image): approved"]
+    monkeypatch.setattr(settings, "MARKETING_X_IMAGES", True)
+    assert "⚠️" not in rs.compose_bundle_decision_text("post", [x_post, bluesky], [], "2026-10-09", False, [])
+
+
+# ── drop 1 re-review (2026-10-09): the X-image blocker names its OWN consequence ─────────────────────
+#
+# Every other blocker leaves an approved post `approved` until it expires, so "NOT sent (it expires after
+# its day)" is true for them and stays byte-for-byte. An X image post with MARKETING_X_IMAGES off is
+# different: the Approve wakes the publisher, `outlet_x.prepare` refuses it and `_refuse` marks it
+# `failed` at once — so its line must say so, never promise an expiry. Mutation-checked by hand on
+# 2026-10-09: giving the X-images blocker the shared consequence again turned the X-images cases red and
+# left the other blockers' cases green. Restored.
+
+# r3 (2026-10-09): after the approval only the outcome — the remedy moved before the decision.
+_X_IMAGES_OFF_FAILS = "NOT sent: it will be marked failed (MARKETING_X_IMAGES is off)"
+_STAYS_APPROVED = "NOT sent (it expires after its day)"
+
+
+def _blocker_case(monkeypatch, case: str) -> str:
+    """Narrow `configured` (everything can send) to exactly one blocker; returns its reason."""
+    monkeypatch.setattr(settings, "MARKETING_X_IMAGES", case != "x_images_off")
+    if case == "publishing_off":
+        monkeypatch.setattr(settings, "MARKETING_ENABLED", False)
+        return "publishing is OFF on the web"
+    if case == "dry_run":
+        monkeypatch.setattr(settings, "MARKETING_DRY_RUN", True)
+        return "the web is in DRY RUN"
+    if case == "not_enabled":
+        monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["bluesky"])
+        return "x is not enabled"
+    assert case == "x_images_off"
+    return _X_IMAGES_OFF
+
+
+_BLOCKER_CASES = [("publishing_off", _STAYS_APPROVED), ("dry_run", _STAYS_APPROVED),
+                  ("not_enabled", _STAYS_APPROVED), ("x_images_off", _X_IMAGES_OFF_FAILS)]
+
+
+@pytest.mark.parametrize("case, consequence", _BLOCKER_CASES, ids=[c for c, _ in _BLOCKER_CASES])
+def test_each_send_blocker_carries_its_own_consequence_in_the_bundle_result(configured, monkeypatch, case,
+                                                                              consequence):
+    reason = _blocker_case(monkeypatch, case)
+    x_post = _x_image_post()
+    assert rs.web_send_block(x_post) == rs.SendBlock(reason, consequence)
+    assert rs.web_send_blocker(x_post) == reason                 # the notify-time headers read the reason alone
+    lines, blocked = rs.bundle_result_lines([{"outcome": "approved", "row": x_post}])
+    assert blocked is True
+    assert lines == [f"• X (image): approved — ⚠️ {reason}: {consequence}"]
+    if case == "x_images_off":
+        assert "expires" not in lines[0]
+
+
+@pytest.mark.parametrize("case, consequence", _BLOCKER_CASES, ids=[c for c, _ in _BLOCKER_CASES])
+def test_each_send_blocker_carries_its_own_consequence_in_the_per_post_approve_line(
+        client, ledger, tg, wakes, monkeypatch, case, consequence):
+    reason = _blocker_case(monkeypatch, case)
+    pid = _seed_post(ledger, RUN_A, "x", "image", title=None, caption="Live words")
+    assert _post_hook(client, _tap(pid, text="X · image · run 2026-09-28\n\nLive words")).status_code == 200
+    assert _post(ledger, pid)["status"] == "approved" and wakes == [1]   # the decision is still recorded
+    assert tg.of("answerCallbackQuery")[0]["text"] == f"Approved — but {reason}: nothing will be sent"
+    (edit,) = tg.of("editMessageText")
+    assert re.fullmatch(r"X · image · run 2026-09-28\n\nLive words\n\n✅ Approved \d\d:\d\d ET — ⚠️ "
+                        + re.escape(f"{reason}: {consequence}"), edit["text"]), edit["text"]
+
+
+class _IdTelegram(FakeTelegram):
+    """FakeTelegram that also remembers the message id of each answer (None for a non-message)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: List[Optional[int]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        resp = super().handler(request)
+        body = json.loads(resp.content or b"{}")
+        result = body.get("result") if isinstance(body, dict) else None
+        self.ids.append(result.get("message_id") if isinstance(result, dict) else None)
+        return resp
+
+
+@pytest.fixture
+def tgi(monkeypatch):
+    fake = _IdTelegram()
+    monkeypatch.setattr(telegram, "_client", httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    return fake
+
+
+def _nested_col(row: Dict[str, Any], col: str) -> Any:
+    """The fake's `_col` with PostgREST's nested JSON path (`a->b->>c`), as the bundle fence filters on."""
+    if "->>" not in col:
+        return row.get(col)
+    path, key = col.rsplit("->>", 1)
+    parts = path.split("->")
+    doc: Any = row.get(parts[0])
+    for part in parts[1:]:
+        doc = doc.get(part) if isinstance(doc, dict) else None
+    value = doc.get(key) if isinstance(doc, dict) else None
+    if value is None:
+        return None
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+@pytest.fixture
+def bundle_ledger(monkeypatch, ledger):
+    import sys
+    import test_marketing_run_service as fake_db
+    monkeypatch.setattr(fake_db, "_col", _nested_col)
+    monkeypatch.setattr(settings, "MARKETING_REVIEW_BUNDLES", True)
+    # created_at's minutes wrap every 3,600 posts of the session-wide counter; member order follows it.
+    monkeypatch.setattr(sys.modules[__name__], "_SEQ", iter(range(10, 3600)))
+    return ledger
+
+
+def _sent_decisions(tg: _IdTelegram) -> List[Dict[str, Any]]:
+    out = []
+    for (method, payload), mid in zip(tg.calls, tg.ids):
+        datas = [b["callback_data"] for row in (payload.get("reply_markup") or {}).get("inline_keyboard", [])
+                 for b in row]
+        if method == "sendMessage" and any(d.startswith("g:") for d in datas):
+            out.append({**payload, "message_id": mid})
+    return out
+
+
+def _tap_message(message: Dict[str, Any], verb: str, target: str) -> Dict[str, Any]:
+    """A tap on `message` as Telegram returns it (id, text and keyboard included)."""
+    msg = {"message_id": message["message_id"], "date": 1759000000, "chat": {"id": OWNER, "type": "private"},
+           "text": message.get("text")}
+    if message.get("reply_markup") is not None:
+        msg["reply_markup"] = message["reply_markup"]
+    return {"update_id": 9100, "callback_query": {"id": "cbq-d", "from": {"id": OWNER, "is_bot": False},
+                                                  "message": msg, "chat_instance": "ci", "data": f"{verb}:{target}"}}
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_drop_offers_the_reasons_and_a_reason_lands_on_the_dropped_post_only(
+        bundle_ledger, tgi, wakes):
+    svc = bundle_ledger
+    _seed_run(svc, video_id=None)
+    ids = {p: _seed_post(svc, RUN_A, p, "text", caption="Same words.", title=None) for p in ("x", "bluesky", "threads")}
+    await rs.review_cycle()
+    (decision,) = _sent_decisions(tgi)
+    bid = decision["reply_markup"]["inline_keyboard"][0][0]["callback_data"][2:]
+    tgi.calls.clear()
+    tgi.ids.clear()
+
+    # ✂ drop BLUESKY → the decision message keeps the rest's buttons, and ONE small message under it offers
+    # the per-post reasons for the dropped post.
+    res = await rs.handle_update(_tap_message(decision, "s", ids["bluesky"]))
+    assert res["outcome"] == "rejected"
+    (edit,) = tgi.of("editMessageText")
+    assert edit["reply_markup"] == rs.bundle_keyboard(bid, [_post(svc, ids["x"]), _post(svc, ids["threads"])])
+    ((ask, ask_id),) = [(p, mid) for (m, p), mid in zip(tgi.calls, tgi.ids) if m == "sendMessage"]
+    assert ask["text"] == "Why was the BLUESKY post dropped? Tap a reason (optional)."
+    assert ask["reply_markup"] == rs.reject_reason_keyboard(ids["bluesky"])
+    assert ask["reply_parameters"]["message_id"] == decision["message_id"]
+    assert "parse_mode" not in ask
+
+    # ✅ Approve all decides the other two…
+    after_drop = {**decision, "text": edit["text"], "reply_markup": edit["reply_markup"]}
+    res = await rs.handle_update(_tap_message(after_drop, "g", bid))
+    assert res["decided"] == 2 and wakes == [1]
+
+    # …and a reason tapped on the small message is recorded on the dropped post only.
+    res = await rs.handle_update(_tap_message({"message_id": ask_id, "text": ask["text"],
+                                               "reply_markup": ask["reply_markup"]}, "t", ids["bluesky"]))
+    assert res["outcome"] == "recorded"
+    dropped = _post(svc, ids["bluesky"])
+    assert dropped["status"] == "rejected" and dropped["metadata"]["review"]["reason"] == "tone"
+    for p in ("x", "threads"):
+        assert _post(svc, ids[p])["status"] == "approved"
+        assert "reason" not in (_post(svc, ids[p])["metadata"].get("review") or {})
+    last = tgi.of("editMessageText")[-1]
+    assert last["message_id"] == ask_id and last["text"].endswith("Reason: Tone")
+    assert last["reply_markup"] == {"inline_keyboard": []}
+
+    # A replayed drop once the reason is recorded asks nothing more.
+    tgi.calls.clear()
+    await rs.handle_update(_tap_message(decision, "s", ids["bluesky"]))
+    assert tgi.of("sendMessage") == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reason_offer_after_a_drop_is_a_warning_and_the_drop_stands(bundle_ledger, tgi, caplog):
+    svc = bundle_ledger
+    _seed_run(svc, video_id=None)
+    a, b = (_seed_post(svc, RUN_A, p, "text", caption="Same words.", title=None) for p in ("x", "bluesky"))
+    await rs.review_cycle()
+    (decision,) = _sent_decisions(tgi)
+    tgi.script["sendMessage"] = [(500, {"ok": False, "description": "Internal Server Error"})]
+    caplog.set_level(logging.WARNING)
+    res = await rs.handle_update(_tap_message(decision, "s", a))
+    assert res == {"ok": True, "outcome": "rejected", "post_id": a}
+    assert _post(svc, a)["status"] == "rejected" and _post(svc, b)["status"] == "pending_review"
+    assert any(r.levelno == logging.WARNING and "could not offer the reject reasons after a drop" in r.getMessage()
+               and a in r.getMessage() for r in caplog.records)
+
+
+VIDEO_B = "55555555-5555-4555-8555-555555555555"
+
+
+def _seed_second_video(svc, video_id: str = VIDEO_B) -> None:
+    _rows(svc, mrs.ASSETS).append({
+        "id": video_id, "run_id": RUN_A, "kind": "video", "status": "ready",
+        "storage_path": f"2026-09-28/video/{'c' * 64}.mp4", "content_type": "video/mp4", "bytes": 5_000_000,
+        "metadata": {}})
+
+
+@pytest.mark.asyncio
+async def test_a_video_member_carrying_another_video_is_left_out_of_the_bundle(bundle_ledger, tgi, wakes, caplog):
+    svc = bundle_ledger
+    _seed_run(svc)                       # VIDEO, the run's verified pointer
+    _seed_second_video(svc)              # a second ready video of the same run
+    ids = {"tiktok": _seed_post(svc, RUN_A, "tiktok", "video", caption="tt", title=None, asset_ids=[VIDEO]),
+           "youtube": _seed_post(svc, RUN_A, "youtube", "video", caption="yt", title="YT", asset_ids=[VIDEO_B]),
+           "instagram": _seed_post(svc, RUN_A, "instagram", "video", caption="ig", title=None, asset_ids=[VIDEO])}
+    caplog.set_level(logging.ERROR)
+    counters = await rs.review_cycle()
+    assert counters["failed"] == 1 and counters["bundles"] == 1 and counters["stamped"] == 2
+    (video,) = tgi.of("sendVideo")
+    assert video["video"].endswith(f"/2026-09-28/video/{'a' * 64}.mp4")
+    assert video["caption"].startswith("VIDEO · TIKTOK, INSTAGRAM · run 2026-09-28")
+    texts = [p["text"] for p in tgi.of("sendMessage")]
+    assert not any("YOUTUBE (video)" in t and t.startswith("CAPTION") for t in texts)   # its caption is not shown
+    (decision,) = _sent_decisions(tgi)
+    assert decision["text"].split("\n")[1] == "Approve all sends: TIKTOK (video), INSTAGRAM (video)"
+    assert ("⚠️ Not in this decision: YOUTUBE — its post does not carry the video shown above (logged). Approve all "
+            "does not cover it.") in decision["text"].split("\n")
+    bid = decision["reply_markup"]["inline_keyboard"][0][0]["callback_data"][2:]
+    assert decision["reply_markup"] == rs.bundle_keyboard(bid, [_post(svc, ids["tiktok"]), _post(svc, ids["instagram"])])
+    yt = _post(svc, ids["youtube"])
+    assert yt["status"] == "pending_review"
+    assert "review_bundle" not in yt["metadata"] and "review_notified_at" not in yt["metadata"]
+    assert _post(svc, ids["tiktok"])["metadata"]["review_bundle"]["members"] == [ids["tiktok"], ids["instagram"]]
+    (err,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert ids["youtube"] in err.getMessage() and RUN_A in err.getMessage() and "LEFT OUT" in err.getMessage()
+
+    # ✅ Approve all never reaches the video the owner was not shown.
+    res = await rs.handle_update(_tap_message(decision, "g", bid))
+    assert res["decided"] == 2 and wakes == [1]
+    assert _post(svc, ids["youtube"])["status"] == "pending_review"
+    assert {_post(svc, ids[p])["status"] for p in ("tiktok", "instagram")} == {"approved"}
+
+    # The next sweep offers it on its own, showing ITS video — the owner decides what they saw.
+    tgi.calls.clear()
+    tgi.ids.clear()
+    await rs.review_cycle()
+    (video,) = tgi.of("sendVideo")
+    assert video["video"].endswith(f"/2026-09-28/video/{'c' * 64}.mp4")
+    (decision,) = _sent_decisions(tgi)
+    assert decision["text"].split("\n")[1] == "Approve all sends: YOUTUBE (video)" and "⚠️" not in decision["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_lone_video_member_that_cannot_match_the_shown_video_sends_nothing(bundle_ledger, tgi, caplog):
+    """Two videos on one post (or one that is not a ready video of the run) never equals the one video shown:
+    nothing is offered, nothing is stamped, and it is logged at ERROR every sweep until it expires."""
+    svc = bundle_ledger
+    _seed_run(svc)
+    _seed_second_video(svc)
+    pid = _seed_post(svc, RUN_A, "tiktok", "video", caption="tt", title=None, asset_ids=[VIDEO, VIDEO_B])
+    caplog.set_level(logging.ERROR)
+    counters = await rs.review_cycle()
+    assert tgi.calls == [] and counters["failed"] == 1 and counters["bundles"] == 0
+    assert _post(svc, pid)["status"] == "pending_review" and "review_bundle" not in _post(svc, pid)["metadata"]
+    assert any(pid in r.getMessage() and "LEFT OUT" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_video_members_that_all_carry_the_shown_video_are_all_offered(bundle_ledger, tgi, caplog):
+    """The guard leaves the normal day alone: every video post carries the run's one video."""
+    svc = bundle_ledger
+    _seed_run(svc)
+    _seed_second_video(svc)              # present, but no post names it
+    ids = [_seed_post(svc, RUN_A, p, "video", caption=p, title=None, asset_ids=[VIDEO])
+           for p in ("tiktok", "youtube", "instagram")]
+    caplog.set_level(logging.ERROR)
+    counters = await rs.review_cycle()
+    assert counters["failed"] == 0 and counters["stamped"] == 3
+    (decision,) = _sent_decisions(tgi)
+    assert "⚠️" not in decision["text"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert all(_post(svc, pid)["metadata"]["review_notified_at"] for pid in ids)
+
+
+# ── drop 1 re-review r3 (2026-10-09): the X-image failure is said BEFORE the decision ─────────────────
+#
+# Its result line used to carry the only "will be marked failed" warning AND the remedy ("turn
+# MARKETING_X_IMAGES on before approving, or drop it") — after the approval, when the bundle keyboard is
+# gone and a ✂ drop can only answer `already_approved`. Now the per-post header and the bundle decision
+# message say what approving would do and what to do first; the result line states only the outcome. Every
+# other blocker's pre-decision line stays byte-identical. Mutation-checked by hand on 2026-10-09: restoring
+# "approving will not send …" for the X-images blocker turned the x_images_off cases red (the other three
+# stayed green); putting the remedy back into the consequence turned the result-line assertion red. Restored.
+
+_BEFORE_CASES = [("publishing_off", "approving will not send it", "approving will not send X"),
+                 ("dry_run", "approving will not send it", "approving will not send X"),
+                 ("not_enabled", "approving will not send it", "approving will not send X"),
+                 ("x_images_off", _X_IMAGES_OFF_BEFORE, _X_IMAGES_OFF_BEFORE)]
+
+
+@pytest.mark.parametrize("case, header_tail, decision_tail", _BEFORE_CASES, ids=[c[0] for c in _BEFORE_CASES])
+def test_each_blocker_says_before_the_decision_what_approving_would_do(configured, monkeypatch, case, header_tail,
+                                                                        decision_tail):
+    reason = _blocker_case(monkeypatch, case)
+    x_post = _x_image_post()
+    header = rs.compose_post_text(x_post, "2026-10-09", []).split("\n\n", 1)[0]
+    assert header == f"X · image · run 2026-10-09 · ⚠️ {reason}: {header_tail}"
+    text = rs.compose_bundle_decision_text("post", [x_post], [], "2026-10-09", False, [])
+    assert text.split("\n")[2] == f"⚠️ {reason}: {decision_tail}"
+    lines, _blocked = rs.bundle_result_lines([{"outcome": "approved", "row": x_post}])
+    if case == "x_images_off":
+        assert "mark X failed" in header and "mark X failed" in text      # the consequence, before the tap
+        # …and after it only the outcome: no advice that can no longer be followed.
+        assert lines == [f"• X (image): approved — ⚠️ {reason}: NOT sent: it will be marked failed "
+                         "(MARKETING_X_IMAGES is off)"]
+        assert "drop" not in lines[0] and "before approving" not in lines[0] and " first" not in lines[0]
+
+
+
+def test_the_x_image_remedy_names_only_a_control_the_message_carries(configured, monkeypatch):
+    """Re-review r3: "drop it" was offered on the per-post message and on a one-member bundle, neither of
+    which has a ✂ drop button. Mutation-checked by hand: making `can_drop` always True turns this red."""
+    monkeypatch.setattr(settings, "MARKETING_X_IMAGES", False)
+    x_post = _x_image_post()
+    header = rs.compose_post_text(x_post, "2026-10-09", []).split("\n\n", 1)[0]
+    assert header.endswith(_X_IMAGES_OFF_BEFORE) and "drop" not in header
+    one = rs.compose_bundle_decision_text("post", [x_post], [], "2026-10-09", False, [])
+    assert f"⚠️ {_X_IMAGES_OFF}: {_X_IMAGES_OFF_BEFORE}" in one.split("\n") and "✂" not in one
+    two = rs.compose_bundle_decision_text("post", [x_post, {**_x_image_post(), "platform": "bluesky"}], [],
+                                          "2026-10-09", False, [])
+    assert f"⚠️ {_X_IMAGES_OFF}: {_X_IMAGES_OFF_BEFORE_DROP}" in two.split("\n")

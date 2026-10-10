@@ -96,6 +96,13 @@ def _md_result(title: str, item, template, run_date: date, res: WriterResult, sh
         out += [f"> {line}" for line in pkg["video_script"]]
         out += ["", "**Cards:**"] + [f"- **{c['title']}** — {c['body']}" for c in pkg["cards"]]
         out += ["", "**Carousel:**"] + [f"- **{c['title']}** — {c['body']}" for c in pkg["carousel_slides"]]
+        image = pkg.get("image_post")
+        if isinstance(image, dict):
+            out += ["", f"**Post image:** {image.get('title', '')}"] + [
+                f"> {para}" for para in (image.get("paragraphs") or [])]
+        elif pkg.get("dropped_image"):
+            out += ["", "**Post image DROPPED:** " + ", ".join(
+                sorted({str(v.get("code")) for v in pkg["dropped_image"] if isinstance(v, dict)}))]
         for platform, post in pkg["posts"].items():
             title = f" — title: “{post['title']}”" if post.get("title") else ""
             out += ["", f"**{platform}**{title}", "", "```", post["caption"], "```"]
@@ -230,7 +237,8 @@ def _package_shape(row: Dict[str, Any]) -> Dict[str, Any]:
     lines = [text for _i, text in sorted(numbered)]
     # Whitespace collapsed: a double space must not hide "no one" from `_NUMBER_RE`, or split a label.
     return {"hook": " ".join((fields.get("hook") or "").split()), "lines": lines,
-            "title": " ".join((fields.get("captions.youtube_title") or "").split())}
+            "title": " ".join((fields.get("captions.youtube_title") or "").split()),
+            "image_title": " ".join((fields.get("image_post.title") or "").split())}
 
 
 def shape_stats(rows: List[Dict[str, Any]], *, line_floor: int = wp._ASK_SCRIPT_LINE_WORDS_MIN) -> Dict[str, Any]:
@@ -245,6 +253,7 @@ def shape_stats(rows: List[Dict[str, Any]], *, line_floor: int = wp._ASK_SCRIPT_
     videos: List[float] = []
     mm_total = mm_named = mm_titles_named = 0
     study = yes_no = who_wins = numbers = copies = yes_no_titles = investor_hooks = investor_titles = 0
+    image_titles = yes_no_image_titles = investor_image_titles = mm_image_titles_named = 0
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -270,6 +279,10 @@ def shape_stats(rows: List[Dict[str, Any]], *, line_floor: int = wp._ASK_SCRIPT_
         numbers += bool(_NUMBER_RE.search(hook))
         copies += hook.strip().lower() == _EXAMPLE_HOOK.lower()
         yes_no_titles += is_yes_no_question(title)
+        # The post image's title follows the same HOOK AND TITLES rules (Drop 1, 2026-10-09).
+        image_title = shape["image_title"]
+        image_titles += bool(image_title)
+        yes_no_image_titles += bool(image_title) and is_yes_no_question(image_title)
         item = content_pool.get_item(str(row.get("item") or ""))
         if item is not None and item.kind == content_pool.MONEY_MOVES:
             mm_total += 1
@@ -278,6 +291,9 @@ def shape_stats(rows: List[Dict[str, Any]], *, line_floor: int = wp._ASK_SCRIPT_
             names = content_pool.title_companies(item)
             mm_named += any(_names(hook, n) for n in names)
             mm_titles_named += any(_names(title, n) for n in names)
+            if image_title:
+                investor_image_titles += bool(_INVESTOR_FRAMED_RE.search(image_title))
+                mm_image_titles_named += any(_names(image_title, n) for n in names)
     if words:
         out.update({
             "script_words": {"median": statistics.median(words), "min": min(words), "max": max(words)},
@@ -294,6 +310,9 @@ def shape_stats(rows: List[Dict[str, Any]], *, line_floor: int = wp._ASK_SCRIPT_
             "mm_youtube_titles_naming_company": f"{mm_titles_named}/{mm_total}",
             "yes_no_youtube_titles": yes_no_titles,
             "mm_investor_framed_hooks": investor_hooks, "mm_investor_framed_youtube_titles": investor_titles,
+            "image_titles": f"{image_titles}/{len(words)}", "yes_no_image_titles": yes_no_image_titles,
+            "mm_image_titles_naming_company": f"{mm_image_titles_named}/{mm_total}",
+            "mm_investor_framed_image_titles": investor_image_titles,
         })
     out["rounds_outside_enforced_window"] = outside
     return out
@@ -466,7 +485,7 @@ def _dump_packages(path: Path, jobs, results, *, judge_mode: str, allow_x_url: b
             # (With the judge in shadow or off, ok == regex_ok, the writer's own test.)
             accepted = bool(res.package) and bool(vr.package) and vr.regex_ok and all(
                 res.package.get(k) == vr.package.get(k)
-                for k in ("hook", "video_script", "cards", "carousel_slides", "captions"))
+                for k in ("hook", "video_script", "cards", "carousel_slides", "captions", "image_post"))
             # A byte-identical repair matches too; the writer keeps the EARLIER round on a tie.
             accepted, kept = accepted and not kept, kept or accepted
             out.append({"id": f"{key}#{template_id}#r{n + 1}", "item": key, "template": template_id,

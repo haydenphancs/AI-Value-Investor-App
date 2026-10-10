@@ -10,7 +10,6 @@ import SwiftUI
 struct ReportSentimentBadge: View {
     let text: String
     let textColor: Color
-    let backgroundColor: Color
     var fontSize: Font = AppTypography.caption
 
     var body: some View {
@@ -20,9 +19,12 @@ struct ReportSentimentBadge: View {
             .foregroundColor(textColor)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
+            // Opaque. Callers used to pass `color.opacity(0.15)` of the ink's own hue, which
+            // no text token survives in light (gain 4.39, loss 4.34, caution 4.20 even on a
+            // white card — test_ios_theme_parity §6c); every text token is audited ≥ 4.5 here.
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                    .fill(backgroundColor)
+                    .fill(AppColors.cardBackgroundLight)
             )
     }
 }
@@ -31,18 +33,15 @@ struct ReportSentimentBadge: View {
     VStack(spacing: AppSpacing.md) {
         ReportSentimentBadge(
             text: "Overpriced",
-            textColor: AppColors.bearish,
-            backgroundColor: AppColors.bearish.opacity(0.15)
+            textColor: AppColors.bearish
         )
         ReportSentimentBadge(
             text: "Underpriced",
-            textColor: AppColors.bullish,
-            backgroundColor: AppColors.bullish.opacity(0.15)
+            textColor: AppColors.bullish
         )
         ReportSentimentBadge(
             text: "RAISED",
-            textColor: AppColors.bullish,
-            backgroundColor: AppColors.bullish.opacity(0.15)
+            textColor: AppColors.bullish
         )
     }
     .padding()

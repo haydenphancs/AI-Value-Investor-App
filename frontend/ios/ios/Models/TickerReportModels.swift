@@ -737,10 +737,6 @@ enum ManagementGuidance: String {
         case .lowered: return AppColors.bearish
         }
     }
-
-    var backgroundColor: Color {
-        color.opacity(0.15)
-    }
 }
 
 // MARK: - Insider Activity
@@ -756,10 +752,6 @@ enum InsiderSentiment: String {
         case .negative: return AppColors.bearish
         case .neutral: return AppColors.neutral
         }
-    }
-
-    var backgroundColor: Color {
-        color.opacity(0.15)
     }
 }
 
@@ -1332,14 +1324,6 @@ enum MoatOverallRating: String {
         case .wide: return AppColors.alertPurple      // Indigo-500 (Purple) - Elite defense
         case .narrow: return AppColors.accentYellow   // Yellow-500 - Strong but beatable
         case .none: return AppColors.textSecondary    // Gray-500 - No structural advantage
-        }
-    }
-
-    var backgroundColor: Color {
-        switch self {
-        case .wide: return AppColors.alertPurple.opacity(0.15)
-        case .narrow: return AppColors.accentYellow.opacity(0.15)
-        case .none: return AppColors.textSecondary.opacity(0.15)
         }
     }
 

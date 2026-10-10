@@ -34,7 +34,9 @@ struct HealthCheckStatusBadge: View {
         .padding(.vertical, AppSpacing.xs)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                .fill(rating.color.opacity(0.15))
+                // Opaque: every rating colour on its own 15% tint is under 4.5:1 in light
+                // (test_ios_theme_parity §6c).
+                .fill(AppColors.cardBackgroundLight)
         )
     }
 }

@@ -420,11 +420,16 @@ CURATION: dict[str, TableDoc] = {
         key=("run_date", "status", "stage", "content_class", "source_ref", "attempts", "timings"),
         note="Migration 170. The media worker (a Railway cron service holding NO Supabase key) "
              "claims the day by INSERTing this row through the internal API and checkpoints "
-             "`stage` so a skipped or killed cron slot resumes on the next hourly tick."),
+             "`stage` so a skipped or killed cron slot resumes on the next hourly tick. "
+             "content_class (A/C/F since migration 190) is only a best-effort MIRROR: the class "
+             "that gates a post derives from marketing_scripts.template_id "
+             "(selection.content_class_of)."),
     "public.marketing_assets": T("marketing",
         key=("run_id", "kind", "storage_path", "sha256", "status", "duration_seconds"),
         note="Two-phase upload: pending_upload while the worker holds a signed upload URL, ready "
-             "once the API has HEAD-verified the object. Paths are content-addressed and immutable."),
+             "once the API has HEAD-verified the object. Paths are content-addressed and immutable. "
+             "Company logos (migration 190's comment) live in the same bucket under "
+             "logos/<sha256[:32]>.<png|jpg>, stored by the web side, with NO row here."),
     "public.marketing_posts": T("marketing",
         key=("run_id", "platform", "format", "status", "idempotency_key", "external_url",
              "cost_micros"),
@@ -440,12 +445,13 @@ CURATION: dict[str, TableDoc] = {
              "from this table. guid never changes; mp3_path is immutable (Spotify re-fetches only "
              "on a path change)."),
     # ------------------------------------------------------------ marketing (173 + 176)
-    # Purpose text comes from each table's COMMENT ON TABLE — migration 173, and 176 for
-    # marketing_scripts, whose comment it rewrites (precedence 1);
+    # Purpose text comes from each table's COMMENT ON TABLE — migration 173, then 176 and 190 for
+    # marketing_scripts, each of which rewrites its comment (precedence 1);
     # `purpose=` is still given so the card is not blank if the comment is ever lost.
     "public.marketing_scripts": T("marketing",
-        purpose="One row per marketing run: the day's frozen selection and the class-A "
-                "writer's validated package, plus the violations of rounds that failed.",
+        purpose="One row per marketing run: the day's frozen selection and either the class-A "
+                "writer's validated package (plus the violations of rounds that failed) or a "
+                "class-C/F template's composed package with the as-filed record behind it.",
         key=("run_id", "run_date", "status", "source_ref", "template_id", "generation_id",
              "lease_until", "generations", "content_rejections", "reject_reason",
              "retry_not_before", "output"),
@@ -459,7 +465,11 @@ CURATION: dict[str, TableDoc] = {
              "`output` immutable. Two caps: 4 content rejections (reject_reason content) and 4 "
              "generations ending without a verdict (writer_unavailable). `run_date` is written "
              "in the selecting INSERT and is what selection's `recent` window reads. Writer "
-             "output never goes to the public bucket or to marketing_runs.metadata."),
+             "output never goes to the public bucket or to marketing_runs.metadata. Since "
+             "migration 190 (Company Weekly): template_id is a lesson template (class A) or a news "
+             "series id (class C/F, selection.content_class_of) — the class that gates a post. A "
+             "template row is INSERTed accepted by the selecting INSERT: no writer, no lease, "
+             "tokens_used 0, the as-filed record in fact_sheet."),
     "public.marketing_link_hits": T("marketing",
         purpose="Per-campaign daily tap counts for the smart link GET /go/{campaign}.",
         key=("campaign", "day", "hits"),

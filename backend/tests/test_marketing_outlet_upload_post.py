@@ -1,7 +1,8 @@
 """The Upload-Post OUTLET (`app/services/marketing/outlet_upload_post.py`) — design doc §12.10, Stage 2.
 
 One adapter instance per platform: TikTok, YouTube and Instagram get the day's verified MP4 by its
-PUBLIC URL; Facebook, LinkedIn and Threads get text. Driven here through the REAL thin client
+PUBLIC URL; Facebook, LinkedIn and Threads get text — or (drop 1) the run's post image, by its public
+URL after a checked download, through /upload_photos. Driven here through the REAL thin client
 (`app/integrations/upload_post.py`) over an `httpx.MockTransport`, so the client's outcome split and
 the adapter's mapping of it are tested together — the seam where a mistake turns into a double post
 (an accepted job read as "not sent") or a lost one (a pending job read as failed).
@@ -40,7 +41,7 @@ import pytest
 
 from app.integrations import upload_post
 from app.services.marketing import outlet_upload_post as oup
-from app.services.marketing import outlets, post_copy
+from app.services.marketing import outlet_base, outlets, post_copy
 from app.services.marketing import publisher_service as pub
 from app.services.marketing import run_service as mrs
 from app.services.marketing.outlet_base import (
@@ -59,8 +60,10 @@ from app.services.marketing.outlet_base import (
     RETRY,
     SUBMITTED,
     UNKNOWN,
+    POST_IMAGE_KEY,
     MarketingPublishRefused,
     Outcome,
+    PostImage,
     Prepared,
 )
 from test_marketing_publisher import Env, _assert_review_kept
@@ -138,7 +141,7 @@ class UpServer:
         self.requests.append(request)
         path = request.url.path
         path = path[len("/api"):] if path.startswith("/api") else path
-        if path in ("/upload", "/upload_text"):
+        if path in ("/upload", "/upload_text", "/upload_photos"):
             self.usage += 1
         if self.queues.get(path):
             item = self.queues[path].pop(0)
@@ -169,7 +172,7 @@ class UpServer:
 
     @property
     def uploads(self) -> List[httpx.Request]:
-        return [r for r in self.requests if r.url.path in ("/api/upload", "/api/upload_text")]
+        return [r for r in self.requests if r.url.path in ("/api/upload", "/api/upload_text", "/api/upload_photos")]
 
     @property
     def sequence(self) -> List[str]:
@@ -372,7 +375,10 @@ def test_caption_limits_match_post_copy():
 
 @pytest.mark.parametrize("platform, fmt", [
     ("tiktok", "text"), ("youtube", "text"), ("instagram", None), ("instagram", "carousel"),
-    ("facebook", "video"), ("linkedin", "video"), ("threads", "image"),
+    ("facebook", "video"), ("linkedin", "video"), ("threads", "carousel"),
+    # Image posts go to Facebook, LinkedIn and Threads only: TikTok stays video, YouTube has no
+    # photo route, Instagram stays Reels (drop 1).
+    ("tiktok", "image"), ("youtube", "image"), ("instagram", "image"),
 ])
 def test_prepare_refuses_a_format_the_outlet_does_not_publish(creds, platform, fmt):
     with pytest.raises(MarketingPublishRefused, match="is not published here"):
@@ -509,10 +515,10 @@ def test_platform_fields_are_pinned(creds):
     assert oup.platform_fields("tiktok", _post("tiktok")) == {
         "title": CAPTION, "tiktok_title": CAPTION, "privacy_level": "PUBLIC_TO_EVERYONE",
         "post_mode": "DIRECT_POST", "disable_inbox_fallback": True, "brand_organic_toggle": True,
-        "is_aigc": True}
+        "is_aigc": True, "cover_timestamp": 500}
     assert oup.platform_fields("instagram", _post("instagram")) == {
         "title": CAPTION, "instagram_title": CAPTION, "media_type": "REELS", "share_to_feed": True,
-        "is_ai_generated": True}
+        "is_ai_generated": True, "thumb_offset": "500"}
     assert oup.platform_fields("youtube", _post("youtube")) == {
         "title": TITLE, "youtube_title": TITLE, "youtube_description": CAPTION, "privacyStatus": "public",
         "containsSyntheticMedia": True, "categoryId": "27", "selfDeclaredMadeForKids": False}
@@ -520,6 +526,35 @@ def test_platform_fields_are_pinned(creds):
     assert oup.platform_fields("linkedin", _post("linkedin")) == {"target_linkedin_page_id": LI_PAGE}
     assert oup.platform_fields("threads", _post("threads")) == {"threads_long_text_as_post": True}
     assert oup.platform_fields("mastodon", _post("threads")) == {}
+
+
+_COVER_KEYS = {"cover_timestamp", "thumb_offset"}
+
+
+def test_every_video_post_pins_its_cover_to_the_opening_card(creds):
+    """Review round 2 (medium): the burned narration captions may name a Form 4 filer (allowed in
+    narration), so a platform's auto-picked cover could show a person's name. Every video — template
+    and lesson alike, nothing here reads the authorship — pins its cover to the opening card where
+    Upload-Post allows it: TikTok `cover_timestamp` (integer ms), Instagram `thumb_offset` (ms, a string),
+    both VIDEO_COVER_MS = 500 (inside card 0, which runs from t = 0 for ≥ 1.2 s — the timeline side is
+    pinned in tests/test_marketing_video.py). YouTube has no reliable pin and gets none."""
+    tiktok = oup.platform_fields("tiktok", _post("tiktok"))
+    assert tiktok["cover_timestamp"] == oup.VIDEO_COVER_MS == 500 and type(tiktok["cover_timestamp"]) is int
+    assert oup.platform_fields("instagram", _post("instagram"))["thumb_offset"] == "500"
+    assert not _COVER_KEYS & set(oup.platform_fields("youtube", _post("youtube")))
+    for platform in ("tiktok", "instagram"):
+        assert oup.UploadPostAdapter(platform).prepare(_post(platform)).payload["fields"] == \
+            oup.platform_fields(platform, _post(platform))
+
+
+@pytest.mark.parametrize("platform", oup.PLATFORMS)
+@pytest.mark.parametrize("fmt", ["text", "image", None, "carousel"])
+def test_no_cover_field_on_anything_but_a_video(creds, platform, fmt):
+    """The cover pin is a VIDEO field: a text or image post (or a format no outlet publishes) never
+    carries it — on the text fields, on the photo fields, or on any platform."""
+    post = _post(platform, format=fmt)
+    assert not _COVER_KEYS & set(oup.platform_fields(platform, post))
+    assert not _COVER_KEYS & set(oup.photo_fields(platform, post, ALT))
 
 
 def test_page_ids_are_stripped(monkeypatch, creds):
@@ -561,6 +596,9 @@ async def test_the_request_actually_sent(up, ledger, platform):
         assert flags["is_ai_generated"] == "true" and flags["media_type"] == "REELS"
     elif platform == "youtube":
         assert flags["containsSyntheticMedia"] == "true" and flags["privacyStatus"] == "public"
+    # the cover pin travels on the request too (review round 2): TikTok and Instagram videos only
+    assert flags.get("cover_timestamp") == ("500" if platform == "tiktok" else None)
+    assert flags.get("thumb_offset") == ("500" if platform == "instagram" else None)
 
 
 # ── send: the outcome matrix ────────────────────────────────────────────────────────────────────
@@ -1349,3 +1387,184 @@ async def test_e2e_a_plan_refusal_fails_the_post_with_an_alert(penv):
     await pub.publish_cycle()
     await pub.reconcile_cycle()
     assert len(penv.up.uploads) == 1                                  # a refusal is never retried
+
+
+# ── IMAGE posts on Facebook, LinkedIn and Threads (drop 1, contract C9) ─────────────────────────
+
+PHOTO = ("facebook", "linkedin", "threads")
+IMG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8 + b"\xff\xd9"
+IMG_SHA = hashlib.sha256(IMG).hexdigest()
+CARD_ID = "0b6f3a52-3c1d-4f7e-9a10-2b8c4d6e8f03"
+CARD_PATH = "2026-10-01/card-0123456789abcdef.jpg"
+CARD_URL = f"{SB_URL}/storage/v1/object/public/{BUCKET}/{CARD_PATH}"
+PIC_TITLE = "Why time in the market compounds"
+PIC_PARAS = ("Compounding needs years, not weeks.", "Missing a few strong days changes the result a lot.")
+ALT = PIC_TITLE + "\n\n" + "\n\n".join(PIC_PARAS)
+
+
+def _pic() -> PostImage:
+    return PostImage(asset_id=CARD_ID, url=CARD_URL, sha256=IMG_SHA, size=len(IMG), title=PIC_TITLE,
+                     paragraphs=PIC_PARAS)
+
+
+def _img_post(platform: str, **over: Any) -> Dict[str, Any]:
+    post = _post(platform, format="image", asset_ids=[CARD_ID], idempotency_key=f"{DAY}:{platform}:image")
+    post[POST_IMAGE_KEY] = _pic()
+    post.update(over)
+    return post
+
+
+class _Bucket:
+    """The public media bucket the picture is downloaded from before Upload-Post is asked to fetch it."""
+
+    def __init__(self) -> None:
+        self.body = IMG
+        self.status = 200
+        self.requests: List[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if str(request.url) != CARD_URL:
+            return httpx.Response(404)
+        return httpx.Response(self.status, content=self.body)
+
+
+@pytest.fixture
+def bucket(monkeypatch) -> _Bucket:
+    fake = _Bucket()
+    monkeypatch.setattr(outlet_base, "_fetch_transport", httpx.MockTransport(fake.handler))
+    return fake
+
+
+@pytest.mark.parametrize("platform", PHOTO)
+def test_prepare_an_image_post(creds, platform):
+    prepared = oup.UploadPostAdapter(platform).prepare(_img_post(platform))
+    payload = prepared.payload
+    assert payload["kind"] == "photo" and payload["asset_id"] == CARD_ID and payload["image"] == _pic().meta()
+    assert payload["request_id"] == f"{DAY}:{platform}:image:a1"
+    assert payload["fields"] == oup.photo_fields(platform, _img_post(platform), ALT)
+    assert prepared.publish_meta["upload_post"]["image"] == _pic().meta()
+    assert f"image={CARD_ID}" in prepared.summary and PIC_TITLE not in prepared.summary
+
+
+def test_photo_fields_are_the_text_fields_plus_the_alt_text(creds):
+    """Pinned (rules/marketing.md §1): the page ids that keep a post off a PERSONAL profile, Threads'
+    no-split flag, and the alt text. No AI flag — Upload-Post forwards none to these three platforms;
+    the caption's disclaimer is the disclosure."""
+    assert oup.photo_fields("facebook", _post("facebook"), ALT) == {"facebook_page_id": FB_PAGE,
+                                                                     "facebook_alt_text": ALT}
+    assert oup.photo_fields("linkedin", _post("linkedin"), ALT) == {"target_linkedin_page_id": LI_PAGE,
+                                                                     "linkedin_alt_text": ALT}
+    assert oup.photo_fields("threads", _post("threads"), ALT) == {"threads_long_text_as_post": True,
+                                                                   "threads_alt_text": ALT}
+    assert oup.PHOTO_PLATFORMS == frozenset(PHOTO)
+
+
+def test_photo_alt_text_keeps_whole_paragraphs_within_1000(creds):
+    long = PostImage(asset_id=CARD_ID, url=CARD_URL, sha256=IMG_SHA, size=len(IMG), title="T",
+                     paragraphs=("a" * 600, "b" * 600))
+    prepared = oup.UploadPostAdapter("threads").prepare({**_img_post("threads"), POST_IMAGE_KEY: long})
+    assert prepared.payload["fields"]["threads_alt_text"] == "T\n\n" + "a" * 600
+
+
+@pytest.mark.parametrize("platform", PHOTO)
+@pytest.mark.parametrize("over, why", [
+    ({POST_IMAGE_KEY: None}, "not resolved"),
+    ({"asset_ids": []}, "exactly its one picture"),
+    ({"asset_ids": [CARD_ID, "x"]}, "exactly its one picture"),
+    ({"asset_ids": [ASSET_ID]}, "exactly its one picture"),
+])
+def test_prepare_refuses_a_bad_image_post(creds, platform, over, why):
+    with pytest.raises(MarketingPublishRefused, match=why):
+        oup.UploadPostAdapter(platform).prepare(_img_post(platform, **over))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", PHOTO)
+async def test_an_image_post_goes_to_upload_photos_by_its_checked_url(up, bucket, platform):
+    rid = f"{DAY}:{platform}:image:a1"
+    up.answer("/upload_photos", _ack(rid))
+    adapter = oup.UploadPostAdapter(platform)
+    post = _img_post(platform)
+    prepared = adapter.prepare(post)
+    outcome = await adapter.send({k: v for k, v in post.items() if k != POST_IMAGE_KEY}, prepared)
+    assert outcome.kind == SUBMITTED
+    assert up.sequence == ["GET /uploadposts/me", "POST /upload_photos", "GET /uploadposts/me"]
+    (req,) = up.calls("/upload_photos")
+    assert req.headers["idempotency-key"] == rid
+    parts = _parts(req)
+    assert parts[:7] == [("user", PROFILE), ("platform[]", platform), ("title", CAPTION), ("photos[]", CARD_URL),
+                         ("async_upload", "true"), ("request_id", rid), ("external_id", POST_ID)]
+    assert dict(parts[7:]) == {k: ("true" if v is True else v) for k, v in prepared.payload["fields"].items()}
+    assert not {"cover_timestamp", "thumb_offset"} & {name for name, _ in parts}   # an image has no cover
+    assert len(bucket.requests) == 1          # downloaded and checked BEFORE Upload-Post was asked
+    assert outcome.publish_meta["upload_post"]["image"] == _pic().meta()
+
+
+@pytest.mark.asyncio
+async def test_an_image_post_never_sends_a_picture_that_is_not_the_one_reviewed(up, bucket):
+    bucket.body = IMG[:-1] + b"\x00"
+    adapter = oup.UploadPostAdapter("threads")
+    outcome = await adapter.send(_post("threads", status="queued"), adapter.prepare(_img_post("threads")))
+    assert outcome.kind == REFUSED and outcome.category == "media" and outcome.alert == "failed"
+    assert up.requests == []                  # not even the usage read
+
+
+@pytest.mark.asyncio
+async def test_an_image_post_whose_picture_cannot_be_downloaded_is_not_sent(up, bucket):
+    bucket.status = 503
+    adapter = oup.UploadPostAdapter("facebook")
+    outcome = await adapter.send(_post("facebook", status="queued"), adapter.prepare(_img_post("facebook")))
+    assert outcome.kind == NOT_SENT and outcome.category == "media" and up.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, kind, category", [
+    ((500, {"success": False, "error": "boom"}), AMBIGUOUS, "server"),
+    (httpx.ConnectError, NOT_SENT, "transport"),
+    ((403, {"success": False, "message": "plan"}), REFUSED, "plan"),
+    ((400, {"success": False, "message": "x", "invalid_platforms": {"linkedin": "no"}}), REFUSED, "not_connected"),
+])
+async def test_an_image_post_keeps_the_outcome_split(up, bucket, answer, kind, category):
+    up.answer("/upload_photos", answer)
+    adapter = oup.UploadPostAdapter("linkedin")
+    outcome = await adapter.send(_post("linkedin", status="queued"), adapter.prepare(_img_post("linkedin")))
+    assert (outcome.kind, outcome.category) == (kind, category)
+
+
+@pytest.mark.asyncio
+async def test_e2e_an_image_post_through_the_publisher(penv, bucket):
+    """The publisher resolves the picture from the LEDGER (a ready card of the post's run + the accepted
+    image_post), hands prepare a copy with it attached, claims the row AS READ (no picture written to
+    it), and the adapter posts the checked URL."""
+    run_id = "22222222-3333-4444-8555-666666666666"
+    key = f"{mrs.run_date_et().isoformat()}:threads:image"
+    penv.fake.tables[mrs.ASSETS].rows.append({
+        "id": CARD_ID, "run_id": run_id, "kind": "card", "status": "ready", "storage_path": CARD_PATH,
+        "content_type": "image/jpeg", "bytes": len(IMG), "sha256": IMG_SHA,
+        "metadata": {"image_role": "post_image", "onscreen_text": [PIC_TITLE, *PIC_PARAS, "footer"]}})
+    penv.fake.tables[mrs.SCRIPTS].rows.append({
+        "run_id": run_id, "status": "accepted",
+        "output": {"image_post": {"title": PIC_TITLE, "paragraphs": list(PIC_PARAS)}}})
+    pid = penv.seed(platform="threads", key=key, format="image", asset_ids=[CARD_ID], caption=CAPTION, run_id=run_id)
+    penv.up.answer("/upload_photos", _ack(f"{key}:a1"))
+    counters = await pub.publish_cycle()
+    assert counters["submitted"] == 1
+    row = penv.row(pid)
+    assert row["status"] == "queued" and row["metadata"]["publish"]["state"] == "submitted"
+    assert POST_IMAGE_KEY not in row and POST_IMAGE_KEY not in row["metadata"]
+    assert row["metadata"]["publish"]["upload_post"]["image"]["url"] == CARD_URL
+    (req,) = penv.up.calls("/upload_photos")
+    assert ("photos[]", CARD_URL) in _parts(req) and ("threads_alt_text", ALT) in _parts(req)
+
+
+@pytest.mark.asyncio
+async def test_e2e_an_image_post_without_its_card_is_refused_before_any_claim(penv, bucket):
+    key = f"{mrs.run_date_et().isoformat()}:threads:image"
+    pid = penv.seed(platform="threads", key=key, format="image", asset_ids=["no-such-card"], caption=CAPTION)
+    counters = await pub.publish_cycle()
+    assert counters["failed"] == 1
+    row = penv.row(pid)
+    assert row["status"] == "failed" and row["attempts"] == 0          # never claimed
+    assert row["metadata"]["publish"]["category"] == "media" and "no asset" in row["last_error"]
+    assert penv.up.uploads == [] and bucket.requests == []

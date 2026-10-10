@@ -88,7 +88,9 @@ struct SearchBookCard: View {
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.primaryBlue.opacity(0.15))
+                    // Opaque: `primaryBlue` on its own 15% tint is 4.19:1 in light
+                    // (test_ios_theme_parity §6c).
+                    .background(AppColors.cardBackgroundLight)
                     .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(PlainButtonStyle())

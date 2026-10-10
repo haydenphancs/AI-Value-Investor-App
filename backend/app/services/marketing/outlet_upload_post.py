@@ -33,10 +33,24 @@ What makes this outlet different (docs.upload-post.com, verified 2026-10-01):
   `containsSyntheticMedia`; TikTok also carries "Your brand" (`brand_organic_toggle`) — undisclosed
   self-promotion is For-You-ineligible. Facebook / LinkedIn / Threads text has no API-level AI flag;
   the caption's disclaimer is the disclosure.
+* **The cover is the opening card** (review round 2): every video pins TikTok's `cover_timestamp` and
+  Instagram's `thumb_offset` to VIDEO_COVER_MS, inside the first card (the owner's 2026-10-09
+  "Role-only video" decision: no video frame names a person, so the pin keeps the designed opening
+  card, not a name guard). YouTube Shorts take no reliable pin.
 
 Free-tier verification: each successful submit records Upload-Post's account usage before and after
 (`metadata.publish.upload_post.usage_before/after`), which answers the one undocumented quota
 question — whether one upload costs one credit per platform.
+
+IMAGE posts (drop 1, contract C9) on Facebook, LinkedIn and Threads (`PHOTO_PLATFORMS`): the same
+caption plus the run's post image, through POST /upload_photos with the picture's PUBLIC URL (Upload-Post
+fetches it, as it does a video) and its alt text (`<platform>_alt_text`: the title and whole
+paragraphs). Before the request the picture is downloaded from that URL and checked against the asset
+row (byte cap, sha256), so Upload-Post can only fetch the picture the owner reviewed; a picture that is
+not it is REFUSED, a download that failed is NOT_SENT. Everything else — the Idempotency-Key, the 20 h
+resend window, SUBMITTED → poll — is the video/text path's. No AI flag: Upload-Post forwards one only
+to Instagram, TikTok, YouTube and X; the caption's disclaimer is the disclosure. TikTok photo posts are
+out of scope (TikTok stays video); YouTube is not a photo platform; Instagram stays Reels.
 """
 
 from __future__ import annotations
@@ -44,11 +58,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from app.config import settings
 from app.integrations import upload_post
 from app.schemas.marketing import POST_FORMATS_BY_PLATFORM
+from app.services.marketing import outlet_base
 from app.services.marketing.post_copy import FORBIDDEN_CHARS
 from app.services.marketing.outlet_base import (
     ABSENT,
@@ -68,10 +83,12 @@ from app.services.marketing.outlet_base import (
     UNKNOWN,
     Adapter,
     MarketingPublishRefused,
+    MediaProblem,
     Outcome,
     Prepared,
     ReconcileResult,
     RetractResult,
+    image_of,
     scrub,
     text_sha256,
 )
@@ -80,6 +97,11 @@ logger = logging.getLogger(__name__)
 
 PLATFORMS = ("tiktok", "youtube", "instagram", "facebook", "linkedin", "threads")
 VIDEO_PLATFORMS = frozenset({"tiktok", "youtube", "instagram"})
+#: The platforms that take an IMAGE post here (POST /upload_photos).
+PHOTO_PLATFORMS = frozenset({"facebook", "linkedin", "threads"})
+#: The photo alt-text fields' cap (the upload-photo page: `instagram_alt_text` / `x_alt_text` ≤ 1,000;
+#: the same is kept for the rest).
+PHOTO_ALT_MAX = 1000
 #: Upload-Post's unpublish works for these (not Instagram, TikTok or Threads).
 DELETE_PLATFORMS = frozenset({"facebook", "youtube", "linkedin"})
 #: A resend reuses the Idempotency-Key, which Upload-Post honours for 24 h — stay well inside it.
@@ -90,6 +112,17 @@ CAPTION_LIMITS: Dict[str, int] = {"tiktok": 2200, "instagram": 2200, "youtube": 
 YOUTUBE_TITLE_MAX = 100
 #: YouTube "Education".
 YOUTUBE_CATEGORY_ID = "27"
+#: The video's COVER frame, pinned to the OPENING card for every video (template and lesson; review
+#: round 2). Since the owner's 2026-10-09 "Role-only video" decision no video frame names a person
+#: (narration and cards say the role; `news_templates` refuses a name anywhere in the video), and the
+#: pin stays for every video so the cover is the designed opening card. The worker's timeline (`marketing/video.timeline`) opens on card 0 at
+#: t = 0 and keeps it at least MIN_SEGMENT_SECONDS (1.2 s) — a template's opening card over the
+#: name-free hook alone, a lesson's first content card over the hook — and the first crossfade starts
+#: only at card 1's boundary, so 500 ms is inside the opening card, past the very first frame
+#: (tests/test_marketing_video.py pins the timeline side). TikTok takes `cover_timestamp` (integer ms;
+#: Upload-Post's default is 1000), Instagram `thumb_offset` (ms, a string). YouTube has no reliable pin:
+#: a custom thumbnail needs a verified channel and Shorts ignore it — the Short picks its own frame.
+VIDEO_COVER_MS = 500
 _IN_FLIGHT = frozenset({"pending", "queued", "processing", "in_progress"})
 #: Per-platform error codes that mean the OWNER must reconnect the social account in Upload-Post.
 _REAUTH_CODES = frozenset({"account_reauth_required", "account_checkpoint_required", "tiktok_reconnect_required"})
@@ -140,16 +173,21 @@ def _first_id(value: Any) -> Optional[str]:
 
 
 def platform_fields(platform: str, post: Dict[str, Any]) -> Dict[str, Any]:
-    """The per-platform form fields of one request (pure; pinned by tests)."""
+    """The per-platform form fields of one request (pure; pinned by tests). A VIDEO post's cover is
+    pinned to its opening card where Upload-Post can (VIDEO_COVER_MS); no other format carries it."""
     caption = str(post.get("caption") or "")
+    video = post.get("format") == "video"
     if platform == "tiktok":
-        return {"title": caption, "tiktok_title": caption, "privacy_level": "PUBLIC_TO_EVERYONE",
-                "post_mode": "DIRECT_POST", "disable_inbox_fallback": True, "brand_organic_toggle": True,
-                "is_aigc": True}
+        fields = {"title": caption, "tiktok_title": caption, "privacy_level": "PUBLIC_TO_EVERYONE",
+                  "post_mode": "DIRECT_POST", "disable_inbox_fallback": True, "brand_organic_toggle": True,
+                  "is_aigc": True}
+        return {**fields, "cover_timestamp": VIDEO_COVER_MS} if video else fields
     if platform == "instagram":
-        return {"title": caption, "instagram_title": caption, "media_type": "REELS", "share_to_feed": True,
-                "is_ai_generated": True}
+        fields = {"title": caption, "instagram_title": caption, "media_type": "REELS", "share_to_feed": True,
+                  "is_ai_generated": True}
+        return {**fields, "thumb_offset": str(VIDEO_COVER_MS)} if video else fields
     if platform == "youtube":
+        # No cover pin (VIDEO_COVER_MS): custom thumbnails need a verified channel; Shorts ignore them.
         title = str(post.get("title") or "")
         return {"title": title, "youtube_title": title, "youtube_description": caption,
                 "privacyStatus": "public", "containsSyntheticMedia": True, "categoryId": YOUTUBE_CATEGORY_ID,
@@ -162,6 +200,13 @@ def platform_fields(platform: str, post: Dict[str, Any]) -> Dict[str, Any]:
         # One post, never an auto-split thread (Upload-Post splits over 500 BYTES by default).
         return {"threads_long_text_as_post": True}
     return {}
+
+
+def photo_fields(platform: str, post: Dict[str, Any], alt: str) -> Dict[str, Any]:
+    """The per-platform form fields of one IMAGE post (pure; pinned by tests): the text post's own
+    (the Facebook / LinkedIn page id; Threads' no-split flag, harmless if the photo route ignores it)
+    plus the picture's alt text as `<platform>_alt_text`."""
+    return {**platform_fields(platform, post), f"{platform}_alt_text": alt}
 
 
 class UploadPostAdapter(Adapter):
@@ -190,9 +235,11 @@ class UploadPostAdapter(Adapter):
 
     def prepare(self, post: Dict[str, Any]) -> Prepared:
         platform = self.platform
-        expected = POST_FORMATS_BY_PLATFORM.get(platform, ())
-        if post.get("format") not in expected:
-            raise MarketingPublishRefused(f"{platform}: format {post.get('format')!r} is not published here "
+        expected = tuple(f for f in POST_FORMATS_BY_PLATFORM.get(platform, ())
+                         if f != "image" or platform in PHOTO_PLATFORMS)
+        fmt = post.get("format")
+        if fmt not in expected:
+            raise MarketingPublishRefused(f"{platform}: format {fmt!r} is not published here "
                                           f"(expected {'/'.join(expected) or 'none'})")
         caption = post.get("caption") if isinstance(post.get("caption"), str) else ""
         if not caption.strip():
@@ -200,10 +247,19 @@ class UploadPostAdapter(Adapter):
         if len(caption) > CAPTION_LIMITS[platform]:
             raise MarketingPublishRefused(f"{platform}: {len(caption)} characters > {CAPTION_LIMITS[platform]}")
         asset_ids = [str(a) for a in (post.get("asset_ids") or []) if a]
+        image = None
         if self.video:
             if len(asset_ids) != 1:
                 raise MarketingPublishRefused(f"{platform}: a video post needs exactly one video asset, "
                                               f"it has {len(asset_ids)}")
+        elif fmt == "image":
+            image = image_of(post)
+            if image is None:
+                raise MarketingPublishRefused(f"{platform}: the image post's picture was not resolved",
+                                              category="media")
+            if asset_ids != [image.asset_id]:
+                raise MarketingPublishRefused(f"{platform}: an image post carries exactly its one picture",
+                                              category="media")
         elif asset_ids:
             raise MarketingPublishRefused(f"{platform}: a text post may not carry media")
         if platform == "youtube":
@@ -229,16 +285,36 @@ class UploadPostAdapter(Adapter):
                 raise MarketingPublishRefused(f"{platform}: unreadable attempt count") from None
             request_id = f"{post.get('idempotency_key')}:a{attempt}"
             first_sent_at = datetime.now(timezone.utc).isoformat()
-        payload = {"kind": "video" if self.video else "text", "request_id": request_id,
+        kind = "video" if self.video else "photo" if image is not None else "text"
+        payload = {"kind": kind, "request_id": request_id,
                    "external_id": str(post.get("id") or ""), "text": caption,
-                   "asset_id": asset_ids[0] if self.video else None,
-                   "fields": platform_fields(platform, post)}
+                   "asset_id": asset_ids[0] if self.video or image is not None else None,
+                   "image": image.meta() if image is not None else None,
+                   "fields": (photo_fields(platform, post, image.alt(PHOTO_ALT_MAX)) if image is not None
+                              else platform_fields(platform, post))}
+        up_meta = {**stored, "request_id": request_id, "first_sent_at": first_sent_at}
+        if image is not None:
+            up_meta["image"] = image.meta()
         return Prepared(
             payload=payload, text_sha256=sha, reserve_micros=0,
-            publish_meta={"upload_post": {**stored, "request_id": request_id, "first_sent_at": first_sent_at}},
+            publish_meta={"upload_post": up_meta},
             summary=(f"{platform} via upload-post kind={payload['kind']} request_id={request_id} "
-                     f"chars={len(caption)} sha256={sha[:12]}"),
+                     + (f"image={image.asset_id} bytes={image.size} " if image is not None else "")
+                     + f"chars={len(caption)} sha256={sha[:12]}"),
         )
+
+    async def _photo_url(self, image: Dict[str, Any]) -> Union[str, Outcome]:
+        """The picture's public URL — once a download of it matched the asset row (byte cap, sha256),
+        so Upload-Post can only fetch the picture the owner reviewed — or the Outcome that ends this
+        attempt (nothing was sent to Upload-Post)."""
+        fetched = await outlet_base.fetch_post_image(str(image["url"]), size=image["size"],
+                                                     sha256=str(image["sha256"]))
+        if isinstance(fetched, MediaProblem):
+            error = scrub(f"{self.platform}: {fetched.error}")
+            if fetched.definite:
+                return Outcome(REFUSED, "media", error=error, alert="failed")
+            return Outcome(NOT_SENT, "media", error=error)
+        return str(image["url"])
 
     async def _video_url(self, asset_id: str) -> Optional[str]:
         """The verified MP4's public URL, or None when the asset is not a READY video of the ledger."""
@@ -263,6 +339,7 @@ class UploadPostAdapter(Adapter):
         platform, payload = self.platform, prepared.payload
         base_meta = dict(prepared.publish_meta["upload_post"])
         video_url: Optional[str] = None
+        photo_url: Optional[str] = None
         if payload["kind"] == "video":
             try:
                 video_url = await self._video_url(str(payload["asset_id"]))
@@ -271,12 +348,22 @@ class UploadPostAdapter(Adapter):
             if not video_url:
                 return Outcome(REFUSED, "asset", error=f"{platform}: the video asset is not a ready video",
                                alert="failed")
+        elif payload["kind"] == "photo":
+            checked = await self._photo_url(payload["image"])
+            if isinstance(checked, Outcome):
+                return checked
+            photo_url = checked
         usage_before = await self._usage()
         try:
             if payload["kind"] == "video":
                 res = await upload_post.upload_video(platform=platform, video_url=str(video_url),
                                                      fields=payload["fields"], request_id=payload["request_id"],
                                                      external_id=payload["external_id"])
+            elif payload["kind"] == "photo":
+                res = await upload_post.upload_photos(platform=platform, photo_urls=[str(photo_url)],
+                                                      caption=payload["text"], fields=payload["fields"],
+                                                      request_id=payload["request_id"],
+                                                      external_id=payload["external_id"])
             else:
                 res = await upload_post.upload_text(platform=platform, text=payload["text"],
                                                     fields=payload["fields"], request_id=payload["request_id"],

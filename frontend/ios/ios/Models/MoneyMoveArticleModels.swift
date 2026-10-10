@@ -161,6 +161,18 @@ enum CalloutStyle {
         case .highlight: return AppColors.alertPurple.opacity(0.3)
         }
     }
+
+    /// The callout's icon ink — OPAQUE. The icon used to take `borderColor`, i.e. its hue at
+    /// 30%, which measured 1.5–1.7:1 on the callout's own tint (test_ios_theme_parity §6c):
+    /// the lightbulb that says what kind of callout this is was close to invisible.
+    var iconColor: Color {
+        switch self {
+        case .info: return AppColors.primaryBlue
+        case .warning: return AppColors.caution
+        case .success: return AppColors.gain
+        case .highlight: return AppColors.alertPurple
+        }
+    }
 }
 
 // MARK: - Chart Data

@@ -667,9 +667,13 @@ def test_the_reports_screen_draws_logos_through_the_atom():
 # ── 3c. The whale-holding and trade tiles (the two former AsyncImage holdouts) ─
 
 _CACHED_TILES = [
-    # (file, view header, its `logoSymbol` body, tile side in pt, letter-tile fill opacity)
-    (_WHALE, "struct WhaleTickerIcon: View", "logoURL.flatMap(CompanyLogoCache.symbol(forLogoURL:))", 40, "0.2"),
-    (_TRADE, "struct TradeTickerLogo: View", "CompanyLogoCache.symbol(for: ticker)", 48, "0.15"),
+    # (file, view header, its `logoSymbol` body, tile side in pt, letter-tile fill). The fill is
+    # OPAQUE since 2026-10-09: the letter is text, and its colour on its own 15–20% tint was
+    # under 4.5:1 in light (test_ios_theme_parity §6c).
+    (_WHALE, "struct WhaleTickerIcon: View", "logoURL.flatMap(CompanyLogoCache.symbol(forLogoURL:))", 40,
+     "AppColors.cardBackgroundLight"),
+    (_TRADE, "struct TradeTickerLogo: View", "CompanyLogoCache.symbol(for: ticker)", 48,
+     "AppColors.cardBackgroundLight"),
 ]
 
 
@@ -678,8 +682,8 @@ def test_whale_and_trade_tiles_draw_the_cached_logo_synchronously():
     group's cards) drew the FMP CDN logo through their own `AsyncImage`, so every rebuilt row
     started on its letter tile. They now read `CompanyLogoCache` exactly as the atom does —
     synchronous read, symbol-tagged `fetched`, one `.task(id: logoSymbol)` — and keep their own
-    look: an un-chipped logo at the tile's side, the same corner radius, the tinted letter tile."""
-    for path, header, symbol_body, side, opacity in _CACHED_TILES:
+    look: an un-chipped logo at the tile's side, the same corner radius, the letter tile."""
+    for path, header, symbol_body, side, letter_fill in _CACHED_TILES:
         name = header.split()[1].rstrip(":")
         view = _decl(_code(path), header, f"the {name} view")
         assert "letterFallback" in view and "backgroundColor" in view, (
@@ -760,7 +764,7 @@ def test_whale_and_trade_tiles_draw_the_cached_logo_synchronously():
             "load-and-cancellation guard")
 
         letter = _decl(view, "private var letterFallback: some View", f"{name}.letterFallback")
-        for literal in (f".fill(backgroundColor.opacity({opacity}))", f".frame(width: {side}, height: {side})",
+        for literal in (f".fill({letter_fill})", f".frame(width: {side}, height: {side})",
                         "Text(String(ticker.prefix(1)))", "RoundedRectangle(cornerRadius: AppCornerRadius.medium)"):
             assert _has(letter, literal), f"{name}'s letter tile drifted: `{literal}` missing"
 
@@ -1162,9 +1166,9 @@ _MUTATIONS = [
     (_TRADE, "                    .aspectRatio(contentMode: .fit)\n",
      "                    .aspectRatio(contentMode: .fit)\n                    .padding(8)\n",
      test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo's logo tile drifted"),
-    (_WHALE, ".fill(backgroundColor.opacity(0.2))", ".fill(backgroundColor.opacity(0.35))",
+    (_WHALE, ".fill(AppColors.cardBackgroundLight)", ".fill(backgroundColor.opacity(0.2))",
      test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "WhaleTickerIcon's letter tile drifted"),
-    (_TRADE, ".fill(backgroundColor.opacity(0.15))", ".fill(backgroundColor.opacity(0.3))",
+    (_TRADE, ".fill(AppColors.cardBackgroundLight)", ".fill(backgroundColor.opacity(0.15))",
      test_whale_and_trade_tiles_draw_the_cached_logo_synchronously, "TradeTickerLogo's letter tile drifted"),
     # The whale tile's warning for a logo_url it cannot key.
     (_WHALE, "                    Self.log.warning(", "                    _ = (",

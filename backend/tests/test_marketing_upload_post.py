@@ -1363,3 +1363,122 @@ async def test_post_analytics_a_snapshot_dated_in_the_future_is_unreadable(monke
 ])
 def test_snapshot_date_reads_up_to_tomorrow_and_no_further(raw, expected):
     assert upload_post._snapshot_date(raw, date(2026, 10, 1)) == expected
+
+
+# ── the photo upload of an IMAGE post (drop 1, contract C9) ─────────────────────────────────────
+
+PHOTO_URL = "https://xyz.supabase.co/storage/v1/object/public/marketing-media/2026-10-09/card-0123456789abcdef.jpg"
+PHOTO_RID = "2026-10-09:threads:image:a1"
+
+
+async def _photos(**over):
+    kw = dict(platform="threads", photo_urls=[PHOTO_URL], caption="Caption — AI-assisted",
+              fields={"threads_alt_text": "Title\n\nParagraph.", "threads_long_text_as_post": True},
+              request_id=PHOTO_RID, external_id=EXTERNAL_ID)
+    kw.update(over)
+    return await upload_post.upload_photos(**kw)
+
+
+@pytest.mark.asyncio
+async def test_upload_photos_request_shape(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, {**ASYNC_ACK, "request_id": PHOTO_RID}))
+    res = await _photos()
+    assert res == {"mode": "async", "request_id": PHOTO_RID}
+    req = fake.last
+    assert req.method == "POST" and str(req.url) == f"{BASE}/upload_photos"
+    assert req.headers["authorization"] == f"Apikey {API_KEY}"
+    # The Idempotency-Key is what makes a resend return the existing job.
+    assert req.headers["idempotency-key"] == PHOTO_RID
+    assert _parts(req) == [
+        ("user", PROFILE),
+        ("platform[]", "threads"),
+        ("title", "Caption — AI-assisted"),
+        ("photos[]", PHOTO_URL),
+        ("async_upload", "true"),
+        ("request_id", PHOTO_RID),
+        ("external_id", EXTERNAL_ID),
+        ("threads_alt_text", "Title\n\nParagraph."),
+        ("threads_long_text_as_post", "true"),
+    ]
+    # The photo goes by its URL as a plain field: Upload-Post fetches it; nothing is attached.
+    assert b"filename" not in req.content
+
+
+@pytest.mark.asyncio
+async def test_upload_photos_sends_one_field_per_photo(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, ASYNC_ACK))
+    second = PHOTO_URL.replace("card-0", "card-1")
+    await _photos(photo_urls=(PHOTO_URL, f"  {second} "))
+    assert [v for n, v in _parts(fake.last) if n == "photos[]"] == [PHOTO_URL, second]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over, why", [
+    ({"caption": ""}, "empty caption"),
+    ({"caption": "   "}, "empty caption"),
+    ({"caption": None}, "empty caption"),
+    ({"photo_urls": []}, "photo_urls"),
+    ({"photo_urls": PHOTO_URL}, "photo_urls"),               # a bare string is not a list of URLs
+    ({"photo_urls": [PHOTO_URL] * 5}, "photo_urls"),
+    ({"photo_urls": ["http://xyz.supabase.co/card.jpg"]}, "photo_urls"),
+    ({"photo_urls": ["https://"]}, "photo_urls"),
+    ({"photo_urls": [PHOTO_URL + "\nX-Evil: 1"]}, "photo_urls"),
+    ({"photo_urls": ["https://a.example/x y.jpg"]}, "photo_urls"),
+    ({"photo_urls": [None]}, "photo_urls"),
+    ({"fields": {"title": "another caption"}}, "set by this client"),
+    ({"fields": {"photos[]": "https://evil.example/x.jpg"}}, "set by this client"),
+    ({"request_id": "bad id"}, "request_id"),
+    ({"platform": "Threads!"}, "platform"),
+])
+async def test_upload_photos_refuses_before_sending(monkeypatch, creds, over, why):
+    fake = _install(monkeypatch, _answer(200, ASYNC_ACK))
+    with pytest.raises(upload_post.UploadPostRefusedError, match=why) as ei:
+        await _photos(**over)
+    assert ei.value.status is None and fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_upload_photos_without_credentials_is_not_configured(monkeypatch):
+    monkeypatch.setattr(upload_post.settings, "MARKETING_UPLOAD_POST_API_KEY", None)
+    monkeypatch.setattr(upload_post.settings, "MARKETING_UPLOAD_POST_USER", PROFILE)
+    fake = _install(monkeypatch, _answer(200, ASYNC_ACK))
+    for over in ({}, {"caption": ""}, {"photo_urls": []}):
+        with pytest.raises(upload_post.UploadPostNotConfiguredError):
+            await _photos(**over)
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, body, exc", [
+    (400, {"success": False, "message": "Bad photo"}, upload_post.UploadPostRefusedError),
+    (400, {"success": False, "message": "none", "invalid_platforms": {"threads": "not connected"}},
+     upload_post.UploadPostNotConnectedError),
+    (401, {"success": False, "message": "Invalid or expired token"}, upload_post.UploadPostAuthError),
+    (403, {"success": False, "message": "plan"}, upload_post.UploadPostPlanError),
+    (429, {"success": False, "message": "monthly", "usage": {"count": 10, "limit": 10}},
+     upload_post.UploadPostQuotaError),
+    (500, {"success": False, "error": "boom"}, upload_post.UploadPostAmbiguousError),
+    (409, {"success": False, "message": "in progress"}, upload_post.UploadPostAmbiguousError),
+])
+async def test_upload_photos_keeps_the_outcome_split(monkeypatch, creds, status, body, exc):
+    _install(monkeypatch, _answer(status, body))
+    with pytest.raises(exc) as ei:
+        await _photos()
+    assert type(ei.value) is exc and API_KEY not in str(ei.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, exc", [(httpx.ConnectError, upload_post.UploadPostNotSentError),
+                                        (httpx.ReadTimeout, upload_post.UploadPostAmbiguousError)])
+async def test_upload_photos_transport_failures_split_and_hide_the_key(monkeypatch, creds, error, exc):
+    _install(monkeypatch, _raising(error))
+    with pytest.raises(exc) as ei:
+        await _photos()
+    assert ei.value.__context__ is None and API_KEY not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_upload_photos_sync_answer_is_normalised(monkeypatch, creds):
+    result = {"success": True, "url": "https://www.threads.net/@caydex/post/1", "post_id": "1"}
+    _install(monkeypatch, _answer(200, {"success": True, "results": {"threads": result}}))
+    assert await _photos() == {"mode": "sync", "request_id": None, "results": {"threads": result}, "usage": None}

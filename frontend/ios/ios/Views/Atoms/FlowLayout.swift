@@ -100,12 +100,11 @@ struct FlowLayout: Layout {
         // Short chips pack onto rows; the long label wraps inside the 220pt column.
         FlowLayout {
             ForEach(["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN"], id: \.self) { symbol in
-                TintedTagBadge(text: symbol, color: AppColors.textSecondary, backgroundOpacity: 0.10)
+                TintedTagBadge(text: symbol, color: AppColors.textSecondary)
             }
             TintedTagBadge(
                 text: "A chip label long enough to need a second line in this column",
                 color: AppColors.textSecondary,
-                backgroundOpacity: 0.10,
                 textLineLimit: 2
             )
         }

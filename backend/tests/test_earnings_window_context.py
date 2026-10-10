@@ -365,3 +365,18 @@ async def test_a_duplicate_pending_and_reported_pair_in_one_response_is_not_a_la
     out = await EarningsWindowService().statuses(NOON, fmp=fake, symbols=["ORCL"])
     assert out["ORCL"].status == EARNINGS_REPORTED
     assert out["ORCL"].reported_seen_at is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_calendar_days_refuses_datetime_days_before_any_call():
+    """`fetch_calendar_days` is public since 2026-10-09 (the Home Earnings Shockers card
+    uses it). A `datetime` is a `date` subclass: it would be sent as `…T00:00:00` and then
+    never equal a row's date, so every row would vanish as if the day were empty."""
+    fake = _DayFake({"2026-09-10": [_row("2026-09-10")]})
+    with pytest.raises(TypeError, match="needs datetime.date days"):
+        await ews.fetch_calendar_days(fake.get_earnings_calendar, [NOON])
+    with pytest.raises(TypeError):
+        await ews.fetch_calendar_days(fake.get_earnings_calendar, ["2026-09-10"])
+    assert fake.calls == []
+    out = await ews.fetch_calendar_days(fake.get_earnings_calendar, [TODAY])
+    assert [r["symbol"] for r in out[TODAY]] == ["ORCL"]

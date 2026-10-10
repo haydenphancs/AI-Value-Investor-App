@@ -19,12 +19,19 @@ What these pin, by what a regression would cost:
    circuit-broken instead of burning the 300-a-day createSession allowance.
 4. `enabled_platforms()` — the ONE predicate for "publishes and gets Approve buttons" — needs both
    a listing and complete credentials (and an X budget).
+5. IMAGE posts (drop 1): only the run's verified post image is ever uploaded — downloaded from its
+   public URL and checked (byte cap, sha256) first; any failure before the post itself is NOT_SENT
+   (a picture that is not the one reviewed is REFUSED); X refunds exactly what was not billed and is
+   matched without its media t.co; Bluesky names the blob's CID in the claim-time record and uploads
+   the blob again on every resend.
 
 Hermetic: backend/conftest.py blocks sockets; nothing here reaches a network.
 """
 
 from __future__ import annotations
 
+import base64 as _b64
+import copy as _copy
 import hashlib
 import json
 import logging
@@ -39,8 +46,10 @@ import httpx
 import pytest
 
 from app.integrations import bluesky, x_api
-from app.services.marketing import outlet_bluesky, outlet_x, outlets, post_copy
+from app.services.marketing import outlet_base, outlet_bluesky, outlet_x, outlets, post_copy
+from app.services.marketing import run_service as mrs
 from app.services.marketing.outlet_base import (
+    POST_IMAGE_KEY,
     ABSENT,
     AMBIGUOUS,
     FOUND,
@@ -54,6 +63,8 @@ from app.services.marketing.outlet_base import (
     UNKNOWN,
     Adapter,
     MarketingPublishRefused,
+    MediaProblem,
+    PostImage,
     Prepared,
 )
 
@@ -184,6 +195,9 @@ def x_on(monkeypatch):
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MONTHLY_BUDGET_USD", 2.0)
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", False)
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MADE_WITH_AI", True)
+    # Image posts are pinned off here (never the .env's); the image tests turn them on.
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGES", False)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", 200_000)
 
 
 @pytest.fixture
@@ -251,10 +265,17 @@ def test_x_prepare_refuses_a_post_without_text(x_on, caption):
         outlet_x.ADAPTER.prepare(_x_post(caption))
 
 
-@pytest.mark.parametrize("fmt", ["video", "carousel", "image", "", None, "TEXT"])
-def test_x_prepare_refuses_anything_but_a_text_post(x_on, fmt):
-    with pytest.raises(MarketingPublishRefused, match="text only"):
+@pytest.mark.parametrize("fmt", ["video", "carousel", "", None, "TEXT", "IMAGE"])
+def test_x_prepare_refuses_anything_but_a_text_or_image_post(x_on, fmt):
+    with pytest.raises(MarketingPublishRefused, match="is not published on X"):
         outlet_x.ADAPTER.prepare(_x_post(format=fmt))
+
+
+def test_x_prepare_refuses_an_image_post_while_x_images_is_off(x_on):
+    """MARKETING_X_IMAGES is read at PUBLISH time: a run that froze "image" for X while it was on is
+    refused (failed + alert) once it is off — never sent as a text post the owner did not review."""
+    with pytest.raises(MarketingPublishRefused, match="MARKETING_X_IMAGES is off — X publishes text only"):
+        outlet_x.ADAPTER.prepare(_x_post(format="image"))
 
 
 def test_x_prepare_refuses_media_on_a_text_post(x_on):
@@ -977,8 +998,10 @@ def test_bluesky_prepare_refuses_a_key_without_a_run_date(bsky_on, key):
     ({"caption": ""}, "no text"),
     ({"caption": "  \n"}, "no text"),
     ({"caption": None}, "no text"),
-    ({"format": "video"}, "text only"),
-    ({"format": None}, "text only"),
+    ({"format": "video"}, "is not published on Bluesky"),
+    ({"format": None}, "is not published on Bluesky"),
+    ({"format": "IMAGE"}, "is not published on Bluesky"),
+    ({"format": "image"}, "picture was not resolved"),
     ({"asset_ids": ["a1"]}, "media"),
     ({"caption": "a" * 301}, "characters"),
     ({"caption": "Read https://evil.example/x"}, "smart link"),
@@ -1750,3 +1773,663 @@ def test_x_metrics_headroom_reads_the_url_switch_at_call_time(monkeypatch, x_on)
     for allow_urls, expected in ((False, 60_000), (True, 800_000), (False, 60_000)):
         monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
         assert outlet_x.metrics_headroom_micros() == expected
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# IMAGE posts (drop 1, contract C9) — the shared picture helpers, then X and Bluesky
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+IMG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8 + b"\xff\xd9"
+IMG_SHA = hashlib.sha256(IMG).hexdigest()
+IMG_CID = bluesky.raw_cid_for_sha256(IMG_SHA)
+PIC_URL = "https://xyz.supabase.co/storage/v1/object/public/marketing-media/2026-09-30/card-0123456789abcdef.jpg"
+PIC_ID = "0b6f3a52-3c1d-4f7e-9a10-2b8c4d6e8f02"
+RUN_ID = "11111111-2222-4333-8444-555555555555"
+PIC_TITLE = "Why time in the market compounds"
+PIC_PARAS = ("Compounding needs years, not weeks.", "Missing a few strong days changes the result a lot.")
+ALT = PIC_TITLE + "\n\n" + "\n\n".join(PIC_PARAS)
+MEDIA_ID = "1880000000000000001"
+X_IMG_KEY = "2026-09-30:x:image"
+B_IMG_KEY = "2026-09-30:bluesky:image"
+B_IMG_CAPTION = "Moats protect returns over decades. AI-assisted"
+
+
+def _pic(**over: Any) -> PostImage:
+    kw = dict(asset_id=PIC_ID, url=PIC_URL, sha256=IMG_SHA, size=len(IMG), title=PIC_TITLE, paragraphs=PIC_PARAS)
+    kw.update(over)
+    return PostImage(**kw)
+
+
+class PicServer:
+    """The public media bucket: serves the picture at PIC_URL (or a scripted answer) and records reads."""
+
+    def __init__(self) -> None:
+        self.body: Any = IMG
+        self.status = 200
+        self.requests: List[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if callable(self.body):
+            return self.body(request)
+        if str(request.url) != PIC_URL:
+            return httpx.Response(404)
+        return httpx.Response(self.status, content=self.body)
+
+
+@pytest.fixture
+def pics(monkeypatch) -> PicServer:
+    server = PicServer()
+    monkeypatch.setattr(outlet_base, "_fetch_transport", httpx.MockTransport(server.handler))
+    return server
+
+
+# ── outlet_base: alt text, the verified download, the ledger loader ─────────────────────────────
+
+
+def test_alt_text_is_the_title_and_whole_paragraphs():
+    assert outlet_base.alt_text(PIC_TITLE, PIC_PARAS, 1000) == ALT
+    assert _pic().alt(1000) == ALT
+
+
+def test_alt_text_drops_whole_paragraphs_never_a_cut_sentence():
+    paras = ("a" * 300, "This is not a recommendation to buy.", "c" * 300)
+    title = "T" * 10
+    full = outlet_base.alt_text(title, paras, 10_000)
+    assert full.count("\n\n") == 3
+    # One character short of the full text: the LAST paragraph goes as a whole.
+    limited = outlet_base.alt_text(title, paras, len(full) - 1)
+    assert limited == title + "\n\n" + paras[0] + "\n\n" + paras[1]
+    # A limit that cuts the second paragraph keeps only what fits whole — never "…is not a".
+    assert outlet_base.alt_text(title, paras, len(title) + 2 + 300 + 5) == title + "\n\n" + paras[0]
+    # Once a paragraph does not fit, none after it is added (the order of the picture is kept).
+    assert outlet_base.alt_text(title, ("x" * 50, "y"), len(title) + 10) == title
+
+
+def test_alt_text_cuts_only_a_title_longer_than_the_limit():
+    assert outlet_base.alt_text("T" * 20, ("p",), 8) == "T" * 8
+    assert outlet_base.alt_text("", ("p", "q"), 100) == "p\n\nq"
+
+
+@pytest.mark.asyncio
+async def test_fetch_post_image_returns_the_checked_bytes(pics):
+    assert await outlet_base.fetch_post_image(PIC_URL, size=len(IMG), sha256=IMG_SHA) == IMG
+    (req,) = pics.requests
+    assert req.method == "GET" and "authorization" not in req.headers   # a public object, no credential
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, definite, why", [
+    (IMG[:-1] + b"\x00", True, "not the one recorded"),     # same size, other bytes
+    (IMG[:-1], True, "not the one recorded"),                # shorter
+    (IMG + b"x", True, "larger than"),                       # longer: the cap stops the read
+    (IMG * 50, True, "larger than"),
+])
+async def test_fetch_post_image_refuses_a_picture_that_is_not_the_one_reviewed(pics, body, definite, why):
+    pics.body = body
+    out = await outlet_base.fetch_post_image(PIC_URL, size=len(IMG), sha256=IMG_SHA)
+    assert isinstance(out, MediaProblem) and out.definite is definite and why in out.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 403, 500, 301, 206])
+async def test_fetch_post_image_non_200_is_retryable(pics, status):
+    pics.status = status
+    out = await outlet_base.fetch_post_image(PIC_URL, size=len(IMG), sha256=IMG_SHA)
+    assert isinstance(out, MediaProblem) and out.definite is False and f"HTTP {status}" in out.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError])
+async def test_fetch_post_image_transport_failure_is_retryable(pics, error):
+    pics.body = _raise(error)
+    out = await outlet_base.fetch_post_image(PIC_URL, size=len(IMG), sha256=IMG_SHA)
+    assert isinstance(out, MediaProblem) and out.definite is False and error.__name__ in out.error
+
+
+@pytest.mark.asyncio
+async def test_fetch_post_image_unreadable_size_is_definite(pics):
+    out = await outlet_base.fetch_post_image(PIC_URL, size="big", sha256=IMG_SHA)
+    assert isinstance(out, MediaProblem) and out.definite and pics.requests == []
+
+
+class _Ledger:
+    """`get_asset` / `get_script` / `public_url` — what `load_post_image` reads."""
+
+    def __init__(self) -> None:
+        self.asset: Any = {"id": PIC_ID, "run_id": RUN_ID, "kind": "card", "status": "ready",
+                           "storage_path": "2026-09-30/card-0123456789abcdef.jpg", "content_type": "image/jpeg",
+                           "bytes": len(IMG), "sha256": IMG_SHA.upper(),
+                           "metadata": {"image_role": "post_image", "onscreen_text": [PIC_TITLE, *PIC_PARAS, "f"]}}
+        self.script: Any = {"run_id": RUN_ID, "status": "accepted",
+                            "output": {"image_post": {"title": PIC_TITLE, "paragraphs": list(PIC_PARAS)}}}
+        self.fail: Optional[BaseException] = None
+        self.calls: List[str] = []
+
+    async def get_asset(self, asset_id: str) -> Any:
+        self.calls.append(f"asset:{asset_id}")
+        if self.fail is not None:
+            raise self.fail
+        return _copy.deepcopy(self.asset)
+
+    async def get_script(self, run_id: str) -> Any:
+        self.calls.append(f"script:{run_id}")
+        return _copy.deepcopy(self.script)
+
+    @staticmethod
+    def public_url(path: str) -> str:
+        return f"https://xyz.supabase.co/storage/v1/object/public/marketing-media/{path}"
+
+
+@pytest.fixture
+def ledger(monkeypatch) -> _Ledger:
+    fake = _Ledger()
+    # `load_post_image` imports the getter INSIDE the call: the SOURCE module's binding is patched.
+    monkeypatch.setattr(mrs, "get_marketing_run_service", lambda: fake)
+    return fake
+
+
+def _image_row(**over: Any) -> Dict[str, Any]:
+    row = {"id": "post-img-1", "run_id": RUN_ID, "platform": "bluesky", "format": "image",
+           "asset_ids": [PIC_ID], "caption": B_IMG_CAPTION, "idempotency_key": B_IMG_KEY}
+    row.update(over)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_load_post_image_resolves_the_runs_verified_card(ledger):
+    image = await outlet_base.load_post_image(_image_row())
+    assert image == _pic()                       # sha256 lower-cased, URL from the storage path
+    assert ledger.calls == [f"asset:{PIC_ID}", f"script:{RUN_ID}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asset_over, why", [
+    ({"status": "pending_upload"}, "status"),
+    ({"kind": "video"}, "post image"),
+    ({"metadata": {"image_role": "other"}}, "post image"),
+    ({"metadata": None}, "post image"),
+    ({"run_id": "another-run"}, "another run"),
+    ({"content_type": "image/png"}, "content type"),
+    ({"bytes": 0}, "size"),
+    ({"bytes": 950_001}, "size"),
+    ({"bytes": True}, "size"),
+    ({"bytes": "5"}, "size"),
+    ({"sha256": "abc"}, "sha256"),
+    ({"sha256": None}, "sha256"),
+    ({"storage_path": ""}, "storage path"),
+])
+async def test_load_post_image_refuses_an_asset_that_is_not_the_post_image(ledger, asset_over, why):
+    ledger.asset.update(asset_over)
+    out = await outlet_base.load_post_image(_image_row())
+    assert isinstance(out, MediaProblem) and out.definite and why in out.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_over, why", [
+    ({"asset_ids": []}, "names 0"), ({"asset_ids": None}, "names 0"), ({"asset_ids": [PIC_ID, "b"]}, "names 2"),
+    ({"asset_ids": PIC_ID}, "names 0"), ({"run_id": None}, "no run"),
+])
+async def test_load_post_image_needs_exactly_one_asset_and_a_run(ledger, row_over, why):
+    out = await outlet_base.load_post_image(_image_row(**row_over))
+    assert isinstance(out, MediaProblem) and out.definite and why in out.error and ledger.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("script", [
+    None, {"status": "rejected", "output": {"image_post": {"title": "t", "paragraphs": ["a", "b"]}}},
+    {"status": "accepted", "output": {}}, {"status": "accepted", "output": {"image_post": {"title": "t",
+                                                                                          "paragraphs": ["a"]}}},
+    {"status": "accepted", "output": "x"},
+])
+async def test_load_post_image_needs_the_accepted_image_post(ledger, script):
+    ledger.script = script
+    out = await outlet_base.load_post_image(_image_row())
+    assert isinstance(out, MediaProblem) and out.definite and "image_post" in out.error
+
+
+@pytest.mark.asyncio
+async def test_load_post_image_missing_asset_is_definite_and_a_failed_read_is_not(ledger):
+    ledger.asset = None
+    out = await outlet_base.load_post_image(_image_row())
+    assert isinstance(out, MediaProblem) and out.definite and "no asset" in out.error
+    ledger.fail = RuntimeError("ledger down")
+    out = await outlet_base.load_post_image(_image_row())
+    assert isinstance(out, MediaProblem) and not out.definite and "RuntimeError" in out.error
+
+
+@pytest.mark.asyncio
+async def test_load_post_image_refuses_a_non_https_url(ledger, monkeypatch):
+    monkeypatch.setattr(_Ledger, "public_url", staticmethod(lambda path: f"http://local/{path}"))
+    out = await outlet_base.load_post_image(_image_row())
+    assert isinstance(out, MediaProblem) and out.definite and "https" in out.error
+
+
+# ── X: the image post ─────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def x_images(monkeypatch, x_on):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGES", True)
+
+
+def _x_img_post(caption: str = X_CAPTION, **over: Any) -> Dict[str, Any]:
+    post = _x_post(caption, format="image", asset_ids=[PIC_ID], idempotency_key=X_IMG_KEY)
+    post[POST_IMAGE_KEY] = _pic()
+    post.update(over)
+    return post
+
+
+def test_x_prepare_an_image_post(x_images):
+    prepared = outlet_x.ADAPTER.prepare(_x_img_post())
+    assert prepared.payload["image"] == {**_pic().meta(), "alt": ALT}
+    assert prepared.reserve_micros == 200_000 and prepared.pre_send_charge == ("x_media_alt", 5_000)
+    x_meta = prepared.publish_meta["x"]
+    assert x_meta["image"] == _pic().meta() and x_meta["alt_micros"] == 5_000 and "alt" not in x_meta
+    assert "x image" in prepared.summary and PIC_TITLE not in prepared.summary
+
+
+@pytest.mark.parametrize("setting, allow_urls, caption, reserve", [
+    (200_000, False, X_CAPTION, 200_000),
+    (15_000, False, X_CAPTION, 15_000),     # the console confirmed a text-post price
+    (0, False, X_CAPTION, 15_000),          # never below a text post
+    (15_000, True, f"{X_CAPTION} {post_copy.LINK_BASE_URL}/x", 200_000),   # never below a URL post
+    (500_000, True, f"{X_CAPTION} {post_copy.LINK_BASE_URL}/x", 500_000),
+])
+def test_x_image_reserve_is_the_setting_with_floors(monkeypatch, x_images, setting, allow_urls, caption, reserve):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", setting)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
+    assert outlet_x.ADAPTER.prepare(_x_img_post(caption)).reserve_micros == reserve
+
+
+@pytest.mark.parametrize("over, why", [
+    ({POST_IMAGE_KEY: None}, "not resolved"),
+    ({"asset_ids": []}, "exactly its one picture"),
+    ({"asset_ids": [PIC_ID, "other"]}, "exactly its one picture"),
+    ({"asset_ids": ["other"]}, "exactly its one picture"),
+    ({"caption": "$AAPL and $MSFT"}, "cashtags"),
+    ({"caption": "Thanks @someone"}, "@mention"),
+    ({"caption": "Read https://example.com/x"}, "MARKETING_X_ALLOW_URLS"),
+    ({"caption": "a" * 281}, "weighted"),
+])
+def test_x_prepare_refuses_a_bad_image_post(x_images, over, why):
+    with pytest.raises(MarketingPublishRefused, match=why):
+        outlet_x.ADAPTER.prepare(_x_img_post(**over))
+
+
+def test_x_text_post_is_unchanged_while_images_are_on(x_images):
+    prepared = outlet_x.ADAPTER.prepare(_x_post())
+    assert prepared.reserve_micros == 15_000 and prepared.pre_send_charge is None
+    assert "image" not in prepared.payload
+
+
+def _x_paths(fake: FakeX) -> List[str]:
+    return [r.url.path for r in fake.requests]
+
+
+async def _x_img_send(post: Optional[Dict[str, Any]] = None):
+    post = post or _x_img_post()
+    prepared = outlet_x.ADAPTER.prepare(post)
+    sent = {k: v for k, v in post.items() if k != POST_IMAGE_KEY}     # send() sees the CLAIMED row
+    return prepared, await outlet_x.ADAPTER.send(sent, prepared)
+
+
+UPLOADED = (200, {"data": {"id": MEDIA_ID, "media_key": f"3_{MEDIA_ID}", "size": len(IMG)}})
+ALT_SET = (200, {"data": {"id": MEDIA_ID}})
+
+
+@pytest.mark.asyncio
+async def test_x_image_send_uploads_sets_alt_then_posts_with_the_media(monkeypatch, x_images, pics):
+    fake = _x(monkeypatch, UPLOADED, ALT_SET,
+              (201, {"data": {"id": X_POST_ID, "text": f"{X_CAPTION} https://t.co/AbC123"}}))
+    prepared, outcome = await _x_img_send()
+    assert outcome.kind == PUBLISHED and outcome.external_id == X_POST_ID and outcome.refund_micros == 0
+    assert outcome.publish_meta == {"x": {**prepared.publish_meta["x"], "media_id": MEDIA_ID}}
+    assert _x_paths(fake) == ["/2/media/upload", "/2/media/metadata", "/2/tweets"]
+    upload, alt, create = (json.loads(r.content) for r in fake.requests)
+    assert _b64.b64decode(upload["media"]) == IMG and upload["media_category"] == "tweet_image"
+    assert alt == {"id": MEDIA_ID, "metadata": {"alt_text": {"text": ALT}}}
+    assert create == {"text": X_CAPTION, "made_with_ai": True, "media": {"media_ids": [MEDIA_ID]}}
+    assert len(pics.requests) == 1          # the picture was downloaded and checked once
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, kind", [(IMG[:-1] + b"\x00", REFUSED), (IMG + b"!", REFUSED)])
+async def test_x_image_send_never_uploads_a_picture_that_is_not_the_one_reviewed(monkeypatch, x_images, pics,
+                                                                                  body, kind):
+    fake = _x(monkeypatch)
+    pics.body = body
+    prepared, outcome = await _x_img_send()
+    assert outcome.kind == kind and outcome.category == "media" and outcome.alert == "failed"
+    assert outcome.refund_micros == -(200_000 + 5_000)       # nothing was billed
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_x_image_send_download_failure_is_not_sent(monkeypatch, x_images, pics):
+    fake = _x(monkeypatch)
+    pics.status = 503
+    _prepared, outcome = await _x_img_send()
+    assert outcome.kind == NOT_SENT and outcome.category == "media" and outcome.refund_micros == -205_000
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, kind, category, alert", [
+    (_raise(httpx.ConnectError), NOT_SENT, "transport", None),
+    (_raise(httpx.ReadTimeout), NOT_SENT, "media", None),          # the MEDIA may exist; the post cannot
+    ((503, {"title": "Service Unavailable"}), NOT_SENT, "media", None),
+    ((400, {"title": "Invalid Request", "detail": "bad image"}), NOT_SENT, "media", None),
+    ((403, {"title": "Forbidden"}), NOT_SENT, "media", None),
+    (lambda request: httpx.Response(429, json={"title": "Too Many Requests"},   # reset read at REQUEST time
+                                    headers={"x-rate-limit-reset": str(int(time.time()) + 900)}),
+     NOT_SENT, "rate_limited", None),
+    ((401, {"title": "Unauthorized"}), NOT_SENT, "auth", "auth"),
+    ((402, {"title": "Payment Required"}), REFUSED, "credits", "failed"),
+    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "pending"}}}), NOT_SENT, "media", None),
+    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "failed"}}}), NOT_SENT, "media", None),
+])
+async def test_x_image_upload_failure_ends_before_any_post_and_refunds_everything(monkeypatch, x_images, pics,
+                                                                                  answer, kind, category, alert):
+    fake = _x(monkeypatch, answer)
+    _prepared, outcome = await _x_img_send()
+    assert (outcome.kind, outcome.category, outcome.alert) == (kind, category, alert)
+    assert outcome.refund_micros == -205_000                   # an upload has no price; nothing else ran
+    assert _x_paths(fake) == ["/2/media/upload"]
+    _no_secret(outcome.error)
+    if category == "rate_limited":
+        assert 800 < _secs_from_now(outcome.retry_at) < 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, kind, category, refund", [
+    (_raise(httpx.ConnectError), NOT_SENT, "transport", -205_000),     # never left: not billed
+    (_raise(httpx.ReadTimeout), NOT_SENT, "media", -200_000),          # may have been billed: kept
+    ((503, {"title": "Service Unavailable"}), NOT_SENT, "media", -200_000),
+    ((400, {"title": "Invalid Request"}), NOT_SENT, "media", -200_000),
+    ((429, {"title": "Too Many Requests"}), NOT_SENT, "rate_limited", -200_000),
+    ((401, {"title": "Unauthorized"}), NOT_SENT, "auth", -200_000),
+    ((402, {"title": "Payment Required"}), REFUSED, "credits", -205_000),
+    ((200, {"data": {"id": "1880000000000000009"}}), NOT_SENT, "media", -200_000),   # another media's id
+])
+async def test_x_image_alt_text_failure_ends_before_the_post(monkeypatch, x_images, pics, answer, kind, category,
+                                                             refund):
+    fake = _x(monkeypatch, UPLOADED, answer)
+    _prepared, outcome = await _x_img_send()
+    assert (outcome.kind, outcome.category, outcome.refund_micros) == (kind, category, refund)
+    assert _x_paths(fake) == ["/2/media/upload", "/2/media/metadata"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, kind, refund", [
+    (_raise(httpx.ConnectError), NOT_SENT, -200_000),      # the create never left; the alt text did
+    ((402, {"title": "Payment Required"}), REFUSED, -200_000),
+    ((503, {"title": "Service Unavailable"}), AMBIGUOUS, 0),
+    (_raise(httpx.ReadTimeout), AMBIGUOUS, 0),
+    ((429, {"title": "Too Many Requests"}), NOT_SENT, 0),  # as for a text post: a refused create may be billed
+])
+async def test_x_image_create_failure_keeps_the_text_post_rules(monkeypatch, x_images, pics, answer, kind, refund):
+    fake = _x(monkeypatch, UPLOADED, ALT_SET, answer)
+    prepared, outcome = await _x_img_send()
+    assert outcome.kind == kind and outcome.refund_micros == refund
+    assert _x_paths(fake) == ["/2/media/upload", "/2/media/metadata", "/2/tweets"]
+    if kind == AMBIGUOUS:
+        # Whatever may be live names its media, merged with the claim's own `x` record.
+        assert outcome.publish_meta == {"x": {**prepared.publish_meta["x"], "media_id": MEDIA_ID}}
+
+
+@pytest.mark.asyncio
+async def test_x_image_resend_uploads_again(monkeypatch, x_images, pics):
+    """A NOT_SENT attempt goes back to `approved`; the next one uploads afresh (a media id expires)."""
+    fake = _x(monkeypatch, UPLOADED, (503, {"title": "Service Unavailable"}),
+              UPLOADED, ALT_SET, (201, {"data": {"id": X_POST_ID, "text": X_CAPTION}}))
+    _p, first = await _x_img_send()
+    _p, second = await _x_img_send()
+    assert (first.kind, second.kind) == (NOT_SENT, PUBLISHED)
+    assert _x_paths(fake).count("/2/media/upload") == 2 and len(pics.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored, caption, found", [
+    (f"{X_CAPTION} https://t.co/AbC123", X_CAPTION, True),
+    (X_CAPTION, X_CAPTION, True),                                    # if X ever stops appending it
+    (f"{X_CAPTION}  https://t.co/AbC123  ", X_CAPTION, True),
+    (f"{X_CAPTION} https://t.co/L1nk https://t.co/M3dia", f"{X_CAPTION} https://caydexinvest.com/go/x", True),
+    (f"Another post https://t.co/AbC123", X_CAPTION, False),
+    (f"{X_CAPTION} https://t.co/AbC123 extra", X_CAPTION, False),   # only a TRAILING link is the media's
+])
+async def test_x_image_reconcile_matches_without_the_media_link(monkeypatch, x_images, stored, caption, found):
+    async def timeline(user_id: str, **_kw: Any) -> Dict[str, Any]:
+        return {"posts": [_tweet(stored)], "result_count": 1}
+
+    monkeypatch.setattr(x_api, "list_user_posts", timeline)
+    post = _queued_x(caption, format="image", asset_ids=[PIC_ID])
+    result = await outlet_x.ADAPTER.reconcile(post)
+    assert result.kind == (FOUND if found else ABSENT)
+
+
+@pytest.mark.asyncio
+async def test_x_text_reconcile_never_strips_a_trailing_link(monkeypatch, x_on):
+    async def timeline(user_id: str, **_kw: Any) -> Dict[str, Any]:
+        return {"posts": [_tweet(f"{X_CAPTION} https://t.co/AbC123")], "result_count": 1}
+
+    monkeypatch.setattr(x_api, "list_user_posts", timeline)
+    assert (await outlet_x.ADAPTER.reconcile(_queued_x())).kind == ABSENT
+
+
+@pytest.mark.parametrize("images, allow_urls, setting, per_post", [
+    (False, False, 200_000, 15_000),
+    (False, True, 200_000, 200_000),
+    (True, False, 200_000, 205_000),
+    (True, True, 200_000, 205_000),
+    (True, False, 15_000, 20_000),           # a confirmed $0.015 image post + its $0.005 alt text
+    (True, True, 15_000, 205_000),
+])
+def test_x_metrics_headroom_prices_image_posts_while_they_are_on(monkeypatch, x_on, images, allow_urls, setting,
+                                                                 per_post):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGES", images)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", setting)
+    assert outlet_x.metrics_headroom_micros() == 4 * per_post
+
+
+# ── Bluesky: the image post ─────────────────────────────────────────────────────────────────────
+
+
+def _b_img_post(caption: str = B_IMG_CAPTION, **over: Any) -> Dict[str, Any]:
+    post = _b_post(caption, format="image", asset_ids=[PIC_ID], idempotency_key=B_IMG_KEY)
+    post[POST_IMAGE_KEY] = _pic()
+    post.update(over)
+    return post
+
+
+UPLOAD_BLOB = "com.atproto.repo.uploadBlob"
+
+
+def _blob_ok(cid: str = IMG_CID, size: int = len(IMG)) -> tuple:
+    return 200, {"blob": {"$type": "blob", "ref": {"$link": cid}, "mimeType": "image/jpeg", "size": size}}
+
+
+def test_bluesky_prepare_an_image_post_names_its_blob_before_any_upload(bsky_on):
+    prepared = outlet_bluesky.ADAPTER.prepare(_b_img_post())
+    record = prepared.payload["record"]
+    assert record["text"] == B_IMG_CAPTION
+    assert record["embed"] == {"$type": "app.bsky.embed.images", "images": [{
+        "alt": ALT,
+        "image": {"$type": "blob", "ref": {"$link": IMG_CID}, "mimeType": "image/jpeg", "size": len(IMG)},
+        "aspectRatio": {"width": 1080, "height": 1350}}]}
+    assert prepared.payload["image"] == {**_pic().meta(), "cid": IMG_CID}
+    meta = prepared.publish_meta["bluesky"]
+    assert meta["record"] == record and meta["image"] == prepared.payload["image"]
+    assert prepared.payload["rkey"] == outlet_bluesky.tid_for(B_IMG_KEY, 0, RUN_DAY)
+    assert prepared.reserve_micros == 0 and prepared.pre_send_charge is None
+    assert f"cid={IMG_CID}" in prepared.summary and PIC_TITLE not in prepared.summary
+
+
+def test_bluesky_image_retry_reuses_the_stored_record_byte_for_byte(bsky_on):
+    first = outlet_bluesky.ADAPTER.prepare(_b_img_post())
+    stored = {**first.publish_meta["bluesky"]}
+    again = outlet_bluesky.ADAPTER.prepare({**_with_bsky_meta(_b_img_post(), **stored),
+                                            POST_IMAGE_KEY: _pic()})
+    assert again.payload["record"] == first.payload["record"] and again.payload["rkey"] == first.payload["rkey"]
+
+
+@pytest.mark.parametrize("record_cid", ["bafkreiother", None])
+def test_bluesky_image_retry_refuses_a_stored_record_naming_another_picture(bsky_on, record_cid):
+    first = outlet_bluesky.ADAPTER.prepare(_b_img_post())
+    stored = _copy.deepcopy(first.publish_meta["bluesky"])
+    if record_cid is None:
+        stored["record"].pop("embed")
+    else:
+        stored["record"]["embed"]["images"][0]["image"]["ref"]["$link"] = record_cid
+    with pytest.raises(MarketingPublishRefused, match="another picture"):
+        outlet_bluesky.ADAPTER.prepare({**_with_bsky_meta(_b_img_post(), **stored), POST_IMAGE_KEY: _pic()})
+
+
+def test_bluesky_text_retry_refuses_a_stored_record_with_a_picture(bsky_on):
+    first = outlet_bluesky.ADAPTER.prepare(_b_img_post())
+    stored = _copy.deepcopy(first.publish_meta["bluesky"])
+    with pytest.raises(MarketingPublishRefused, match="another picture"):
+        outlet_bluesky.ADAPTER.prepare(_with_bsky_meta(_b_post(B_IMG_CAPTION), **stored))
+
+
+@pytest.mark.parametrize("over, why", [
+    ({POST_IMAGE_KEY: None}, "not resolved"),
+    ({"asset_ids": []}, "exactly its one picture"),
+    ({"asset_ids": ["other"]}, "exactly its one picture"),
+    ({POST_IMAGE_KEY: _pic(sha256="zz")}, "no blob CID"),
+    ({"caption": "a" * 301}, "characters"),
+])
+def test_bluesky_prepare_refuses_a_bad_image_post(bsky_on, over, why):
+    with pytest.raises(MarketingPublishRefused, match=why):
+        outlet_bluesky.ADAPTER.prepare(_b_img_post(**over))
+
+
+async def _b_img_send(post: Optional[Dict[str, Any]] = None):
+    post = post or _b_img_post()
+    prepared = outlet_bluesky.ADAPTER.prepare(post)
+    sent = {k: v for k, v in post.items() if k != POST_IMAGE_KEY}
+    return prepared, await outlet_bluesky.ADAPTER.send(sent, prepared)
+
+
+@pytest.mark.asyncio
+async def test_bluesky_image_send_uploads_the_blob_then_puts_the_record(bsky, pics):
+    rkey = outlet_bluesky.tid_for(B_IMG_KEY, 0, RUN_DAY)
+    bsky.add(CREATE, (200, _session_body())).add(UPLOAD_BLOB, _blob_ok()).add(PUT, _put_ok(rkey))
+    prepared, outcome = await _b_img_send()
+    assert outcome.kind == PUBLISHED and outcome.external_id == f"at://{DID}/{bluesky.POST_COLLECTION}/{rkey}"
+    assert bsky.nsids() == [CREATE, UPLOAD_BLOB, PUT]
+    (upload,) = bsky.of(UPLOAD_BLOB)
+    assert str(upload.url).startswith(PDS) and upload.content == IMG
+    assert upload.headers["content-type"] == "image/jpeg" and upload.headers["authorization"] == f"Bearer {ACCESS}"
+    (put,) = bsky.of(PUT)
+    assert json.loads(put.content)["record"] == prepared.payload["record"]
+    assert outcome.publish_meta["bluesky"]["image"] == prepared.payload["image"]
+
+
+@pytest.mark.asyncio
+async def test_bluesky_image_send_refuses_a_cid_the_pds_disagrees_with(bsky, pics, caplog):
+    bsky.add(CREATE, (200, _session_body())).add(UPLOAD_BLOB, _blob_ok(cid="bafkreiotherotherotherotherother"))
+    _prepared, outcome = await _b_img_send()
+    assert outcome.kind == REFUSED and outcome.category == "media" and outcome.alert == "failed"
+    assert bsky.of(PUT) == []      # the record could never resolve its blob: never written
+
+
+@pytest.mark.asyncio
+async def test_bluesky_image_never_uploads_a_picture_that_is_not_the_one_reviewed(bsky, pics):
+    pics.body = IMG[:-1] + b"\x00"
+    _prepared, outcome = await _b_img_send()
+    assert outcome.kind == REFUSED and outcome.category == "media" and outcome.alert == "failed"
+    assert bsky.requests == []     # not even a login
+
+
+@pytest.mark.asyncio
+async def test_bluesky_image_download_failure_is_not_sent(bsky, pics):
+    pics.status = 500
+    _prepared, outcome = await _b_img_send()
+    assert outcome.kind == NOT_SENT and outcome.category == "media" and bsky.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, category, alert", [
+    (_raise(httpx.ConnectError), "transport", None),
+    (_raise(httpx.ReadTimeout), "media", None),
+    ((502, {"error": "UpstreamFailure"}), "media", None),
+    ((400, {"error": "BlobTooLarge", "message": "too big"}), "media", None),
+    ((429, {"error": "RateLimitExceeded"}), "rate_limited", None),
+    ((401, {"error": "AuthenticationRequired"}), "auth", "auth"),
+    ((200, {"blob": {}}), "media", None),
+])
+async def test_bluesky_image_upload_failure_writes_no_record(bsky, pics, answer, category, alert):
+    bsky.add(CREATE, (200, _session_body())).add(UPLOAD_BLOB, answer)
+    _prepared, outcome = await _b_img_send()
+    assert (outcome.kind, outcome.category, outcome.alert) == (NOT_SENT, category, alert)
+    assert bsky.of(PUT) == []
+    _no_secret(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_bluesky_image_upload_expired_token_renews_once_and_uploads_again(bsky, pics):
+    rkey = outlet_bluesky.tid_for(B_IMG_KEY, 0, RUN_DAY)
+    bsky.add(CREATE, (200, _session_body()))
+    bsky.add(UPLOAD_BLOB, (400, {"error": "ExpiredToken", "message": "Token has expired"}), _blob_ok())
+    bsky.add(REFRESH_NSID, (200, _session_body(access=NEW_ACCESS, refresh=NEW_REFRESH)))
+    bsky.add(PUT, _put_ok(rkey))
+    _prepared, outcome = await _b_img_send()
+    assert outcome.kind == PUBLISHED
+    assert bsky.nsids() == [CREATE, UPLOAD_BLOB, REFRESH_NSID, UPLOAD_BLOB, PUT]
+    assert bsky.of(UPLOAD_BLOB)[1].headers["authorization"] == f"Bearer {NEW_ACCESS}"
+
+
+@pytest.mark.asyncio
+async def test_bluesky_image_resend_after_absent_uploads_the_blob_again(bsky, pics):
+    """An ambiguous put is reconciled; absent → the SAME record is resent, and the blob (which the PDS
+    garbage-collects when no record names it) is uploaded again first."""
+    rkey = outlet_bluesky.tid_for(B_IMG_KEY, 0, RUN_DAY)
+    bsky.add(CREATE, (200, _session_body())).add(UPLOAD_BLOB, _blob_ok(), _blob_ok())
+    bsky.add(PUT, (502, {"error": "UpstreamFailure"}), _put_ok(rkey))
+    prepared, first = await _b_img_send()
+    assert first.kind == AMBIGUOUS
+    stored = {**prepared.publish_meta["bluesky"], **first.publish_meta["bluesky"]}
+    retry = {**_with_bsky_meta(_b_img_post(), **stored), POST_IMAGE_KEY: _pic()}
+    again, second = await _b_img_send(retry)
+    assert again.payload["record"] == prepared.payload["record"] and second.kind == PUBLISHED
+    assert bsky.nsids() == [CREATE, UPLOAD_BLOB, PUT, UPLOAD_BLOB, PUT]
+    puts = [json.loads(r.content) for r in bsky.of(PUT)]
+    assert puts[0] == puts[1]       # byte-identical record, same key: putRecord is idempotent
+
+
+@pytest.mark.parametrize("setting", [None, "abc", float("inf")])
+def test_x_image_reserve_with_an_unreadable_setting_is_the_url_price(monkeypatch, x_images, caplog, setting):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", setting)
+    assert outlet_x.image_post_micros(False) == outlet_x.URL_POST_MICROS
+    assert any("MARKETING_X_IMAGE_POST_MICROS is unreadable" in r.getMessage() for r in caplog.records)
+
+
+# ── drop 2 (contract D14): X's "made with AI" flag is per post ───────────────────────────────────
+
+
+@pytest.mark.parametrize("setting", [True, False])
+@pytest.mark.parametrize("stamped, sent_if_on", [
+    (True, True),             # an AI-written lesson, or a narrated template video
+    (False, False),           # a template image/text post: written by a fixed template from public data
+    ("missing", True),        # a row from before drop 2 carries no flag: it discloses, as before
+    (None, True), (0, True), ("false", True), ("False", True), ([], True),   # never read as "no": discloses
+])
+def test_x_made_with_ai_is_the_setting_and_the_posts_own_flag(monkeypatch, x_on, setting, stamped, sent_if_on):
+    """`made_with_ai` = MARKETING_X_MADE_WITH_AI AND the post's `metadata.made_with_ai` (stamped by
+    create_posts with `post_copy.made_with_ai`). Only an explicit False turns the flag off — an absent or
+    unreadable value is a disclosure, never a silent "not AI"."""
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MADE_WITH_AI", setting)
+    metadata = {} if stamped == "missing" else {"made_with_ai": stamped}
+    prepared = outlet_x.ADAPTER.prepare(_x_post(metadata=metadata))
+    want = setting and sent_if_on
+    assert prepared.payload == {"text": X_CAPTION, "made_with_ai": want}
+    assert prepared.publish_meta["x"]["made_with_ai"] is want
+    assert f"made_with_ai={want}" in prepared.summary
+
+
+def test_x_made_with_ai_tolerates_a_post_with_no_metadata_object(monkeypatch, x_on):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MADE_WITH_AI", True)
+    for metadata in (None, "x", ["made_with_ai", False]):
+        assert outlet_x.ADAPTER.prepare(_x_post(metadata=metadata)).payload["made_with_ai"] is True

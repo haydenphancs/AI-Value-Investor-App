@@ -6,12 +6,17 @@ Signals Service — builds the Home "App-Exclusive Signals" section
                            who bought), windowed on the DISCLOSURE date (filings
                            lag 30–45 days, so "this week" = what was just filed).
                            Source: FMP ``senate-latest`` + ``house-latest``.
-  • Whale Accumulation   — tickers the 13F whale registry is adding to (distinct
-                           FUNDS, deduped by CIK — the registry double-lists a
-                           person and their fund on ONE CIK). Source: the
-                           daily-hydrated Supabase whale tables (no FMP calls).
+  • Whale Accumulation   — tickers the 13F whale registry ADDED SHARES of in each
+                           fund's latest filing (a BOUGHT New/Increased trade, share
+                           count × implied price — never a weight that rose with the
+                           price). Distinct FUNDS, deduped by CIK (the registry
+                           double-lists a person and their fund on ONE CIK). Source:
+                           the daily-hydrated Supabase whale tables (no FMP calls).
   • Earnings Shockers    — biggest EPS beats/misses vs the Street (signed
-                           surprise %). Source: FMP ``earnings-calendar``.
+                           surprise %). Source: FMP ``earnings-calendar``, ONE ET day
+                           per call (a multi-day request is cut at 4,000 rows, newest
+                           dates kept). A dropped/added-digit actual and a non-common
+                           line (warrant / unit / right / preferred) never rank.
   • CEO Buys             — chief executives buying their OWN stock on the open
                            market (Form 4 P-Purchase, common stock), ranked by total
                            DOLLARS bought in the last 30 days of FILINGS (one CEO per
@@ -56,6 +61,7 @@ import re
 
 from app.utils.postgrest_paging import fetch_all_rows
 from app.utils.inflight import fail_shared_future
+from app.utils.period_labels import _13F_FILING_LAG_DAYS, latest_filed_13f_quarter
 from app.database import get_supabase
 from app.integrations.fmp import (
     get_fmp_client,
@@ -64,6 +70,8 @@ from app.integrations.fmp import (
     FMPUnavailableException,
 )
 from app.services.earnings_service import _compute_surprise
+from app.services._earnings_common import eps_digit_shift_suspect
+from app.services.earnings_window_service import et_date, fetch_calendar_days
 # Reuse the dashboard's hardened primitives so signals fold class-share variants
 # (BRK.B ↔ BRK-B) and reject NaN/Inf exactly like the scanners do. NOTE: the
 # dashboard service must import THIS module function-locally to avoid a cycle.
@@ -73,6 +81,7 @@ from app.services.home_dashboard_service import (
     _MOVERS_EXCHANGES,
 )
 from app.services._whale_common import (
+    _parse_filing_period,
     parse_congress_amount_bounds,
     format_amount_range,
 )
@@ -102,7 +111,7 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────
 _SIGNALS_MEM_TTL_SECONDS = 2700          # 45 min in-memory freshness ceiling
 _SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 survives restart; sources daily/quarterly
-_SIGNALS_CACHE_KEY = "signals_v5"        # bump to invalidate stale rows on a semantics change —
+_SIGNALS_CACHE_KEY = "signals_v6"        # bump to invalidate stale rows on a semantics change —
                                          # v4 (2026-09-23) added the `ceo` card: a v3 row validates
                                          # (the field is optional) but would hide CEO Buys for up to
                                          # its 24h TTL after a deploy. The old row is simply ignored.
@@ -110,7 +119,12 @@ _SIGNALS_CACHE_KEY = "signals_v5"        # bump to invalidate stale rows on a se
                                          # Capital Stock" / beneficial-interest / "Ordinary Stock"
                                          # lines and drops ADS-linked and unit-award lines, and
                                          # `is_ceo_role` rejects region-tailed segment CEOs.
-_SIGNALS_DEGRADED_TTL_SECONDS = 300      # a build where a branch RAISED: memory only, 5 min, never
+                                         # v6 (2026-10-09): Earnings Shockers fetches one ET day
+                                         # per call, skips a dropped/added-digit EPS and drops
+                                         # warrants/units/rights/preferreds (RZLVW sat at #7 of
+                                         # the v5 row); Whale Accumulation counts SHARE increases
+                                         # in each fund's latest 13F, not a weight change.
+_SIGNALS_DEGRADED_TTL_SECONDS = 300     # a build where a branch RAISED: memory only, 5 min, never
                                          # persisted — so the failed card comes back on the next
                                          # rebuild instead of being pinned for 24h by Tier 2.
 _SIGNALS_TABLE = "signals_cache"
@@ -139,6 +153,17 @@ _CONGRESS_MIN_MEMBERS = 2                # a "most-bought" headline needs > 1 me
 
 # Whale
 _WHALE_MIN_FUNDS = 2                     # a "funds loading up" headline needs > 1 fund
+# "Adding" is a SHARE increase in the fund's LATEST 13F: a `whale_trades` BOUGHT row of type
+# New or Increased (shares_change × implied price, `_whale_common.calc_13f_trade_dollars`).
+# It used to be `whale_holdings.change_percent > 0`, which is the change in the stock's
+# portfolio WEIGHT — a rally alone, or the rest of the book shrinking, counted as buying.
+_WHALE_ADD_TRADE_TYPES = frozenset({"New", "Increased"})
+# Which quarter a fund must have filed to count: `latest_filed_13f_quarter` with the 45-day
+# statutory lag PLUS this grace. The deadline flips that quarter on the deadline day itself,
+# but a fund filing ON the deadline is only hydrated by the next daily sweep — without the
+# grace every deadline-day filer would read as late for a build, and that short card would
+# be persisted for 24 h (possibly under `_WHALE_MIN_FUNDS`, hiding the card).
+_WHALE_FILING_GRACE_DAYS = 7
 
 # Earnings
 _EARNINGS_WINDOW_DAYS = 7                 # bound staleness to ~the past week (was 10); ranking is
@@ -151,6 +176,40 @@ _EARNINGS_MIN_ABS_ESTIMATE = 0.05        # skip near-zero estimates: (actual-est
 _EARNINGS_QUOTE_CANDIDATES = 40          # over-fetch (was 25) so the exchange + $250M gate below does
                                           # not starve the final list of real large-cap shockers.
 _EARNINGS_MIN_MARKET_CAP = 250_000_000   # $250M quality floor (parity with the scanner cards)
+_EARNINGS_FETCH_DEADLINE_SECONDS = 20.0  # the whole 8-day round (parity with the earnings window's
+                                          # own round). The client retries each call internally, so
+                                          # without a bound a slow FMP could hold the build for minutes.
+_EARNINGS_LOG_SAMPLE = 10                # rows named in one skip/drop log line
+
+# Non-common listings. FMP's earnings calendar copies an issuer's EPS onto its warrant,
+# unit, right and preferred lines, so a de-SPAC miss could rank twice: "Rezolve AI Limited
+# Warrants" (RZLVW, -128%) sat at #7 of the live card on 2026-10-09. A "shocker" is a STOCK's
+# report, so these lines are dropped (never remapped onto the parent — the parent ranks on
+# its own row when it has one). Two signals, either one suffices:
+#
+# * the symbol's SHAPE. Dash suffixes: -WT/-WS warrants, -U/-UN units, -R/-RT rights, -WI
+#   when-issued, -P / -P<letter> a preferred series. A class share carries ONE class letter
+#   (BRK-B, BF-B, MOG-A, HEI-A, LEN-B) and never matches. NASDAQ's fifth-letter identifiers
+#   W (warrant), R (rights), U (unit) apply to a 5-letter NASDAQ symbol only; the share-class
+#   exceptions that use a fifth letter (GOOGL, FWONK, CMCSA) use other letters.
+# * the quote's NAME. Warrants are named anywhere; rights/"wts" only as the trailing word
+#   ("… Rights"); a coupon ("6.5% Series A …") or a preferred/notes phrase marks a fixed-income
+#   line. Units are left to the symbol: an MLP's "Common Units" IS the common equity. A bare
+#   "Series A" is not a rule either — Liberty's tracking stocks are named "Series A …".
+_NON_COMMON_DASH_SUFFIX_RE = re.compile(r"-(?:WTS?|WS|W|UN|U|RTS?|R|WI|P[A-Z]?)$")
+_NASDAQ_NON_COMMON_FIFTH_LETTERS = frozenset("WRU")
+_NON_COMMON_NAME_MAX = 160               # names are short; cap before any regex runs
+_NON_COMMON_NAME_RE = re.compile(
+    r"\bwarrants?\b"
+    r"|\bc/wts?\b"
+    r"|\b(?:rights?|wts?)\W*$"
+    r"|\d(?:\.\d+)?\s*%"
+    r"|\bpreferred\s+(?:stock|shares?|securities)\b"
+    r"|\b(?:pfd|prf)\b"
+    r"|\bnotes?\s+due\b|\bdebentures?\b"
+    r"|\bwhen[\s-]+issued\b",
+    re.IGNORECASE,
+)
 
 # CEO Buys (home E2, 2026-09-23)
 _CEO_WINDOW_DAYS = 30                    # FILING-date window: the market learns of a buy when it is
@@ -337,52 +396,223 @@ def _aggregate_congress(
     return SignalGroupResponse(kind="congress", entries=entries, as_of_date=as_of)
 
 
+class _WhaleAdd(NamedTuple):
+    """One fund's share increase in one stock, from its LATEST 13F (a `whale_trades` row)."""
+
+    whale_id: str
+    dedup: str                       # the fund's CIK, or `nocik:<whale_id>`
+    symbol: str                      # canonical (BRK.B → BRK-B)
+    trade_type: str                  # "New" | "Increased"
+    amount: Optional[float]          # shares added × implied price (an ESTIMATE)
+    new_allocation: Optional[float]  # the position's weight in that filing (%)
+    quarter_end: str                 # the 13F row's `date`: the quarter END, never a filing day
+    company_name: str
+
+
+def _quarter_of(value: Any) -> Optional[Tuple[int, int]]:
+    """``(year, quarter)`` of a ``YYYY-MM-DD`` date, read from the MONTH — so the hydrators'
+    fallback quarter ends (03-30 / 12-30) land in the same quarter as the real 03-31."""
+    d = _parse_iso_date(value)
+    return (d.year, (d.month - 1) // 3 + 1) if d is not None else None
+
+
+def _expected_13f_quarter(now: datetime) -> Tuple[int, int]:
+    """The quarter a CURRENT 13F filer has filed by ``now`` (statutory lag + the grace)."""
+    return latest_filed_13f_quarter(
+        now=now, lag_days=_13F_FILING_LAG_DAYS + _WHALE_FILING_GRACE_DAYS
+    )
+
+
+def _quarter_floor(quarter: Tuple[int, int]) -> str:
+    """First day of ``quarter`` (``YYYY-MM-DD``): the date floor for the group read."""
+    return f"{quarter[0]:04d}-{(quarter[1] - 1) * 3 + 1:02d}-01"
+
+
+def _whale_roster(whales: Any) -> Dict[str, Tuple[str, Optional[Tuple[int, int]]]]:
+    """``whale_id → (dedup key, last filed quarter)`` for the 13F roster rows.
+
+    The dedup key is the CIK — a fund registered under both a person and a firm name
+    (Ray Dalio ↔ Bridgewater) shares one — or ``nocik:<id>`` when the CIK is blank, so
+    null-CIK whales never collapse into one fund. The quarter is ``whales.last_filing_period``
+    (``"2026-Q2"``, written by the nightly hydrator), ``None`` when absent or unparseable."""
+    roster: Dict[str, Tuple[str, Optional[Tuple[int, int]]]] = {}
+    for w in whales if isinstance(whales, list) else ():
+        if not isinstance(w, dict) or w.get("id") is None:
+            continue
+        wid = str(w["id"])
+        cik = str(w.get("cik") or "").strip()
+        roster[wid] = (cik or f"nocik:{wid}", _parse_filing_period(w.get("last_filing_period")))
+    return roster
+
+
+def _latest_13f_groups(
+    roster: Dict[str, Tuple[str, Optional[Tuple[int, int]]]], groups: Any, *, now: datetime,
+) -> Dict[str, Tuple[str, str]]:
+    """``trade_group_id → (whale_id, group date)``: each CURRENT fund's latest-quarter group.
+
+    * a fund's latest quarter is the newest quarter among its ``whale_trade_groups``;
+    * it must be at or after ``_expected_13f_quarter(now)`` — a late or dormant filer's
+      newest buys are a quarter (or years) old, not "accumulation";
+    * ``last_filing_period`` newer than every group means the fund FILED a newer quarter
+      that held no trades: its older buys are not current, so it contributes nothing;
+    * ONE group per fund — the latest date inside that quarter (a fallback ``-30`` date and
+      the real quarter end can both exist as groups; ``(whale_id, date)`` is the key).
+    Malformed rows (not a dict, no id, unparseable date, not a roster whale) are skipped."""
+    expected = _expected_13f_quarter(now)
+    best: Dict[str, Tuple[Tuple[int, int], str, str]] = {}
+    for g in groups if isinstance(groups, list) else ():
+        if not isinstance(g, dict):
+            continue
+        wid = str(g.get("whale_id") or "")
+        gid = str(g.get("id") or "")
+        quarter = _quarter_of(g.get("date"))
+        if wid not in roster or not gid or quarter is None:
+            continue
+        cand = (quarter, str(g.get("date"))[:10], gid)
+        if wid not in best or cand > best[wid]:
+            best[wid] = cand
+
+    chosen: Dict[str, Tuple[str, str]] = {}
+    for wid, (quarter, gdate, gid) in best.items():
+        filed = roster[wid][1]
+        if filed is not None and filed > quarter:
+            continue
+        if quarter < expected:
+            continue
+        chosen[gid] = (wid, gdate)
+    return chosen
+
+
+def _whale_add_rank(add: "_WhaleAdd") -> Tuple[float, float, str]:
+    """Which of a fund's registry rows represents it (smaller = stronger): the larger add,
+    then the larger weight, then the whale id — a TOTAL order, so a person and their fund
+    sharing one CIK always resolve to the same row, whatever order the rows arrived in."""
+    return (-(add.amount or 0.0), -(add.new_allocation or 0.0), add.whale_id)
+
+
+def _latest_quarter_adds(
+    roster: Dict[str, Tuple[str, Optional[Tuple[int, int]]]],
+    chosen: Dict[str, Tuple[str, str]],
+    trades: Any,
+) -> Dict[str, Dict[str, _WhaleAdd]]:
+    """``symbol → {fund dedup key → _WhaleAdd}`` — who ADDED SHARES in their latest 13F.
+
+    A trade counts when it belongs to one of the ``chosen`` groups, under that group's own
+    whale and date, with action BOUGHT and trade_type New or Increased. Shared by the card
+    and the drill-down, so "N funds adding" and the list behind it cannot disagree.
+    Defensive skips (each logged once per build, never silently):
+      * a row whose ``date`` differs from its group's (the writers set them equal);
+      * a (fund, stock) pair holding BOTH a BOUGHT and a SOLD row in one group — a stale row
+        left by an older derivation (the writers upserted without pruning until 2026-10-09),
+        and no way to tell which one is current.
+    Per (stock, fund) the largest add is kept (a class share can arrive as BRK.B and BRK-B)."""
+    actions: Dict[Tuple[str, str], Set[str]] = {}
+    best: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    mismatched = 0
+    for t in trades if isinstance(trades, list) else ():
+        if not isinstance(t, dict):
+            continue
+        owner = chosen.get(str(t.get("trade_group_id") or ""))
+        if owner is None:
+            continue
+        wid, gdate = owner
+        if str(t.get("whale_id") or "") != wid:
+            continue
+        if str(t.get("date") or "")[:10] != gdate:
+            mismatched += 1
+            continue
+        sym = _canonical_symbol(t.get("ticker"))
+        if sym in _BAD_SYMBOLS:
+            continue
+        action = str(t.get("action") or "").strip().upper()
+        actions.setdefault((wid, sym), set()).add(action)
+        if action != "BOUGHT" or t.get("trade_type") not in _WHALE_ADD_TRADE_TYPES:
+            continue
+        amount = _finite_float(t.get("amount"))
+        prev = best.get((wid, sym))
+        if prev is None or (amount or 0.0) > (prev["_amount"] or 0.0):
+            best[(wid, sym)] = {**t, "_amount": amount}
+
+    out: Dict[str, Dict[str, _WhaleAdd]] = {}
+    contradictory: List[str] = []
+    for (wid, sym), t in best.items():
+        if {"BOUGHT", "SOLD"} <= actions.get((wid, sym), set()):
+            contradictory.append(f"{sym}@{wid}")
+            continue
+        allocation = _finite_float(t.get("new_allocation"))
+        add = _WhaleAdd(
+            whale_id=wid,
+            dedup=roster[wid][0],
+            symbol=sym,
+            trade_type=str(t.get("trade_type")),
+            amount=t["_amount"] if t["_amount"] is not None and t["_amount"] > 0 else None,
+            new_allocation=allocation if allocation is not None and allocation > 0 else None,
+            quarter_end=str(t.get("date") or "")[:10],
+            company_name=str(t.get("company_name") or "").strip(),
+        )
+        funds = out.setdefault(sym, {})
+        cur = funds.get(add.dedup)
+        if cur is None or _whale_add_rank(add) < _whale_add_rank(cur):
+            funds[add.dedup] = add
+    if mismatched:
+        logger.warning(
+            "Whale Accumulation: skipped %d trade row(s) whose date differs from their "
+            "group's (the writers set them equal)", mismatched,
+        )
+    if contradictory:
+        logger.warning(
+            "Whale Accumulation: skipped %d (stock, fund) pair(s) holding both a BOUGHT and "
+            "a SOLD row in one 13F group (a stale row from an older derivation): %s",
+            len(contradictory), ", ".join(sorted(contradictory)[:_EARNINGS_LOG_SAMPLE]),
+        )
+    return out
+
+
+def _whale_adds(whales: Any, groups: Any, trades: Any, *, now: datetime) -> Dict[str, Dict[str, _WhaleAdd]]:
+    """The three steps in one call (roster → latest groups → adds), for one-shot callers."""
+    roster = _whale_roster(whales)
+    return _latest_quarter_adds(roster, _latest_13f_groups(roster, groups, now=now), trades)
+
+
+def _whale_card_name(symbol: str, funds: Dict[str, _WhaleAdd], names: Dict[str, str]) -> str:
+    """Display name for a card row: the profile-enriched holdings name when one exists,
+    else a trade's own name unless it is just the ticker (the 13F extract often carries no
+    issuer name, and the writers then store the symbol), else ``""``."""
+    if names.get(symbol):
+        return names[symbol]
+    for add in sorted(funds.values(), key=lambda a: a.dedup):
+        n = add.company_name
+        if n and n.upper() not in (symbol, symbol.replace("-", ".")):
+            return n
+    return ""
+
+
 def _aggregate_whale(
-    holding_rows: Any,
-    whale_cik_map: Dict[Any, str],
+    adds: Dict[str, Dict[str, _WhaleAdd]],
     *,
+    names: Optional[Dict[str, str]] = None,
     as_of: Optional[str] = None,
     top_n: int = _SIGNAL_ROWS,
 ) -> Optional[SignalGroupResponse]:
-    """Rank tickers by DISTINCT 13F funds adding to them (deduped by CIK).
+    """Rank tickers by DISTINCT 13F funds that ADDED SHARES in their latest filing.
 
-    ``whale_cik_map`` maps a 13F ``whale_id`` → its dedup key (CIK, or a
-    ``nocik:<id>`` sentinel when the CIK is null so it never collapses with other
-    null-CIK whales). Only whales present in that map are counted (13F-only). A
-    holding counts as "adding" when its QoQ ``change_percent`` > 0. Returns ``None``
-    when nothing qualifies or the top ticker is below ``_WHALE_MIN_FUNDS``.
-    """
-    if not isinstance(holding_rows, list):
+    ``adds`` is ``_latest_quarter_adds``' map (already deduped by CIK). Returns ``None``
+    when nothing qualifies or the top ticker is below ``_WHALE_MIN_FUNDS``."""
+    if not isinstance(adds, dict):
         return None
-
-    agg: Dict[str, Dict[str, Any]] = {}
-    for row in holding_rows:
-        if not isinstance(row, dict):
-            continue
-        dedup = whale_cik_map.get(row.get("whale_id"))
-        if dedup is None:
-            continue  # not a 13F whale in the registry
-        cp = _finite_float(row.get("change_percent"))
-        if cp is None or cp <= 0:
-            continue
-        sym = _canonical_symbol(row.get("ticker"))
-        if sym in _BAD_SYMBOLS:
-            continue
-        e = agg.setdefault(sym, {"funds": set(), "name": ""})
-        e["funds"].add(dedup)
-        cn = (row.get("company_name") or "").strip()
-        if cn and not e["name"]:
-            e["name"] = cn
-
-    ranked = sorted(agg.items(), key=lambda kv: (-len(kv[1]["funds"]), kv[0]))
-    if not ranked or len(ranked[0][1]["funds"]) < _WHALE_MIN_FUNDS:
+    names = names or {}
+    ranked = sorted(
+        ((sym, funds) for sym, funds in adds.items() if funds),
+        key=lambda kv: (-len(kv[1]), kv[0]),
+    )
+    if not ranked or len(ranked[0][1]) < _WHALE_MIN_FUNDS:
         return None
-
     entries = [
         SignalRowResponse(
-            rank=i + 1, symbol=sym, name=e["name"], value=float(len(e["funds"])),
+            rank=i + 1, symbol=sym, name=_whale_card_name(sym, funds, names),
+            value=float(len(funds)),
         )
-        for i, (sym, e) in enumerate(ranked[:top_n])
+        for i, (sym, funds) in enumerate(ranked[:top_n])
     ]
     return SignalGroupResponse(kind="whale", entries=entries, as_of_date=as_of)
 
@@ -397,17 +627,23 @@ def _aggregate_earnings(
     """Rank recent US reporters FRESHEST-FIRST, then by |EPS surprise %| within a day.
 
     Reuses ``earnings_service._compute_surprise``. A row is skipped when: the symbol
-    is foreign (dotted, e.g. ZOO.L), actual/estimate is missing, ``|estimate|`` is
-    below ``_EARNINGS_MIN_ABS_ESTIMATE`` (near-zero denominators explode the %), or
-    ``|surprise|`` is outside [min_abs, max_abs]. A symbol reporting twice keeps its
-    MOST-RECENT report. Ranking is (date desc, |surprise| desc) so the card leads with
-    the latest shockers, not a stale big one. Returns ``None`` when nothing qualifies.
+    is foreign (dotted, e.g. ZOO.L), its shape marks a non-common line (``-WT``, ``-U``,
+    ``-PB``…; the name-based rules need the quote and run in ``_build_earnings``),
+    actual/estimate is missing, ``|estimate|`` is below ``_EARNINGS_MIN_ABS_ESTIMATE``
+    (near-zero denominators explode the %), the actual has the dropped/added-digit
+    signature (``eps_digit_shift_suspect`` — a 0.169 for a real 1.69 would otherwise lead
+    the card as a "-90% miss"), or ``|surprise|`` is outside [min_abs, max_abs]. A symbol
+    reporting twice keeps its MOST-RECENT report. Ranking is (date desc, |surprise| desc)
+    so the card leads with the latest shockers, not a stale big one. Returns ``None`` when
+    nothing qualifies.
     NOTE: no exchange/market-cap filter here (calendar rows carry none) — the caller
     ``_build_earnings`` over-ranks candidates then applies the exchange + $250M gate.
     """
     if not isinstance(calendar, list):
         return None
 
+    digit_shift: List[str] = []
+    non_common: List[str] = []
     best: Dict[str, Dict[str, Any]] = {}
     for row in calendar:
         if not isinstance(row, dict):
@@ -423,6 +659,9 @@ def _aggregate_earnings(
         sym = _canonical_symbol(raw_symbol)
         if sym in _BAD_SYMBOLS:
             continue
+        if _non_common_symbol_shape(sym):
+            non_common.append(sym)
+            continue
         actual = _finite_float(row.get("epsActual"))
         if actual is None:
             actual = _finite_float(row.get("eps"))
@@ -435,6 +674,12 @@ def _aggregate_earnings(
         # thousands-of-% "surprises" (the est≈0.01 penny-EPS artifact). Skip them at
         # the source; a genuine low bar like NKE's $0.11 estimate still clears.
         if abs(estimate) < _EARNINGS_MIN_ABS_ESTIMATE:
+            continue
+        # The calendar carries no filed GAAP EPS, so the signature alone decides (the same
+        # call earnings_service makes for a quarter with no filing yet): the row is SKIPPED,
+        # never shown with a "corrected" number.
+        if eps_digit_shift_suspect(actual, estimate, None):
+            digit_shift.append(f"{sym} {actual:g} vs {estimate:g}")
             continue
         surprise = _compute_surprise(actual, estimate)
         if surprise is None:
@@ -454,6 +699,17 @@ def _aggregate_earnings(
         ):
             best[sym] = {"surprise": surprise, "date": date_str}
 
+    if digit_shift:
+        logger.warning(
+            "Earnings Shockers: skipped %d row(s) whose EPS actual has the dropped/added-"
+            "digit signature (feed glitch, not a surprise): %s",
+            len(digit_shift), "; ".join(digit_shift[:_EARNINGS_LOG_SAMPLE]),
+        )
+    if non_common:
+        logger.info(
+            "Earnings Shockers: skipped %d non-common line(s) by symbol shape: %s",
+            len(non_common), ", ".join(non_common[:_EARNINGS_LOG_SAMPLE]),
+        )
     if not best:
         return None
 
@@ -491,6 +747,37 @@ def _earnings_quote_ok(quote: Any) -> bool:
         return False
     market_cap = _finite_float(quote.get("marketCap"))
     return market_cap is not None and market_cap >= _EARNINGS_MIN_MARKET_CAP
+
+
+def _non_common_symbol_shape(symbol: Any, exchange: Any = None) -> bool:
+    """True when the SYMBOL alone marks a warrant / unit / right / preferred line (see the
+    ``_NON_COMMON_*`` note). ``exchange`` unlocks NASDAQ's fifth-letter rule; without it
+    (before the quote) only the dash suffixes are read."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    if _NON_COMMON_DASH_SUFFIX_RE.search(sym):
+        return True
+    return (
+        str(exchange or "").strip().upper() == "NASDAQ"
+        and len(sym) == 5
+        and sym.isalpha()
+        and sym[-1] in _NASDAQ_NON_COMMON_FIFTH_LETTERS
+    )
+
+
+def _is_non_common_listing(symbol: Any, name: Any, exchange: Any) -> bool:
+    """True for a warrant / unit / right / preferred / notes line, by symbol shape or by
+    the quote's name. A missing name leaves the symbol rules alone; never raises.
+
+    Earnings Shockers only: CEO Buys already keeps the common line at the source (the
+    Form 4 security title, ``is_common_stock``), and an MLP's "Common Units" or a tracking
+    stock's "Series A" name must not be read as a non-common line there or here."""
+    if _non_common_symbol_shape(symbol, exchange):
+        return True
+    if not isinstance(name, str) or not name.strip():
+        return False
+    return bool(_NON_COMMON_NAME_RE.search(name[:_NON_COMMON_NAME_MAX]))
 
 
 # ── CEO Buys (pure; the drill-down reuses exactly the card's filters) ──────────
@@ -1033,65 +1320,96 @@ class SignalsService:
         # Supabase SDK is sync → run the whole query+aggregate off the event loop.
         return await asyncio.to_thread(self._query_and_aggregate_whale)
 
-    def _query_and_aggregate_whale(self) -> Optional[SignalGroupResponse]:
-        # Wrapped so a Supabase failure degrades THIS branch with a whale-specific
-        # marker (rather than surfacing only as a generic "signal whale failed" from
-        # _build's gather) — honoring the "each branch degrades independently" rule.
+    def _query_and_aggregate_whale(
+        self, *, now: Optional[datetime] = None
+    ) -> Optional[SignalGroupResponse]:
+        """Whale Accumulation: funds that ADDED SHARES in their latest 13F (see
+        ``_latest_quarter_adds``). Supabase only — no FMP call.
+
+        Four paged reads: the 13F roster, each fund's trade groups since the expected
+        quarter began, those groups' trades, and the holdings names for the card rows. A
+        Supabase failure RAISES so ``_build`` records a failure (card omitted, build not
+        persisted) rather than an honest "no fund is adding" ``None``."""
+        now = now if now is not None else datetime.now(timezone.utc)
         try:
             sb = get_supabase()
             whales = (
                 fetch_all_rows(
                     lambda: sb.table("whales")
-                    .select("id, cik, last_hydrated_at")
+                    .select("id, cik, last_hydrated_at, last_filing_period")
                     .eq("data_source", "13f"),
                     order_by="id",
                     what="signals: 13F whale roster",
                 )
             )
-            if not whales:
+            roster = _whale_roster(whales)
+            if not roster:
                 logger.info(
                     "Whale Accumulation: no 13F whales in registry — omitting card"
                 )
                 return None
+            hydrated = [str(w.get("last_hydrated_at"))[:10] for w in whales
+                        if isinstance(w, dict) and w.get("last_hydrated_at")]
+            as_of = max(hydrated) if hydrated else None
+            whale_ids = sorted(roster)
+            floor = _quarter_floor(_expected_13f_quarter(now))
 
-            cik_map: Dict[Any, str] = {}
-            hydrated: List[str] = []
-            for w in whales:
-                wid = w.get("id")
-                if wid is None:
-                    continue
-                cik = (w.get("cik") or "").strip()
-                # Null/blank CIK → per-whale sentinel so it stays its OWN distinct
-                # fund rather than collapsing all null-CIK whales into one.
-                cik_map[wid] = cik if cik else f"nocik:{wid}"
-                hd = w.get("last_hydrated_at")
-                if hd:
-                    hydrated.append(str(hd)[:10])
+            groups = (
+                fetch_all_rows(
+                    lambda: sb.table("whale_trade_groups")
+                    .select("id, whale_id, date")
+                    .in_("whale_id", whale_ids)
+                    .gte("date", floor),
+                    order_by="id",
+                    what="signals: 13F trade groups since the expected quarter",
+                )
+            )
+            chosen = _latest_13f_groups(roster, groups, now=now)
+            if not chosen:
+                logger.info(
+                    "Whale Accumulation: no 13F fund has a current quarter on file "
+                    "(groups since %s: %d) — omitting card", floor, len(groups),
+                )
+                return None
 
+            # BOTH actions: a SOLD row beside a BOUGHT row in one group is a stale pair,
+            # and `_latest_quarter_adds` can only refuse it if it can see it.
+            trades = (
+                fetch_all_rows(
+                    lambda: sb.table("whale_trades")
+                    .select(
+                        "id, whale_id, trade_group_id, ticker, company_name, action, "
+                        "trade_type, amount, new_allocation, date"
+                    )
+                    .in_("trade_group_id", sorted(chosen)),
+                    order_by="id",
+                    what="signals: latest-quarter 13F trades",
+                )
+            )
+            adds = _latest_quarter_adds(roster, chosen, trades)
+
+            names: Dict[str, str] = {}
             holdings = (
                 fetch_all_rows(
                     lambda: sb.table("whale_holdings")
-                    .select("whale_id, ticker, company_name, change_percent")
-                    .gt("change_percent", 0),
-                    # `id`, NOT `whale_id`. The helper's contract requires a unique-ish
-                    # sort key, and `whale_id` repeats up to 30 times (one row per holding
-                    # per whale, `whale_service._sync_to_whale_tables`). This is the ONE
-                    # read here that genuinely crosses 1,000 rows, so the page boundary
-                    # lands INSIDE a tie group: each query orders the tie independently, so
-                    # a row can land on both pages or on neither. A dropped row under-counts
-                    # "N funds adding" — and under `_WHALE_MIN_FUNDS` the Accumulation card
-                    # disappears. The old `.limit(10000)` truncated deterministically; an
-                    # unordered pager fails nondeterministically, which is worse.
+                    .select("id, ticker, company_name")
+                    .in_("whale_id", whale_ids),
                     order_by="id",
-                    what="signals: whale_holdings accumulation",
+                    what="signals: 13F holding names",
                 )
             )
-            # The old `.limit(10000)` did NOT lift PostgREST's ~1,000-row cap — the very
-            # truncation its own comment warned about was already happening: the registry
-            # is 45 13F whales × up to 30 holdings, so the `change_percent > 0` subset
-            # crosses 1,000 and "N funds adding" under-counted, unordered and silently.
-            as_of = max(hydrated) if hydrated else None
-            return _aggregate_whale(holdings, cik_map, as_of=as_of)
+            for h in holdings:
+                sym = _canonical_symbol(h.get("ticker")) if isinstance(h, dict) else ""
+                cn = str(h.get("company_name") or "").strip() if isinstance(h, dict) else ""
+                if sym in adds and cn and cn.upper() != sym and sym not in names:
+                    names[sym] = cn
+
+            logger.info(
+                "Whale Accumulation: %d fund(s) current since %s, %d trade row(s), "
+                "%d stock(s) with a share increase",
+                len(chosen), floor, len(trades), len(adds),
+            )
+            return _aggregate_whale(adds, names=names, as_of=as_of)
         except Exception as exc:  # noqa: BLE001 — degrade this card, never the dashboard
             logger.warning(
                 "Whale Accumulation query failed: %s: %s", type(exc).__name__, exc
@@ -1100,19 +1418,41 @@ class SignalsService:
             # rather than an honest "no fund is adding" `None`.
             raise
 
-    async def _build_earnings(self) -> Optional[SignalGroupResponse]:
-        now = datetime.now(timezone.utc)
-        to_date = now.strftime("%Y-%m-%d")
-        from_date = (now - timedelta(days=_EARNINGS_WINDOW_DAYS)).strftime("%Y-%m-%d")
-        # get_earnings_calendar RAISES on FMP failure (unlike the congress methods)
-        # → propagates to _build's return_exceptions → earnings None + a warning.
-        calendar = await self.fmp.get_earnings_calendar(from_date, to_date)
+    async def _build_earnings(
+        self, *, now: Optional[datetime] = None
+    ) -> Optional[SignalGroupResponse]:
+        now = now if now is not None else datetime.now(timezone.utc)
+        # ONE CALL PER ET DAY, never one D-7..D window: FMP cuts an `earnings-calendar`
+        # answer at 4,000 rows and keeps the NEWEST dates, so in peak season the single
+        # request silently lost the oldest days of the week this card ranks. ET, not UTC:
+        # the calendar's `date` is the US announcement day, and from 20:00 ET the UTC
+        # date is already tomorrow. `fetch_calendar_days` is all-or-nothing — one failed
+        # or malformed day RAISES, so `_build` marks the card failed and the 24 h tier is
+        # never written with a week that is missing a day.
+        today = et_date(now)
+        days = [today - timedelta(days=i) for i in range(_EARNINGS_WINDOW_DAYS, -1, -1)]
+        try:
+            by_day = await asyncio.wait_for(
+                fetch_calendar_days(self.fmp.get_earnings_calendar, days),
+                timeout=_EARNINGS_FETCH_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise FMPUnavailableException(
+                f"Earnings Shockers: calendar {days[0].isoformat()}..{days[-1].isoformat()} "
+                f"({len(days)} day calls) not fetched within "
+                f"{_EARNINGS_FETCH_DEADLINE_SECONDS:.0f}s"
+            ) from exc
+        calendar = [row for d in days for row in by_day.get(d, [])]
+        logger.info(
+            "Earnings Shockers: %d calendar row(s) over %s..%s (%d day calls)",
+            len(calendar), days[0].isoformat(), days[-1].isoformat(), len(days),
+        )
         # Rank a bounded candidate set, THEN enforce the same $250M quality floor the
         # movers/volume/shorts cards use. Earnings-calendar rows carry no market cap,
         # so quote the top candidates and drop micro-caps (mirrors _build_shorts) —
         # otherwise a $30M name with a huge beat outranks the real large-cap shockers.
         candidates = _aggregate_earnings(
-            calendar or [], top_n=_EARNINGS_QUOTE_CANDIDATES
+            calendar, top_n=_EARNINGS_QUOTE_CANDIDATES
         )
         if candidates is None or not candidates.entries:
             return None
@@ -1134,9 +1474,15 @@ class SignalsService:
             )
 
         kept: List[SignalRowResponse] = []
+        non_common: List[str] = []
         for e in candidates.entries:  # already ranked freshest-first
             quote = qmap.get(e.symbol, {})
             if not _earnings_quote_ok(quote):
+                continue
+            # The quote is the first place the NAME and EXCHANGE are known, so this is
+            # where "… Warrants" and NASDAQ's W/R/U fifth letter are read.
+            if _is_non_common_listing(e.symbol, quote.get("name"), quote.get("exchange")):
+                non_common.append(f"{e.symbol} ({quote.get('name') or 'no name'})")
                 continue
             # Fill the company name from the quote already in hand so the card reads
             # "Nike", not a bare "NKE" (iOS strips the legal suffix for display).
@@ -1151,10 +1497,17 @@ class SignalsService:
             if len(kept) >= _SIGNAL_ROWS:
                 break
 
+        if non_common:
+            logger.info(
+                "Earnings Shockers: dropped %d non-common listing(s) (warrant / unit / "
+                "right / preferred): %s",
+                len(non_common), "; ".join(non_common[:_EARNINGS_LOG_SAMPLE]),
+            )
         if not kept:
             logger.info(
                 "Earnings Shockers: no candidate cleared the exchange + $%dM floor "
-                "— omitting card", _EARNINGS_MIN_MARKET_CAP // 1_000_000,
+                "and the common-stock check — omitting card",
+                _EARNINGS_MIN_MARKET_CAP // 1_000_000,
             )
             return None
 
@@ -1379,126 +1732,101 @@ class SignalsService:
         )
 
     def _detail_whale_rows(
-        self, sym: str
+        self, sym: str, *, now: Optional[datetime] = None
     ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
-        """Our registry 13F funds adding this ticker — SAME source as the card, so
-        the list matches the "N funds adding" count and every fund is tappable."""
+        """The registry 13F funds that ADDED SHARES of this ticker in their latest 13F —
+        the SAME reads and the SAME ``_latest_13f_groups`` / ``_latest_quarter_adds`` as the
+        card, so the list is exactly its "N funds adding", and every fund is tappable.
+
+        Per fund (deduped by CIK, the largest add kept): its weight in that filing, "New"
+        for a new position, the implied-price $ estimate of the shares added, and the
+        quarter END the filing reports (iOS: "Q2 2026 13F"). No weight CHANGE is sent — it
+        moves with price, which is exactly what this card stopped counting."""
+        now = now if now is not None else datetime.now(timezone.utc)
         try:
             sb = get_supabase()
             whales = (
                 fetch_all_rows(
                     lambda: sb.table("whales")
-                    .select("id, name, cik, firm_name, last_hydrated_at")
+                    .select("id, name, cik, firm_name, last_hydrated_at, last_filing_period")
                     .eq("data_source", "13f"),
                     order_by="id",
                     what="signals: 13F whale roster (detail)",
                 )
             )
-            wmap: Dict[Any, Dict[str, str]] = {}   # whale_id -> {name, firm, cik(dedup key)}
+            roster = _whale_roster(whales)
+            info: Dict[str, Dict[str, str]] = {}
             hydrated: List[str] = []
             for w in whales:
-                wid = w.get("id")
-                if wid is None:
+                if not isinstance(w, dict) or w.get("id") is None:
                     continue
-                cik = (w.get("cik") or "").strip()
-                # Dedup key = CIK — kept as a safety net even after migration 080
-                # merged person↔fund rows (null CIK still needs the per-whale
-                # sentinel to stay distinct). Same rule the card counts by.
-                wmap[wid] = {
+                info[str(w["id"])] = {
                     "name": w.get("name") or "",
                     # strip: a whitespace-only firm (bad row edit) must fall
                     # through to the "13F fund" subtitle, not render blank.
                     "firm": (w.get("firm_name") or "").strip(),
-                    "cik": cik or f"nocik:{wid}",
                 }
-                hd = w.get("last_hydrated_at")
-                if hd:
-                    hydrated.append(str(hd)[:10])
+                if w.get("last_hydrated_at"):
+                    hydrated.append(str(w["last_hydrated_at"])[:10])
+            as_of = max(hydrated) if hydrated else None
+            if not roster:
+                return [], as_of
 
-            # Class-share tickers store either delimiter; match both forms.
-            variants = list({sym, sym.replace("-", ".")})
-            holdings = (
+            floor = _quarter_floor(_expected_13f_quarter(now))
+            groups = (
                 fetch_all_rows(
-                    lambda: sb.table("whale_holdings")
-                    .select("whale_id, ticker, allocation, change_percent")
-                    .in_("ticker", variants)
-                    .gt("change_percent", 0),
-                    # Unique key — see the accumulation read above. Single-page today
-                    # thanks to the ticker filter, so this is latent rather than live.
+                    lambda: sb.table("whale_trade_groups")
+                    .select("id, whale_id, date")
+                    .in_("whale_id", sorted(roster))
+                    .gte("date", floor),
                     order_by="id",
-                    what="signals: holders of this ticker",
+                    what="signals: 13F trade groups since the expected quarter (detail)",
                 )
             )
-            # NOTE: disclosure_date is congress-only (migration 076) — always NULL for
-            # 13F, so it's not selected here (avoids that coupling); the 13F `date` IS
-            # the filing date, which iOS renders as "Filed …".
+            chosen = _latest_13f_groups(roster, groups, now=now)
+            if not chosen:
+                return [], as_of
+
+            # Class-share tickers are stored with either delimiter; read both forms. BOTH
+            # actions, for the same stale-pair refusal the card applies.
+            variants = sorted({sym, sym.replace("-", ".")})
             trades = (
                 fetch_all_rows(
                     lambda: sb.table("whale_trades")
-                    .select("whale_id, ticker, action, trade_type, amount, date")
-                    .in_("ticker", variants)
-                    .eq("action", "BOUGHT"),
-                    # `date` is a TEXT column on which every fund filing in the same
-                    # quarter ties — not a paging key. Ordering is irrelevant to this
-                    # caller's result anyway: the most-recent-per-whale pick below is a
-                    # full scan of `trades` in Python, so the read only has to be COMPLETE.
+                    .select(
+                        "id, whale_id, trade_group_id, ticker, company_name, action, "
+                        "trade_type, amount, new_allocation, date"
+                    )
+                    .in_("trade_group_id", sorted(chosen))
+                    .in_("ticker", variants),
                     order_by="id",
-                    what="signals: BOUGHT trades for this ticker",
+                    what="signals: latest-quarter 13F trades for this ticker",
                 )
             )
-            # MOST-RECENT BOUGHT trade per whale (latest filing date; tie-break larger $)
-            # → the "how much" + "when". Using the latest (not the largest-$) keeps
-            # amount + date COHERENT (same trade) and shows the freshest activity.
-            tmap: Dict[Any, Dict[str, Any]] = {}
-            for t in trades:
-                wid = t.get("whale_id")
-                if wid not in wmap:
-                    continue
-                tdate_str = str(t.get("date") or "")[:10]
-                amt = _finite_float(t.get("amount")) or 0.0
-                cur = tmap.get(wid)
-                if cur is None or (tdate_str, amt) > (cur["_date"], cur["_amt"]):
-                    tmap[wid] = {**t, "_date": tdate_str, "_amt": amt}
+            funds = _latest_quarter_adds(roster, chosen, trades).get(sym, {})
 
-            # Dedup by CIK so a fund registered under BOTH a person and a firm name
-            # (Ray Dalio ↔ Bridgewater) appears ONCE — matching the card's distinct-
-            # fund count. Keep the strongest row per CIK.
-            best_by_cik: Dict[str, SignalHolderResponse] = {}
-            for h in holdings:
-                info = wmap.get(h.get("whale_id"))
-                if info is None:
-                    continue  # not a 13F registry whale
-                cp = _finite_float(h.get("change_percent"))
-                if cp is None or cp <= 0:
-                    continue
-                wid = h.get("whale_id")
-                tr = tmap.get(wid)
-                amount_est = _finite_float(tr.get("amount")) if tr else None
-                is_new = ((tr.get("trade_type") or "") == "New") if tr else None
-                tdate = (str(tr.get("date"))[:10] or None) if (tr and tr.get("date")) else None
-                candidate = SignalHolderResponse(
-                    whale_id=str(wid),
-                    name=info["name"],
+            rows: List[SignalHolderResponse] = []
+            for add in funds.values():
+                who = info.get(add.whale_id, {"name": "", "firm": ""})
+                rows.append(SignalHolderResponse(
+                    whale_id=add.whale_id,
+                    name=who["name"],
                     # Person-fronted whales carry their firm here ("Bridgewater
                     # Associates" under "Ray Dalio") so the name never appears
                     # without the firm; generic label only when no firm exists.
-                    subtitle=info["firm"] or "13F fund",
-                    transaction_date=tdate,
-                    # disclosure_date stays None for 13F (congress-only; iOS falls back
-                    # to transaction_date for the "Filed …" label).
-                    allocation_percent=_finite_float(h.get("allocation")),
-                    allocation_change=round(cp, 2),
-                    is_new_position=is_new,
-                    amount_est=amount_est,
+                    subtitle=who["firm"] or "13F fund",
+                    # The 13F row's `date` is the QUARTER END its filing reports holdings
+                    # for (FMP's institutional-ownership `date`), never the day the 13F was
+                    # filed; disclosure_date stays None (congress-only). iOS labels it by
+                    # quarter: "Q2 2026 13F".
+                    transaction_date=add.quarter_end or None,
+                    allocation_percent=add.new_allocation,
+                    allocation_change=None,
+                    is_new_position=add.trade_type == "New",
+                    amount_est=add.amount,
                     action="BOUGHT",
-                )
-                key = info["cik"]
-                existing = best_by_cik.get(key)
-                if existing is None or _whale_row_rank(candidate) < _whale_row_rank(existing):
-                    best_by_cik[key] = candidate
-
-            rows = sorted(best_by_cik.values(), key=_whale_row_rank)
-            as_of = max(hydrated) if hydrated else None
+                ))
+            rows.sort(key=_whale_row_rank)
             return rows[:_DETAIL_ROWS], as_of
         except Exception as exc:  # noqa: BLE001
             # RE-RAISE (don't swallow to []): a Supabase failure must propagate so

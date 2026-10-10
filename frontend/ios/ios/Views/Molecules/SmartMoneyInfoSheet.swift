@@ -225,8 +225,10 @@ struct SmartMoneyInfoSheet: View {
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(width: 24, height: 24)
                 .background(
+                    // Opaque: `primaryBlue` on its own 15% tint is 4.19:1 in light
+                    // (test_ios_theme_parity §6c). The row is a `.cardFill()`.
                     Circle()
-                        .fill(AppColors.primaryBlue.opacity(0.15))
+                        .fill(AppColors.cardBackgroundLight)
                 )
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {

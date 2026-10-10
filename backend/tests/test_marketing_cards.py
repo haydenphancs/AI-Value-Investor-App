@@ -227,20 +227,24 @@ def _script(**over):
     return s
 
 
-def test_cards_for_script_brand_then_cards_in_order_then_disclaimer():
+def test_cards_for_script_opens_on_the_first_text_card_never_the_brand_card():
+    """Drop 1 (2026-10-09): "videos open on the company, never on our logo" — the first card of
+    the video is the script's first text card, then the rest in order, then the disclaimer."""
     specs = cards.cards_for_script(_script())
-    assert [s.kind for s in specs] == ["brand", "text", "text", "text", "disclaimer"]
-    assert [(s.title, s.body) for s in specs[1:-1]] == [
+    assert [s.kind for s in specs] == ["text", "text", "text", "disclaimer"]
+    assert [(s.title, s.body) for s in specs[:-1]] == [
         ("Start early", "Time does most of the work."), ("Stay diversified", "Many companies, not one."),
         ("Keep costs low", "Fees compound too.")]
     assert specs[-1].body == DISCLAIMER
+    assert all(s.kind != "brand" for s in specs)
 
 
-def test_the_hook_is_never_drawn_on_a_card():
+def test_the_hook_and_the_wordmark_are_never_drawn_when_there_are_text_cards():
     specs = cards.cards_for_script(_script())
     drawn = [t for s in specs for t in cards.onscreen_strings(s)]
     assert all("smart first investor" not in t for t in drawn)
-    assert cards.onscreen_strings(specs[0]) == [cards.WORDMARK]
+    assert cards.WORDMARK not in drawn
+    assert cards.onscreen_strings(specs[0]) == ["Start early", "Time does most of the work."]
 
 
 def test_cards_for_script_skips_empty_cards_and_strips():
@@ -248,14 +252,19 @@ def test_cards_for_script_skips_empty_cards_and_strips():
         {"title": "", "body": ""}, {"title": "  ", "body": "\n"}, {}, {"title": None, "body": None},
         {"title": "  Title only  "}, {"body": "\tBody only\n"}, {"title": "T", "body": "B", "extra": "x"},
     ]))
-    assert [(s.kind, s.title, s.body) for s in specs[1:-1]] == [
+    assert [(s.kind, s.title, s.body) for s in specs[:-1]] == [
         ("text", "Title only", ""), ("text", "", "Body only"), ("text", "T", "B")]
 
 
-def test_cards_for_script_with_no_cards_is_brand_and_disclaimer():
-    for cs in ([], None):
+def test_cards_for_script_with_no_drawable_card_falls_back_to_the_brand_card_and_says_so(caplog):
+    """The narration still needs a card under it; the wordmark is the one other string the server
+    allows. Never silent: the writer always emits three cards, so this is a malformed script."""
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    for cs in ([], None, [{"title": " ", "body": ""}, {}]):
+        caplog.clear()
         specs = cards.cards_for_script(_script(cards=cs))
         assert [s.kind for s in specs] == ["brand", "disclaimer"]
+        assert any("brand card" in r.getMessage() for r in caplog.records), cs
     specs = cards.cards_for_script({"disclaimer_card": DISCLAIMER})
     assert [s.kind for s in specs] == ["brand", "disclaimer"]
 
@@ -788,6 +797,329 @@ def test_raqm_engine_renders_every_kind_inside_the_zone():
     assert proc.returncode == 0 and "RAQM-OK" in proc.stdout, proc.stderr[-2000:]
 
 
+# ── the post image (drop 1, 2026-10-09: contract C5) ─────────────────────────
+
+FOOTER = post_copy.image_footer(date(2026, 10, 9))
+IMG_TITLE = "Mr. Market's mood is not the business"
+IMG_PARAGRAPHS = (
+    "Every day, a moody partner offers to buy your share of the business or sell you his.",
+    "Some days he is gloomy and names a low price. Some days he is giddy and names a high one.",
+    "You never have to accept his offer. The business keeps doing its work whatever he says.",
+)
+#: The writer's maxima (contract C8: a title of ≤ 70 characters and ≤ 10 words; 2-4 paragraphs of
+#: ≤ 220 characters), in deliberately long words: the worst a legal image can be.
+MAX_IMG_TITLE = "Understanding Extraordinary Diversification Throughout Uncertain Times"   # 70
+MAX_IMG_PARAGRAPH = ("Institutional investors frequently rebalance diversified portfolios quarterly, maintaining "
+                     "predetermined allocations between international equities, government securities, "
+                     "corporate obligations, infrastructure, commodities.")[:220]
+MAX_IMG_PARAGRAPH_2 = ("Understanding extraordinary international diversification throughout unpredictable "
+                       "economic environments requires institutional discipline, comprehensive documentation, "
+                       "and considerable patience whenever volatility.")[:220]
+
+
+def _img(**over) -> "cards.ImageSpec":
+    base = dict(title=IMG_TITLE, paragraphs=IMG_PARAGRAPHS, footer=FOOTER)
+    base.update(over)
+    return cards.ImageSpec(**base)
+
+
+def _max_img() -> "cards.ImageSpec":
+    return cards.ImageSpec(MAX_IMG_TITLE, (MAX_IMG_PARAGRAPH, MAX_IMG_PARAGRAPH_2) * 2, FOOTER)
+
+
+def _image_script(**over) -> Dict:
+    s = _script(image_post={"title": IMG_TITLE, "paragraphs": list(IMG_PARAGRAPHS)}, image_footer=FOOTER)
+    s.update(over)
+    return s
+
+
+def _jpeg_markers(data: bytes) -> List[int]:
+    """The JPEG's marker codes up to the first scan (SOS), walking the segment lengths."""
+    assert data[:2] == b"\xff\xd8", "not a JPEG (no SOI)"
+    out, i = [], 2
+    while i + 4 <= len(data):
+        assert data[i] == 0xFF, f"no marker at {i}"
+        code = data[i + 1]
+        out.append(code)
+        if code == 0xDA:                       # SOS: entropy-coded data follows
+            break
+        (n,) = struct.unpack(">H", data[i + 2:i + 4])
+        i += 2 + n
+    return out
+
+
+def test_the_post_image_constants_mirror_the_server():
+    assert cards.POST_IMAGE_MAX_BYTES == sch.POST_IMAGE_MAX_BYTES == 950_000
+    assert cards.POST_IMAGE_EXT == sch.POST_IMAGE_EXT == "jpg"
+    assert cards.POST_IMAGE_EXT in sch.ASSET_KIND_EXTENSIONS["card"]
+    assert cards.IMAGE_ROLE_POST == sch.IMAGE_ROLE_POST and cards.IMAGE_ROLE_POST in sch.IMAGE_ROLES
+    assert (cards.IMAGE_PARAGRAPHS_MIN, cards.IMAGE_PARAGRAPHS_MAX) == (
+        sch.IMAGE_POST_PARAGRAPHS_MIN, sch.IMAGE_POST_PARAGRAPHS_MAX)
+    assert (cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT) == (1080, 1350)
+    assert cards.IMAGE_WIDTH * 5 == cards.IMAGE_HEIGHT * 4                      # 4:5
+    q = cards.JPEG_QUALITIES
+    assert list(q) == sorted(set(q), reverse=True) and all(1 <= v <= 95 for v in q)
+    assert cards.CARD_RENDER_VERSION == "cards/v3"     # v3: drop 2a (opening card, logos, news layouts)
+
+
+def test_image_for_script_reads_the_worker_script_verbatim():
+    odd_title, odd_para = "  Two  spaces, kept  ", "A paragraph\nwith a newline and   runs."
+    spec = cards.image_for_script(_image_script(
+        image_post={"title": odd_title, "paragraphs": [odd_para, "Second."], "extra": "ignored"}))
+    assert spec == cards.ImageSpec(odd_title, (odd_para, "Second."), FOOTER)   # never stripped
+    assert cards.image_for_script(_script()) is None                          # no image_post key
+    assert cards.image_for_script(_image_script(image_post=None)) is None
+    assert cards.image_for_script(_image_script(image_post=None, image_footer=None)) is None
+
+
+@pytest.mark.parametrize("over", [
+    {"image_post": "a string"}, {"image_post": ["a", "list"]},
+    {"image_post": {"title": "t", "paragraphs": "one string"}},
+    {"image_post": {"title": "t", "paragraphs": ("a", "b")}},                 # JSON never sends a tuple
+    {"image_post": {"title": "t"}},
+    {"image_post": {"title": "t", "paragraphs": ["only one"]}},
+    {"image_post": {"title": "t", "paragraphs": ["a", "b", "c", "d", "e"]}},
+    {"image_post": {"title": "  ", "paragraphs": ["a", "b"]}},
+    {"image_post": {"title": None, "paragraphs": ["a", "b"]}},
+    {"image_post": {"title": 7, "paragraphs": ["a", "b"]}},
+    {"image_post": {"title": "t", "paragraphs": ["a", " \n"]}},
+    {"image_post": {"title": "t", "paragraphs": ["a", 5]}},
+    {"image_post": {"title": "t", "paragraphs": ["a", None]}},
+    {"image_footer": None}, {"image_footer": ""}, {"image_footer": "   "}, {"image_footer": 3},
+])
+def test_a_malformed_image_post_or_a_missing_footer_is_a_value_error(over):
+    with pytest.raises(ValueError):
+        cards.image_for_script(_image_script(**over))
+
+
+def test_image_for_script_refuses_a_script_that_is_not_a_dict():
+    with pytest.raises(ValueError):
+        cards.image_for_script(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kwargs, exc", [
+    ({"paragraphs": ["a", "b"]}, TypeError),                                  # must be a tuple
+    ({"paragraphs": ("a",)}, ValueError),
+    ({"paragraphs": ("a",) * 5}, ValueError),
+    ({"paragraphs": ("a", 1)}, TypeError),
+    ({"paragraphs": ("a", "")}, ValueError),
+    ({"title": ""}, ValueError), ({"title": None}, TypeError),
+    ({"footer": "\t"}, ValueError), ({"footer": b"bytes"}, TypeError),
+])
+def test_imagespec_refuses_what_it_cannot_draw_faithfully(kwargs, exc):
+    with pytest.raises(exc):
+        _img(**kwargs)
+
+
+def test_image_onscreen_strings_are_verbatim_in_order_and_once():
+    assert cards.image_onscreen_strings(_img()) == [IMG_TITLE, *IMG_PARAGRAPHS, FOOTER]
+    twice = _img(paragraphs=(IMG_TITLE, "Different."))
+    assert cards.image_onscreen_strings(twice) == [IMG_TITLE, "Different.", FOOTER]
+
+
+def test_what_the_worker_registers_passes_the_servers_schema_and_its_allow_list():
+    """The post image's registration body, exactly as render.stage_render builds it, validates
+    against the server's own request schema; and every declared string is the accepted image
+    post's title/paragraph or its footer, the footer among them (run_service._check_post_image_text)."""
+    script = _image_script()
+    spec = cards.image_for_script(script)
+    image = cards.render_image(spec, font_path=FONT, layout_engine="basic")
+    drawn = cards.image_onscreen_strings(spec)
+    body = sch.AssetRegisterRequest(
+        kind="card", ext=cards.POST_IMAGE_EXT, sha256="a" * 64, bytes=len(image.data),
+        metadata={"onscreen_text": drawn, "image_role": cards.IMAGE_ROLE_POST, "render_key": "k" * 64,
+                  "card_version": cards.CARD_RENDER_VERSION})
+    assert body.metadata["onscreen_text"] == drawn
+    stored = sch.normalize_image_post(script["image_post"])
+    allowed = {stored["title"], *stored["paragraphs"], script["image_footer"]}
+    assert [t for t in drawn if t not in allowed] == [] and script["image_footer"] in drawn
+    sch.validate_onscreen_text(drawn)
+    # …and the schema really is the fence: no footer declared, or too many bytes, is refused.
+    with pytest.raises(ValueError):
+        sch.AssetRegisterRequest(kind="card", ext="jpg", sha256="a" * 64, bytes=cards.POST_IMAGE_MAX_BYTES + 1,
+                                 metadata={"onscreen_text": drawn, "image_role": cards.IMAGE_ROLE_POST})
+
+
+def _assert_every_word_in_order(layout: "cards.CardLayout", spec: "cards.ImageSpec") -> None:
+    fields = [("title", spec.title)] + [(f"paragraph{i}", p) for i, p in enumerate(spec.paragraphs)] + [
+        ("footer", spec.footer)]
+    for name, text in fields:
+        lines = layout.field_lines(name)
+        assert [w for ln in lines for w in ln.split()] == text.split(), (name, text, lines)
+    assert {ln.field for ln in layout.lines} == {name for name, _ in fields}
+
+
+def _assert_image_ink_inside(layout: "cards.CardLayout") -> None:
+    m = cards.IMAGE_MARGIN
+    page_zone = (m, m, cards.IMAGE_WIDTH - m, cards.IMAGE_HEIGHT - m)
+    assert layout.panel and cards._within(layout.panel, page_zone)
+    assert layout.rule and cards._within(layout.rule, layout.panel)
+    for ln in layout.lines:
+        bounds = page_zone if ln.field == "footer" else layout.panel
+        assert cards._within(ln.ink, bounds), (ln.field, ln.text, ln.ink, bounds)
+        if ln.field == "footer":
+            assert ln.ink[1] >= layout.panel[3] + cards.IMAGE_FOOTER_GAP          # below the panel
+
+
+@pytest.mark.parametrize("engine", ["basic"])
+def test_the_writers_maximum_image_fits_whole_with_a_step_to_spare(engine):
+    spec = _max_img()
+    assert len(MAX_IMG_TITLE) <= 70 and len(MAX_IMG_TITLE.split()) <= 10
+    assert all(len(p) <= 220 for p in spec.paragraphs) and len(spec.paragraphs) == 4
+    layout = cards.layout_image(spec, font_path=FONT, layout_engine=engine)
+    _assert_every_word_in_order(layout, spec)
+    _assert_image_ink_inside(layout)
+    assert layout.step < cards.RAMP_STEPS, "the writer's maximum must not need the floor sizes"
+
+
+def test_a_real_image_draws_every_word_at_the_start_sizes():
+    layout = cards.layout_image(_img(), font_path=FONT, layout_engine="basic")
+    _assert_every_word_in_order(layout, _img())
+    _assert_image_ink_inside(layout)
+    assert layout.step == 0 and layout.kind == "post_image"
+    assert all(ln.anchor == "ma" for ln in layout.lines if ln.field == "footer")   # centred
+
+
+def test_two_paragraphs_and_a_short_title_fit_too():
+    spec = _img(title="Start early", paragraphs=("Time does most of the work.", "Fees compound too."))
+    layout = cards.layout_image(spec, font_path=FONT, layout_engine="basic")
+    _assert_every_word_in_order(layout, spec)
+    _assert_image_ink_inside(layout)
+
+
+def _raw_image(spec: "cards.ImageSpec") -> Tuple[Image.Image, "cards.CardLayout"]:
+    return cards.draw_image(spec, font_path=FONT, layout_engine="basic")
+
+
+@pytest.mark.parametrize("spec", [_img(), _max_img()], ids=["real", "writer_max"])
+def test_nothing_is_drawn_in_the_image_margins_and_only_brand_colours(spec):
+    im, layout = _raw_image(spec)
+    assert im.size == (cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT) and im.mode == "RGB"
+    m, w, h = cards.IMAGE_MARGIN, cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT
+    footer_top = min(ln.ink[1] for ln in layout.lines if ln.field == "footer")
+    for name, box in {"top": (0, 0, w, layout.panel[1]), "left": (0, 0, m, h), "right": (w - m, 0, w, h),
+                      "bottom": (0, h - m, w, h), "panel→footer": (0, layout.panel[3], w, footer_top)}.items():
+        assert _pure_page(im, box), f"something was drawn in the {name} margin {box}"
+    assert not _pure_page(im, layout.panel)                                    # anti-vacuity
+    off = [c for _, c in im.getcolors(maxcolors=1 << 20) if not _on_palette(c)]
+    assert off == [], f"{len(off)} off-palette colours, e.g. {off[:5]}"
+    colours = {c for _, c in im.getcolors(maxcolors=1 << 20)}
+    assert {cards._rgb(cards.ACCENT), cards._rgb(cards.TEXT), cards._rgb(cards.CARD), cards.FOOTER_FILL} <= colours
+
+
+def test_the_post_image_is_a_baseline_jpeg_under_the_cap_with_no_metadata():
+    image = cards.render_image(_img(), font_path=FONT, layout_engine="basic")
+    data = image.data
+    assert len(data) <= cards.POST_IMAGE_MAX_BYTES and image.quality == cards.JPEG_QUALITIES[0]
+    markers = _jpeg_markers(data)
+    assert 0xC0 in markers, "not a baseline (SOF0) JPEG"
+    assert not {0xC1, 0xC2, 0xC3} & set(markers), "progressive / extended / lossless JPEG"
+    assert 0xE1 not in markers and 0xE2 not in markers, "EXIF / ICC metadata make bytes drift"
+    decoded = Image.open(io.BytesIO(data))
+    decoded.load()
+    assert decoded.format == "JPEG" and decoded.size == (1080, 1350) and decoded.mode == "RGB"
+    assert not decoded.info.get("progressive") and not decoded.info.get("progression")
+    # The JPEG is the drawn image (4:4:4, high quality): every pixel close to the raw one.
+    raw, _ = _raw_image(_img())
+    diff = [abs(a - b) for a, b in zip(raw.tobytes(), decoded.tobytes())]
+    assert sum(diff) / len(diff) < 2.0
+
+
+def test_the_post_image_bytes_are_deterministic_and_follow_the_text():
+    a = cards.render_image(_img(), font_path=FONT, layout_engine="basic").data
+    cards._font.cache_clear()
+    b = cards.render_image(_img(), font_path=FONT, layout_engine="basic").data
+    assert a == b
+    c = cards.render_image(_img(title=IMG_TITLE + "!"), font_path=FONT, layout_engine="basic").data
+    d = cards.render_image(_img(footer=post_copy.image_footer(date(2026, 10, 10))), font_path=FONT,
+                           layout_engine="basic").data
+    assert len({a, c, d}) == 3
+
+
+def test_the_quality_steps_down_until_the_image_fits_and_never_ships_bigger():
+    top = cards.render_image(_img(), font_path=FONT, layout_engine="basic")
+    stepped = cards.render_image(_img(), font_path=FONT, layout_engine="basic", max_bytes=len(top.data) - 1)
+    assert stepped.quality < top.quality and len(stepped.data) <= len(top.data) - 1
+    assert stepped.quality in cards.JPEG_QUALITIES
+    with pytest.raises(cards.ImageTooLarge) as ei:
+        cards.render_image(_img(), font_path=FONT, layout_engine="basic", max_bytes=1000)
+    assert all(f"q{q}=" in str(ei.value) for q in cards.JPEG_QUALITIES)       # every step was tried
+    for bad in (0, -5, True, 1.5, None):
+        with pytest.raises(ValueError):
+            cards.render_image(_img(), font_path=FONT, max_bytes=bad)  # type: ignore[arg-type]
+    im, _ = _raw_image(_img())
+    for bad_q in (0, 96, True, 80.0):
+        with pytest.raises(ValueError):
+            cards.encode_jpeg(im, bad_q)  # type: ignore[arg-type]
+
+
+def test_an_image_that_cannot_fit_whole_is_an_overflow_never_a_cut():
+    long = " ".join(["Diversification"] * 37)[:600]
+    with pytest.raises(cards.CardOverflow):
+        cards.layout_image(_img(paragraphs=(long,) * 4), font_path=FONT, layout_engine="basic")
+    with pytest.raises(cards.CardOverflow, match="wide"):
+        cards.layout_image(_img(title="Pneumonoultramicroscopicsilicovolcanoconiosis" * 2),
+                           font_path=FONT, layout_engine="basic")
+    t0 = time.monotonic()
+    with pytest.raises(cards.CardOverflow, match=str(cards.MAX_STRING_CHARS)):
+        cards.layout_image(_img(paragraphs=("a " * 400, "b")), font_path=FONT)
+    with pytest.raises(cards.CardOverflow, match=str(cards.MAX_STRING_CHARS)):
+        cards.render_image(_img(footer="y" * 10_000_000), font_path=FONT)
+    assert time.monotonic() - t0 < 2.0
+
+
+@pytest.mark.parametrize("over, missing", [
+    ({"title": "Growth 🚀"}, "🚀"),
+    ({"paragraphs": ("Plain.", "中文 text")}, "中"),
+    ({"footer": FOOTER + " ✅"}, "✅"),
+])
+def test_check_image_glyphs_refuses_what_the_font_cannot_draw(over, missing):
+    with pytest.raises(cards.MissingGlyphs) as ei:
+        cards.check_image_glyphs(_img(**over), FONT)
+    assert missing in ei.value.chars
+
+
+def test_the_real_footer_and_sample_have_every_glyph():
+    assert "·" in FOOTER
+    cards.check_image_glyphs(_img(), FONT)
+    cards.check_image_glyphs(_max_img(), FONT)
+
+
+_RAQM_IMAGE_CHECK = r"""
+import sys
+from marketing import cards
+assert cards.raqm_available(), "no raqm"
+F, T, P1, P2, FOOT = sys.argv[1:6]
+spec = cards.ImageSpec(T, (P1, P2, P1, P2), FOOT)
+layout = cards.layout_image(spec, font_path=F, layout_engine="raqm")
+assert layout.engine == "raqm" and layout.step < cards.RAMP_STEPS, layout.step
+for name, text in [("title", T), ("paragraph0", P1), ("paragraph1", P2), ("footer", FOOT)]:
+    assert [w for ln in layout.field_lines(name) for w in ln.split()] == text.split(), name
+a = cards.render_image(spec, font_path=F, layout_engine="raqm").data
+assert a == cards.render_image(spec, font_path=F, layout_engine="raqm").data
+assert len(a) <= cards.POST_IMAGE_MAX_BYTES
+im, lay = cards.draw_image(spec, font_path=F, layout_engine="raqm")
+page = cards._rgb(cards.PAGE)
+m = cards.IMAGE_MARGIN
+for box in [(0, 0, 1080, m), (0, 0, m, 1350), (1080 - m, 0, 1080, 1350), (0, 1350 - m, 1080, 1350)]:
+    assert im.crop(box).getextrema() == tuple((c, c) for c in page), box
+print("RAQM-IMAGE-OK")
+"""
+
+
+def test_raqm_lays_out_the_writers_maximum_image_too():
+    env = _raqm_env()
+    if env is None:
+        pytest.skip("libraqm not available to Pillow")
+    env.pop("PYTHONPATH", None)
+    proc = subprocess.run([sys.executable, "-c", _RAQM_IMAGE_CHECK, FONT, MAX_IMG_TITLE, MAX_IMG_PARAGRAPH,
+                           MAX_IMG_PARAGRAPH_2, FOOTER],
+                          cwd=_BACKEND, env=env, capture_output=True, text=True, timeout=180)
+    if proc.returncode != 0 and "no raqm" in proc.stderr:
+        pytest.skip("libraqm not loadable in a subprocess either")
+    assert proc.returncode == 0 and "RAQM-IMAGE-OK" in proc.stdout, proc.stderr[-2000:]
+
+
 # ── the worker boundary ──────────────────────────────────────────────────────
 
 
@@ -801,3 +1133,285 @@ def test_importing_cards_loads_no_pillow_and_no_app(tmp_path):
                           text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr[-1000:]
     assert json.loads(proc.stdout.strip().splitlines()[-1]) == []
+
+
+# ── the local preview's post image (marketing/preview.py, review worker:W3) ────
+# `preview_image` runs AFTER the narration and the full video render: it must never raise, or the
+# report is lost; and it draws the image only when the script carries image_post AND a footer.
+
+
+def test_the_preview_skips_the_image_of_a_real_switches_off_script(tmp_path):
+    from marketing import preview
+    # What the server's worker_script sends while MARKETING_IMAGE_POSTS is off: the writer's
+    # image_post, no footer. `cards.image_for_script` raises ValueError on it (the old crash).
+    script = _image_script(image_footer=None, post_formats={"x": "text", "tiktok": "video"})
+    with pytest.raises(ValueError):
+        cards.image_for_script(script)
+    report = preview.preview_image(script, tmp_path, FONT)
+    assert set(report) == {"skipped"} and "image_footer" in report["skipped"]
+    stored = {k: v for k, v in _image_script().items() if k != "image_footer"}   # no key at all
+    assert set(preview.preview_image(stored, tmp_path, FONT)) == {"skipped"}
+    assert preview.preview_image(_image_script(image_footer="   "), tmp_path, FONT).keys() == {"skipped"}
+    assert not (tmp_path / "post_image.jpg").exists()
+
+
+def test_the_preview_has_no_image_entry_without_an_image_post(tmp_path):
+    from marketing import preview
+    assert preview.preview_image(_script(), tmp_path, FONT) is None
+    assert preview.preview_image(_image_script(image_post=None), tmp_path, FONT) is None
+    assert not (tmp_path / "post_image.jpg").exists()
+
+
+def test_the_preview_renders_the_demo_image(tmp_path):
+    from marketing import preview
+    report = preview.preview_image(preview.DEMO, tmp_path, FONT)
+    data = (tmp_path / "post_image.jpg").read_bytes()
+    assert report["bytes"] == len(data) <= cards.POST_IMAGE_MAX_BYTES and data[:2] == b"\xff\xd8"
+    assert report["onscreen_text"][-1] == preview.DEMO["image_footer"]
+    assert "error" not in report and "skipped" not in report
+
+
+@pytest.mark.parametrize("over, kind", [
+    ({"image_post": {"title": "t", "paragraphs": ["only one"]}}, "ValueError"),
+    ({"image_post": "a string"}, "ValueError"),
+    ({"image_post": {"title": "Growth 🚀", "paragraphs": ["One.", "Two."]}}, "MissingGlyphs"),
+    ({"image_post": {"title": "t", "paragraphs": ["a " * 400, "b"]}}, "CardOverflow"),
+])
+def test_a_preview_image_that_cannot_render_is_recorded_never_raised(tmp_path, over, kind):
+    from marketing import preview
+    report = preview.preview_image(_image_script(**over), tmp_path, FONT)
+    assert set(report) == {"error"} and report["error"].startswith(f"{kind}: ")
+    assert not (tmp_path / "post_image.jpg").exists()
+
+
+@pytest.mark.parametrize("exc", [cards.ImageTooLarge("over the cap at every step"), cards.CardAssetError("font")])
+def test_a_preview_image_over_the_cap_or_without_its_font_is_recorded(tmp_path, monkeypatch, exc):
+    from marketing import preview
+
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(cards, "render_image", boom)
+    report = preview.preview_image(_image_script(), tmp_path, FONT)
+    assert report == {"error": f"{type(exc).__name__}: {exc}"}
+    assert not (tmp_path / "post_image.jpg").exists()
+
+
+# ── drop 2a: the template opening card, per-line videos, logo plates ─────────
+# A template (news) video opens on the COMPANY: its kicker, its logo(s) on light plates (a wordmark
+# tile — the company name — when a logo did not verify), chip, figure and headline; then one text
+# card per narration line, then the disclaimer. The strings it may draw are the server's
+# template_onscreen.opening_strings (checked here against that module itself).
+
+from app.services.marketing import template_onscreen as tos  # noqa: E402
+
+_TPL_ENTRIES = [{"key": "GME", "name": "GameStop", "url": None, "sha256": None},
+                {"key": "NVDA", "name": "NVIDIA", "url": None, "sha256": None}]
+_OPENING = {"kicker": "FILED LAST WEEK · FORM 4", "logos": ["GME"], "chip": "GME", "figure": "$74.4M",
+            "headline": "GameStop's CEO disclosed buying GameStop stock"}
+_TPL_LINES = ["GameStop's chief executive disclosed buying about seventy four million dollars of stock.",
+              "The filings came in between November ninth and November thirteenth this year.",
+              "The purchases covered one million shares across three separate trades.",
+              "Form four filings are public, and the figures here are as filed."]
+_TPL_CARDS = [{"title": "Who filed", "body": "GameStop's CEO, on SEC Form 4."},
+              {"title": "When", "body": "Filed Nov 9 to Nov 13, 2026."},
+              {"title": "How much", "body": "1,000,000 shares across 3 purchases."},
+              {"title": "About the figures", "body": "Amounts as filed; not adjusted."}]
+TEMPLATE_DISCLAIMER = post_copy.disclaimer_card(date(2026, 11, 16), authorship="template")
+
+
+def _template_script(**over):
+    s = {"hook": "A chief executive disclosed a large purchase last week.", "video_script": list(_TPL_LINES),
+         "cards": [dict(c) for c in _TPL_CARDS], "carousel_slides": [], "disclaimer_card": TEMPLATE_DISCLAIMER,
+         "authorship": "template", "content_class": "C", "series": "ceo_buys", "video_layout": "per_line",
+         "opening_card": dict(_OPENING), "logos": [dict(e) for e in _TPL_ENTRIES]}
+    s.update(over)
+    return s
+
+
+def _red_logo(path: Path) -> str:
+    im = Image.new("RGBA", (300, 200), (0, 0, 0, 0))
+    im.paste((220, 20, 20, 255), (40, 40, 260, 160))
+    im.save(path)
+    return str(path)
+
+
+def test_the_opening_kind_and_the_template_mirrors():
+    assert "opening" in cards.KINDS and cards.CARD_RENDER_VERSION == "cards/v3"
+    assert cards.LAYOUTS == tos.LAYOUTS and cards.OPENING_KEYS == tos.OPENING_KEYS
+    assert cards.MAX_OPENING_LOGOS == tos.MAX_OPENING_LOGOS == 2
+    assert cards.TEMPLATE_AUTHORSHIP == sch.TEMPLATE_AUTHORSHIP and cards.VIDEO_LAYOUT_PER_LINE == sch.VIDEO_LAYOUT_PER_LINE
+    # the template disclaimer card is the template wording (D8), not the writer's
+    assert "fixed template" in TEMPLATE_DISCLAIMER and "Written with AI" not in TEMPLATE_DISCLAIMER
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"kind": "opening", "title": "h"},                                               # no kicker
+    {"kind": "opening", "badge": "k"},                                               # no headline
+    {"kind": "opening", "badge": "k", "title": "h"},                                 # no logo
+    {"kind": "opening", "badge": "k", "title": "h", "body": "b",
+     "logos": (cards.LogoArt("A", "Alpha"),)},                                       # draws no body
+    {"kind": "opening", "badge": "k", "title": "h",
+     "logos": (cards.LogoArt("A", "Alpha"),) * 2},                                   # a repeated logo
+    {"kind": "opening", "badge": "k", "title": "h",
+     "logos": tuple(cards.LogoArt(k, k) for k in "ABC")},                            # three logos
+    {"kind": "text", "title": "t", "logos": (cards.LogoArt("A", "Alpha"),)},         # only an opening has logos
+])
+def test_an_opening_cardspec_refuses_what_it_cannot_draw(kwargs):
+    with pytest.raises(ValueError):
+        cards.CardSpec(**kwargs)
+    with pytest.raises(TypeError):
+        cards.CardSpec("opening", badge="k", title="h", logos=[cards.LogoArt("A", "Alpha")])   # a list
+
+
+@pytest.mark.parametrize("resolved", [False, True], ids=["wordmark", "logo"])
+def test_the_opening_card_draws_exactly_its_strings_and_the_server_allows_them(resolved, tmp_path):
+    files = {"GME": tmp_path / "gme.png"} if resolved else {}
+    if resolved:
+        _red_logo(files["GME"])
+    spec = cards.opening_spec(_OPENING, cards.logo_table(_template_script(), files))
+    strings = cards.onscreen_strings(spec)
+    server = tos.opening_strings(_OPENING, _TPL_ENTRIES)
+    assert server and set(strings) <= set(server)
+    if resolved:
+        assert "GameStop" not in strings and strings == [s for s in server if s != "GameStop"]
+    else:
+        assert strings == server                       # kicker, wordmark name, chip, figure, headline
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    by_field: Dict[str, List[str]] = {}
+    for ln in layout.lines:
+        by_field.setdefault(ln.field, []).extend(ln.text.split())
+    expected = {"badge": _OPENING["kicker"], "label": _OPENING["chip"], "figure": _OPENING["figure"],
+                "title": _OPENING["headline"]}
+    if not resolved:
+        expected["wordmark:GME"] = "GameStop"
+    assert {f: " ".join(w) for f, w in by_field.items()} == expected
+    assert len(layout.tiles) == 1 and layout.tiles[0][1].key == "GME"
+    _assert_ink_inside(layout)
+    for box, _art in layout.tiles:
+        assert cards._within(box, (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1]))
+    data = cards.render_card(spec, font_path=FONT, layout_engine="basic")
+    im = _assert_nothing_outside_the_zone(data, "opening")
+    # the logo (pure red) is drawn on its plate, unaltered — and nowhere else is red
+    px = im.load()
+    box = layout.tiles[0][0]
+    reds = [(x, y) for y in range(cards.TEXT_ZONE_Y[0], cards.TEXT_ZONE_Y[1], 4)
+            for x in range(cards.SAFE_X[0], cards.SAFE_X[1], 4)
+            if px[x, y][0] - max(px[x, y][1], px[x, y][2]) > 40]
+    assert all(box[0] <= x < box[2] and box[1] <= y < box[3] for x, y in reds)
+    assert bool(reds) == resolved
+    assert (220, 20, 20) in {c for _n, c in im.crop(box).getcolors(1 << 20)} or not resolved
+
+
+def test_the_opening_card_with_two_companies_and_no_chip_or_figure():
+    card = {"kicker": "13F SEASON", "logos": ["GME", "NVDA"], "headline": "A filer reported two changes"}
+    assert tos.validate_opening_card(card, tos.logo_keys(_TPL_ENTRIES)) is None
+    spec = cards.opening_spec(card, cards.logo_table(_template_script()))
+    assert cards.onscreen_strings(spec) == tos.opening_strings(card, _TPL_ENTRIES)
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    (a, _), (b, _) = layout.tiles
+    assert a[2] < b[0] and a[1] == b[1] and (a[2] - a[0]) == (b[2] - b[0])          # side by side, equal
+    _assert_nothing_outside_the_zone(cards.render_card(spec, font_path=FONT, layout_engine="basic"), "opening 2")
+
+
+def test_the_opening_card_uses_only_neutral_colours_off_its_plates():
+    spec = cards.opening_spec(_OPENING, cards.logo_table(_template_script()))
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    im = _png(cards.render_card(spec, font_path=FONT, layout_engine="basic"))
+    box = layout.tiles[0][0]
+    off = [c for _n, c in im.getcolors(1 << 20) if not _on_palette(c)]
+    assert off == [], off[:5]           # the plate is TEXT, the wordmark PAGE: still the brand palette
+    assert cards._rgb(cards.PLATE) == (255, 255, 255) and im.getpixel(((box[0] + box[2]) // 2, box[1] + 3)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize("card, needle", [
+    ("not an object", "object"),
+    ({**_OPENING, "extra": "x"}, "unknown key"),
+    ({k: v for k, v in _OPENING.items() if k != "headline"}, "no headline"),
+    ({**_OPENING, "logos": []}, "logos"),
+    ({**_OPENING, "logos": ["GME", "NVDA", "GME"]}, "logos"),
+    ({**_OPENING, "logos": ["GME", "GME"]}, "repeats"),
+    ({**_OPENING, "logos": ["ZZZ"]}, "no logo entry"),
+    ({**_OPENING, "logos": "GME"}, "logos"),
+    ({**_OPENING, "chip": " padded"}, "drawable"),
+    ({**_OPENING, "headline": "two\nlines"}, "drawable"),
+    ({**_OPENING, "figure": 74.4}, "drawable"),
+])
+def test_opening_spec_fails_loudly_on_drift(card, needle):
+    with pytest.raises(ValueError, match=needle):
+        cards.opening_spec(card, cards.logo_table(_template_script()))
+
+
+def test_a_per_line_script_is_the_opening_one_card_per_line_and_the_disclaimer():
+    specs = cards.cards_for_script(_template_script())
+    assert [s.kind for s in specs] == ["opening", "text", "text", "text", "text", "disclaimer"]
+    assert [(s.title, s.body) for s in specs[1:5]] == [(c["title"], c["body"]) for c in _TPL_CARDS]
+    assert specs[0].badge == _OPENING["kicker"] and specs[0].logo_keys == ("GME",)
+    assert specs[-1].body == TEMPLATE_DISCLAIMER
+    # every string the video may draw is one the server allows (run_service D12: brand text ∪ card
+    # titles/bodies ∪ the disclaimer ∪ the opening strings)
+    allowed = set(sch.VIDEO_BRAND_TEXT) | {c[k] for c in _TPL_CARDS for k in ("title", "body")} | {
+        TEMPLATE_DISCLAIMER} | set(tos.opening_strings(_OPENING, _TPL_ENTRIES))
+    drawn = [t for s in specs for t in cards.onscreen_strings(s)]
+    assert set(drawn) <= allowed and TEMPLATE_DISCLAIMER in drawn
+    cards.check_glyphs(specs, FONT)
+    for s in specs:
+        _assert_nothing_outside_the_zone(cards.render_card(s, font_path=FONT, layout_engine="basic"), s.kind)
+
+
+@pytest.mark.parametrize("over, needle", [
+    ({"video_layout": None}, "needs video_layout"),                                 # a template, lesson-shaped
+    ({"video_layout": "grid"}, "is not 'per_line'"),
+    ({"opening_card": None}, "opening_card"),
+    ({"cards": _TPL_CARDS[:3]}, "one card per narration line"),
+    ({"video_script": _TPL_LINES[:3]}, "one card per narration line"),
+    ({"cards": [], "video_script": []}, "one card per narration line"),
+    ({"cards": [*_TPL_CARDS[:3], {"title": " ", "body": ""}]}, "draws nothing"),
+    ({"authorship": "robot"}, "authorship"),
+])
+def test_a_template_video_never_falls_back_to_the_lesson_shape(over, needle):
+    with pytest.raises(ValueError, match=needle):
+        cards.cards_for_script(_template_script(**over))
+
+
+def test_a_lesson_script_keeps_the_drop_1_card_set_whatever_logos_it_is_given(tmp_path):
+    lesson = _script()
+    assert cards.cards_for_script(lesson) == cards.cards_for_script(lesson, logos={}) == cards.cards_for_script(
+        lesson, logos=cards.logo_table(_template_script()))
+    assert [s.kind for s in cards.cards_for_script(lesson)] == ["text", "text", "text", "disclaimer"]
+    assert not cards.is_template(lesson) and not cards.is_template({**lesson, "authorship": "ai"})
+    with pytest.raises(ValueError):
+        cards.cards_for_script({**lesson, "video_layout": "per_line"})              # no opening card
+
+
+#: The drop-1 bytes of a lesson card and a lesson post image, measured 2026-10-09 BEFORE drop 2a
+#: touched cards.py (Pillow 12.0.0, the basic layout engine): drop 2a must not move a lesson pixel.
+_DROP1_GOLDEN = {
+    "text": "131841d08529bb1663cba627527edd72955e17f90d1088eb50aeae9b153527ea",
+    "disclaimer": "547d820e2556cc21b34f442f4d7e138ec6e3711526cd11c8947a266b67c6a4c7",
+    "brand": "1dd83d1bd703c6318251c0dd1fa815ad8b52f01a770b1b70ea508c4140e4d496",
+    "image": "dae9aa5326e0894a1abaa119c403d178cb873d75d0b7ce5fac54e91cb5380f6a",
+}
+
+
+@pytest.mark.skipif(PIL.__version__ != "12.0.0", reason="the golden bytes were measured on Pillow 12.0.0")
+def test_a_lesson_renders_byte_identical_to_drop_1():
+    import hashlib
+
+    d1 = ("Educational, impersonal information — not investment advice. Investing involves risk. "
+          "Written with AI assistance. Caydex · Sep 29, 2026")
+    got = {
+        "text": cards.render_card(cards.CardSpec("text", title="Myth: Design and Manufacturing Are One",
+                                                 body="Traditional automakers built millions of cars for a century."),
+                                  font_path=FONT, logo_path=LOGO, layout_engine="basic"),
+        "disclaimer": cards.render_card(cards.CardSpec("disclaimer", body=d1), font_path=FONT, logo_path=LOGO,
+                                        layout_engine="basic"),
+        "brand": cards.render_card(cards.CardSpec("brand"), font_path=FONT, logo_path=LOGO, layout_engine="basic"),
+        "image": cards.render_post_image(
+            {"image_post": {"title": "Why diversification matters",
+                            "paragraphs": ["Spreading money across many companies lowers the damage any one can do.",
+                                           "It does not remove risk; it changes its shape."]},
+             "image_footer": "Educational only · not investment advice · Written with AI assistance · Sep 29, 2026 · Caydex"},
+            font_path=FONT, layout_engine="basic").data,
+    }
+    assert {k: hashlib.sha256(v).hexdigest() for k, v in got.items()} == _DROP1_GOLDEN

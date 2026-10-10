@@ -30,10 +30,6 @@ enum RevenueSegmentRole: String {
         }
     }
 
-    var backgroundColor: Color {
-        color.opacity(0.15)
-    }
-
     var borderColor: Color {
         return AppColors.textSecondary
     }

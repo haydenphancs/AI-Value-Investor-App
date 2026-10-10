@@ -13,7 +13,10 @@ Flow of one GENERATION (the unit the run ledger counts and caps):
 "Acceptable" is scoped, because an all-or-nothing verdict over ~15 fields would reject most
 honest drafts: the SHARED parts (hook, script, cards, slides) must be clean, and each platform's
 caption stands alone — a caption that fails drops only that outlet (recorded in
-`dropped_outlets`), provided at least `MIN_OUTLETS` survive.
+`dropped_outlets`), provided at least `MIN_OUTLETS` survive. The post image's text (`image_post`,
+drop 1) stands alone the same way: it is one reading chain (title → paragraphs) under the same
+scans, and if it still fails after the repair it is DROPPED (`image_post` None, the reasons in
+`dropped_image` — that day's posts are text), never the package.
 
 What this module never does: invent a disclaimer, a CTA or a hashtag (code-owned, `post_copy`),
 publish anything, or swallow a Gemini error — `generate_json` failures propagate so the caller
@@ -39,7 +42,7 @@ from app.services.agents.persona_config import neutral_system_instruction
 from app.services.marketing import judge as jd
 from app.services.marketing import writer_prompts as wp
 from app.services.marketing.generation_budget import MODEL_CALLS_PER_GENERATION
-from app.services.marketing.compliance import Violation, clean, scan_text
+from app.services.marketing.compliance import Violation, clean, scan_text, sentences
 from app.services.marketing.content_pool import ContentItem, strict_instruments
 from app.services.marketing.grounding import check_grounding
 from app.services.marketing.post_copy import (
@@ -79,6 +82,8 @@ _BLOCKED_FINISHES = frozenset({
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 SHARED_FIELDS = ("hook", "video_script", "cards", "carousel_slides")
+#: The package key that lists why the image post was dropped (empty when it was kept).
+DROPPED_IMAGE = "dropped_image"
 
 
 @dataclass
@@ -87,6 +92,10 @@ class ValidationResult:
     shared: List[Violation] = field(default_factory=list)
     outlets: Dict[str, List[Violation]] = field(default_factory=dict)
     posts: Dict[str, ComposedPost] = field(default_factory=dict)
+    #: The image post's violations (drop 1). Never part of `regex_ok` / `ok`: a failing image is
+    #: dropped from the package, never the package itself — but they ARE in `violations`, so the
+    #: one repair hears them.
+    image: List[Violation] = field(default_factory=list)
     #: The semantic judge has graded this candidate (`generate_package` sets both flags;
     #: `validate_package` alone never does, so a pure validation keeps its old meaning). In
     #: `enforce` mode an UNJUDGED candidate is never ok — a judge call that failed, or never
@@ -105,8 +114,14 @@ class ValidationResult:
         return self.regex_ok and (self.judged or not self.judge_required)
 
     @property
+    def image_ok(self) -> bool:
+        """The package still carries its image post (no check refused it)."""
+        return (self.package is not None and not self.image
+                and self.package.get(wp.IMAGE_FIELD) is not None)
+
+    @property
     def violations(self) -> List[Violation]:
-        out = list(self.shared)
+        out = list(self.shared) + list(self.image)
         for vs in self.outlets.values():
             out.extend(vs)
         return out
@@ -254,6 +269,92 @@ def _pairs(obj: Dict[str, Any], key: str, lo: int, hi: int, title_max: int, body
     return pairs
 
 
+def _flat(text: str) -> str:
+    """`clean()`, then every whitespace run — line breaks included — folded to one space. The
+    worker lays the image's lines out itself (a model line break would only be drawn as a stray
+    gap, and the sentence count would read it as a sentence end); what is stored is exactly what
+    was scanned, and the worker draws it verbatim."""
+    return " ".join(clean(text).split())
+
+
+def _over_len(n: int, limit: int, unit: str) -> str:
+    return f"{n} {unit} - the limit is {limit}; cut at least {n - limit} {unit}"
+
+
+def _long_word(name: str, text: str, limit: int) -> Optional[Violation]:
+    """A word longer than `limit` characters (a chained "buy-high-sell-low-…" token), or None."""
+    tok = next((t for t in text.split() if len(t) > limit), None)
+    if tok is None:
+        return None
+    return Violation(name, "too_long", f"a word of {len(tok)} characters (\"{tok[:24]}…\") - the limit "
+                                       f"is {limit}; put spaces around dashes or use shorter words")
+
+
+def _image_text(obj: Dict[str, Any]) -> Tuple[str, List[str], List[Violation]]:
+    """The image post's title and paragraphs (drop 1, contract C8), flattened and capped, with
+    their SHAPE violations: schema, count, empty, and the length limits (title words and characters;
+    per paragraph characters and sentences; a word too long for the worker to wrap, anywhere in it).
+    The compliance + grounding scan runs over the same
+    strings as one reading chain in `validate_package`. A non-object, a non-string title or a
+    paragraph list that is not all strings is `schema` and nothing else (no text to measure)."""
+    name = wp.IMAGE_FIELD
+    out: List[Violation] = []
+    raw = obj.get(name)
+    if not isinstance(raw, dict):
+        out.append(Violation(name, "schema",
+                             f"expected an object with title and paragraphs, got {type(raw).__name__}"))
+        return "", [], out
+    title_raw, paras_raw = raw.get("title"), raw.get("paragraphs")
+    if not isinstance(title_raw, str):
+        out.append(Violation(f"{name}.title", "schema", f"expected a string, got {type(title_raw).__name__}"))
+    if not isinstance(paras_raw, list) or not all(isinstance(p, str) for p in paras_raw):
+        out.append(Violation(f"{name}.paragraphs", "schema", "expected a list of strings"))
+    if out:
+        return "", [], out
+
+    title = _flat(title_raw)
+    if not title:
+        out.append(Violation(f"{name}.title", "empty", "title is empty"))
+    elif not _HAS_ALNUM_RE.search(title[:_HAS_WORD_SCAN_CAP]):
+        out.append(Violation(f"{name}.title", "empty", "title has no words"))
+    if _words(title) > wp.IMAGE_TITLE_MAX_WORDS:
+        out.append(Violation(f"{name}.title", "too_long", _over_words(_words(title), wp.IMAGE_TITLE_MAX_WORDS)))
+    if len(title) > wp.IMAGE_TITLE_MAX_CHARS:
+        out.append(Violation(f"{name}.title", "too_long",
+                             _over_len(len(title), wp.IMAGE_TITLE_MAX_CHARS, "characters")))
+    long_title_word = _long_word(f"{name}.title", title, wp.IMAGE_WORD_MAX_CHARS)
+    if long_title_word is not None:
+        out.append(long_title_word)
+
+    if not wp.IMAGE_PARAGRAPHS_MIN <= len(paras_raw) <= wp.IMAGE_PARAGRAPHS_MAX:
+        out.append(Violation(f"{name}.paragraphs", "count",
+                             f"{len(paras_raw)} paragraphs - use {wp.IMAGE_PARAGRAPHS_MIN} to "
+                             f"{wp.IMAGE_PARAGRAPHS_MAX}"))
+    paragraphs: List[str] = []
+    # Cut to the maximum BEFORE anything is cleaned or scanned (an endless list costs one type
+    # check per entry above, nothing more).
+    for i, p in enumerate(paras_raw[:wp.IMAGE_PARAGRAPHS_MAX]):
+        pname = f"{name}.paragraphs[{i}]"
+        text = _flat(p)
+        if not _has_words(text):
+            out.append(Violation(pname, "empty", "paragraph has no words" if text else "paragraph is empty"))
+        if len(text) > wp.IMAGE_PARAGRAPH_MAX_CHARS:
+            out.append(Violation(pname, "too_long",
+                                 _over_len(len(text), wp.IMAGE_PARAGRAPH_MAX_CHARS, "characters")))
+        long_word = _long_word(pname, text[:_HAS_WORD_SCAN_CAP], wp.IMAGE_WORD_MAX_CHARS)
+        if long_word is not None:
+            out.append(long_word)
+        # Abbreviation-aware ("Mr. Market", "e.g. banks"), linear, and only ever over a capped
+        # prefix: an over-long paragraph is already refused above.
+        n = len(sentences(text[:_HAS_WORD_SCAN_CAP]))
+        if n > wp.IMAGE_PARAGRAPH_MAX_SENTENCES:
+            out.append(Violation(pname, "too_long",
+                                 f"{n} sentences - the limit is {wp.IMAGE_PARAGRAPH_MAX_SENTENCES}; "
+                                 f"cut or join at least {n - wp.IMAGE_PARAGRAPH_MAX_SENTENCES}"))
+        paragraphs.append(text)
+    return title, paragraphs, out
+
+
 def _scan(name: str, text: str, item: ContentItem, *, allow_emoji: bool,
           myth_framed: bool = False, next_text: str = "") -> List[Violation]:
     return (scan_text(name, text, allow_emoji=allow_emoji,
@@ -348,10 +449,20 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
             deck += [(f"{key}[{i}].title", p["title"], False),
                      (f"{key}[{i}].body", p["body"], bool(_MYTH_TITLE_RE.match(p["title"])))]
         chains.append(deck)
-    for chain in chains:
+    # The image post (drop 1) is a fourth chain — its title, then its paragraphs in reading order —
+    # scanned exactly like the decks (emoji refused: Inter cannot draw one, and an unrenderable
+    # glyph is a SkipRun that loses the whole day), but its violations land in their OWN bucket:
+    # they drop the image, never the package. A bare myth label as the title ("The myth") frames
+    # only the FIRST paragraph — the next ones are the debunk, and must not inherit the exemption.
+    image_title, image_paragraphs, image_vs = _image_text(obj)
+    image_chain: List[Tuple[str, str, bool]] = (
+        ([(f"{wp.IMAGE_FIELD}.title", image_title, False)] if image_title else [])
+        + [(f"{wp.IMAGE_FIELD}.paragraphs[{i}]", p, i == 0 and bool(_MYTH_TITLE_RE.match(image_title)))
+           for i, p in enumerate(image_paragraphs) if p])
+    for chain, bucket in [(c, shared) for c in chains] + [(image_chain, image_vs)]:
         for j, (name, text, myth_framed) in enumerate(chain):
             nxt = chain[j + 1][1] if j + 1 < len(chain) else ""
-            shared.extend(_scan(name, text, item, allow_emoji=False, myth_framed=myth_framed,
+            bucket.extend(_scan(name, text, item, allow_emoji=False, myth_framed=myth_framed,
                                 next_text=nxt))
 
     caps_raw = obj.get("captions")
@@ -399,23 +510,43 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
         "captions": bodies,
         "posts": {p: post.as_dict() for p, post in posts.items()},
         "dropped_outlets": {p: [v.as_dict() for v in vs] for p, vs in outlets.items()},
+        # The post image's text exactly as scanned (the worker draws it verbatim and the server
+        # checks its declared on-screen text string for string), or None once any check refused it
+        # — `script_service.freeze_post_formats` then makes that day's posts text.
+        wp.IMAGE_FIELD: ({"title": image_title, "paragraphs": image_paragraphs}
+                         if not image_vs else None),
+        DROPPED_IMAGE: [v.as_dict() for v in image_vs],
         "disclaimer_card": disclaimer_card(run_date),
         "source_ref": item.key,
         "run_date": run_date.isoformat(),
         # What the captions' code-owned value line says about the app (prelaunch / preorder / live).
         "store_state": normalize_store_state(store_state),
     }
-    return ValidationResult(package=package, shared=shared, outlets=outlets, posts=posts)
+    return ValidationResult(package=package, shared=shared, outlets=outlets, posts=posts,
+                            image=image_vs)
 
 
 # ── generation ────────────────────────────────────────────────────────────────
 
 
-def _pick_best(candidates: List[ValidationResult]) -> Optional[ValidationResult]:
+def _counted(vr: ValidationResult, image_posts: bool) -> int:
+    """The violations that matter to the repair decision and the tie-break: all of them, or — with
+    image posts off (`image_posts` False: nothing will draw the image) — all but the image's own."""
+    return len(vr.violations) - (0 if image_posts else len(vr.image))
+
+
+def _pick_best(candidates: List[ValidationResult], *,
+               image_posts: bool = True) -> Optional[ValidationResult]:
+    """More outlets first; then a candidate that kept its image post (it serves the five image
+    platforms) over one that lost it; then fewer violations. With image posts off the image is no
+    reason to prefer a candidate and its violations are not counted — the pick is the one made
+    before the image existed."""
     ok = [c for c in candidates if c.ok]
     if not ok:
         return None
-    return max(ok, key=lambda c: (len(c.posts), -len(c.violations)))
+    if not image_posts:
+        return max(ok, key=lambda c: (len(c.posts), -_counted(c, False)))
+    return max(ok, key=lambda c: (len(c.posts), c.image_ok, -len(c.violations)))
 
 
 #: Attribute a propagating exception carries: tokens this generation already spent before it
@@ -451,29 +582,58 @@ def _note_failed_generation(e: Exception, tokens: int, rounds: List[RoundRecord]
         )
 
 
+#: A shared copy's detail (the verdict's own, after a pointer to the field it was filed on).
+_COPY_DETAIL_CAP = 400
+
 #: Judge verdicts listed first in a repair prompt, capped: `repair_prompt` keeps 40 violations,
 #: and a regex flood must not push the semantic findings out of the model's view.
 _JUDGE_REPAIR_CAP = 10
 
 
+def _enforce(vr: ValidationResult, label: str, viol: Violation) -> None:
+    """One verdict target, by its family: a shared field fails the round; a caption drops ONLY its
+    outlet (a YouTube title or description drops `youtube`); an image field drops ONLY the image."""
+    family = jd.label_family(label)
+    if family == jd.FAMILY_CAPTION:
+        platform = jd.caption_platform(viol.field)
+        vr.posts.pop(platform, None)
+        vr.outlets.setdefault(platform, []).append(viol)
+    elif family == jd.FAMILY_IMAGE:
+        vr.image.append(viol)
+    else:
+        vr.shared.append(viol)
+
+
 def _apply_verdicts(vr: ValidationResult, verdicts: List[jd.Verdict]) -> List[Violation]:
-    """Enforce the judge's verdicts on a candidate: a shared-field verdict fails the round; a
-    caption verdict drops ONLY that outlet (a YouTube title or description drops `youtube`).
-    The stored `package["posts"]` / `dropped_outlets` are rebuilt too — `create_posts` copies
-    captions from the ACCEPTED package, so a flagged caption must be gone from it."""
+    """Enforce the judge's verdicts on a candidate, each on every field `judge.verdict_targets`
+    names (`_enforce`): the field the judge filed it on — always, whatever else matches — plus the
+    field(s) holding its words: a shared field fails the round, a caption drops that outlet, an image
+    field drops the image (that day's posts are text).
+    The stored `package["posts"]` / `dropped_outlets` / `image_post` are rebuilt too —
+    `create_posts` copies captions from the ACCEPTED package and the worker draws its image post,
+    so a flagged caption or image must be gone from it.
+
+    Fail closed (drop-1 re-review, 2026-10-09): a verdict filed on the image whose words are the X
+    caption's drops the image AND X; one whose words a card repeats fails the round (the repair hears
+    the card). Never the reverse: a match elsewhere adds a target, never removes the judge's."""
     applied: List[Violation] = []
+    # The fields as the judge read them, before anything below drops a caption or the image.
+    fields = jd.package_fields(vr.package or {})
     for v in verdicts:
         viol = v.violation()
         applied.append(viol)
-        if v.is_caption:
-            platform = jd.caption_platform(v.field)
-            vr.posts.pop(platform, None)
-            vr.outlets.setdefault(platform, []).append(viol)
-        else:
-            vr.shared.append(viol)
+        _enforce(vr, v.label, viol)
+        for lab in jd.verdict_targets(v, fields)[1:]:
+            copy_viol = Violation(jd.field_name(lab), v.rule,
+                                  f"the same words as {v.label}: {viol.detail}"[:_COPY_DETAIL_CAP])
+            _enforce(vr, lab, copy_viol)
+            applied.append(copy_viol)
     if vr.package is not None:
         vr.package["posts"] = {p: post.as_dict() for p, post in vr.posts.items()}
         vr.package["dropped_outlets"] = {p: [x.as_dict() for x in xs] for p, xs in vr.outlets.items()}
+        if vr.image:
+            vr.package[wp.IMAGE_FIELD] = None
+        vr.package[DROPPED_IMAGE] = [x.as_dict() for x in vr.image]
     return applied
 
 
@@ -496,6 +656,7 @@ async def generate_package(
     allow_x_url: bool = False,
     store_state: str = STORE_PRELAUNCH,
     before_call: Optional[Callable[[], Awaitable[Optional[bool]]]] = None,
+    image_posts: bool = True,
 ) -> WriterResult:
     """One generation: a draft and, if it has any violation, ONE repair — each graded by the
     semantic judge (`judge.py`) under `judge_mode` (REQUIRED: there is no fail-open default;
@@ -504,8 +665,10 @@ async def generate_package(
 
     * The judge grades round 1 whenever it parsed (so the one repair hears both the regex and the
       semantic findings), and round 2 only when the regex passed it (nothing else could use it).
-    * `enforce`: a verdict on a shared field fails the round, one on a caption drops that outlet,
-      and a candidate the judge did not grade is never accepted. `shadow`: verdicts are recorded
+    * `enforce`: a verdict on a shared field fails the round, one on a caption drops that outlet
+      and one on the image drops the image — and the same again on each other field holding its
+      words (`_apply_verdicts`) — and a candidate the judge did not grade is never
+      accepted. `shadow`: verdicts are recorded
       and never block; a judge failure is logged and ignored. `off`: no judge call.
     * Gemini errors propagate (the caller classifies transient vs not) — unchanged in type, but
       carrying the tokens this generation already spent as `marketing_tokens_used`
@@ -515,6 +678,11 @@ async def generate_package(
     * `store_state` (default: prelaunch, the line that claims least) is the code-owned value line's
       state, read once by the caller at write time; the prompts and the validator both use it, so
       the caption budget asked for is the one enforced.
+    * `image_posts` (default True: a direct caller gets the drop-1 behaviour) says whether this run
+      will draw the image post — `script_service` reads `MARKETING_IMAGE_POSTS` ONCE and passes the
+      same value it freezes the formats with. False: an image problem alone never buys the repair
+      round, the image is no reason to prefer a candidate, and a dropped image is logged at INFO.
+      The image is still validated, judged and stored either way (the package shape is unchanged).
     * `before_call` runs before EACH model call, judge calls included; whatever it raises
       propagates (the script service refreshes its lease there). If it returns False (the lease
       can no longer cover a call), an acceptable candidate in hand is kept and the call skipped;
@@ -538,7 +706,7 @@ async def generate_package(
         """False = keep the candidate in hand and skip this call."""
         if before_call is None or await before_call() is not False:
             return True
-        if _pick_best(candidates) is not None:
+        if _pick_best(candidates, image_posts=image_posts) is not None:
             logger.warning(
                 "marketing writer: the lease cannot cover the %s call source_ref=%s generation=%s "
                 "— accepting the best round so far", kind, item.key, generation_id)
@@ -573,7 +741,7 @@ async def generate_package(
                     usage_tag=USAGE_TAG,
                 )
             except Exception as e:
-                best = _pick_best(candidates)
+                best = _pick_best(candidates, image_posts=image_posts)
                 if best is None:
                     raise
                 # The repair call failed but an earlier round was already publishable: keep it
@@ -617,7 +785,7 @@ async def generate_package(
                                     "round=%d (%s: %s) — ignored", item.key, generation_id,
                                     round_no, type(e).__name__, e)
                                 vr.judged = True
-                            elif _pick_best(candidates) is not None:
+                            elif _pick_best(candidates, image_posts=image_posts) is not None:
                                 logger.warning(
                                     "marketing judge FAILED on round %d (%s: %s) source_ref=%s "
                                     "generation=%s — keeping the judged round-1 package",
@@ -650,8 +818,10 @@ async def generate_package(
             ))
             if stop:
                 break
-            if vr is not None and vr.ok and not vr.violations:
-                break  # clean — nothing for a repair to improve
+            if vr is not None and vr.ok and not _counted(vr, image_posts):
+                # Clean — nothing for a repair to improve. With image posts off, an image problem
+                # alone is not worth a repair: nothing will draw the image.
+                break
     except Exception as e:
         # Only Exception: a CancelledError (BaseException) must propagate untouched.
         _note_failed_generation(e, tokens, rounds, item, generation_id)
@@ -661,7 +831,7 @@ async def generate_package(
                      "script_service's owner-life arithmetic assumes at most %d", calls,
                      MODEL_CALLS_PER_GENERATION, item.key, generation_id, MODEL_CALLS_PER_GENERATION)
 
-    best = _pick_best(candidates)
+    best = _pick_best(candidates, image_posts=image_posts)
     if best is None:
         # Every round, tagged — the repair prompt above still saw only the last round's list.
         history = [{**v, "round": r.round} for r in rounds for v in r.violations]
@@ -672,6 +842,15 @@ async def generate_package(
         return WriterResult("rejected", None, history, rounds, tokens,
                             raw_outputs=raw_outputs, judge_mode=mode)
     package = dict(best.package or {})
+    if package.get(wp.IMAGE_FIELD) is None:
+        # Degraded, not failed: the package still publishes, as text where the image would go.
+        # Codes only — a detail carries model text, and this line feeds Sentry and the digest. With
+        # image posts off nothing would have drawn the image, so it is not a degradation: INFO.
+        (logger.warning if image_posts else logger.info)(
+            "marketing writer: the image post was DROPPED source_ref=%s generation=%s codes=%s — "
+            "%s", item.key, generation_id, sorted({v.code for v in best.image}),
+            "this run's image platforms post text" if image_posts
+            else "image posts are off, so nothing changes")
     package.update({"template_id": template.id, "prompt_version": wp.PROMPT_VERSION,
                     "model": WRITER_MODEL})
     if mode != jd.MODE_OFF:

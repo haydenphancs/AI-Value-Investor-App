@@ -473,3 +473,337 @@ def test_choose_never_returns_an_item_outside_the_pool():
     for d in _posting_days(EPOCH, 60):
         s: Optional[str] = choose(pool, d, recent=outsiders + pool[:2]).source_ref
         assert s in pool
+
+
+# ══ Drop 2 ("Company Weekly"): the class registry and the weekly series calendar ══════════════
+
+from app.schemas import marketing as mschemas  # noqa: E402
+from app.services.trillion_club import rules as tc_rules  # noqa: E402
+
+#: APPEND-ONLY. Every template id a `marketing_scripts` row may hold, with the class it decides.
+#: A stored row keeps its template_id for good, so an id that stops resolving (renamed, removed,
+#: re-classed) turns an accepted day into a post with no gate. Add rows; never edit or drop one.
+KNOWN_TEMPLATE_IDS = {
+    "myth_vs_fact": "A", "three_takeaways": "A", "case_story": "A", "question_hook": "A", "checklist": "A",
+    "ceo_buys": "C", "insider_buys": "C", "thirteen_f": "C", "congress_count": "C",
+    "company_stakes": "F", "earnings": "F", "money_map": "F", "theme_explainer": "F",
+}
+
+
+def test_every_known_template_id_still_resolves_to_its_class():
+    for template_id, klass in KNOWN_TEMPLATE_IDS.items():
+        assert sel.content_class_of(template_id) == klass, template_id
+    # The registry holds nothing the pin does not know (a new id is added to the pin with it).
+    assert set(sel.TEMPLATES_BY_ID) | set(sel.SERIES_BY_ID) == set(KNOWN_TEMPLATE_IDS)
+
+
+def test_lesson_and_series_ids_are_disjoint_and_series_are_news_classes():
+    assert not set(sel.TEMPLATES_BY_ID) & set(sel.SERIES_BY_ID)
+    assert sel.LESSON not in sel.TEMPLATES_BY_ID and sel.LESSON not in sel.SERIES_BY_ID
+    ids = [s.id for s in sel.SERIES]
+    assert len(ids) == len(set(ids)) and set(ids) == set(sel.SERIES_BY_ID)
+    for s in sel.SERIES:
+        assert s.content_class in mschemas.NEWS_CLASSES, s
+        assert s.name.strip() and s.id == s.id.strip().lower(), s
+    assert {s.content_class for s in sel.SERIES} == set(mschemas.NEWS_CLASSES)
+    assert set(mschemas.CONTENT_CLASSES) == {"A"} | {s.content_class for s in sel.SERIES}
+
+
+@pytest.mark.parametrize("bad", [None, "", "lesson", "CEO_BUYS", " ceo_buys", "ceo_buys ", "news:ceo_buys",
+                                 "x", 7, True, ["ceo_buys"]])
+def test_content_class_of_anything_else_is_none(bad):
+    assert sel.content_class_of(bad) is None
+
+
+#: Drop 2a's series (the per-series switch's production default) and drop 2b's.
+DROP_2A = frozenset({"ceo_buys", "insider_buys", "thirteen_f", "money_map"})
+DROP_2B = frozenset({"congress_count", "company_stakes", "earnings", "theme_explainer"})
+
+
+def test_every_series_has_shipped_since_drop_2b():
+    """Drop 2b ships the last four series in CODE: SHIPPED_SERIES is now every series. Production still
+    runs only what the per-series switch lists (its default is the 2a four — test_marketing_news_series_
+    switch.py pins that the 2b days stay off with it)."""
+    assert sel.SHIPPED_SERIES == DROP_2A | DROP_2B == frozenset(sel.SERIES_BY_ID)
+    assert not DROP_2A & DROP_2B
+    assert isinstance(sel.SHIPPED_SERIES, frozenset)
+
+
+def test_lesson_constants_match_the_content_pool_and_the_template_registry():
+    assert sel.LESSON_KINDS == (content_pool.MONEY_MOVES, content_pool.JOURNEY)
+    assert set(sel.LESSON_TEMPLATE_IDS) <= set(sel.TEMPLATES_BY_ID)
+    for kind in sel.LESSON_KINDS:
+        fits = [t for t in sel.LESSON_TEMPLATE_IDS if kind in sel.TEMPLATES_BY_ID[t].kinds]
+        assert len(fits) >= 2, (kind, fits)  # or the weekly lesson's template would be a constant
+
+
+# ── 13F season ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("due, quarter", [
+    (date(2026, 11, 16), (2026, 3)),   # Nov 14 is a Saturday → Monday
+    (date(2027, 2, 16), (2026, 4)),    # Sun Feb 14, then Washington's Birthday Mon Feb 15
+    (date(2027, 5, 17), (2027, 1)),    # Sat May 15 → Monday
+    (date(2026, 8, 14), (2026, 2)),    # a Friday: not rolled
+])
+def test_thirteen_f_season_edges(due, quarter):
+    assert tc_rules.sec_13f_due_date(*quarter) == due
+    assert sel.thirteen_f_season(due) == quarter
+    assert sel.thirteen_f_season(due + timedelta(days=41)) == quarter
+    assert sel.thirteen_f_season(due + timedelta(days=42)) is None
+    assert sel.thirteen_f_season(due - timedelta(days=1)) is None
+
+
+def test_thirteen_f_season_matches_a_brute_force_oracle_over_ten_years():
+    seasons = []
+    for year in range(2024, 2037):
+        for q in (1, 2, 3, 4):
+            due = tc_rules.sec_13f_due_date(year, q)
+            seasons.append(((year, q), due, due + timedelta(days=sel.THIRTEEN_F_SEASON_DAYS)))
+    d = date(2025, 1, 1)
+    while d <= date(2035, 12, 31):
+        expected = [yq for yq, lo, hi in seasons if lo <= d < hi]
+        assert len(expected) <= 1, (d, expected)  # seasons never overlap
+        assert sel.thirteen_f_season(d) == (expected[0] if expected else None), d
+        d += timedelta(days=1)
+
+
+def test_the_first_13f_tuesdays_of_the_q3_2026_wave():
+    tuesdays = [d for d in (date(2026, 11, 16) + timedelta(days=i) for i in range(60))
+                if d.weekday() == 1 and sel.thirteen_f_season(d)]
+    assert tuesdays == [date(2026, 11, 17), date(2026, 11, 24), date(2026, 12, 1), date(2026, 12, 8),
+                        date(2026, 12, 15), date(2026, 12, 22)]
+
+
+@pytest.mark.parametrize("d", [date.min, date(1, 3, 31), date(1900, 6, 1), date(9999, 1, 2), date.max])
+def test_the_calendar_never_raises_at_the_extremes(d):
+    assert sel.thirteen_f_season(d) is None
+    plan = sel.plan_for(d)
+    assert plan.rest_day == (not is_posting_day(d))
+    assert isinstance(sel.in_earnings_season(d), bool)
+
+
+# ── Congress Count Tuesday and disclosure month ───────────────────────────────
+
+
+@pytest.mark.parametrize("d", [date(2026, 11, 10), date(2026, 12, 8), date(2027, 1, 12)])
+def test_known_congress_count_days(d):
+    assert sel.is_congress_count_day(d)
+    assert not sel.is_congress_count_day(d - timedelta(days=7))
+    assert not sel.is_congress_count_day(d + timedelta(days=7))
+    assert not sel.is_congress_count_day(d + timedelta(days=1))
+
+
+def test_exactly_one_congress_tuesday_a_month_for_ten_years():
+    per_month: Dict[tuple, List[date]] = {}
+    d = date(2026, 1, 1)
+    while d < date(2036, 1, 1):
+        if sel.is_congress_count_day(d):
+            per_month.setdefault((d.year, d.month), []).append(d)
+        d += timedelta(days=1)
+    assert len(per_month) == 120
+    for days in per_month.values():
+        assert len(days) == 1 and days[0].weekday() == 1 and 8 <= days[0].day <= 14
+        month_end = days[0].replace(day=1) - timedelta(days=1)
+        assert (days[0] - month_end).days >= 7  # at least 7 days after the disclosure month ended
+
+
+@pytest.mark.parametrize("d, month", [
+    (date(2026, 12, 8), "2026-11"), (date(2027, 1, 12), "2026-12"), (date(2026, 3, 10), "2026-02"),
+    (date(2028, 3, 14), "2028-02"), (date(2026, 11, 1), "2026-10"),
+])
+def test_congress_disclosure_month_is_the_calendar_month_before(d, month):
+    assert sel.congress_disclosure_month(d) == month
+
+
+# ── earnings season ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("quarter_end", [date(2026, 3, 31), date(2026, 6, 30), date(2026, 9, 30),
+                                         date(2026, 12, 31), date(2028, 3, 31)])
+def test_earnings_season_bounds(quarter_end):
+    def at(n: int) -> bool:
+        return sel.in_earnings_season(quarter_end + timedelta(days=n))
+
+    assert (at(0), at(9), at(10), at(56), at(57)) == (False, False, True, True, False)
+
+
+def test_earnings_season_rolls_over_january_and_the_named_thursdays():
+    assert not sel.in_earnings_season(date(2027, 1, 9)) and sel.in_earnings_season(date(2027, 1, 10))
+    assert sel.in_earnings_season(date(2027, 2, 25)) and not sel.in_earnings_season(date(2027, 2, 26))
+    assert sel.in_earnings_season(date(2026, 11, 19)) and not sel.in_earnings_season(date(2026, 11, 26))
+    assert not sel.in_earnings_season(date(2026, 10, 8)) and sel.in_earnings_season(date(2026, 10, 15))
+    assert sel.in_earnings_season(date(2027, 1, 14))
+
+
+# ── plan_for and enabled_chain ────────────────────────────────────────────────
+
+
+def test_the_named_days_plans():
+    assert sel.plan_for(date(2026, 12, 8)).chain[:2] == ("congress_count", "thirteen_f")
+    assert sel.plan_for(date(2026, 12, 8)).reason == "tuesday_congress_13f"
+    assert sel.plan_for(date(2026, 11, 17)).chain[0] == "thirteen_f"
+    assert sel.plan_for(date(2026, 11, 10)).chain[:2] == ("congress_count", "company_stakes")
+    assert sel.plan_for(date(2026, 10, 13)).reason == "tuesday_congress"
+    assert sel.plan_for(date(2026, 10, 20)) == sel.DayPlan(
+        False, ("company_stakes", "theme_explainer", "money_map", sel.LESSON), "tuesday")
+    assert sel.plan_for(date(2026, 11, 16)) == sel.DayPlan(
+        False, ("ceo_buys", "insider_buys", "money_map", "theme_explainer", sel.LESSON), "monday")
+    assert sel.plan_for(date(2026, 11, 19)).chain[0] == "earnings"
+    assert sel.plan_for(date(2026, 11, 26)) == sel.DayPlan(
+        False, ("money_map", "theme_explainer", sel.LESSON), "thursday_off")
+    assert sel.plan_for(date(2026, 11, 21)) == sel.DayPlan(False, (sel.LESSON,), "saturday")
+    for rest in (date(2026, 11, 18), date(2026, 11, 20), date(2026, 11, 22)):
+        assert sel.plan_for(rest) == sel.DayPlan(True)
+
+
+def test_every_chain_ends_in_the_lesson_without_duplicates_for_ten_years():
+    d = date(2026, 1, 1)
+    while d < date(2036, 1, 1):
+        plan = sel.plan_for(d)
+        if not is_posting_day(d):
+            assert plan == sel.DayPlan(True), d
+        else:
+            assert not plan.rest_day and plan.chain and plan.chain[-1] == sel.LESSON, (d, plan)
+            assert plan.chain.count(sel.LESSON) == 1 and len(set(plan.chain)) == len(plan.chain), (d, plan)
+            assert set(plan.chain) - {sel.LESSON} <= set(sel.SERIES_BY_ID), (d, plan)
+            assert plan.reason != "lesson_only", d
+            for classes in ({"A"}, {"A", "C"}, {"A", "F"}, {"A", "C", "F"}):
+                chain = sel.enabled_chain(plan.chain, frozenset(classes))
+                assert chain[-1] == sel.LESSON and len(set(chain)) == len(chain), (d, classes, chain)
+                assert all(sel.SERIES_BY_ID[s].content_class in classes and s in sel.SHIPPED_SERIES
+                           for s in chain[:-1]), (d, classes, chain)
+        d += timedelta(days=1)
+
+
+def test_enabled_chain_filters_by_class_shipping_and_order():
+    tue = sel.plan_for(date(2026, 12, 8)).chain
+    assert tue == ("congress_count", "thirteen_f", "company_stakes", "theme_explainer", "money_map", sel.LESSON)
+    acf = frozenset({"A", "C", "F"})
+    # every series has shipped: the default shipped set keeps the whole chain
+    assert sel.enabled_chain(tue, acf) == tue
+    assert sel.enabled_chain(tue, frozenset({"A", "C"})) == ("congress_count", "thirteen_f", sel.LESSON)
+    assert sel.enabled_chain(tue, frozenset({"A", "F"})) == (
+        "company_stakes", "theme_explainer", "money_map", sel.LESSON)
+    assert sel.enabled_chain(tue, frozenset({"A"})) == (sel.LESSON,)
+    # the shipped set (production passes the per-series switch) filters, keeping the chain's order
+    assert sel.enabled_chain(tue, acf, shipped=DROP_2A) == ("thirteen_f", "money_map", sel.LESSON)
+    assert sel.enabled_chain(tue, frozenset({"A", "C"}), shipped=DROP_2A) == ("thirteen_f", sel.LESSON)
+    assert sel.enabled_chain(tue, acf, shipped=frozenset()) == (sel.LESSON,)
+    monday = sel.plan_for(date(2026, 11, 16)).chain
+    assert sel.enabled_chain(monday, acf, shipped=DROP_2A) == ("ceo_buys", "insider_buys", "money_map", sel.LESSON)
+    assert sel.enabled_chain(monday, acf) == monday
+    # unknown, duplicate and post-lesson steps are dropped; the lesson stays whatever the classes say
+    assert sel.enabled_chain(("money_map", "nope", "money_map", sel.LESSON, "ceo_buys"), acf) == (
+        "money_map", sel.LESSON)
+    assert sel.enabled_chain(("ceo_buys", sel.LESSON), frozenset()) == (sel.LESSON,)
+    assert sel.enabled_chain((), acf) == ()
+
+
+def test_enabled_chain_reads_the_shipped_set_at_call_time(monkeypatch):
+    """A series ships by its id joining SHIPPED_SERIES (and is withdrawn by leaving it); the default is
+    read per call, never frozen at import."""
+    tue = sel.plan_for(date(2026, 12, 8)).chain
+    acf = frozenset({"A", "C", "F"})
+    assert sel.enabled_chain(tue, acf)[:2] == ("congress_count", "thirteen_f")
+    monkeypatch.setattr(sel, "SHIPPED_SERIES", sel.SHIPPED_SERIES - {"congress_count"})
+    assert sel.enabled_chain(tue, acf)[:2] == ("thirteen_f", "company_stakes")
+
+
+def test_classes_a_alone_is_todays_selection_byte_for_byte_for_two_years():
+    """With MARKETING_CONTENT_CLASSES unset every posting day's chain is the lesson alone, and the
+    lesson path (`lesson_refs` filter, no template narrowing) picks exactly what `choose` picks."""
+    classes = mschemas.parse_content_classes("A")
+    pool = _pool(9) + _pool(6, "money_moves")
+    history: List[str] = []
+    for d in _posting_days(date(2026, 10, 12), 2 * 52 * 4):
+        assert sel.enabled_chain(sel.plan_for(d).chain, classes) == (sel.LESSON,), d
+        recent = list(reversed(history))
+        assert sel.lesson_refs(recent) == recent
+        today = choose(pool, d, recent)
+        assert choose(pool, d, sel.lesson_refs(recent), templates=None) == today, d
+        history.append(today.source_ref)
+
+
+# ── lesson_refs: news refs never starve the lesson rotation ───────────────────
+
+
+def test_lesson_refs_keeps_only_lesson_refs_in_order():
+    recent = ["news:ceo_buys:2026-11-09", "journey:a", "money_moves:b", "news:money_map:AAPL:FY2025",
+              "journey", "journeys:x", None, 7, "money_moves:", "JOURNEY:c", "journey:d"]
+    assert sel.lesson_refs(recent) == ["journey:a", "money_moves:b", "money_moves:", "journey:d"]
+    assert sel.lesson_refs(iter(["journey:a"])) == ["journey:a"]
+    assert sel.lesson_refs([]) == []
+
+
+def _news_week_history(pool: Sequence[str], lessons: int, *, read_limit: int, use_filter: bool) -> List[str]:
+    """The production loop once three news posts share the ledger with every lesson: each lesson
+    day reads the newest `read_limit` refs of every kind (newest first), filters them (or not), and
+    picks. Returns the lessons in order."""
+    ledger: List[str] = []
+    picked: List[str] = []
+    days = _posting_days(date(2026, 11, 16), lessons * 4)
+    for i, d in enumerate(days):
+        if i % 4 != 3:      # Mon/Tue/Thu: a news post
+            ledger.append(f"news:ceo_buys:{d.isoformat()}")
+            continue
+        recent = list(reversed(ledger))[:read_limit]
+        s = choose(pool, d, sel.lesson_refs(recent) if use_filter else recent)
+        picked.append(s.source_ref)
+        ledger.append(s.source_ref)
+    return picked
+
+
+def test_34_consecutive_lessons_are_distinct_with_three_news_refs_per_lesson():
+    """The real pool has 34 items; `choose` avoids the last min(33, 60) refs it is given. With news
+    refs in the ledger the script service reads 240 rows (RECENT_WINDOW × 4 posting days) and
+    filters them to lessons — remove either and the lesson feed repeats within 34 lessons."""
+    pool = _pool(20) + _pool(14, "money_moves")
+    news_read = sel.RECENT_WINDOW * len(POST_WEEKDAYS)
+    assert news_read == 240
+    picked = _news_week_history(pool, 70, read_limit=news_read, use_filter=True)
+    for i in range(len(picked) - 34 + 1):
+        assert len(set(picked[i:i + 34])) == 34, i
+
+    def repeats(seq: List[str]) -> bool:
+        return any(len(set(seq[i:i + 34])) < 34 for i in range(len(seq) - 34 + 1))
+
+    # The test can fail: a 60-row read, or no filter, repeats lessons inside 34.
+    assert repeats(_news_week_history(pool, 70, read_limit=sel.RECENT_WINDOW, use_filter=True))
+    assert repeats(_news_week_history(pool, 70, read_limit=news_read, use_filter=False))
+
+
+# ── the weekly lesson's template narrowing ────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["money_moves", "journey"])
+def test_choose_template_narrowed_to_the_lesson_templates(kind):
+    got = {choose_template(kind, o, sel.LESSON_TEMPLATE_IDS) for o in range(-200, 200)}
+    assert got == set(sel.LESSON_TEMPLATE_IDS)
+    # None, or every eligible id, is the unchanged rotation.
+    for o in range(-300, 300):
+        assert choose_template(kind, o, None) == choose_template(kind, o) \
+            == choose_template(kind, o, _eligible_ids(kind) + ["not_a_template"])
+
+
+def test_choose_template_falls_back_when_nothing_allowed_fits(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        assert choose_template("journey", 3, ["case_story"]) == choose_template("journey", 3)
+        assert choose_template("journey", 3, []) == choose_template("journey", 3)
+    assert sum("no allowed template" in r.getMessage() for r in caplog.records) == 2
+    assert choose_template("journey", 5, "question_hook") == "question_hook"   # one id as a str
+    with pytest.raises(IndexError):
+        choose_template("podcast", 0, sel.LESSON_TEMPLATE_IDS)
+
+
+def test_narrowing_the_templates_never_moves_the_item_rotation():
+    pool = _pool(7, "journey") + _pool(7, "money_moves")
+    for d in _posting_days(EPOCH - timedelta(days=100), 300):
+        plain = choose(pool, d, pool[:3])
+        narrow = choose(pool, d, pool[:3], templates=sel.LESSON_TEMPLATE_IDS)
+        assert (narrow.rest_day, narrow.source_ref, narrow.posting_ordinal) == \
+            (plain.rest_day, plain.source_ref, plain.posting_ordinal)
+        assert narrow.template_id in sel.LESSON_TEMPLATE_IDS
+    assert choose(pool, EPOCH + timedelta(days=2), templates=sel.LESSON_TEMPLATE_IDS) == Selection(rest_day=True)

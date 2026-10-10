@@ -20,11 +20,9 @@ struct FollowButton: View {
                 .foregroundColor(isFollowing ? AppColors.textSecondary : AppColors.primaryBlue)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)
-                .background(
-                    isFollowing
-                        ? AppColors.cardBackgroundLight
-                        : AppColors.primaryBlue.opacity(0.15)
-                )
+                // Opaque in both states: `primaryBlue` on its own 15% tint is 4.19:1 in light
+                // (test_ios_theme_parity §6c); on `cardBackgroundLight` it is audited ≥ 4.5.
+                .background(AppColors.cardBackgroundLight)
                 .cornerRadius(AppCornerRadius.small)
         }
         .buttonStyle(PlainButtonStyle())

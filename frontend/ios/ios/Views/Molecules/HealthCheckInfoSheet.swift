@@ -231,8 +231,10 @@ struct HealthCheckInfoSheet: View {
     private func tipCard(number: String, title: String, description: String) -> some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
             ZStack {
+                // Opaque: `primaryBlue` on its own 20% tint is 3.89:1 in light
+                // (test_ios_theme_parity §6c). The tip card is a `.cardFill()`.
                 Circle()
-                    .fill(AppColors.primaryBlue.opacity(0.2))
+                    .fill(AppColors.cardBackgroundLight)
                     .frame(width: 28, height: 28)
 
                 Text(number)

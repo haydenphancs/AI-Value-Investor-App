@@ -195,6 +195,9 @@ def _package(item_key: str) -> Dict[str, Any]:
 #: What a FakeWriter records when the service does NOT pass `store_state` — never a real state, so a
 #: service that stopped stating it cannot pass for one that passed the default ("prelaunch").
 STORE_STATE_NOT_PASSED = "<not passed>"
+#: The same for `image_posts` (drop-1 review, server:F4): never a bool, so a service that stopped
+#: stating the switch cannot pass for one that passed the writer's default (True).
+IMAGE_POSTS_NOT_PASSED = "<not passed>"
 
 
 class FakeWriter:
@@ -217,10 +220,11 @@ class FakeWriter:
         self.between_rounds = None  # optional callable(generation_id), run after a round's call
 
     async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, judge_mode,
-                       before_call=None, store_state=STORE_STATE_NOT_PASSED):
+                       before_call=None, store_state=STORE_STATE_NOT_PASSED,
+                       image_posts=IMAGE_POSTS_NOT_PASSED):
         self.calls.append({"item": item.key, "template": template.id, "generation_id": generation_id,
                            "run_date": run_date, "judge_mode": judge_mode,
-                           "store_state": store_state})
+                           "store_state": store_state, "image_posts": image_posts})
         for i in range(self.rounds):
             if before_call is not None:
                 ok = await before_call()
@@ -249,6 +253,10 @@ def world(monkeypatch):
     runs = mrs.MarketingRunService(supabase=sb)
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", False)
     monkeypatch.setattr(mrs.settings, "MARKETING_RUN_STALE_SECONDS", 2700)
+    # Image posts (drop 1) off, whatever this machine's environment says: the tests that need them
+    # turn them on themselves.
+    monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_POSTS", False)
+    monkeypatch.setattr(mrs.settings, "MARKETING_X_IMAGES", False)
     # The claim window is computed from the ET date; pin it so the fixed POSTING_DAY is "today".
     monkeypatch.setattr(ss, "_today_et", lambda: POSTING_DAY)
     # No real back-off sleeps in retried ledger writes.
@@ -270,11 +278,13 @@ NONCE = "0123456789abcdef0123456789abcdef"
 
 
 def _run(sb: FakeSB, day: date, **extra) -> str:
-    """A run the worker HOLDS: in_progress and claimed just now (what claim_run writes)."""
+    """A run the worker HOLDS: in_progress and claimed just now (what claim_run writes for a drop-1
+    worker, which declares it can render the post image)."""
     rid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     sb.tables[mrs.RUNS].rows.append({"id": rid, "run_date": day.isoformat(), "status": "in_progress",
-                                     "stage": "planned", "metadata": {"claim_nonce": NONCE},
+                                     "stage": "planned",
+                                     "metadata": {"claim_nonce": NONCE, "worker_capabilities": ["post_image"]},
                                      "timings": {}, "attempts": 1,
                                      "dry_run": True, "started_at": now, "updated_at": now, **extra})
     return rid
@@ -571,8 +581,17 @@ async def test_accepted_script_returns_only_the_worker_subset(world):
     await _drain(svc)
     state = await svc.kick(rid, claim=_holder(svc, rid))
     script = state["script"]
-    assert set(script) == {"hook", "video_script", "cards", "carousel_slides", "disclaimer_card", "outlets"}
+    assert set(script) == {"hook", "video_script", "cards", "carousel_slides", "disclaimer_card", "outlets",
+                           "post_formats", "image_post", "image_footer",
+                           # drop 2 (contract D11): a lesson's template fields are their lesson defaults
+                           "content_class", "authorship", "series", "video_layout", "opening_card",
+                           "image_spec", "logos"}
+    assert (script["content_class"], script["authorship"], script["series"], script["video_layout"],
+            script["opening_card"], script["image_spec"], script["logos"]) == ("A", "ai", None, None, None, None, [])
     assert script["outlets"] == ["x", "youtube"]
+    # Image posts off: the formats are frozen all the same (text / video), with no image to draw.
+    assert script["post_formats"] == {"x": "text", "youtube": "video"}
+    assert script["image_post"] is None and script["image_footer"] is None
     row = _script_row(sb, rid)
     assert row["status"] == "accepted" and row["lease_until"] is None and row["tokens_used"] == 1234
     assert row["fact_sheet"]["sentences"]  # the sheet the package was grounded on
@@ -693,11 +712,13 @@ async def test_losing_the_lease_mid_generation_stops_the_spend_not_just_the_writ
 
     class Thief(FakeWriter):
         async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, judge_mode,
-                           before_call=None, store_state=STORE_STATE_NOT_PASSED):
+                           before_call=None, store_state=STORE_STATE_NOT_PASSED,
+                           image_posts=IMAGE_POSTS_NOT_PASSED):
             _script_row(sb, rid)["generation_id"] = "someone-else"  # a takeover happened
             return await super().__call__(item, template, run_date, generation_id=generation_id,
                                           allow_x_url=allow_x_url, judge_mode=judge_mode,
-                                          before_call=before_call, store_state=store_state)
+                                          before_call=before_call, store_state=store_state,
+                                          image_posts=image_posts)
 
     thief = Thief(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=thief)
@@ -1177,7 +1198,8 @@ async def test_a_ledger_blip_before_the_model_call_hands_the_run_back(world, cap
                 raise mrs.MarketingRunError("get_run failed: 520")
             return await super().get_run(run_id)
 
-    rid = _run(sb, POSTING_DAY, source_ref=KEY)  # mirrored already: no update_run read
+    # mirrored already (drop 2: the mirror is source_ref + template_id + class): no update_run read
+    rid = _run(sb, POSTING_DAY, source_ref=KEY, template_id="three_takeaways", content_class="A")
     row = _seed(sb, rid)
     row.pop("run_date")
     writer = FakeWriter(["accepted"])
@@ -1239,6 +1261,14 @@ def _asset(sb, rid, kind="video", status="ready") -> str:
     return aid
 
 
+def _run_video(sb, rid) -> str:
+    """A ready video of `rid` named by the run's `metadata.video_asset_id` — what the worker's `rendered`
+    PATCH leaves, and the one video every video post of a run with frozen formats must carry (F1)."""
+    aid = _asset(sb, rid)
+    _run_row(sb, rid)["metadata"]["video_asset_id"] = aid
+    return aid
+
+
 @pytest.mark.asyncio
 async def test_create_posts_refuses_before_the_script_is_accepted(world):
     sb, runs = world
@@ -1254,10 +1284,12 @@ async def test_create_posts_uses_the_accepted_copy_not_the_workers(world):
     (post,) = await runs.create_posts(rid, [{
         "platform": "youtube", "format": "video", "title": "WORKER TITLE",
         "caption": "buy $AAPL now", "metadata": {"made_with_ai": False},
-        "asset_ids": [_asset(sb, rid)],
+        "asset_ids": [_run_video(sb, rid)],
     }], claim=_holder_of(runs, rid))
     assert post["caption"] == "server YT copy" and post["title"] == "Server title"
-    assert post["metadata"]["source_ref"] and "made_with_ai" not in post["metadata"]
+    # the worker's metadata is ignored: its made_with_ai=False never lands — the server's own flag does
+    # (drop 2: an AI-written lesson video is made with AI)
+    assert post["metadata"]["source_ref"] and post["metadata"]["made_with_ai"] is True
     assert post["metadata"]["dry_run"] is True
 
 
@@ -1289,7 +1321,7 @@ async def test_media_posts_are_never_auto_approved(world, monkeypatch):
     _run_row(sb, rid)["dry_run"] = False
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", True)
     video, text = await runs.create_posts(rid, [
-        {"platform": "youtube", "format": "video", "asset_ids": [_asset(sb, rid)]},
+        {"platform": "youtube", "format": "video", "asset_ids": [_run_video(sb, rid)]},
         {"platform": "x", "format": "text"},
     ], claim=_holder_of(runs, rid))
     assert video["status"] == "pending_review"
@@ -1425,10 +1457,17 @@ def test_every_marketing_exception_class_classifies_to_a_marketing_code():
     ]
     assert any(c.__name__ == "MarketingJudgeUnavailable" for c in classes)
     assert len(classes) >= 7
+    # Drop 2: a class whose constructor validates its first argument (logo_check.LogoRejected takes a
+    # LOGO_REJECT_REASONS value) is built with a valid one — never skipped, so the walk stays complete.
+    from app.services.marketing import logo_check
+
+    ctor_args = {logo_check.LogoRejected: (sorted(logo_check.LOGO_REJECT_REASONS)[0],)}
+    assert {"MarketingTemplateRefused", "MarketingNewsUnavailable", "NewsTemplateRefused",
+            "LogoRejected"} <= {c.__name__ for c in classes}
     for cls in classes:
         if cls is script_service.LeaseLost:
             continue  # internal control flow, never leaves the generation task
-        code, status = classify_exception(cls("x"))
+        code, status = classify_exception(cls(*ctor_args.get(cls, ("x",))))
         assert code.value.startswith("MARKETING_"), cls.__name__
         assert status < 500 or code.value == "MARKETING_LEDGER_ERROR", cls.__name__
 
@@ -2324,3 +2363,466 @@ async def test_an_unreadable_store_state_is_a_recorded_writer_failure_never_a_cr
     assert any(lvl == logging.ERROR and "writer FAILED" in m and "store state unreadable" in m
                for lvl, m in msgs), msgs
     assert not any("generation CRASHED" in m for _lvl, m in msgs), msgs
+
+
+# ── drop 1: the formats frozen into the accepted output (contract C3) ────────
+#
+# Which of text / image each text platform's post takes is decided ONCE, when the accepted output is
+# written, from MARKETING_IMAGE_POSTS / MARKETING_X_IMAGES and the writer's validated `image_post` —
+# and frozen into the stored output (`post_formats`, `image_post`, `image_footer`). The worker reads
+# them back from the script; `create_posts` records each platform only in its frozen format.
+
+from app.services.marketing import post_copy  # noqa: E402
+
+_IMG = {"title": "Three habits that compound",
+        "paragraphs": ["Small, steady saving adds up.", "Costs you avoid keep working for you."]}
+_ALL_POSTS = ("x", "bluesky", "facebook", "linkedin", "threads", "youtube", "tiktok", "instagram")
+
+
+def _image_package(image_post: Any = None, posts=_ALL_POSTS, **extra) -> Dict[str, Any]:
+    pkg = _package(KEY)
+    pkg["posts"] = {p: {"platform": p, "title": "T" if p == "youtube" else None, "caption": f"copy {p}"}
+                    for p in posts}
+    pkg["image_post"] = copy.deepcopy(_IMG) if image_post is None else image_post
+    pkg.update(extra)
+    return pkg
+
+
+def _image_switches(monkeypatch, images: bool, x_images: bool = False) -> None:
+    monkeypatch.setattr(ss.settings, "MARKETING_IMAGE_POSTS", images)
+    monkeypatch.setattr(ss.settings, "MARKETING_X_IMAGES", x_images)
+
+
+class ImageWriter(FakeWriter):
+    """FakeWriter whose accepted package carries copy for every outlet and an `image_post` (or the
+    one given — None for none, anything else verbatim)."""
+
+    def __init__(self, outcomes, image_post: Any = "default", **kw):
+        super().__init__(outcomes, **kw)
+        self.image_post = image_post
+
+    async def __call__(self, *a, **k):
+        result = await super().__call__(*a, **k)
+        if result.package is not None:
+            judge = result.package.get("judge")
+            result.package.clear()
+            result.package.update(_image_package(posts=_ALL_POSTS))
+            if self.image_post != "default":
+                result.package["image_post"] = self.image_post
+            if judge is not None:
+                result.package["judge"] = judge
+        return result
+
+
+_VIDEO_FORMATS = {"youtube": "video", "tiktok": "video", "instagram": "video"}
+
+
+@pytest.mark.parametrize("images, x_images, expected_text_formats", [
+    (False, False, {p: "text" for p in ("x", "bluesky", "facebook", "linkedin", "threads")}),
+    (False, True, {p: "text" for p in ("x", "bluesky", "facebook", "linkedin", "threads")}),
+    (True, False, {"x": "text", **{p: "image" for p in ("bluesky", "facebook", "linkedin", "threads")}}),
+    (True, True, {p: "image" for p in ("x", "bluesky", "facebook", "linkedin", "threads")}),
+])
+def test_freeze_post_formats_decides_each_platform_from_the_switches(images, x_images, expected_text_formats):
+    package = _image_package()
+    snapshot = copy.deepcopy(package)
+    out = ss.freeze_post_formats(package, POSTING_DAY, image_posts=images, x_images=x_images, run_id="r")
+    assert out["post_formats"] == {**_VIDEO_FORMATS, **expected_text_formats}
+    assert out["image_post"] == _IMG                       # kept either way: it is the writer's text
+    if "image" in out["post_formats"].values():
+        assert out["image_footer"] == post_copy.image_footer(POSTING_DAY)
+    else:
+        assert "image_footer" not in out
+    assert package == snapshot                              # a copy: the writer's package is untouched
+    assert mrs.frozen_post_formats(out) == out["post_formats"]   # what is stored reads back
+
+
+@pytest.mark.parametrize("bad", [
+    {"title": "t", "paragraphs": ["only one"]}, {"title": "", "paragraphs": ["a", "b"]},
+    {"paragraphs": ["a", "b"]}, "a string", ["t", "a", "b"], 42,
+    {"title": "t", "paragraphs": ["a", "b", "c", "d", "e"]},
+])
+def test_an_unusable_image_post_makes_every_platform_text_and_is_logged(bad, caplog):
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        out = ss.freeze_post_formats(_image_package(image_post=bad), POSTING_DAY, image_posts=True,
+                                     x_images=True, run_id="run-7")
+    assert out["image_post"] is None and "image_footer" not in out
+    assert set(out["post_formats"].values()) == {"text", "video"}
+    assert any("image_post is unusable" in r.getMessage() and "run-7" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_absent_image_post_is_text_without_a_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        pkg = _image_package()
+        del pkg["image_post"]
+        out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=True, x_images=True)
+        out2 = ss.freeze_post_formats(_image_package(image_post=None) | {"image_post": None}, POSTING_DAY,
+                                      image_posts=True, x_images=True)
+    for o in (out, out2):
+        assert o["image_post"] is None and set(o["post_formats"].values()) == {"text", "video"}
+    assert not caplog.records
+
+
+def test_freeze_covers_only_the_outlets_with_copy_and_drops_a_stale_footer(caplog):
+    pkg = _image_package(posts=("bluesky", "tiktok"), image_footer="a stale footer from somewhere")
+    out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=False, x_images=False)
+    assert out["post_formats"] == {"bluesky": "text", "tiktok": "video"}   # dropped outlets: no format
+    assert "image_footer" not in out
+    # a platform outside the format map gets no format, loudly
+    pkg = _image_package(posts=("bluesky", "pinterest"))
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=True, x_images=False, run_id="r")
+    assert out["post_formats"] == {"bluesky": "image"}
+    assert any("pinterest" in r.getMessage() for r in caplog.records)
+    # no posts at all: an empty map, never an error
+    assert ss.freeze_post_formats({"posts": None}, POSTING_DAY, image_posts=True, x_images=True)[
+        "post_formats"] == {}
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_package_freezes_its_formats_and_the_worker_reads_them_back(world, monkeypatch):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    stored = _script_row(sb, rid)["output"]
+    expected = {**_VIDEO_FORMATS, "x": "text", "bluesky": "image", "facebook": "image",
+                "linkedin": "image", "threads": "image"}
+    assert stored["post_formats"] == expected
+    assert stored["image_post"] == _IMG and stored["image_footer"] == post_copy.image_footer(POSTING_DAY)
+    assert stored["judge"]["mode"] == "enforce" and stored["posts"]["x"]["caption"] == "copy x"
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    script = state["script"]
+    assert script["post_formats"] == expected and script["image_post"] == _IMG
+    assert script["image_footer"] == post_copy.image_footer(POSTING_DAY)
+    # The wire model carries them (add-only fields of WorkerScript).
+    from app.schemas.marketing import ScriptKickResponse
+
+    wire = ScriptKickResponse.model_validate(state).model_dump()["script"]
+    assert wire["post_formats"] == expected and wire["image_post"] == _IMG
+    # FROZEN: flipping the switches after acceptance changes nothing the worker reads.
+    _image_switches(monkeypatch, images=False, x_images=False)
+    again = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert again["post_formats"] == expected and again["image_footer"] == script["image_footer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at_start, expected_x", [(False, "text"), (True, "image")])
+async def test_the_image_switch_is_read_once_when_the_generation_starts_and_freezes_with_it(
+        world, monkeypatch, at_start, expected_x):
+    """Drop-1 review (server:F4): MARKETING_IMAGE_POSTS is read ONCE, when the generation starts (like
+    the store state): the writer is told it — off, an image problem alone buys no repair round — and
+    the formats are frozen with the SAME value. A flip during a slow generation lands on the next
+    generation, never half on this one (a writer told "off" and formats frozen "image", or the
+    reverse). This used to read the switch again at the accepted write."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=at_start, x_images=True)
+    writer = ImageWriter(["accepted"])
+    writer.gate = asyncio.Event()
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    for _ in range(500):   # until the generation is INSIDE the writer (past every pre-call read)
+        if writer.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert writer.calls and not writer.gate.is_set()
+    _image_switches(monkeypatch, images=not at_start, x_images=True)
+    writer.gate.set()
+    await _drain(svc)
+    assert [c["image_posts"] for c in writer.calls] == [at_start]
+    assert _script_row(sb, rid)["output"]["post_formats"]["x"] == expected_x
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_image_post_never_rejects_the_package(world, monkeypatch, caplog):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=True)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"], image_post={"title": "only"}))
+    rid = _run(sb, POSTING_DAY)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and row["generations"] == 1
+    assert row["output"]["image_post"] is None and "image_footer" not in row["output"]
+    assert set(row["output"]["post_formats"].values()) == {"text", "video"}
+    assert any("image_post is unusable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_freeze_failure_keeps_the_paid_package_without_formats(world, monkeypatch, caplog):
+    """An unexpected raise while freezing must not throw away a paid, accepted package (that would
+    re-bill a generation): it is stored WITHOUT formats — which reads back exactly as a script accepted
+    before image posts existed — and the failure is an ERROR."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("freeze broke")
+
+    monkeypatch.setattr(ss, "freeze_post_formats", broken)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and row["generations"] == 1
+    assert "post_formats" not in row["output"] and "image_footer" not in row["output"]
+    assert any(r.levelno == logging.ERROR and "could not freeze the post formats" in r.getMessage()
+               for r in caplog.records)
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["post_formats"] is None and script["image_post"] is None and script["image_footer"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_script_accepted_before_drop_1_reads_back_exactly_as_before(world):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    _seed(sb, rid, status="accepted", output=_package(KEY), generation_id=str(uuid.uuid4()))
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    script = state["script"]
+    assert script["post_formats"] is None and script["image_post"] is None and script["image_footer"] is None
+    assert script["outlets"] == ["x", "youtube"]
+    from app.schemas.marketing import ScriptKickResponse
+
+    assert ScriptKickResponse.model_validate(state).script.post_formats is None
+
+
+@pytest.mark.parametrize("bad", [{"x": "carousel"}, "image", {"x": "image"}])
+@pytest.mark.asyncio
+async def test_frozen_formats_that_do_not_read_back_reach_the_worker_as_none(world, caplog, bad):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    _seed(sb, rid, status="accepted", output={**_package(KEY), "post_formats": bad,
+                                              "image_post": copy.deepcopy(_IMG)},
+          generation_id=str(uuid.uuid4()))
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["post_formats"] is None and script["image_post"] is None and script["image_footer"] is None
+    assert any(r.levelno == logging.ERROR and "do not read back" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_an_image_day_end_to_end_records_image_posts_with_the_frozen_formats(world, monkeypatch):
+    """kick → accepted (image posts on) → the worker's post image (a ready card, role post_image, named
+    by the run's pointer) → create_posts: the text platforms as images, X as text, video as video."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    image = _asset(sb, rid, kind="card")
+    next(a for a in sb.tables[mrs.ASSETS].rows if a["id"] == image)["metadata"] = {"image_role": "post_image"}
+    _run_row(sb, rid)["metadata"]["image_asset_id"] = image
+    video = _run_video(sb, rid)
+    posts = await runs.create_posts(rid, [
+        {"platform": "bluesky", "format": "image", "asset_ids": [image]},
+        {"platform": "threads", "format": "image", "asset_ids": [image]},
+        {"platform": "x", "format": "text"},
+        {"platform": "youtube", "format": "video", "asset_ids": [video]},
+    ], claim=_holder_of(runs, rid))
+    assert [(p["platform"], p["format"], p["status"]) for p in posts] == [
+        ("bluesky", "image", "pending_review"), ("threads", "image", "pending_review"),
+        ("x", "text", "pending_review"), ("youtube", "video", "pending_review")]
+    assert [p["caption"] for p in posts] == ["copy bluesky", "copy threads", "copy x", "copy youtube"]
+    # X was frozen as text: an image for it is refused, whatever the worker asks.
+    with pytest.raises(mrs.MarketingRequestInvalid):
+        await runs.create_posts(rid, [{"platform": "x", "format": "image", "asset_ids": [image]}],
+                                claim=_holder_of(runs, rid))
+
+
+def test_the_kick_route_serializes_the_frozen_formats(client, monkeypatch):
+    import app.api.v1.endpoints.marketing_internal as mi
+
+    script = {"hook": "h", "video_script": ["l"], "cards": [], "carousel_slides": [],
+              "disclaimer_card": "d", "outlets": ["bluesky", "tiktok"],
+              "post_formats": {"bluesky": "image", "tiktok": "video"}, "image_post": _IMG,
+              "image_footer": post_copy.image_footer(POSTING_DAY)}
+
+    class Svc:
+        def __init__(self, s):
+            self.s = s
+
+        async def kick(self, run_id, *, claim):
+            return {"status": "accepted", "source_ref": KEY, "template_id": "checklist", "script": self.s}
+
+    monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc(script))
+    body = client.post(f"{_BASE}/runs/r1/script", headers=_H).json()
+    assert body["script"]["post_formats"] == {"bluesky": "image", "tiktok": "video"}
+    assert body["script"]["image_post"] == _IMG and body["script"]["image_footer"].endswith("· Caydex")
+    # an older service shape (no drop-1 keys) still answers, with nulls the worker treats as absent
+    legacy = {k: v for k, v in script.items() if k not in ("post_formats", "image_post", "image_footer")}
+    monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc(legacy))
+    body = client.post(f"{_BASE}/runs/r1/script", headers=_H).json()
+    assert body["script"]["post_formats"] is None and body["script"]["image_footer"] is None
+
+
+def test_the_image_switches_ship_off_and_the_x_image_price_is_bounded(monkeypatch):
+    """Declared defaults (not this machine's environment): every drop-1 switch fail-closed, and the X
+    image price a bounded integer that fails the deploy when it is not."""
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    fields = Settings.model_fields
+    assert fields["MARKETING_REVIEW_BUNDLES"].default is False
+    assert fields["MARKETING_IMAGE_POSTS"].default is False
+    assert fields["MARKETING_X_IMAGES"].default is False
+    assert fields["MARKETING_X_IMAGE_POST_MICROS"].default == 200_000
+    for bad in ("-1", "1000001", "abc", "0.5", ""):
+        monkeypatch.setenv("MARKETING_X_IMAGE_POST_MICROS", bad)
+        with pytest.raises(ValidationError) as e:
+            Settings()
+        assert [err["loc"] for err in e.value.errors()] == [("MARKETING_X_IMAGE_POST_MICROS",)], bad
+    for ok in ("0", "1000000", "200000"):
+        monkeypatch.setenv("MARKETING_X_IMAGE_POST_MICROS", ok)
+        assert Settings().MARKETING_X_IMAGE_POST_MICROS == int(ok)
+
+
+# ── UP-IMG-1: a Threads image post only while its caption fits 500 UTF-8 BYTES ─────
+
+
+@pytest.mark.parametrize("caption, nbytes, expected", [
+    ("a" * 500, 500, "image"),                      # 500 bytes: fits
+    ("a" * 498 + "é", 500, "image"),                # 499 characters, 500 bytes: fits
+    ("a" * 499 + "é", 501, "text"),                 # 500 characters, 501 bytes: does not
+    ("a" * 499 + "—", 502, "text"),                 # 500 characters (the value line's em dash): does not
+    ("a" * 501, 501, "text"),
+])
+def test_a_threads_caption_over_500_utf8_bytes_freezes_threads_as_text(caption, nbytes, expected, caplog):
+    """Upload-Post splits Threads text over 500 BYTES into a thread unless `threads_long_text_as_post`
+    works — verified only on its text route. A longer caption keeps Threads on the text route (one
+    post); the rule is Threads-only (Bluesky's equally long caption still takes the image)."""
+    assert len(caption.encode("utf-8")) == nbytes
+    pkg = _image_package()
+    pkg["posts"]["threads"]["caption"] = caption
+    pkg["posts"]["bluesky"]["caption"] = caption
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=True, x_images=True, run_id="run-9")
+    assert out["post_formats"]["threads"] == expected
+    assert out["post_formats"]["bluesky"] == "image" and out["image_footer"]
+    logged = [r for r in caplog.records if "Threads caption" in r.getMessage()]
+    if expected == "text":
+        (rec,) = logged
+        assert rec.levelno == logging.INFO and f"{nbytes} UTF-8 bytes" in rec.getMessage()
+        assert "run-9" in rec.getMessage()
+    else:
+        assert logged == []
+    assert mrs.frozen_post_formats(out) == out["post_formats"]
+
+
+def test_a_long_threads_caption_with_image_posts_off_is_text_as_always(caplog):
+    pkg = _image_package()
+    pkg["posts"]["threads"]["caption"] = "a" * 499 + "—"
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=False, x_images=False)
+    assert out["post_formats"]["threads"] == "text"
+    assert not [r for r in caplog.records if "Threads caption" in r.getMessage()]
+
+
+# ── compat F2: image formats only for a run whose holding worker can render them ──
+
+
+@pytest.mark.asyncio
+async def test_an_old_worker_holding_the_run_gets_text_posts_and_a_warning_naming_it(world, monkeypatch, caplog):
+    """MARKETING_IMAGE_POSTS on, but the worker that claimed the run declared nothing (an older image):
+    every text platform is frozen as TEXT — the posts it can make — instead of `image`, which its
+    create_posts call would have refused for the whole day (videos included)."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=True)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY, worker_version="phase4")
+    _run_row(sb, rid)["metadata"].pop("worker_capabilities")
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert out["post_formats"] == {**_VIDEO_FORMATS, **{p: "text" for p in ("x", "bluesky", "facebook",
+                                                                            "linkedin", "threads")}}
+    assert "image_footer" not in out and out["image_post"] == _IMG
+    warned = [r.getMessage() for r in caplog.records if "did not declare" in r.getMessage()]
+    assert len(warned) == 1 and "'phase4'" in warned[0] and rid in warned[0] and "TEXT" in warned[0]
+
+
+@pytest.mark.parametrize("declared_at_start, declared_at_write, expected", [
+    (True, False, "text"),    # an older worker re-claimed the run during the generation
+    (False, True, "image"),   # a drop-1 worker re-claimed it
+])
+@pytest.mark.asyncio
+async def test_the_capability_of_the_worker_holding_the_run_at_write_time_decides(
+        world, monkeypatch, declared_at_start, declared_at_write, expected):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=True)
+    writer = ImageWriter(["accepted"])
+    writer.gate = asyncio.Event()
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _run(sb, POSTING_DAY)
+    meta = _run_row(sb, rid)["metadata"]
+    if not declared_at_start:
+        meta.pop("worker_capabilities")
+    await svc.kick(rid, claim=_holder(svc, rid))
+    for _ in range(500):
+        if writer.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert writer.calls and not writer.gate.is_set()
+    if declared_at_write:
+        meta["worker_capabilities"] = ["post_image"]
+    else:
+        meta.pop("worker_capabilities", None)
+    writer.gate.set()
+    await _drain(svc)
+    assert _script_row(sb, rid)["output"]["post_formats"]["bluesky"] == expected
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_cannot_be_read_at_write_time_freezes_text(world, monkeypatch, caplog):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=True)
+    writer = ImageWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _run(sb, POSTING_DAY)
+    real_get_run = runs.get_run
+
+    async def broken_after_the_model_call(run_id):
+        if writer.calls:      # the write-time read of the holder fails; the kick's own reads did not
+            raise mrs.MarketingRunError("get_run failed: 520")
+        return await real_get_run(run_id)
+
+    monkeypatch.setattr(runs, "get_run", broken_after_the_model_call)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and set(row["output"]["post_formats"].values()) == {"text", "video"}
+    assert any("could not read run_id" in r.getMessage() and "frozen as text" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_with_image_posts_off_the_holder_is_never_consulted(world, monkeypatch):
+    """Switches off: the freeze is what it was before the capability check — no run read, no warning."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=False)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    _run_row(sb, rid)["metadata"].pop("worker_capabilities")
+    asked: List[str] = []
+
+    async def spy(run_id, gen_id):
+        asked.append(run_id)
+        return True
+
+    monkeypatch.setattr(svc, "_holder_renders_images", spy)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert asked == []
+    assert set(_script_row(sb, rid)["output"]["post_formats"].values()) == {"text", "video"}

@@ -634,14 +634,6 @@ enum ReportStatus: String {
         case .ready: return AppColors.gain        // Green
         }
     }
-
-    var backgroundColor: Color {
-        switch self {
-        case .processing: return AppColors.primaryBlue.opacity(0.2)
-        case .failed: return AppColors.loss.opacity(0.2)
-        case .ready: return AppColors.gain.opacity(0.2)
-        }
-    }
 }
 
 // MARK: - Analysis Report

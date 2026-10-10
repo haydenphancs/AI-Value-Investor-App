@@ -90,7 +90,7 @@ struct SignalHolder: Identifiable {
     let whaleId: String?             // non-nil → tappable → WhaleProfileView
     let name: String
     let subtitle: String
-    let dateText: String             // "Filed Jun 30" / "Traded Jun 1 · Disclosed Jun 30"
+    let dateText: String             // "Q2 2026 13F" / "Traded Jun 1 · Disclosed Jun 30"
     let primaryText: String          // right headline (allocation move / range)
     let secondaryText: String        // right secondary (~$ est / owner)
     var isTappable: Bool { whaleId != nil }
@@ -226,9 +226,19 @@ enum SignalDetailFormat {
         return parts.joined(separator: " · ")
     }
 
+    /// "Q2 2026 13F". A 13F row's date is the QUARTER END its filing reports holdings for
+    /// (the backend stores FMP's institutional-ownership `date`), never the day the 13F was
+    /// filed, so it is labelled by quarter. Reading only the month also keeps the backend's
+    /// fallback quarter ends (Mar 30 / Dec 30) in the right quarter. "" when unparseable.
     static func whaleDate(_ iso: String?) -> String {
-        guard let d = shortDate(iso) else { return "" }
-        return "Filed \(d)"
+        guard let iso else { return "" }
+        let day = String(iso.prefix(10))
+        guard isoParser.date(from: day) != nil else { return "" }
+        let fields = day.split(separator: "-")
+        guard fields.count == 3, let year = Int(fields[0]), let month = Int(fields[1]),
+              (1...12).contains(month) else { return "" }
+        let quarter: Int = (month - 1) / 3 + 1
+        return "Q\(quarter) \(year) 13F"
     }
 
     /// "Traded Sep 18 · Filed Sep 20" — a Form 4 is FILED, not "disclosed" like a PTR.

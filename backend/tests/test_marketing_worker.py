@@ -605,12 +605,17 @@ class FakeBackend:
             ready = [dict(a, public_url=f"https://sb.example/object/public/marketing-media/{a['storage_path']}")
                      for a in self.assets.values() if a["status"] == "ready"]
 
-            def verified(key, kind):
+            def verified(key, kind, role=None):
                 pointer = (self.run.get("metadata") or {}).get(key)
-                return pointer if any(a["id"] == pointer and a["kind"] == kind for a in ready) else None
+                return pointer if any(a["id"] == pointer and a["kind"] == kind
+                                      and (role is None or (a.get("metadata") or {}).get("image_role") == role)
+                                      for a in ready) else None
 
+            # Like the real read-back (run_service.read_back): the post image is a ready `card` whose
+            # image_role is the post image.
             return httpx.Response(200, json={"voice_asset_id": verified("voice_asset_id", "audio"),
                                              "video_asset_id": verified("video_asset_id", "video"),
+                                             "image_asset_id": verified("image_asset_id", "card", "post_image"),
                                              "assets": ready})
         if path.endswith("/posts") and request.method == "POST":
             if self.posts_status != 200:
@@ -1232,7 +1237,8 @@ def test_every_media_stage_fits_its_worst_case_inside_the_start_margin(m):
     # pin counted neither the calls nor the heartbeat, and promised the 30-min deadline).
     worst = {
         "voiced": voice.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + 3 * call,   # list, register, complete
-        "rendered": render.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + 3 * call,
+        # list + (register, complete) for the video AND the post image (drop 1)
+        "rendered": render.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + 5 * call,
         "assets_ready": 2 * call,                                                 # read-back, create_posts
         "selected": call,
         # stage_script polls until min(start + SCRIPT_POLL_BUDGET, t0 + DEADLINE - 60), so at the
@@ -1501,6 +1507,335 @@ def test_post_specs_edges():
     assert rd.post_specs(["tiktok", "tiktok"], "v")[0] == {"platform": "tiktok", "format": "video", "asset_ids": ["v"]}
 
 
+# ── drop 1 (2026-10-09): the post image and the run's frozen formats (contract C5) ─────────────
+
+
+_IMAGE_POST = {"title": "Mr. Market's mood is not the business",
+               "paragraphs": ["Every day he names a price for your share of the business.",
+                              "His price follows his mood, not the business itself."]}
+
+
+def _footer() -> str:
+    from datetime import date
+
+    from app.services.marketing import post_copy
+
+    return post_copy.image_footer(date(2026, 9, 17))
+
+
+def _server_script(platforms, *, image_posts=True, x_images=False, image_post=_IMAGE_POST) -> Dict[str, Any]:
+    """The worker script EXACTLY as the server builds it: the writer's package frozen at write time
+    (script_service.freeze_post_formats) and cut down for the worker (script_service.worker_script),
+    validated against the wire schema the endpoint answers with."""
+    from datetime import date
+
+    from app.schemas.marketing import WorkerScript
+    from app.services.marketing import script_service
+
+    package = {k: v for k, v in _VIDEO_SCRIPT.items() if k != "outlets"}
+    package["posts"] = {p: {"caption": f"server {p} copy"} for p in platforms}
+    package["image_post"] = image_post
+    output = script_service.freeze_post_formats(package, date(2026, 9, 17), image_posts=image_posts,
+                                                x_images=x_images, run_id="run-1")
+    return WorkerScript.model_validate(script_service.worker_script(output)).model_dump()
+
+
+def _accepted(script: Dict[str, Any]) -> FakeBackend:
+    return FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                       "template_id": "case_story", "script": script}])
+
+
+def _image_script(**over) -> Dict[str, Any]:
+    s = dict(_VIDEO_SCRIPT, outlets=["bluesky", "facebook", "tiktok", "x"],
+             post_formats={"bluesky": "image", "facebook": "text", "tiktok": "video", "x": "image"},
+             image_post=_IMAGE_POST, image_footer=_footer())
+    s.update(over)
+    return s
+
+
+def _cards(be: FakeBackend) -> List[Dict[str, Any]]:
+    return [a for a in be.assets.values() if a["kind"] == "card"]
+
+
+def test_an_image_and_video_day_records_each_outlet_in_its_frozen_format(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    from app.schemas.marketing import AssetRegisterRequest, normalize_image_post
+    from marketing import cards
+
+    script = _server_script(["bluesky", "facebook", "instagram", "linkedin", "threads", "tiktok", "x", "youtube"])
+    assert script["post_formats"] == {"bluesky": "image", "facebook": "image", "instagram": "video",
+                                      "linkedin": "image", "threads": "image", "tiktok": "video",
+                                      "x": "text", "youtube": "video"}       # X images off by default
+    be = _accepted(script)
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    (card,) = _cards(be)
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    md = card["metadata"]
+    footer = script["image_footer"]
+    assert md["onscreen_text"] == [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"], footer]
+    assert md["image_role"] == cards.IMAGE_ROLE_POST == "post_image" and len(md["render_key"]) == 64
+    assert md["card_version"] == cards.CARD_RENDER_VERSION and md["template_id"] == "case_story"
+    assert card["content_type"] == "image/jpeg" and card["status"] == "ready"
+    # What went over the wire passes the server's own request schema and its allow-list.
+    reg = next(b for b in be.registered if b["kind"] == "card")
+    AssetRegisterRequest.model_validate(reg)
+    assert reg["ext"] == "jpg" and 0 < reg["bytes"] <= cards.POST_IMAGE_MAX_BYTES
+    stored = normalize_image_post(_IMAGE_POST)
+    assert set(md["onscreen_text"]) <= {stored["title"], *stored["paragraphs"], footer} and footer in md["onscreen_text"]
+    (body,) = [b for p, b in be.uploaded.items() if "/card-" in p]
+    assert b"Content-Type: image/jpeg" in body and b"\xff\xd8\xff" in body       # a real JPEG went up
+    # The image is registered BEFORE the video, and both pointers ride in the ONE checkpoint PATCH.
+    kinds = [b["kind"] for b in be.registered]
+    assert kinds.index("card") < kinds.index("video")
+    rendered = next(p for p in be.patches if p.get("stage") == "rendered")
+    assert rendered["metadata"] == {"image_asset_id": card["id"], "video_asset_id": video["id"]}
+    ((posts,),) = [list(b.values()) for b in be.posts_bodies]
+    by_platform = {p["platform"]: p for p in posts}
+    assert {p: s["format"] for p, s in by_platform.items()} == script["post_formats"]
+    for p, spec in by_platform.items():
+        assert spec.get("asset_ids") == {"image": [card["id"]], "video": [video["id"]]}.get(spec["format"]), p
+    assert be.run["status"] == "media_ready"
+
+
+def test_an_image_only_day_draws_the_image_and_never_narrates(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    from marketing import voice as vc
+
+    def never(lines, **k):
+        raise AssertionError("an image-only day must never be narrated")
+
+    script = _server_script(["bluesky", "x"], x_images=True)
+    assert script["post_formats"] == {"bluesky": "image", "x": "image"}
+    be = _accepted(script)
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(vc, "run_child", never)
+    assert m.main() == 0
+    (card,) = _cards(be)
+    assert not [a for a in be.assets.values() if a["kind"] in ("audio", "video")]
+    voiced = next(p for p in be.patches if p.get("stage") == "voiced")
+    rendered = next(p for p in be.patches if p.get("stage") == "rendered")
+    assert "metadata" not in voiced and rendered["metadata"] == {"image_asset_id": card["id"]}
+    assert be.posts_bodies == [{"posts": [{"platform": "bluesky", "format": "image", "asset_ids": [card["id"]]},
+                                          {"platform": "x", "format": "image", "asset_ids": [card["id"]]}]}]
+    # The render is a real stage on such a day (render + upload): it keeps the full start margin,
+    # while the voice stage, with nothing to narrate, takes the quick one.
+    assert m.stage_start_margin("rendered", {"script": script}) == m.STAGE_START_MARGIN_SECONDS
+    assert m.stage_start_margin("voiced", {"script": script}) == m.QUICK_STAGE_MARGIN_SECONDS
+
+
+def test_image_switches_off_records_text_posts_and_draws_no_image(m, monkeypatch, env):
+    script = _server_script(["bluesky", "tiktok", "x"], image_posts=False)
+    assert script["post_formats"] == {"bluesky": "text", "tiktok": "video", "x": "text"}
+    # The server still hands over the stored image_post (no footer): the FORMATS decide, never its
+    # mere presence — an image nobody posts would be an unchecked public object.
+    assert script["image_post"] == _IMAGE_POST and script["image_footer"] is None
+    be = _accepted(script)
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert _cards(be) == []
+    rendered = next(p for p in be.patches if p.get("stage") == "rendered")
+    assert set(rendered["metadata"]) == {"video_asset_id"}
+    assert [(p["platform"], p["format"]) for p in be.posts_bodies[0]["posts"]] == [
+        ("bluesky", "text"), ("tiktok", "video"), ("x", "text")]
+
+
+def test_a_matching_ready_post_image_is_reused_without_drawing_again(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    from marketing import cards
+    from marketing import render as rd
+
+    be = _accepted(_image_script())
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    (card,) = _cards(be)
+
+    def boom(*a, **k):
+        raise AssertionError("a reused render must not be drawn again")
+
+    monkeypatch.setattr(cards, "render_image", boom)
+    monkeypatch.setattr(rd, "produce_video", boom)
+    # a later tick re-claims the SAME run after a lost close (resume from `voiced`)
+    be.run.update({"status": "in_progress", "stage": "voiced"})
+    for key in ("image_asset_id", "video_asset_id"):
+        be.run["metadata"].pop(key)
+    n_registered = len(be.registered)
+    assert m.main() == 0
+    assert _cards(be) == [card] and be.run["metadata"]["image_asset_id"] == card["id"]
+    assert not [b for b in be.registered[n_registered:] if b["kind"] in ("card", "video")]
+    assert be.run["status"] == "media_ready"
+
+
+@pytest.mark.parametrize("over", [
+    {"image_post": {"title": "Growth 🚀", "paragraphs": ["Plain one.", "Plain two."]}},
+    {"cards": [{"title": "Growth 🚀", "body": "Plain body."}]},       # the VIDEO's card: no image left behind
+])
+def test_a_glyph_the_font_cannot_draw_skips_the_day_before_anything_is_uploaded(m, monkeypatch, env, over):
+    pytest.importorskip("PIL")
+    be = _accepted(_image_script(**over))
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "unrenderable_text"
+    assert not [b for b in be.registered if b["kind"] in ("card", "video")] and be.posts_bodies == []
+
+
+def test_a_video_card_that_cannot_fit_leaves_no_post_image_behind(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    from marketing import cards
+    from marketing import render as rd
+
+    def overflow(**_k):
+        raise cards.CardOverflow("one word wider than the zone")
+
+    be = _accepted(_image_script())
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", overflow)
+    assert m.main() == 0
+    assert be.run["metadata"]["skip_reason"] == "unrenderable_text"
+    assert _cards(be) == [] and be.posts_bodies == []
+
+
+def test_image_text_that_cannot_fit_whole_skips_the_day(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    long = " ".join(["Diversification"] * 37)[:600]
+    be = _accepted(_image_script(image_post={"title": "t", "paragraphs": [long] * 4}))
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["metadata"]["skip_reason"] == "unrenderable_text"
+    assert not [b for b in be.registered if b["kind"] in ("card", "video")]
+
+
+def test_an_image_over_the_cap_at_every_quality_skips_the_day_and_is_never_sent(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    from marketing import cards
+
+    be = _accepted(_image_script())
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(cards, "POST_IMAGE_MAX_BYTES", 1000)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "image_too_large"
+    assert not [b for b in be.registered if b["kind"] in ("card", "video")]
+
+
+def test_the_byte_assert_refuses_an_oversize_image_even_if_the_ladder_let_it_through(m, monkeypatch, env):
+    pytest.importorskip("PIL")
+    from marketing import cards
+
+    real = cards.render_image
+
+    def lying(*a, **k):
+        out = real(*a, **k)
+        return cards.RenderedImage(data=out.data + b"\0" * cards.POST_IMAGE_MAX_BYTES, quality=out.quality,
+                                   layout=out.layout)
+
+    be = _accepted(_image_script())
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(cards, "render_image", lying)
+    assert m.main() == 1
+    assert "over" in _closing_patch(be)["last_error"] and _cards(be) == []
+
+
+@pytest.mark.parametrize("over, needle", [
+    ({"image_post": None}, "no image_post"),
+    ({"image_footer": None}, "image_footer"),
+    ({"image_post": {"title": "t", "paragraphs": ["only one"]}}, "paragraphs"),
+    ({"post_formats": {"x": "carousel"}}, "post_formats"),
+    ({"post_formats": ["x", "image"]}, "post_formats"),
+])
+def test_an_image_contract_breach_fails_the_run_loudly(m, monkeypatch, env, over, needle):
+    be = _accepted(_image_script(**over))
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    closing = _closing_patch(be)
+    assert closing["status"] == "failed" and needle in closing["last_error"], closing
+    assert be.posts_bodies == []
+
+
+def test_a_resume_past_rendered_without_a_verified_post_image_fails_loudly(m, monkeypatch, env):
+    """Never post an image outlet without its image (or silently as text)."""
+    be = _accepted(_image_script(post_formats={"bluesky": "image", "facebook": "text", "tiktok": "text",
+                                               "x": "text"}))
+    be.run["stage"] = "rendered"
+    be.run["metadata"] = {"image_asset_id": "asset-not-there"}
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert "no verified post image" in _closing_patch(be)["last_error"] and be.posts_bodies == []
+
+
+def test_frozen_and_outlet_formats():
+    from marketing import render as rd
+
+    old = {"outlets": ["tiktok", "x", "pinterest"]}
+    assert rd.frozen_formats(old) is None and rd.frozen_formats({"post_formats": None}) is None
+    assert rd.outlet_formats(old) == {"tiktok": "video", "x": "text"}           # POST_FORMAT fallback
+    assert rd.video_needed(old) and not rd.image_needed(old)
+    new = {"outlets": ["x", "bluesky", "tiktok"], "post_formats": {"x": "image", "bluesky": "text"}}
+    assert rd.outlet_formats(new) == {"x": "image", "bluesky": "text"}         # the frozen map wins
+    assert rd.image_needed(new) and not rd.video_needed(new)
+    assert rd.frozen_formats(new) == new["post_formats"] and rd.frozen_formats(new) is not new["post_formats"]
+    assert rd.outlet_formats({"outlets": None}) == {} and rd.outlet_formats({}) == {}
+    for bad in ("image", ["x"], {"x": "carousel"}, {"x": None}, {"x": 1}, {3: "text"}):
+        with pytest.raises(rd.RenderInputError):
+            rd.frozen_formats({"post_formats": bad})
+        with pytest.raises(rd.RenderInputError):
+            rd.outlet_formats({"outlets": ["x"], "post_formats": bad})
+
+
+def test_post_specs_follow_the_frozen_formats(caplog):
+    from marketing import render as rd
+
+    formats = {"bluesky": "image", "facebook": "text", "tiktok": "video"}
+    assert rd.post_specs(["bluesky", "facebook", "tiktok"], "v", "i", formats=formats) == [
+        {"platform": "bluesky", "format": "image", "asset_ids": ["i"]},
+        {"platform": "facebook", "format": "text"},
+        {"platform": "tiktok", "format": "video", "asset_ids": ["v"]}]
+    with pytest.raises(rd.RenderInputError, match="post image"):
+        rd.post_specs(["bluesky"], "v", None, formats=formats)
+    with pytest.raises(rd.RenderInputError, match="video"):
+        rd.post_specs(["tiktok"], None, "i", formats=formats)
+    with pytest.raises(rd.RenderInputError, match="frozen format"):
+        rd.post_specs(["x"], None, None, formats={"x": "carousel"})
+    # An outlet with copy but no frozen format: no post, logged at ERROR (never a guess the server
+    # would refuse — which would fail every other post of the day with it).
+    caplog.set_level(logging.ERROR, logger="marketing.render")
+    assert rd.post_specs(["x", "facebook"], None, None, formats={"facebook": "text"}) == [
+        {"platform": "facebook", "format": "text"}]
+    assert any("'x'" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+    # The image id is never used for a text or video post, nor the video id for an image post.
+    assert rd.post_specs(["facebook"], "v", "i", formats=formats) == [{"platform": "facebook", "format": "text"}]
+
+
+def test_the_worker_mirrors_the_servers_image_contract():
+    from app.schemas import marketing as sch
+    from marketing import render as rd
+    from marketing import video
+
+    assert rd.FROZEN_FORMATS == sch.FROZEN_POST_FORMATS
+    assert sch.POST_MEDIA_KINDS["image"] == ("card",)
+    # Every format the server can freeze for a platform is one the worker records.
+    for platform, allowed in sch.POST_FORMATS_BY_PLATFORM.items():
+        assert set(allowed) <= set(rd.FROZEN_FORMATS), platform
+    assert rd.RENDER_STAGE_VERSION == "render/v3"      # v3: drop 2a (template scripts)
+    from marketing import logos
+
+    assert rd.worst_case_seconds(120.0) == (video.worst_case_seconds(120.0) + rd.IMAGE_RENDER_SECONDS + 120.0
+                                            + logos.LOGOS_WORST_CASE_SECONDS)
+
+
+def test_the_image_render_key_changes_with_every_input_that_changes_the_bytes():
+    from marketing import render as rd
+
+    base = dict(texts=["T", "P1", "P2", "F"], card_version="c1", layout_engine="raqm", max_bytes=950_000)
+    k = rd.image_render_key(**base)
+    assert k == rd.image_render_key(**base) and len(k) == 64
+    for change in ({"texts": ["T", "P1", "P2", "F!"]}, {"texts": ["T", "P2", "P1", "F"]}, {"card_version": "c2"},
+                   {"layout_engine": "basic"}, {"max_bytes": 900_000}):
+        assert rd.image_render_key(**{**base, **change}) != k, change
+    # never the video's key for the same strings
+    assert k != rd.render_key(audio_sha256="a" * 64, words=[], card_texts=[base["texts"]], threads=2,
+                              card_version="c1", video_version="v1", max_seconds=75.0, layout_engine="raqm")
+
+
 def test_the_render_readiness_check_names_every_missing_piece(m, monkeypatch, tmp_path):
     out = m.render_readiness(str(tmp_path / "fonts"))
     assert not out["ready"]
@@ -1689,3 +2024,807 @@ def test_a_social_setting_in_a_copy_of_the_real_tree_is_caught(tmp_path):
     docker = copy / "Dockerfile"
     docker.write_text(docker.read_text() + "\nENV MARKETING_X_CONSUMER_SECRET=\"\"\n")
     assert _social_hits(copy) == ["Dockerfile: MARKETING_X_CONSUMER_SECRET"]
+
+
+# ── drop 1 (compat F2): the worker declares what it can render on every claim ──
+
+
+def test_every_claim_declares_the_post_image_capability_the_server_accepts(m, monkeypatch, env, caplog):
+    """The server freezes `image` post formats only for a run whose claiming worker declared it can
+    render the post image; this worker does (render.py draws the 4:5 post image), on every claim — and
+    the server's claim schema keeps exactly what it sends (nothing dropped as unknown). Drop 2a: it also
+    declares `news_templates` (it draws the per-line template video, its opening card and the
+    `image_spec` image) — without it the server gives the run the lesson, never a company-news day. Drop
+    2b: `layouts_2b` (it draws the `pair` / `grid` images) — without it the server drops company_stakes
+    and theme_explainer from the day's chain."""
+    import logging
+
+    from app.schemas.marketing import WORKER_CAPABILITIES, RunClaimRequest
+
+    assert m.BackendClient.WORKER_CAPABILITIES == WORKER_CAPABILITIES == ("post_image", "news_templates",
+                                                                          "layouts_2b")
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    (body,) = be.claim_bodies
+    assert body["capabilities"] == ["post_image", "news_templates", "layouts_2b"]
+    with caplog.at_level(logging.WARNING):
+        assert RunClaimRequest.model_validate(body).capabilities == ["layouts_2b", "news_templates", "post_image"]
+    assert not [r for r in caplog.records if "does not know" in r.getMessage()]
+
+
+def test_the_worker_declares_layouts_2b_only_because_its_cards_draw_every_2b_layout(m):
+    """`layouts_2b` is a promise about THIS image's renderer: the server hands a `pair` / `grid` image only
+    to a holder that declared it, so the worker's own `cards.SHIPPED_LAYOUTS` must list every one of
+    WORKER_LAYOUTS_2B (a worker that declared it without drawing them would fail those days)."""
+    from app.schemas.marketing import WORKER_CAPABILITY_LAYOUTS_2B, WORKER_LAYOUTS_2B
+    from marketing import cards
+
+    assert WORKER_CAPABILITY_LAYOUTS_2B in m.BackendClient.WORKER_CAPABILITIES
+    assert set(WORKER_LAYOUTS_2B) <= set(cards.SHIPPED_LAYOUTS), (WORKER_LAYOUTS_2B, cards.SHIPPED_LAYOUTS)
+
+
+def test_the_preview_docs_name_only_scripts_and_flags_that_exist():
+    """Review R9 (low): marketing/preview.py told the operator to write a template preview with
+    `scripts/marketing_preview.py --series`, which has no such flag (the generator is
+    scripts/marketing_news_preview.py). Every `scripts/<name>.py --flag …` the module names must be a
+    real file defining each flag named right after it; the generator it names mirrors its bucket host."""
+    preview = (_PKG / "preview.py").read_text(encoding="utf-8")
+    scripts_dir = _PKG.parent / "scripts"
+    refs = re.findall(r"scripts/(\w+\.py)((?:[ \t]+--[a-z][a-z-]*)*)", preview)
+    assert refs and any(name == "marketing_news_preview.py" for name, _ in refs), refs
+    for name, flags in refs:
+        target = scripts_dir / name
+        assert target.is_file(), name
+        text = target.read_text(encoding="utf-8")
+        for flag in re.findall(r"--[a-z][a-z-]*", flags):
+            assert re.search(r"add_argument\(\s*[\"']" + re.escape(flag) + r"[\"']", text), (name, flag)
+    generator = (scripts_dir / "marketing_news_preview.py").read_text(encoding="utf-8")
+    assert '"marketing.preview"' in generator and "PREVIEW_BUCKET_HOST" in generator
+
+
+# ── drop 2a (contract D13/D14): template (news) days — logos, the per-line video, the news image ──
+
+
+_TPL_HOST = "sb.example"
+_LOGO_BASE = f"https://{_TPL_HOST}/storage/v1/object/public/marketing-media/logos/"
+
+
+def _real_download():
+    """`render.download` itself — the autouse `_no_real_voice` fixture replaces the module attribute
+    with a fake for every test, so the original is taken from a pristine copy of the module."""
+    spec = importlib.util.spec_from_file_location("marketing_render_pristine", _PKG / "render.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _png_bytes(size=(200, 200), colour=(220, 20, 20, 255), *, fmt="PNG", mode="RGBA") -> bytes:
+    from PIL import Image
+
+    im = Image.new(mode, size, (0, 0, 0, 0) if mode == "RGBA" else 0)
+    if mode == "RGBA":
+        im.paste(colour, (20, 20, size[0] - 20, size[1] - 20))
+    buf = __import__("io").BytesIO()
+    im.save(buf, format=fmt)
+    return buf.getvalue()
+
+
+def _logo_entry(key: str, name: str, data: bytes, ext: str = "png") -> Dict[str, Any]:
+    import hashlib
+
+    sha = hashlib.sha256(data).hexdigest()
+    return {"key": key, "name": name, "url": f"{_LOGO_BASE}{sha[:32]}.{ext}", "sha256": sha, "bytes": len(data),
+            "width": 200, "height": 200}
+
+
+class _Downloads:
+    """`render.download` for a template day: logo URLs answer from `objects` (counted), anything else
+    is the narration."""
+
+    def __init__(self, objects: Dict[str, bytes]):
+        self.objects = objects
+        self.calls: List[tuple] = []
+
+    def __call__(self, url, **kw):
+        self.calls.append((url, kw))
+        if "/logos/" in url:
+            if url not in self.objects:
+                raise RuntimeError("HTTP 404")
+            return self.objects[url]
+        return _FAKE_M4A
+
+
+def test_logos_resolve_to_verified_files_or_wordmarks(tmp_path, caplog):
+    pytest.importorskip("PIL")
+    from marketing import logos as lg
+
+    good, other = _png_bytes(), _png_bytes(colour=(20, 200, 40, 255))
+    a, b = _logo_entry("AAA", "Alpha", good), _logo_entry("BBB", "Beta", good)
+    tampered = _logo_entry("CCC", "Gamma", other)
+    dl = _Downloads({a["url"]: good, tampered["url"]: good})        # CCC's object holds other bytes
+    script = {"logos": [a, dict(a, name="Alpha again"), tampered,
+                        {"key": "DDD", "name": "Delta", "url": None, "sha256": None},
+                        {"key": "", "name": "no key"}, "junk"]}
+    caplog.set_level(logging.INFO, logger="marketing.logos")
+    out = lg.resolve_logos(script, bucket_origin=_TPL_HOST, download=dl, dest_dir=tmp_path)
+    assert set(out) == {"AAA", "CCC", "DDD"}
+    assert out["AAA"].read_bytes() == good and out["AAA"].name == f"logo-{a['sha256'][:32]}.png"
+    assert out["CCC"] is None and out["DDD"] is None
+    assert [u for u, _k in dl.calls] == [a["url"], tampered["url"]]          # one fetch per key; none for DDD
+    _url, kw = dl.calls[0]
+    assert kw["max_bytes"] == lg.LOGO_MAX_BYTES and 0 < kw["timeout"] <= lg.LOGO_DOWNLOAD_TIMEOUT_SECONDS
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1 and "CCC" in errors[0].getMessage() and "sha256" in errors[0].getMessage()
+    assert all(_LOGO_BASE not in r.getMessage() for r in caplog.records)   # no URL in a log line
+    assert b  # (same bytes, different key: the address is content-only, both may share it)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda e: e.update(url=e["url"].replace("https://", "http://")),
+    lambda e: e.update(url=e["url"].replace(_TPL_HOST, "evil.example")),
+    lambda e: e.update(url=e["url"].replace(_TPL_HOST, f"{_TPL_HOST}.evil.example")),
+    lambda e: e.update(url=e["url"].replace("https://", f"https://user@")),
+    lambda e: e.update(url=e["url"].replace("marketing-media", "other-bucket")),
+    lambda e: e.update(url=e["url"].replace("/logos/", "/2026-11-16/")),
+    lambda e: e.update(url=e["url"].replace("/logos/", "/logos/../")),
+    lambda e: e.update(url=e["url"] + "?download=1"),
+    lambda e: e.update(url=e["url"].replace(".png", ".gif")),
+    lambda e: e.update(url=e["url"].replace(".png", ".PNG")),
+    lambda e: e.update(url=e["url"].upper().replace("HTTPS://SB.EXAMPLE", "https://sb.example")),
+    lambda e: e.update(url=e["url"].replace(e["sha256"][:32], "0" * 32)),           # hex ≠ sha[:32]
+    lambda e: e.update(sha256=None), lambda e: e.update(sha256="A" * 64), lambda e: e.update(sha256="ab"),
+    lambda e: e.update(url=5),
+], ids=["http", "other_host", "suffix_host", "userinfo", "other_bucket", "other_prefix", "dotdot", "query",
+        "gif", "upper_ext", "upper_hex", "hex_mismatch", "no_sha", "upper_sha", "short_sha", "not_a_str"])
+def test_a_logo_url_that_is_not_ours_is_never_fetched(tmp_path, mutate):
+    from marketing import logos as lg
+
+    entry = _logo_entry("AAA", "Alpha", _png_bytes())
+    mutate(entry)
+    dl = _Downloads({})
+    assert lg.resolve_logos({"logos": [entry]}, bucket_origin=_TPL_HOST, download=dl, dest_dir=tmp_path) == {"AAA": None}
+    assert dl.calls == []
+
+
+def test_no_bucket_origin_means_every_logo_is_a_wordmark_and_nothing_is_fetched(tmp_path):
+    from marketing import logos as lg
+
+    dl = _Downloads({})
+    entry = _logo_entry("AAA", "Alpha", _png_bytes())
+    assert lg.resolve_logos({"logos": [entry]}, bucket_origin=None, download=dl, dest_dir=tmp_path) == {"AAA": None}
+    assert dl.calls == []
+    assert lg.resolve_logos({}, bucket_origin=_TPL_HOST, download=dl, dest_dir=tmp_path) == {}
+    assert lg.resolve_logos({"logos": "AAA"}, bucket_origin=_TPL_HOST, download=dl, dest_dir=tmp_path) == {}
+
+
+def test_the_bucket_origin_comes_from_the_verified_narration_then_any_ready_asset():
+    from marketing import logos as lg
+
+    def asset(i, url):
+        return {"id": i, "public_url": url}
+
+    good = f"https://{_TPL_HOST}/storage/v1/object/public/marketing-media/2026-11-16/audio-1.m4a"
+    other = "https://cdn.example/storage/v1/object/public/marketing-media/2026-11-16/manifest-1.json"
+    assert lg.bucket_origin({"voice_asset_id": "v", "assets": [asset("m", other), asset("v", good)]}) == _TPL_HOST
+    assert lg.bucket_origin({"voice_asset_id": None, "assets": [asset("m", other)]}) == "cdn.example"
+    for bad in ("http://sb.example/storage/v1/object/public/marketing-media/x.json",
+                "https://sb.example/object/public/marketing-media/x.json",               # not the Storage path
+                "https://a@sb.example/storage/v1/object/public/marketing-media/x.json",
+                "https://sb.example/storage/v1/object/public/other/x.json", None, 7):
+        assert lg.bucket_origin({"assets": [asset("m", bad)]}) is None, bad
+    assert lg.bucket_origin({"assets": []}) is None and lg.bucket_origin("junk") is None
+
+
+@pytest.mark.parametrize("data, ext, needle", [
+    ("bomb", "png", "pixels"),
+    ("huge", "png", "pixels"),
+    ("small", "png", "outside"),
+    ("wide", "png", "aspect"),
+    ("apng", "png", "animated"),
+    ("jpeg_as_png", "png", "JPEG"),
+    ("truncated", "png", ""),
+    ("garbage", "jpg", ""),
+], ids=lambda v: v if isinstance(v, str) else "")
+def test_a_logo_that_does_not_decode_safely_is_a_wordmark(data, ext, needle, tmp_path, caplog):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    from marketing import logos as lg
+
+    if data == "bomb":            # 20000×20000 bilevel: a few KB on disk, 400 M pixels decoded
+        buf = __import__("io").BytesIO()
+        Image.new("1", (20000, 20000)).save(buf, format="PNG")
+        raw = buf.getvalue()
+        assert len(raw) < lg.LOGO_MAX_BYTES
+    elif data == "huge":          # past MAX_IMAGE_PIXELS, under Pillow's own bomb limit
+        buf = __import__("io").BytesIO()
+        Image.new("1", (3000, 3000)).save(buf, format="PNG")
+        raw = buf.getvalue()
+    elif data == "small":
+        raw = _png_bytes(size=(60, 60))
+    elif data == "wide":
+        raw = _png_bytes(size=(1000, 200))
+    elif data == "apng":
+        buf = __import__("io").BytesIO()
+        frames = [Image.new("RGB", (200, 200), c) for c in ((255, 0, 0), (0, 0, 255))]
+        frames[0].save(buf, format="PNG", save_all=True, append_images=frames[1:])
+        raw = buf.getvalue()
+    elif data == "jpeg_as_png":
+        raw = _png_bytes(fmt="JPEG", mode="RGB")
+    elif data == "truncated":
+        raw = _png_bytes()[:300]
+    else:
+        raw = b"\xff\xd8\xff\xe0" + b"\x00" * 500
+    problem = lg.decode_problem(raw, ext)
+    assert problem and needle in problem, problem
+    entry = _logo_entry("AAA", "Alpha", raw, ext)
+    caplog.set_level(logging.WARNING, logger="marketing.logos")
+    out = lg.resolve_logos({"logos": [entry]}, bucket_origin=_TPL_HOST, download=_Downloads({entry["url"]: raw}),
+                           dest_dir=tmp_path)
+    assert out == {"AAA": None} and not list(tmp_path.iterdir())
+    assert any(r.levelno == logging.WARNING and "AAA" in r.getMessage() for r in caplog.records)
+
+
+def test_a_good_jpeg_and_png_decode():
+    pytest.importorskip("PIL")
+    from marketing import logos as lg
+
+    assert lg.decode_problem(_png_bytes(), "png") is None
+    assert lg.decode_problem(_png_bytes(fmt="JPEG", mode="RGB"), "jpg") is None
+    assert lg.decode_problem(_png_bytes(), "gif") is not None
+
+
+def test_an_oversize_or_failing_download_is_a_wordmark_never_a_raise(tmp_path):
+    from marketing import logos as lg
+
+    big = _logo_entry("BIG", "Big", b"x" * (lg.LOGO_MAX_BYTES + 1))
+    boom = _logo_entry("ERR", "Err", _png_bytes(size=(201, 201)))
+
+    def download(url, **kw):
+        if "x" * 3 and url == boom["url"]:
+            raise TimeoutError("read timed out")
+        return b"x" * (lg.LOGO_MAX_BYTES + 1)
+
+    out = lg.resolve_logos({"logos": [big, boom]}, bucket_origin=_TPL_HOST, download=download, dest_dir=tmp_path)
+    assert out == {"BIG": None, "ERR": None}
+
+
+def test_the_logo_downloads_share_one_bounded_budget(tmp_path, caplog):
+    """12 logos on a slow host. httpx bounds each PHASE of a request separately (connect, TLS, write,
+    every read), so a download is given a wall-clock SHARE (`max_seconds`, at most half of what is left)
+    and each phase a quarter of it (`timeout`) — review W2: with `timeout == max_seconds` one download
+    could take connect + TLS + write + header read + a chunk ≈ 5 × its share. Here every download takes
+    the worst it can (`worst_case_download_seconds`: its share + one read past it) and still ENDS before
+    the budget does; a logo that would start with less than MIN_DOWNLOAD_SECONDS left is a wordmark."""
+    from marketing import logos as lg
+
+    data = _png_bytes()
+    entries = [_logo_entry(f"K{i}", f"Company {i}", data) for i in range(14)]
+    clock = {"t": 0.0}
+    calls: List[Dict[str, float]] = []
+
+    def slow(url, **kw):
+        share, timeout = kw["max_seconds"], kw["timeout"]
+        calls.append({"start": clock["t"], "share": share, "timeout": timeout})
+        assert timeout == share / lg.DOWNLOAD_PHASES == share / 4      # each httpx phase: a quarter
+        # the first is quick; every other one takes the worst a bounded download can: its four
+        # pre-body phases at `timeout` each (= its share), then one read past the elapsed check
+        clock["t"] += 3.75 if len(calls) == 1 else 4 * timeout + timeout
+        return data
+
+    caplog.set_level(logging.WARNING, logger="marketing.logos")
+    out = lg.resolve_logos({"logos": entries}, bucket_origin=_TPL_HOST, download=slow, dest_dir=tmp_path,
+                           monotonic=lambda: clock["t"])
+    assert clock["t"] <= lg.LOGOS_BUDGET_SECONDS
+    for c in calls:
+        left = lg.LOGOS_BUDGET_SECONDS - c["start"]
+        assert left >= lg.MIN_DOWNLOAD_SECONDS
+        assert c["share"] == min(lg.LOGO_DOWNLOAD_TIMEOUT_SECONDS, left / 2)
+        assert c["start"] + lg.worst_case_download_seconds(c["share"]) <= lg.LOGOS_BUDGET_SECONDS
+    assert [c["share"] for c in calls][-2:] == [3.125, 1.171875]       # half of the 6.25 s, 2.34375 s left
+    assert len(calls) <= lg.MAX_LOGOS
+    assert sum(1 for p in out.values() if p) == len(calls) and len(out) == 14
+    assert any("budget" in r.getMessage() or "more than" in r.getMessage() for r in caplog.records)
+
+
+def test_the_render_download_refuses_redirects_oversize_and_slow_drips(monkeypatch):
+    import itertools
+    import time as _time
+
+    rd = _real_download()
+    real = httpx.Client
+
+    def serve(handler):
+        monkeypatch.setattr(httpx, "Client", functools.partial(real, transport=httpx.MockTransport(handler)))
+
+    serve(lambda req: httpx.Response(302, headers={"location": "https://evil.example/x.png"}))
+    with pytest.raises(rd.RenderInputError, match="HTTP 302"):
+        rd.download("https://sb.example/a.png", max_bytes=100, timeout=1)
+    serve(lambda req: httpx.Response(200, content=b"x" * 101))
+    with pytest.raises(rd.RenderInputError, match="exceeded 100 bytes"):
+        rd.download("https://sb.example/a.png", max_bytes=100, timeout=1)
+    serve(lambda req: httpx.Response(200, content=b"ok"))
+    assert rd.download("https://sb.example/a.png", max_bytes=100, timeout=1) == b"ok"
+    # the clock reads: the start, once the headers landed, after each chunk
+    ticks = itertools.chain([0.0, 1.0], itertools.count(10.0, 10.0))   # a quick start, then a slow drip
+    monkeypatch.setattr(_time, "monotonic", lambda: next(ticks))
+    with pytest.raises(rd.RenderInputError, match=r"exceeded 5\.0s$"):
+        rd.download("https://sb.example/a.png", max_bytes=100, timeout=1, max_seconds=5.0)
+    ticks = itertools.count(0.0, 10.0)                                # a slow start: caught before the body
+    monkeypatch.setattr(_time, "monotonic", lambda: next(ticks))
+    with pytest.raises(rd.RenderInputError, match=r"exceeded 5\.0s before its body"):
+        rd.download("https://sb.example/a.png", max_bytes=100, timeout=1, max_seconds=5.0)
+
+
+def test_slow_response_headers_end_the_download_before_its_body(monkeypatch):
+    """Review W2, over a real loopback socket: response headers that trickle in, each read well inside
+    the per-phase `timeout`, used to be cut by nothing — `max_seconds` was checked only after a body
+    chunk, so a body that then stalled surfaced as an httpx ReadTimeout one more `timeout` later. The
+    elapsed check once the headers land ends it right there, as the download's own error."""
+    import socket
+    import threading
+    import time as _time
+
+    rd = _real_download()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        conn, _ = server.accept()
+        with conn:
+            conn.settimeout(10)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            conn.sendall(b"HTTP/1.1 200 OK\r\n")
+            for i in range(4):                       # 4 × 0.2 s of headers, each read inside the 1 s timeout
+                if stop.wait(0.2):
+                    return
+                conn.sendall(f"X-Slow-{i}: v\r\n".encode())
+            conn.sendall(b"Content-Length: 2\r\n\r\n")
+            stop.wait(3.0)                           # the body stalls past the per-read timeout
+            try:
+                conn.sendall(b"ok")
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    started = _time.monotonic()
+    try:
+        with pytest.raises(rd.RenderInputError, match="before its body"):
+            rd.download(f"http://127.0.0.1:{port}/logos/x.png", max_bytes=100, timeout=1.0, max_seconds=0.5)
+        assert _time.monotonic() - started < 2.0               # ended at the headers, not after the stall
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
+
+
+def test_the_twelve_logo_worst_case_fits_the_render_margin(m):
+    from marketing import logos, render, video
+
+    worst = render.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS)
+    assert worst == (video.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + render.IMAGE_RENDER_SECONDS
+                     + m.UPLOAD_TIMEOUT_SECONDS + logos.LOGOS_WORST_CASE_SECONDS)
+    # the logo step: the shared budget, which every download ends inside, + one per-phase read of headroom
+    assert logos.LOGOS_WORST_CASE_SECONDS == (logos.MAX_LOGOS * logos.LOGO_DOWNLOAD_TIMEOUT_SECONDS
+                                              + logos.LOGO_DOWNLOAD_TIMEOUT_SECONDS / logos.DOWNLOAD_PHASES)
+    for tenths in range(int(logos.MIN_DOWNLOAD_SECONDS * 10), logos.LOGOS_BUDGET_SECONDS * 10 + 1):
+        left = tenths / 10
+        share = min(logos.LOGO_DOWNLOAD_TIMEOUT_SECONDS, left * logos.DOWNLOAD_SHARE_OF_LEFT)
+        assert logos.worst_case_download_seconds(share) < left, left   # a download never outlives the budget
+    assert worst <= m.STAGE_START_MARGINS["rendered"] == m.STAGE_START_MARGIN_SECONDS
+
+
+def test_the_worker_maps_the_template_refusal_to_a_skipped_day(m, monkeypatch, env, caplog):
+    from app.api.error_response import ErrorCode
+    from marketing import render as rd
+
+    assert rd.TEMPLATE_REFUSED == "MARKETING_TEMPLATE_REFUSED"
+    server = getattr(ErrorCode, "MARKETING_TEMPLATE_REFUSED", None)
+    if server is not None:                       # pinned equal once the web half (D13) declares it
+        assert server.value == rd.TEMPLATE_REFUSED
+    be = FakeBackend(posts_status=409, posts_error_code="MARKETING_TEMPLATE_REFUSED")
+    _wire(m, monkeypatch, be)
+    caplog.set_level(logging.ERROR)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "template_refused"
+    assert any("TEMPLATE REFUSED" in r.getMessage() for r in caplog.records)
+    # one create_posts call: deterministic, never retried
+    assert len([c for c in be.calls if c[1].endswith("/posts")]) == 1
+
+
+# ── a whole template day against the fake backend ──────────────────────────
+
+
+class _TemplateBackend(FakeBackend):
+    """FakeBackend whose read-back answers Storage-shaped public URLs (the shape the logos' bucket
+    origin is read from)."""
+
+    def handler(self, request):
+        resp = super().handler(request)
+        if request.method == "GET" and request.url.path.endswith("/assets") and resp.status_code == 200:
+            body = json.loads(resp.content)
+            for a in body.get("assets") or []:
+                a["public_url"] = a["public_url"].replace(f"https://{_TPL_HOST}/object/public/",
+                                                          f"https://{_TPL_HOST}/storage/v1/object/public/")
+            return httpx.Response(200, json=body)
+        return resp
+
+
+def _template_world(tmp_path, *, tamper: str = ""):
+    pytest.importorskip("PIL")
+    from datetime import date
+
+    from app.schemas.marketing import WorkerScript
+    from app.services.marketing import post_copy
+
+    run_date = date(2026, 9, 17)
+    gme, nvda = _png_bytes(colour=(220, 20, 20, 255)), _png_bytes(colour=(20, 200, 40, 255), size=(240, 200))
+    entries = [_logo_entry("GME", "GameStop", gme), _logo_entry("NVDA", "NVIDIA", nvda)]
+    objects = {entries[0]["url"]: gme, entries[1]["url"]: nvda}
+    if tamper:
+        objects[next(e["url"] for e in entries if e["key"] == tamper)] = _png_bytes(colour=(1, 2, 3, 255))
+    footer = post_copy.image_footer(run_date, "template", source="SEC Form 4 filings", as_of="Sep 17, 2026")
+    opening = {"kicker": "FILED LAST WEEK · FORM 4", "logos": ["GME"], "chip": "GME", "figure": "$74.4M",
+               "headline": "GameStop's CEO disclosed buying GameStop stock"}
+    image_spec = {"layout": "rows", "version": 1, "kicker": "FILED LAST WEEK · FORM 4", "footer": footer,
+                  "title": "CEO purchases disclosed last week",
+                  "sections": [{"rows": [{"logo": "GME", "cells": ["GameStop", "CEO", "$74.4M"]},
+                                         {"logo": "NVDA", "cells": ["NVIDIA", "CEO", "$12.0M"]}]}]}
+    lines = ["GameStop's chief executive disclosed buying about seventy four million dollars of stock.",
+             "NVIDIA's chief executive disclosed a twelve million dollar purchase the same week.",
+             "Both purchases were reported on Form four filings with the SEC.",
+             "The figures here are as filed, and filings can be amended later."]
+    cards_ = [{"title": "First filing", "body": "CEO purchase, $74.4M as filed."},
+              {"title": "Second filing", "body": "CEO purchase, $12.0M as filed."},
+              {"title": "The source", "body": "SEC Form 4 filings."},
+              {"title": "About the figures", "body": "As filed; filings can be amended."}]
+    script = WorkerScript.model_validate({
+        "hook": "Two chief executives disclosed buying their own stock last week.", "video_script": lines,
+        "cards": cards_, "carousel_slides": [],
+        "disclaimer_card": post_copy.disclaimer_card(run_date, authorship="template"),
+        "outlets": ["bluesky", "facebook", "tiktok", "x"],
+        "post_formats": {"bluesky": "image", "facebook": "text", "tiktok": "video", "x": "image"},
+        "image_post": {"title": "A table of CEO purchases disclosed last week",
+                       "paragraphs": ["Two rows, largest first.", "Source: SEC Form 4 filings."]},
+        "image_footer": footer, "content_class": "C", "authorship": "template", "series": "ceo_buys",
+        "video_layout": "per_line", "opening_card": opening, "image_spec": image_spec, "logos": entries,
+    }).model_dump()
+    be = _TemplateBackend(script_states=[{"status": "accepted", "source_ref": "news:ceo_buys:2026-09-10",
+                                          "template_id": "ceo_buys", "script": script}])
+    return be, script, _Downloads(objects)
+
+
+def _video_fake(seen: Dict[str, Any]):
+    def produce(*, workdir, specs, words, narration_seconds, audio_file, fonts_dir, logo_path, threads,
+                heartbeat, run_id, max_seconds, layout_engine, hook_card=False):
+        from marketing import cards
+        from marketing import voice as vc
+
+        seen.update(hook_card=hook_card, kinds=[s.kind for s in specs],
+                    opening_logos={a.key: (a.path is not None and Path(a.path).is_file()) for a in specs[0].logos})
+        # the opening card really renders with its logo/wordmark plate (Pillow, no ffmpeg)
+        cards.render_card(specs[0], font_path=str(Path(fonts_dir) / "Inter-Bold.ttf"), layout_engine=layout_engine)
+        return _FAKE_MP4, narration_seconds + vc.DISCLAIMER_CARD_SECONDS, list(range(len(specs)))
+    return produce
+
+
+def test_a_template_day_draws_logos_once_and_declares_only_what_the_server_allows(m, monkeypatch, env, tmp_path):
+    from app.schemas.marketing import VIDEO_BRAND_TEXT, AssetRegisterRequest
+    from app.services.marketing import template_onscreen as tos
+    from marketing import cards
+    from marketing import render as rd
+
+    be, script, dl = _template_world(tmp_path)
+    seen: Dict[str, Any] = {}
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _video_fake(seen))
+    assert m.main() == 0, be.patches[-1]
+    # the per-line video: [opening] + one card per line + [disclaimer], opening over the hook
+    assert seen["hook_card"] is True
+    assert seen["kinds"] == ["opening", "text", "text", "text", "text", "disclaimer"]
+    assert seen["opening_logos"] == {"GME": True}                    # verified file, alive during the render
+    # each logo fetched ONCE for the stage, shared by the video and the image
+    logo_calls = [u for u, _k in dl.calls if "/logos/" in u]
+    assert sorted(logo_calls) == sorted(e["url"] for e in script["logos"])
+    (card,) = [a for a in be.assets.values() if a["kind"] == "card"]
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    # the image: the server's template branch (run_service D12) — image_strings ∪ {footer}, footer required,
+    # the alt text never
+    img_md = card["metadata"]
+    allowed = set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
+    assert set(img_md["onscreen_text"]) <= allowed and script["image_footer"] in img_md["onscreen_text"]
+    assert not ({script["image_post"]["title"], *script["image_post"]["paragraphs"]} & set(img_md["onscreen_text"]))
+    assert img_md["image_layout"] == "rows" and img_md["card_version"] == cards.CARD_RENDER_VERSION == "cards/v3"
+    assert img_md["logos"] == [[e["key"], e["sha256"]] for e in script["logos"]]      # both drawn as logos
+    # the video: brand text ∪ card titles/bodies ∪ disclaimer ∪ opening strings, disclaimer required
+    vid_md = video["metadata"]
+    v_allowed = set(VIDEO_BRAND_TEXT) | {c[k] for c in script["cards"] for k in ("title", "body")} | {
+        script["disclaimer_card"]} | set(tos.opening_strings(script["opening_card"], script["logos"]))
+    assert set(vid_md["onscreen_text"]) <= v_allowed and script["disclaimer_card"] in vid_md["onscreen_text"]
+    assert "GameStop" not in vid_md["onscreen_text"]                 # the logo drew, not its wordmark
+    assert vid_md["video_layout"] == "per_line" and vid_md["render_version"] == rd.RENDER_STAGE_VERSION
+    for reg in be.registered:
+        AssetRegisterRequest.model_validate(reg)
+    ((posts,),) = [list(b.values()) for b in be.posts_bodies]
+    assert {p["platform"]: p["format"] for p in posts} == script["post_formats"]
+    assert be.run["status"] == "media_ready"
+
+
+def test_a_tampered_logo_is_a_wordmark_on_both_media(m, monkeypatch, env, tmp_path, caplog):
+    from app.services.marketing import template_onscreen as tos
+    from marketing import render as rd
+
+    be, script, dl = _template_world(tmp_path, tamper="GME")
+    seen: Dict[str, Any] = {}
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _video_fake(seen))
+    caplog.set_level(logging.ERROR, logger="marketing.logos")
+    assert m.main() == 0
+    assert seen["opening_logos"] == {"GME": False}
+    assert any("GME" in r.getMessage() and "sha256" in r.getMessage() for r in caplog.records)
+    (card,) = [a for a in be.assets.values() if a["kind"] == "card"]
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    assert "GameStop" in video["metadata"]["onscreen_text"]          # the opening's wordmark, declared
+    assert "GameStop" in tos.opening_strings(script["opening_card"], script["logos"])
+    assert card["metadata"]["logos"] == [["GME", None], ["NVDA", script["logos"][1]["sha256"]]]
+    assert be.run["status"] == "media_ready"
+
+
+def test_a_template_script_with_a_contract_breach_fails_the_run_loudly(m, monkeypatch, env, tmp_path):
+    from marketing import render as rd
+
+    for over, needle in (({"image_spec": None}, "image_spec"), ({"video_layout": None}, "video_layout"),
+                         ({"opening_card": None}, "opening_card"), ({"authorship": "robot"}, "authorship")):
+        be, script, dl = _template_world(tmp_path)
+        be.script_states[0]["script"] = dict(script, **over)
+        _wire(m, monkeypatch, be)
+        monkeypatch.setattr(rd, "download", dl)
+        monkeypatch.setattr(rd, "produce_video", _video_fake({}))
+        assert m.main() == 1, over
+        closing = _closing_patch(be)
+        assert closing["status"] == "failed" and needle in closing["last_error"], (over, closing)
+        assert be.posts_bodies == [] and not [a for a in be.assets.values() if a["kind"] in ("card", "video")]
+
+
+def test_a_lesson_day_calls_the_drop_1_render_keyword_for_keyword(m, monkeypatch, env):
+    """A lesson never passes hook_card (the drop-1 fakes and callers keep working) and fetches no logo."""
+    from marketing import render as rd
+
+    calls: List[Dict[str, Any]] = []
+    downloads: List[str] = []
+
+    def spy(**kw):
+        calls.append(kw)
+        return _fake_produce_video(**kw)
+
+    be = _video_backend()
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", spy)
+    monkeypatch.setattr(rd, "download", lambda url, **k: downloads.append(url) or _FAKE_M4A)
+    assert m.main() == 0
+    (kw,) = calls
+    assert "hook_card" not in kw and [s.kind for s in kw["specs"]] == ["text", "text", "disclaimer"]
+    assert len(downloads) == 1 and "/logos/" not in downloads[0]     # the narration only
+
+
+def test_an_image_only_template_day_places_the_bucket_from_the_manifest_and_never_narrates(
+        m, monkeypatch, env, tmp_path):
+    """No video outlet → no narration; the bucket origin then comes from another ready asset of the
+    run (the preflight manifest), so the logos still verify and draw."""
+    from app.services.marketing import template_onscreen as tos
+    from marketing import render as rd
+    from marketing import voice as vc
+
+    be, script, dl = _template_world(tmp_path)
+    script = dict(script, outlets=["bluesky", "x"], post_formats={"bluesky": "image", "x": "image"})
+    be.script_states[0]["script"] = script
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(vc, "run_child", lambda *a, **k: (_ for _ in ()).throw(AssertionError("narrated")))
+    assert m.main() == 0
+    assert not [a for a in be.assets.values() if a["kind"] in ("audio", "video")]
+    (card,) = [a for a in be.assets.values() if a["kind"] == "card"]
+    assert card["metadata"]["logos"] == [[e["key"], e["sha256"]] for e in script["logos"]]
+    allowed = set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
+    assert set(card["metadata"]["onscreen_text"]) <= allowed
+    assert sorted(u for u, _k in dl.calls) == sorted(e["url"] for e in script["logos"])
+    assert be.run["status"] == "media_ready"
+
+
+# ── review round 2: the logo download's phase caps, and the bytes counted are the wire's ────────────
+
+
+def _serve_once(delay_headers: float, body: bytes):
+    """A one-shot loopback HTTP server that waits `delay_headers` seconds after the request before it
+    sends ANY response byte (a cold CDN fetching the object from its origin), then answers 200 with
+    `body`. Returns (port, stop, thread, server)."""
+    import socket
+    import threading
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    stop = threading.Event()
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        with conn:
+            conn.settimeout(10)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            if stop.wait(delay_headers):
+                return
+            try:
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: "
+                             + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return server.getsockname()[1], stop, thread, server
+
+
+def test_a_logo_whose_first_byte_takes_1_5_seconds_still_draws(tmp_path, caplog):
+    """Review round 2 (low): every httpx phase used to get share / 4 = 1.25 s, so a cold CDN that took
+    1.3 s to its first byte turned a real logo into a wordmark with ~59 s of the budget unused. Now
+    connect / TLS / write keep the quarter and every read gets the rest of the share (3.75 s): the real
+    `render.download`, over a loopback socket whose headers come after 1.5 s, returns the logo, which
+    verifies and is drawn. Mutation-checked by hand (2026-10-09): with the old even split this is a
+    wordmark (httpx ReadTimeout after 1.25 s) and the test fails."""
+    pytest.importorskip("PIL")
+    import time as _time
+
+    from marketing import logos as lg
+
+    rd = _real_download()
+    data = _png_bytes()
+    entry = _logo_entry("AAA", "Alpha", data)
+    port, stop, thread, server = _serve_once(1.5, data)
+    seen: List[Dict[str, Any]] = []
+
+    def download(url, **kw):              # the URL resolve_logos verified, served from the loopback host
+        assert url == entry["url"]
+        seen.append(kw)
+        return rd.download(f"http://127.0.0.1:{port}/logos/x.png", **kw)
+
+    caplog.set_level(logging.INFO, logger="marketing.logos")
+    started = _time.monotonic()
+    try:
+        out = lg.resolve_logos({"logos": [entry]}, bucket_origin=_TPL_HOST, download=download, dest_dir=tmp_path)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
+    assert out["AAA"] is not None and out["AAA"].read_bytes() == data, [r.getMessage() for r in caplog.records]
+    assert _time.monotonic() - started >= 1.5                              # it really waited for the headers
+    (kw,) = seen
+    assert kw["max_seconds"] == 5.0 and kw["timeout"] == 1.25 and kw["read_timeout"] == 3.75
+
+
+def test_the_logo_phase_caps_split_each_share_and_every_download_still_ends_inside_the_budget(tmp_path):
+    """Connect / TLS / write: share / DOWNLOAD_PHASES each (never above the share); every read: the
+    rest of the share. Every download here takes the worst a bounded one can
+    (`worst_case_download_seconds` = share + one read = 1.75 × share) and still ends before the shared
+    budget does, and the step's worst case still fits the render stage's margin."""
+    from marketing import logos as lg
+
+    data = _png_bytes()
+    entries = [_logo_entry(f"K{i}", f"Company {i}", data) for i in range(14)]
+    clock = {"t": 0.0}
+    calls: List[Dict[str, float]] = []
+
+    def worst(url, **kw):
+        share = kw["max_seconds"]
+        calls.append({"start": clock["t"], "share": share})
+        assert kw["timeout"] == lg.connect_seconds(share) == share / 4 <= share
+        assert kw["read_timeout"] == lg.read_seconds(share) == share - share / 4
+        clock["t"] += lg.worst_case_download_seconds(share)
+        return data
+
+    out = lg.resolve_logos({"logos": entries}, bucket_origin=_TPL_HOST, download=worst, dest_dir=tmp_path,
+                           monotonic=lambda: clock["t"])
+    assert clock["t"] < lg.LOGOS_BUDGET_SECONDS
+    assert calls and calls[0]["share"] == lg.LOGO_DOWNLOAD_TIMEOUT_SECONDS
+    assert lg.worst_case_download_seconds(5.0) == 5.0 + 3.75
+    for c in calls:
+        left = lg.LOGOS_BUDGET_SECONDS - c["start"]
+        assert c["start"] + lg.worst_case_download_seconds(c["share"]) <= lg.LOGOS_BUDGET_SECONDS
+        assert lg.worst_case_download_seconds(c["share"]) <= 0.875 * left + 1e-9
+    assert sum(1 for p in out.values() if p) == len(calls)
+
+
+def test_the_render_download_gives_reads_their_own_cap_and_keeps_the_old_one_by_default(monkeypatch):
+    """`timeout` caps the pool wait, connect and the write; `read_timeout` (default: `timeout`, the
+    narration download's call is unchanged) caps every read."""
+    rd = _real_download()
+    real = httpx.Client
+    seen: List[Any] = []
+
+    def client(**kw):
+        seen.append(kw["timeout"])
+        return real(transport=httpx.MockTransport(lambda req: httpx.Response(200, content=b"ok")), **kw)
+
+    monkeypatch.setattr(httpx, "Client", client)
+    assert rd.download("https://sb.example/a.png", max_bytes=10, timeout=1.25, read_timeout=3.75,
+                       max_seconds=5.0) == b"ok"
+    assert rd.download("https://sb.example/a.m4a", max_bytes=10, timeout=60) == b"ok"
+    first, second = seen
+    assert (first.connect, first.write, first.pool, first.read) == (1.25, 1.25, 1.25, 3.75)
+    assert (second.connect, second.write, second.pool, second.read) == (60, 60, 60, 60)
+
+
+class _CountedBody(httpx.SyncByteStream):
+    """A streamed response body that records how many of its parts were read."""
+
+    def __init__(self, parts: List[bytes]):
+        self.parts = parts
+        self.read = 0
+
+    def __iter__(self):
+        for part in self.parts:
+            self.read += 1
+            yield part
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "GZIP", "br", "deflate", "zstd", "identity, gzip", " gzip "])
+def test_the_render_download_asks_for_identity_and_refuses_an_encoded_body_unread(monkeypatch, encoding):
+    """Round 1's note on LOGO-2: `render.download` counted DECODED bytes, so a small gzip body could
+    inflate far past the cap before the cap saw it. It now asks for `Accept-Encoding: identity` and
+    refuses a content-encoded answer before reading a byte of its body."""
+    import gzip
+
+    rd = _real_download()
+    real = httpx.Client
+    body = _CountedBody([gzip.compress(b"\0" * 2_000_000)])
+    asked: List[str] = []
+
+    def handler(req):
+        asked.append(req.headers.get("accept-encoding", ""))
+        return httpx.Response(200, headers={"content-encoding": encoding}, stream=body)
+
+    monkeypatch.setattr(httpx, "Client", functools.partial(real, transport=httpx.MockTransport(handler)))
+    with pytest.raises(rd.RenderInputError, match="encoded response, refused unread"):
+        rd.download("https://sb.example/a.png", max_bytes=512_000, timeout=1.0, max_seconds=5.0)
+    assert asked == ["identity"] and body.read == 0
+
+
+@pytest.mark.parametrize("headers", [{}, {"content-encoding": "identity"}, {"content-encoding": " Identity "}])
+def test_the_render_download_reads_an_identity_body_raw_and_caps_the_wire_bytes(monkeypatch, headers):
+    """The body is read RAW (iter_raw): the bytes counted against the cap are the bytes on the wire.
+    `iter_bytes` (the decoding reader) is made to fail here, so reading through it again turns this
+    red; the cap still holds at one byte over."""
+    rd = _real_download()
+    real = httpx.Client
+
+    def no_decoding(self, *a, **k):
+        raise AssertionError("the body was read through the decoding iterator")
+
+    monkeypatch.setattr(httpx.Response, "iter_bytes", no_decoding)
+    parts = [b"ab", b"cd"]
+    monkeypatch.setattr(httpx, "Client", functools.partial(real, transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, headers=headers, stream=_CountedBody(list(parts))))))
+    assert rd.download("https://sb.example/a.png", max_bytes=4, timeout=1.0, max_seconds=5.0) == b"abcd"
+    with pytest.raises(rd.RenderInputError, match="exceeded 3 bytes"):
+        rd.download("https://sb.example/a.png", max_bytes=3, timeout=1.0, max_seconds=5.0)

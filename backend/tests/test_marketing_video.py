@@ -234,6 +234,137 @@ def test_timeline_invariants_hold_over_random_tables():
                            out_file="v.mp4", threads=2)
 
 
+# ── timeline, the production opening (drop 1: hook_card=False, no brand card) ─
+# Everything above pins the kept pre-drop-1 shape (`hook_card=True`, card 0 over the hook alone).
+# The render now calls `timeline(..., hook_card=False)`: card 0 is the first CONTENT card and is on
+# screen from frame 0, through the hook, until its group's lines end.
+
+
+def T(words, n_cards, narration, tail=4.0):
+    return vid.timeline(words, n_cards, narration, tail, hook_card=False)
+
+
+def test_the_render_asks_the_timeline_for_the_content_opening(monkeypatch, tmp_path):
+    """The stage's own call (render.produce_video), not a re-statement of it: the timeline is asked
+    for hook_card=False with every card the stage built (no brand card in front)."""
+    from marketing import render as rd
+
+    class Stop(Exception):
+        pass
+
+    seen = {}
+
+    def spy(words, n_cards, narration, tail, **kw):
+        seen.update(kw, n_cards=n_cards)
+        raise Stop
+
+    monkeypatch.setattr(vid, "timeline", spy)
+    with pytest.raises(Stop):
+        rd.produce_video(workdir=tmp_path, specs=[object()] * 4, words=[], narration_seconds=5.0,
+                         audio_file="a.m4a", fonts_dir=str(_FONT.parent), logo_path=None, threads=2,
+                         heartbeat=None, run_id="r", max_seconds=75.0, layout_engine="basic")
+    assert seen == {"hook_card": False, "n_cards": 4}
+    monkeypatch.undo()
+    segs = T(_table([0.0, 2.5, 6.0, 9.5]), 4, 12.0)
+    assert segs[0].start == 0.0 and segs[0].card == 0          # content, from the first frame
+
+
+def test_the_writers_shape_switches_on_lines_3_and_5_like_the_prompt_says():
+    """6 script lines and 3 cards (writer_prompts: card k is on screen while lines 1-2, 3-4 and 5-6
+    are spoken): card 0 covers the hook AND lines 1-2, card 1 lines 3-4, card 2 lines 5-6. The same
+    promise tests/test_marketing_length_budget.py checks on the old hook-card shape."""
+    starts = [0.0] + [2.5 + 4.0 * i for i in range(6)]      # hook, then lines 1..6 at 2.5, 6.5, …, 22.5
+    segs = T(_table(starts), 4, 26.0)
+    assert [s.card for s in segs] == [0, 1, 2, 3]
+    assert [s.start for s in segs] == [0.0, 10.5, 18.5, 26.0]   # 0 (hook), line 3, line 5, the disclaimer
+    _assert_well_formed(segs, 4, 26.0, 4.0)
+
+
+@pytest.mark.parametrize("line_words", [[11] * 6, [13] * 6, [11, 13, 11, 13, 11, 13], [13, 13, 11, 11, 13, 11]])
+def test_any_obedient_line_mix_keeps_the_pairs(line_words):
+    words, t = [], 0.0
+    for line, n in enumerate([6] + line_words):
+        for _ in range(n):
+            words.append(W("word", round(t, 3), round(t + 0.3, 3), line))
+            t += 0.37
+        t += 0.28
+    narration = round(t - 0.28, 3)
+    first = {}
+    for w in words:
+        first.setdefault(w["line"], round(w["s"] * 1000))
+    segs = T(words, 4, narration)
+    assert [round(s.start * 1000) for s in segs[1:3]] == [first[3], first[5]]
+
+
+def test_one_content_card_covers_the_whole_narration():
+    assert T(_table([0.0, 2.5, 5.0]), 2, 8.0) == [S(0, 0.0, 8.0), S(1, 8.0, 12.0)]
+
+
+def test_no_words_or_only_a_hook_is_card_0_alone():
+    assert T([], 6, 6.0) == [S(0, 0.0, 6.0), S(5, 6.0, 10.0)]
+    assert T(_table([0.0]), 6, 6.0) == [S(0, 0.0, 6.0), S(5, 6.0, 10.0)]
+
+
+def test_a_narration_shorter_than_two_minimum_segments_is_card_0_alone():
+    assert T(_table([0.0, 0.5]), 5, 1.0) == [S(0, 0.0, 1.0), S(4, 1.0, 5.0)]      # < MIN: documented
+    assert T(_table([0.0, 1.3]), 5, 2.3) == [S(0, 0.0, 2.3), S(4, 2.3, 6.3)]      # 2 × 1.2 > 2.3
+
+
+def test_two_cards_need_two_minimums_and_no_hook_minimum():
+    """Without a hook card, k cards need k·MIN (not (k + 1)·MIN): 2.4 s holds two cards."""
+    segs = T(_table([0.0, 0.4, 1.0]), 3, 2.4)
+    assert [s.card for s in segs] == [0, 1, 2]
+    assert segs[1].start == pytest.approx(1.2)                  # the minimum pushed line 2's switch
+    _assert_well_formed(segs, 3, 2.4, 4.0)
+
+
+def test_too_many_content_cards_drop_the_trailing_ones_deterministically():
+    starts = [0.0] + [1.0 + 0.5 * i for i in range(10)]
+    a = T(_table(starts, word_len=0.2), 12, 6.0)
+    assert a == T(_table(starts, word_len=0.2), 12, 6.0)
+    assert [s.card for s in a] == [0, 1, 2, 3, 4, 11]           # ⌊6.0 / 1.2⌋ = 5 cards fit
+    _assert_well_formed(a, 12, 6.0, 4.0)
+
+
+def test_more_content_cards_than_lines_split_the_time():
+    segs = T(_table([0.0, 2.0, 4.0]), 6, 20.0)                  # 5 content cards, 2 lines
+    _assert_well_formed(segs, 6, 20.0, 4.0)
+    assert len(segs) == 6 and segs[0] == S(0, 0.0, segs[1].start)
+    assert 4.0 in [s.start for s in segs]                       # line 2 still opens a card
+
+
+def test_hook_card_must_be_a_bool():
+    for bad in (0, 1, None, "no"):
+        with pytest.raises(ValueError, match="hook_card"):
+            vid.timeline(_table([0.0, 2.0]), 3, 5.0, 4.0, hook_card=bad)
+
+
+def test_content_opening_invariants_hold_over_random_tables():
+    rng = random.Random(20261009)
+    for _ in range(600):
+        n_lines = rng.randint(0, 14)
+        t, words = 0.0, []
+        for line in range(n_lines + 1):
+            if line == 0 and rng.random() < 0.2:
+                continue
+            for _w in range(rng.randint(1, 6)):
+                d = rng.uniform(0.12, 0.6)
+                words.append(W("w", round(t, 3), round(t + d, 3), line))
+                t += d
+            t += 0.28
+        narration = max(t - 0.28, 0.05) + rng.uniform(0, 0.3)
+        n_cards = rng.randint(2, 16)
+        segs = T(words, n_cards, narration)
+        _assert_well_formed(segs, n_cards, narration, 4.0)
+        lines = {w["line"] for w in words if w["line"] >= 1}
+        expected = max(min(n_cards - 1, math.floor(narration * 1000) // 1200), 1) if lines else 1
+        assert len(segs) - 1 == expected
+        if narration >= 1.0 / vid.FPS:
+            vid.build_argv(ffmpeg="ffmpeg", card_files=[f"c{s.card}.png" for s in segs],
+                           segments=segs, audio_file="a.m4a", ass_file="c.ass", fonts_dir="fonts",
+                           out_file="v.mp4", threads=2)
+
+
 # ── build_argv ───────────────────────────────────────────────────────────────
 
 
@@ -872,44 +1003,137 @@ def _pixel(path: Path, at: float) -> bytes:
 
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
 def test_a_real_render_keeps_the_disclaimer_tail_and_is_bit_exact(tmp_path):
-    colours = {0: (23, 27, 38), 1: (30, 35, 48), 2: (59, 130, 246)}       # brand, text, disclaimer
+    """The production opening (hook_card=False, drop 1): the FIRST CONTENT card is on screen from
+    frame 0 through the hook — no brand card — then the second content card, then the disclaimer
+    tail after the narration."""
+    colours = {0: (30, 35, 48), 1: (59, 130, 246), 2: (200, 200, 200)}    # content 1, content 2, disclaimer
     for i, c in colours.items():
         _png(tmp_path / f"card{i:02d}.png", colour=c)
-    narration = 2.6
+    narration = 3.2
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
                     f"sine=frequency=440:sample_rate=48000:duration={narration}", "-ac", "2", "-c:a", "aac",
                     "-b:a", "160k", "-fflags", "+bitexact", "-flags:a", "+bitexact",
                     str(tmp_path / "narration.m4a")], check=True, capture_output=True, timeout=30)
-    words = [W("Money", 0.0, 0.4, 0), W("moves.", 0.4, 0.9, 0), W("Start", 1.3, 1.8, 1),
-             W("small.", 1.8, 2.5, 1)]
+    words = [W("Money", 0.0, 0.4, 0), W("moves.", 0.4, 0.9, 0), W("Start", 1.0, 1.4, 1),
+             W("small.", 1.4, 1.8, 1), W("Stay", 1.9, 2.4, 2), W("long.", 2.4, 3.0, 2)]
     (tmp_path / "captions.ass").write_text(cap.build_ass(words), encoding="utf-8")
     (tmp_path / "fonts").mkdir()
     shutil.copyfile(_FONT, tmp_path / "fonts" / "Inter-Bold.ttf")
     tail = 1.0
-    segs = vid.timeline(words, 3, narration, tail)
-    assert segs == [S(0, 0.0, 1.3), S(1, 1.3, 2.6), S(2, 2.6, 3.6)]
+    segs = vid.timeline(words, 3, narration, tail, hook_card=False)
+    assert segs == [S(0, 0.0, 1.9), S(1, 1.9, 3.2), S(2, 3.2, 4.2)]
+    total = 4.2
     kw = dict(workdir=str(tmp_path), card_files=[f"card{s.card:02d}.png" for s in segs], segments=segs,
               audio_file="narration.m4a", ass_file="captions.ass", fonts_dir="fonts", threads=2,
               run_id="smoke", max_seconds=75.0)
     data, probe = vid.render_video(**kw)
-    vid.check_probe(probe, expected_seconds=3.6, max_seconds=75.0, max_bytes=10 ** 9)
+    vid.check_probe(probe, expected_seconds=total, max_seconds=75.0, max_bytes=10 ** 9)
     assert probe.r_frame_rate == "30/1" and probe.avg_frame_rate == "30/1"   # CFR, no stretched frame
-    # the tail is really there — the anti-`-shortest` assertion: 2.6 s of audio, 3.6 s of file
-    assert probe.duration >= 3.6 - 1.0 / vid.FPS
+    # the tail is really there — the anti-`-shortest` assertion: 3.2 s of audio, 4.2 s of file
+    assert probe.duration >= total - 1.0 / vid.FPS
     # …and the container overhead (B-frame start) fits the slack the cap allows
-    assert probe.duration <= 3.6 + vid.CONTAINER_SLACK_SECONDS
+    assert probe.duration <= total + vid.CONTAINER_SLACK_SECONDS
     counts = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
                              "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
                              str(tmp_path / "video.mp4")], capture_output=True, text=True, timeout=30)
-    assert int(counts.stdout.strip()) == round(3.6 * vid.FPS)
+    assert int(counts.stdout.strip()) == round(total * vid.FPS)
     audio_end = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
                                 "stream=duration", "-of", "csv=p=0", str(tmp_path / "video.mp4")],
                                capture_output=True, text=True, timeout=30)
-    assert float(audio_end.stdout.strip()) >= 3.6 - 0.05                   # padded, not cut
+    assert float(audio_end.stdout.strip()) >= total - 0.05                 # padded, not cut
     assert vid.moov_before_mdat(str(tmp_path / "video.mp4"))
-    # the disclaimer card fills the tail; the brand card the hook (BT.709 round-trip, ±6 per channel)
-    for at, colour in ((0.5, colours[0]), (2.0, colours[1]), (3.4, colours[2])):
+    # The FIRST frame is the first content card — during the hook, not a brand card (BT.709
+    # round-trip, ±6 per channel); then the second card; the disclaimer card fills the tail.
+    for at, colour in ((0.0, colours[0]), (0.5, colours[0]), (1.5, colours[0]), (2.6, colours[1]),
+                       (4.0, colours[2])):
         got = _pixel(tmp_path / "video.mp4", at)
         assert all(abs(g - c) <= 6 for g, c in zip(got, colour)), (at, tuple(got), colour)
     again, _ = vid.render_video(**{**kw, "out_file": "video2.mp4"})
     assert again == data                                                    # bit-exact
+
+
+# ── drop 2a: a template (per-line) video — the opening card over the hook, one card per line ──
+
+
+def test_a_per_line_video_switches_card_i_at_line_i():
+    """A template script: [opening] + 4 text cards (one per narration line) + [disclaimer] = 6 cards,
+    timed with hook_card=True — the opening card is on screen over the hook alone, and card i opens
+    exactly at the first word of line i (contract D14: no new timeline function)."""
+    starts = [0.0, 3.1, 8.4, 13.9, 19.2]                 # hook + lines 1..4
+    narration = 24.5
+    segs = vid.timeline(_table(starts), 6, narration, 4.0, hook_card=True)
+    _assert_well_formed(segs, 6, narration, 4.0)
+    assert segs == [S(0, 0.0, 3.1), S(1, 3.1, 8.4), S(2, 8.4, 13.9), S(3, 13.9, 19.2), S(4, 19.2, narration),
+                    S(5, narration, narration + 4.0)]
+
+
+def test_a_per_line_video_with_uneven_lines_still_gives_every_line_its_card():
+    """Lines of very different length (a 1.3 s line, a 9 s line): one card per line regardless."""
+    starts = [0.0, 2.0, 3.3, 12.3, 14.0]
+    segs = vid.timeline(_table(starts), 6, 18.0, 4.0, hook_card=True)
+    assert [s.start for s in segs[1:5]] == [2.0, 3.3, 12.3, 14.0]
+    assert [s.card for s in segs] == [0, 1, 2, 3, 4, 5]
+
+
+def test_the_render_passes_hook_card_only_for_a_template(monkeypatch, tmp_path):
+    """render.produce_video forwards `hook_card` to the timeline: True for a per-line (template) video,
+    False — the drop-1 opening — by default."""
+    from marketing import render as rd
+
+    class Stop(Exception):
+        pass
+
+    seen = []
+
+    def spy(words, n_cards, narration, tail, **kw):
+        seen.append(kw)
+        raise Stop
+
+    monkeypatch.setattr(vid, "timeline", spy)
+    kw = dict(workdir=tmp_path, specs=[object()] * 6, words=[], narration_seconds=5.0, audio_file="a.m4a",
+              fonts_dir=str(_FONT.parent), logo_path=None, threads=2, heartbeat=None, run_id="r",
+              max_seconds=75.0, layout_engine="basic")
+    for extra in ({"hook_card": True}, {}):
+        with pytest.raises(Stop):
+            rd.produce_video(**kw, **extra)
+    assert seen == [{"hook_card": True}, {"hook_card": False}]
+
+
+# ── review round 2: the platforms' pinned cover frame is the opening card ─────────────────────────────
+
+
+def _cover_ms() -> int:
+    """`VIDEO_COVER_MS` read from the web's Upload-Post adapter SOURCE (AST — this suite never imports
+    app.*): the millisecond TikTok (`cover_timestamp`) and Instagram (`thumb_offset`) take as the cover."""
+    import ast
+
+    path = Path(__file__).resolve().parents[1] / "app" / "services" / "marketing" / "outlet_upload_post.py"
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "VIDEO_COVER_MS"):
+            return ast.literal_eval(node.value)
+    raise AssertionError("outlet_upload_post.py defines no VIDEO_COVER_MS")
+
+
+@pytest.mark.parametrize("hook_card", [True, False])
+def test_the_pinned_cover_frame_is_always_the_opening_card(hook_card):
+    """The publisher pins TikTok's and Instagram's cover at VIDEO_COVER_MS so a platform never picks a
+    frame whose burned caption names a Form 4 filer. That only holds while the timeline keeps card 0
+    alone on screen at that instant: from t = 0, at least MIN_SEGMENT_SECONDS, with card 1's crossfade
+    starting only at its own boundary. Walked over random narrations (both openings: a template's
+    `hook_card=True`, a lesson's `False`), including the shortest the two-card rule allows."""
+    cover = _cover_ms() / 1000.0
+    assert _cover_ms() == 500 and 0 < cover
+    assert cover + 1.0 / vid.FPS <= vid.MIN_SEGMENT_SECONDS          # a whole frame of card 0 at the cover
+    rng = random.Random(20261009)
+    for _ in range(300):
+        narration = rng.uniform(2 * vid.MIN_SEGMENT_SECONDS, 90.0)
+        n_lines = rng.randint(1, 7)
+        starts = sorted(rng.uniform(0.0, narration - 0.5) for _ in range(n_lines + 1))
+        starts[0] = 0.0
+        n_cards = rng.randint(2, 9)
+        segs = vid.timeline(_table(starts, word_len=0.2), n_cards, narration, 4.0, hook_card=hook_card)
+        first = segs[0]
+        assert first.card == 0 and first.start == 0.0
+        assert first.end >= cover + 1.0 / vid.FPS, segs             # the cover instant is card 0's, alone
+        assert vid._frame(cover) < vid._frame(first.end)

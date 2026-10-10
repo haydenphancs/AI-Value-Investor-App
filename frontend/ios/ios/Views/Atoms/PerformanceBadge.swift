@@ -52,10 +52,12 @@ struct PerformanceBadge: View {
             .foregroundColor(color)
             .padding(.horizontal, showBackground ? AppSpacing.sm : 0)
             .padding(.vertical, showBackground ? AppSpacing.xs : 0)
+            // Opaque, not `color.opacity(0.15)`: gain/loss on their own tint are 4.39/4.34 in
+            // light even on a white card (test_ios_theme_parity §6c).
             .background(
                 showBackground
                     ? RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                        .fill(color.opacity(0.15))
+                        .fill(AppColors.cardBackgroundLight)
                     : nil
             )
     }

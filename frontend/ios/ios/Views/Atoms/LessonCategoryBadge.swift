@@ -18,7 +18,9 @@ struct LessonCategoryBadge: View {
                 .foregroundColor(category.badgeColor)
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xxs)
-                .background(category.badgeColor.opacity(0.15))
+                // Opaque: `caution` on its own 15% tint is 4.20:1 in light
+                // (test_ios_theme_parity §6c).
+                .background(AppColors.cardBackgroundLight)
                 .cornerRadius(AppCornerRadius.small)
         }
     }

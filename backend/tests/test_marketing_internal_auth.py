@@ -67,9 +67,12 @@ class _FakeService:
 
     def __init__(self):
         self.calls = []
+        self.claim_capabilities = []
 
-    async def claim_run(self, run_date, *, worker_version, dry_run, now=None, claim_nonce=None, resume_only=False):
+    async def claim_run(self, run_date, *, worker_version, dry_run, now=None, claim_nonce=None, resume_only=False,
+                        capabilities=()):
         self.calls.append(("claim", run_date, worker_version, dry_run))
+        self.claim_capabilities.append(capabilities)
         if resume_only:
             return None, "no_run"
         return {
@@ -202,6 +205,43 @@ def test_claim_round_trip_and_extra_columns_are_ignored(client, token, fake_serv
     assert body["run"]["run_date"] == _TODAY.isoformat() and body["run"]["dry_run"] is False
     assert "an_extra_column" not in body["run"]
     assert fake_service.calls == [("claim", _TODAY, "phase1", False)]
+
+
+def test_the_claim_passes_the_workers_declared_capabilities_and_an_old_worker_declares_none(
+        client, token, fake_service):
+    """Drop 1 (compat F2): a worker declares what it can render; the route hands exactly that to the
+    ledger (which records it on the run). An older worker sends no field and declares nothing."""
+    h = {"X-Marketing-Worker-Token": token}
+    base = {"run_date": _TODAY.isoformat(), "worker_version": "drop1", "claim_nonce": _NONCE}
+    assert client.post(f"{_BASE}/runs/claim", json={**base, "capabilities": ["post_image", "post_image"]},
+                       headers=h).status_code == 200
+    assert client.post(f"{_BASE}/runs/claim", json=base, headers=h).status_code == 200
+    assert fake_service.claim_capabilities == [("post_image",), ()]
+
+
+@pytest.mark.parametrize("declared", [["carousel"], ["POST_IMAGE"], ["post_image", "carousel"]])
+def test_a_claim_declaring_an_unknown_capability_keeps_the_claim_without_crediting_it(
+        client, token, fake_service, declared):
+    """Drop 2a (PW-1): an UNKNOWN string is dropped (WARNING in the schema), never a 422 — a newer
+    worker must not lose every claim to a web rollback — and never credited as a capability."""
+    r = client.post(f"{_BASE}/runs/claim",
+                    json={"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE,
+                          "capabilities": declared},
+                    headers={"X-Marketing-Worker-Token": token})
+    assert r.status_code == 200, r.text
+    expected = ("post_image",) if "post_image" in declared else ()
+    assert fake_service.claim_capabilities == [expected]
+
+
+@pytest.mark.parametrize("bad", [[42], "post_image", ["post_image"] * 9, None])
+def test_a_claim_with_a_malformed_capability_list_is_refused_before_the_ledger(client, token, fake_service, bad):
+    """Typed and bounded: a non-list, a non-string value, None or more than 8 entries is a 422."""
+    r = client.post(f"{_BASE}/runs/claim",
+                    json={"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE,
+                          "capabilities": bad},
+                    headers={"X-Marketing-Worker-Token": token})
+    assert r.status_code == 422, r.text
+    assert fake_service.calls == []
 
 
 @pytest.mark.parametrize("bad", ["2026/09/17", "17-09-2026", "2026-13-01", "today", ""])

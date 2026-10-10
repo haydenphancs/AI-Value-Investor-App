@@ -127,6 +127,41 @@ async def test_the_voice_pointer_is_returned_only_when_it_verifies(svc, caplog):
 
 
 @pytest.mark.asyncio
+async def test_the_image_pointer_rides_the_workers_patch_and_is_returned_only_when_it_verifies(svc, caplog):
+    """Drop 1: the worker names its post image in the `rendered` checkpoint PATCH
+    (`metadata.image_asset_id` — worker-writable, not server-owned); the read-back returns it only
+    when it names a READY `card` of this run whose image_role is the post image."""
+    assert "image_asset_id" not in sch.SERVER_OWNED_RUN_METADATA
+    run = await _claim(svc)
+    claim = _holder(run)
+    footer = "Educational only · not investment advice · Written with AI assistance · Sep 17, 2026 · Caydex"
+    await svc.insert_script({"run_id": run["id"], "status": "accepted", "source_ref": "journey:x",
+                             "template_id": "checklist", "generation_id": "g",
+                             "output": {"hook": "h", "video_script": [], "posts": {},
+                                        "post_formats": {"bluesky": "image"},
+                                        "image_post": {"title": "T", "paragraphs": ["P1", "P2"]},
+                                        "image_footer": footer}})
+    image, _ = await svc.register_asset(run["id"], kind="card", ext="jpg", sha256=SHA, size_bytes=1, claim=claim,
+                                        metadata={"image_role": "post_image",
+                                                  "onscreen_text": ["T", "P1", "P2", footer]})
+    plain, _ = await svc.register_asset(run["id"], kind="card", ext="png", sha256="c" * 64, size_bytes=1,
+                                        claim=claim)
+    pending, _ = await svc.register_asset(run["id"], kind="card", ext="jpg", sha256="d" * 64, size_bytes=1,
+                                          claim=claim, metadata={"image_role": "post_image",
+                                                                 "onscreen_text": [footer]})
+    for x in (image, plain):
+        svc.fake.objects.add(x["storage_path"])
+        await svc.complete_asset(x["id"], claim=claim)
+    for pointer, expect in ((image["id"], image["id"]), (plain["id"], None), (pending["id"], None),
+                            ("not-an-asset", None)):
+        await svc.update_run(run["id"], metadata={"image_asset_id": pointer}, worker=True, claim=claim)
+        back = await svc.read_back(run["id"], claim=claim)
+        assert back["image_asset_id"] == expect, pointer
+        assert back["voice_asset_id"] is None and back["video_asset_id"] is None
+    assert any("image_asset_id" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_read_back_is_for_the_holder_only(svc):
     run = await _claim(svc)
     with pytest.raises(mrs.MarketingRunNotHeld):

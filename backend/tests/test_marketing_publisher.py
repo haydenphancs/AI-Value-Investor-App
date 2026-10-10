@@ -62,7 +62,7 @@ import httpx
 import pytest
 
 from app.schemas.marketing import POST_PLATFORMS
-from app.services.marketing import outlet_x, outlets, post_copy, publish_clock
+from app.services.marketing import outlet_base, outlet_x, outlets, post_copy, publish_clock
 from app.services.marketing import publisher_service as pub
 from app.services.marketing import run_service as mrs
 from app.services.marketing.outlet_base import (
@@ -75,10 +75,13 @@ from app.services.marketing.outlet_base import (
     REFUSED,
     RETRACTED,
     RETRY,
+    POST_IMAGE_KEY,
     UNKNOWN,
     Adapter,
     MarketingPublishRefused,
+    MediaProblem,
     Outcome,
+    PostImage,
     Prepared,
     ReconcileResult,
     RetractResult,
@@ -155,6 +158,9 @@ class FakeAdapter(Adapter):
         self.retract_configured = True
         self.is_available = True
         self.refuse: Optional[MarketingPublishRefused] = None
+        #: A second write-ahead charge the publisher journals after the claim (X's alt text).
+        self.pre_send: Optional[tuple] = None
+        self.prepare_posts: List[Dict[str, Any]] = []
         self.on_prepare: Optional[Callable[[Dict[str, Any]], None]] = None
         self.on_send: Optional[Callable[[Dict[str, Any]], None]] = None
         self.outcomes: List[Any] = []
@@ -177,6 +183,7 @@ class FakeAdapter(Adapter):
 
     def prepare(self, post: Dict[str, Any]) -> Prepared:
         self.prepare_ids.append(str(post.get("id")))
+        self.prepare_posts.append(post)
         if self.on_prepare is not None:
             self.on_prepare(post)
         if self.refuse is not None:
@@ -186,6 +193,7 @@ class FakeAdapter(Adapter):
             payload={"text": text}, text_sha256=text_sha256(text), reserve_micros=self.reserve,
             publish_meta={self.platform: {"rkey": f"rk-{post.get('id')}"}},
             summary=f"{self.platform} fake payload chars={len(text)}",
+            pre_send_charge=self.pre_send,
         )
         self.prepared.append(prepared)
         return prepared
@@ -2679,3 +2687,361 @@ async def test_a_tick_that_raises_between_its_steps_never_ends_the_loop(monkeypa
     assert len(ticks) == 3 and waits == [600, 600]
     assert [r for r in caplog.records if r.exc_info and r.getMessage().startswith(
         "marketing publisher tick FAILED (RuntimeError: a gate exploded)")]
+
+
+# ── IMAGE posts and the pre-send charge (drop 1, contract C9) ────────────────────────────────────
+
+X_ALT = 5_000
+PIC = PostImage(asset_id="card-1", url="https://xyz.supabase.co/storage/v1/object/public/marketing-media/c.jpg",
+                sha256="ab" * 32, size=1234, title="Title", paragraphs=("One.", "Two."))
+
+
+@pytest.fixture
+def pictures(monkeypatch):
+    """`outlet_base.load_post_image` scripted: answers in order (a PostImage, a MediaProblem or an
+    exception to raise); the default answer is PIC. Every call records the row it was given."""
+    state: Dict[str, Any] = {"answers": [], "calls": []}
+
+    async def load(post: Dict[str, Any]) -> Any:
+        state["calls"].append(copy.deepcopy(post))
+        item = state["answers"].pop(0) if state["answers"] else PIC
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(outlet_base, "load_post_image", load)
+    return state
+
+
+def _seed_image(env: Env, **kw: Any) -> str:
+    day = mrs.run_date_et()
+    platform = kw.pop("platform", "x")
+    return env.seed(platform=platform, format="image", asset_ids=["card-1"],
+                    key=f"{day.isoformat()}:{platform}:image", **kw)
+
+
+@pytest.mark.asyncio
+async def test_a_pre_send_charge_is_journaled_after_the_claim_and_before_the_send(env, pictures):
+    env.x.pre_send = ("x_media_alt", X_ALT)
+    pid = _seed_image(env)
+    seen: Dict[str, Any] = {}
+    env.x.on_send = lambda post: seen.update(arg=copy.deepcopy(post), stored=env.row(pid))
+    counters = await pub.publish_cycle()
+    assert counters["published"] == 1
+    # The write-ahead of the billed alt-text call is in the ledger BEFORE the send runs …
+    assert _journal(seen["stored"]) == [("x_create", X_POST), ("x_media_alt", X_ALT)]
+    assert seen["stored"]["status"] == "queued" and seen["stored"]["cost_micros"] == X_POST + X_ALT
+    # … and send() got that fresh row (its fence), not the one the claim returned.
+    assert seen["arg"]["updated_at"] == seen["stored"]["updated_at"]
+    row = env.row(pid)
+    assert row["status"] == "published" and row["attempts"] == 1
+    _assert_journal_balances(row)
+    _assert_review_kept(row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over, capped", [(0, False), (1, True)])
+async def test_the_cap_counts_the_pre_send_charge_before_the_claim(env, pictures, over, capped):
+    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.spend_row(env.budget - X_POST - X_ALT + over)   # exactly at the limit is allowed; one micro over is not
+    pid = _seed_image(env)
+    before = env.row(pid)
+    counters = await pub.publish_cycle()
+    assert counters["capped"] == (1 if capped else 0)
+    if capped:
+        assert env.x.sends == []
+        row = env.row(pid)
+        assert row["status"] == "approved" and row["attempts"] == 0 and _journal(row) == []
+        assert row["metadata"].get("x_cap_alert_month")       # the once-a-month alert, nothing else
+        assert {k: v for k, v in row.items() if k not in ("metadata", "updated_at")} == \
+            {k: v for k, v in before.items() if k not in ("metadata", "updated_at")}
+    else:
+        assert len(env.x.sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pre_send_write_sends_nothing_and_refunds_the_claim(env, pictures, monkeypatch, caplog):
+    env.x.pre_send = ("x_media_alt", X_ALT)
+    pid = _seed_image(env)
+    real = env.svc.transition_post
+
+    async def flaky(post_id, **kw):
+        if kw.get("charge") and kw["charge"][0] == "x_media_alt":
+            raise RuntimeError("ledger hiccup")
+        return await real(post_id, **kw)
+
+    monkeypatch.setattr(env.svc, "transition_post", flaky)
+    counters = await pub.publish_cycle()
+    assert env.x.sends == [] and counters["retry"] == 1
+    row = env.row(pid)
+    assert row["status"] == "approved" and row["attempts"] == 1
+    assert row["metadata"]["publish"]["state"] == "not_sent" and row["metadata"]["publish"]["category"] == "ledger"
+    assert _journal(row) == [("x_create", X_POST), ("refund_not_sent", -X_POST)] and row["cost_micros"] == 0
+    assert _messages(caplog, "pre-send charge x_media_alt NOT journaled", logging.ERROR)
+
+
+@pytest.mark.asyncio
+async def test_a_row_moved_before_its_pre_send_charge_is_left_alone(env, pictures, monkeypatch, caplog):
+    env.x.pre_send = ("x_media_alt", X_ALT)
+    pid = _seed_image(env)
+    real = env.svc.transition_post
+
+    async def moved(post_id, **kw):
+        if kw.get("charge") and kw["charge"][0] == "x_media_alt":
+            return None        # someone else moved the row out of `queued`
+        return await real(post_id, **kw)
+
+    monkeypatch.setattr(env.svc, "transition_post", moved)
+    await pub.publish_cycle()
+    assert env.x.sends == []
+    row = env.row(pid)
+    assert row["status"] == "queued" and _journal(row) == [("x_create", X_POST)]
+    assert _messages(caplog, "left `queued` before its pre-send charge", logging.ERROR)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome, journal, cost", [
+    # Nothing billed (the upload failed): the claim and the alt text are both refunded.
+    (Outcome(NOT_SENT, "media", error="upload failed", refund_micros=-(X_POST + X_ALT)),
+     [("x_create", X_POST), ("x_media_alt", X_ALT), ("refund_not_sent", -(X_POST + X_ALT))], 0),
+    # The create never left, the alt text did: only the post is refunded (not the default full refund).
+    (Outcome(NOT_SENT, "transport", error="connect", refund_micros=-X_POST),
+     [("x_create", X_POST), ("x_media_alt", X_ALT), ("refund_not_sent", -X_POST)], X_ALT),
+    # A credits-depleted alt write: nothing billed, refused.
+    (Outcome(REFUSED, "credits", error="402", refund_micros=-(X_POST + X_ALT), alert="failed"),
+     [("x_create", X_POST), ("x_media_alt", X_ALT), ("refund", -(X_POST + X_ALT))], 0),
+])
+async def test_an_adapters_refund_replaces_the_default_not_sent_refund(env, pictures, outcome, journal, cost):
+    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.x.outcomes = [outcome]
+    pid = _seed_image(env)
+    await pub.publish_cycle()
+    row = env.row(pid)
+    assert _journal(row) == journal and row["cost_micros"] == cost
+    assert row["status"] == ("failed" if outcome.kind == REFUSED else "approved")
+    _assert_journal_balances(row)
+
+
+@pytest.mark.asyncio
+async def test_a_text_not_sent_still_gets_the_default_transport_refund(env):
+    env.x.outcomes = [Outcome(NOT_SENT, "transport", error="connect")]
+    pid = env.seed()
+    await pub.publish_cycle()
+    assert _journal(env.row(pid)) == [("x_create", X_POST), ("refund_not_sent", -X_POST)]
+
+
+@pytest.mark.asyncio
+async def test_an_image_post_is_prepared_with_its_picture_and_claimed_as_read(env, pictures):
+    pid = _seed_image(env, platform="bluesky")
+    before = env.row(pid)
+    await pub.publish_cycle()
+    (seen,) = env.bsky.prepare_posts
+    assert seen[POST_IMAGE_KEY] is PIC and seen["id"] == pid
+    assert pictures["calls"][0]["id"] == pid and POST_IMAGE_KEY not in pictures["calls"][0]
+    # The picture rides only on prepare's copy: the claimed row and the ledger never hold it.
+    sent_post, _prepared = env.bsky.sends[0]
+    assert POST_IMAGE_KEY not in sent_post
+    row = env.row(pid)
+    assert POST_IMAGE_KEY not in row and POST_IMAGE_KEY not in row["metadata"]
+    assert row["status"] == "published" and before["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_text_post_never_loads_a_picture(env, pictures):
+    env.seed()
+    await pub.publish_cycle()
+    assert pictures["calls"] == [] and POST_IMAGE_KEY not in env.x.prepare_posts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_picture_that_cannot_be_read_this_tick_leaves_the_row_untouched(env, pictures, caplog):
+    pictures["answers"] = [MediaProblem("ledger down")]
+    pid = _seed_image(env, platform="bluesky")
+    before = env.row(pid)
+    counters = await pub.publish_cycle()
+    assert env.row(pid) == before and env.bsky.prepare_ids == [] and env.bsky.sends == []
+    assert counters["retry"] == 1
+    assert _messages(caplog, "its picture could not be resolved this tick", logging.WARNING)
+
+
+@pytest.mark.asyncio
+async def test_a_picture_loader_bug_is_logged_and_retried(env, pictures, caplog):
+    pictures["answers"] = [RuntimeError("boom")]
+    pid = _seed_image(env, platform="bluesky")
+    before = env.row(pid)
+    counters = await pub.publish_cycle()
+    assert env.row(pid) == before and counters["retry"] == 1
+    bug = [r for r in caplog.records if "post image loader BUG" in r.getMessage()]
+    assert bug and bug[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_a_picture_that_can_never_be_right_refuses_the_post_unclaimed(env, pictures):
+    pictures["answers"] = [MediaProblem("asset card-1 is not a usable post image: status 'failed'", definite=True)]
+    pid = _seed_image(env, platform="bluesky")
+    counters = await pub.publish_cycle()
+    assert counters["failed"] == 1 and env.bsky.prepare_ids == [] and env.bsky.sends == []
+    row = env.row(pid)
+    assert row["status"] == "failed" and row["attempts"] == 0
+    assert row["metadata"]["publish"]["category"] == "media"
+    assert row["metadata"]["alert_kind"] == "failed" and "not a usable post image" in row["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_image_post_is_resolved_and_only_logged(env, pictures, monkeypatch, caplog):
+    monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", True)
+    pid = _seed_image(env, platform="bluesky")
+    before = env.row(pid)
+    await pub.publish_cycle()
+    assert env.row(pid) == before and env.bsky.sends == [] and len(pictures["calls"]) == 1
+    assert _messages(caplog, "DRY_RUN: would publish")
+
+
+@pytest.mark.asyncio
+async def test_a_reconcile_resend_of_an_image_post_carries_its_picture(env, pictures):
+    pid = env.seed_queued(platform="bluesky", started_ago=700, format="image", asset_ids=["card-1"])
+    env.raw(pid)["metadata"]["publish"]["bluesky"] = {"rkey": f"rk-{pid}"}
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["resent"] == 1 and env.bsky.prepare_posts[0][POST_IMAGE_KEY] is PIC
+    assert env.row(pid)["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_a_reconcile_resend_waits_when_the_picture_cannot_be_read(env, pictures):
+    pictures["answers"] = [MediaProblem("ledger down")]
+    pid = env.seed_queued(platform="bluesky", started_ago=700, format="image", asset_ids=["card-1"])
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["resent"] == 0 and counters["absent"] == 1 and env.bsky.sends == []
+    row = env.row(pid)
+    assert row["status"] == "queued" and row["metadata"]["publish"]["reconcile"]["last_result"] == ABSENT
+
+
+# ── a resend deferred only by its picture does not use up the check (review money:F2) ──
+
+
+def _seed_last_check(env: Env) -> str:
+    """A Bluesky image post whose LAST scheduled check (n=3 of 4) is due now."""
+    pid = env.seed_queued(platform="bluesky", started_ago=30_000, format="image", asset_ids=["card-1"])
+    env.raw(pid)["metadata"]["publish"]["reconcile"] = {
+        "n": 3, "last_at": (_now() - timedelta(hours=2)).isoformat(), "last_result": "unknown", "error": "x"}
+    return pid
+
+
+def _rec(env: Env, pid: str) -> Dict[str, Any]:
+    return env.row(pid)["metadata"]["publish"]["reconcile"]
+
+
+def _age_deferral(env: Env, pid: str) -> None:
+    """Move the deferral stamp past RESEND_DEFERRAL_RETRY (the check it did not count is due again)."""
+    rec = env.raw(pid)["metadata"]["publish"]["reconcile"]
+    rec["deferred_at"] = (_now() - pub.RESEND_DEFERRAL_RETRY - timedelta(seconds=1)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_resend_deferred_by_its_picture_keeps_the_check_and_waits_before_the_next(env, pictures, caplog):
+    pictures["answers"] = [MediaProblem("ledger down")]
+    pid = env.seed_queued(platform="bluesky", started_ago=700, format="image", asset_ids=["card-1"])
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["absent"] == 1 and counters["resent"] == 0 and env.bsky.sends == []
+    rec = _rec(env, pid)
+    # Not counted: n is still 0 (it was 1 before the fix), and the deferral is stamped with its reason.
+    assert rec["n"] == 0 and rec["last_result"] == ABSENT and rec["resend_deferrals"] == 1
+    assert rec["deferred_at"] and "ledger down" in rec["error"]
+    assert _messages(caplog, "resend deferred (1 of 3)", logging.WARNING)
+    _assert_journal_balances(env.row(pid))
+    # The next tick inside RESEND_DEFERRAL_RETRY does not re-read the platform.
+    snapshot = env.row(pid)
+    await pub.reconcile_cycle()
+    assert len(env.bsky.reconciles) == 1 and env.row(pid) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_last_check_deferred_by_its_picture_resends_once_the_picture_reads(env, pictures):
+    pictures["answers"] = [MediaProblem("ledger down")]        # then PIC (the default answer)
+    pid = _seed_last_check(env)
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True), ReconcileResult(ABSENT, resend_safe=True)]
+    await pub.reconcile_cycle()
+    assert _rec(env, pid)["n"] == 3 and env.bsky.sends == []    # before the fix: n=4 → escalated next tick
+    _age_deferral(env, pid)
+    counters = await pub.reconcile_cycle()
+    assert counters["escalated"] == 0 and counters["resent"] == 1
+    assert len(env.bsky.sends) == 1 and env.bsky.prepare_posts[-1][POST_IMAGE_KEY] is PIC
+    row = env.row(pid)
+    assert row["status"] == "published" and "alert_kind" not in row["metadata"]
+    assert row["metadata"]["publish"]["resends"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_picture_that_never_reads_still_reaches_the_owner_after_the_bounded_deferrals(env, pictures):
+    limit = pub.MAX_RESEND_DEFERRALS
+    pictures["answers"] = [MediaProblem("ledger down") for _ in range(limit + 1)]
+    pid = _seed_last_check(env)
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True) for _ in range(limit + 1)]
+    for k in range(1, limit + 1):
+        counters = await pub.reconcile_cycle()
+        assert counters["escalated"] == 0
+        rec = _rec(env, pid)
+        assert rec["n"] == 3 and rec["resend_deferrals"] == k
+        _age_deferral(env, pid)
+    # The write-ahead carries the count, so a check that dies mid-way can never reset the bound.
+    assert env.bsky.reconciles[-1]["metadata"]["publish"]["reconcile"]["resend_deferrals"] == limit - 1
+    await pub.reconcile_cycle()                                   # one deferral past the bound: it counts
+    rec = _rec(env, pid)
+    assert rec["n"] == 4 and rec["resend_deferrals"] == limit + 1 and "deferred_at" not in rec
+    counters = await pub.reconcile_cycle()                        # the schedule is spent → the owner
+    assert counters["escalated"] == 1 and len(env.bsky.reconciles) == limit + 1 and env.bsky.sends == []
+    row = env.row(pid)
+    assert row["metadata"]["alert_kind"] == "unknown"
+    assert "last check: absent" in row["metadata"]["alert_text"] and "ledger down" in row["metadata"]["alert_text"]
+    _assert_journal_balances(row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("junk", ["2", -1, True, 2.5, [1]])
+async def test_a_corrupt_deferral_count_reads_as_spent(env, pictures, junk):
+    pictures["answers"] = [MediaProblem("ledger down")]
+    pid = _seed_last_check(env)
+    env.raw(pid)["metadata"]["publish"]["reconcile"]["resend_deferrals"] = junk
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    await pub.reconcile_cycle()
+    rec = _rec(env, pid)
+    assert rec["n"] == 4 and rec["resend_deferrals"] == pub.MAX_RESEND_DEFERRALS + 1 and "deferred_at" not in rec
+
+
+@pytest.mark.asyncio
+async def test_an_uncounted_deferral_past_the_schedule_is_checked_again_not_escalated(env, pictures):
+    # A deferral on an extra check past the schedule (the PENDING re-poll) keeps n at the schedule's
+    # length: the stamp, not the counter, says that check is still owed.
+    pid = _seed_last_check(env)
+    env.raw(pid)["metadata"]["publish"]["reconcile"].update(
+        n=4, last_result=ABSENT, error="resend deferred, the picture could not be read: ledger down",
+        resend_deferrals=1, deferred_at=(_now() - timedelta(minutes=11)).isoformat())
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["escalated"] == 0 and counters["resent"] == 1 and env.row(pid)["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_a_deferral_stamp_in_the_future_never_holds_the_post_back(env, pictures):
+    pid = _seed_last_check(env)
+    env.raw(pid)["metadata"]["publish"]["reconcile"]["deferred_at"] = (_now() + timedelta(days=30)).isoformat()
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["resent"] == 1 and env.row(pid)["status"] == "published"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("why", ["definite_picture", "pre_send_charge"])
+async def test_a_reconcile_resend_that_cannot_be_prepared_goes_to_the_owner(env, pictures, why):
+    if why == "definite_picture":
+        pictures["answers"] = [MediaProblem("no asset card-1 in the ledger", definite=True)]
+    else:
+        env.bsky.pre_send = ("bluesky_extra", 1)
+    pid = env.seed_queued(platform="bluesky", started_ago=700, format="image", asset_ids=["card-1"])
+    env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
+    counters = await pub.reconcile_cycle()
+    assert counters["escalated"] == 1 and env.bsky.sends == []
+    assert env.row(pid)["metadata"]["alert_kind"] == "unknown"

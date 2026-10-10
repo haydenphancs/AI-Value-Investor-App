@@ -5,9 +5,11 @@ Three kinds of message to the owner's review chat, each sent AT LEAST ONCE and s
 with a fenced, merging write (`run_service.transition_post`), exactly like the review sweep's
 `review_notified_at`:
 
-* **Posted** — "✅ Posted on X · run <date>" + the link, as a reply to the post's review message,
-  with a 🗑 Retract button when the platform can delete through its API. Stamp:
-  `metadata.posted_notified_at` (+ `posted_message_id`, which the retract confirmation edits).
+* **Posted** — "✅ Posted on X · <format> · run <date>" + the link, as a reply to the post's review
+  message (a review bundle's decision message, when the post was decided in one), with a 🗑 Retract
+  button when the platform can delete through its API. Stamp: `metadata.posted_notified_at`
+  (+ `posted_message_id`, which the retract confirmation edits). The format (video / image / text,
+  drop 1) tells an image post from the same platform's text post.
 * **Retracted** — the posted message is edited to say "🗑 Retracted HH:MM ET" (keyboard removed),
   or a new message when it cannot be edited. Stamp: `metadata.retract_notified_at`.
 * **Alerts** — `metadata.alert_kind` / `alert_text` written by the publisher (a refusal, attempts
@@ -29,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from app.integrations import telegram
 from app.integrations.telegram import TelegramException, TelegramRateLimitException
+from app.schemas.marketing import POST_FORMATS
 from app.services.marketing import outlets, review_service
 from app.services.marketing.review_service import (
     _Pacer,
@@ -60,10 +63,18 @@ def _run_date(post: Dict[str, Any]) -> str:
     return key[:10] if len(key) >= 10 else "?"
 
 
+def _format(post: Dict[str, Any]) -> str:
+    """The post's format (video / image / text …) when it is one the ledger knows, else "?" — never a
+    raw column value in a message."""
+    fmt = post.get("format")
+    return fmt if isinstance(fmt, str) and fmt in POST_FORMATS else "?"
+
+
 def posted_text(post: Dict[str, Any]) -> str:
     adapter = outlets.adapter_for(post.get("platform"))
     url = (adapter.post_url(post) if adapter else None) or post.get("external_url") or "(no link — the platform gave none)"
-    lines = [f"✅ Posted on {str(post.get('platform') or '?').upper()} · run {_run_date(post)}", str(url)]
+    lines = [f"✅ Posted on {str(post.get('platform') or '?').upper()} · {_format(post)} · run {_run_date(post)}",
+             str(url)]
     if not outlets.retract_capable(post.get("platform")) or not post.get("external_id"):
         lines.append("(no Retract button: remove it by hand on the platform if needed)")
     return "\n".join(lines)
@@ -170,8 +181,8 @@ async def feed_cycle() -> Dict[str, int]:
                                 "a new one", post.get("id"), e)
             if not done:
                 try:
-                    await _send(chat_id, f"{line} · {str(post.get('platform')).upper()} · run {_run_date(post)}",
-                                pacer)
+                    await _send(chat_id, f"{line} · {str(post.get('platform')).upper()} · {_format(post)} · "
+                                         f"run {_run_date(post)}", pacer)
                 except TelegramRateLimitException:
                     raise
                 except TelegramException as e:
@@ -200,7 +211,7 @@ async def feed_cycle() -> Dict[str, int]:
                 continue
             budget -= 1
             text = (f"{meta.get('alert_text') or kind}\n"
-                    f"({str(post.get('platform')).upper()} · {post.get('format')} · run {_run_date(post)})")
+                    f"({str(post.get('platform')).upper()} · {_format(post)} · run {_run_date(post)})")
             markup = None
             if kind == "unknown" and post_id and post.get("status") == "queued":
                 markup = unknown_outcome_keyboard(post_id)

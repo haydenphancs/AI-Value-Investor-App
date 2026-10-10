@@ -34,7 +34,9 @@ struct ArticleStatisticValue: View {
                     .padding(.vertical, 2)
                     .background(
                         Capsule()
-                            .fill(trend.color.opacity(0.15))
+                            // Opaque: gain/loss/caution on their own tint fail AA in light
+                            // (test_ios_theme_parity §6c).
+                            .fill(AppColors.cardBackgroundLight)
                     )
                 }
             }

@@ -78,8 +78,7 @@ struct ReportInsiderActivityTable: View {
                 if hasInsiderActivity && !insiderData.isUnavailable {
                     ReportSentimentBadge(
                         text: insiderData.sentiment.rawValue,
-                        textColor: insiderData.sentiment.color,
-                        backgroundColor: insiderData.sentiment.backgroundColor
+                        textColor: insiderData.sentiment.color
                     )
                 }
             }

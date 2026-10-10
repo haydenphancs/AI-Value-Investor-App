@@ -746,8 +746,10 @@ def _upload_result(method: str, platform: str, request_id: str, status: int, bod
     raise _ambiguous(method, status, "without a request_id, results or job_id")
 
 
-async def _upload(method: str, path: str, *, platform: str, media: Tuple[str, str],
+async def _upload(method: str, path: str, *, platform: str, media: List[Tuple[str, str]],
                   fields: Mapping[str, Any], request_id: str, external_id: str) -> Dict[str, Any]:
+    """`media` = the route's own content parts, in order (`video`; `title`; `title` + `photos[]`…) —
+    a caller's `fields` may set none of their names."""
     _credentials(method)  # not configured → raised before any argument work, nothing sent
     p = _check_platform(method, platform)
     rid = _check_request_id(method, request_id)
@@ -755,12 +757,12 @@ async def _upload(method: str, path: str, *, platform: str, media: Tuple[str, st
     own: List[Tuple[str, Any]] = [
         ("user", user()),
         ("platform[]", p),
-        media,
+        *media,
         ("async_upload", True),
         ("request_id", rid),
         ("external_id", eid),
     ]
-    form = _form(method, own, fields, _OWN_FIELDS | {media[0]})
+    form = _form(method, own, fields, _OWN_FIELDS | {name for name, _ in media})
     status, body = await _call(method, "POST", path, form=form, idempotency_key=rid)
     return _upload_result(method, p, rid, status, body)
 
@@ -778,12 +780,16 @@ async def upload_video(*, platform: str, video_url: str, fields: Mapping[str, An
     {"mode": "scheduled", "job_id"}."""
     method = "upload_video"
     url = video_url.strip() if isinstance(video_url, str) else ""
-    if (not url.lower().startswith("https://") or len(url) <= len("https://")
-            or _CONTROL_RE.search(url) or " " in url):
+    if not _public_https(url):
         _credentials(method)
         raise _refuse(method, "video_url must be a public https:// URL")
-    return await _upload(method, "/upload", platform=platform, media=("video", url), fields=fields,
+    return await _upload(method, "/upload", platform=platform, media=[("video", url)], fields=fields,
                          request_id=request_id, external_id=external_id)
+
+
+def _public_https(url: str) -> bool:
+    return (url.lower().startswith("https://") and len(url) > len("https://")
+            and not _CONTROL_RE.search(url) and " " not in url)
 
 
 async def upload_text(*, platform: str, text: str, fields: Mapping[str, Any], request_id: str,
@@ -794,7 +800,41 @@ async def upload_text(*, platform: str, text: str, fields: Mapping[str, Any], re
     if not isinstance(text, str) or not text.strip():
         _credentials(method)
         raise _refuse(method, "empty text")
-    return await _upload(method, "/upload_text", platform=platform, media=("title", text), fields=fields,
+    return await _upload(method, "/upload_text", platform=platform, media=[("title", text)], fields=fields,
+                         request_id=request_id, external_id=external_id)
+
+
+#: Photos one /upload_photos request carries here (an image post is ONE picture; X takes 4 per post,
+#: Bluesky 4 — more becomes a thread or a split post, which the publisher never wants).
+MAX_PHOTOS = 4
+
+
+async def upload_photos(*, platform: str, photo_urls: Any, caption: str, fields: Mapping[str, Any],
+                        request_id: str, external_id: str) -> Dict[str, Any]:
+    """POST /upload_photos — the caption as `title` ("the default caption"; a `<platform>_title` in
+    `fields` would override it), then each photo by its PUBLIC https URL as one `photos[]` field
+    (Upload-Post fetches it, as it does a video); otherwise as `upload_video` (facebook_page_id,
+    target_linkedin_page_id, the `<platform>_alt_text` fields … come in `fields`). Same answers, same
+    Idempotency-Key, same outcome split.
+
+    Upload-Post facts (the upload-photo page and `/openapi.json`, VERIFIED 2026-10-09 with the plan's
+    research): required `user`, `platform[]`, `photos[]` ("public HTTPS URLs of the images (send each
+    URL as a separate `photos[]` field)" — the OpenAPI spec types it as binary only); `title` is the
+    default caption; Facebook, LinkedIn and Threads are photo platforms, YouTube is not.
+
+    A blank caption, no photo, more than 4, or a photo URL that is not a public https:// URL raises
+    UploadPostRefusedError (status None) — nothing was sent."""
+    method = "upload_photos"
+    if not isinstance(caption, str) or not caption.strip():
+        _credentials(method)
+        raise _refuse(method, "empty caption")
+    urls = [u.strip() if isinstance(u, str) else "" for u in photo_urls] \
+        if isinstance(photo_urls, (list, tuple)) else []
+    if not 1 <= len(urls) <= MAX_PHOTOS or not all(_public_https(u) for u in urls):
+        _credentials(method)
+        raise _refuse(method, f"photo_urls must be 1-{MAX_PHOTOS} public https:// URLs")
+    return await _upload(method, "/upload_photos", platform=platform,
+                         media=[("title", caption), *(("photos[]", u) for u in urls)], fields=fields,
                          request_id=request_id, external_id=external_id)
 
 

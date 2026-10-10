@@ -50,7 +50,9 @@ struct GroundedContextChip: View {
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.xs)
         .background(
-            Capsule().fill(groundingUnavailable ? Color.clear : AppColors.primaryBlue.opacity(0.12))
+            // Opaque, not `primaryBlue.opacity(0.12)` (4.37:1 in light even on white —
+            // test_ios_theme_parity §6c). The blue stroke below still marks the chip.
+            Capsule().fill(groundingUnavailable ? Color.clear : AppColors.cardBackgroundLight)
         )
         .overlay(
             Capsule().stroke(

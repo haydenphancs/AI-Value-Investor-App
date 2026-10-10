@@ -127,9 +127,11 @@ struct ReportRevenueEngineSection: View {
                 }
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xs)
+                // Opaque, not `role.color.opacity(0.15)`: gain/loss/primaryBlue on their own
+                // tint fail AA in light (test_ios_theme_parity §6c).
                 .background(
                     Capsule()
-                        .fill(role.backgroundColor)
+                        .fill(AppColors.cardBackgroundLight)
                 )
 
                 Spacer()

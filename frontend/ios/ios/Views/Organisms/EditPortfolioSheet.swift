@@ -159,7 +159,9 @@ struct EditPortfolioSheet: View {
                     .foregroundColor(AppColors.primaryBlue)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xxs)
-                    .background(AppColors.primaryBlue.opacity(0.15))
+                    // Opaque: `primaryBlue` on its own 15% tint is 4.19:1 in light
+                    // (test_ios_theme_parity §6c). The row is `cardBackground`.
+                    .background(AppColors.cardBackgroundLight)
                     .cornerRadius(AppCornerRadius.small)
             }
         }

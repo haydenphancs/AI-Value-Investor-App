@@ -117,7 +117,9 @@ struct LibraryBookCard: View {
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.primaryBlue.opacity(0.15))
+                    // Opaque, as is Review below: a text token on its own 15% tint
+                    // fails AA in light (test_ios_theme_parity §6c).
+                    .background(AppColors.cardBackgroundLight)
                     .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -137,7 +139,7 @@ struct LibraryBookCard: View {
                         .foregroundColor(AppColors.bullish)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.bullish.opacity(0.15))
+                        .background(AppColors.cardBackgroundLight)
                         .cornerRadius(AppCornerRadius.medium)
                     }
                     .buttonStyle(PlainButtonStyle())

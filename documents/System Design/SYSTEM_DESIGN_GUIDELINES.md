@@ -345,6 +345,10 @@ The redesigned Home tab (`HomeDashboardView`) is fed by ONE aggregation endpoint
 2. **Daily Scanners** — movers / heavy-volume / short-interest leaderboards.
 3. **App-Exclusive Signals** — congress buys / whale accumulation / earnings shockers /
    CEO buys (Pro-locked; a build in which any card raised is never persisted to Tier 2).
+   Since 2026-10-09 whale accumulation counts SHARE increases (`whale_trades` BOUGHT
+   New/Increased) in each current fund's latest 13F, never a portfolio-weight change, and
+   earnings shockers reads the calendar one ET day per call (FMP truncates a multi-day
+   answer at 4,000 rows, newest dates kept), skipping digit-shifted EPS and non-common lines.
 4. **Emerging Frontiers themes** — megatrend cards from the `trending_themes`
    Supabase table (server-editable → no app release), with a per-theme drill-down at
    `GET /home/themes/{slug}` → `ThemeDetailResponse`. Since migration 174 (2026-09-23)
@@ -3553,8 +3557,9 @@ every renderer:
   filings and valuation figures such as market cap, P/E, EV and dividend yield may reach a public
   post, subject to the MAR, real-person and congressional limits below; a market price,
   % price moves, price charts and ETF data may not; FMP is never credited; and a screenshot
-  showing a price, a % move or a chart uses labelled sample values. Nothing on the marketing
-  path reads FMP yet.
+  showing a price, a % move or a chart uses labelled sample values. Since Drop 2a (2026-10-09) the
+  ONE allow-listing adapter `app/services/marketing/company_news_adapter.py` reads FMP for the company
+  news templates (§12.13); nothing else on the marketing path may import FMP.
 - **EU MAR Art. 2(4) reaches a US brand feed.** For an instrument admitted to or traded on an
   EU venue (large US names trade on Tradegate/gettex), a public opinion on its present or
   future value or price is an investment recommendation with per-post disclosure duties, and
@@ -3664,8 +3669,8 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     claim in between leaves only an orphan `pending_upload` row, which completion refuses.
   - a PATCH writes only an `in_progress` run, only the statuses `failed`, `skipped` and
     `media_ready`, moves `stage` only to the observed or the requested value (never "any
-    stage ahead"), and may not write `metadata.claim_nonce` or `metadata.closed` — both
-    server-owned (`SERVER_OWNED_RUN_METADATA`): a PATCH carrying either has it dropped with a
+    stage ahead"), and may not write `metadata.claim_nonce`, `metadata.closed` or `metadata.worker_capabilities` —
+    all server-owned (`SERVER_OWNED_RUN_METADATA`): a PATCH carrying one has it dropped with a
     WARNING (§12.11). A terminal PATCH whose effect is already present (the same
     status, and the same stage if one is named) answers 200 and writes nothing — the worker
     retries a PATCH whose response was lost, so a 409 there logged a failure for a write
@@ -3688,10 +3693,13 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     judge flagged — so a day run under `shadow`/`off` is voiced and rendered but never becomes a
     post; the worker closes it `skipped` (`judge_not_enforced`). That guard, not a second switch,
     is what makes turning auto-publish on later safe. The dispatch on the run's content class is
-    explicit (2026-10-05): class A goes to that judge check and EVERY other value — class C before
-    its own template gate exists, a NULL, an unknown or mis-cased letter — is refused with 422
-    `MARKETING_REQUEST_INVALID` before any asset read or INSERT (the worker fails the run). It used
-    to let every non-A value through with no gate at all.
+    explicit (2026-10-05): class A goes to that judge check and EVERY other value — a NULL, an
+    unknown or mis-cased letter — is refused with 422 `MARKETING_REQUEST_INVALID` before any asset
+    read or INSERT (the worker fails the run). It used to let every non-A value through with no gate
+    at all. Since Drop 2a the class comes from the SCRIPT (its template id), not the run mirror, and
+    classes C and F have their own branch: the class enabled in `MARKETING_CONTENT_CLASSES`, template
+    authorship, and `news_templates.revalidate` passing (else 409 `MARKETING_TEMPLATE_REFUSED`, the day
+    skipped `template_refused`); C/F posts are never auto-approved (§12.13).
   - a post leaves `pending_review` only through `review_post` (a human's decision): ONE
     conditional UPDATE on `status = pending_review` that records who decided (`approved_by`,
     `metadata.review`), so a double tap or two reviewers can never flip a decided post — or
@@ -4028,9 +4036,10 @@ The state machine's invariants (hardened 2026-09-24 by two adversarial review ro
   the next kick — found five times independently, a dead final owner used to leave the row
   `generating` forever — but a lapsed lease whose owner is a live task in THIS process is left
   alone for up to `OWNER_ALIVE_SECONDS`, after which it counts as wedged. That is a whole
-  worst-case generation plus a minute (`worst_case_generation_seconds`, 4,637 s at defaults):
-  the acquire and run-date read, four model calls each preceded by a lease refresh, and the
-  terminal write with its re-read, every PostgREST statement bounded only by the client's 120 s
+  worst-case generation plus a minute (`worst_case_generation_seconds`, 4,697 s at defaults, so
+  `OWNER_ALIVE_SECONDS` = 4,757 s): the acquire and run-date read, four model calls each preceded by a
+  lease refresh, the holder-capability run read of an accepted package while `MARKETING_IMAGE_POSTS`
+  is on (Drop 1), and the terminal write with its re-read, every PostgREST statement bounded only by the client's 120 s
   timeout. It used to be 3 × the lease (1,896 s), shorter than a real generation, so at a cap a
   slow LIVE owner was declared wedged and its paid package fenced out. A
   lease refresh retries a Supabase blip and, if every attempt fails, continues while the lease
@@ -4179,10 +4188,11 @@ script and its narration into ONE 9:16 MP4 (1080×1920, H.264 High yuv420p 30 fp
 accept); the `assets_ready` stage then records the day's posts and the run closes `media_ready`.
 
 - **Cards** (`backend/marketing/cards.py`, Pillow, Inter Bold, brand colours only: #171B26 page, #1E2330 card,
-  #60A5FA accent, white): a BRAND card (the logo and the wordmark) while the hook is spoken — the
-  hook itself is shown only by the burned captions, because the validators never checked a
-  hook→card reading chain — then the accepted script's cards (title and body always together, in
-  order), then the DISCLAIMER card (the server-supplied text, the logo and `caydexinvest.com`).
+  #60A5FA accent, white): since 2026-10-09 (owner: never open on our logo) the video opens on the
+  accepted script's FIRST card while the hook is spoken — the hook itself is still shown only by the
+  burned captions, because the validators never checked a hook→card reading chain (before that date a
+  BRAND card, the logo and the wordmark, played under the hook) — then the rest of the script's cards
+  (title and body always together, in order), then the DISCLAIMER card (the server-supplied text, the logo and `caydexinvest.com`).
   Text is wrapped greedily and shrunk to fit, never truncated; a card that cannot fit, or a glyph
   the font lacks, is `SkipRun("unrenderable_text")` — it would fail the same way on every retry.
   Card text stays above the caption band and inside the 920-px safe width (the platforms' UI
@@ -4628,6 +4638,119 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
 
 ---
 
+### 12.12 Company Weekly — Drop 1: two decisions a day, an image on every post (2026-10-09)
+
+Owner decisions of 2026-10-09 (`.claude/rules/marketing.md` §1, top box) reshape the engine into
+"Company Weekly" (company news on three days, one lesson a week). Drop 1 builds the delivery half;
+every behaviour sits behind a fail-closed web switch, and with all of them off the engine behaves as
+before (the one unconditional change: videos open on their first content card).
+
+- **Formats are frozen per run.** When the accepted output is written, `script_service.freeze_post_formats`
+  records `post_formats` per platform (video for TikTok/YouTube/Instagram; image or text for Facebook,
+  LinkedIn, Threads, Bluesky, X) from `MARKETING_IMAGE_POSTS` / `MARKETING_X_IMAGES`, read once. The
+  worker reads the formats back with the script; `create_posts` refuses a spec in another format, an
+  image post without exactly the run's verified `image_asset_id`, and a second post for one platform.
+- **The post image** (`backend/marketing/cards.py`): one 1080×1350 baseline JPEG ≤ 950,000 bytes per run,
+  rendered in the `rendered` stage from the writer's `image_post` (title + 2-4 short paragraphs, scanned
+  and judged like the cards; dropped — never a package rejection — when it fails) with a burned
+  code-owned footer (`post_copy.image_footer`). Registered as a `card` with `image_role = post_image` and
+  its declared `onscreen_text`; the server accepts only the accepted output's image strings and requires
+  the footer (`run_service._check_post_image_text`).
+- **Publishing images**: Upload-Post `upload_photos` (Facebook, LinkedIn, Threads), Bluesky `uploadBlob` +
+  `app.bsky.embed.images` (the record, with its locally computed blob CID, still built once in the
+  write-ahead claim; the blob re-uploaded at send time), X v2 media upload + alt text (alt text journaled
+  as a fenced pre-send charge; the post reserved at `MARKETING_X_IMAGE_POST_MICROS` until the console
+  confirms the price). Every outlet downloads the picture with a byte cap and checks its sha256 against
+  the asset row before sending it anywhere.
+- **The worker declares what it can render** (`capabilities: ["post_image", "news_templates", "layouts_2b"]` on the
+  claim, recorded as server-owned `metadata.worker_capabilities`); formats freeze as "image" only when the
+  run's holder declared it, so an old worker image degrades to text posts instead of failing the day, and a
+  news day is built only for a holder that declared `news_templates` (else it becomes the lesson). The
+  claim drops an unknown capability string with a WARNING rather than refusing it, so a newer worker never
+  loses its claim to an older web. Threads stays
+  text when its caption is over 500 UTF-8 bytes (the photo route's no-split flag is unverified). Video
+  posts are pinned to the run's verified `video_asset_id` like the image.
+- **Two decisions a day** (`MARKETING_REVIEW_BUNDLES`): once a run is `media_ready`, `review_service`
+  stamps a VIDEO bundle and a POST bundle (`metadata.review_bundle` = id, members, caption sha) and sends
+  the media, each distinct caption with its platforms, and one decision message (✅ Approve all / ❌ Reject
+  all / ✂ drop one platform). `run_service.review_bundle` decides every member in one conditional UPDATE
+  fenced on status and the bundle id; changed captions are left out and reported.
+- **Not in Drop 1**: company-news templates and the one FMP adapter (Drop 2, contract
+  `~/.claude/plans/company-weekly-drop2-contract.md`), partial-bundle survival when only the video fails
+  (a voice/render skip still loses the day), the Facebook link cap.
+
+### 12.13 Company Weekly — Drop 2a: company news from fixed templates (2026-10-09)
+
+The owner's 2026-10-09 decisions (`.claude/rules/marketing.md` §1, top box) allow the Pro signals and
+real names (never a member of Congress) in public posts. Drop 2a adds three posting-day series of
+company news — Monday CEO/insider buys (Form 4), Tuesday 13F Season (the ~6 weeks after each 13F
+deadline), Thursday "How [company] makes money" (Money Map) — and keeps one Learn lesson on Saturday.
+Everything sits behind `MARKETING_CONTENT_CLASSES` ("A" = lessons only, byte-identical to Drop 1).
+
+- **Content classes.** C = filings (ceo_buys, insider_buys, thirteen_f; congress_count in 2b), F = company
+  facts (money_map; company_stakes, earnings, theme_explainer in 2b). Migration 190 widens the run CHECK
+  to A/C/F. The class is derived from the script's frozen template id (`selection.content_class_of`); the
+  run's column is an informational mirror nothing gates on.
+- **The calendar** (`selection.plan_for`): a chain of series per weekday that always ends in the lesson;
+  `enabled_chain` drops series of disabled classes or not yet shipped. Lesson rotation reads only lesson
+  refs (`lesson_refs`), so news days never crowd the 34-item pool.
+- **The one FMP adapter** (`app/services/marketing/company_news_adapter.py`, the named import-boundary exemption): recomputes
+  each series from source (never from the Pro cards): Form 4 code-P buys through a parity-tested copy of
+  the CEO-buy rules (`app/services/_insider_buys_common.py`), 13F share-count diffs only between ADJACENT quarters
+  (`_whale_common.select_13f_comparison`), Money Map from the revenue-breakdown, profit-power and
+  company-facts services (curated pool + Trillion Club + Emerging Frontiers companies). It returns typed,
+  allow-listed records (`app/services/marketing/company_news_rules.py`); a leak test fails on any price, % move, chart, person or
+  member field. It fails closed: an upstream failure raises, nothing qualified returns a skip reason.
+- **Templates** (`app/services/marketing/news_templates.py`, pure): deterministic copy pinned verbatim in a lexicon; a strict
+  name renderer (CEO names corroborated by the company profile) and a placement rule keep names out of
+  every headline, cover, image, title, hashtag and CTA and out of the whole video — hook, narration (burned
+  as captions) and every card, the opening card included; the video says the role (owner decision
+  2026-10-09, "Role-only video"), and a name appears only in written caption paragraphs; the Congress roster
+  (`backend/data/congress_roster.json`, CC0) is a block-list; `copy_rules.BANNED_COPY` + `FORECAST_COPY`
+  apply. `revalidate` re-composes the package from the stored fact sheet and must match byte for byte —
+  at write time and again in `create_posts`.
+- **The build** runs as a background task at the first kick (≤ 240 s; the kick waits ≤ 20 s and answers
+  `generating`), falls back series by series to the lesson, and inserts the accepted row first-write-wins
+  with 0 tokens and template authorship. Template copy says "Built by a fixed template from public data"
+  and "Not affiliated with anyone named"; `made_with_ai` is False on template images/text, True on video.
+- **Visuals**: company logos (the FMP profile image, validated by `app/services/marketing/logo_check.py`, stored content-addressed
+  under the bucket's logos prefix, never overwritten) drawn unaltered on a light plate with a wordmark
+  fallback; the video opens on a code-owned opening card (logo + headline number) with one card per
+  narration line; the 4:5 post image uses one of the `template_onscreen` layouts (rows, spotlight, bars in
+  2a). The server checks every drawn string against the template's declared strings.
+- **Form 4 posts fail closed at the company level** (review rounds, 2026-10-09/10): any Form 4/A of the
+  issuer — read by the issuer CIK across every share class — filed from the window start through the run
+  day refuses that company for the week, and a CEO/CFO is shown only when every word of the officer title
+  is on a short sitting-officer allow-list. Six rounds of per-line amendment exceptions each opened a new
+  hole; the company-level rule replaced them.
+
+### 12.14 Company Weekly — Drop 2b: Congress counts, company stakes, earnings, themes (2026-10-10)
+
+Built and shipped in code, OFF in production until the owner lists each series in the web setting
+`MARKETING_NEWS_SERIES` (default = the four 2a series; the effective set is that ∩
+`selection.SHIPPED_SERIES`, read at call time, and `create_posts` re-checks it).
+
+- **congress_count** (class C, the first Tuesday on/after the 8th): FMP's senate and house "latest" feeds
+  (verified sorted by disclosure date, newest first) walked back to the start of the previous calendar
+  month, fail closed; only `Purchase` rows; distinct members per company counted through an in-memory hash
+  that is discarded at once — no identity field (names, office, district, owner, link, `senateID`) ever
+  reaches a record, a log line or a fact sheet; at least 2 members; copy "N members of Congress disclosed
+  purchases of <Company> stock in <Month>", never a chamber, party, state or dollar total.
+- **company_stakes** (class F, every Tuesday — after congress_count / thirteen_f in the chain, so in 13F
+  season or on a Congress Tuesday it runs only when those produce nothing): the Trillion Club stakes, the published
+  catalogue included (an owner-revertible night decision), a named investee with a disclosed figure, the
+  stake's own value basis as the verb; a "pair" image (investor → investee).
+- **earnings** (class F, Thursdays in earnings season): one ET day per calendar call, a digit-shift guard,
+  a minimum estimate size, a USD REPORTING currency (the trading currency is not enough), profile batches
+  until enough large companies qualify; the copy states the reported EPS beside the analysts' estimate on
+  the same basis — never "earned", "expected", "beat" or "miss" — with revenue at a common precision.
+- **theme_explainer** (class F, a fallback on Monday, Tuesday and Thursday; Saturday is the lesson only): Emerging Frontiers theme names and members with
+  each member's largest filed segment, never performance, momentum, ETF reasons or generated text; a
+  "grid" image; "{n} of its {m} companies" when the company gate dropped members.
+- The "pair" and "grid" layouts are drawn only by a worker that declares the `layouts_2b` capability; without
+  it the server drops company_stakes and theme_explainer from that day's chain. Release order: migration 190
+  → web → worker (the committed web predates worker capabilities).
+
 ## Appendix A: Where things live
 
 ### iOS
@@ -4703,6 +4826,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | Jun 2026 | Industry-relative peer benchmarks (sector fallback) over a broad ~$500M universe | Fairer "vs avg" than a large-cap-skewed S&P 500 set; one shared `sector_benchmarks` table | Sector-only benchmarks; a separate industry table |
 | Jun 2026 | TTM current-snapshot benchmark (`period_type='ttm'`); median + positive-only + cap | Apples-to-apples with the company card; no partial-fiscal-year spike; robust to outliers | Latest fiscal year; trimmed mean |
 | Jun 2026 | Close-aligned report cache + `CACHE_SCHEMA_FLOOR` | Reports are point-in-time snapshots pinned to the last close; floor forces re-collect on a schema change | Rolling wall-clock TTL |
+| Oct 2026 | Company Weekly marketing: news from deterministic templates + one allow-listing FMP adapter; Pro signals and real names (not Congress) publishable; 2 review decisions a day; an image on every post | Owner decisions 2026-10-09: lessons reached ~nobody, company news is what the audience values; templates avoid the uncalibrated LLM judge for facts about named companies and people | LLM-written company posts; meme/trending-sound videos (copyright, publicity and MAR risk); keeping lessons only |
 | Jun 2026 | Separate weekly TTM job vs quarterly fiscal recompute; period-type-scoped freshness | TTM drifts daily, fiscal only on earnings; non-overlapping windows avoid FMP contention | One combined recompute job |
 | Jul 2026 | `_spawn` supervision + a reconciliation sweeper, rather than a task queue | Makes "tasks don't survive restarts" survivable: a strong handle is retained, `add_done_callback` logs a dying loop, and `research_reconciliation_service` re-refunds work a dead worker abandoned | Celery, RQ, Dramatiq (all still rejected) |
 | Jul 2026 | Flat string error codes (`INSUFFICIENT_CREDITS`), not numbered (`BIZ_2001`) | Greppable across backend + iOS; the code IS the name, so a mismatch is visible at the call site | Numbered enum per the original §6.2 sketch |

@@ -178,6 +178,11 @@ _INFLIGHT_MODULES = [
     # * the Overview's fundamentals bundle (~15 upstream calls cold), one build per ticker
     #   shared by the screen, the key-facts read and every chat section that needs it.
     "stock_overview_service.py",
+    # Added 2026-10-09 with Company Weekly (marketing Drop 2a): the ONE allow-listing FMP adapter
+    # memoizes its upstream walks (the insider feed, profiles, 13F builds, logos) behind shared
+    # futures — two series of one template build share the insider walk, and a series whose budget
+    # runs out leaves the walk running to warm the memo instead of cancelling it for the others.
+    "marketing/company_news_adapter.py",
 ]
 
 

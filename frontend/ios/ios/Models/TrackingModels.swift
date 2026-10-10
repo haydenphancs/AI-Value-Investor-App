@@ -1209,8 +1209,13 @@ struct WhaleTradeGroupActivity: Identifiable {
             return "Date unavailable"
         }
 
-        let calendar = Calendar.current
-        let now = Date()
+        // 13F filers: `date` is the QUARTER END the filing reports, never the day it was
+        // filed, so "5 days ago" read as a trade last week. Named by quarter instead
+        // ("Q2 2026 13F", `ThirteenFQuarter`), which also buckets one quarter's filings
+        // under one timeline header.
+        if category == .investors || category == .institutions {
+            return ThirteenFQuarter.label(for: date)
+        }
 
         // Congressional rows are dated by DISCLOSURE, not by when the trade happened —
         // the STOCK Act lag is 30-45 days. Saying "Today" over a filing about a trade
@@ -1222,19 +1227,9 @@ struct WhaleTradeGroupActivity: Identifiable {
             return "Disclosed \(formatter.string(from: date))"
         }
 
-        if calendar.isDateInToday(date) {
-            return "Today"
-        } else if calendar.isDateInYesterday(date) {
-            return "Yesterday"
-        }
-
-        let components = calendar.dateComponents([.day], from: date, to: now)
-        // `days > 0` guard: a future date produced a NEGATIVE count that rendered as
-        // "-3 days ago".
-        if let days = components.day, days > 0, days <= 7 {
-            return "\(days) day\(days == 1 ? "" : "s") ago"
-        }
-
+        // No category: the whale's row was missing from the feed's join, so nothing says
+        // whether this is a 13F or a disclosure — a plain date, claiming neither recency
+        // nor a filing.
         formatter.dateFormat = "MMM dd, yyyy"
         return formatter.string(from: date)
     }

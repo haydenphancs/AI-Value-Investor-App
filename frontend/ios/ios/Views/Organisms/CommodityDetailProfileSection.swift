@@ -74,9 +74,11 @@ struct CommodityDetailProfileSection: View {
                 }
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.xs)
+                // Opaque: a category colour on its own 15% tint is under 4.5:1 in light
+                // (test_ios_theme_parity §6c).
                 .background(
                     Capsule()
-                        .fill(profile.category.color.opacity(0.15))
+                        .fill(AppColors.cardBackgroundLight)
                 )
 
                 // Info rows

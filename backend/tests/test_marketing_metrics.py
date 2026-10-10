@@ -664,8 +664,10 @@ def env(monkeypatch, caplog, ledger, jobs):
     monkeypatch.setattr(ms.settings, "MARKETING_ENABLED", True)
     monkeypatch.setattr(ms.settings, "MARKETING_METRICS_ENABLED", True)
     monkeypatch.setattr(ms.settings, "MARKETING_DRY_RUN", False)
-    # The headroom is priced by this switch (`outlet_x.metrics_headroom_micros`): pinned, never the .env's.
+    # The headroom is priced by these switches (`outlet_x.metrics_headroom_micros`): pinned, never the .env's.
     monkeypatch.setattr(ms.settings, "MARKETING_X_ALLOW_URLS", False)
+    monkeypatch.setattr(ms.settings, "MARKETING_X_IMAGES", False)
+    monkeypatch.setattr(ms.settings, "MARKETING_X_IMAGE_POST_MICROS", 200_000)
     monkeypatch.setattr(x_api, "configured", lambda: True)
     monkeypatch.setattr(x_api, "user_id_from_access_token", lambda: X_USER)
     monkeypatch.setattr(outlet_x, "budget_micros", lambda: e.budget)
@@ -1210,6 +1212,7 @@ def test_the_x_measure_prices_are_pinned_in_literal_micros(monkeypatch):
     """Review 2026-10-01 #12: every boundary below is written in these literals, so a mutated price (a
     headroom of 0, a $0.001 User read) fails here instead of moving every assertion with it."""
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", False)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGES", False)
     assert (outlet_x.USER_READ_MICROS, outlet_x.METRICS_READ_RESERVE_MICROS,
             outlet_x.metrics_headroom_micros()) == (10_000, 5_000, 60_000) == (USER_READ, RESERVE, HEADROOM)
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", True)
@@ -1251,6 +1254,29 @@ async def test_an_x_read_exactly_at_the_headroom_limit_is_allowed(env, monkeypat
     env.ledger.spend(edge)
     await env.measure(THU)
     assert len(env.x.reads) == 1 and env.ledger.metrics(pid)["status"] == "ok"
+
+
+#: Drop 1: while MARKETING_X_IMAGES is on, a post is priced as an image post — MARKETING_X_IMAGE_POST_MICROS
+#: ($0.20 by default) plus its $0.005 alt text — so four posts of headroom are $0.82.
+IMAGE_HEADROOM = 4 * (200_000 + 5_000)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spent, reads", [(2_000_000 - RESERVE - IMAGE_HEADROOM, 1),
+                                          (2_000_000 - RESERVE - IMAGE_HEADROOM + 1, 0)])
+async def test_with_x_images_on_metric_reads_leave_four_image_posts_of_headroom(env, monkeypatch, spent, reads):
+    monkeypatch.setattr(ms.settings, "MARKETING_X_IMAGES", True)
+    assert outlet_x.metrics_headroom_micros() == IMAGE_HEADROOM == 820_000
+    env.x_account_holder(THU)
+    pid = env.ledger.post("x", published_at=THU - timedelta(days=1, hours=1))
+    ext = env.ledger.raw(pid)["external_id"]
+    env.x.timeline = {ext: xpost(ext, like_count=1)}
+    env.ledger.spend(spent)
+    await env.measure(THU)
+    assert len(env.x.reads) == reads
+    assert env.ledger.metrics(pid)["status"] == ("ok" if reads else "capped")
+    if not reads:
+        assert env.ledger.metrics(pid)["note"] == "the monthly X cap keeps 4 posts of headroom ($0.820) — not read"
 
 
 @pytest.mark.asyncio
@@ -2867,10 +2893,33 @@ def test_a_hostile_last_error_is_scrubbed_folded_onto_one_line_and_capped():
     ("empty_narration", "voice stage"),
     ("narration_too_long", "voice stage"),
     ("unrenderable_text", "render stage"),
+    ("image_too_large", "post image"),
 ])
 def test_each_known_skip_reason_says_where_to_look(reason, needle):
     msg = _health(_run("skipped", stage="selected", metadata={"skip_reason": reason}))
     assert msg is not None and f"SKIPPED ({reason})" in msg and needle in msg
+
+
+def test_every_skip_reason_the_worker_raises_has_a_hint():
+    """A new `SkipRun("…")` in the worker (drop 1 added `image_too_large`) must come with a digest
+    hint, or the owner's alert reads "an unrecognised reason". AST scan of every worker module: the
+    string literal passed to `SkipRun(...)` / `skip(...)` (render and voice take it injected)."""
+    import ast
+    from pathlib import Path
+
+    from app.services.marketing import digest_service as ds
+
+    pkg = Path(__file__).resolve().parents[1] / "marketing"
+    raised = set()
+    for path in pkg.glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in ("SkipRun", "skip") and len(node.args) == 1
+                    and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                raised.add(node.args[0].value)
+    assert {"unrenderable_text", "image_too_large", "rest_day"} <= raised   # the scan is not vacuous
+    missing = sorted(raised - {"rest_day"} - set(ds._SKIP_HINTS))           # rest_day never alerts
+    assert not missing, f"worker skip reasons with no digest hint: {missing}"
 
 
 def test_a_rejected_day_names_the_run_whose_draft_to_read():
@@ -6299,3 +6348,166 @@ async def test_the_cycles_run_with_no_arguments_as_the_tick_calls_them(monkeypat
     assert await ds.health_cycle() == {"checked": 0, "sent": 0, "failed": 0, "rate_limited": 0}
     assert await ds.digest_cycle() == {"sent": 0, "failed": 0, "rate_limited": 0}
 
+
+
+# ── drop 1 (contract C12): each post's format in the digest ───────────────────
+
+
+def test_the_digest_shows_each_posts_format():
+    posts = [
+        _post("tiktok", "published", format="video"),
+        _post("bluesky", "published", format="image"),
+        _post("x", "published"),                                                     # text
+        _post("threads", "rejected", run_date="2026-10-01", format="image",
+              meta={"review": {"decision": "rejected", "reason": "tone"}}),
+        _post("linkedin", "failed", run_date="2026-09-29", format="image", last_error="refused",
+              meta={"publish": {"category": "forbidden"}}),
+        _post("x", "failed", run_date="2026-09-29", last_error=None),                # text
+        # a format outside the ledger's is "unknown", never echoed
+        _post("facebook", "rejected", run_date="2026-10-01", format="<b>gif</b>",
+              meta={"review": {"decision": "rejected"}}),
+        _post("youtube", "published", format="video", live=False),                    # rehearsal: not counted
+    ]
+    s = _summary(posts)
+    assert s["by_format"] == {"video": {"published": 1}, "image": {"published": 1, "rejected": 1, "failed": 1},
+                              "text": {"published": 1, "failed": 1}, "unknown": {"rejected": 1}}
+    text = ds.compose_digest(s)
+    assert ("Formats: video 1 (published 1) · image 3 (published 1 · rejected 1 · failed 1) · "
+            "text 2 (published 1 · failed 1) · unknown 1 (rejected 1)") in text.splitlines()
+    assert "  ❌ THREADS · run 10-01 · Tone · image" in text.splitlines()
+    assert "  ❌ FACEBOOK · run 10-01 · no reason · unknown" in text.splitlines()
+    assert "  ✖ LINKEDIN · run 09-29 · forbidden: refused · image" in text.splitlines()
+    assert "  ✖ X · run 09-29 · no error recorded · text" in text.splitlines()
+    assert "<b>" not in text and "gif" not in text
+    _assert_no_model_text(text)
+    # the Formats line sits under the per-platform counts, above Expired / Rejected / Failed
+    lines = text.splitlines()
+    assert lines.index(next(line for line in lines if line.startswith("Formats: "))) \
+        < lines.index(next(line for line in lines if line.startswith("Rejected ")))
+
+
+def test_a_week_without_live_posts_has_no_formats_line():
+    text = _digest([_post("x", "published", live=False)])
+    assert "Formats:" not in text and "Posts: none this week" in text
+
+
+# ══ Drop 2 (contract D13): the template refusal's hint, the series note ═════════════════════════════
+
+
+def test_the_template_refusal_says_where_to_look():
+    msg = _health(_run("skipped", stage="assets_ready", metadata={"skip_reason": "template_refused"}))
+    assert msg is not None and "SKIPPED (template_refused)" in msg
+    assert "create_posts TEMPLATE REFUSED" in msg and "MARKETING_CONTENT_CLASSES" in msg
+
+
+def _template_refused_switches() -> List[str]:
+    """Every `MARKETING_*` setting a `raise MarketingTemplateRefused(…)` in run_service names in its
+    message (AST: the raise's own string constants — never a comment, never another exception)."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "services" / "marketing" / "run_service.py")
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    names: List[str] = []
+    raises = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                and getattr(node.exc.func, "id", None) == "MarketingTemplateRefused"):
+            continue
+        raises += 1
+        for sub in ast.walk(node.exc):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                names.extend(re.findall(r"MARKETING_[A-Z_]+", sub.value))
+    assert raises >= 3, raises            # the class switch, the series switch, the re-check
+    return sorted(set(names))
+
+
+def test_the_template_refusal_hint_names_every_switch_create_posts_refuses_on():
+    """Review R9 (low): the per-series switch (drop 2b) also answers `template_refused`; the owner's alert
+    must name MARKETING_NEWS_SERIES too, not only the class switch — or it points at the wrong setting."""
+    switches = _template_refused_switches()
+    assert {"MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES"} <= set(switches), switches
+    msg = _health(_run("skipped", stage="assets_ready", metadata={"skip_reason": "template_refused"}))
+    assert msg is not None
+    missing = [s for s in switches if s not in msg]
+    assert not missing, (missing, msg)
+
+
+def _worker_rejection_skip_reasons() -> Dict[str, str]:
+    """`REJECTION_SKIP_REASONS` of marketing/main.py, read by AST (the worker is never imported here)."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "marketing" / "main.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        target = node.target if isinstance(node, ast.AnnAssign) else (
+            node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None)
+        if isinstance(target, ast.Name) and target.id == "REJECTION_SKIP_REASONS":
+            return ast.literal_eval(node.value)
+    raise AssertionError("marketing/main.py defines no REJECTION_SKIP_REASONS")
+
+
+def test_every_rejection_skip_reason_the_worker_records_has_a_hint():
+    """A `rejected` kick body becomes a skip reason through the worker's REJECTION_SKIP_REASONS (not a
+    `SkipRun("…")` literal, so the scan above cannot see them): each value needs a digest hint too, or the
+    owner's alert reads "an unrecognised reason"."""
+    reasons = _worker_rejection_skip_reasons()
+    assert {"content_rejected", "writer_unavailable", "empty_pool", "source_ineligible"} <= set(reasons.values())
+    missing = sorted(set(reasons.values()) - {"rest_day"} - set(ds._SKIP_HINTS))
+    assert not missing, f"rejection skip reasons with no digest hint: {missing}"
+
+
+def _with_series(series: Any, trail: Any) -> Dict[str, Any]:
+    return _run("published", metadata={"series": series, "series_trail": trail})
+
+
+@pytest.mark.parametrize("series, trail, note", [
+    ("money_map", [{"series": "money_map", "outcome": "chosen"}], "Money Map"),
+    ("money_map", [{"series": "ceo_buys", "outcome": "no_candidates", "reason": "ceo_none_qualified"},
+                   {"series": "insider_buys", "outcome": "unavailable", "reason": "insider_feed_unavailable"},
+                   {"series": "money_map", "outcome": "chosen"}],
+     "Money Map (fell back from CEO Buys: nothing qualified)"),
+    ("lesson", [{"series": "thirteen_f", "outcome": "timeout"}, {"series": "lesson", "outcome": "chosen"}],
+     "Lesson (fell back from 13F Season: its data source timed out)"),
+    ("ceo_buys", [], "CEO Buys"),
+    ("ceo_buys", None, "CEO Buys"),
+    ("thirteen_f", [{"series": "ceo_buys", "outcome": "budget"}, {"series": "thirteen_f", "outcome": "chosen"}],
+     "13F Season (fell back from CEO Buys: out of time)"),
+    ("money_map", [{"series": "ceo_buys", "outcome": "all_refused", "reason": "x"}],
+     "Money Map (fell back from CEO Buys: every candidate failed the template checks)"),
+    ("money_map", [{"series": "ceo_buys", "outcome": "brand_new_outcome"}],
+     "Money Map (fell back from CEO Buys: brand_new_outcome)"),
+    ("money_map", [{"series": "ceo_buys", "outcome": "<b>bold\nline</b>"}],
+     "Money Map (fell back from CEO Buys: it did not post)"),
+    # an unknown first step is skipped, never shown: only operator labels reach the text
+    ("money_map", [{"series": "<script>", "outcome": "error"}, "junk", {"series": "insider_buys", "outcome": "error"}],
+     "Money Map (fell back from Insider Buys: an error)"),
+    ("not_a_series", [{"series": "ceo_buys", "outcome": "error"}], ""),
+    (None, None, ""),
+    (["money_map"], None, ""),
+])
+def test_the_series_note_names_only_known_series_and_fixed_words(series, trail, note):
+    assert ds._series_note(_with_series(series, trail)) == note
+
+
+@pytest.mark.parametrize("run", [None, "x", {}, {"metadata": None}, {"metadata": "x"}])
+def test_the_series_note_of_a_run_without_metadata_is_empty(run):
+    assert ds._series_note(run) == ""
+
+
+def test_the_digest_day_line_carries_the_series_note():
+    mon, tue = date(2026, 11, 16), date(2026, 11, 17)
+    runs = [
+        _run("published", run_date=mon.isoformat(), metadata={
+            "series": "money_map", "series_trail": [{"series": "ceo_buys", "outcome": "no_candidates"},
+                                                    {"series": "money_map", "outcome": "chosen"}]}),
+        _run("skipped", run_date=tue.isoformat(), metadata={"skip_reason": "template_refused", "series": "thirteen_f",
+                                                            "series_trail": [{"series": "thirteen_f",
+                                                                              "outcome": "chosen"}]}),
+    ]
+    rows, _peak = ds._run_rows(runs, mon, tue)
+    assert rows == [(mon, "published · Money Map (fell back from CEO Buys: nothing qualified)"),
+                    (tue, "skipped — template_refused · 13F Season")]
+    # a run from before drop 2 (no series) keeps exactly its old line
+    rows, _peak = ds._run_rows([_run("published", run_date=mon.isoformat())], mon, mon)
+    assert rows == [(mon, "published")]

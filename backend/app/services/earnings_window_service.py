@@ -448,7 +448,7 @@ class EarningsWindowService:
         days = context_days(today)
         try:
             fetched = await asyncio.wait_for(
-                _fetch_days(getter, days), timeout=_FETCH_DEADLINE_SECONDS,
+                fetch_calendar_days(getter, days), timeout=_FETCH_DEADLINE_SECONDS,
             )
         except asyncio.TimeoutError:
             self._note_failure(
@@ -487,7 +487,7 @@ class EarningsWindowService:
         days = sorted({previous_trading_day(today), today})
         try:
             fetched = await asyncio.wait_for(
-                _fetch_days(getter, days), timeout=_FETCH_DEADLINE_SECONDS,
+                fetch_calendar_days(getter, days), timeout=_FETCH_DEADLINE_SECONDS,
             )
         except Exception as e:
             logger.warning(
@@ -595,7 +595,7 @@ class EarningsWindowService:
         )
 
 
-async def _fetch_days(
+async def fetch_calendar_days(
     getter: Callable[..., Awaitable[Any]], days: List[date]
 ) -> Dict[date, List[Dict[str, Any]]]:
     """One calendar call per day, bounded concurrency, ALL-OR-NOTHING.
@@ -603,7 +603,20 @@ async def _fetch_days(
     A partial round could leave only a stale duplicate row for a ticker whose
     confirmed date failed to load — a wrong status, not just a missing one — so any
     failed day fails the round and the previous snapshot keeps serving.
+
+    Public because the Home Earnings Shockers card (`signals_service._build_earnings`)
+    fetches its week the same way: a multi-day request is cut at 4,000 rows with the
+    NEWEST dates kept, so it is the only shape that cannot silently lose a day.
+
+    ``days`` must be ``date`` objects. A ``datetime`` (a ``date`` subclass) would send
+    ``2026-10-09T00:00:00`` upstream and then never equal a row's date, dropping every
+    row as if the day were empty — so it is refused outright.
     """
+    for d in days:
+        if isinstance(d, datetime) or not isinstance(d, date):
+            raise TypeError(
+                f"fetch_calendar_days needs datetime.date days, got {type(d).__name__}"
+            )
     sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
 
     async def _one(d: date) -> Tuple[date, List[Dict[str, Any]]]:

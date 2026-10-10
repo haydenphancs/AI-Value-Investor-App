@@ -34,6 +34,7 @@ class _FakeQuery:
     def eq(self, *a, **k): return self
     def in_(self, *a, **k): return self
     def gt(self, *a, **k): return self
+    def gte(self, *a, **k): return self
     def limit(self, *a, **k): return self
     # These two arrived with `fetch_all_rows` (2026-09-12): the reads are PAGED now,
     # because `.limit(5000)` never lifted PostgREST's ~1,000-row server cap and the
@@ -84,126 +85,201 @@ def _svc():
     return SignalsService()
 
 
-# ── Whale drill-down ───────────────────────────────────────────────────
+# ── Whale drill-down: share increases in each fund's latest 13F ─────────
+#
+# Since 2026-10-09 the card and this list read `whale_trades` (BOUGHT New / Increased in the
+# fund's latest, current 13F group) — not `whale_holdings.change_percent`, a WEIGHT change.
+# The fake ignores filters, so the Python re-checks are what these tests exercise.
+# At _DNOW (2026-06-30) the expected 13F quarter is 2026-Q1.
+
+_DNOW = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+_Q1 = "2026-03-31"
+
+
+def _w(wid, name, cik=None, firm=None, filed="2026-Q1"):
+    return {"id": wid, "name": name, "cik": cik, "firm_name": firm,
+            "last_hydrated_at": "2026-04-02T00:00:00Z", "last_filing_period": filed}
+
+
+def _g(wid, date=_Q1):
+    return {"id": f"g-{wid}-{date}", "whale_id": wid, "date": date}
+
+
+def _t(wid, ticker, *, action="BOUGHT", trade_type="Increased", amount=1_000_000.0,
+       date=_Q1, alloc=1.0, name=None):
+    return {"id": f"t-{wid}-{ticker}-{action}-{date}", "whale_id": wid,
+            "trade_group_id": f"g-{wid}-{date}", "ticker": ticker,
+            "company_name": name or ticker, "action": action, "trade_type": trade_type,
+            "amount": amount, "new_allocation": alloc, "date": date}
+
+
+def _tables(whales, trades, groups=None, holdings=None):
+    return {
+        "whales": whales,
+        "whale_trade_groups": groups if groups is not None else [_g(w["id"]) for w in whales],
+        "whale_trades": trades,
+        "whale_holdings": holdings or [],
+    }
+
+
+def _rows(monkeypatch, tables, sym="TSM"):
+    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
+    return _svc()._detail_whale_rows(sym, now=_DNOW)
 
 
 def test_whale_rows_join_registry_all_tappable_with_amount_and_ranking(monkeypatch):
-    tables = {
-        "whales": [
-            {"id": "w1", "name": "Citadel Advisors", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w2", "name": "Renaissance Tech", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w3", "name": "AQR Capital", "last_hydrated_at": "2026-03-31T00:00:00Z"},
+    tables = _tables(
+        [_w("w1", "Citadel Advisors", "C1"), _w("w2", "Renaissance Tech", "C2"),
+         _w("w3", "AQR Capital", "C3")],
+        [
+            _t("w1", "TSM", amount=2_400_000, alloc=3.1),
+            _t("w2", "TSM", trade_type="New", amount=800_000, alloc=5.0),
+            _t("w3", "TSM", action="SOLD", trade_type="Decreased"),     # trimmed → excluded
+            _t("wX", "TSM", amount=9_000_000),                          # not a registry whale
         ],
-        "whale_holdings": [
-            {"whale_id": "w1", "ticker": "TSM", "allocation": 3.1, "change_percent": 1.2},
-            {"whale_id": "w2", "ticker": "TSM", "allocation": 5.0, "change_percent": 0.8},
-            {"whale_id": "w3", "ticker": "TSM", "allocation": 2.0, "change_percent": -0.5},  # trimmed → excluded
-            {"whale_id": "wX", "ticker": "TSM", "allocation": 9.0, "change_percent": 4.0},   # not a 13F registry whale → excluded
-        ],
-        "whale_trades": [
-            {"whale_id": "w1", "ticker": "TSM", "action": "BOUGHT", "trade_type": "Increased",
-             "amount": 2_400_000, "date": "2026-03-31", "disclosure_date": "2026-05-15"},
-            # w2 has no BOUGHT trade row → amount_est stays None
-        ],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, as_of = _svc()._detail_whale_rows("TSM")
+        groups=[_g("w1"), _g("w2"), _g("w3"), _g("wX")],
+    )
+    rows, as_of = _rows(monkeypatch, tables)
 
-    assert [r.name for r in rows] == ["Citadel Advisors", "Renaissance Tech"]  # w3 trimmed, wX non-registry
+    assert [r.name for r in rows] == ["Citadel Advisors", "Renaissance Tech"]
     assert all(r.whale_id is not None for r in rows)          # every whale is a registry fund → tappable
-    # w1 ranks first ($ est present); w2 has no $ est.
     assert rows[0].whale_id == "w1" and rows[0].amount_est == 2_400_000
-    assert rows[0].allocation_percent == 3.1 and rows[0].allocation_change == 1.2
-    assert rows[1].whale_id == "w2" and rows[1].amount_est is None
-    assert as_of == "2026-03-31"
+    assert rows[0].allocation_percent == 3.1 and rows[0].is_new_position is False
+    assert rows[1].whale_id == "w2" and rows[1].is_new_position is True
+    # No weight CHANGE is sent any more (it moves with price); the date is the quarter END.
+    assert all(r.allocation_change is None for r in rows)
+    assert all(r.transaction_date == _Q1 and r.disclosure_date is None for r in rows)
+    assert as_of == "2026-04-02"
 
 
 def test_whale_rows_dedup_shared_cik_person_and_fund(monkeypatch):
-    # A fund registered under BOTH a person and a firm name shares ONE CIK →
-    # must appear once (matches the card's distinct-fund count).
-    tables = {
-        "whales": [
-            {"id": "wp", "name": "Ray Dalio", "cik": "CIK1", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "wf", "name": "Bridgewater Associates", "cik": "CIK1", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w2", "name": "Citadel", "cik": "CIK2", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-        ],
-        "whale_holdings": [
-            {"whale_id": "wp", "ticker": "TSM", "allocation": 1.63, "change_percent": 1.63},
-            {"whale_id": "wf", "ticker": "TSM", "allocation": 1.63, "change_percent": 1.63},
-            {"whale_id": "w2", "ticker": "TSM", "allocation": 0.9, "change_percent": 0.2},
-        ],
-        "whale_trades": [],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
-    assert len(rows) == 2                                   # CIK1 collapsed, CIK2 separate
-    names = {r.name for r in rows}
-    assert "Citadel" in names
-    assert "Bridgewater Associates" in names               # tie-break name asc wins the shared CIK
-    assert "Ray Dalio" not in names
+    # A fund registered under BOTH a person and a firm name shares ONE CIK → once,
+    # matching the card's distinct-fund count; the larger add represents it.
+    tables = _tables(
+        [_w("wp", "Ray Dalio", "CIK1"), _w("wf", "Bridgewater Associates", "CIK1"),
+         _w("w2", "Citadel", "CIK2")],
+        [_t("wp", "TSM", amount=1_000_000), _t("wf", "TSM", amount=1_630_000),
+         _t("w2", "TSM", amount=900_000)],
+    )
+    rows, _ = _rows(monkeypatch, tables)
+    assert [r.name for r in rows] == ["Bridgewater Associates", "Citadel"]
+
+
+def test_whale_rows_shared_cik_tie_is_resolved_the_same_way_every_time(monkeypatch):
+    whales = [_w("wb", "Person", "CIK1"), _w("wa", "Firm", "CIK1")]
+    trades = [_t("wb", "TSM"), _t("wa", "TSM")]                  # identical adds
+    first, _ = _rows(monkeypatch, _tables(whales, trades))
+    again, _ = _rows(monkeypatch, _tables(list(reversed(whales)), list(reversed(trades))))
+    assert [r.whale_id for r in first] == [r.whale_id for r in again] == ["wa"]
 
 
 def test_whale_rows_subtitle_carries_firm_name(monkeypatch):
-    # Post-merge (migration 080): person-fronted whales carry firm_name, and the
-    # drill-down row's subtitle shows the FIRM so the name never appears alone.
-    # Whales without a firm (true institutions) keep the "13F fund" fallback.
-    tables = {
-        "whales": [
-            {"id": "wp", "name": "Ray Dalio", "cik": "CIK1",
-             "firm_name": "Bridgewater Associates",
-             "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w2", "name": "Renaissance Technologies", "cik": "CIK2",
-             "firm_name": None,
-             "last_hydrated_at": "2026-03-31T00:00:00Z"},
-        ],
-        "whale_holdings": [
-            {"whale_id": "wp", "ticker": "TSM", "allocation": 1.6, "change_percent": 1.6},
-            {"whale_id": "w2", "ticker": "TSM", "allocation": 0.9, "change_percent": 0.2},
-        ],
-        "whale_trades": [],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
-
-    by_name = {r.name: r for r in rows}
+    # Person-fronted whales carry firm_name; the row's subtitle shows the FIRM so the name
+    # never appears alone. Whales without a firm keep the "13F fund" fallback.
+    tables = _tables(
+        [_w("wp", "Ray Dalio", "CIK1", firm="Bridgewater Associates"),
+         _w("w2", "Renaissance Technologies", "CIK2", firm=None)],
+        [_t("wp", "TSM"), _t("w2", "TSM")],
+    )
+    by_name = {r.name: r for r in _rows(monkeypatch, tables)[0]}
     assert by_name["Ray Dalio"].subtitle == "Bridgewater Associates"
     assert by_name["Renaissance Technologies"].subtitle == "13F fund"
 
 
 def test_whale_rows_firm_edge_cases_whitespace_and_unicode(monkeypatch):
-    # Whitespace-only firm (bad row edit) → generic fallback, never a blank
-    # subtitle; ampersand firm names (live registry data) pass through intact.
-    tables = {
-        "whales": [
-            {"id": "w1", "name": "Broken Row", "cik": "C1", "firm_name": "   ",
-             "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w2", "name": "Duan Yongping", "cik": "C2",
-             "firm_name": "H&H International Investment",
-             "last_hydrated_at": "2026-03-31T00:00:00Z"},
-        ],
-        "whale_holdings": [
-            {"whale_id": "w1", "ticker": "TSM", "allocation": 1.0, "change_percent": 0.5},
-            {"whale_id": "w2", "ticker": "TSM", "allocation": 2.0, "change_percent": 1.1},
-        ],
-        "whale_trades": [],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
-
-    by_name = {r.name: r for r in rows}
+    tables = _tables(
+        [_w("w1", "Broken Row", "C1", firm="   "),
+         _w("w2", "Duan Yongping", "C2", firm="H&H International Investment")],
+        [_t("w1", "TSM"), _t("w2", "TSM")],
+    )
+    by_name = {r.name: r for r in _rows(monkeypatch, tables)[0]}
     assert by_name["Broken Row"].subtitle == "13F fund"
     assert by_name["Duan Yongping"].subtitle == "H&H International Investment"
 
 
 def test_whale_rows_empty_when_nothing_adding(monkeypatch):
-    tables = {
-        "whales": [{"id": "w1", "name": "Citadel", "last_hydrated_at": "2026-03-31T00:00:00Z"}],
-        "whale_holdings": [],
-        "whale_trades": [],
-    }
+    tables = _tables([_w("w1", "Citadel", "C1")],
+                     [_t("w1", "TSM", action="SOLD", trade_type="Decreased")])
+    assert _rows(monkeypatch, tables)[0] == []
+    # No current group at all (a late filer) → empty, not an error.
+    late = _tables([_w("w1", "Citadel", "C1", filed="2025-Q4")], [_t("w1", "TSM", date="2025-12-31")],
+                   groups=[_g("w1", "2025-12-31")])
+    assert _rows(monkeypatch, late)[0] == []
+
+
+def test_a_weight_that_rose_on_price_alone_is_not_listed(monkeypatch):
+    # The defect this replaced: Flat's holding weight rose (change_percent > 0) with no
+    # share bought; Adder bought shares while its weight FELL.
+    tables = _tables(
+        [_w("w1", "Adder", "C1"), _w("w2", "Flat", "C2")],
+        [_t("w1", "TSM", alloc=0.8)],
+        holdings=[{"whale_id": "w1", "ticker": "TSM", "allocation": 0.8, "change_percent": -0.4},
+                  {"whale_id": "w2", "ticker": "TSM", "allocation": 3.0, "change_percent": 2.0}],
+    )
+    assert [r.name for r in _rows(monkeypatch, tables)[0]] == ["Adder"]
+
+
+def test_a_groups_read_failure_raises_on_card_and_detail(monkeypatch):
+    class _Boom(_FakeSupabase):
+        def table(self, name):
+            if name == "whale_trade_groups":
+                raise RuntimeError("supabase down")
+            return super().table(name)
+
+    tables = _tables([_w("w1", "A", "C1"), _w("w2", "B", "C2")], [_t("w1", "TSM"), _t("w2", "TSM")])
+    monkeypatch.setattr(ssvc, "get_supabase", lambda: _Boom(tables))
+    with pytest.raises(RuntimeError):
+        _svc()._detail_whale_rows("TSM", now=_DNOW)
+    with pytest.raises(RuntimeError):
+        _svc()._query_and_aggregate_whale(now=_DNOW)
+
+
+# ── The card (same reads, same functions) ───────────────────────────────
+
+
+def _card(monkeypatch, tables):
     monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
-    assert rows == []
+    return _svc()._query_and_aggregate_whale(now=_DNOW)
+
+
+def _parity_tables():
+    whales = [_w(f"w{i}", f"Fund {i}", f"C{i}") for i in range(1, 7)]
+    whales.append(_w("w1b", "Fund 1 (person)", "C1"))           # shares C1 with w1
+    whales.append(_w("wnull", "No CIK Fund", None))
+    trades = [
+        _t("w1", "NVDA"), _t("w1b", "NVDA"), _t("w2", "NVDA"), _t("w3", "NVDA", trade_type="New"),
+        _t("w4", "NVDA", action="SOLD", trade_type="Decreased"),
+        _t("w2", "BRK.B"), _t("w5", "BRK-B"), _t("wnull", "BRK.B"),
+        _t("w6", "TSM"), _t("w6", "TSM", action="SOLD", trade_type="Decreased"),   # stale pair
+        _t("w5", "TSM"),
+        _t("w1", "AAPL"),                                                            # one fund only
+    ]
+    holdings = [{"id": "h1", "whale_id": "w2", "ticker": "NVDA", "company_name": "NVIDIA Corporation"}]
+    return _tables(whales, trades, holdings=holdings)
+
+
+def test_the_card_counts_distinct_funds_that_added_shares(monkeypatch):
+    g = _card(monkeypatch, _parity_tables())
+    assert [(e.symbol, e.value) for e in g.entries] == [
+        ("BRK-B", 3.0), ("NVDA", 3.0), ("AAPL", 1.0), ("TSM", 1.0),
+    ]
+    assert g.entries[1].name == "NVIDIA Corporation"     # holdings name over the bare ticker
+    assert g.as_of_date == "2026-04-02"
+
+
+def test_every_card_count_equals_its_drill_down_list(monkeypatch):
+    tables = _parity_tables()
+    g = _card(monkeypatch, tables)
+    for e in g.entries:
+        rows, _ = _rows(monkeypatch, tables, sym=e.symbol)
+        assert len(rows) == e.value, e.symbol
+
+
+def test_no_current_fund_omits_the_card_honestly(monkeypatch):
+    tables = _tables([_w("w1", "A", "C1", filed="2025-Q4"), _w("w2", "B", "C2", filed="2025-Q4")],
+                     [_t("w1", "TSM", date="2025-12-31"), _t("w2", "TSM", date="2025-12-31")],
+                     groups=[_g("w1", "2025-12-31"), _g("w2", "2025-12-31")])
+    assert _card(monkeypatch, tables) is None
 
 
 def test_whale_rows_reraise_on_supabase_error(monkeypatch):
@@ -476,74 +552,29 @@ def test_signal_holder_fully_populated_variants_round_trip():
 # ── Outlier / boundary hardening (deep-review additions) ────────────────
 
 
-def test_whale_row_uses_most_recent_trade_date_not_largest_amount(monkeypatch):
-    # A whale with a big OLD buy and a smaller RECENT buy: show the RECENT date +
-    # its amount (coherent + fresh), not the older larger-amount trade's date.
-    tables = {
-        "whales": [
-            {"id": "w1", "name": "Citadel", "cik": "C1", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-        ],
-        "whale_holdings": [
-            {"whale_id": "w1", "ticker": "TSM", "allocation": 2.0, "change_percent": 1.0},
-        ],
-        "whale_trades": [
-            {"whale_id": "w1", "ticker": "TSM", "action": "BOUGHT", "trade_type": "Increased",
-             "amount": 5_000_000, "date": "2025-12-31"},   # big, OLD
-            {"whale_id": "w1", "ticker": "TSM", "action": "BOUGHT", "trade_type": "Increased",
-             "amount": 900_000, "date": "2026-03-31"},      # small, RECENT
-        ],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
+def test_whale_row_reads_only_the_latest_quarter_not_a_bigger_older_buy(monkeypatch):
+    # A big OLD buy and a smaller RECENT one: only the fund's latest 13F counts, so the row
+    # shows the recent quarter and that trade's amount (coherent + current).
+    tables = _tables(
+        [_w("w1", "Citadel", "C1")],
+        [_t("w1", "TSM", amount=5_000_000, date="2025-12-31"), _t("w1", "TSM", amount=900_000)],
+        groups=[_g("w1", "2025-12-31"), _g("w1")],
+    )
+    rows, _ = _rows(monkeypatch, tables)
     assert len(rows) == 1
-    assert rows[0].transaction_date == "2026-03-31"     # most recent, not 2025-12-31
-    assert rows[0].amount_est == 900_000                # that trade's amount (coherent)
+    assert rows[0].transaction_date == _Q1 and rows[0].amount_est == 900_000
 
 
 def test_whale_rows_null_cik_stay_distinct(monkeypatch):
-    tables = {
-        "whales": [
-            {"id": "w1", "name": "A Fund", "cik": None, "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w2", "name": "B Fund", "cik": "", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-        ],
-        "whale_holdings": [
-            {"whale_id": "w1", "ticker": "TSM", "allocation": 1.0, "change_percent": 1.0},
-            {"whale_id": "w2", "ticker": "TSM", "allocation": 1.0, "change_percent": 1.0},
-        ],
-        "whale_trades": [],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
-    assert len(rows) == 2   # null/blank CIK → sentinel per whale, NOT collapsed
-
-
-def test_whale_rows_change_percent_zero_excluded(monkeypatch):
-    tables = {
-        "whales": [
-            {"id": "w1", "name": "Adder", "cik": "C1", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-            {"id": "w2", "name": "Flat", "cik": "C2", "last_hydrated_at": "2026-03-31T00:00:00Z"},
-        ],
-        "whale_holdings": [
-            {"whale_id": "w1", "ticker": "TSM", "allocation": 2.0, "change_percent": 1.5},
-            {"whale_id": "w2", "ticker": "TSM", "allocation": 3.0, "change_percent": 0.0},  # not adding
-        ],
-        "whale_trades": [],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("TSM")
-    assert [r.name for r in rows] == ["Adder"]   # change_percent==0 excluded
+    tables = _tables([_w("w1", "A Fund", None), _w("w2", "B Fund", "")],
+                     [_t("w1", "TSM"), _t("w2", "TSM")])
+    assert len(_rows(monkeypatch, tables)[0]) == 2   # null/blank CIK → sentinel per whale
 
 
 def test_whale_rows_match_class_share_variant(monkeypatch):
-    # Holdings stored as "BRK.B" must match a request canonicalized to "BRK-B".
-    tables = {
-        "whales": [{"id": "w1", "name": "Berkshire Fund", "cik": "C1", "last_hydrated_at": "2026-03-31T00:00:00Z"}],
-        "whale_holdings": [{"whale_id": "w1", "ticker": "BRK.B", "allocation": 2.5, "change_percent": 0.5}],
-        "whale_trades": [{"whale_id": "w1", "ticker": "BRK.B", "action": "BOUGHT", "trade_type": "Increased",
-                          "amount": 1_200_000, "date": "2026-03-31"}],
-    }
-    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
-    rows, _ = _svc()._detail_whale_rows("BRK-B")
+    # Trades stored as "BRK.B" must match a request canonicalized to "BRK-B".
+    tables = _tables([_w("w1", "Berkshire Fund", "C1")], [_t("w1", "BRK.B", amount=1_200_000)])
+    rows, _ = _rows(monkeypatch, tables, sym="BRK-B")
     assert len(rows) == 1 and rows[0].name == "Berkshire Fund" and rows[0].amount_est == 1_200_000
 
 

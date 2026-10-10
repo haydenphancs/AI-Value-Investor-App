@@ -942,18 +942,26 @@ def _contrast(a, b) -> float:
 
 
 def segment_contrast(detail_src: str, theme_src: str, chip_src: str) -> List[Tuple[str, float]]:
-    """(appearance, ratio) of the RESTING segment label: `accent` ink on `accent @ opacity`
-    blended over the page background — what the eye actually sees."""
+    """(appearance, ratio) of the RESTING segment label — what the eye actually sees: `accent`
+    ink on the chip's resting fill, which is either a TINT of the accent (`accent.opacity(n)`,
+    blended over the page) or, since 2026-10-09, an opaque palette token."""
     picker = _closure_after(type_body(_code(detail_src), "TrillionClubDetailView"), "private var segmentPicker: some View")
     token = re.search(r"accent:\s*AppColors\.(\w+)", picker)
     assert token, "segmentPicker passes no accent token"
-    opacity = float(re.search(r"accent\.opacity\(([\d.]+)\)", _code(chip_src)).group(1))
+    chip = _code(chip_src)
+    tinted = re.search(r"accent\.opacity\(([\d.]+)\)", chip)
+    opaque = re.search(r"isSelected\s*\?\s*accentFill\s*:\s*AppColors\.(\w+)", chip)
+    assert tinted or opaque, "AccentFilterChip's resting fill is neither an accent tint nor a palette token"
     ink, page = _token_hex(theme_src, token.group(1)), _token_hex(theme_src, "background")
     out = []
     for i, mode in enumerate(("light", "dark")):
-        fg, bg = _rgb(ink[i]), _rgb(page[i])
-        tint = tuple(opacity * f + (1 - opacity) * b for f, b in zip(fg, bg))
-        out.append((mode, round(_contrast(fg, tint), 2)))
+        fg = _rgb(ink[i])
+        if tinted:
+            opacity = float(tinted.group(1))
+            bg = tuple(opacity * f + (1 - opacity) * b for f, b in zip(fg, _rgb(page[i])))
+        else:
+            bg = _rgb(_token_hex(theme_src, opaque.group(1))[i])
+        out.append((mode, round(_contrast(fg, bg), 2)))
     return out
 
 
@@ -963,10 +971,15 @@ def test_segment_chips_clear_text_contrast_in_both_appearances():
 
 
 def test_segment_contrast_guard_fires():
-    """primaryBlue on its own 15% tint is 3.87:1 on the light page — the shipped defect."""
-    mutated = _replace_once(_src(DETAIL), "accent: AppColors.textSecondary,", "accent: AppColors.primaryBlue,")
-    ratios = dict(segment_contrast(mutated, _src(THEME), _src(FILTER_CHIP)))
+    """primaryBlue on its own 15% tint is 3.87:1 on the light page — the shipped defect. The
+    chip's resting fill is opaque now, so the mutation has to put the tint back as well."""
+    blue = _replace_once(_src(DETAIL), "accent: AppColors.textSecondary,", "accent: AppColors.primaryBlue,")
+    tinted_chip = _replace_once(_src(FILTER_CHIP), "isSelected ? accentFill : AppColors.cardBackgroundLight",
+                                "isSelected ? accentFill : accent.opacity(0.15)")
+    ratios = dict(segment_contrast(blue, _src(THEME), tinted_chip))
     assert ratios["light"] < 4.5, ratios
+    # ...and the opaque resting fill is exactly what made primaryBlue safe there.
+    assert all(r >= 4.5 for r in dict(segment_contrast(blue, _src(THEME), _src(FILTER_CHIP))).values())
 
 
 # ── 7.8 Section titles are VoiceOver headings ─────────────────────────────────────

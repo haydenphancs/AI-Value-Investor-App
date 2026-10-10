@@ -106,8 +106,12 @@ struct PersonaCard: View {
             .padding(.vertical, AppSpacing.md)
             .padding(.horizontal, AppSpacing.sm)
             .background(
+                // Selected is OPAQUE `cardBackgroundLight` + the accent stroke below. The tagline
+                // is inked in the accent, and an accent on its own 15% tint is ~4.2:1 in light
+                // even over white (`accentColor` is clamped only against opaque surfaces) —
+                // test_ios_theme_parity §6c.
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .cardFill(isSelected ? persona.accentColor.opacity(0.15) : AppColors.cardBackground)
+                    .cardFill(isSelected ? AppColors.cardBackgroundLight : AppColors.cardBackground)
                     .overlay(
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
                             .stroke(

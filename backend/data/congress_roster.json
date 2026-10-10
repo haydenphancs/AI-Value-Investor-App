@@ -1,0 +1,4821 @@
+{
+ "_about": "Members of the US Congress serving now or at any time since 2021-01-03, names only. Source: the public-domain (CC0) unitedstates/congress-legislators dataset (legislators-current.json + legislators-historical.json), fetched 2026-10-09. Used ONLY as a block-list: a company-news template refuses any text naming a member (rules/marketing.md §1 — members of Congress are never named). Refresh with backend/scripts/refresh_congress_roster.py (owner-run).",
+ "fetched_on": "2026-10-09",
+ "congress_start": "2025-01-03",
+ "members": [
+  {
+   "first": "Ralph",
+   "last": "Abraham",
+   "official_full": "Ralph Lee Abraham",
+   "current": false
+  },
+  {
+   "first": "Alma",
+   "last": "Adams",
+   "official_full": "Alma S. Adams",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Aderholt",
+   "official_full": "Robert B. Aderholt",
+   "current": true
+  },
+  {
+   "first": "Pete",
+   "last": "Aguilar",
+   "official_full": "Pete Aguilar",
+   "current": true
+  },
+  {
+   "first": "Lamar",
+   "last": "Alexander",
+   "official_full": "Lamar Alexander",
+   "current": false
+  },
+  {
+   "first": "Mark",
+   "last": "Alford",
+   "official_full": "Mark Alford",
+   "current": true
+  },
+  {
+   "first": "Rick",
+   "last": "Allen",
+   "official_full": "Rick W. Allen",
+   "current": true
+  },
+  {
+   "first": "Colin",
+   "last": "Allred",
+   "official_full": "Colin Z. Allred",
+   "current": false
+  },
+  {
+   "first": "Angela",
+   "last": "Alsobrooks",
+   "official_full": "Angela D. Alsobrooks",
+   "current": true
+  },
+  {
+   "first": "Justin",
+   "last": "Amash",
+   "official_full": "Justin Amash",
+   "current": false
+  },
+  {
+   "first": "Gabe",
+   "last": "Amo",
+   "official_full": "Gabe Amo",
+   "current": true
+  },
+  {
+   "first": "Mark",
+   "last": "Amodei",
+   "official_full": "Mark E. Amodei",
+   "current": true
+  },
+  {
+   "first": "Yassamin",
+   "last": "Ansari",
+   "official_full": "Yassamin Ansari",
+   "current": true
+  },
+  {
+   "first": "Alan",
+   "last": "Armstrong",
+   "official_full": "Alan Armstrong",
+   "current": true
+  },
+  {
+   "first": "Kelly",
+   "last": "Armstrong",
+   "official_full": "Kelly Armstrong",
+   "current": false
+  },
+  {
+   "first": "Jodey",
+   "last": "Arrington",
+   "official_full": "Jodey C. Arrington",
+   "current": true
+  },
+  {
+   "first": "Jake",
+   "last": "Auchincloss",
+   "official_full": "Jake Auchincloss",
+   "current": true
+  },
+  {
+   "first": "Cynthia",
+   "last": "Axne",
+   "official_full": "Cynthia Axne",
+   "current": false
+  },
+  {
+   "first": "Brian",
+   "last": "Babin",
+   "official_full": "Brian Babin",
+   "current": true
+  },
+  {
+   "first": "Don",
+   "last": "Bacon",
+   "official_full": "Don Bacon",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Baird",
+   "official_full": "James R. Baird",
+   "current": true
+  },
+  {
+   "first": "Troy",
+   "last": "Balderson",
+   "official_full": "Troy Balderson",
+   "current": true
+  },
+  {
+   "first": "Tammy",
+   "last": "Baldwin",
+   "official_full": "Tammy Baldwin",
+   "current": true
+  },
+  {
+   "first": "Becca",
+   "last": "Balint",
+   "official_full": "Becca Balint",
+   "current": true
+  },
+  {
+   "first": "Jim",
+   "last": "Banks",
+   "official_full": "Jim Banks",
+   "current": true
+  },
+  {
+   "first": "Garland",
+   "last": "Barr",
+   "nickname": "Andy",
+   "official_full": "Andy Barr",
+   "current": true
+  },
+  {
+   "first": "Nanette",
+   "last": "Barragán",
+   "official_full": "Nanette Diaz Barragán",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Barrasso",
+   "official_full": "John Barrasso",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "Barrett",
+   "official_full": "Tom Barrett",
+   "current": true
+  },
+  {
+   "first": "Karen",
+   "last": "Bass",
+   "official_full": "Karen Bass",
+   "current": false
+  },
+  {
+   "first": "Michael",
+   "last": "Baumgartner",
+   "official_full": "Michael Baumgartner",
+   "current": true
+  },
+  {
+   "first": "Aaron",
+   "last": "Bean",
+   "official_full": "Aaron Bean",
+   "current": true
+  },
+  {
+   "first": "Joyce",
+   "last": "Beatty",
+   "official_full": "Joyce Beatty",
+   "current": true
+  },
+  {
+   "first": "Nicholas",
+   "last": "Begich",
+   "official_full": "Nicholas J. Begich III",
+   "current": true
+  },
+  {
+   "first": "Wesley",
+   "last": "Bell",
+   "official_full": "Wesley Bell",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Bennet",
+   "official_full": "Michael F. Bennet",
+   "current": true
+  },
+  {
+   "first": "Cliff",
+   "last": "Bentz",
+   "official_full": "Cliff Bentz",
+   "current": true
+  },
+  {
+   "first": "Ami",
+   "last": "Bera",
+   "official_full": "Ami Bera",
+   "current": true
+  },
+  {
+   "first": "Jack",
+   "last": "Bergman",
+   "official_full": "Jack Bergman",
+   "current": true
+  },
+  {
+   "first": "Donald",
+   "last": "Beyer",
+   "official_full": "Donald S. Beyer, Jr.",
+   "current": true
+  },
+  {
+   "first": "Stephanie",
+   "last": "Bice",
+   "official_full": "Stephanie I. Bice",
+   "current": true
+  },
+  {
+   "first": "Andy",
+   "last": "Biggs",
+   "official_full": "Andy Biggs",
+   "current": true
+  },
+  {
+   "first": "Sheri",
+   "last": "Biggs",
+   "official_full": "Sheri Biggs",
+   "current": true
+  },
+  {
+   "first": "Gus",
+   "last": "Bilirakis",
+   "official_full": "Gus M. Bilirakis",
+   "current": true
+  },
+  {
+   "first": "Dan",
+   "last": "Bishop",
+   "official_full": "Dan Bishop",
+   "current": false
+  },
+  {
+   "first": "Rob",
+   "last": "Bishop",
+   "official_full": "Rob Bishop",
+   "current": false
+  },
+  {
+   "first": "Sanford",
+   "last": "Bishop",
+   "official_full": "Sanford D. Bishop, Jr.",
+   "current": true
+  },
+  {
+   "first": "Marsha",
+   "last": "Blackburn",
+   "official_full": "Marsha Blackburn",
+   "current": true
+  },
+  {
+   "first": "Everton",
+   "last": "Blair",
+   "official_full": "Everton Blair Jr.",
+   "current": true
+  },
+  {
+   "first": "Earl",
+   "last": "Blumenauer",
+   "official_full": "Earl Blumenauer",
+   "current": false
+  },
+  {
+   "first": "Richard",
+   "last": "Blumenthal",
+   "official_full": "Richard Blumenthal",
+   "current": true
+  },
+  {
+   "first": "Roy",
+   "last": "Blunt",
+   "official_full": "Roy Blunt",
+   "current": false
+  },
+  {
+   "first": "Lisa",
+   "last": "Blunt Rochester",
+   "official_full": "Lisa Blunt Rochester",
+   "current": true
+  },
+  {
+   "first": "Lauren",
+   "last": "Boebert",
+   "official_full": "Lauren Boebert",
+   "current": true
+  },
+  {
+   "first": "Suzanne",
+   "last": "Bonamici",
+   "official_full": "Suzanne Bonamici",
+   "current": true
+  },
+  {
+   "first": "Cory",
+   "last": "Booker",
+   "official_full": "Cory A. Booker",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Boozman",
+   "official_full": "John Boozman",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Bost",
+   "official_full": "Mike Bost",
+   "current": true
+  },
+  {
+   "first": "Carolyn",
+   "last": "Bourdeaux",
+   "official_full": "Carolyn Bourdeaux",
+   "current": false
+  },
+  {
+   "first": "Jamaal",
+   "last": "Bowman",
+   "official_full": "Jamaal Bowman",
+   "current": false
+  },
+  {
+   "first": "Brendan",
+   "last": "Boyle",
+   "official_full": "Brendan F. Boyle",
+   "current": true
+  },
+  {
+   "first": "Kevin",
+   "last": "Brady",
+   "official_full": "Kevin Brady",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Braun",
+   "official_full": "Mike Braun",
+   "current": false
+  },
+  {
+   "first": "Josh",
+   "last": "Brecheen",
+   "official_full": "Josh Brecheen",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Bresnahan",
+   "official_full": "Robert P. Bresnahan, Jr.",
+   "current": true
+  },
+  {
+   "first": "Anthony",
+   "last": "Brindisi",
+   "official_full": "Anthony Brindisi",
+   "current": false
+  },
+  {
+   "first": "Katie",
+   "last": "Britt",
+   "official_full": "Katie Boyd Britt",
+   "current": true
+  },
+  {
+   "first": "Mo",
+   "last": "Brooks",
+   "official_full": "Mo Brooks",
+   "current": false
+  },
+  {
+   "first": "Susan",
+   "last": "Brooks",
+   "official_full": "Susan W. Brooks",
+   "current": false
+  },
+  {
+   "first": "Anthony",
+   "last": "Brown",
+   "official_full": "Anthony G. Brown",
+   "current": false
+  },
+  {
+   "first": "Sherrod",
+   "last": "Brown",
+   "official_full": "Sherrod Brown",
+   "current": false
+  },
+  {
+   "first": "Shontel",
+   "last": "Brown",
+   "official_full": "Shontel M. Brown",
+   "current": true
+  },
+  {
+   "first": "Julia",
+   "last": "Brownley",
+   "official_full": "Julia Brownley",
+   "current": true
+  },
+  {
+   "first": "Vern",
+   "last": "Buchanan",
+   "official_full": "Vern Buchanan",
+   "current": true
+  },
+  {
+   "first": "Ken",
+   "last": "Buck",
+   "official_full": "Ken Buck",
+   "current": false
+  },
+  {
+   "first": "Larry",
+   "last": "Bucshon",
+   "official_full": "Larry Bucshon",
+   "current": false
+  },
+  {
+   "first": "Ted",
+   "last": "Budd",
+   "official_full": "Ted Budd",
+   "current": true
+  },
+  {
+   "first": "Nicole (Nikki)",
+   "last": "Budzinski",
+   "official_full": "Nikki Budzinski",
+   "current": true
+  },
+  {
+   "first": "Tim",
+   "last": "Burchett",
+   "official_full": "Tim Burchett",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Burgess",
+   "official_full": "Michael C. Burgess",
+   "current": false
+  },
+  {
+   "first": "Eric",
+   "last": "Burlison",
+   "official_full": "Eric Burlison",
+   "current": true
+  },
+  {
+   "first": "Richard",
+   "last": "Burr",
+   "official_full": "Richard Burr",
+   "current": false
+  },
+  {
+   "first": "Cori",
+   "last": "Bush",
+   "official_full": "Cori Bush",
+   "current": false
+  },
+  {
+   "first": "Cheri",
+   "last": "Bustos",
+   "official_full": "Cheri Bustos",
+   "current": false
+  },
+  {
+   "first": "Laphonza",
+   "last": "Butler",
+   "official_full": "Laphonza R. Butler",
+   "current": false
+  },
+  {
+   "first": "George",
+   "last": "Butterfield",
+   "nickname": "G.K.",
+   "official_full": "G. K. Butterfield",
+   "current": false
+  },
+  {
+   "first": "Janelle",
+   "last": "Bynum",
+   "official_full": "Janelle S. Bynum",
+   "current": true
+  },
+  {
+   "first": "Bradley",
+   "last": "Byrne",
+   "official_full": "Bradley Byrne",
+   "current": false
+  },
+  {
+   "first": "Ken",
+   "last": "Calvert",
+   "official_full": "Ken Calvert",
+   "current": true
+  },
+  {
+   "first": "Katherine",
+   "last": "Cammack",
+   "nickname": "Kat",
+   "official_full": "Kat Cammack",
+   "current": true
+  },
+  {
+   "first": "Maria",
+   "last": "Cantwell",
+   "official_full": "Maria Cantwell",
+   "current": true
+  },
+  {
+   "first": "Shelley",
+   "last": "Capito",
+   "official_full": "Shelley Moore Capito",
+   "current": true
+  },
+  {
+   "first": "Yadira",
+   "last": "Caraveo",
+   "official_full": "Yadira Caraveo",
+   "current": false
+  },
+  {
+   "first": "Salud",
+   "last": "Carbajal",
+   "official_full": "Salud O. Carbajal",
+   "current": true
+  },
+  {
+   "first": "Benjamin",
+   "last": "Cardin",
+   "official_full": "Benjamin L. Cardin",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Carey",
+   "official_full": "Mike Carey",
+   "current": true
+  },
+  {
+   "first": "Jerry",
+   "last": "Carl",
+   "official_full": "Jerry L. Carl",
+   "current": false
+  },
+  {
+   "first": "Thomas",
+   "last": "Carper",
+   "official_full": "Thomas R. Carper",
+   "current": false
+  },
+  {
+   "first": "André",
+   "last": "Carson",
+   "official_full": "André Carson",
+   "current": true
+  },
+  {
+   "first": "Earl",
+   "last": "Carter",
+   "nickname": "Buddy",
+   "official_full": "Earl L. \"Buddy\" Carter",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Carter",
+   "official_full": "John R. Carter",
+   "current": true
+  },
+  {
+   "first": "Troy",
+   "last": "Carter",
+   "official_full": "Troy A. Carter",
+   "current": true
+  },
+  {
+   "first": "Matthew",
+   "last": "Cartwright",
+   "nickname": "Matt",
+   "official_full": "Matt Cartwright",
+   "current": false
+  },
+  {
+   "first": "Gregorio",
+   "last": "Casar",
+   "official_full": "Greg Casar",
+   "current": true
+  },
+  {
+   "first": "Ed",
+   "last": "Case",
+   "official_full": "Ed Case",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Casey",
+   "nickname": "Bob",
+   "official_full": "Robert P. Casey, Jr.",
+   "current": false
+  },
+  {
+   "first": "Bill",
+   "last": "Cassidy",
+   "official_full": "Bill Cassidy",
+   "current": true
+  },
+  {
+   "first": "Sean",
+   "last": "Casten",
+   "official_full": "Sean Casten",
+   "current": true
+  },
+  {
+   "first": "Kathy",
+   "last": "Castor",
+   "official_full": "Kathy Castor",
+   "current": true
+  },
+  {
+   "first": "Joaquin",
+   "last": "Castro",
+   "official_full": "Joaquin Castro",
+   "current": true
+  },
+  {
+   "first": "Madison",
+   "last": "Cawthorn",
+   "official_full": "Madison Cawthorn",
+   "current": false
+  },
+  {
+   "first": "Steve",
+   "last": "Chabot",
+   "official_full": "Steve Chabot",
+   "current": false
+  },
+  {
+   "first": "Lori",
+   "last": "Chavez-DeRemer",
+   "official_full": "Lori Chavez-DeRemer",
+   "current": false
+  },
+  {
+   "first": "Liz",
+   "last": "Cheney",
+   "official_full": "Liz Cheney",
+   "current": false
+  },
+  {
+   "first": "Sheila",
+   "last": "Cherfilus-McCormick",
+   "official_full": "Sheila Cherfilus-McCormick",
+   "current": false
+  },
+  {
+   "first": "Judy",
+   "last": "Chu",
+   "official_full": "Judy Chu",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Cicilline",
+   "official_full": "David N. Cicilline",
+   "current": false
+  },
+  {
+   "first": "Juan",
+   "last": "Ciscomani",
+   "official_full": "Juan Ciscomani",
+   "current": true
+  },
+  {
+   "first": "Gilbert",
+   "last": "Cisneros",
+   "official_full": "Gilbert Ray Cisneros, Jr.",
+   "current": true
+  },
+  {
+   "first": "Katherine",
+   "last": "Clark",
+   "official_full": "Katherine M. Clark",
+   "current": true
+  },
+  {
+   "first": "Yvette",
+   "last": "Clarke",
+   "official_full": "Yvette D. Clarke",
+   "current": true
+  },
+  {
+   "first": "Wm.",
+   "last": "Clay",
+   "official_full": "Wm. Lacy Clay",
+   "current": false
+  },
+  {
+   "first": "Emanuel",
+   "last": "Cleaver",
+   "official_full": "Emanuel Cleaver",
+   "current": true
+  },
+  {
+   "first": "Ben",
+   "last": "Cline",
+   "official_full": "Ben Cline",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Cloud",
+   "official_full": "Michael Cloud",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Clyburn",
+   "nickname": "Jim",
+   "official_full": "James E. Clyburn",
+   "current": true
+  },
+  {
+   "first": "Andrew",
+   "last": "Clyde",
+   "official_full": "Andrew S. Clyde",
+   "current": true
+  },
+  {
+   "first": "Steve",
+   "last": "Cohen",
+   "official_full": "Steve Cohen",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "Cole",
+   "official_full": "Tom Cole",
+   "current": true
+  },
+  {
+   "first": "Doug",
+   "last": "Collins",
+   "official_full": "Doug Collins",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Collins",
+   "official_full": "Mike Collins",
+   "current": true
+  },
+  {
+   "first": "Susan",
+   "last": "Collins",
+   "official_full": "Susan M. Collins",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Comer",
+   "official_full": "James Comer",
+   "current": true
+  },
+  {
+   "first": "Herbert",
+   "last": "Conaway",
+   "official_full": "Herbert C. Conaway, Jr.",
+   "current": true
+  },
+  {
+   "first": "K.",
+   "last": "Conaway",
+   "official_full": "K. Michael Conaway",
+   "current": false
+  },
+  {
+   "first": "Gerald",
+   "last": "Connolly",
+   "official_full": "Gerald E. Connolly",
+   "current": false
+  },
+  {
+   "first": "Connie",
+   "last": "Conway",
+   "official_full": "Connie Conway",
+   "current": false
+  },
+  {
+   "first": "Christopher",
+   "last": "Coons",
+   "official_full": "Christopher A. Coons",
+   "current": true
+  },
+  {
+   "first": "Jim",
+   "last": "Cooper",
+   "official_full": "Jim Cooper",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Cornyn",
+   "official_full": "John Cornyn",
+   "current": true
+  },
+  {
+   "first": "J.",
+   "last": "Correa",
+   "official_full": "J. Luis Correa",
+   "current": true
+  },
+  {
+   "first": "Catherine",
+   "last": "Cortez Masto",
+   "official_full": "Catherine Cortez Masto",
+   "current": true
+  },
+  {
+   "first": "Jim",
+   "last": "Costa",
+   "official_full": "Jim Costa",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "Cotton",
+   "official_full": "Tom Cotton",
+   "current": true
+  },
+  {
+   "first": "Joe",
+   "last": "Courtney",
+   "official_full": "Joe Courtney",
+   "current": true
+  },
+  {
+   "first": "TJ",
+   "last": "Cox",
+   "official_full": "TJ Cox",
+   "current": false
+  },
+  {
+   "first": "Angie",
+   "last": "Craig",
+   "official_full": "Angie Craig",
+   "current": true
+  },
+  {
+   "first": "Kevin",
+   "last": "Cramer",
+   "official_full": "Kevin Cramer",
+   "current": true
+  },
+  {
+   "first": "Eli",
+   "last": "Crane",
+   "official_full": "Elijah Crane",
+   "current": true
+  },
+  {
+   "first": "Jeff",
+   "last": "Crank",
+   "official_full": "Jeff Crank",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Crapo",
+   "nickname": "Mike",
+   "official_full": "Mike Crapo",
+   "current": true
+  },
+  {
+   "first": "Eric",
+   "last": "Crawford",
+   "nickname": "Rick",
+   "official_full": "Eric A. \"Rick\" Crawford",
+   "current": true
+  },
+  {
+   "first": "Dan",
+   "last": "Crenshaw",
+   "official_full": "Dan Crenshaw",
+   "current": true
+  },
+  {
+   "first": "Charlie",
+   "last": "Crist",
+   "official_full": "Charlie Crist",
+   "current": false
+  },
+  {
+   "first": "Jasmine",
+   "last": "Crockett",
+   "official_full": "Jasmine Crockett",
+   "current": true
+  },
+  {
+   "first": "Jason",
+   "last": "Crow",
+   "official_full": "Jason Crow",
+   "current": true
+  },
+  {
+   "first": "Ted",
+   "last": "Cruz",
+   "official_full": "Ted Cruz",
+   "current": true
+  },
+  {
+   "first": "Henry",
+   "last": "Cuellar",
+   "official_full": "Henry Cuellar",
+   "current": true
+  },
+  {
+   "first": "Joe",
+   "last": "Cunningham",
+   "official_full": "Joe Cunningham",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Curtis",
+   "official_full": "John R. Curtis",
+   "current": true
+  },
+  {
+   "first": "Tony",
+   "last": "Cárdenas",
+   "official_full": "Tony Cárdenas",
+   "current": false
+  },
+  {
+   "first": "Anthony",
+   "last": "D'Esposito",
+   "official_full": "Anthony D’Esposito",
+   "current": false
+  },
+  {
+   "first": "Steve",
+   "last": "Daines",
+   "official_full": "Steve Daines",
+   "current": true
+  },
+  {
+   "first": "Sharice",
+   "last": "Davids",
+   "official_full": "Sharice Davids",
+   "current": true
+  },
+  {
+   "first": "Warren",
+   "last": "Davidson",
+   "official_full": "Warren Davidson",
+   "current": true
+  },
+  {
+   "first": "Danny",
+   "last": "Davis",
+   "official_full": "Danny K. Davis",
+   "current": true
+  },
+  {
+   "first": "Donald",
+   "last": "Davis",
+   "official_full": "Donald G. Davis",
+   "current": true
+  },
+  {
+   "first": "Rodney",
+   "last": "Davis",
+   "official_full": "Rodney Davis",
+   "current": false
+  },
+  {
+   "first": "Susan",
+   "last": "Davis",
+   "official_full": "Susan A. Davis",
+   "current": false
+  },
+  {
+   "first": "Mónica",
+   "last": "De La Cruz",
+   "official_full": "Monica De La Cruz",
+   "current": true
+  },
+  {
+   "first": "Madeleine",
+   "last": "Dean",
+   "official_full": "Madeleine Dean",
+   "current": true
+  },
+  {
+   "first": "Peter",
+   "last": "DeFazio",
+   "official_full": "Peter A. DeFazio",
+   "current": false
+  },
+  {
+   "first": "Diana",
+   "last": "DeGette",
+   "official_full": "Diana DeGette",
+   "current": true
+  },
+  {
+   "first": "Rosa",
+   "last": "DeLauro",
+   "official_full": "Rosa L. DeLauro",
+   "current": true
+  },
+  {
+   "first": "Suzan",
+   "last": "DelBene",
+   "official_full": "Suzan K. DelBene",
+   "current": true
+  },
+  {
+   "first": "Antonio",
+   "last": "Delgado",
+   "official_full": "Antonio Delgado",
+   "current": false
+  },
+  {
+   "first": "Chris",
+   "last": "Deluzio",
+   "official_full": "Christopher R. Deluzio",
+   "current": true
+  },
+  {
+   "first": "Val",
+   "last": "Demings",
+   "official_full": "Val Butler Demings",
+   "current": false
+  },
+  {
+   "first": "Mark",
+   "last": "DeSaulnier",
+   "official_full": "Mark DeSaulnier",
+   "current": true
+  },
+  {
+   "first": "Scott",
+   "last": "DesJarlais",
+   "official_full": "Scott DesJarlais",
+   "current": true
+  },
+  {
+   "first": "Theodore",
+   "last": "Deutch",
+   "nickname": "Ted",
+   "official_full": "Theodore E. Deutch",
+   "current": false
+  },
+  {
+   "first": "Maxine",
+   "last": "Dexter",
+   "official_full": "Maxine Dexter",
+   "current": true
+  },
+  {
+   "first": "Mario",
+   "last": "Diaz-Balart",
+   "official_full": "Mario Diaz-Balart",
+   "current": true
+  },
+  {
+   "first": "Debbie",
+   "last": "Dingell",
+   "official_full": "Debbie Dingell",
+   "current": true
+  },
+  {
+   "first": "Lloyd",
+   "last": "Doggett",
+   "official_full": "Lloyd Doggett",
+   "current": true
+  },
+  {
+   "first": "Byron",
+   "last": "Donalds",
+   "official_full": "Byron Donalds",
+   "current": true
+  },
+  {
+   "first": "Troy",
+   "last": "Downing",
+   "official_full": "Troy Downing",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Doyle",
+   "official_full": "Michael F. Doyle",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Duarte",
+   "official_full": "John S. Duarte",
+   "current": false
+  },
+  {
+   "first": "Tammy",
+   "last": "Duckworth",
+   "official_full": "Tammy Duckworth",
+   "current": true
+  },
+  {
+   "first": "Jeff",
+   "last": "Duncan",
+   "official_full": "Jeff Duncan",
+   "current": false
+  },
+  {
+   "first": "Neal",
+   "last": "Dunn",
+   "official_full": "Neal P. Dunn",
+   "current": true
+  },
+  {
+   "first": "Richard",
+   "last": "Durbin",
+   "official_full": "Richard J. Durbin",
+   "current": true
+  },
+  {
+   "first": "Charles (Chuck)",
+   "last": "Edwards",
+   "official_full": "Chuck Edwards",
+   "current": true
+  },
+  {
+   "first": "Sarah",
+   "last": "Elfreth",
+   "official_full": "Sarah Elfreth",
+   "current": true
+  },
+  {
+   "first": "Jake",
+   "last": "Ellzey",
+   "official_full": "Jake Ellzey",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "Emmer",
+   "official_full": "Tom Emmer",
+   "current": true
+  },
+  {
+   "first": "Eliot",
+   "last": "Engel",
+   "official_full": "Eliot L. Engel",
+   "current": false
+  },
+  {
+   "first": "Michael",
+   "last": "Enzi",
+   "official_full": "Michael B. Enzi",
+   "current": false
+  },
+  {
+   "first": "Joni",
+   "last": "Ernst",
+   "official_full": "Joni Ernst",
+   "current": true
+  },
+  {
+   "first": "Veronica",
+   "last": "Escobar",
+   "official_full": "Veronica Escobar",
+   "current": true
+  },
+  {
+   "first": "Anna",
+   "last": "Eshoo",
+   "official_full": "Anna G. Eshoo",
+   "current": false
+  },
+  {
+   "first": "Adriano",
+   "last": "Espaillat",
+   "official_full": "Adriano Espaillat",
+   "current": true
+  },
+  {
+   "first": "Ron",
+   "last": "Estes",
+   "official_full": "Ron Estes",
+   "current": true
+  },
+  {
+   "first": "Dwight",
+   "last": "Evans",
+   "official_full": "Dwight Evans",
+   "current": true
+  },
+  {
+   "first": "Gabe",
+   "last": "Evans",
+   "official_full": "Gabe Evans",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Ezell",
+   "official_full": "Mike Ezell",
+   "current": true
+  },
+  {
+   "first": "Patrick",
+   "last": "Fallon",
+   "nickname": "Pat",
+   "official_full": "Pat Fallon",
+   "current": true
+  },
+  {
+   "first": "Julie",
+   "last": "Fedorchak",
+   "official_full": "Julie Fedorchak",
+   "current": true
+  },
+  {
+   "first": "Randy",
+   "last": "Feenstra",
+   "official_full": "Randy Feenstra",
+   "current": true
+  },
+  {
+   "first": "Dianne",
+   "last": "Feinstein",
+   "official_full": "Dianne Feinstein",
+   "current": false
+  },
+  {
+   "first": "A.",
+   "last": "Ferguson",
+   "official_full": "A. Drew Ferguson IV",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Fetterman",
+   "official_full": "John Fetterman",
+   "current": true
+  },
+  {
+   "first": "Cleo",
+   "last": "Fields",
+   "official_full": "Cleo Fields",
+   "current": true
+  },
+  {
+   "first": "Shomari",
+   "last": "Figures",
+   "official_full": "Shomari Figures",
+   "current": true
+  },
+  {
+   "first": "Randall",
+   "last": "Fine",
+   "nickname": "Randy",
+   "official_full": "Randy Fine",
+   "current": true
+  },
+  {
+   "first": "Abby",
+   "last": "Finkenauer",
+   "official_full": "Abby Finkenauer",
+   "current": false
+  },
+  {
+   "first": "Brad",
+   "last": "Finstad",
+   "official_full": "Brad Finstad",
+   "current": true
+  },
+  {
+   "first": "Michelle",
+   "last": "Fischbach",
+   "official_full": "Michelle Fischbach",
+   "current": true
+  },
+  {
+   "first": "Deb",
+   "last": "Fischer",
+   "official_full": "Deb Fischer",
+   "current": true
+  },
+  {
+   "first": "Scott",
+   "last": "Fitzgerald",
+   "official_full": "Scott Fitzgerald",
+   "current": true
+  },
+  {
+   "first": "Brian",
+   "last": "Fitzpatrick",
+   "official_full": "Brian K. Fitzpatrick",
+   "current": true
+  },
+  {
+   "first": "Charles",
+   "last": "Fleischmann",
+   "nickname": "Chuck",
+   "official_full": "Charles J. \"Chuck\" Fleischmann",
+   "current": true
+  },
+  {
+   "first": "Lizzie",
+   "last": "Fletcher",
+   "official_full": "Lizzie Fletcher",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Flood",
+   "official_full": "Mike Flood",
+   "current": true
+  },
+  {
+   "first": "Bill",
+   "last": "Flores",
+   "official_full": "Bill Flores",
+   "current": false
+  },
+  {
+   "first": "Mayra",
+   "last": "Flores",
+   "official_full": "Mayra Flores",
+   "current": false
+  },
+  {
+   "first": "Vince",
+   "last": "Fong",
+   "official_full": "Vince Fong",
+   "current": true
+  },
+  {
+   "first": "Jeff",
+   "last": "Fortenberry",
+   "official_full": "Jeff Fortenberry",
+   "current": false
+  },
+  {
+   "first": "Bill",
+   "last": "Foster",
+   "official_full": "Bill Foster",
+   "current": true
+  },
+  {
+   "first": "Valerie",
+   "last": "Foushee",
+   "official_full": "Valerie P. Foushee",
+   "current": true
+  },
+  {
+   "first": "Virginia",
+   "last": "Foxx",
+   "official_full": "Virginia Foxx",
+   "current": true
+  },
+  {
+   "first": "Lois",
+   "last": "Frankel",
+   "official_full": "Lois Frankel",
+   "current": true
+  },
+  {
+   "first": "C.",
+   "last": "Franklin",
+   "official_full": "Scott Franklin",
+   "current": true
+  },
+  {
+   "first": "Laura",
+   "last": "Friedman",
+   "official_full": "Laura Friedman",
+   "current": true
+  },
+  {
+   "first": "Maxwell",
+   "last": "Frost",
+   "official_full": "Maxwell Frost",
+   "current": true
+  },
+  {
+   "first": "Russell",
+   "last": "Fry",
+   "official_full": "Russell Fry",
+   "current": true
+  },
+  {
+   "first": "Marcia",
+   "last": "Fudge",
+   "official_full": "Marcia L. Fudge",
+   "current": false
+  },
+  {
+   "first": "Russ",
+   "last": "Fulcher",
+   "official_full": "Russ Fulcher",
+   "current": true
+  },
+  {
+   "first": "Clay",
+   "last": "Fuller",
+   "official_full": "Clay Fuller",
+   "current": true
+  },
+  {
+   "first": "Tulsi",
+   "last": "Gabbard",
+   "official_full": "Tulsi Gabbard",
+   "current": false
+  },
+  {
+   "first": "Matt",
+   "last": "Gaetz",
+   "official_full": "Matt Gaetz",
+   "current": false
+  },
+  {
+   "first": "James",
+   "last": "Gallagher",
+   "official_full": "James Gallagher",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Gallagher",
+   "official_full": "Mike Gallagher",
+   "current": false
+  },
+  {
+   "first": "Ruben",
+   "last": "Gallego",
+   "official_full": "Ruben Gallego",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Garamendi",
+   "official_full": "John Garamendi",
+   "current": true
+  },
+  {
+   "first": "Andrew",
+   "last": "Garbarino",
+   "official_full": "Andrew R. Garbarino",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Garcia",
+   "official_full": "Mike Garcia",
+   "current": false
+  },
+  {
+   "first": "Robert",
+   "last": "Garcia",
+   "official_full": "Robert Garcia",
+   "current": true
+  },
+  {
+   "first": "Sylvia",
+   "last": "Garcia",
+   "official_full": "Sylvia R. Garcia",
+   "current": true
+  },
+  {
+   "first": "Jesús",
+   "last": "García",
+   "nickname": "Chuy",
+   "official_full": "Jesús G. \"Chuy\" García",
+   "current": true
+  },
+  {
+   "first": "Cory",
+   "last": "Gardner",
+   "official_full": "Cory Gardner",
+   "current": false
+  },
+  {
+   "first": "Greg",
+   "last": "Gianforte",
+   "official_full": "Greg Gianforte",
+   "current": false
+  },
+  {
+   "first": "Bob",
+   "last": "Gibbs",
+   "official_full": "Bob Gibbs",
+   "current": false
+  },
+  {
+   "first": "Brandon",
+   "last": "Gill",
+   "official_full": "Brandon Gill",
+   "current": true
+  },
+  {
+   "first": "Laura",
+   "last": "Gillen",
+   "official_full": "Laura Gillen",
+   "current": true
+  },
+  {
+   "first": "Kirsten",
+   "last": "Gillibrand",
+   "official_full": "Kirsten E. Gillibrand",
+   "current": true
+  },
+  {
+   "first": "Carlos",
+   "last": "Gimenez",
+   "official_full": "Carlos A. Gimenez",
+   "current": true
+  },
+  {
+   "first": "Marie",
+   "last": "Gluesenkamp Perez",
+   "official_full": "Marie Gluesenkamp Perez",
+   "current": true
+  },
+  {
+   "first": "Louie",
+   "last": "Gohmert",
+   "official_full": "Louie Gohmert",
+   "current": false
+  },
+  {
+   "first": "Jared",
+   "last": "Golden",
+   "official_full": "Jared F. Golden",
+   "current": true
+  },
+  {
+   "first": "Craig",
+   "last": "Goldman",
+   "official_full": "Craig A. Goldman",
+   "current": true
+  },
+  {
+   "first": "Dan",
+   "last": "Goldman",
+   "official_full": "Daniel S. Goldman",
+   "current": true
+  },
+  {
+   "first": "Jimmy",
+   "last": "Gomez",
+   "official_full": "Jimmy Gomez",
+   "current": true
+  },
+  {
+   "first": "Ernest",
+   "last": "Gonzales",
+   "nickname": "Tony",
+   "official_full": "Tony Gonzales",
+   "current": false
+  },
+  {
+   "first": "Anthony",
+   "last": "Gonzalez",
+   "official_full": "Anthony Gonzalez",
+   "current": false
+  },
+  {
+   "first": "Vicente",
+   "last": "Gonzalez",
+   "official_full": "Vicente Gonzalez",
+   "current": true
+  },
+  {
+   "first": "Jenniffer",
+   "last": "González-Colón",
+   "official_full": "Jenniffer González-Colón",
+   "current": false
+  },
+  {
+   "first": "Robert",
+   "last": "Good",
+   "nickname": "Bob",
+   "official_full": "Bob Good",
+   "current": false
+  },
+  {
+   "first": "Lance",
+   "last": "Gooden",
+   "official_full": "Lance Gooden",
+   "current": true
+  },
+  {
+   "first": "Maggie",
+   "last": "Goodlander",
+   "official_full": "Maggie Goodlander",
+   "current": true
+  },
+  {
+   "first": "Paul",
+   "last": "Gosar",
+   "official_full": "Paul A. Gosar",
+   "current": true
+  },
+  {
+   "first": "Josh",
+   "last": "Gottheimer",
+   "official_full": "Josh Gottheimer",
+   "current": true
+  },
+  {
+   "first": "Lindsey",
+   "last": "Graham",
+   "official_full": "Lindsey Graham",
+   "current": false
+  },
+  {
+   "first": "Darline",
+   "last": "Graham Nordone",
+   "official_full": "Darline Graham",
+   "current": true
+  },
+  {
+   "first": "Kay",
+   "last": "Granger",
+   "official_full": "Kay Granger",
+   "current": false
+  },
+  {
+   "first": "Charles",
+   "last": "Grassley",
+   "nickname": "Chuck",
+   "official_full": "Chuck Grassley",
+   "current": true
+  },
+  {
+   "first": "Garret",
+   "last": "Graves",
+   "official_full": "Garret Graves",
+   "current": false
+  },
+  {
+   "first": "Sam",
+   "last": "Graves",
+   "official_full": "Sam Graves",
+   "current": true
+  },
+  {
+   "first": "Adam",
+   "last": "Gray",
+   "official_full": "Adam Gray",
+   "current": true
+  },
+  {
+   "first": "Al",
+   "last": "Green",
+   "official_full": "Al Green",
+   "current": true
+  },
+  {
+   "first": "Mark",
+   "last": "Green",
+   "official_full": "Mark E. Green",
+   "current": false
+  },
+  {
+   "first": "Marjorie",
+   "last": "Greene",
+   "official_full": "Marjorie Taylor Greene",
+   "current": false
+  },
+  {
+   "first": "H.",
+   "last": "Griffith",
+   "official_full": "H. Morgan Griffith",
+   "current": true
+  },
+  {
+   "first": "Adelita",
+   "last": "Grijalva",
+   "official_full": "Adelita S. Grijalva",
+   "current": true
+  },
+  {
+   "first": "Raúl",
+   "last": "Grijalva",
+   "official_full": "Raúl M. Grijalva",
+   "current": false
+  },
+  {
+   "first": "Glenn",
+   "last": "Grothman",
+   "official_full": "Glenn Grothman",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Guest",
+   "official_full": "Michael Guest",
+   "current": true
+  },
+  {
+   "first": "Brett",
+   "last": "Guthrie",
+   "official_full": "Brett Guthrie",
+   "current": true
+  },
+  {
+   "first": "Debra",
+   "last": "Haaland",
+   "official_full": "Debra A. Haaland",
+   "current": false
+  },
+  {
+   "first": "Jim",
+   "last": "Hagedorn",
+   "official_full": "Jim Hagedorn",
+   "current": false
+  },
+  {
+   "first": "Harriet",
+   "last": "Hageman",
+   "official_full": "Harriet M. Hageman",
+   "current": true
+  },
+  {
+   "first": "Bill",
+   "last": "Hagerty",
+   "official_full": "Bill Hagerty",
+   "current": true
+  },
+  {
+   "first": "Kwanza",
+   "last": "Hall",
+   "official_full": "Kwanza Hall",
+   "current": false
+  },
+  {
+   "first": "Abraham",
+   "last": "Hamadeh",
+   "official_full": "Abraham J. Hamadeh",
+   "current": true
+  },
+  {
+   "first": "Josh",
+   "last": "Harder",
+   "official_full": "Josh Harder",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Haridopolos",
+   "official_full": "Mike Haridopolos",
+   "current": true
+  },
+  {
+   "first": "Pat",
+   "last": "Harrigan",
+   "official_full": "Pat Harrigan",
+   "current": true
+  },
+  {
+   "first": "Andy",
+   "last": "Harris",
+   "official_full": "Andy Harris",
+   "current": true
+  },
+  {
+   "first": "Kamala",
+   "last": "Harris",
+   "official_full": "Kamala D. Harris",
+   "current": false
+  },
+  {
+   "first": "Mark",
+   "last": "Harris",
+   "official_full": "Mark Harris",
+   "current": true
+  },
+  {
+   "first": "Diana",
+   "last": "Harshbarger",
+   "official_full": "Diana Harshbarger",
+   "current": true
+  },
+  {
+   "first": "Vicky",
+   "last": "Hartzler",
+   "official_full": "Vicky Hartzler",
+   "current": false
+  },
+  {
+   "first": "Margaret",
+   "last": "Hassan",
+   "nickname": "Maggie",
+   "official_full": "Margaret Wood Hassan",
+   "current": true
+  },
+  {
+   "first": "Alcee",
+   "last": "Hastings",
+   "official_full": "Alcee L. Hastings",
+   "current": false
+  },
+  {
+   "first": "Joshua",
+   "last": "Hawley",
+   "nickname": "Josh",
+   "official_full": "Josh Hawley",
+   "current": true
+  },
+  {
+   "first": "Jahana",
+   "last": "Hayes",
+   "official_full": "Jahana Hayes",
+   "current": true
+  },
+  {
+   "first": "Denny",
+   "last": "Heck",
+   "official_full": "Denny Heck",
+   "current": false
+  },
+  {
+   "first": "Martin",
+   "last": "Heinrich",
+   "official_full": "Martin Heinrich",
+   "current": true
+  },
+  {
+   "first": "George",
+   "last": "Helmy",
+   "official_full": "George S. Helmy",
+   "current": false
+  },
+  {
+   "first": "Kevin",
+   "last": "Hern",
+   "official_full": "Kevin Hern",
+   "current": true
+  },
+  {
+   "first": "Pablo José",
+   "last": "Hernández Rivera",
+   "official_full": "Pablo José Hernández",
+   "current": true
+  },
+  {
+   "first": "Yvette",
+   "last": "Herrell",
+   "official_full": "Yvette Herrell",
+   "current": false
+  },
+  {
+   "first": "Jaime",
+   "last": "Herrera Beutler",
+   "official_full": "Jaime Herrera Beutler",
+   "current": false
+  },
+  {
+   "first": "Jody",
+   "last": "Hice",
+   "official_full": "Jody B. Hice",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Hickenlooper",
+   "official_full": "John W. Hickenlooper",
+   "current": true
+  },
+  {
+   "first": "Brian",
+   "last": "Higgins",
+   "official_full": "Brian Higgins",
+   "current": false
+  },
+  {
+   "first": "Clay",
+   "last": "Higgins",
+   "official_full": "Clay Higgins",
+   "current": true
+  },
+  {
+   "first": "J.",
+   "last": "Hill",
+   "official_full": "J. French Hill",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Himes",
+   "nickname": "Jim",
+   "official_full": "James A. Himes",
+   "current": true
+  },
+  {
+   "first": "Ashley",
+   "last": "Hinson",
+   "official_full": "Ashley Hinson",
+   "current": true
+  },
+  {
+   "first": "Mazie",
+   "last": "Hirono",
+   "official_full": "Mazie K. Hirono",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Hoeven",
+   "official_full": "John Hoeven",
+   "current": true
+  },
+  {
+   "first": "George",
+   "last": "Holding",
+   "official_full": "George Holding",
+   "current": false
+  },
+  {
+   "first": "Trey",
+   "last": "Hollingsworth",
+   "official_full": "Trey Hollingsworth",
+   "current": false
+  },
+  {
+   "first": "Kendra",
+   "last": "Horn",
+   "official_full": "Kendra S. Horn",
+   "current": false
+  },
+  {
+   "first": "Steven",
+   "last": "Horsford",
+   "official_full": "Steven Horsford",
+   "current": true
+  },
+  {
+   "first": "Erin",
+   "last": "Houchin",
+   "official_full": "Erin Houchin",
+   "current": true
+  },
+  {
+   "first": "Chrissy",
+   "last": "Houlahan",
+   "official_full": "Chrissy Houlahan",
+   "current": true
+  },
+  {
+   "first": "Steny",
+   "last": "Hoyer",
+   "official_full": "Steny H. Hoyer",
+   "current": true
+  },
+  {
+   "first": "Valerie",
+   "last": "Hoyle",
+   "official_full": "Val T. Hoyle",
+   "current": true
+  },
+  {
+   "first": "Richard",
+   "last": "Hudson",
+   "official_full": "Richard Hudson",
+   "current": true
+  },
+  {
+   "first": "Jared",
+   "last": "Huffman",
+   "official_full": "Jared Huffman",
+   "current": true
+  },
+  {
+   "first": "Bill",
+   "last": "Huizenga",
+   "official_full": "Bill Huizenga",
+   "current": true
+  },
+  {
+   "first": "Wesley",
+   "last": "Hunt",
+   "official_full": "Wesley Hunt",
+   "current": true
+  },
+  {
+   "first": "Jeff",
+   "last": "Hurd",
+   "official_full": "Jeff Hurd",
+   "current": true
+  },
+  {
+   "first": "Will",
+   "last": "Hurd",
+   "official_full": "Will Hurd",
+   "current": false
+  },
+  {
+   "first": "Jon",
+   "last": "Husted",
+   "official_full": "Jon Husted",
+   "current": true
+  },
+  {
+   "first": "Cindy",
+   "last": "Hyde-Smith",
+   "official_full": "Cindy Hyde-Smith",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Inhofe",
+   "nickname": "Jim",
+   "official_full": "James M. Inhofe",
+   "current": false
+  },
+  {
+   "first": "Darrell",
+   "last": "Issa",
+   "official_full": "Darrell Issa",
+   "current": true
+  },
+  {
+   "first": "Glenn",
+   "last": "Ivey",
+   "official_full": "Glenn Ivey",
+   "current": true
+  },
+  {
+   "first": "Brian",
+   "last": "Jack",
+   "official_full": "Brian Jack",
+   "current": true
+  },
+  {
+   "first": "Jeffrey",
+   "last": "Jackson",
+   "official_full": "Jeff Jackson",
+   "current": false
+  },
+  {
+   "first": "Jonathan",
+   "last": "Jackson",
+   "official_full": "Jonathan L. Jackson",
+   "current": true
+  },
+  {
+   "first": "Ronny",
+   "last": "Jackson",
+   "official_full": "Ronny Jackson",
+   "current": true
+  },
+  {
+   "first": "Sheila",
+   "last": "Jackson Lee",
+   "official_full": "Sheila Jackson Lee",
+   "current": false
+  },
+  {
+   "first": "Chris",
+   "last": "Jacobs",
+   "official_full": "Chris Jacobs",
+   "current": false
+  },
+  {
+   "first": "Sara",
+   "last": "Jacobs",
+   "official_full": "Sara Jacobs",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "James",
+   "official_full": "John James",
+   "current": true
+  },
+  {
+   "first": "Pramila",
+   "last": "Jayapal",
+   "official_full": "Pramila Jayapal",
+   "current": true
+  },
+  {
+   "first": "Hakeem",
+   "last": "Jeffries",
+   "official_full": "Hakeem S. Jeffries",
+   "current": true
+  },
+  {
+   "first": "Bill",
+   "last": "Johnson",
+   "official_full": "Bill Johnson",
+   "current": false
+  },
+  {
+   "first": "Dusty",
+   "last": "Johnson",
+   "official_full": "Dusty Johnson",
+   "current": true
+  },
+  {
+   "first": "Eddie",
+   "last": "Johnson",
+   "official_full": "Eddie Bernice Johnson",
+   "current": false
+  },
+  {
+   "first": "Henry",
+   "last": "Johnson",
+   "nickname": "Hank",
+   "official_full": "Henry C. \"Hank\" Johnson, Jr.",
+   "current": true
+  },
+  {
+   "first": "Julie",
+   "last": "Johnson",
+   "official_full": "Julie Johnson",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Johnson",
+   "official_full": "Mike Johnson",
+   "current": true
+  },
+  {
+   "first": "Ron",
+   "last": "Johnson",
+   "official_full": "Ron Johnson",
+   "current": true
+  },
+  {
+   "first": "Doug",
+   "last": "Jones",
+   "official_full": "Doug Jones",
+   "current": false
+  },
+  {
+   "first": "Mondaire",
+   "last": "Jones",
+   "official_full": "Mondaire Jones",
+   "current": false
+  },
+  {
+   "first": "Jim",
+   "last": "Jordan",
+   "official_full": "Jim Jordan",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Joyce",
+   "official_full": "David P. Joyce",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Joyce",
+   "official_full": "John Joyce",
+   "current": true
+  },
+  {
+   "first": "Jim",
+   "last": "Justice",
+   "official_full": "James C. Justice",
+   "current": true
+  },
+  {
+   "first": "Kaialiʻi",
+   "last": "Kahele",
+   "official_full": "Kaiali’i Kahele",
+   "current": false
+  },
+  {
+   "first": "Timothy",
+   "last": "Kaine",
+   "nickname": "Tim",
+   "official_full": "Tim Kaine",
+   "current": true
+  },
+  {
+   "first": "Sydney",
+   "last": "Kamlager-Dove",
+   "official_full": "Sydney Kamlager-Dove",
+   "current": true
+  },
+  {
+   "first": "Marcy",
+   "last": "Kaptur",
+   "official_full": "Marcy Kaptur",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Katko",
+   "official_full": "John Katko",
+   "current": false
+  },
+  {
+   "first": "Thomas",
+   "last": "Kean",
+   "official_full": "Thomas H. Kean, Jr.",
+   "current": true
+  },
+  {
+   "first": "William",
+   "last": "Keating",
+   "official_full": "William R. Keating",
+   "current": true
+  },
+  {
+   "first": "Fred",
+   "last": "Keller",
+   "official_full": "Fred Keller",
+   "current": false
+  },
+  {
+   "first": "Mark",
+   "last": "Kelly",
+   "official_full": "Mark Kelly",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Kelly",
+   "official_full": "Mike Kelly",
+   "current": true
+  },
+  {
+   "first": "Robin",
+   "last": "Kelly",
+   "official_full": "Robin L. Kelly",
+   "current": true
+  },
+  {
+   "first": "Trent",
+   "last": "Kelly",
+   "official_full": "Trent Kelly",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Kennedy",
+   "official_full": "John Kennedy",
+   "current": true
+  },
+  {
+   "first": "Joseph",
+   "last": "Kennedy",
+   "official_full": "Joseph P. Kennedy III",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Kennedy",
+   "official_full": "Mike Kennedy",
+   "current": true
+  },
+  {
+   "first": "Timothy",
+   "last": "Kennedy",
+   "official_full": "Timothy M. Kennedy",
+   "current": true
+  },
+  {
+   "first": "Ro",
+   "last": "Khanna",
+   "official_full": "Ro Khanna",
+   "current": true
+  },
+  {
+   "first": "Jennifer",
+   "last": "Kiggans",
+   "official_full": "Jennifer A. Kiggans",
+   "current": true
+  },
+  {
+   "first": "Daniel",
+   "last": "Kildee",
+   "official_full": "Daniel T. Kildee",
+   "current": false
+  },
+  {
+   "first": "Kevin",
+   "last": "Kiley",
+   "official_full": "Kevin Kiley",
+   "current": true
+  },
+  {
+   "first": "Derek",
+   "last": "Kilmer",
+   "official_full": "Derek Kilmer",
+   "current": false
+  },
+  {
+   "first": "Andy",
+   "last": "Kim",
+   "official_full": "Andy Kim",
+   "current": true
+  },
+  {
+   "first": "Young",
+   "last": "Kim",
+   "official_full": "Young Kim",
+   "current": true
+  },
+  {
+   "first": "Ron",
+   "last": "Kind",
+   "official_full": "Ron Kind",
+   "current": false
+  },
+  {
+   "first": "Angus",
+   "last": "King",
+   "official_full": "Angus S. King, Jr.",
+   "current": true
+  },
+  {
+   "first": "Peter",
+   "last": "King",
+   "nickname": "Pete",
+   "official_full": "Peter T. King",
+   "current": false
+  },
+  {
+   "first": "Steve",
+   "last": "King",
+   "official_full": "Steve King",
+   "current": false
+  },
+  {
+   "first": "Kimberlyn",
+   "last": "King-Hinds",
+   "official_full": "Kimberlyn King-Hinds",
+   "current": true
+  },
+  {
+   "first": "Adam",
+   "last": "Kinzinger",
+   "official_full": "Adam Kinzinger",
+   "current": false
+  },
+  {
+   "first": "Ann",
+   "last": "Kirkpatrick",
+   "official_full": "Ann Kirkpatrick",
+   "current": false
+  },
+  {
+   "first": "Amy",
+   "last": "Klobuchar",
+   "official_full": "Amy Klobuchar",
+   "current": true
+  },
+  {
+   "first": "Brad",
+   "last": "Knott",
+   "official_full": "Brad Knott",
+   "current": true
+  },
+  {
+   "first": "Raja",
+   "last": "Krishnamoorthi",
+   "official_full": "Raja Krishnamoorthi",
+   "current": true
+  },
+  {
+   "first": "Ann",
+   "last": "Kuster",
+   "official_full": "Ann M. Kuster",
+   "current": false
+  },
+  {
+   "first": "David",
+   "last": "Kustoff",
+   "official_full": "David Kustoff",
+   "current": true
+  },
+  {
+   "first": "Darin",
+   "last": "LaHood",
+   "official_full": "Darin LaHood",
+   "current": true
+  },
+  {
+   "first": "Nicolas",
+   "last": "LaLota",
+   "official_full": "Nick LaLota",
+   "current": true
+  },
+  {
+   "first": "Doug",
+   "last": "LaMalfa",
+   "official_full": "Doug LaMalfa",
+   "current": false
+  },
+  {
+   "first": "Conor",
+   "last": "Lamb",
+   "official_full": "Conor Lamb",
+   "current": false
+  },
+  {
+   "first": "Doug",
+   "last": "Lamborn",
+   "official_full": "Doug Lamborn",
+   "current": false
+  },
+  {
+   "first": "Greg",
+   "last": "Landsman",
+   "official_full": "Greg Landsman",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Langevin",
+   "nickname": "Jim",
+   "official_full": "James R. Langevin",
+   "current": false
+  },
+  {
+   "first": "Nicholas",
+   "last": "Langworthy",
+   "official_full": "Nicholas A. Langworthy",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Lankford",
+   "official_full": "James Lankford",
+   "current": true
+  },
+  {
+   "first": "Rick",
+   "last": "Larsen",
+   "official_full": "Rick Larsen",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Larson",
+   "official_full": "John B. Larson",
+   "current": true
+  },
+  {
+   "first": "George",
+   "last": "Latimer",
+   "official_full": "George Latimer",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Latta",
+   "official_full": "Robert E. Latta",
+   "current": true
+  },
+  {
+   "first": "Jacob",
+   "last": "LaTurner",
+   "nickname": "Jake",
+   "official_full": "Jake LaTurner",
+   "current": false
+  },
+  {
+   "first": "Michael",
+   "last": "Lawler",
+   "official_full": "Michael Lawler",
+   "current": true
+  },
+  {
+   "first": "Brenda",
+   "last": "Lawrence",
+   "official_full": "Brenda L. Lawrence",
+   "current": false
+  },
+  {
+   "first": "Al",
+   "last": "Lawson",
+   "official_full": "Al Lawson, Jr.",
+   "current": false
+  },
+  {
+   "first": "Patrick",
+   "last": "Leahy",
+   "official_full": "Patrick J. Leahy",
+   "current": false
+  },
+  {
+   "first": "Barbara",
+   "last": "Lee",
+   "official_full": "Barbara Lee",
+   "current": false
+  },
+  {
+   "first": "Laurel",
+   "last": "Lee",
+   "official_full": "Laurel M. Lee",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Lee",
+   "official_full": "Mike Lee",
+   "current": true
+  },
+  {
+   "first": "Summer",
+   "last": "Lee",
+   "official_full": "Summer L. Lee",
+   "current": true
+  },
+  {
+   "first": "Susie",
+   "last": "Lee",
+   "official_full": "Susie Lee",
+   "current": true
+  },
+  {
+   "first": "Erica",
+   "last": "Lee Carter",
+   "official_full": "Erica Lee Carter",
+   "current": false
+  },
+  {
+   "first": "Teresa",
+   "last": "Leger Fernandez",
+   "official_full": "Teresa Leger Fernandez",
+   "current": true
+  },
+  {
+   "first": "Debbie",
+   "last": "Lesko",
+   "official_full": "Debbie Lesko",
+   "current": false
+  },
+  {
+   "first": "Julia",
+   "last": "Letlow",
+   "official_full": "Julia Letlow",
+   "current": true
+  },
+  {
+   "first": "Andy",
+   "last": "Levin",
+   "official_full": "Andy Levin",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Levin",
+   "official_full": "Mike Levin",
+   "current": true
+  },
+  {
+   "first": "Sam",
+   "last": "Liccardo",
+   "official_full": "Sam T. Liccardo",
+   "current": true
+  },
+  {
+   "first": "Ted",
+   "last": "Lieu",
+   "official_full": "Ted Lieu",
+   "current": true
+  },
+  {
+   "first": "Daniel",
+   "last": "Lipinski",
+   "official_full": "Daniel Lipinski",
+   "current": false
+  },
+  {
+   "first": "David",
+   "last": "Loebsack",
+   "official_full": "David Loebsack",
+   "current": false
+  },
+  {
+   "first": "Kelly",
+   "last": "Loeffler",
+   "official_full": "Kelly Loeffler",
+   "current": false
+  },
+  {
+   "first": "Zoe",
+   "last": "Lofgren",
+   "official_full": "Zoe Lofgren",
+   "current": true
+  },
+  {
+   "first": "Billy",
+   "last": "Long",
+   "official_full": "Billy Long",
+   "current": false
+  },
+  {
+   "first": "Greg",
+   "last": "Lopez",
+   "official_full": "Greg Lopez",
+   "current": false
+  },
+  {
+   "first": "Barry",
+   "last": "Loudermilk",
+   "official_full": "Barry Loudermilk",
+   "current": true
+  },
+  {
+   "first": "Alan",
+   "last": "Lowenthal",
+   "official_full": "Alan S. Lowenthal",
+   "current": false
+  },
+  {
+   "first": "Nita",
+   "last": "Lowey",
+   "official_full": "Nita M. Lowey",
+   "current": false
+  },
+  {
+   "first": "Frank",
+   "last": "Lucas",
+   "official_full": "Frank D. Lucas",
+   "current": true
+  },
+  {
+   "first": "Blaine",
+   "last": "Luetkemeyer",
+   "official_full": "Blaine Luetkemeyer",
+   "current": false
+  },
+  {
+   "first": "Ben",
+   "last": "Luján",
+   "official_full": "Ben Ray Luján",
+   "current": true
+  },
+  {
+   "first": "Cynthia",
+   "last": "Lummis",
+   "official_full": "Cynthia M. Lummis",
+   "current": true
+  },
+  {
+   "first": "Anna",
+   "last": "Luna",
+   "official_full": "Anna Paulina Luna",
+   "current": true
+  },
+  {
+   "first": "Elaine",
+   "last": "Luria",
+   "official_full": "Elaine G. Luria",
+   "current": false
+  },
+  {
+   "first": "Morgan",
+   "last": "Luttrell",
+   "official_full": "Morgan Luttrell",
+   "current": true
+  },
+  {
+   "first": "Stephen",
+   "last": "Lynch",
+   "official_full": "Stephen F. Lynch",
+   "current": true
+  },
+  {
+   "first": "Nancy",
+   "last": "Mace",
+   "official_full": "Nancy Mace",
+   "current": true
+  },
+  {
+   "first": "Ryan",
+   "last": "Mackenzie",
+   "official_full": "Ryan Mackenzie",
+   "current": true
+  },
+  {
+   "first": "Seth",
+   "last": "Magaziner",
+   "official_full": "Seth Magaziner",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "Malinowski",
+   "official_full": "Tom Malinowski",
+   "current": false
+  },
+  {
+   "first": "Nicole",
+   "last": "Malliotakis",
+   "official_full": "Nicole Malliotakis",
+   "current": true
+  },
+  {
+   "first": "Carolyn",
+   "last": "Maloney",
+   "official_full": "Carolyn B. Maloney",
+   "current": false
+  },
+  {
+   "first": "Sean",
+   "last": "Maloney",
+   "official_full": "Sean Patrick Maloney",
+   "current": false
+  },
+  {
+   "first": "Celeste",
+   "last": "Maloy",
+   "official_full": "Celeste Maloy",
+   "current": true
+  },
+  {
+   "first": "Joe",
+   "last": "Manchin",
+   "official_full": "Joe Manchin, III",
+   "current": false
+  },
+  {
+   "first": "Tracey",
+   "last": "Mann",
+   "official_full": "Tracey Mann",
+   "current": true
+  },
+  {
+   "first": "Kathy",
+   "last": "Manning",
+   "official_full": "Kathy E. Manning",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Mannion",
+   "official_full": "John W. Mannion",
+   "current": true
+  },
+  {
+   "first": "Kenny",
+   "last": "Marchant",
+   "official_full": "Kenny Marchant",
+   "current": false
+  },
+  {
+   "first": "Edward",
+   "last": "Markey",
+   "nickname": "Ed",
+   "official_full": "Edward J. Markey",
+   "current": true
+  },
+  {
+   "first": "Roger",
+   "last": "Marshall",
+   "official_full": "Roger Marshall",
+   "current": true
+  },
+  {
+   "first": "Thomas",
+   "last": "Massie",
+   "official_full": "Thomas Massie",
+   "current": true
+  },
+  {
+   "first": "Brian",
+   "last": "Mast",
+   "official_full": "Brian J. Mast",
+   "current": true
+  },
+  {
+   "first": "Doris",
+   "last": "Matsui",
+   "official_full": "Doris O. Matsui",
+   "current": true
+  },
+  {
+   "first": "Ben",
+   "last": "McAdams",
+   "official_full": "Ben McAdams",
+   "current": false
+  },
+  {
+   "first": "Lucy",
+   "last": "McBath",
+   "official_full": "Lucy McBath",
+   "current": true
+  },
+  {
+   "first": "Sarah",
+   "last": "McBride",
+   "official_full": "Sarah McBride",
+   "current": true
+  },
+  {
+   "first": "Kevin",
+   "last": "McCarthy",
+   "official_full": "Kevin McCarthy",
+   "current": false
+  },
+  {
+   "first": "Michael",
+   "last": "McCaul",
+   "official_full": "Michael T. McCaul",
+   "current": true
+  },
+  {
+   "first": "Lisa",
+   "last": "McClain",
+   "official_full": "Lisa C. McClain",
+   "current": true
+  },
+  {
+   "first": "April",
+   "last": "McClain Delaney",
+   "official_full": "April McClain Delaney",
+   "current": true
+  },
+  {
+   "first": "Jennifer",
+   "last": "McClellan",
+   "official_full": "Jennifer L. McClellan",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "McClintock",
+   "official_full": "Tom McClintock",
+   "current": true
+  },
+  {
+   "first": "Betty",
+   "last": "McCollum",
+   "official_full": "Betty McCollum",
+   "current": true
+  },
+  {
+   "first": "Mitch",
+   "last": "McConnell",
+   "official_full": "Mitch McConnell",
+   "current": true
+  },
+  {
+   "first": "Dave",
+   "last": "McCormick",
+   "official_full": "David McCormick",
+   "current": true
+  },
+  {
+   "first": "Rich",
+   "last": "McCormick",
+   "official_full": "Richard McCormick",
+   "current": true
+  },
+  {
+   "first": "Kristen",
+   "last": "McDonald Rivet",
+   "official_full": "Kristen McDonald Rivet",
+   "current": true
+  },
+  {
+   "first": "Addison",
+   "last": "McDowell",
+   "official_full": "Addison P. McDowell",
+   "current": true
+  },
+  {
+   "first": "A.",
+   "last": "McEachin",
+   "official_full": "A. Donald McEachin",
+   "current": false
+  },
+  {
+   "first": "Morgan",
+   "last": "McGarvey",
+   "official_full": "Morgan McGarvey",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "McGovern",
+   "nickname": "Jim",
+   "official_full": "James P. McGovern",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "McGuire",
+   "official_full": "John J. McGuire III",
+   "current": true
+  },
+  {
+   "first": "Patrick",
+   "last": "McHenry",
+   "official_full": "Patrick T. McHenry",
+   "current": false
+  },
+  {
+   "first": "LaMonica",
+   "last": "McIver",
+   "official_full": "LaMonica McIver",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "McKinley",
+   "official_full": "David B. McKinley",
+   "current": false
+  },
+  {
+   "first": "Cathy",
+   "last": "McMorris Rodgers",
+   "official_full": "Cathy McMorris Rodgers",
+   "current": false
+  },
+  {
+   "first": "Jerry",
+   "last": "McNerney",
+   "official_full": "Jerry McNerney",
+   "current": false
+  },
+  {
+   "first": "Gregory",
+   "last": "Meeks",
+   "official_full": "Gregory W. Meeks",
+   "current": true
+  },
+  {
+   "first": "Peter",
+   "last": "Meijer",
+   "official_full": "Peter Meijer",
+   "current": false
+  },
+  {
+   "first": "Analilia",
+   "last": "Mejia",
+   "official_full": "Analilia Mejia",
+   "current": true
+  },
+  {
+   "first": "Christian",
+   "last": "Menefee",
+   "official_full": "Christian D. Menefee",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Menendez",
+   "official_full": "Robert Menendez",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Menendez",
+   "nickname": "Bob",
+   "official_full": "Robert Menendez",
+   "current": false
+  },
+  {
+   "first": "Grace",
+   "last": "Meng",
+   "official_full": "Grace Meng",
+   "current": true
+  },
+  {
+   "first": "Jeff",
+   "last": "Merkley",
+   "official_full": "Jeff Merkley",
+   "current": true
+  },
+  {
+   "first": "Mark",
+   "last": "Messmer",
+   "official_full": "Mark B. Messmer",
+   "current": true
+  },
+  {
+   "first": "Daniel",
+   "last": "Meuser",
+   "official_full": "Daniel Meuser",
+   "current": true
+  },
+  {
+   "first": "Kweisi",
+   "last": "Mfume",
+   "official_full": "Kweisi Mfume",
+   "current": true
+  },
+  {
+   "first": "Carol",
+   "last": "Miller",
+   "official_full": "Carol D. Miller",
+   "current": true
+  },
+  {
+   "first": "Mary",
+   "last": "Miller",
+   "official_full": "Mary E. Miller",
+   "current": true
+  },
+  {
+   "first": "Max",
+   "last": "Miller",
+   "official_full": "Max L. Miller",
+   "current": true
+  },
+  {
+   "first": "Mariannette",
+   "last": "Miller-Meeks",
+   "official_full": "Mariannette Miller-Meeks",
+   "current": true
+  },
+  {
+   "first": "Cory",
+   "last": "Mills",
+   "official_full": "Cory Mills",
+   "current": true
+  },
+  {
+   "first": "Dave",
+   "last": "Min",
+   "official_full": "Dave Min",
+   "current": true
+  },
+  {
+   "first": "Paul",
+   "last": "Mitchell",
+   "official_full": "Paul Mitchell",
+   "current": false
+  },
+  {
+   "first": "Marcus",
+   "last": "Molinaro",
+   "official_full": "Marcus J. Molinaro",
+   "current": false
+  },
+  {
+   "first": "Ashley",
+   "last": "Moody",
+   "official_full": "Ashley Moody",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Moolenaar",
+   "official_full": "John R. Moolenaar",
+   "current": true
+  },
+  {
+   "first": "Alexander",
+   "last": "Mooney",
+   "official_full": "Alexander X. Mooney",
+   "current": false
+  },
+  {
+   "first": "Barry",
+   "last": "Moore",
+   "official_full": "Barry Moore",
+   "current": true
+  },
+  {
+   "first": "Blake",
+   "last": "Moore",
+   "official_full": "Blake D. Moore",
+   "current": true
+  },
+  {
+   "first": "Gwen",
+   "last": "Moore",
+   "official_full": "Gwen Moore",
+   "current": true
+  },
+  {
+   "first": "Riley",
+   "last": "Moore",
+   "official_full": "Riley M. Moore",
+   "current": true
+  },
+  {
+   "first": "Tim",
+   "last": "Moore",
+   "official_full": "Tim Moore",
+   "current": true
+  },
+  {
+   "first": "Jerry",
+   "last": "Moran",
+   "official_full": "Jerry Moran",
+   "current": true
+  },
+  {
+   "first": "Nathaniel",
+   "last": "Moran",
+   "official_full": "Nathaniel Moran",
+   "current": true
+  },
+  {
+   "first": "Joseph",
+   "last": "Morelle",
+   "official_full": "Joseph D. Morelle",
+   "current": true
+  },
+  {
+   "first": "Bernie",
+   "last": "Moreno",
+   "official_full": "Bernie Moreno",
+   "current": true
+  },
+  {
+   "first": "Kelly",
+   "last": "Morrison",
+   "official_full": "Kelly Morrison",
+   "current": true
+  },
+  {
+   "first": "Jared",
+   "last": "Moskowitz",
+   "official_full": "Jared Moskowitz",
+   "current": true
+  },
+  {
+   "first": "Seth",
+   "last": "Moulton",
+   "official_full": "Seth Moulton",
+   "current": true
+  },
+  {
+   "first": "James (Jim)",
+   "last": "Moylan",
+   "official_full": "James C. Moylan",
+   "current": true
+  },
+  {
+   "first": "Frank",
+   "last": "Mrvan",
+   "official_full": "Frank J. Mrvan",
+   "current": true
+  },
+  {
+   "first": "Debbie",
+   "last": "Mucarsel-Powell",
+   "official_full": "Debbie Mucarsel-Powell",
+   "current": false
+  },
+  {
+   "first": "Kevin",
+   "last": "Mullin",
+   "official_full": "Kevin Mullin",
+   "current": true
+  },
+  {
+   "first": "Markwayne",
+   "last": "Mullin",
+   "official_full": "Markwayne Mullin",
+   "current": false
+  },
+  {
+   "first": "Lisa",
+   "last": "Murkowski",
+   "official_full": "Lisa Murkowski",
+   "current": true
+  },
+  {
+   "first": "Christopher",
+   "last": "Murphy",
+   "official_full": "Christopher Murphy",
+   "current": true
+  },
+  {
+   "first": "Gregory",
+   "last": "Murphy",
+   "official_full": "Gregory F. Murphy",
+   "current": true
+  },
+  {
+   "first": "Stephanie",
+   "last": "Murphy",
+   "official_full": "Stephanie N. Murphy",
+   "current": false
+  },
+  {
+   "first": "Patty",
+   "last": "Murray",
+   "official_full": "Patty Murray",
+   "current": true
+  },
+  {
+   "first": "Jerrold",
+   "last": "Nadler",
+   "official_full": "Jerrold Nadler",
+   "current": true
+  },
+  {
+   "first": "Grace",
+   "last": "Napolitano",
+   "official_full": "Grace F. Napolitano",
+   "current": false
+  },
+  {
+   "first": "Richard",
+   "last": "Neal",
+   "official_full": "Richard E. Neal",
+   "current": true
+  },
+  {
+   "first": "Joe",
+   "last": "Neguse",
+   "official_full": "Joe Neguse",
+   "current": true
+  },
+  {
+   "first": "Troy",
+   "last": "Nehls",
+   "official_full": "Troy E. Nehls",
+   "current": true
+  },
+  {
+   "first": "Dan",
+   "last": "Newhouse",
+   "official_full": "Dan Newhouse",
+   "current": true
+  },
+  {
+   "first": "Marie",
+   "last": "Newman",
+   "official_full": "Marie Newman",
+   "current": false
+  },
+  {
+   "first": "Wiley",
+   "last": "Nickel",
+   "official_full": "Wiley Nickel",
+   "current": false
+  },
+  {
+   "first": "Donald",
+   "last": "Norcross",
+   "official_full": "Donald Norcross",
+   "current": true
+  },
+  {
+   "first": "Ralph",
+   "last": "Norman",
+   "official_full": "Ralph Norman",
+   "current": true
+  },
+  {
+   "first": "Eleanor",
+   "last": "Norton",
+   "official_full": "Eleanor Holmes Norton",
+   "current": true
+  },
+  {
+   "first": "Devin",
+   "last": "Nunes",
+   "official_full": "Devin Nunes",
+   "current": false
+  },
+  {
+   "first": "Zachary (Zach)",
+   "last": "Nunn",
+   "official_full": "Zachary Nunn",
+   "current": true
+  },
+  {
+   "first": "Jay",
+   "last": "Obernolte",
+   "official_full": "Jay Obernolte",
+   "current": true
+  },
+  {
+   "first": "Alexandria",
+   "last": "Ocasio-Cortez",
+   "official_full": "Alexandria Ocasio-Cortez",
+   "current": true
+  },
+  {
+   "first": "Andrew",
+   "last": "Ogles",
+   "official_full": "Andrew Ogles",
+   "current": true
+  },
+  {
+   "first": "Pete",
+   "last": "Olson",
+   "official_full": "Pete Olson",
+   "current": false
+  },
+  {
+   "first": "Johnny",
+   "last": "Olszewski",
+   "official_full": "Johnny Olszewski, Jr.",
+   "current": true
+  },
+  {
+   "first": "Ilhan",
+   "last": "Omar",
+   "official_full": "Ilhan Omar",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Onder",
+   "official_full": "Robert F. Onder, Jr.",
+   "current": true
+  },
+  {
+   "first": "Jon",
+   "last": "Ossoff",
+   "official_full": "Jon Ossoff",
+   "current": true
+  },
+  {
+   "first": "Clarence",
+   "last": "Owens",
+   "nickname": "Burgess",
+   "official_full": "Burgess Owens",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "O’Halleran",
+   "official_full": "Tom O’Halleran",
+   "current": false
+  },
+  {
+   "first": "Alejandro",
+   "last": "Padilla",
+   "nickname": "Alex",
+   "official_full": "Alex Padilla",
+   "current": true
+  },
+  {
+   "first": "Steven",
+   "last": "Palazzo",
+   "official_full": "Steven M. Palazzo",
+   "current": false
+  },
+  {
+   "first": "Frank",
+   "last": "Pallone",
+   "official_full": "Frank Pallone, Jr.",
+   "current": true
+  },
+  {
+   "first": "Gary",
+   "last": "Palmer",
+   "official_full": "Gary J. Palmer",
+   "current": true
+  },
+  {
+   "first": "Jimmy",
+   "last": "Panetta",
+   "official_full": "Jimmy Panetta",
+   "current": true
+  },
+  {
+   "first": "Chris",
+   "last": "Pappas",
+   "official_full": "Chris Pappas",
+   "current": true
+  },
+  {
+   "first": "Bill",
+   "last": "Pascrell",
+   "official_full": "Bill Pascrell, Jr.",
+   "current": false
+  },
+  {
+   "first": "Jimmy",
+   "last": "Patronis",
+   "official_full": "Jimmy Patronis",
+   "current": true
+  },
+  {
+   "first": "Rand",
+   "last": "Paul",
+   "official_full": "Rand Paul",
+   "current": true
+  },
+  {
+   "first": "Donald",
+   "last": "Payne",
+   "official_full": "Donald M. Payne, Jr.",
+   "current": false
+  },
+  {
+   "first": "Nancy",
+   "last": "Pelosi",
+   "official_full": "Nancy Pelosi",
+   "current": true
+  },
+  {
+   "first": "Mary",
+   "last": "Peltola",
+   "official_full": "Mary Sattler Peltola",
+   "current": false
+  },
+  {
+   "first": "Greg",
+   "last": "Pence",
+   "official_full": "Greg Pence",
+   "current": false
+  },
+  {
+   "first": "David",
+   "last": "Perdue",
+   "official_full": "David Perdue",
+   "current": false
+  },
+  {
+   "first": "Ed",
+   "last": "Perlmutter",
+   "official_full": "Ed Perlmutter",
+   "current": false
+  },
+  {
+   "first": "Scott",
+   "last": "Perry",
+   "official_full": "Scott Perry",
+   "current": true
+  },
+  {
+   "first": "Gary",
+   "last": "Peters",
+   "official_full": "Gary C. Peters",
+   "current": true
+  },
+  {
+   "first": "Scott",
+   "last": "Peters",
+   "official_full": "Scott H. Peters",
+   "current": true
+  },
+  {
+   "first": "Collin",
+   "last": "Peterson",
+   "official_full": "Collin C. Peterson",
+   "current": false
+  },
+  {
+   "first": "Brittany",
+   "last": "Pettersen",
+   "official_full": "Brittany Pettersen",
+   "current": true
+  },
+  {
+   "first": "August",
+   "last": "Pfluger",
+   "official_full": "August Pfluger",
+   "current": true
+  },
+  {
+   "first": "Dean",
+   "last": "Phillips",
+   "official_full": "Dean Phillips",
+   "current": false
+  },
+  {
+   "first": "Chellie",
+   "last": "Pingree",
+   "official_full": "Chellie Pingree",
+   "current": true
+  },
+  {
+   "first": "Stacey",
+   "last": "Plaskett",
+   "official_full": "Stacey E. Plaskett",
+   "current": true
+  },
+  {
+   "first": "Mark",
+   "last": "Pocan",
+   "official_full": "Mark Pocan",
+   "current": true
+  },
+  {
+   "first": "Katie",
+   "last": "Porter",
+   "official_full": "Katie Porter",
+   "current": false
+  },
+  {
+   "first": "Robert",
+   "last": "Portman",
+   "nickname": "Rob",
+   "official_full": "Rob Portman",
+   "current": false
+  },
+  {
+   "first": "Bill",
+   "last": "Posey",
+   "official_full": "Bill Posey",
+   "current": false
+  },
+  {
+   "first": "Nellie",
+   "last": "Pou",
+   "official_full": "Nellie Pou",
+   "current": true
+  },
+  {
+   "first": "Ayanna",
+   "last": "Pressley",
+   "official_full": "Ayanna Pressley",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Price",
+   "official_full": "David E. Price",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Quigley",
+   "official_full": "Mike Quigley",
+   "current": true
+  },
+  {
+   "first": "Aumua Amata",
+   "last": "Radewagen",
+   "official_full": "Aumua Amata Coleman Radewagen",
+   "current": true
+  },
+  {
+   "first": "Delia",
+   "last": "Ramirez",
+   "official_full": "Delia C. Ramirez",
+   "current": true
+  },
+  {
+   "first": "Emily",
+   "last": "Randall",
+   "official_full": "Emily Randall",
+   "current": true
+  },
+  {
+   "first": "Jamie",
+   "last": "Raskin",
+   "official_full": "Jamie Raskin",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Reed",
+   "nickname": "Jack",
+   "official_full": "Jack Reed",
+   "current": true
+  },
+  {
+   "first": "Tom",
+   "last": "Reed",
+   "official_full": "Tom Reed",
+   "current": false
+  },
+  {
+   "first": "Guy",
+   "last": "Reschenthaler",
+   "official_full": "Guy Reschenthaler",
+   "current": true
+  },
+  {
+   "first": "Kathleen",
+   "last": "Rice",
+   "official_full": "Kathleen M. Rice",
+   "current": false
+  },
+  {
+   "first": "Tom",
+   "last": "Rice",
+   "official_full": "Tom Rice",
+   "current": false
+  },
+  {
+   "first": "Cedric",
+   "last": "Richmond",
+   "official_full": "Cedric L. Richmond",
+   "current": false
+  },
+  {
+   "first": "Pete",
+   "last": "Ricketts",
+   "official_full": "Pete Ricketts",
+   "current": true
+  },
+  {
+   "first": "Denver",
+   "last": "Riggleman",
+   "official_full": "Denver Riggleman",
+   "current": false
+  },
+  {
+   "first": "Josh",
+   "last": "Riley",
+   "official_full": "Josh Riley",
+   "current": true
+  },
+  {
+   "first": "James",
+   "last": "Risch",
+   "official_full": "James E. Risch",
+   "current": true
+  },
+  {
+   "first": "Luz",
+   "last": "Rivas",
+   "official_full": "Luz M. Rivas",
+   "current": true
+  },
+  {
+   "first": "Pat",
+   "last": "Roberts",
+   "official_full": "Pat Roberts",
+   "current": false
+  },
+  {
+   "first": "Martha",
+   "last": "Roby",
+   "official_full": "Martha Roby",
+   "current": false
+  },
+  {
+   "first": "David",
+   "last": "Roe",
+   "nickname": "Phil",
+   "official_full": "David P. Roe",
+   "current": false
+  },
+  {
+   "first": "Harold",
+   "last": "Rogers",
+   "nickname": "Hal",
+   "official_full": "Harold Rogers",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Rogers",
+   "official_full": "Mike Rogers",
+   "current": true
+  },
+  {
+   "first": "Mitt",
+   "last": "Romney",
+   "official_full": "Mitt Romney",
+   "current": false
+  },
+  {
+   "first": "Francis",
+   "last": "Rooney",
+   "official_full": "Francis Rooney",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Rose",
+   "official_full": "John W. Rose",
+   "current": true
+  },
+  {
+   "first": "Max",
+   "last": "Rose",
+   "official_full": "Max Rose",
+   "current": false
+  },
+  {
+   "first": "Jacky",
+   "last": "Rosen",
+   "official_full": "Jacky Rosen",
+   "current": true
+  },
+  {
+   "first": "Matthew",
+   "last": "Rosendale",
+   "official_full": "Matthew M. Rosendale, Sr.",
+   "current": false
+  },
+  {
+   "first": "Deborah",
+   "last": "Ross",
+   "official_full": "Deborah K. Ross",
+   "current": true
+  },
+  {
+   "first": "Harley",
+   "last": "Rouda",
+   "official_full": "Harley Rouda",
+   "current": false
+  },
+  {
+   "first": "Mike",
+   "last": "Rounds",
+   "official_full": "Mike Rounds",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Rouzer",
+   "official_full": "David Rouzer",
+   "current": true
+  },
+  {
+   "first": "Chip",
+   "last": "Roy",
+   "official_full": "Chip Roy",
+   "current": true
+  },
+  {
+   "first": "Lucille",
+   "last": "Roybal-Allard",
+   "official_full": "Lucille Roybal-Allard",
+   "current": false
+  },
+  {
+   "first": "Marco",
+   "last": "Rubio",
+   "official_full": "Marco Rubio",
+   "current": false
+  },
+  {
+   "first": "Raul",
+   "last": "Ruiz",
+   "official_full": "Raul Ruiz",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Rulli",
+   "official_full": "Michael A. Rulli",
+   "current": true
+  },
+  {
+   "first": "C.",
+   "last": "Ruppersberger",
+   "official_full": "C. A. Dutch Ruppersberger",
+   "current": false
+  },
+  {
+   "first": "Bobby",
+   "last": "Rush",
+   "official_full": "Bobby L. Rush",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Rutherford",
+   "official_full": "John H. Rutherford",
+   "current": true
+  },
+  {
+   "first": "Patrick",
+   "last": "Ryan",
+   "official_full": "Patrick Ryan",
+   "current": true
+  },
+  {
+   "first": "Tim",
+   "last": "Ryan",
+   "official_full": "Tim Ryan",
+   "current": false
+  },
+  {
+   "first": "Gregorio",
+   "last": "Sablan",
+   "official_full": "Gregorio Kilili Camacho Sablan",
+   "current": false
+  },
+  {
+   "first": "Maria",
+   "last": "Salazar",
+   "official_full": "Maria Elvira Salazar",
+   "current": true
+  },
+  {
+   "first": "Andrea",
+   "last": "Salinas",
+   "official_full": "Andrea Salinas",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "San Nicolas",
+   "official_full": "Michael F. Q. San Nicolas",
+   "current": false
+  },
+  {
+   "first": "Bernard",
+   "last": "Sanders",
+   "nickname": "Bernie",
+   "official_full": "Bernard Sanders",
+   "current": true
+  },
+  {
+   "first": "George",
+   "last": "Santos",
+   "official_full": "George Santos",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Sarbanes",
+   "official_full": "John P. Sarbanes",
+   "current": false
+  },
+  {
+   "first": "Benjamin",
+   "last": "Sasse",
+   "nickname": "Ben",
+   "official_full": "Ben Sasse",
+   "current": false
+  },
+  {
+   "first": "Steve",
+   "last": "Scalise",
+   "official_full": "Steve Scalise",
+   "current": true
+  },
+  {
+   "first": "Mary",
+   "last": "Scanlon",
+   "official_full": "Mary Gay Scanlon",
+   "current": true
+  },
+  {
+   "first": "Janice",
+   "last": "Schakowsky",
+   "nickname": "Jan",
+   "official_full": "Janice D. Schakowsky",
+   "current": true
+  },
+  {
+   "first": "Brian",
+   "last": "Schatz",
+   "official_full": "Brian Schatz",
+   "current": true
+  },
+  {
+   "first": "Adam",
+   "last": "Schiff",
+   "official_full": "Adam B. Schiff",
+   "current": true
+  },
+  {
+   "first": "Derek",
+   "last": "Schmidt",
+   "official_full": "Derek Schmidt",
+   "current": true
+  },
+  {
+   "first": "Eric",
+   "last": "Schmitt",
+   "official_full": "Eric Schmitt",
+   "current": true
+  },
+  {
+   "first": "Bradley",
+   "last": "Schneider",
+   "nickname": "Brad",
+   "official_full": "Bradley Scott Schneider",
+   "current": true
+  },
+  {
+   "first": "Hillary",
+   "last": "Scholten",
+   "official_full": "Hillary J. Scholten",
+   "current": true
+  },
+  {
+   "first": "Kurt",
+   "last": "Schrader",
+   "official_full": "Kurt Schrader",
+   "current": false
+  },
+  {
+   "first": "Kim",
+   "last": "Schrier",
+   "official_full": "Kim Schrier",
+   "current": true
+  },
+  {
+   "first": "Charles",
+   "last": "Schumer",
+   "nickname": "Chuck",
+   "official_full": "Charles E. Schumer",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Schweikert",
+   "official_full": "David Schweikert",
+   "current": true
+  },
+  {
+   "first": "Austin",
+   "last": "Scott",
+   "official_full": "Austin Scott",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Scott",
+   "official_full": "David Scott",
+   "current": false
+  },
+  {
+   "first": "Rick",
+   "last": "Scott",
+   "official_full": "Rick Scott",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Scott",
+   "nickname": "Bobby",
+   "official_full": "Robert C. \"Bobby\" Scott",
+   "current": true
+  },
+  {
+   "first": "Tim",
+   "last": "Scott",
+   "official_full": "Tim Scott",
+   "current": true
+  },
+  {
+   "first": "Keith",
+   "last": "Self",
+   "official_full": "Keith Self",
+   "current": true
+  },
+  {
+   "first": "Joseph",
+   "last": "Sempolinski",
+   "official_full": "Joseph Sempolinski",
+   "current": false
+  },
+  {
+   "first": "F.",
+   "last": "Sensenbrenner",
+   "official_full": "F. James Sensenbrenner, Jr.",
+   "current": false
+  },
+  {
+   "first": "José",
+   "last": "Serrano",
+   "official_full": "José E. Serrano",
+   "current": false
+  },
+  {
+   "first": "Pete",
+   "last": "Sessions",
+   "official_full": "Pete Sessions",
+   "current": true
+  },
+  {
+   "first": "Terri",
+   "last": "Sewell",
+   "official_full": "Terri A. Sewell",
+   "current": true
+  },
+  {
+   "first": "Jeanne",
+   "last": "Shaheen",
+   "official_full": "Jeanne Shaheen",
+   "current": true
+  },
+  {
+   "first": "Donna",
+   "last": "Shalala",
+   "official_full": "Donna E. Shalala",
+   "current": false
+  },
+  {
+   "first": "Tim",
+   "last": "Sheehy",
+   "official_full": "Tim Sheehy",
+   "current": true
+  },
+  {
+   "first": "Richard",
+   "last": "Shelby",
+   "official_full": "Richard C. Shelby",
+   "current": false
+  },
+  {
+   "first": "Brad",
+   "last": "Sherman",
+   "official_full": "Brad Sherman",
+   "current": true
+  },
+  {
+   "first": "Mikie",
+   "last": "Sherrill",
+   "official_full": "Mikie Sherrill",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Shimkus",
+   "official_full": "John Shimkus",
+   "current": false
+  },
+  {
+   "first": "Jefferson",
+   "last": "Shreve",
+   "official_full": "Jefferson Shreve",
+   "current": true
+  },
+  {
+   "first": "Lateefah",
+   "last": "Simon",
+   "official_full": "Lateefah Simon",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Simpson",
+   "nickname": "Mike",
+   "official_full": "Michael K. Simpson",
+   "current": true
+  },
+  {
+   "first": "Kyrsten",
+   "last": "Sinema",
+   "official_full": "Kyrsten Sinema",
+   "current": false
+  },
+  {
+   "first": "Albio",
+   "last": "Sires",
+   "official_full": "Albio Sires",
+   "current": false
+  },
+  {
+   "first": "Elissa",
+   "last": "Slotkin",
+   "official_full": "Elissa Slotkin",
+   "current": true
+  },
+  {
+   "first": "Adam",
+   "last": "Smith",
+   "official_full": "Adam Smith",
+   "current": true
+  },
+  {
+   "first": "Adrian",
+   "last": "Smith",
+   "official_full": "Adrian Smith",
+   "current": true
+  },
+  {
+   "first": "Christopher",
+   "last": "Smith",
+   "nickname": "Chris",
+   "official_full": "Christopher H. Smith",
+   "current": true
+  },
+  {
+   "first": "Jason",
+   "last": "Smith",
+   "official_full": "Jason Smith",
+   "current": true
+  },
+  {
+   "first": "Tina",
+   "last": "Smith",
+   "official_full": "Tina Smith",
+   "current": true
+  },
+  {
+   "first": "Lloyd",
+   "last": "Smucker",
+   "official_full": "Lloyd Smucker",
+   "current": true
+  },
+  {
+   "first": "Eric",
+   "last": "Sorensen",
+   "official_full": "Eric Sorensen",
+   "current": true
+  },
+  {
+   "first": "Darren",
+   "last": "Soto",
+   "official_full": "Darren Soto",
+   "current": true
+  },
+  {
+   "first": "Abigail",
+   "last": "Spanberger",
+   "official_full": "Abigail Davis Spanberger",
+   "current": false
+  },
+  {
+   "first": "Ross",
+   "last": "Spano",
+   "official_full": "Ross Spano",
+   "current": false
+  },
+  {
+   "first": "Victoria",
+   "last": "Spartz",
+   "official_full": "Victoria Spartz",
+   "current": true
+  },
+  {
+   "first": "Jackie",
+   "last": "Speier",
+   "official_full": "Jackie Speier",
+   "current": false
+  },
+  {
+   "first": "Debbie",
+   "last": "Stabenow",
+   "official_full": "Debbie Stabenow",
+   "current": false
+  },
+  {
+   "first": "Melanie",
+   "last": "Stansbury",
+   "official_full": "Melanie A. Stansbury",
+   "current": true
+  },
+  {
+   "first": "Greg",
+   "last": "Stanton",
+   "official_full": "Greg Stanton",
+   "current": true
+  },
+  {
+   "first": "Pete",
+   "last": "Stauber",
+   "official_full": "Pete Stauber",
+   "current": true
+  },
+  {
+   "first": "Michelle",
+   "last": "Steel",
+   "official_full": "Michelle Steel",
+   "current": false
+  },
+  {
+   "first": "Elise",
+   "last": "Stefanik",
+   "official_full": "Elise M. Stefanik",
+   "current": true
+  },
+  {
+   "first": "Bryan",
+   "last": "Steil",
+   "official_full": "Bryan Steil",
+   "current": true
+  },
+  {
+   "first": "W.",
+   "last": "Steube",
+   "official_full": "W. Gregory Steube",
+   "current": true
+  },
+  {
+   "first": "Haley",
+   "last": "Stevens",
+   "official_full": "Haley M. Stevens",
+   "current": true
+  },
+  {
+   "first": "Chris",
+   "last": "Stewart",
+   "official_full": "Chris Stewart",
+   "current": false
+  },
+  {
+   "first": "Steve",
+   "last": "Stivers",
+   "official_full": "Steve Stivers",
+   "current": false
+  },
+  {
+   "first": "Marilyn",
+   "last": "Strickland",
+   "official_full": "Marilyn Strickland",
+   "current": true
+  },
+  {
+   "first": "Dale",
+   "last": "Strong",
+   "official_full": "Dale W. Strong",
+   "current": true
+  },
+  {
+   "first": "Marlin",
+   "last": "Stutzman",
+   "official_full": "Marlin A. Stutzman",
+   "current": true
+  },
+  {
+   "first": "Suhas",
+   "last": "Subramanyam",
+   "official_full": "Suhas Subramanyam",
+   "current": true
+  },
+  {
+   "first": "Dan",
+   "last": "Sullivan",
+   "official_full": "Dan Sullivan",
+   "current": true
+  },
+  {
+   "first": "Thomas",
+   "last": "Suozzi",
+   "official_full": "Thomas R. Suozzi",
+   "current": true
+  },
+  {
+   "first": "Eric",
+   "last": "Swalwell",
+   "official_full": "Eric Swalwell",
+   "current": false
+  },
+  {
+   "first": "Emilia",
+   "last": "Sykes",
+   "official_full": "Emilia Strong Sykes",
+   "current": true
+  },
+  {
+   "first": "Linda",
+   "last": "Sánchez",
+   "official_full": "Linda T. Sánchez",
+   "current": true
+  },
+  {
+   "first": "Mark",
+   "last": "Takano",
+   "official_full": "Mark Takano",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Taylor",
+   "official_full": "David J. Taylor",
+   "current": true
+  },
+  {
+   "first": "Van",
+   "last": "Taylor",
+   "official_full": "Van Taylor",
+   "current": false
+  },
+  {
+   "first": "Claudia",
+   "last": "Tenney",
+   "official_full": "Claudia Tenney",
+   "current": true
+  },
+  {
+   "first": "Jon",
+   "last": "Tester",
+   "official_full": "Jon Tester",
+   "current": false
+  },
+  {
+   "first": "Shri",
+   "last": "Thanedar",
+   "official_full": "Shri Thanedar",
+   "current": true
+  },
+  {
+   "first": "Bennie",
+   "last": "Thompson",
+   "official_full": "Bennie G. Thompson",
+   "current": true
+  },
+  {
+   "first": "Glenn",
+   "last": "Thompson",
+   "official_full": "Glenn Thompson",
+   "current": true
+  },
+  {
+   "first": "Mike",
+   "last": "Thompson",
+   "official_full": "Mike Thompson",
+   "current": true
+  },
+  {
+   "first": "Mac",
+   "last": "Thornberry",
+   "official_full": "Mac Thornberry",
+   "current": false
+  },
+  {
+   "first": "John",
+   "last": "Thune",
+   "official_full": "John Thune",
+   "current": true
+  },
+  {
+   "first": "Thomas",
+   "last": "Tiffany",
+   "official_full": "Thomas P. Tiffany",
+   "current": true
+  },
+  {
+   "first": "Thom",
+   "last": "Tillis",
+   "official_full": "Thom Tillis",
+   "current": true
+  },
+  {
+   "first": "William",
+   "last": "Timmons",
+   "official_full": "William R. Timmons IV",
+   "current": true
+  },
+  {
+   "first": "Scott",
+   "last": "Tipton",
+   "official_full": "Scott R. Tipton",
+   "current": false
+  },
+  {
+   "first": "Dina",
+   "last": "Titus",
+   "official_full": "Dina Titus",
+   "current": true
+  },
+  {
+   "first": "Rashida",
+   "last": "Tlaib",
+   "official_full": "Rashida Tlaib",
+   "current": true
+  },
+  {
+   "first": "Jill",
+   "last": "Tokuda",
+   "official_full": "Jill N. Tokuda",
+   "current": true
+  },
+  {
+   "first": "Paul",
+   "last": "Tonko",
+   "official_full": "Paul Tonko",
+   "current": true
+  },
+  {
+   "first": "Patrick",
+   "last": "Toomey",
+   "nickname": "Pat",
+   "official_full": "Patrick J. Toomey",
+   "current": false
+  },
+  {
+   "first": "Norma",
+   "last": "Torres",
+   "official_full": "Norma J. Torres",
+   "current": true
+  },
+  {
+   "first": "Ritchie",
+   "last": "Torres",
+   "official_full": "Ritchie Torres",
+   "current": true
+  },
+  {
+   "first": "Xochitl",
+   "last": "Torres Small",
+   "official_full": "Xochitl Torres Small",
+   "current": false
+  },
+  {
+   "first": "Lori",
+   "last": "Trahan",
+   "official_full": "Lori Trahan",
+   "current": true
+  },
+  {
+   "first": "Derek",
+   "last": "Tran",
+   "official_full": "Derek Tran",
+   "current": true
+  },
+  {
+   "first": "David",
+   "last": "Trone",
+   "official_full": "David J. Trone",
+   "current": false
+  },
+  {
+   "first": "Tommy",
+   "last": "Tuberville",
+   "official_full": "Tommy Tuberville",
+   "current": true
+  },
+  {
+   "first": "Michael",
+   "last": "Turner",
+   "official_full": "Michael R. Turner",
+   "current": true
+  },
+  {
+   "first": "Sylvester",
+   "last": "Turner",
+   "official_full": "Sylvester Turner",
+   "current": false
+  },
+  {
+   "first": "Tom",
+   "last": "Udall",
+   "official_full": "Tom Udall",
+   "current": false
+  },
+  {
+   "first": "Lauren",
+   "last": "Underwood",
+   "official_full": "Lauren Underwood",
+   "current": true
+  },
+  {
+   "first": "Fred",
+   "last": "Upton",
+   "official_full": "Fred Upton",
+   "current": false
+  },
+  {
+   "first": "David",
+   "last": "Valadao",
+   "official_full": "David G. Valadao",
+   "current": true
+  },
+  {
+   "first": "Jefferson",
+   "last": "Van Drew",
+   "official_full": "Jefferson Van Drew",
+   "current": true
+  },
+  {
+   "first": "Beth",
+   "last": "Van Duyne",
+   "official_full": "Beth Van Duyne",
+   "current": true
+  },
+  {
+   "first": "Matt",
+   "last": "Van Epps",
+   "official_full": "Matt Van Epps",
+   "current": true
+  },
+  {
+   "first": "Chris",
+   "last": "Van Hollen",
+   "official_full": "Chris Van Hollen",
+   "current": true
+  },
+  {
+   "first": "Derrick",
+   "last": "Van Orden",
+   "official_full": "Derrick Van Orden",
+   "current": true
+  },
+  {
+   "first": "James David",
+   "last": "Vance",
+   "nickname": "J.D.",
+   "official_full": "J.D. Vance",
+   "current": false
+  },
+  {
+   "first": "Juan",
+   "last": "Vargas",
+   "official_full": "Juan Vargas",
+   "current": true
+  },
+  {
+   "first": "Gabriel (Gabe)",
+   "last": "Vasquez",
+   "official_full": "Gabe Vasquez",
+   "current": true
+  },
+  {
+   "first": "Marc",
+   "last": "Veasey",
+   "official_full": "Marc A. Veasey",
+   "current": true
+  },
+  {
+   "first": "Filemon",
+   "last": "Vela",
+   "official_full": "Filemon Vela",
+   "current": false
+  },
+  {
+   "first": "Nydia",
+   "last": "Velázquez",
+   "official_full": "Nydia M. Velázquez",
+   "current": true
+  },
+  {
+   "first": "Eugene",
+   "last": "Vindman",
+   "official_full": "Eugene Simon Vindman",
+   "current": true
+  },
+  {
+   "first": "Peter",
+   "last": "Visclosky",
+   "official_full": "Peter J. Visclosky",
+   "current": false
+  },
+  {
+   "first": "Ann",
+   "last": "Wagner",
+   "official_full": "Ann Wagner",
+   "current": true
+  },
+  {
+   "first": "Aisha",
+   "last": "Wahab",
+   "current": true
+  },
+  {
+   "first": "Tim",
+   "last": "Walberg",
+   "official_full": "Tim Walberg",
+   "current": true
+  },
+  {
+   "first": "Greg",
+   "last": "Walden",
+   "official_full": "Greg Walden",
+   "current": false
+  },
+  {
+   "first": "Mark",
+   "last": "Walker",
+   "official_full": "Mark Walker",
+   "current": false
+  },
+  {
+   "first": "James",
+   "last": "Walkinshaw",
+   "official_full": "James R. Walkinshaw",
+   "current": true
+  },
+  {
+   "first": "Jackie",
+   "last": "Walorski",
+   "official_full": "Jackie Walorski",
+   "current": false
+  },
+  {
+   "first": "Michael",
+   "last": "Waltz",
+   "official_full": "Michael Waltz",
+   "current": false
+  },
+  {
+   "first": "Mark",
+   "last": "Warner",
+   "official_full": "Mark R. Warner",
+   "current": true
+  },
+  {
+   "first": "Raphael",
+   "last": "Warnock",
+   "official_full": "Raphael G. Warnock",
+   "current": true
+  },
+  {
+   "first": "Elizabeth",
+   "last": "Warren",
+   "official_full": "Elizabeth Warren",
+   "current": true
+  },
+  {
+   "first": "Debbie",
+   "last": "Wasserman Schultz",
+   "official_full": "Debbie Wasserman Schultz",
+   "current": true
+  },
+  {
+   "first": "Maxine",
+   "last": "Waters",
+   "official_full": "Maxine Waters",
+   "current": true
+  },
+  {
+   "first": "Steven",
+   "last": "Watkins",
+   "official_full": "Steve Watkins",
+   "current": false
+  },
+  {
+   "first": "Bonnie",
+   "last": "Watson Coleman",
+   "official_full": "Bonnie Watson Coleman",
+   "current": true
+  },
+  {
+   "first": "Randy",
+   "last": "Weber",
+   "official_full": "Randy K. Weber, Sr.",
+   "current": true
+  },
+  {
+   "first": "Daniel",
+   "last": "Webster",
+   "official_full": "Daniel Webster",
+   "current": true
+  },
+  {
+   "first": "Peter",
+   "last": "Welch",
+   "official_full": "Peter Welch",
+   "current": true
+  },
+  {
+   "first": "Brad",
+   "last": "Wenstrup",
+   "official_full": "Brad R. Wenstrup",
+   "current": false
+  },
+  {
+   "first": "Bruce",
+   "last": "Westerman",
+   "official_full": "Bruce Westerman",
+   "current": true
+  },
+  {
+   "first": "Jennifer",
+   "last": "Wexton",
+   "official_full": "Jennifer Wexton",
+   "current": false
+  },
+  {
+   "first": "Sheldon",
+   "last": "Whitehouse",
+   "official_full": "Sheldon Whitehouse",
+   "current": true
+  },
+  {
+   "first": "George",
+   "last": "Whitesides",
+   "official_full": "George Whitesides",
+   "current": true
+  },
+  {
+   "first": "Roger",
+   "last": "Wicker",
+   "official_full": "Roger F. Wicker",
+   "current": true
+  },
+  {
+   "first": "Tony",
+   "last": "Wied",
+   "official_full": "Tony Wied",
+   "current": true
+  },
+  {
+   "first": "Susan",
+   "last": "Wild",
+   "official_full": "Susan Wild",
+   "current": false
+  },
+  {
+   "first": "Brandon",
+   "last": "Williams",
+   "official_full": "Brandon Williams",
+   "current": false
+  },
+  {
+   "first": "Nikema",
+   "last": "Williams",
+   "official_full": "Nikema Williams",
+   "current": true
+  },
+  {
+   "first": "Roger",
+   "last": "Williams",
+   "official_full": "Roger Williams",
+   "current": true
+  },
+  {
+   "first": "Frederica",
+   "last": "Wilson",
+   "official_full": "Frederica S. Wilson",
+   "current": true
+  },
+  {
+   "first": "Joe",
+   "last": "Wilson",
+   "official_full": "Joe Wilson",
+   "current": true
+  },
+  {
+   "first": "Robert",
+   "last": "Wittman",
+   "official_full": "Robert J. Wittman",
+   "current": true
+  },
+  {
+   "first": "Steve",
+   "last": "Womack",
+   "official_full": "Steve Womack",
+   "current": true
+  },
+  {
+   "first": "Rob",
+   "last": "Woodall",
+   "official_full": "Rob Woodall",
+   "current": false
+  },
+  {
+   "first": "Ron",
+   "last": "Wright",
+   "official_full": "Ron Wright",
+   "current": false
+  },
+  {
+   "first": "Ron",
+   "last": "Wyden",
+   "official_full": "Ron Wyden",
+   "current": true
+  },
+  {
+   "first": "Rudy",
+   "last": "Yakym",
+   "official_full": "Rudy Yakym III",
+   "current": true
+  },
+  {
+   "first": "John",
+   "last": "Yarmuth",
+   "official_full": "John A. Yarmuth",
+   "current": false
+  },
+  {
+   "first": "Ted",
+   "last": "Yoho",
+   "official_full": "Ted S. Yoho",
+   "current": false
+  },
+  {
+   "first": "Don",
+   "last": "Young",
+   "official_full": "Don Young",
+   "current": false
+  },
+  {
+   "first": "Todd",
+   "last": "Young",
+   "official_full": "Todd Young",
+   "current": true
+  },
+  {
+   "first": "Lee",
+   "last": "Zeldin",
+   "official_full": "Lee M. Zeldin",
+   "current": false
+  },
+  {
+   "first": "Ryan",
+   "last": "Zinke",
+   "official_full": "Ryan K. Zinke",
+   "current": true
+  }
+ ]
+}

@@ -21,6 +21,15 @@ refused. Bluesky has no AI-content flag or self-label for posts: the caption's d
 Sessions: createSession is limited to 30 per 5 minutes and 300 per day per account, so the session
 is kept in memory, refreshed once on `ExpiredToken`, logins are capped locally, and a refused login
 opens an hour-long circuit (a wrong app password must not burn the daily allowance).
+
+IMAGE posts (drop 1, contract C9): the record carries `app.bsky.embed.images` — the run's post image
+with its alt text (the title and whole paragraphs) and its 1080×1350 aspect ratio — and is STILL built
+once, in the claim: a blob's CID depends on its bytes only, so it is computed from the asset row's
+sha256 (`bluesky.raw_cid_for_sha256`) before anything is uploaded. At send time the picture is
+downloaded from its public URL (byte cap, sha256 checked), uploaded with `uploadBlob` (again on every
+resend: the PDS garbage-collects a blob no record names), and the PDS's CID must equal the record's;
+then the same `putRecord`. A failed upload writes no record, so it is NOT_SENT; a picture that is not
+the one reviewed, or a CID the PDS disagrees with, is REFUSED.
 """
 
 from __future__ import annotations
@@ -36,13 +45,15 @@ from typing import Any, Deque, Dict, Optional, Tuple, Union
 
 from app.config import settings
 from app.integrations import bluesky
-from app.services.marketing import post_copy
+from app.services.marketing import outlet_base, post_copy
 from app.services.marketing.outlet_base import (
     ABSENT,
     AMBIGUOUS,
     AUTH_BACKOFF_SECONDS,
     FOUND,
     GAVE_UP,
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
     NOT_SENT,
     PUBLISHED,
     REFUSED,
@@ -51,10 +62,13 @@ from app.services.marketing.outlet_base import (
     UNKNOWN,
     Adapter,
     MarketingPublishRefused,
+    MediaProblem,
     Outcome,
+    PostImage,
     Prepared,
     ReconcileResult,
     RetractResult,
+    image_of,
     scrub,
     text_sha256,
 )
@@ -71,6 +85,9 @@ SESSION_MAX_AGE_SECONDS = 100 * 60
 #: Local cap on createSession calls (Bluesky: 30 per 5 min, 300 per day). Normal use is one per
 #: ~100 minutes of activity; anything near this cap is a loop, and it stops here.
 LOGIN_CAP_PER_HOUR = 6
+#: Alt text: the lexicon sets no length; the Bluesky app caps it at 2,000 characters.
+ALT_TEXT_MAX = 2000
+IMAGES_EMBED = "app.bsky.embed.images"
 
 _S32 = "234567abcdefghijklmnopqrstuvwxyz"
 TID_RE = re.compile(r"[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}")
@@ -129,7 +146,7 @@ def link_facets(text: str) -> list:
     return facets
 
 
-def build_record(text: str, created_at: datetime) -> Dict[str, Any]:
+def build_record(text: str, created_at: datetime, embed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     record: Dict[str, Any] = {
         "$type": bluesky.POST_COLLECTION,
         "text": text,
@@ -140,7 +157,40 @@ def build_record(text: str, created_at: datetime) -> Dict[str, Any]:
     facets = link_facets(text)
     if facets:
         record["facets"] = facets
+    if embed is not None:
+        record["embed"] = embed
     return record
+
+
+def image_cid(image: PostImage) -> str:
+    """The CID the PDS will give the picture's blob — from the asset row's sha256, before any upload.
+    A digest that cannot make one refuses the post (the loader already checked its shape)."""
+    try:
+        return bluesky.raw_cid_for_sha256(image.sha256)
+    except ValueError as e:
+        raise MarketingPublishRefused(f"bluesky: the picture's sha256 makes no blob CID ({e})",
+                                      category="media") from None
+
+
+def images_embed(image: PostImage, cid: str) -> Dict[str, Any]:
+    """`app.bsky.embed.images` with the ONE picture: its blob ref, its alt text (title + whole
+    paragraphs, `ALT_TEXT_MAX`) and its 4:5 aspect ratio."""
+    return {"$type": IMAGES_EMBED, "images": [{
+        "alt": image.alt(ALT_TEXT_MAX),
+        "image": bluesky.blob_ref(cid, image.mime, image.size),
+        "aspectRatio": {"width": IMAGE_WIDTH, "height": IMAGE_HEIGHT},
+    }]}
+
+
+def embedded_cid(record: Any) -> Optional[str]:
+    """The blob CID a stored record's image embed names, or None."""
+    embed = record.get("embed") if isinstance(record, dict) else None
+    images = embed.get("images") if isinstance(embed, dict) else None
+    first = images[0] if isinstance(images, list) and images and isinstance(images[0], dict) else {}
+    blob = first.get("image") if isinstance(first.get("image"), dict) else {}
+    ref = blob.get("ref") if isinstance(blob.get("ref"), dict) else {}
+    link = ref.get("$link")
+    return link if isinstance(link, str) and link else None
 
 
 def post_url_for(repo: Any, rkey: Any) -> Optional[str]:
@@ -273,48 +323,110 @@ class BlueskyAdapter(Adapter):
         text = post.get("caption") if isinstance(post.get("caption"), str) else ""
         if not text.strip():
             raise MarketingPublishRefused("bluesky: the post has no text")
-        if post.get("format") != "text":
-            raise MarketingPublishRefused(f"bluesky: format {post.get('format')!r} is not published on Bluesky (text only)")
-        if post.get("asset_ids"):
+        image = None
+        if post.get("format") == "image":
+            image = image_of(post)
+            if image is None:
+                raise MarketingPublishRefused("bluesky: the image post's picture was not resolved", category="media")
+            if [str(a) for a in post.get("asset_ids") or [] if a] != [image.asset_id]:
+                raise MarketingPublishRefused("bluesky: an image post carries exactly its one picture",
+                                              category="media")
+        elif post.get("format") != "text":
+            raise MarketingPublishRefused(
+                f"bluesky: format {post.get('format')!r} is not published on Bluesky (text or image only)")
+        elif post.get("asset_ids"):
             raise MarketingPublishRefused("bluesky: a text post may not carry media")
         if len(text) > MAX_GRAPHEMES or len(text.encode("utf-8")) > MAX_TEXT_BYTES:
             # Code points ≥ graphemes, so this is conservative (post_copy counts the same way).
             raise MarketingPublishRefused(f"bluesky: {len(text)} characters > {MAX_GRAPHEMES}")
         sha = text_sha256(text)
+        cid = image_cid(image) if image is not None else None
         stored = _bluesky_meta(post)
         if (isinstance(stored.get("record"), dict) and stored.get("rkey") and stored.get("text_sha256") == sha
                 and TID_RE.fullmatch(str(stored["rkey"]))):
             # A retry: the exact record and key of the first attempt (an identical putRecord is a no-op).
             rkey, record, salt = str(stored["rkey"]), stored["record"], _salt(stored.get("salt"))
+            if embedded_cid(record) != cid:
+                # The record is resent byte for byte; it must name THIS post's picture (or, for a text
+                # post, none) — a mismatch is a corrupt write-ahead, never something to patch over.
+                raise MarketingPublishRefused("bluesky: the stored record names another picture than the post's",
+                                              category="media")
         else:
             run_day = post_run_date(post)
             if run_day is None:
                 raise MarketingPublishRefused("bluesky: the post's idempotency key carries no run date")
             salt = _salt(stored.get("salt"))
             rkey = tid_for(str(post.get("idempotency_key")), salt, run_day)
-            record = build_record(text, datetime.now(timezone.utc))
+            embed = images_embed(image, cid) if image is not None and cid is not None else None
+            record = build_record(text, datetime.now(timezone.utc), embed)
         facets = record.get("facets") or []
+        meta: Dict[str, Any] = {"rkey": rkey, "record": record, "salt": salt, "text_sha256": sha}
+        payload: Dict[str, Any] = {"rkey": rkey, "record": record}
+        if image is not None:
+            meta["image"] = payload["image"] = {**image.meta(), "cid": cid}
         return Prepared(
-            payload={"rkey": rkey, "record": record},
+            payload=payload,
             text_sha256=sha,
             reserve_micros=0,
-            publish_meta={"bluesky": {"rkey": rkey, "record": record, "salt": salt, "text_sha256": sha}},
-            summary=f"bluesky rkey={rkey} chars={len(text)} link_facets={len(facets)} sha256={sha[:12]}",
+            publish_meta={"bluesky": meta},
+            summary=(f"bluesky rkey={rkey} chars={len(text)} link_facets={len(facets)} "
+                     + (f"image={image.asset_id} bytes={image.size} cid={cid} " if image is not None else "")
+                     + f"sha256={sha[:12]}"),
         )
 
-    async def _put(self, prepared: Prepared) -> Tuple[_Session, Dict[str, Any]]:
-        """putRecord with one renewal on ExpiredToken (nothing is written on that error). Returns
-        (_NoSession, {}) when no session could be had."""
+    async def _upload_blob(self, session: Dict[str, Any], prepared: Prepared, data: bytes) -> Optional[Outcome]:
+        """uploadBlob of the picture before the record that names it. None when the PDS stored it under
+        the record's CID; else the Outcome that ends this attempt — no record was written, so every
+        failure is NOT_SENT, except a CID the PDS disagrees with (the write-ahead record could never
+        resolve its blob: REFUSED). An ExpiredToken propagates, for the caller's one renewal."""
+        image = prepared.payload["image"]
+        try:
+            blob = await bluesky.upload_blob(str(session["pds"]), str(session["access_jwt"]), data=data,
+                                             mime_type=str(image["mime"]))
+        except bluesky.BlueskyExpiredTokenError:
+            raise
+        except bluesky.BlueskyNotSentError as e:
+            return Outcome(NOT_SENT, "transport", error=scrub(e))
+        except bluesky.BlueskyRateLimitError as e:
+            retry_at = getattr(e, "retry_at", None)
+            if retry_at is not None:
+                _block((retry_at - datetime.now(timezone.utc)).total_seconds(), "rate limited")
+            return Outcome(NOT_SENT, "rate_limited", error=scrub(e), retry_at=retry_at)
+        except bluesky.BlueskyAuthError as e:
+            _block(AUTH_BACKOFF_SECONDS, "auth refused")
+            return Outcome(NOT_SENT, "auth", error=scrub(e),
+                           retry_at=datetime.now(timezone.utc) + timedelta(seconds=AUTH_BACKOFF_SECONDS), alert="auth")
+        except bluesky.BlueskyException as e:
+            # Refused or ambiguous: the blob may or may not be stored, the POST is not — no record yet.
+            return Outcome(NOT_SENT, "media", error=scrub(f"bluesky: the picture upload failed: {e}"))
+        if blob.get("cid") != image.get("cid") or blob.get("size") != image.get("size"):
+            logger.error("marketing bluesky: uploadBlob answered cid=%s size=%s for the picture the record names "
+                         "(cid=%s size=%s) asset=%s", blob.get("cid"), blob.get("size"), image.get("cid"),
+                         image.get("size"), image.get("asset_id"))
+            return Outcome(REFUSED, "media", alert="failed",
+                           error=scrub(f"bluesky: the PDS stored the picture as {blob.get('cid')} "
+                                       f"({blob.get('size')} bytes); the record names {image.get('cid')}"))
+        return None
+
+    async def _put(self, prepared: Prepared, data: Optional[bytes] = None
+                   ) -> Tuple[_Session, Dict[str, Any], Optional[Outcome]]:
+        """(uploadBlob of `data` when given, then) putRecord, with one renewal on ExpiredToken (nothing
+        is written on that error). Returns (_NoSession, {}, None) when no session could be had, and
+        (session, {}, outcome) when the picture's upload ended the attempt."""
         session = await _get_session()
         for attempt in range(2):
             if isinstance(session, _NoSession):
-                return session, {}
+                return session, {}, None
             try:
+                if data is not None:
+                    early = await self._upload_blob(session, prepared, data)
+                    if early is not None:
+                        return session, {}, early
                 res = await bluesky.put_record(
                     str(session["pds"]), str(session["access_jwt"]), repo=str(session["did"]),
                     collection=bluesky.POST_COLLECTION, rkey=prepared.payload["rkey"],
                     record=prepared.payload["record"])
-                return session, res
+                return session, res, None
             except bluesky.BlueskyExpiredTokenError:
                 if attempt:
                     raise
@@ -323,6 +435,16 @@ class BlueskyAdapter(Adapter):
 
     async def send(self, post: Dict[str, Any], prepared: Prepared) -> Outcome:
         rkey = prepared.payload["rkey"]
+        data: Optional[bytes] = None
+        image = prepared.payload.get("image")
+        if image:
+            fetched = await outlet_base.fetch_post_image(str(image["url"]), size=image["size"],
+                                                         sha256=str(image["sha256"]))
+            if isinstance(fetched, MediaProblem):
+                if fetched.definite:
+                    return Outcome(REFUSED, "media", error=scrub(f"bluesky: {fetched.error}"), alert="failed")
+                return Outcome(NOT_SENT, "media", error=scrub(f"bluesky: {fetched.error}"))
+            data = fetched
         # Where the put went (the session's account and PDS), recorded with an AMBIGUOUS outcome so
         # a reconcile after a restart asks THAT server, never a mirror.
         where: Dict[str, Any] = {}
@@ -337,7 +459,7 @@ class BlueskyAdapter(Adapter):
             return Outcome(AMBIGUOUS, category, error=error, publish_meta=meta)
 
         try:
-            session, res = await self._put(prepared)
+            session, res, early = await self._put(prepared, data)
         except bluesky.BlueskyNotSentError as e:
             return Outcome(NOT_SENT, "transport", error=scrub(e))
         except bluesky.BlueskyRateLimitError as e:
@@ -368,6 +490,8 @@ class BlueskyAdapter(Adapter):
         if isinstance(session, _NoSession):
             return Outcome(NOT_SENT, session.category, error=session.error, retry_at=session.retry_at,
                            alert=session.alert)
+        if early is not None:
+            return early   # the picture's upload ended the attempt; no record was written
         did = str(session.get("did") or "")
         uri = str(res.get("uri") or f"at://{did}/{bluesky.POST_COLLECTION}/{rkey}")
         return Outcome(

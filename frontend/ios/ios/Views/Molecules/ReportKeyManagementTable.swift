@@ -132,8 +132,10 @@ struct ReportKeyManagementTable: View {
                                 .padding(.horizontal, AppSpacing.sm)
                                 .padding(.vertical, 2)
                                 .background(
+                                    // Opaque: `gain` on its own 15% tint is 4.39:1
+                                    // in light (test_ios_theme_parity §6c).
                                     Capsule()
-                                        .fill(AppColors.bullish.opacity(0.15))
+                                        .fill(AppColors.cardBackgroundLight)
                                 )
                         }
                     }

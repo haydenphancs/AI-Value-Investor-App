@@ -65,7 +65,9 @@ struct ChatMarketOverviewWidget: View {
                 .foregroundColor(valuationColor)
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xxs)
-                .background(valuationColor.opacity(0.15))
+                // Opaque: gain/loss/caution on their own 15% tint fail AA in light
+                // (test_ios_theme_parity §6c).
+                .background(AppColors.cardBackgroundLight)
                 .cornerRadius(AppCornerRadius.small)
         }
     }

@@ -95,8 +95,7 @@ struct TrillionClubInfoSheet: View {
                             }
                             FlowLayout(spacing: AppSpacing.xs, lineSpacing: AppSpacing.xs) {
                                 ForEach(members.list) { member in
-                                    TintedTagBadge(text: member.name, color: AppColors.textSecondary,
-                                                   backgroundOpacity: 0.10)
+                                    TintedTagBadge(text: member.name, color: AppColors.textSecondary)
                                 }
                             }
                         }

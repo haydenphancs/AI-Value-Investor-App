@@ -167,9 +167,11 @@ struct ReportMoatCompetitionSection: View {
                     .foregroundColor(valueColor)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xs)
+                    // Opaque: a text colour on its own 15% tint fails AA in light
+                    // (test_ios_theme_parity §6c).
                     .background(
                         Capsule()
-                            .fill(valueColor.opacity(0.15))
+                            .fill(AppColors.cardBackgroundLight)
                     )
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -201,9 +203,11 @@ struct ReportMoatCompetitionSection: View {
                     .foregroundColor(data.overallRating.color)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xs)
+                    // Opaque: `accentYellow` on its own 15% tint is 4.41:1 in light even on a
+                    // white card, 3.90 on `cardBackgroundLight` (test_ios_theme_parity §6c).
                     .background(
                         Capsule()
-                            .fill(data.overallRating.backgroundColor)
+                            .fill(AppColors.cardBackgroundLight)
                     )
 
                 Spacer()

@@ -343,7 +343,9 @@ struct WhaleActivityNotice: View {
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.sm)
-        .background(tint.opacity(0.10))
+        // Opaque, not `tint.opacity(0.10)`: `caution` on its own 10% tint over the page is
+        // 4.15:1 in light (test_ios_theme_parity §6c). The ink carries the warmth.
+        .background(AppColors.cardBackgroundLight)
         .cornerRadius(AppCornerRadius.medium)
         .padding(.horizontal, AppSpacing.lg)
         .accessibilityElement(children: .combine)
@@ -442,7 +444,9 @@ struct WhaleRiskBadge: View {
         .foregroundColor(riskProfile.color)
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.sm)
-        .background(riskProfile.color.opacity(0.15))
+        // Opaque: every risk colour on its own 15% tint is under 4.5:1 in light
+        // (test_ios_theme_parity §6c).
+        .background(AppColors.cardBackgroundLight)
         .cornerRadius(AppCornerRadius.pill)
     }
 }
@@ -1142,8 +1146,10 @@ struct WhaleTickerIcon: View {
 
     private var letterFallback: some View {
         ZStack {
+            // Opaque: the letter is TEXT, and a text colour on its own 20% tint
+            // fails AA in light (test_ios_theme_parity §6c).
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(backgroundColor.opacity(0.2))
+                .fill(AppColors.cardBackgroundLight)
                 .frame(width: 40, height: 40)
 
             Text(String(ticker.prefix(1)))
@@ -1196,6 +1202,7 @@ struct WhaleRecentTradesSection: View {
                 ForEach(tradeGroups) { group in
                     WhaleTradeGroupCard(
                         group: group,
+                        isCongressionalWhale: isCongressional,
                         onTap: { onTradeGroupTapped?(group) }
                     )
 
@@ -1219,6 +1226,8 @@ struct WhaleRecentTradesSection: View {
 // MARK: - Whale Trade Group Card
 struct WhaleTradeGroupCard: View {
     let group: WhaleTradeGroup
+    /// The profile's own verdict — see `WhaleTradeGroup.formattedDate(whaleIsCongressional:)`.
+    let isCongressionalWhale: Bool
     var onTap: (() -> Void)?
 
     var body: some View {
@@ -1232,7 +1241,7 @@ struct WhaleTradeGroupCard: View {
                     HStack {
                         // Left side: Date and trade count stacked
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                            Text(group.formattedDate)
+                            Text(group.formattedDate(whaleIsCongressional: isCongressionalWhale))
                                 .font(AppTypography.bodyEmphasis)
                                 .foregroundColor(AppColors.textSecondary)
                             

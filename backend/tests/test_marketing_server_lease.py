@@ -118,9 +118,10 @@ def test_the_lease_outlives_one_call_and_still_fits_one_worker_poll_session():
 def _independent_worst_case_generation_seconds() -> float:
     """A whole generation, recomputed HERE from the retry constants the loops use and from
     postgrest's own client timeout (not via `generation_budget`): acquire (read + conditional
-    UPDATE) + the run-date read + per model call (one lease refresh + the call) + one terminal
-    write with its re-read. `test_marketing_residuals_lease.py` drives the real loops to prove
-    these counts are what the code does."""
+    UPDATE) + the run-date read + per model call (one lease refresh + the call) + the holder-capability
+    read of an accepted package while image posts are on (drop 1) + one terminal write with its
+    re-read. `test_marketing_residuals_lease.py` drives the real loops to prove these counts are what
+    the code does."""
     from postgrest.constants import DEFAULT_POSTGREST_CLIENT_TIMEOUT
     from app.services.marketing.generation_budget import MODEL_CALLS_PER_GENERATION
 
@@ -131,7 +132,8 @@ def _independent_worst_case_generation_seconds() -> float:
                 + sum(ss._FINISH_BACKOFF_SECONDS * k for k in range(1, ss._FINISH_ATTEMPTS))
                 + stmt)  # the `_landed` re-read after a retry matched nothing
     per_call = ss.worst_case_model_call_seconds() + refresh
-    return 2 * stmt + stmt + MODEL_CALLS_PER_GENERATION * per_call + terminal
+    holder_read = stmt  # `_holder_renders_images`: one run read after the last model call
+    return 2 * stmt + stmt + MODEL_CALLS_PER_GENERATION * per_call + holder_read + terminal
 
 
 def test_an_in_process_owner_counts_as_alive_for_a_whole_generation_and_no_longer():
@@ -140,16 +142,18 @@ def test_an_in_process_owner_counts_as_alive_for_a_whole_generation_and_no_longe
     lease refresh, every ledger statement to the PostgREST timeout, the terminal write with its
     retries and re-read — or a slow LIVE owner at the cap is closed out from under and its paid
     package is fenced out. It used to be 3 × LEASE_SECONDS (1896 s) against a real worst case of
-    ~2710 s with two calls, 4577 s with four. It must also be finite and tight (the bound plus
-    the margin, rounded up), or one wedged task wedges the day in that process."""
+    ~2710 s with two calls, 4697 s with four (4577 s before drop 1's holder read was counted). It
+    must also be finite and tight (the bound plus the margin, rounded up), or one wedged task
+    wedges the day in that process."""
     generation = _independent_worst_case_generation_seconds()
     assert ss.worst_case_generation_seconds() == pytest.approx(generation)
     assert ss.OWNER_ALIVE_SECONDS >= generation + ss.LEASE_MARGIN_SECONDS
     assert ss.OWNER_ALIVE_SECONDS < generation + ss.LEASE_MARGIN_SECONDS + 1
     if (settings.GEMINI_REQUEST_TIMEOUT_SECONDS, settings.GEMINI_QUOTA_MAX_RETRIES,
             settings.GEMINI_TIMEOUT_MAX_RETRIES, settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS) == (90, 2, 0, 5.0):
-        # 3 × 120 + 4 × (572 + 361.5) + 483, at the shipped defaults (PostgREST 120 s, 4 calls)
-        assert generation == 4577.0 and ss.OWNER_ALIVE_SECONDS == 4637
+        # 4 × 120 + 4 × (572 + 361.5) + 483 = 4697, at the shipped defaults (PostgREST 120 s, 4 calls;
+        # acquire 2 + run-date 1 + holder read 1); OWNER_ALIVE = ceil(4697 + 60) = 4757
+        assert generation == 4697.0 and ss.OWNER_ALIVE_SECONDS == 4757
     # The lease stays PER CALL: it is the cross-process takeover window, refreshed before each.
     assert ss.LEASE_SECONDS < ss.OWNER_ALIVE_SECONDS
 

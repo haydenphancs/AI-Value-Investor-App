@@ -10,17 +10,6 @@ import SwiftUI
 struct SentimentBadge: View {
     let sentiment: MarketSentiment
 
-    private var backgroundColor: Color {
-        switch sentiment {
-        case .bullish:
-            return AppColors.bullish.opacity(0.2)
-        case .bearish:
-            return AppColors.bearish.opacity(0.2)
-        case .neutral:
-            return AppColors.neutral.opacity(0.2)
-        }
-    }
-
     private var textColor: Color {
         switch sentiment {
         case .bullish:
@@ -59,7 +48,9 @@ struct SentimentBadge: View {
         .foregroundColor(textColor)
         .padding(.horizontal, AppSpacing.sm)
         .padding(.vertical, AppSpacing.xs)
-        .background(backgroundColor)
+        // Opaque, not the ink's own 20% tint: gain/loss/caution measure 4.08/3.98/3.92
+        // there in light even on a white card (test_ios_theme_parity §6c).
+        .background(AppColors.cardBackgroundLight)
         .clipShape(Capsule())
     }
 }

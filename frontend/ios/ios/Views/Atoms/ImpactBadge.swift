@@ -18,7 +18,9 @@ struct ImpactBadge: View {
             .padding(.vertical, AppSpacing.xs)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                    .fill(level.color.opacity(0.15))
+                    // Opaque: loss/caution/primaryBlue on their own tint fail AA in light
+                    // (test_ios_theme_parity §6c).
+                    .fill(AppColors.cardBackgroundLight)
             )
     }
 }

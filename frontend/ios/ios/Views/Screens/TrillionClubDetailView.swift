@@ -246,9 +246,10 @@ struct TrillionClubDetailView: View {
     private var segmentPicker: some View {
         FlowLayout(spacing: AppSpacing.xs, lineSpacing: AppSpacing.xs) {
             ForEach(TrillionClubDetailSegment.allCases) { item in
-                // Resting ink is `textSecondary`, not `primaryBlue`: the chip draws its ink on a
-                // 15% tint of itself, and primaryBlue there measures 3.87:1 on the light page
-                // (textSecondary: 5.56 light / 6.59 dark). Selected stays white on primaryFill.
+                // Resting ink is `textSecondary`. The chip used to draw its ink on a 15% tint of
+                // itself, where primaryBlue measured 3.87:1 on the light page; its resting fill is
+                // opaque `cardBackgroundLight` now (textSecondary 6.62 / 7.37 there). Selected
+                // stays white on primaryFill.
                 AccentFilterChip(
                     label: item.rawValue,
                     accent: AppColors.textSecondary,
@@ -512,8 +513,10 @@ struct TrillionClubDetailView: View {
                 .font(AppTypography.labelEmphasis)
                 .foregroundColor(AppColors.primaryBlue)
                 .frame(maxWidth: .infinity, minHeight: 44)
-                // Text on its own tint: 8% keeps primaryBlue at 4.63:1 in light.
-                .background(Capsule().fill(AppColors.primaryBlue.opacity(0.08)))
+                // Opaque. The 8% `primaryBlue` tint this replaced measured 4.63:1 only on a
+                // white card; this button sits on the PAGE, where it was 4.26 in light
+                // (test_ios_theme_parity §6c).
+                .background(Capsule().fill(AppColors.cardBackgroundLight))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)

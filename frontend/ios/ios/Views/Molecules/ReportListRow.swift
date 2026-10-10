@@ -44,7 +44,9 @@ struct ReportListRow: View {
                                 .foregroundColor(chip.color)
                                 .padding(.horizontal, AppSpacing.sm)
                                 .padding(.vertical, 2)
-                                .background(Capsule().fill(chip.color.opacity(0.15)))
+                                // Opaque: a text colour on its own 15% tint fails AA
+                                // in light (test_ios_theme_parity §6c).
+                                .background(Capsule().fill(AppColors.cardBackgroundLight))
                         }
                     }
                     ForEach(Array(leftLines.enumerated()), id: \.offset) { _, line in

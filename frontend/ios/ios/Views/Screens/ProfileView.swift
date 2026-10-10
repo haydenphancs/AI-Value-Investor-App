@@ -778,8 +778,11 @@ struct TierBadge: View {
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.xs + 2)
         .background(
+            // Opaque: `primaryBlue` / `accentYellow` on their own tint are 4.19 / 4.60:1 in
+            // light even on a white card (test_ios_theme_parity §6c). The tier's hue stays
+            // in the border and the ink.
             Capsule()
-                .fill(tierBackgroundColor)
+                .fill(AppColors.cardBackgroundLight)
                 .overlay(
                     Capsule()
                         .stroke(tierBorderColor, lineWidth: 1)
@@ -808,14 +811,6 @@ struct TierBadge: View {
         case .free: return AppColors.textSecondary
         case .pro: return AppColors.primaryBlue
         case .premium: return AppColors.accentYellow
-        }
-    }
-
-    private var tierBackgroundColor: Color {
-        switch tier {
-        case .free: return AppColors.textSecondary.opacity(0.1)
-        case .pro: return AppColors.primaryBlue.opacity(0.15)
-        case .premium: return AppColors.accentYellow.opacity(0.12)
         }
     }
 

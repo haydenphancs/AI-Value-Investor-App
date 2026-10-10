@@ -18,7 +18,10 @@ the model wrote 6.47). The fixes are pinned here:
   OWN store state (the code-owned value line), in the prompt and in the validator alike;
 * a length violation's detail — which the repair prompt replays verbatim — names the hard limit
   and how much to cut, once (it used to show two different ceilings for one caption), and the
-  script's length repair keeps its line structure (shorten / lengthen lines, or drop / add one).
+  script's length repair keeps its line structure (shorten / lengthen lines, or drop / add one);
+* the image post (drop 1, 2026-10-09) is asked for in words under its enforced character limits,
+  its spec line is pinned per kind, its length details name the limit and the cut, and the repair
+  replay still holds the longest real package plus a maximal image.
 
 Category 1 (pure): the Learn bundle, the 09-26 package fixture, the worker's pure timing modules
 and the prompt builders; no model call.
@@ -235,17 +238,24 @@ _LO, _HI = wp._ASK_SCRIPT_LINE_WORDS_MIN, wp._ASK_SCRIPT_LINE_WORDS
 ])
 def test_the_cards_line_matches_how_the_render_splits_the_lines(line_words):
     """The prompt tells the model each card is on screen while lines 1-2, 3-4 and 5-6 are spoken.
-    That is only true if the renderer splits 6 script lines over 3 text cards exactly there."""
+    That is only true if the renderer splits 6 script lines over 3 text cards exactly there — in
+    the PRODUCTION opening (drop 1, contract C11: `render.produce_video` calls
+    `timeline(..., hook_card=False)`; no brand card, the first content card is on screen from frame
+    0, over the hook AND lines 1-2). The cards are the 3 text cards + the disclaimer card."""
     assert len(line_words) == wp._ASK_SCRIPT_LINES
     words, narration = _word_table([wp._ASK_HOOK_WORDS] + list(line_words))
     first_ms = {}
     for w in words:
         first_ms.setdefault(w["line"], round(w["s"] * 1000))
-    segs = vid.timeline(words, wp._ASK_CARD_COUNT + 2, narration, vc.DISCLAIMER_CARD_SECONDS)
-    text_cards = segs[1:-1]
-    assert [s.card for s in text_cards] == list(range(1, wp._ASK_CARD_COUNT + 1))   # all shown
+    segs = vid.timeline(words, wp._ASK_CARD_COUNT + 1, narration, vc.DISCLAIMER_CARD_SECONDS,
+                        hook_card=False)
+    text_cards = segs[:-1]
+    assert [s.card for s in text_cards] == list(range(wp._ASK_CARD_COUNT))   # all shown, card 0 first
+    assert text_cards[0].start == 0                  # the first frame is content (hook spoken over it)
+    assert segs[-1].card == wp._ASK_CARD_COUNT       # then the disclaimer card
     line_at = {ms: line for line, ms in first_ms.items()}
-    opening = [line_at[round(s.start * 1000)] for s in text_cards]
+    # Card 0 opens at 0 under the hook; its own group starts at script line 1.
+    opening = [1] + [line_at[round(s.start * 1000)] for s in text_cards[1:]]
     closing = [o - 1 for o in opening[1:]] + [wp._ASK_SCRIPT_LINES]
     spans = [f"{a}-{b}" for a, b in zip(opening, closing)]
     assert spans == ["1-2", "3-4", "5-6"]
@@ -462,6 +472,8 @@ def _pkg() -> dict:
                      "youtube_description": " ".join(g[2:6]), "instagram": " ".join(g[3:6]),
                      "facebook": " ".join(g[4:7]), "x": g[5], "threads": " ".join(g[6:8]),
                      "bluesky": g[7], "linkedin": " ".join(g[:5])},
+        "image_post": {"title": " ".join(g[6].split()[:4]).rstrip(",.:;"),
+                       "paragraphs": [s for s in g[6:] if len(s) <= 200][:2]},
     }
 
 
@@ -680,3 +692,68 @@ def test_a_narrated_word_longer_than_the_audio_table_allows_is_refused_as_conten
     pkg["video_script"][2] = "Think about " + "a" * (AUDIO_WORD_MAX_CHARS - 1) + "."
     vr = ws.validate_package(pkg, _item(), RUN_DATE)
     assert not any(f"limit is {AUDIO_WORD_MAX_CHARS}" in v.detail for v in vr.violations)
+
+
+# ── the image post (drop 1, 2026-10-09) ──────────────────────────────────────────────────────
+
+
+def test_the_image_asks_sit_under_the_enforced_limits():
+    """Asked in words, at the measured characters per word, under every enforced ceiling."""
+    assert wp._ASK_IMAGE_TITLE_WORDS < wp.IMAGE_TITLE_MAX_WORDS
+    assert wp._ASK_IMAGE_TITLE_WORDS * wp._CHARS_PER_WORD <= wp.IMAGE_TITLE_MAX_CHARS
+    assert wp._ASK_IMAGE_PARAGRAPH_WORDS * wp._CHARS_PER_WORD <= wp.IMAGE_PARAGRAPH_MAX_CHARS
+    assert (wp._ASK_IMAGE_TITLE_WORDS, wp._ASK_IMAGE_PARAGRAPH_WORDS) == (8, 25)
+
+
+def test_the_image_line_is_pinned_verbatim_and_is_kind_specific():
+    assert _spec_line(_spec(), "- image_post:") == (
+        "- image_post: the text of one still image posted on its own (see IMAGE POST) - title: one "
+        "line of at most 8 words, naming no company (see HOOK AND TITLES); paragraphs: 2 to 4, in "
+        "reading order, each 1 or 2 sentences of at most 25 words in total.")
+    item = content_pool.get_item(COSTCO)
+    line = _spec_line(wp._output_spec(item, RUN_DATE, False), "- image_post:")
+    assert "naming the company its title names" in line and item.title in line
+
+
+@pytest.mark.parametrize("field, value, detail", [
+    ("image_post.title", "x" * 3 + " " + "y" * 70, "74 characters - the limit is 70; cut at least 4 characters"),
+    ("image_post.paragraphs[0]", "z" * 221, "221 characters - the limit is 220; cut at least 1 characters"),
+])
+def test_an_overlong_image_field_names_the_limit_and_the_cut(field, value, detail):
+    pkg = copy.deepcopy(_pkg())
+    if field.endswith("title"):
+        pkg["image_post"]["title"] = value
+    else:
+        pkg["image_post"]["paragraphs"][0] = value
+    assert _detail(pkg, field, "too_long") == detail
+
+
+def test_the_repair_replay_holds_the_longest_real_package_and_a_maximal_image():
+    """`_REPAIR_DRAFT_CAP` rose 7000 → 8000 with the image: the longest 09-26 real package plus an
+    image at every enforced maximum must replay whole, or the repair works on a cut-off draft."""
+    from test_marketing_judge_packages_0926 import _packages, _rebuild
+
+    longest = max(len(json.dumps(_rebuild(p["fields"]), ensure_ascii=False)) for p in _packages())
+    image = {"image_post": {"title": "t" * wp.IMAGE_TITLE_MAX_CHARS,
+                            "paragraphs": ["p" * wp.IMAGE_PARAGRAPH_MAX_CHARS] * wp.IMAGE_PARAGRAPHS_MAX}}
+    assert longest + len(json.dumps(image)) <= wp._REPAIR_DRAFT_CAP, (longest, wp._REPAIR_DRAFT_CAP)
+
+
+def test_the_worker_lays_out_an_image_at_every_writer_limit_with_its_longest_words():
+    """The writer's limits are only safe if the worker can draw what they let through: a title of
+    IMAGE_TITLE_MAX_CHARS and four IMAGE_PARAGRAPH_MAX_CHARS paragraphs, every word as long as
+    IMAGE_WORD_MAX_CHARS allows (long words waste line space), must lay out whole — a CardOverflow
+    would skip the whole day. Ordinary letters: no real word is 24 copies of "m"."""
+    from marketing import cards
+
+    word = "abcdefghijklmnopqrstuvwxyz"[:wp.IMAGE_WORD_MAX_CHARS]
+    title = " ".join([word.capitalize()] * 2 + [word[:wp.IMAGE_TITLE_MAX_CHARS - 2 * (len(word) + 1)].capitalize()])
+    para = " ".join([word] * 8)
+    para += " " + word[:wp.IMAGE_PARAGRAPH_MAX_CHARS - len(para) - 1]
+    assert len(title) == wp.IMAGE_TITLE_MAX_CHARS and len(para) == wp.IMAGE_PARAGRAPH_MAX_CHARS
+    assert max(len(t) for t in (title + " " + para).split()) == wp.IMAGE_WORD_MAX_CHARS
+    spec = cards.ImageSpec(title=title, paragraphs=(para,) * wp.IMAGE_PARAGRAPHS_MAX,
+                           footer=post_copy.image_footer(RUN_DATE))
+    font = str(Path(__file__).resolve().parents[1] / "marketing" / "assets" / "fonts" / "Inter-Bold.ttf")
+    layout = cards.layout_image(spec, font_path=font, layout_engine="basic")
+    assert 0 <= layout.step <= cards.RAMP_STEPS

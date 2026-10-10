@@ -27,7 +27,9 @@ column's ONE writer: fenced on the status and `metrics->>rev`, it never touches 
   starts only while the month's journal leaves the reserve PLUS `outlet_x.METRICS_HEADROOM_POSTS`
   posts of headroom under MARKETING_X_MONTHLY_BUDGET_USD, priced at what a post would reserve right
   now (`outlet_x.metrics_headroom_micros()`: $0.015 a post, $0.20 while MARKETING_X_ALLOW_URLS is
-  on) — posting always wins — else the post records `capped`, with no read and no charge. The
+  on; while MARKETING_X_IMAGES is on, an image post — MARKETING_X_IMAGE_POST_MICROS plus its $0.005
+  alt text — when that is dearer) — posting always wins — else the post records `capped`, with no
+  read and no charge. The
   account (`get_me`, `x_account_read`) is read on Mondays, or when the stored snapshot is more than
   eight days old. Paid reads never run under MARKETING_DRY_RUN.
   A DEFINITE refusal of a post read (400 / 401 / 403 / 404 — any definite 4xx refusal but 402; a

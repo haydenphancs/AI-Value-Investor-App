@@ -384,8 +384,13 @@ struct WhaleTradeGroup: Identifiable, Codable {
     ///
     /// Congress: absolute "Traded … · Disclosed …" (no relative labels — a
     /// disclosure can't honestly be "Today" given the STOCK Act lag).
-    /// 13F: relative for recent filings, else the full date.
-    var formattedDate: String {
+    /// 13F: the quarter, "Q2 2026 13F" (`ThirteenFQuarter`). `date` is the quarter END the
+    /// filing reports, never the day it was filed, so it gets no relative label either.
+    ///
+    /// `whaleIsCongressional` is the PROFILE's verdict. A congressional row written before
+    /// migration 076 has no range or disclosure date, so `isCongressional` misses it — and a
+    /// politician files no 13F, so that row keeps the plain date rather than a quarter.
+    func formattedDate(whaleIsCongressional: Bool) -> String {
         if isCongressional {
             let tx = WhaleTradeGroup.isReal(transactionDate)
                 ? WhaleTradeGroup.shortDateFormatter.string(from: transactionDate!)
@@ -402,21 +407,8 @@ struct WhaleTradeGroup: Identifiable, Codable {
         }
 
         guard WhaleTradeGroup.isReal(date) else { return "Date unavailable" }
-        let calendar = Calendar.current
-        let now = Date()
-        let daysAgo = calendar.dateComponents([.day], from: date, to: now).day ?? 0
-
-        // `daysAgo > 0` guard: a filing dated in the future (a bad upstream row) gave a
-        // NEGATIVE count that rendered as "-3 days ago".
-        if daysAgo == 0 {
-            return "Today"
-        } else if daysAgo == 1 {
-            return "Yesterday"
-        } else if daysAgo > 0 && daysAgo <= 14 {
-            return "\(daysAgo) days ago"
-        } else {
-            return formattedDateFull
-        }
+        if whaleIsCongressional { return formattedDateFull }
+        return ThirteenFQuarter.label(for: date)
     }
 
     var formattedTradeCount: String {

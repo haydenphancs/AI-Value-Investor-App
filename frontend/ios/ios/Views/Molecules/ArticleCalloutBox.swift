@@ -20,7 +20,7 @@ struct ArticleCalloutBox: View {
             // Icon
             Image(systemName: icon)
                 .font(AppTypography.iconDefault).fontWeight(.semibold)
-                .foregroundColor(style.borderColor)
+                .foregroundColor(style.iconColor)
                 .frame(width: 24)
 
             // Text (read-along highlight when timings are present)

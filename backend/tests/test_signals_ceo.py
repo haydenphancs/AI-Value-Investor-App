@@ -115,9 +115,31 @@ def _syms(group):
     ("officer: Chairman & CEO, Marriott International", True),
     ("officer: Chief Executive Officer and Director USA Compression", True),
     ("officer: CEO and Founder", True),
+    # Review rounds 5-6 (2026-10-09) tied incoming / designate / future / successor to the CEO
+    # phrase here; round 7 restored the committed rule (the Home card's) and moved that question
+    # to the Company Weekly adapter, which refuses ANY transitional word in a CEO / CFO row's role
+    # text (`role_uncertain`). The rows below hold at the committed rule: a sitting CEO with a
+    # transitional SECOND title is the CEO.
+    ("officer: Chief Executive Officer", True), ("officer: President and CEO", True),
+    ("officer: Chief Executive Officer and Chairman-Designate", True),
+    ("officer: President, CEO and Incoming Chairman", True), ("officer: CEO & Future Chair", True),
+    ("officer: Chief Executive Officer, Successor Trustee", True),
+    ("officer: President, CEO & Designated Broker", True),
+    ("director, officer, other: CEO; Designated Filer", True),
 ])
 def test_ceo_title_variants(title, ok):
     assert is_ceo_role(title) is ok
+
+
+def test_the_shared_not_sitting_rule_is_the_committed_one():
+    """Review round 7: the shared "not the sitting CEO" rule (the Home CEO Buys card) is back to its
+    committed text; the Company Weekly adapter adds its own, stricter gate on top (`role_uncertain`:
+    any transitional word anywhere in a CEO / CFO row's role text). Rounds 5-6's tied words must
+    not come back here."""
+    from app.services import _insider_common as ic
+    assert ic._NOT_SITTING_RE.pattern == (
+        r"\b(?:former|retired|previous|past|emeritus|outgoing|elect)\b|\bex[-\s]?(?:ceo|chief)\b")
+    assert ic._NOT_SITTING_RE.flags & __import__("re").I
 
 
 @pytest.mark.parametrize("title,label", [
@@ -690,7 +712,9 @@ async def test_congress_and_whale_failures_now_raise_so_the_build_knows(monkeypa
 
 
 def test_the_cache_key_was_bumped_for_the_new_card():
-    assert ssvc._SIGNALS_CACHE_KEY == "signals_v5"
+    # v6 (2026-10-09): Earnings Shockers changed semantics (one ET day per calendar call,
+    # digit-shift skip, non-common lines dropped), so a v5 row must not be served.
+    assert ssvc._SIGNALS_CACHE_KEY == "signals_v6"
     assert ssvc._SIGNAL_STEPS == ("congress", "whale", "earnings", "ceo")
     assert set(ssvc._SIGNAL_STEPS) == set(SignalsGroupResponse.model_fields)
 

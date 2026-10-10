@@ -2,8 +2,9 @@
 X API v2 — a thin client for the marketing PUBLISHER's X outlet (design doc §12.10).
 
 Two callers, both driven by the publisher loop in `app/services/marketing/publisher_service.py`, in
-the WEB process: `app/services/marketing/outlet_x.py` posts text to the brand account that owns the
-X developer app, reads that account's own timeline to reconcile a post whose outcome is unknown,
+the WEB process: `app/services/marketing/outlet_x.py` posts text — or, for an image post, uploads the
+image, sets its alt text and posts it — to the brand account that owns the X developer app, reads
+that account's own timeline to reconcile a post whose outcome is unknown,
 and deletes a post the owner retracts; `app/services/marketing/metrics_service.py` (the measure
 step) reads the account's own posts' public counts (`list_user_posts_metrics`) and its follower
 count (`get_me`). Every read is billed by X — the budget and the charge journal live in the callers.
@@ -83,6 +84,25 @@ The metrics reads — VERIFIED 2026-10-01 against the same pages:
     `{"followers_count", "following_count", "tweet_count" (the reference: `post_count`),
     "listed_count", …}` to `data` beside `id` / `username` / `name`.
     https://docs.x.com/x-api/users/get-my-user
+
+The media writes for an IMAGE post (drop 1, 2026-10-09) — VERIFIED 2026-10-09 against the live OpenAPI
+spec (https://api.x.com/2/openapi.json, "X API v2" 2.170) and the media introduction page
+(https://docs.x.com/x-api/media/introduction); recorded with the plan's research, never called live:
+  * POST /2/media/upload (`mediaUpload`) takes application/json or multipart/form-data; its body
+    `MediaUploadRequest` REQUIRES `media` ("base64-encoded in JSON bodies") and `media_category`
+    (enum incl. `tweet_image`) and allows nothing else (`additionalProperties: false` — so no
+    `media_type`). Security includes UserToken (OAuth 1.0a); a JSON body is not signed (as for a
+    create). 200 → `{"data": {"id" (required), "media_key", "size", "expires_after_secs", "image":
+    {w, h, image_type}, "processing_info": {"state": pending | in_progress | failed | succeeded, …}},
+    "errors"?}`. The guide: "Simple POST /2/media/upload is for images and small files only", an
+    image at most 5 MB.
+  * POST /2/media/metadata (`createMediaMetadata`) `{"id": <media id>, "metadata": {"alt_text":
+    {"text": ≤ 1000 characters}}}` → `{"data": {"id", "associated_metadata"?}}`.
+  * POST /2/tweets `media: {"media_ids": [1-4 ids matching ^[0-9]{1,19}$]}` (`CreatePostsMedia`).
+  * Pricing (the pricing page, undated): "Media Metadata $0.005 per request"; no line for a media
+    upload; whether an image post bills as "Post: Create" is unconfirmed — the caller reserves it at
+    MARKETING_X_IMAGE_POST_MICROS until the one live test post (OWNER_TASKS).
+  * A post with media is stored with the media's t.co link appended to its `text`.
 """
 
 from __future__ import annotations
@@ -135,6 +155,20 @@ METRICS_POST_FIELDS = "created_at,public_metrics"
 METRICS_EXCLUDE = "replies,retweets"
 #: The earliest `start_time` / `end_time` X accepts ("Must be on or after 2010-11-06").
 EARLIEST_WINDOW = datetime(2010, 11, 6, tzinfo=timezone.utc)
+
+#: The one media category this client uploads (an image for a post).
+MEDIA_CATEGORY_IMAGE = "tweet_image"
+#: The simple upload's image ceiling (the media guide: images ≤ 5 MB).
+MEDIA_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+#: `CreateMediaMetadataMetadataAltText.text` maxLength.
+ALT_TEXT_MAX = 1000
+#: `CreatePostsMedia.media_ids` holds 1-4 ids.
+MAX_MEDIA_IDS = 4
+#: A media id (`MediaId`: ^[0-9]{1,19}$) and a media key ("<type>_<id>").
+_MEDIA_ID_RE = re.compile(r"[0-9]{1,19}")
+_MEDIA_KEY_RE = re.compile(r"[0-9]{1,3}_[0-9]{1,19}")
+#: `processing_info.state` values the spec names.
+_MEDIA_STATES = frozenset({"pending", "in_progress", "failed", "succeeded"})
 
 
 # ── Exception hierarchy ────────────────────────────────────────────────
@@ -564,6 +598,13 @@ def _require_id(method: str, value: Any, what: str) -> str:
     return s
 
 
+def _require_media_id(method: str, value: Any, what: str) -> str:
+    s = value if isinstance(value, str) else ""
+    if not _MEDIA_ID_RE.fullmatch(s):
+        raise XApiRefusedError(f"x {method}: {what} must be a numeric media id — not sent", method=method)
+    return s
+
+
 def _ambiguous_body(method: str, status: int, why: str) -> XApiAmbiguousError:
     return XApiAmbiguousError(f"x {method}: HTTP {status} {why}", method=method, status=status)
 
@@ -613,17 +654,25 @@ def _window_time(method: str, value: Any, name: str) -> datetime:
 # ── API methods ────────────────────────────────────────────────────────
 
 
-async def create_post(text: str, *, made_with_ai: bool = False) -> Dict[str, Any]:
-    """POST /2/tweets with `{"text"}` (+ `"made_with_ai": true` only when asked).
+async def create_post(text: str, *, made_with_ai: bool = False,
+                      media_ids: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """POST /2/tweets with `{"text"}` (+ `"made_with_ai": true` only when asked, + `"media":
+    {"media_ids": [...]}` when `media_ids` is given: 1-4 ids `upload_media` returned).
 
     Returns `{"id": str, "text": str, "errors": list}` — `text` is X's stored copy ("" if X sent
-    none), `errors` any problem objects that rode along with the created post."""
+    none; a post with media carries the media's t.co link at its end), `errors` any problem objects
+    that rode along with the created post."""
     method = "create_post"
     if not isinstance(text, str) or not text.strip():
         raise XApiRefusedError(f"x {method}: empty text — not sent", method=method)
     payload: Dict[str, Any] = {"text": text}
     if made_with_ai is True:
         payload["made_with_ai"] = True
+    if media_ids is not None:
+        if not isinstance(media_ids, (list, tuple)) or not 1 <= len(media_ids) <= MAX_MEDIA_IDS:
+            raise XApiRefusedError(f"x {method}: media_ids must hold 1-{MAX_MEDIA_IDS} ids — not sent",
+                                   method=method)
+        payload["media"] = {"media_ids": [_require_media_id(method, m, "media_ids") for m in media_ids]}
     resp, body, hidden = await _call(method, "POST", "/2/tweets", json_body=payload)
 
     data = body.get("data") if isinstance(body, dict) else None
@@ -641,6 +690,77 @@ async def create_post(text: str, *, made_with_ai: bool = False) -> Dict[str, Any
         )
     out_text = data.get("text") if isinstance(data.get("text"), str) else ""
     return {"id": post_id, "text": out_text, "errors": errors}
+
+
+async def upload_media(data: bytes, *, media_category: str = MEDIA_CATEGORY_IMAGE) -> Dict[str, Any]:
+    """POST /2/media/upload — the one-shot image upload, JSON `{"media": <base64>, "media_category":
+    "tweet_image"}` (nothing else: the request schema allows no other field).
+
+    Returns `{"id": str, "media_key": str | None, "size": int | None, "state": str | None}` — `state`
+    is `processing_info.state` when X sent a known one (an image is normally ready at once: None or
+    "succeeded"; the caller must not attach one still "pending" / "in_progress"). A media upload is
+    never a post: whatever happens here, no post exists. Empty bytes, more than 5 MB or another
+    category raise XApiRefusedError (status None) before anything is sent; a 2xx without a readable
+    numeric `data.id` raises XApiAmbiguousError; `processing_info.state == "failed"` raises
+    XApiRefusedError (X answered and the media is unusable)."""
+    method = "upload_media"
+    if media_category != MEDIA_CATEGORY_IMAGE:
+        raise XApiRefusedError(f"x {method}: only {MEDIA_CATEGORY_IMAGE!r} media is uploaded — not sent",
+                               method=method)
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise XApiRefusedError(f"x {method}: no media bytes — not sent", method=method)
+    if len(data) > MEDIA_UPLOAD_MAX_BYTES:
+        raise XApiRefusedError(f"x {method}: {len(data)} bytes > {MEDIA_UPLOAD_MAX_BYTES} — not sent",
+                               method=method)
+    payload = {"media": base64.b64encode(bytes(data)).decode("ascii"), "media_category": media_category}
+    resp, body, hidden = await _call(method, "POST", "/2/media/upload", json_body=payload)
+    status = resp.status_code
+    item = body.get("data") if isinstance(body, dict) else None
+    raw_id = item.get("id") if isinstance(item, dict) else None
+    media_id = str(raw_id) if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else ""
+    if not _MEDIA_ID_RE.fullmatch(media_id):
+        raise _ambiguous_body(method, status, "without a readable data.id")
+    info = item.get("processing_info") if isinstance(item.get("processing_info"), dict) else {}
+    raw_state = info.get("state")
+    state = raw_state.strip().lower() if isinstance(raw_state, str) and raw_state.strip().lower() in _MEDIA_STATES \
+        else None
+    if state == "failed":
+        raise XApiRefusedError(f"x {method}: HTTP {status} — media {media_id} processing failed",
+                               method=method, status=status)
+    errors = _error_dicts(body)
+    if errors:
+        ptype, title, detail = _problem({"errors": errors}, hidden)
+        logger.warning("x upload_media: media %s uploaded WITH %d error object(s) — first: %s",
+                       media_id, len(errors), _describe(method, status, ptype, title, detail))
+    key = item.get("media_key")
+    size = item.get("size")
+    return {"id": media_id,
+            "media_key": key if isinstance(key, str) and _MEDIA_KEY_RE.fullmatch(key) else None,
+            "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
+            "state": state}
+
+
+async def create_media_metadata(media_id: str, *, alt_text: str) -> Dict[str, Any]:
+    """POST /2/media/metadata `{"id": <media id>, "metadata": {"alt_text": {"text": alt_text}}}` — the
+    image's alt text (X bills it: "Media Metadata", $0.005 a request). Returns `{"id": str}`.
+
+    A media id that is not numeric, or alt text that is blank or longer than 1000 characters, raises
+    XApiRefusedError (status None) before anything is sent; a 2xx whose `data.id` is missing or names
+    ANOTHER media raises XApiAmbiguousError."""
+    method = "create_media_metadata"
+    mid = _require_media_id(method, media_id, "media_id")
+    if not isinstance(alt_text, str) or not alt_text.strip() or len(alt_text) > ALT_TEXT_MAX:
+        raise XApiRefusedError(f"x {method}: alt text must be 1-{ALT_TEXT_MAX} characters — not sent",
+                               method=method)
+    resp, body, _hidden = await _call(method, "POST", "/2/media/metadata",
+                                      json_body={"id": mid, "metadata": {"alt_text": {"text": alt_text}}})
+    item = body.get("data") if isinstance(body, dict) else None
+    raw_id = item.get("id") if isinstance(item, dict) else None
+    answered = str(raw_id) if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else ""
+    if answered != mid:
+        raise _ambiguous_body(method, resp.status_code,
+                              "without data.id" if not answered else "for another media id")
+    return {"id": mid}
 
 
 async def delete_post(post_id: str) -> Dict[str, Any]:

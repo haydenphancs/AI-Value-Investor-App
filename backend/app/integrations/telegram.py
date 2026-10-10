@@ -42,6 +42,10 @@ Bot API facts this module relies on — VERIFIED against https://core.telegram.o
   * sendVideo: `video` may be "an HTTP URL as a String for Telegram to get a video from the
     Internet"; caption "0-1024 characters after entities parsing"; supports_streaming. Sending
     Files: by URL "5 MB max size for photos and 20 MB max for other types of content".
+  * sendPhoto (drop 1, 2026-10-09 — the review bundles' image card): the same shape as sendVideo,
+    `photo` by HTTP URL, caption 0-1024. NOT re-read on the docs page that day: the shape is the one
+    sendVideo's verified entry above describes, and the by-URL photo cap is the verified "5 MB" line.
+    The image card is a ≤ 950 KB JPEG (schemas/marketing.POST_IMAGE_MAX_BYTES), far inside it.
   * editMessageText(chat_id, message_id, text 1-4096, reply_markup: InlineKeyboardMarkup).
   * (VERIFIED 2026-09-30) sendMessage takes `reply_parameters` (a ReplyParameters object:
     `message_id` — "Identifier of the message that will be replied to in the current chat";
@@ -80,6 +84,8 @@ MAX_CALLBACK_DATA_BYTES = 64
 MAX_CALLBACK_ANSWER_CHARS = 200
 #: Telegram fetches a URL-sent video itself, up to this size ("20 MB max for other types").
 MAX_URL_SEND_BYTES = 20 * 1024 * 1024
+#: …and a URL-sent photo up to this size ("5 MB max size for photos").
+MAX_URL_PHOTO_BYTES = 5 * 1024 * 1024
 
 _SECRET_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,256}")
 #: Cap on Telegram's own `description` in our exception messages (it is short in practice).
@@ -214,6 +220,9 @@ def _retry_after(body: Dict[str, Any], headers: httpx.Headers) -> Optional[int]:
 #: timeout is longer than a plain message's: a 15 s timeout on a video Telegram then delivered
 #: anyway made every cycle re-send it (review 2026-09-29).
 _VIDEO_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+#: sendPhoto by URL makes Telegram fetch the JPEG (≤ 950 KB here) before it answers — longer than a
+#: plain message for the same reason as the video, shorter than the video's.
+_PHOTO_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
 async def _call(method: str, payload: Dict[str, Any], *, timeout: Optional[httpx.Timeout] = None) -> Dict[str, Any]:
@@ -316,6 +325,23 @@ async def send_video(
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     return await _call("sendVideo", payload, timeout=_VIDEO_TIMEOUT)
+
+
+async def send_photo(
+    chat_id: int,
+    photo_url: str,
+    *,
+    caption: Optional[str] = None,
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """sendPhoto by URL (Telegram fetches it: ≤ 5 MB). Caption is plain text (never `parse_mode`),
+    ≤ 1024. The same answer handling as every other method (`_call`)."""
+    payload: Dict[str, Any] = {"chat_id": chat_id, "photo": photo_url}
+    if caption:
+        payload["caption"] = caption
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return await _call("sendPhoto", payload, timeout=_PHOTO_TIMEOUT)
 
 
 async def edit_message_text(

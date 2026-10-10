@@ -200,7 +200,7 @@ async def _earnings_status(fmp: Any, scope: str, as_of: datetime, actuals: str) 
     if scope.startswith("__") or is_crypto_scope(scope):
         return None
     today = ews.et_date(as_of)
-    fetched = await ews._fetch_days(fmp.get_earnings_calendar, ews.context_days(today))
+    fetched = await ews.fetch_calendar_days(fmp.get_earnings_calendar, ews.context_days(today))
     rows = [r for day_rows in fetched.values() for r in day_rows]
     if actuals == "absent":
         rows = mask_actuals(rows, today)

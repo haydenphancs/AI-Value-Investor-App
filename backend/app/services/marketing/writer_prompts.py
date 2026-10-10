@@ -2,7 +2,8 @@
 Prompts and response schema for the class-A marketing writer (SYSTEM_DESIGN_GUIDELINES §12.5).
 
 The writer turns ONE cleaned Learn fact sheet (`content_pool.py`) into a package: a hook, a
-spoken video script, card and carousel text, and a caption BODY per platform. Everything with
+spoken video script, card and carousel text, the post image's title and paragraphs (drop 1,
+2026-10-09), and a caption BODY per platform. Everything with
 legal or commercial weight — hashtags, calls to action, disclaimers — is appended later by code
 (`post_copy.py`), so the prompt forbids the model from writing any of it.
 
@@ -42,7 +43,11 @@ from app.services.marketing.selection import Template
 #: 2026-10-07.1 (review): HOOK AND TITLES also bans yes/no openers by name and an investor-framed
 #: verdict (a problem or an opportunity for investors) and what a company will do next; PHRASING
 #: names "buy when" / "sell when" even about what a company buys (the timed-trade row refuses it).
-PROMPT_VERSION = "2026-10-07.1"
+#: 2026-10-09.1 (drop 1, contract C8): a new REQUIRED output field `image_post` — the title and 2-4
+#: short paragraphs the worker draws on the day's post image (IMAGE POST; its title follows HOOK AND
+#: TITLES; rule 6's no-emoji list names it). Validated and judged as its own reading chain; a failing
+#: image is dropped (that day's posts are text), never a rejected package.
+PROMPT_VERSION = "2026-10-09.1"
 
 # ── editorial limits ──
 # ENFORCED ceilings (writer_service) sit above what the prompt ASKS for (`_ASK_*`): a model
@@ -67,6 +72,22 @@ CARDS_MIN, CARDS_MAX = 3, 4
 CARD_TITLE_MAX_WORDS, CARD_BODY_MAX_WORDS = 8, 28
 SLIDES_MIN, SLIDES_MAX = 5, 8
 SLIDE_TITLE_MAX_WORDS, SLIDE_BODY_MAX_WORDS = 10, 40
+#: The post image's text (drop 1, contract C8): a title of at most 70 characters and 10 words, then
+#: 2-4 paragraphs of 1-2 sentences and at most 220 characters each — what one 1080×1350 card holds
+#: in Inter Bold without truncation (the worker never cuts text; it refuses to draw what does not
+#: fit). Inside the server's own bounds (`schemas.marketing.IMAGE_POST_PARAGRAPHS_*`,
+#: `ONSCREEN_TEXT_MAX_CHARS`); a test pins that.
+IMAGE_FIELD = "image_post"
+IMAGE_TITLE_MAX_WORDS, IMAGE_TITLE_MAX_CHARS = 10, 70
+IMAGE_PARAGRAPHS_MIN, IMAGE_PARAGRAPHS_MAX = 2, 4
+IMAGE_PARAGRAPH_MAX_CHARS = 220
+IMAGE_PARAGRAPH_MAX_SENTENCES = 2
+#: The longest single word the image may carry. The worker wraps on whitespace only and never
+#: breaks a word: one wider than the text column at the floor size is a CardOverflow, which skips
+#: the WHOLE day (drop 1 keeps the run all-or-nothing). Real words run 400-600 px at 24 characters
+#: on the title's 40 px floor, inside the 824 px column (tests/test_marketing_length_budget.py lays
+#: the worst case out with the worker's own code); a chained "buy-high-sell-low-…" does not.
+IMAGE_WORD_MAX_CHARS = 24
 
 _ASK_HOOK_WORDS = 10
 #: Shorter videos (owner, 2026-10-05: ~35-40 s). EXACTLY 6 lines — the model obeys line counts (all
@@ -85,9 +106,16 @@ _ASK_CARD_COUNT = 3
 _LINES_PER_CARD = _ASK_SCRIPT_LINES // _ASK_CARD_COUNT
 _ASK_CARD = (6, 20)
 _ASK_SLIDE = (8, 30)
+#: The image asks, in words (a model counts words far better than characters): 8 title words is
+#: ~53 characters at the measured 6.6 a word (enforced: 70 and 10 words); 25 paragraph words is
+#: ~165 (enforced: 220).
+_ASK_IMAGE_TITLE_WORDS = 8
+_ASK_IMAGE_PARAGRAPH_WORDS = 25
 
-#: Characters of the previous draft replayed into a repair prompt.
-_REPAIR_DRAFT_CAP = 7000
+#: Characters of the previous draft replayed into a repair prompt. 8000 since the image post
+#: (2026-10-09): the 09-26 real packages ran to ~6,900 characters, and a full image adds up to ~950,
+#: so the old 7000 would have cut the replay short on a long draft.
+_REPAIR_DRAFT_CAP = 8000
 
 _TEXT_PAIR: Dict[str, Any] = {
     "type": "OBJECT",
@@ -110,8 +138,16 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
             "properties": {f: {"type": "STRING"} for f in CAPTION_FIELDS},
             "required": list(CAPTION_FIELDS),
         },
+        IMAGE_FIELD: {
+            "type": "OBJECT",
+            "properties": {
+                "title": {"type": "STRING"},
+                "paragraphs": {"type": "ARRAY", "items": {"type": "STRING"}},
+            },
+            "required": ["title", "paragraphs"],
+        },
     },
-    "required": ["hook", "video_script", "cards", "carousel_slides", "captions"],
+    "required": ["hook", "video_script", "cards", "carousel_slides", "captions", IMAGE_FIELD],
 }
 
 #: The task body. `writer_service` wraps it with `neutral_system_instruction`, which puts
@@ -186,7 +222,7 @@ SYSTEM_BODY = (
     "no backslashes. Write US, UK and EU without dots (\"US markets\"; a dotted \"U.S.\" is "
     "refused), and always put a space after an abbreviation's final dot (\"e.g. banks\", "
     "never \"e.g.banks\" - that reads as a web address). No emoji in the hook, "
-    "the script, the cards or the slides. The YouTube title and description may not contain "
+    "the script, the cards, the slides or the image post. The YouTube title and description may not contain "
     "< or > (write it in words, or use an arrow); the YouTube title is one line.\n"
     "7. Never mention yourself, any app, any brand of your own, or any app store as a place "
     "to get an app (a case study's own product, such as Apple's App Store, is fine), and never "
@@ -235,8 +271,18 @@ SYSTEM_BODY = (
     "dominant, successful or valuable it or its stock is, and never whether it is good or bad, a "
     "problem or an opportunity, for investors or shareholders. The YouTube title follows the "
     "same rules: it names the company or the lesson's idea, may ask how, why or what, and is never "
-    "a yes/no question. A lesson's hook might read \"Why can a profitable company still run out of "
+    "a yes/no question. The image post's title follows the hook's rules too: one concrete tension, "
+    "contrast or surprising fact, naming only what the hook may name, never a yes/no question and "
+    "never a number. A lesson's hook might read \"Why can a profitable company still run out of "
     "cash?\" - a shape to learn from, not a line to copy.\n\n"
+    "IMAGE POST: image_post is the text drawn on ONE still image that is posted on its own, beside "
+    "a caption, with no video and no narration - so it must make sense without them. Its title is "
+    "the headline; its paragraphs are read in order under it, each one or two short sentences that "
+    "carry one idea. Every hard rule above applies to every word of it: facts from the fact sheet "
+    "only, no person, no opinion or forecast about any company, no call to action, no emoji, and a "
+    "misconception is labelled, reported or answered No exactly as rule 9 says. The image cannot "
+    f"break a word across lines, so never chain words with dashes into one word of more than "
+    f"{IMAGE_WORD_MAX_CHARS} characters.\n\n"
     "PHRASING the checker refuses even when it is honest (write around it): business growth "
     "as a present-tense habit (\"revenue consistently climbs\", \"profits always grow\") - "
     "state it in the past tense with its span instead (\"revenue grew year after year\"); and "
@@ -353,6 +399,10 @@ def _output_spec(item: ContentItem, run_date: date, allow_x_url: bool,
         f"most {_ASK_CARD[0]} words, body at most {_ASK_CARD[1]} words.",
         f"- carousel_slides: {SLIDES_MIN} to {SLIDES_MAX}; title at most {_ASK_SLIDE[0]} words, "
         f"body at most {_ASK_SLIDE[1]} words.",
+        f"- image_post: the text of one still image posted on its own (see IMAGE POST) - title: one "
+        f"line of at most {_ASK_IMAGE_TITLE_WORDS} words, {_hook_subject(item)} (see HOOK AND "
+        f"TITLES); paragraphs: {IMAGE_PARAGRAPHS_MIN} to {IMAGE_PARAGRAPHS_MAX}, in reading order, "
+        f"each 1 or 2 sentences of at most {_ASK_IMAGE_PARAGRAPH_WORDS} words in total.",
         "- captions: the post BODY only for each platform - no hashtags, links, calls to "
         "action or disclaimers. Vary the wording per platform. Character limits:",
         *_field_budgets(item, run_date, allow_x_url, store_state),
@@ -469,7 +519,7 @@ REPAIR_HINTS = {
     "markup": "plain text only - no markdown, HTML, backticks, curly braces { } or backslashes",
     "hashtag": "no hashtags - they are added separately",
     "cashtag": "no $TICKER symbols",
-    "emoji": "no emoji in the hook, script, cards or slides",
+    "emoji": "no emoji in the hook, script, cards, slides or image post",
     "non_latin": "use plain English characters - no accented or non-Latin letters unless the "
                  "fact sheet spells the word that way",
     "non_ascii_digit": "use the digits 0-9 only",
@@ -480,6 +530,11 @@ REPAIR_HINTS = {
     "over_platform_limit": "shorten that caption - with the hashtags, the publisher's line about the "
                            "app, the link and the disclaimer added it no longer fits the platform",
     "disclaimer_missing": "write no disclaimer of your own - the publisher appends it",
+    # Drop 2: `check_composed(authorship="template")` only — a template post never reaches the
+    # writer, so a repair round cannot carry it; the entry keeps the every-code-has-a-hint pin
+    # honest rather than exempting the code.
+    "authorship_mismatch": "write nothing about how this text was made - the publisher adds its "
+                           "own notice",
     "platform_forbidden_char": "remove the characters that platform does not allow (YouTube: "
                                "no < or >, and a one-line title) - rephrase in plain words",
     "grounding_error": "rewrite that field in plain words, using only facts from the fact sheet",

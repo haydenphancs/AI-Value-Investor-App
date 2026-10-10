@@ -1317,8 +1317,9 @@ class HomeDashboardService:
                 ttl_seconds=sig._SIGNALS_MEM_TTL_SECONDS,
                 refresh_ahead_seconds=_SIGNALS_REFRESH_AHEAD_SECONDS,
                 build_budget_seconds=sig._SIGNALS_BUILD_TIMEOUT_SECONDS,
-                # A signals rebuild is ~8 FMP calls; retry a failed card on the section's
-                # own degraded cadence, not every 45 s.
+                # A signals rebuild is ~15 FMP calls (8 of them the one-day-per-call earnings
+                # calendar); retry a failed card on the section's own degraded cadence, not
+                # every 45 s.
                 cooldown_seconds=max(_WARM_FAILURE_COOLDOWN_SECONDS, sig._SIGNALS_DEGRADED_TTL_SECONDS),
                 session_bound=False,
                 enabled=lambda: True,

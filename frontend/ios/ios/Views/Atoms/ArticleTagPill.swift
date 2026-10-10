@@ -17,12 +17,13 @@ struct ArticleTagPill: View {
         case warning
         case success
 
+        /// The tinted styles are OPAQUE: caution/loss/gain on their own 20% tint measure
+        /// 3.92/3.98/4.08:1 in light even on a white card (test_ios_theme_parity §6c). Their
+        /// hue stays in the border and the ink.
         var backgroundColor: Color {
             switch self {
             case .standard: return Color.black.opacity(0.4)
-            case .featured: return AppColors.caution.opacity(0.2)
-            case .warning: return AppColors.loss.opacity(0.2)
-            case .success: return AppColors.gain.opacity(0.2)
+            case .featured, .warning, .success: return AppColors.cardBackgroundLight
             }
         }
 

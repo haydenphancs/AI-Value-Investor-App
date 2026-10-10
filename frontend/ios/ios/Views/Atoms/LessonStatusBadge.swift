@@ -26,7 +26,9 @@ struct LessonStatusBadge: View {
                 .foregroundColor(status.color)
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xs)
-                .background(status.backgroundColor)
+                // Opaque, not `status.backgroundColor` (`primaryBlue@0.15`, 4.19:1 in light
+                // even on a white card — test_ios_theme_parity §6c).
+                .background(AppColors.cardBackgroundLight)
                 .cornerRadius(AppCornerRadius.small)
 
         case .notStarted:

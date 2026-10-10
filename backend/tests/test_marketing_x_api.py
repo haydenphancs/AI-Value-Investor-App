@@ -12,6 +12,7 @@ reconciled — confusing the two either double-posts or strands a post.
 
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import logging
@@ -1174,3 +1175,178 @@ async def test_metrics_read_a_count_without_data_stays_ambiguous_even_beside_err
     with pytest.raises(x_api.XApiAmbiguousError) as ei:
         await _metrics()
     assert "result_count=3 and no data" in str(ei.value)
+
+
+# ── the media writes of an IMAGE post (drop 1, contract C9) ─────────────────────────────────────
+
+#: A stand-in picture: bytes only (the client never decodes an image).
+IMG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8 + b"\xff\xd9"
+MEDIA_ID = "1880000000000000001"
+
+
+@pytest.mark.asyncio
+async def test_upload_media_sends_only_base64_media_and_the_category_signed_without_the_body(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, {"data": {
+        "id": MEDIA_ID, "media_key": f"3_{MEDIA_ID}", "size": len(IMG), "expires_after_secs": 86400,
+        "image": {"w": 1080, "h": 1350, "image_type": "image/jpeg"}}}))
+    out = await x_api.upload_media(IMG)
+    assert out == {"id": MEDIA_ID, "media_key": f"3_{MEDIA_ID}", "size": len(IMG), "state": None}
+    (request,) = fake.requests
+    assert request.method == "POST" and str(request.url) == "https://api.x.com/2/media/upload"
+    body = json.loads(request.content)
+    # MediaUploadRequest allows nothing else (additionalProperties: false): no media_type.
+    assert set(body) == {"media", "media_category"} and body["media_category"] == "tweet_image"
+    assert base64.b64decode(body["media"], validate=True) == IMG
+    params = _oauth_params(request.headers["Authorization"])
+    assert params["oauth_consumer_key"] == CK and params["oauth_token"] == AT
+    # A JSON body is not an OAuth parameter: the signature covers no body field (as for a create).
+    base = x_api.signature_base_string("POST", "https://api.x.com/2/media/upload",
+                                       {k: v for k, v in params.items() if k != "oauth_signature"})
+    assert "media_category" not in base and "tweet_image" not in base
+    assert x_api.hmac_sha1_signature(base, CS, ATS) == params["oauth_signature"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data, category, why", [
+    (b"", "tweet_image", "no media bytes"),
+    (None, "tweet_image", "no media bytes"),
+    ("text", "tweet_image", "no media bytes"),
+    (b"x" * (5 * 1024 * 1024 + 1), "tweet_image", "bytes >"),
+    (IMG, "tweet_video", "only 'tweet_image'"),
+])
+async def test_upload_media_refuses_before_sending(monkeypatch, creds, data, category, why):
+    fake = _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID}}))
+    with pytest.raises(x_api.XApiRefusedError, match=why) as ei:
+        await x_api.upload_media(data, media_category=category)
+    assert ei.value.status is None and fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_upload_media_accepts_exactly_five_megabytes(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID}}))
+    assert (await x_api.upload_media(b"x" * (5 * 1024 * 1024)))["id"] == MEDIA_ID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [
+    {}, {"id": ""}, {"id": "12a"}, {"id": True}, {"id": "1" * 20}, {"id": None}, "not an object",
+])
+async def test_upload_media_without_a_readable_id_is_ambiguous(monkeypatch, creds, data):
+    _install(monkeypatch, _answer(200, {"data": data}))
+    with pytest.raises(x_api.XApiAmbiguousError, match="without a readable data.id"):
+        await x_api.upload_media(IMG)
+
+
+@pytest.mark.asyncio
+async def test_upload_media_reads_an_integer_id_and_drops_odd_fields(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"data": {"id": int(MEDIA_ID), "media_key": "evil\nkey", "size": -3,
+                                                 "processing_info": {"state": "Weird"}}}))
+    assert await x_api.upload_media(IMG) == {"id": MEDIA_ID, "media_key": None, "size": None, "state": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state, expected", [("succeeded", "succeeded"), ("pending", "pending"),
+                                             ("IN_PROGRESS", "in_progress")])
+async def test_upload_media_reports_the_processing_state(monkeypatch, creds, state, expected):
+    _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID, "processing_info": {"state": state}}}))
+    assert (await x_api.upload_media(IMG))["state"] == expected
+
+
+@pytest.mark.asyncio
+async def test_upload_media_whose_processing_failed_is_refused(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "failed"}}}))
+    with pytest.raises(x_api.XApiRefusedError, match="processing failed") as ei:
+        await x_api.upload_media(IMG)
+    assert ei.value.status == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, body, exc", [
+    (400, {"title": "Invalid Request", "detail": "media is not an image"}, x_api.XApiRefusedError),
+    (401, {"title": "Unauthorized"}, x_api.XApiAuthError),
+    (402, {"title": "Payment Required"}, x_api.XApiCreditsDepletedError),
+    (403, {"title": "Forbidden", "detail": "You are not permitted to perform this action."}, x_api.XApiForbiddenError),
+    (429, {"title": "Too Many Requests"}, x_api.XApiRateLimitError),
+    (503, {"title": "Service Unavailable"}, x_api.XApiAmbiguousError),
+])
+async def test_upload_media_errors_keep_the_outcome_split(monkeypatch, creds, status, body, exc):
+    _install(monkeypatch, _answer(status, body))
+    with pytest.raises(exc) as ei:
+        await x_api.upload_media(IMG)
+    assert type(ei.value) is exc and ei.value.method == "upload_media"
+    for secret in (CK, CS, AT, ATS):
+        assert secret not in str(ei.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, exc", [(httpx.ConnectError, x_api.XApiNotSentError),
+                                        (httpx.ReadTimeout, x_api.XApiAmbiguousError)])
+async def test_upload_media_transport_failures_split_and_hide_the_request(monkeypatch, creds, error, exc):
+    _install(monkeypatch, _raising(error))
+    with pytest.raises(exc) as ei:
+        await x_api.upload_media(IMG)
+    assert ei.value.__context__ is None and ei.value.__cause__ is None
+    assert AT not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_create_media_metadata_sets_the_alt_text(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID, "associated_metadata": {}}}))
+    assert await x_api.create_media_metadata(MEDIA_ID, alt_text="Title\n\nParagraph one.") == {"id": MEDIA_ID}
+    (request,) = fake.requests
+    assert request.method == "POST" and str(request.url) == "https://api.x.com/2/media/metadata"
+    assert json.loads(request.content) == {"id": MEDIA_ID, "metadata": {"alt_text": {"text": "Title\n\nParagraph one."}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_id, alt, why", [
+    (MEDIA_ID, "", "alt text"), (MEDIA_ID, "   ", "alt text"), (MEDIA_ID, None, "alt text"),
+    (MEDIA_ID, "a" * 1001, "alt text"), ("12a", "alt", "numeric media id"), (12, "alt", "numeric media id"),
+    ("1" * 20, "alt", "numeric media id"),
+])
+async def test_create_media_metadata_refuses_before_sending(monkeypatch, creds, media_id, alt, why):
+    fake = _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID}}))
+    with pytest.raises(x_api.XApiRefusedError, match=why):
+        await x_api.create_media_metadata(media_id, alt_text=alt)
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_create_media_metadata_accepts_exactly_1000_characters(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"data": {"id": MEDIA_ID}}))
+    assert await x_api.create_media_metadata(MEDIA_ID, alt_text="a" * 1000) == {"id": MEDIA_ID}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, why", [({}, "without data.id"), ({"data": {"id": "1880000000000000002"}},
+                                                                  "for another media id")])
+async def test_create_media_metadata_answer_must_name_our_media(monkeypatch, creds, body, why):
+    _install(monkeypatch, _answer(200, body))
+    with pytest.raises(x_api.XApiAmbiguousError, match=why):
+        await x_api.create_media_metadata(MEDIA_ID, alt_text="alt")
+
+
+@pytest.mark.asyncio
+async def test_create_post_attaches_media_ids(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(201, {"data": {"id": "1790000000000000001",
+                                                        "text": "Caption https://t.co/AbC123"}}))
+    out = await x_api.create_post("Caption", made_with_ai=True, media_ids=[MEDIA_ID])
+    assert out["id"] == "1790000000000000001" and out["text"].endswith("https://t.co/AbC123")
+    assert json.loads(fake.requests[0].content) == {"text": "Caption", "made_with_ai": True,
+                                                     "media": {"media_ids": [MEDIA_ID]}}
+
+
+@pytest.mark.asyncio
+async def test_create_post_without_media_ids_sends_no_media_key(monkeypatch, creds):
+    fake = _install(monkeypatch, _answer(201, {"data": {"id": "1790000000000000001", "text": "Caption"}}))
+    await x_api.create_post("Caption")
+    assert "media" not in json.loads(fake.requests[0].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_ids", [[], [MEDIA_ID] * 5, MEDIA_ID, ["12a"], [int(MEDIA_ID)], [None]])
+async def test_create_post_refuses_unusable_media_ids_before_sending(monkeypatch, creds, media_ids):
+    fake = _install(monkeypatch, _answer(201, {"data": {"id": "1"}}))
+    with pytest.raises(x_api.XApiRefusedError, match="media"):
+        await x_api.create_post("Caption", media_ids=media_ids)
+    assert fake.requests == []

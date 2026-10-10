@@ -21,14 +21,6 @@ enum LessonStatus: String, CaseIterable {
         case .notStarted: return AppColors.textMuted
         }
     }
-
-    var backgroundColor: Color {
-        switch self {
-        case .completed: return AppColors.bullish.opacity(0.15)
-        case .upNext: return AppColors.primaryBlue.opacity(0.15)
-        case .notStarted: return Color.clear
-        }
-    }
 }
 
 // MARK: - Lesson Category

@@ -13,8 +13,9 @@ What this module is: PURE apart from the model client, which the caller injects 
 nothing from `app.services.agents`, so it stays FMP-free even transitively —
 `tests/test_marketing_import_boundary.py` lists it in `PURE_MODULES`). It builds the prompt and the
 per-call response schema, and turns the model's answer into `Violation`s. It never decides what
-to do with them: `writer_service.generate_package` applies them (a shared-field verdict fails the
-round, a caption verdict drops only that outlet) under `MARKETING_JUDGE_MODE`.
+to do with them: `writer_service.generate_package` applies them under `MARKETING_JUDGE_MODE` on
+every field `verdict_targets` names (a shared field fails the round, a caption drops its outlet, an
+image field drops the image).
 
 Failure semantics — the part that must never fail open:
 * a Gemini error propagates UNCHANGED (the caller classifies transient vs not);
@@ -22,7 +23,10 @@ Failure semantics — the part that must never fail open:
   — a writer FAILURE, never a pass, and never a content verdict (an outage must not count against
   the day's content cap);
 * a verdict naming a field the package does not have, or a rule the rubric does not have, is
-  still a violation (fail closed), reported on the shared `judge` field / as `judge_unclassified`.
+  still a violation (fail closed), reported on the shared `judge` field / as `judge_unclassified`;
+* a verdict never leaves the field the judge named: that field always keeps its action, and the
+  field(s) holding the flagged words are enforced TOO (`verdict_targets`) — a mislabelled or copied
+  quote can add a target, never remove one.
 """
 
 from __future__ import annotations
@@ -34,9 +38,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.services.chat_security import neutralize_fences
-from app.services.marketing.compliance import Violation, clean
+from app.services.marketing.compliance import Violation, clean, skeleton
 from app.services.marketing.content_pool import MONEY_MOVES, ContentItem
 from app.services.marketing.post_copy import CAPTION_FIELDS
+from app.services.marketing.writer_prompts import IMAGE_FIELD
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,10 @@ JUDGE_MODEL = "gemini-3.8-flash"
 JUDGE_THINKING_BUDGET = 0
 #: A grader, not a writer: 0 so a borderline verdict does not flip between samples.
 JUDGE_TEMPERATURE = 0.0
-#: Bump whenever the rubric, the prompt or the schema changes meaningfully.
+#: Bump whenever the rubric, the prompt or the schema changes meaningfully. NOT bumped for the
+#: image-post fields of 2026-10-09 (`package_fields`): the rubric, the prompt builder and the schema
+#: builder are unchanged, and a package without an image is judged byte for byte as before — the
+#: writer's PROMPT_VERSION records the new field.
 JUDGE_RUBRIC_VERSION = "2026-09-26.9"
 USAGE_TAG = "marketing_judge"
 
@@ -216,7 +224,13 @@ def package_fields(package: Dict[str, Any]) -> List[Tuple[str, str]]:
     (`writer_service.validate_package` output — never the raw model object). Captions whose
     outlet the regex already dropped are left out (they cannot publish), and so is every piece of
     code-owned copy (hashtags, CTA, disclaimer): only the model's own words are judged.
-    Caption labels are `captions.<field>`; shared labels match the regex's field names."""
+    Caption labels are `captions.<field>`; shared labels match the regex's field names.
+
+    The post image's text (drop 1) follows the slides as `image_post.title` then
+    `image_post.paragraphs[i]` — the regex's names too — and only while the package still carries
+    it: an image the regex already dropped cannot publish, exactly like a dropped caption. A
+    package without one (every package written before 2026-10-09) yields the same fields as before.
+    The image footer is code-owned copy and is never a field."""
     out: List[Tuple[str, str]] = []
     hook = package.get("hook")
     if isinstance(hook, str) and hook:
@@ -232,6 +246,15 @@ def package_fields(package: Dict[str, Any]) -> List[Tuple[str, str]]:
                 text = pair.get(part)
                 if isinstance(text, str) and text:
                     out.append((f"{key}[{i}].{part}", text))
+    image = package.get(IMAGE_FIELD)
+    if isinstance(image, dict):
+        title = image.get("title")
+        if isinstance(title, str) and title:
+            out.append((f"{IMAGE_FIELD}.title", title))
+        paragraphs = image.get("paragraphs")
+        for i, text in enumerate(paragraphs if isinstance(paragraphs, list) else []):
+            if isinstance(text, str) and text:
+                out.append((f"{IMAGE_FIELD}.paragraphs[{i}]", text))
     live = set((package.get("posts") or {}).keys())
     captions = package.get("captions") or {}
     for f in CAPTION_FIELDS:
@@ -268,6 +291,12 @@ def base_label(label: str) -> str:
     """`captions.linkedin[3]` → `captions.linkedin`; any other label unchanged."""
     m = _CAPTION_SENTENCE_RE.match(label)
     return m.group(1) if m else label
+
+
+def field_name(label: str) -> str:
+    """The field name the regex uses for a judge label: `captions.x[2]` → `x`; any other label as is."""
+    base = base_label(label)
+    return base[len("captions."):] if base.startswith("captions.") else base
 
 
 def _one_line(text: str) -> str:
@@ -342,31 +371,161 @@ class Verdict:
     @property
     def field(self) -> str:
         """The field name the regex uses for the same text (`x`, not `captions.x[2]`)."""
-        base = base_label(self.label)
-        return base[len("captions."):] if base.startswith("captions.") else base
+        return field_name(self.label)
 
     @property
     def is_caption(self) -> bool:
         return self.label.startswith("captions.")
+
+    @property
+    def is_image(self) -> bool:
+        """A verdict on the post image's text: it drops the image only (never the package)."""
+        return self.label.startswith(f"{IMAGE_FIELD}.")
 
     def violation(self) -> Violation:
         detail = f"\"{self.quote}\" - {self.reason}" if self.quote else self.reason
         return Violation(self.field, self.rule, detail[:_DETAIL_CAP])
 
 
-def _norm(text: str) -> str:
-    return _WS_RE.sub(" ", clean(text)).strip().casefold()
+#: What a verdict on a label costs (`writer_service._apply_verdicts`): a SHARED field fails the round,
+#: a CAPTION drops its outlet, the IMAGE drops the image.
+FAMILY_SHARED, FAMILY_CAPTION, FAMILY_IMAGE = "shared", "caption", "image"
+
+
+def label_family(label: str) -> str:
+    """The family of a judge label. Anything that is not a caption or an image label — an unknown
+    one included — is shared: it fails the round (fail closed)."""
+    if label.startswith("captions."):
+        return FAMILY_CAPTION
+    if label.startswith(f"{IMAGE_FIELD}."):
+        return FAMILY_IMAGE
+    return FAMILY_SHARED
+
+
+#: Dashes BETWEEN words ("safe—never") separate them; `skeleton` would fold them into a hyphen.
+_DASH_TO_SPACE = str.maketrans({c: " " for c in "\u2012\u2013\u2014\u2015\u2212"})
+#: A match token: one run of letters or digits, or the sentence-boundary token `|`. Every other
+#: character — commas, quotes, apostrophes, hyphens — separates tokens, identically in the quote and in
+#: the field.
+_TOKEN_RE = re.compile(r"[^\W_]+|\|")
+#: A sentence end — `.` `!` `?` `;` `:` followed by whitespace or the end of the text — becomes the
+#: boundary token, so a quote never matches words that run across a sentence end it does not itself
+#: contain ("sell your winners" is not in "…and sell. Your winners need time."; re-review r3). A mark
+#: INSIDE a token ("6.9", "U.S.markets") is not an end. Any `|` already in the text is dropped first.
+_SENTENCE_END_RE = re.compile(r"[.!?;:]+(?=\s|$)")
+#: A word for `HOME_MIN_WORDS`: letters or digits with an apostrophe, hyphen or period INSIDE kept
+#: ("don't", "low-stress", "U.S.", "6.9" are one word each), and a comma between digits ("1,000").
+_WORD_RE = re.compile(r"[^\W_]+(?:(?:['.\-]|(?<=\d),(?=\d))[^\W_]+)*")
+
+
+def _fold(text: str) -> str:
+    """`clean`ed, dashes spaced, quotes straightened and accents dropped (`compliance.skeleton`),
+    case-folded: the form the judge's quote and a field are compared in."""
+    return skeleton(clean(text).translate(_DASH_TO_SPACE)).casefold()
+
+
+def _key(text: str) -> str:
+    """The match key of a quote or a field: its letter/digit runs (`_TOKEN_RE`), one space apart.
+    Punctuation is not part of it, so a quote ending in "." matches the same words ending in "!",
+    followed by a comma, or with no mark at all (a title), and a curly apostrophe matches a straight
+    one (drop-1 re-review round 2, 2026-10-09: each of those used to hide a copy). A sentence end
+    is kept as the token `|` (`_SENTENCE_END_RE`), and leading or trailing `|` tokens are dropped, so a
+    quote's own final "." is not required while a match can never span a sentence end (round 3)."""
+    folded = _SENTENCE_END_RE.sub(" | ", _fold(text).replace("|", " "))
+    tokens = _TOKEN_RE.findall(folded)
+    while tokens and tokens[0] == "|":
+        tokens.pop(0)
+    while tokens and tokens[-1] == "|":
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def _quoted_in(q: str, text: str) -> bool:
+    """`q`'s words occur in `text`'s, adjacent and in the same order (both already `_key`-ed):
+    a contiguous run of whole tokens — "rate" is not in "moderate", and the same words in another
+    order are not a copy. One substring search over space-bounded keys."""
+    return bool(q) and f" {q} " in f" {text} "
+
+
+#: A quote of at least this many words is enforced on EVERY field that holds it (`verdict_targets`):
+#: that long, a match elsewhere is a copy of the flagged words. A shorter one ("safe", "the fund") also
+#: sits in honest lines, so it follows its words only when the judge's own field lacks them and one
+#: enforcement unit alone has them (drop-1 re-review, 2026-10-09).
+HOME_MIN_WORDS = 3
+
+
+def _word_count(quote: str) -> int:
+    """Words in a quote (`_WORD_RE` over its `_fold`): a lone dash is none, "safe—never" is two, and
+    a contraction or a hyphenated word is one."""
+    return len(_WORD_RE.findall(_fold(quote)))
+
+
+def quote_homes(quote: str, fields: Sequence[Tuple[str, str]]) -> List[str]:
+    """Every label among `fields`, of ANY family, whose text holds `quote`'s words in order
+    (`_quoted_in` over `_key`s: punctuation, quote style, accents and case aside), in field order."""
+    q = _key(quote)
+    if not q:
+        return []
+    return [lab for lab, text in fields if _quoted_in(q, _key(text))]
+
+
+def enforcement_unit(label: str) -> Tuple[str, str]:
+    """What enforcing a verdict on `label` removes: every SHARED label is ONE unit — enforcing any of
+    them fails the same round (re-review r3: a card title and its script line are one home, not two);
+    a CAPTION label is its outlet (`youtube_title` and `youtube_description` are one); every IMAGE
+    label is the one image."""
+    family = label_family(label)
+    if family == FAMILY_CAPTION:
+        return family, caption_platform(field_name(label))
+    if family == FAMILY_IMAGE:
+        return family, IMAGE_FIELD
+    return family, "round"
+
+
+def verdict_targets(verdict: Verdict, fields: Sequence[Tuple[str, str]]) -> List[str]:
+    """Every label a verdict is enforced on: its OWN label first — always, so the action the judge
+    asked for is never lost — then each field holding its words (`quote_homes`) that is not the same
+    field: all of them for a quote of `HOME_MIN_WORDS`+ words; for a shorter one, only when the
+    verdict's own field does not hold it (the judge mislabelled it) and every field that does sits in
+    ONE `enforcement_unit` — the image title and a paragraph, or the YouTube title and description,
+    are one home, not two (re-review round 2) — and then each of those fields.
+
+    Families do not limit the homes: a flagged X sentence repeated in the image drops the image too,
+    and an image sentence repeated in a card fails the round. `writer_service._apply_verdicts` acts on
+    each target by its family (shared: the round fails; caption: the outlet drops; image: the image
+    drops). `fields` are `package_fields` (whole captions) or their `split_captions` form; a caption
+    sentence and its whole caption count as one field."""
+    own = verdict.label
+    q = _key(verdict.quote)
+    homes = quote_homes(verdict.quote, fields)
+    if _word_count(verdict.quote) < HOME_MIN_WORDS:
+        texts = dict(fields)
+        own_text = texts.get(own, texts.get(base_label(own)))
+        units = {enforcement_unit(lab) for lab in homes}
+        if (own_text is not None and _quoted_in(q, _key(own_text))) or len(units) != 1:
+            homes = []
+    targets = [own]
+    seen = {base_label(own)}
+    for lab in homes:
+        if base_label(lab) not in seen:
+            seen.add(base_label(lab))
+            targets.append(lab)
+    return targets
 
 
 def _locate(quote: str, label: str, texts: Dict[str, str]) -> Tuple[str, bool]:
-    """Keep the verdict on its field if the quote is there; move it to the one field that
-    contains it if the judge mislabelled it; otherwise keep it where it was, unlocated."""
-    q = _norm(quote)
-    if not q:
-        return label, False
-    if label in texts and q in _norm(texts[label]):
-        return label, True
-    homes = [lab for lab, t in texts.items() if q in _norm(t)]
+    """(where a verdict sits, whether its quote is there). A label the package HAS never moves —
+    `located` only reports whether its text holds the quote (logs, calibration); where the words
+    really are is `verdict_targets`' job, which adds targets and never removes this one.
+
+    A label the package does not have moves to the one field holding the quote whose family costs
+    at least as much (shared, or the label's own family); else it stays, and `parse_verdicts` files it
+    on the shared `judge` field (fail closed)."""
+    q = _key(quote)
+    if label in texts:
+        return label, _quoted_in(q, _key(texts[label]))
+    allowed = {FAMILY_SHARED, label_family(label)}
+    homes = [lab for lab, t in texts.items() if label_family(lab) in allowed and _quoted_in(q, _key(t))]
     if len(homes) == 1:
         return homes[0], True
     return label, False
@@ -407,17 +566,13 @@ def parse_verdicts(result: Dict[str, Any], fields: Sequence[Tuple[str, str]]) ->
             logger.warning("marketing judge: unknown rule %r — kept as %s (fail closed)",
                            rule[:40], UNCLASSIFIED)
             rule = UNCLASSIFIED
-        label = label.strip()
+        named = label.strip()
+        label, located = _locate(quote, named, texts)
         if label not in texts:
-            moved, found = _locate(quote, label, texts)
-            if moved in texts:
-                label = moved
-            else:
-                logger.warning("marketing judge: verdict on an unknown field %r — kept on %r "
-                               "(fail closed)", label[:60], UNKNOWN_FIELD)
-                out.append(Verdict(UNKNOWN_FIELD, rule, quote, reason, False))
-                continue
-        label, located = _locate(quote, label, texts)
+            logger.warning("marketing judge: verdict on an unknown field %r — kept on %r "
+                           "(fail closed)", named[:60], UNKNOWN_FIELD)
+            out.append(Verdict(UNKNOWN_FIELD, rule, quote, reason, False))
+            continue
         out.append(Verdict(label, rule, quote, reason, located))
     return out
 

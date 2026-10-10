@@ -23,6 +23,17 @@ final answer: `POST /api/v1/internal/marketing/runs/{run_id}/script` → `kick(r
                    that died) → back to "selected", or `rejected` (reason
                    `writer_unavailable`) at MAX_WRITER_FAILURES
 
+Company Weekly (drop 2, contract D11): the first kick reads the day's series calendar
+(`selection.plan_for`) narrowed to MARKETING_CONTENT_CLASSES and the shipped series. A chain of just
+the lesson is the selection above, byte for byte while the classes are "A". Any other chain is a
+TEMPLATE BUILD, run as a background task the kick waits on for at most TEMPLATE_KICK_WAIT_SECONDS
+(then `generating`; the next kick joins the same task): each series of the chain asks the company-news
+adapter for candidates, each candidate is composed by `news_templates` from its JSON round trip,
+re-checked as it will be stored, given its logos and its frozen formats, and the first that passes is
+inserted `accepted` — no writer, no lease, 0 tokens, first write wins. A series that yields nothing
+falls through to the next (recorded in `fact_sheet.selection.trail`); the chain always ends in the
+lesson.
+
 Why not a long request: a 20–90 s Gemini call inside the worker's 30 s HTTP timeout was retried
 up to three times CONCURRENTLY, and uvicorn's 30 s graceful shutdown cut it on every deploy. A
 short poll touches neither. Why a lease and not just the in-process task set: Railway runs the
@@ -44,19 +55,42 @@ kick closes (the lease expiry is a real backstop at every count) — nothing is 
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import logging
 import math
+import re
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
 
 from app.config import settings
-from app.schemas.marketing import SCRIPT_REJECT_REASONS
-from app.services.marketing import content_pool, selection, smart_link
+from app.schemas.marketing import (
+    CONTENT_CLASSES,
+    POST_FORMATS_BY_PLATFORM,
+    SCRIPT_REJECT_REASONS,
+    TEMPLATE_AUTHORSHIP,
+    VIDEO_LAYOUT_PER_LINE,
+    WORKER_CAPABILITY_LAYOUTS_2B,
+    WORKER_CAPABILITY_NEWS_TEMPLATES,
+    WORKER_CAPABILITY_POST_IMAGE,
+    WORKER_LAYOUTS_2B,
+    image_post_problem,
+    normalize_image_post,
+    parse_content_classes,
+)
+from app.services.marketing import content_pool, post_copy, selection, smart_link
+# Company Weekly (drop 2): the pure halves of the template day — records + fact sheet, the templates,
+# the on-screen allow-list and the logo header check. FMP-free (PURE_MODULES). The ONE FMP door, the
+# adapter, is imported lazily inside `MarketingScriptService._news_source_fn` and nowhere else.
+from app.services.marketing import company_news_rules as news_rules
+from app.services.marketing import logo_check, news_templates, template_onscreen
 from app.services.marketing.generation_budget import (
     LEDGER_STATEMENT_SECONDS,
     MODEL_CALLS_PER_GENERATION,
 )
+from app.services.marketing.run_service import SERIES_TRAIL_MAX as RUN_SERIES_TRAIL_MAX
 from app.services.marketing.run_service import (
     CallerClaim,
     MarketingRunError,
@@ -64,9 +98,11 @@ from app.services.marketing.run_service import (
     MarketingRunNotHeld,
     MarketingRunService,
     claim_problem,
+    frozen_post_formats,
     get_marketing_run_service,
     held_problem,
     run_date_et,
+    run_worker_capabilities,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,9 +168,13 @@ _REFRESH_BACKOFF_SECONDS = 0.5
 _FINISH_BACKOFF_SECONDS = 1.0
 #: Statements a generation's task issues outside the model calls, refreshes and terminal write:
 #: `_acquire` reads the row and takes it with one conditional UPDATE; `_run_date_of` reads the run
-#: when the script row carries no run_date.
+#: when the script row carries no run_date; `_holder_renders_images` reads the run once more on the
+#: ACCEPTED path while MARKETING_IMAGE_POSTS is on (drop 1) — after the last model call and before the
+#: terminal write, so it counts on every generation's worst case (it was missing: 4577 s against a
+#: real 4697 s, past OWNER_ALIVE_SECONDS' 4637 s).
 _ACQUIRE_STATEMENTS = 2
 _RUN_DATE_STATEMENTS = 1
+_HOLDER_STATEMENTS = 1
 
 
 def _linear_backoff_total(attempts: int, step: float) -> float:
@@ -161,13 +201,15 @@ def worst_case_terminal_write_seconds() -> float:
 def worst_case_generation_seconds() -> float:
     """The longest ONE generation task (`_generate`) can live: acquire (read + conditional
     UPDATE) + the run-date read + MODEL_CALLS_PER_GENERATION × (one lease refresh + one model
-    call, each at its worst) + one terminal write at its worst. 4577 s at defaults with four model
-    calls (it was ~2710 s with two, which OWNER_ALIVE_SECONDS = 3 × the lease = 1896 s did not
-    cover). Every await in it is bounded by one of those terms; the cancel paths share the 5-s
-    shutdown budget. A crash after a WRITTEN terminal write sends one more fenced write, but by
-    then the row is final and the owner's age decides nothing."""
+    call, each at its worst) + the holder-capability read of an accepted package (image posts on)
+    + one terminal write at its worst. 4697 s at defaults with four model calls —
+    (2 + 1 + 1) × 120 + 4 × (572 + 361.5) + 483 (it was ~2710 s with two calls, which
+    OWNER_ALIVE_SECONDS = 3 × the lease = 1896 s did not cover). Every await in it is bounded by one
+    of those terms; the cancel paths share the 5-s shutdown budget. A crash after a WRITTEN terminal
+    write sends one more fenced write, but by then the row is final and the owner's age decides
+    nothing."""
     return (
-        (_ACQUIRE_STATEMENTS + _RUN_DATE_STATEMENTS) * LEDGER_STATEMENT_SECONDS
+        (_ACQUIRE_STATEMENTS + _RUN_DATE_STATEMENTS + _HOLDER_STATEMENTS) * LEDGER_STATEMENT_SECONDS
         + MODEL_CALLS_PER_GENERATION * (worst_case_model_call_seconds() + worst_case_refresh_seconds())
         + worst_case_terminal_write_seconds()
     )
@@ -193,6 +235,59 @@ RETRY_AFTER_GEMINI_FAILURE = timedelta(minutes=30)
 HAND_BACK_TIMEOUT_SECONDS = 3.0
 #: How many recent picks selection must not repeat.
 RECENT_LIMIT = selection.RECENT_WINDOW
+
+# ── Company Weekly (drop 2, contract D11): the template day ──────────────────────────────────────
+#: How long ONE kick waits for a running template build before answering `generating` (the worker
+#: polls again). Pinned < marketing/main.py BACKEND_TIMEOUT_SECONDS − 5 by an AST read: a kick that
+#: outlived the worker's HTTP timeout would be retried while still running.
+TEMPLATE_KICK_WAIT_SECONDS = 20.0
+#: The whole build — every series of the day's chain, its candidates, their logos — from its start.
+#: Pinned < marketing/main.py SCRIPT_POLL_BUDGET_SECONDS: the worker polls at least this long.
+TEMPLATE_BUILD_BUDGET_SECONDS = 240.0
+#: Per-series caps inside the build budget, each above the adapter's measured worst case for one
+#: `candidates()` call (the FMP client's own 5xx retries included). A series is started with
+#: min(its cap, what is left) and waited for 2 s past it; a later series of the chain gets what the
+#: earlier ones left. A series added here ships in the same change (it is in selection.SHIPPED_SERIES).
+#:   thirteen_f      150 s — a live registry build (Berkshire) is the slow path (contract D11).
+#:   congress_count   60 s — ~10 s normally (2 chambers × ~8 pages, the confirming re-read, 1 profile
+#:                           batch); ~30 s worst (the 7500-row re-read and its confirm). On a
+#:                           Congress Tuesday in the 13F season it runs FIRST and still leaves
+#:                           thirteen_f its whole 150 s (pinned by a test).
+#:   company_stakes   45 s — ~3-5 s (club group + rows, one stakes read, 1 profile batch).
+#:   earnings         45 s — ~5-10 s (7 one-day calendar reads, 4 at a time, 1 profile batch); ~20 s worst.
+#:   theme_explainer  45 s — ~10-25 s (≤ 2 themes × 1 profile batch + ≤ 12 breakdowns); ~40 s worst.
+SERIES_BUDGET_SECONDS: Dict[str, float] = {
+    "thirteen_f": 150.0,
+    "congress_count": 60.0,
+    "company_stakes": 45.0,
+    "earnings": 45.0,
+    "theme_explainer": 45.0,
+}
+DEFAULT_SERIES_BUDGET_SECONDS = 45.0
+#: How long past its cap a series' `candidates()` is waited for (the adapter raises at its own
+#: deadline; this only bounds a hung one).
+SERIES_WAIT_SLACK_SECONDS = 2.0
+#: A series is not started with less than this left of the build budget (it falls through: "budget").
+SERIES_MIN_START_SECONDS = 5.0
+#: How many ranked records one series offers (the candidate loop tries them in order).
+MAX_CANDIDATES_PER_SERIES = 5
+#: One logo fetch (inside what is left of the build budget).
+LOGO_FETCH_TIMEOUT_SECONDS = 8.0
+#: Logo fetches in flight at once.
+LOGO_FETCH_CONCURRENCY = 4
+#: The ledger read a news day makes: every posting day of the recent window (news refs included, so the
+#: adapter's ledger check sees them); the lesson rotation filters it with `selection.lesson_refs`.
+NEWS_RECENT_LIMIT = RECENT_LIMIT * len(selection.POST_WEEKDAYS)
+#: A series' outcome in the day's fallback trail (`fact_sheet.selection.trail`, run `series_trail`).
+SERIES_OUTCOMES = ("chosen", "no_candidates", "all_recent", "all_refused", "unavailable", "timeout",
+                   "error", "budget")
+#: How many trail entries reach the run mirror and each post (`series_trail`) — run_service's bound.
+SERIES_TRAIL_MAX = RUN_SERIES_TRAIL_MAX
+#: The series whose post image is a drop-2b layout (WORKER_LAYOUTS_2B: company_stakes `pair`,
+#: theme_explainer `grid`), derived from the templates' own specs. Only a holder that declared
+#: WORKER_CAPABILITY_LAYOUTS_2B draws them: `_select` drops them from the chain for any other holder.
+LAYOUTS_2B_SERIES: FrozenSet[str] = frozenset(
+    sid for sid, spec in news_templates.SERIES_SPECS.items() if spec.layout in WORKER_LAYOUTS_2B)
 
 # Body states the worker branches on — part of the wire contract with backend/marketing/main.py.
 REST_DAY = "rest_day"
@@ -266,6 +361,12 @@ def _today_et() -> date:
     return run_date_et(_now())
 
 
+def _mono() -> float:
+    """The template build's clock (the adapter's `deadline` is on `time.monotonic`). Indirected so a
+    test can move it without touching the event loop's own clock."""
+    return time.monotonic()
+
+
 def _iso(dt: datetime) -> str:
     """UTC, microseconds, `Z` — never `+00:00`: these values also travel as PostgREST FILTER
     values (the takeover CAS fences on `lease_until`), where a `+` decodes to a space and the
@@ -323,7 +424,20 @@ def _spent(exc: BaseException) -> int:
 
 def worker_script(output: Dict[str, Any]) -> Dict[str, Any]:
     """The subset the WORKER needs to voice and render (Phases 3-4). Captions are not in it:
-    they are server-authored and reach the ledger only through `create_posts`."""
+    they are server-authored and reach the ledger only through `create_posts`.
+
+    Drop 1 adds the run's frozen `post_formats`, its `image_post` and the image's `image_footer` —
+    all three None for an output accepted before image posts existed (the worker then falls back to
+    its own POST_FORMAT, exactly as before). Frozen formats that do not read back (a hand-edited row)
+    are sent as None too, logged: `create_posts` refuses every post of such a run, so the day fails
+    loudly there rather than on a guess here."""
+    try:
+        formats = frozen_post_formats(output)
+    except ValueError as e:
+        logger.error("marketing script: the accepted output's post_formats do not read back (%s) — "
+                     "the worker gets none; create_posts will refuse this run's posts", e)
+        formats = None
+    footer = output.get("image_footer")
     return {
         "hook": output.get("hook") or "",
         "video_script": list(output.get("video_script") or []),
@@ -331,7 +445,184 @@ def worker_script(output: Dict[str, Any]) -> Dict[str, Any]:
         "carousel_slides": list(output.get("carousel_slides") or []),
         "disclaimer_card": output.get("disclaimer_card") or "",
         "outlets": sorted((output.get("posts") or {}).keys()),
+        "post_formats": formats,
+        "image_post": normalize_image_post(output.get("image_post")) if formats is not None else None,
+        "image_footer": footer if formats is not None and isinstance(footer, str) and footer else None,
+        **_worker_template_fields(output),
     }
+
+
+#: The keys of an `output.logos` entry the worker reads (`marketing/logos.py`), and nothing else.
+_WORKER_LOGO_KEYS = ("key", "name", "url", "sha256", "bytes", "width", "height")
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _worker_logos(raw: Any) -> List[Dict[str, Any]]:
+    """The well-formed entries of `output.logos` (contract D10), cut to the keys the worker reads: a
+    1..16-character key (first entry of a key wins), a drawable company name, a url that is None or an
+    https string, a sha256 that is None or 64 lowercase hex, and None-or-int sizes — at most
+    template_onscreen.MAX_LOGOS. A malformed entry is dropped (logged): its key then has no logo entry,
+    and the worker refuses to draw a spec that references it rather than guess a name."""
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for i, entry in enumerate(raw if isinstance(raw, list) else []):
+        key = entry.get("key") if isinstance(entry, dict) else None
+        name = entry.get("name") if isinstance(entry, dict) else None
+        url = entry.get("url") if isinstance(entry, dict) else None
+        sha = entry.get("sha256") if isinstance(entry, dict) else None
+        sizes = [entry.get(k) for k in ("bytes", "width", "height")] if isinstance(entry, dict) else [None]
+        ok = (isinstance(key, str) and 1 <= len(key) <= template_onscreen.LOGO_KEY_MAX_CHARS and key not in seen
+              and template_onscreen.drawable_problem(name) is None
+              and (url is None or (isinstance(url, str) and url.startswith("https://") and len(url) <= 2048))
+              and (sha is None or (isinstance(sha, str) and _SHA256_HEX_RE.fullmatch(sha) is not None))
+              and all(v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0) for v in sizes))
+        if not ok:
+            logger.error("marketing script: output.logos[%d] is malformed — not sent to the worker", i)
+            continue
+        seen.add(key)
+        out.append({k: entry.get(k) for k in _WORKER_LOGO_KEYS})
+        if len(out) >= template_onscreen.MAX_LOGOS:
+            break
+    return out
+
+
+def _worker_template_fields(output: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop 2's worker fields (`WorkerScript`): the script's class and authorship (defaults "A" / "ai" —
+    a lesson, exactly as before), its series, the per-line video layout, and — each only when its
+    validator passes against the run's own logos — the opening card and the post image's `image_spec`,
+    plus the well-formed logos. Anything that does not validate is sent as None and logged ERROR: the
+    worker then fails loudly on a template day (it never draws a template as a lesson), and the server's
+    on-screen checks refuse anything else."""
+    klass = output.get("content_class", "A")
+    if klass not in CONTENT_CLASSES:
+        logger.error("marketing script: the accepted output's content_class %r is unknown — sent as None",
+                     str(klass)[:20])
+        klass = None
+    authorship = output.get("authorship", post_copy.AUTHORSHIP_AI)
+    if authorship not in post_copy.AUTHORSHIPS:
+        logger.error("marketing script: the accepted output's authorship %r is unknown — sent as None",
+                     str(authorship)[:20])
+        authorship = None
+    series = output.get("series")
+    if series is not None and (not isinstance(series, str) or series not in selection.SERIES_BY_ID):
+        logger.error("marketing script: the accepted output's series %r is unknown — sent as None", str(series)[:40])
+        series = None
+    layout = output.get("video_layout")
+    if layout is not None and layout != VIDEO_LAYOUT_PER_LINE:
+        logger.error("marketing script: the accepted output's video_layout %r is unknown — sent as None",
+                     str(layout)[:40])
+        layout = None
+    logos = _worker_logos(output.get("logos"))
+    keys = template_onscreen.logo_keys(logos)
+    opening = output.get("opening_card")
+    if opening is not None:
+        problem = template_onscreen.validate_opening_card(opening, keys)
+        if problem is not None:
+            logger.error("marketing script: the accepted output's opening_card does not validate (%s) — sent "
+                         "as None", str(problem)[:200])
+            opening = None
+    spec = output.get("image_spec")
+    if spec is not None:
+        footer = output.get("image_footer")
+        problem = template_onscreen.validate_image_spec(spec, keys, footer=footer if isinstance(footer, str) else None)
+        if problem is not None:
+            logger.error("marketing script: the accepted output's image_spec does not validate (%s) — sent as "
+                         "None", str(problem)[:200])
+            spec = None
+    return {
+        "content_class": klass,
+        "authorship": authorship,
+        "series": series,
+        "video_layout": layout,
+        "opening_card": copy.deepcopy(opening) if opening is not None else None,
+        "image_spec": copy.deepcopy(spec) if spec is not None else None,
+        "logos": logos,
+    }
+
+
+#: A Threads IMAGE post is frozen only while its composed caption fits this many UTF-8 BYTES. Upload-Post
+#: splits Threads text over 500 bytes into a thread by default; `threads_long_text_as_post` (sent by
+#: `outlet_upload_post`) stops that on /upload_text, but is unverified on /upload_photos — and a split
+#: image post would carry the value line, the /go link and the caption disclaimer in a reply. Characters
+#: are not bytes: the live value line's em dash alone makes a 500-character caption 502+ bytes. A
+#: longer caption keeps Threads on the text route (one post). Drop it once Upload-Post's OpenAPI confirms
+#: the flag on the photo route.
+THREADS_IMAGE_CAPTION_MAX_BYTES = 500
+
+
+def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: bool, x_images: bool,
+                        run_id: Optional[str] = None) -> Dict[str, Any]:
+    """The accepted output as it is stored (drop 1, contract C3): a COPY of the writer's package with
+    the run's formats frozen into it, decided ONCE at write time like the store state — the worker
+    learns them only from the script read-back, and `create_posts` records each platform only in its
+    frozen format. Pure but for logging; never raises on a malformed `image_post`.
+
+    * `post_formats`: for every platform the package carries copy for — the video platforms
+      "video"; the others "image" iff `image_posts` and (not X, or `x_images`) and the package has a
+      usable `image_post` (and, for Threads, its caption fits THREADS_IMAGE_CAPTION_MAX_BYTES); else
+      "text".
+    * `image_post`: the writer's `{title, paragraphs}` reduced to exactly those keys, or None when
+      it is absent or unusable (logged; that day's posts are text — never a rejected package).
+    * `image_footer`: `post_copy.image_footer(run_date)`, only when some format is "image".
+
+    Drop 2 (contract D11): a TEMPLATE output (`authorship == "template"`) keeps its OWN `image_footer`
+    — composed with the record's source and as-of date, and compared by `news_templates.revalidate` at
+    create_posts, so it stays whatever the formats are (a missing one is a ValueError, never replaced)
+    — and a platform is "image" only when its `image_spec` also validates against the output's logos
+    and that footer (`template_onscreen.validate_image_spec`); otherwise that day's posts are text."""
+    out = dict(output)
+    template = output.get("authorship") == TEMPLATE_AUTHORSHIP
+    template_footer = output.get("image_footer")
+    if template and (not isinstance(template_footer, str) or not template_footer.strip()):
+        raise ValueError("a template output carries no image_footer (it is composed with the record's "
+                         "source and as-of date, never replaced)")
+    raw = output.get("image_post")
+    image_post = normalize_image_post(raw)
+    if raw is not None and image_post is None:
+        logger.warning("marketing script: the accepted package's image_post is unusable run_id=%s (%s) — "
+                       "stored as None; that day's image formats fall back to text", run_id,
+                       image_post_problem(raw))
+    out["image_post"] = image_post
+    image_ok = image_post is not None
+    if template and image_ok:
+        problem = template_onscreen.validate_image_spec(
+            output.get("image_spec"), template_onscreen.logo_keys(output.get("logos")), footer=template_footer)
+        if problem is not None:
+            logger.warning("marketing script: the template's image_spec does not validate run_id=%s (%s) — "
+                           "that day's image formats fall back to text", run_id, str(problem)[:200])
+            image_ok = False
+    posts = output.get("posts") if isinstance(output.get("posts"), dict) else {}
+    formats: Dict[str, str] = {}
+    for platform in sorted(posts):
+        allowed = POST_FORMATS_BY_PLATFORM.get(platform, ())
+        if "video" in allowed:
+            formats[platform] = "video"
+        elif ("image" in allowed and image_posts and image_ok
+              and (platform != "x" or x_images)):
+            caption = posts[platform].get("caption") if isinstance(posts[platform], dict) else None
+            size = len(caption.encode("utf-8")) if isinstance(caption, str) else 0
+            if platform == "threads" and size > THREADS_IMAGE_CAPTION_MAX_BYTES:
+                logger.info("marketing script: the Threads caption is %d UTF-8 bytes > %d run_id=%s — Threads "
+                            "is frozen as TEXT (Upload-Post splits a longer post into a thread unless the "
+                            "no-split flag works, and that flag is verified only on its text route)",
+                            size, THREADS_IMAGE_CAPTION_MAX_BYTES, run_id)
+                formats[platform] = "text"
+            else:
+                formats[platform] = "image"
+        elif "text" in allowed:
+            formats[platform] = "text"
+        else:
+            # create_posts refuses a platform outside the format map anyway; say so once, here.
+            logger.warning("marketing script: the accepted package carries copy for %r, which has no "
+                           "recordable format run_id=%s — no format frozen for it", platform, run_id)
+    out["post_formats"] = formats
+    if template:
+        out["image_footer"] = template_footer
+    elif "image" in formats.values():
+        out["image_footer"] = post_copy.image_footer(run_date)
+    else:
+        out.pop("image_footer", None)
+    return out
 
 
 def _fact_sheet_snapshot(item: content_pool.ContentItem) -> Dict[str, Any]:
@@ -344,12 +635,57 @@ def _fact_sheet_snapshot(item: content_pool.ContentItem) -> Dict[str, Any]:
     }
 
 
+def _trail_steps(row: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
+    """The fallback trail a selection recorded in the script's fact sheet (`fact_sheet.selection.trail`,
+    drop 2) as flat `{series, outcome, reason?}` string entries, or None when the script carries no
+    selection block (a lesson-only plan, or a row written before drop 2)."""
+    sheet = row.get("fact_sheet") if isinstance(row.get("fact_sheet"), dict) else {}
+    block = sheet.get("selection")
+    if not isinstance(block, dict):
+        return None
+    steps: List[Dict[str, str]] = []
+    for entry in block.get("trail") if isinstance(block.get("trail"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kept = {k: str(entry[k])[:60] for k in ("series", "outcome", "reason")
+                if isinstance(entry.get(k), str) and entry[k]}
+        if "series" in kept and "outcome" in kept:
+            steps.append(kept)
+    return steps
+
+
+def _selection_mirror(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The server-owned run metadata a selection mirrors (drop 2): `series` — the series the day took
+    (the trail's "chosen" step; the template id when the trail does not say) — and `series_trail`, the
+    first SERIES_TRAIL_MAX steps. None when the script recorded no selection block."""
+    steps = _trail_steps(row)
+    if steps is None:
+        return None
+    chosen = next((s["series"] for s in reversed(steps) if s.get("outcome") == "chosen"), None)
+    if chosen is None:
+        tid = row.get("template_id")
+        chosen = tid if isinstance(tid, str) and tid in selection.SERIES_BY_ID else selection.LESSON
+    return {"series": chosen, "series_trail": steps[:SERIES_TRAIL_MAX]}
+
+
+def _trail_text(trail: List[Dict[str, str]]) -> str:
+    """A trail for one log line: `ceo_buys:no_candidates(ceo_none_qualified) > insider_buys:unavailable(…)`."""
+    return " > ".join(f"{t.get('series')}:{t.get('outcome')}" + (f"({t['reason']})" if t.get("reason") else "")
+                      for t in trail) or "-"
+
+
 class MarketingScriptService:
-    def __init__(self, runs: Optional[MarketingRunService] = None, *, writer=None) -> None:
+    def __init__(self, runs: Optional[MarketingRunService] = None, *, writer=None, news=None) -> None:
         self._runs = runs
         # Injected in tests; the real one is imported lazily because it loads the agents
         # package (and, through it, the FMP client) — keep that out of module import.
         self._writer = writer
+        # Drop 2: the company-news source (`candidates`, `fetch_logo`, `MarketingNewsUnavailable`) —
+        # the adapter module, imported lazily by `_news_source_fn` (the ONE FMP door); a fake in tests.
+        self._news = news
+        # run_id → its running template build (`_await_template_build`): a later kick JOINS it instead
+        # of starting a second build. Removed when the task ends.
+        self._builds: Dict[str, asyncio.Task] = {}
         self._tasks: Set[asyncio.Task] = set()
         self._running: Set[str] = set()
         # run_id → when its task was spawned (`_owner_state`), and generation_id → the last
@@ -374,6 +710,17 @@ class MarketingScriptService:
             self._writer = generate_package
         return self._writer
 
+    def _news_source_fn(self):
+        """The company-news source of a template day: `company_news_adapter` (§1's ONE allow-listing FMP
+        adapter, contract D6). Imported HERE, lazily, like the writer — this method is the adapter's only
+        importer anywhere under app/ (tests/test_marketing_import_boundary.py pins the qualname), so a
+        lesson-only process never loads the FMP client through the marketing engine."""
+        if self._news is None:
+            from app.services.marketing import company_news_adapter
+
+            self._news = company_news_adapter
+        return self._news
+
     # ── kick ─────────────────────────────────────────────────────────────────
 
     async def kick(self, run_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
@@ -393,6 +740,10 @@ class MarketingScriptService:
         if row is None:
             self._require_held(run)
             row = await self._select(run)
+            if row is None:
+                # A template build (drop 2) is still running in the background: no row yet, nothing
+                # chosen to name. The worker polls again; the next kick joins the same build.
+                return {"status": GENERATING, "source_ref": None, "template_id": None}
         await self._heal_mirror(run, row)
         return await self._advance(run_id, row, run=run)
 
@@ -412,33 +763,128 @@ class MarketingScriptService:
         """Copy the selection onto `marketing_runs` for the ledger. Informational only —
         `recent` reads marketing_scripts — and self-healing: a lost write (or a lost INSERT
         response whose retry adopted the row) is repaired by the next poll. Only on a HELD run:
-        `update_run` bumps `updated_at`, which is the claim's liveness."""
+        `update_run` bumps `updated_at`, which is the claim's liveness.
+
+        Drop 2 (contract D11): the mirror is `source_ref`, `template_id`, the class the script's
+        template id decides (`selection.content_class_of`: "A" for a lesson, "C"/"F" for a series — an
+        unknown id mirrors no class, WARNING) and, when the selection recorded a fallback trail
+        (`fact_sheet.selection`), the server-owned run metadata `series` + `series_trail` (≤ 8). It is
+        written only when something differs, as ONE fenced write (`update_run(cas=True)`: the metadata
+        merge must not revert a claim or a worker PATCH that lands between its read and its write)."""
         ref = row.get("source_ref")
-        if not ref or run.get("source_ref") == ref:
+        if not ref:
+            return
+        template_id = row.get("template_id")
+        klass = selection.content_class_of(template_id)
+        meta_want = _selection_mirror(row)
+        run_meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        if (run.get("source_ref") == ref and run.get("template_id") == template_id
+                and (klass is None or run.get("content_class") == klass)
+                and (meta_want is None or all(run_meta.get(k) == v for k, v in meta_want.items()))):
             return
         if self._held_problem(run) is not None:
             logger.info("marketing script: selection not mirrored onto run %s (not held); the "
                         "script row is the record", run.get("id"))
             return
-        if run.get("source_ref"):
+        if run.get("source_ref") and run.get("source_ref") != ref:
             logger.warning("marketing script: run %s mirrors source_ref=%r but its script says %r — "
                            "rewriting the mirror from the script", run.get("id"), run.get("source_ref"), ref)
+        if klass is None:
+            logger.warning("marketing script: run %s's script names template %r, which has no content class "
+                           "— no class mirrored (create_posts will refuse the day)", run.get("id"),
+                           str(template_id)[:40])
         try:
-            await self.runs.update_run(
-                run["id"], source_ref=ref, template_id=row.get("template_id"), content_class="A",
+            written = await self.runs.update_run(
+                run["id"], source_ref=ref, template_id=template_id, content_class=klass,
+                metadata=meta_want, cas=True,
             )
-            run["source_ref"] = ref
         except Exception as e:
             logger.warning("marketing script: could not mirror the selection onto run %s "
                            "source_ref=%s (%s: %s) — the next kick retries", run.get("id"), ref,
                            type(e).__name__, e)
+            return
+        if written is None:
+            logger.info("marketing script: run %s changed under the selection mirror — nothing written; the "
+                        "next kick retries", run.get("id"))
+            return
+        run["source_ref"] = ref
 
-    async def _select(self, run: Dict[str, Any]) -> Dict[str, Any]:
+    async def _select(self, run: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The day's first selection (drop 2, contract D11). A rest day → the rest_day INSERT. Otherwise
+        the series calendar (`selection.plan_for`), narrowed to the enabled classes and the shipped series
+        (`enabled_chain`): a chain of just the lesson is selected HERE, synchronously — with the classes
+        at "A" (the default) its writes are exactly today's — and any other chain becomes a background
+        TEMPLATE BUILD (`_await_template_build`), whose row this returns if it lands inside
+        TEMPLATE_KICK_WAIT_SECONDS, else None (the kick answers `generating`).
+
+        A news chain is used ONLY when the worker HOLDING the run declared it can draw a template
+        (WORKER_CAPABILITY_NEWS_TEMPLATES on its claim — `metadata.worker_capabilities`, server-owned).
+        Any other holder (a drop-1 image after a rollback, or a web deployed before its worker) would
+        draw the template as a lesson — the person's name on the video's first frame, the alt text on the
+        image — so its day is the LESSON (WARNING naming the worker), never a failed day. A holder that
+        declared `news_templates` but not WORKER_CAPABILITY_LAYOUTS_2B (a drop-2a image) loses only the
+        series whose image is a drop-2b layout (LAYOUTS_2B_SERIES, WARNING): the rest of the chain runs."""
         run_id = run["id"]
         run_date = date.fromisoformat(str(run["run_date"])[:10])
+        plan = selection.plan_for(run_date)
+        if plan.rest_day:
+            row, ours = await self.runs.insert_script(
+                {"run_id": run_id, "run_date": run_date.isoformat(), "status": REST_DAY})
+            logger.info("marketing script %s run_id=%s run_date=%s status=%s (rest day)",
+                        "SELECTED" if ours else "selection ADOPTED (a concurrent kick won)", run_id, run_date,
+                        row.get("status"))
+            return row
+        classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+        # The per-series switch (drop 2b): MARKETING_NEWS_SERIES ∩ the shipped series, read NOW — and only
+        # while a news class is on. With the classes at "A" the chain is the lesson whatever the switch
+        # says, so nothing about it is read or logged: that day stays byte for byte Drop 1's.
+        news_series = (selection.parse_news_series(settings.MARKETING_NEWS_SERIES)
+                       if classes != frozenset({"A"}) else frozenset())
+        chain = selection.enabled_chain(plan.chain, classes, shipped=news_series)
+        if classes != frozenset({"A"}):
+            logger.info("marketing script: content classes enabled: %s news_series=%s run_id=%s run_date=%s "
+                        "plan=%s chain=%s", ",".join(sorted(classes)), ",".join(sorted(news_series)) or "none",
+                        run_id, run_date, plan.reason, list(chain))
+        if chain and chain != (selection.LESSON,) and \
+                WORKER_CAPABILITY_NEWS_TEMPLATES not in run_worker_capabilities(run):
+            logger.warning(
+                "marketing script: the day's chain %s has news series, but the worker holding run_id=%s "
+                "(worker_version=%r, attempt %s, declared %s) did not declare %r on its claim — an older "
+                "worker image cannot draw a template; the day is the LESSON (deploy the drop-2 marketing "
+                "worker)", list(chain), run_id, str(run.get("worker_version") or "")[:64], run.get("attempts"),
+                sorted(run_worker_capabilities(run)) or "nothing", WORKER_CAPABILITY_NEWS_TEMPLATES)
+            chain = (selection.LESSON,)
+        cannot_draw = [s for s in chain if s in LAYOUTS_2B_SERIES]
+        if cannot_draw and WORKER_CAPABILITY_LAYOUTS_2B not in run_worker_capabilities(run):
+            # A drop-2a image draws templates but refuses a `pair` / `grid` image (a failed day): those
+            # series leave the chain, which falls through to its next series exactly as a refused one does.
+            logger.warning(
+                "marketing script: the day's chain %s has %s, whose post image is a drop-2b layout (%s), but "
+                "the worker holding run_id=%s (worker_version=%r, attempt %s, declared %s) did not declare %r "
+                "on its claim — %s dropped from the chain (deploy the drop-2b marketing worker)", list(chain),
+                cannot_draw, "/".join(WORKER_LAYOUTS_2B), run_id, str(run.get("worker_version") or "")[:64],
+                run.get("attempts"), sorted(run_worker_capabilities(run)) or "nothing",
+                WORKER_CAPABILITY_LAYOUTS_2B, "it is" if len(cannot_draw) == 1 else "they are")
+            chain = tuple(s for s in chain if s not in LAYOUTS_2B_SERIES)
+        if chain == (selection.LESSON,) or not chain:
+            recent = await self.runs.recent_source_refs(run_date, NEWS_RECENT_LIMIT)
+            return await self._select_lesson(run, run_date, recent, classes=classes, selection_block=None)
+        return await self._await_template_build(run, run_date, plan, chain, classes)
+
+    async def _select_lesson(self, run: Dict[str, Any], run_date: date, recent: List[str], *,
+                             classes: FrozenSet[str], selection_block: Optional[Dict[str, Any]]
+                             ) -> Dict[str, Any]:
+        """The Learn lesson of the day (class A, the writer) — today's selection, whatever the chain. Only
+        the LESSON refs of `recent` reach the rotation (`selection.lesson_refs`: news refs would crowd its
+        window and the 34-item pool would repeat), and while a news class is on the lesson's template is one
+        of `LESSON_TEMPLATE_IDS` (plan §3). `selection_block` (the plan, the chain and the fallback trail)
+        rides in the fact sheet only when the day's chain had news series; with the classes at "A" the
+        INSERT is byte for byte today's."""
+        run_id = run["id"]
         pool = content_pool.eligible_keys()
-        recent = await self.runs.recent_source_refs(run_date, RECENT_LIMIT)
-        sel = selection.choose(pool, run_date, recent)
+        lessons = selection.lesson_refs(recent)
+        templates = selection.LESSON_TEMPLATE_IDS if classes != frozenset({"A"}) else None
+        sel = selection.choose(pool, run_date, lessons, templates=templates)
         # run_date rides in the same first-write-wins INSERT: it is what `recent` reads.
         base = {"run_id": run_id, "run_date": run_date.isoformat()}
         if sel.rest_day:
@@ -448,21 +894,312 @@ class MarketingScriptService:
             logger.error("marketing script: EMPTY content pool run_id=%s run_date=%s", run_id, run_date)
             new = {**base, "status": REJECTED, "reject_reason": REASON_EMPTY_POOL,
                    "last_error": "empty content pool"}
+            if selection_block is not None:
+                new["fact_sheet"] = {"selection": selection_block}
         else:
             item = content_pool.get_item(sel.source_ref)
+            sheet = _fact_sheet_snapshot(item) if item else {}
+            if selection_block is not None:
+                sheet["selection"] = selection_block
             new = {
                 **base, "status": SELECTED, "source_ref": sel.source_ref,
                 "template_id": sel.template_id,
-                "fact_sheet": _fact_sheet_snapshot(item) if item else {},
+                "fact_sheet": sheet,
             }
         row, ours = await self.runs.insert_script(new)
         logger.info(
             "marketing script %s run_id=%s run_date=%s status=%s source_ref=%s template=%s "
             "pool=%d recent=%d", "SELECTED" if ours else "selection ADOPTED (a concurrent kick won)",
             run_id, run_date, row.get("status"), row.get("source_ref"), row.get("template_id"),
-            len(pool), len(recent),
+            len(pool), len(lessons),
         )
         return row
+
+    # ── the template day (drop 2, contract D11) ───────────────────────────────
+
+    async def _await_template_build(self, run: Dict[str, Any], run_date: date, plan: "selection.DayPlan",
+                                    chain: Tuple[str, ...], classes: FrozenSet[str]) -> Optional[Dict[str, Any]]:
+        """Start the day's template build as a BACKGROUND task (or join the one already running for this
+        run) and wait at most TEMPLATE_KICK_WAIT_SECONDS for its row. None when it is still running —
+        the kick answers `generating` and the next kick joins the same task. A build that CRASHED re-raises
+        into the kick that awaits it (a 5xx: the worker retries, and the next kick builds afresh); one that
+        crashed while nobody waited was logged by its done-callback and is simply rebuilt.
+
+        Why a task: a 13F day may need a live registry build (150 s), far past the worker's 30 s HTTP
+        timeout. The build holds no lease and writes ONE row, first write wins, so a second process
+        building the same day in a deploy overlap is harmless — the loser adopts the winner's row."""
+        run_id = str(run["id"])
+        task = self._builds.get(run_id)
+        if task is not None and task.done():
+            self._builds.pop(run_id, None)
+            if not task.cancelled() and task.exception() is None:
+                return task.result()
+            task = None
+        if task is None:
+            task = asyncio.create_task(self._build_template_day(run, run_date, plan, chain, classes),
+                                       name=f"marketing_template:{run_id}")
+            self._builds[run_id] = task
+            self._tasks.add(task)
+            task.add_done_callback(lambda t, rid=run_id: self._template_build_done(rid, t))
+            logger.info("marketing script: template build STARTED run_id=%s run_date=%s plan=%s chain=%s",
+                        run_id, run_date, plan.reason, list(chain))
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), TEMPLATE_KICK_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.info("marketing script: template build of run %s still running after %.0fs — answering "
+                        "generating", run_id, TEMPLATE_KICK_WAIT_SECONDS)
+            return None
+
+    def _template_build_done(self, run_id: str, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        if self._builds.get(run_id) is task:
+            self._builds.pop(run_id, None)
+        if task.cancelled():
+            logger.warning("marketing script: template build of run %s was CANCELLED (shutdown) — the next "
+                           "kick builds the day afresh", run_id)
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("marketing script: template build CRASHED run_id=%s: %s: %s — the next kick builds "
+                         "the day afresh", run_id, type(exc).__name__, exc, exc_info=exc)
+
+    async def _build_template_day(self, run: Dict[str, Any], run_date: date, plan: "selection.DayPlan",
+                                  chain: Tuple[str, ...], classes: FrozenSet[str]) -> Dict[str, Any]:
+        """Walk the day's chain until a series yields a record its template composes and re-checks, and
+        store it as the day's ACCEPTED script — or fall to the lesson at the chain's end. Always ends in
+        exactly ONE `insert_script` (first write wins: a concurrent builder's row is adopted). No model,
+        no lease, 0 tokens. Every fallback lands in the trail (`fact_sheet.selection`), logged.
+
+        Each record is composed from its JSON ROUND TRIP (what the fact sheet stores and create_posts
+        re-reads), so compose-time and re-check-time inputs are identical; the output is re-checked with
+        `news_templates.revalidate` after the logos and the frozen formats are attached, as stored.
+
+        It starts by reading the day's row: a kick whose "no row yet" read raced a build that had just
+        finished (its INSERT committed, its done-callback ran) starts a new build — which ADOPTS that row
+        here instead of walking the adapter again (a series that timed out in the first build would
+        otherwise hit FMP a second time, only to lose its INSERT with 23505). A new build is created only
+        after the previous one's done-callback ran, so its INSERT is already visible to this read."""
+        run_id = str(run["id"])
+        existing = await self.runs.get_script(run_id)
+        if existing is not None:
+            logger.info("marketing template day: run_id=%s already has its row (status=%s source=%s) — a "
+                        "finished build's row ADOPTED, nothing rebuilt", run_id, existing.get("status"),
+                        existing.get("source_ref"))
+            return existing
+        started = _mono()
+        deadline = started + TEMPLATE_BUILD_BUDGET_SECONDS
+        recent = await self.runs.recent_source_refs(run_date, NEWS_RECENT_LIMIT)
+        exclude = frozenset(r for r in recent if isinstance(r, str))
+        try:
+            news = self._news_source_fn()
+        except Exception as e:  # noqa: BLE001 — a broken adapter import must not cost the day its lesson
+            logger.exception("marketing template day: the company-news source could not be loaded run_id=%s "
+                             "(%s: %s) — every series falls through to the lesson", run_id, type(e).__name__, e)
+            news = None
+        unavailable_cls = getattr(news, "MarketingNewsUnavailable", None)
+        store_state = smart_link.store_state()
+        allow_x_url = bool(settings.MARKETING_X_ALLOW_URLS)
+        image_posts = bool(settings.MARKETING_IMAGE_POSTS)   # read ONCE for this build, like a generation
+        trail: List[Dict[str, str]] = []
+
+        def block(extra: Dict[str, str]) -> Dict[str, Any]:
+            return {"plan": plan.reason, "chain": list(chain), "trail": [*trail, extra]}
+
+        for i, series in enumerate(chain):
+            if series == selection.LESSON:
+                row = await self._select_lesson(run, run_date, recent, classes=classes,
+                                                selection_block=block({"series": selection.LESSON,
+                                                                       "outcome": "chosen"}))
+                logger.info("marketing template day fell to the LESSON run_id=%s trail=%s in %.1fs", run_id,
+                            _trail_text(trail), _mono() - started)
+                return row
+            nxt = chain[i + 1] if i + 1 < len(chain) else None
+            if news is None:
+                self._fell_back(run_id, trail, series, "error", "news_source_unavailable", nxt)
+                continue
+            left = deadline - _mono()
+            if left < SERIES_MIN_START_SECONDS:
+                self._fell_back(run_id, trail, series, "budget", f"{max(left, 0.0):.1f}s left", nxt)
+                continue
+            cap = min(left, SERIES_BUDGET_SECONDS.get(series, DEFAULT_SERIES_BUDGET_SECONDS))
+            try:
+                got = await asyncio.wait_for(
+                    news.candidates(series, run_date=run_date, exclude=exclude, limit=MAX_CANDIDATES_PER_SERIES,
+                                    deadline=_mono() + cap),
+                    cap + SERIES_WAIT_SLACK_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                self._fell_back(run_id, trail, series, "timeout", f"no answer in {cap:.0f}s", nxt)
+                continue
+            except Exception as e:  # noqa: BLE001 — one series' failure is the next series' turn
+                if unavailable_cls is not None and isinstance(e, unavailable_cls):
+                    self._fell_back(run_id, trail, series, "unavailable",
+                                    str(getattr(e, "reason", "") or type(e).__name__), nxt)
+                else:
+                    logger.exception("marketing series %s ERROR run_id=%s (%s: %s)", series, run_id,
+                                     type(e).__name__, e)
+                    self._fell_back(run_id, trail, series, "error", type(e).__name__, nxt)
+                continue
+            records = tuple(getattr(got, "records", ()) or ())
+            rejections = getattr(got, "rejections", None)
+            rejections = dict(rejections) if isinstance(rejections, Mapping) else {}
+            refused: List[str] = []
+            for rec in records:
+                built = await self._compose_candidate(
+                    run, run_date, series, rec, rejections, block({"series": series, "outcome": "chosen"}),
+                    store_state=store_state, allow_x_url=allow_x_url, image_posts=image_posts,
+                    deadline=deadline, news=news, refused=refused)
+                if built is None:
+                    continue
+                output, sheet, ref = built
+                row, ours = await self.runs.insert_script({
+                    "run_id": run_id, "run_date": run_date.isoformat(), "status": ACCEPTED,
+                    "source_ref": ref, "template_id": series, "output": output, "violations": [],
+                    "fact_sheet": sheet, "generation_id": str(uuid.uuid4()), "generations": 0,
+                    "model": None, "prompt_version": news_templates.TEMPLATE_VERSION, "tokens_used": 0,
+                })
+                if ours:
+                    logger.info("marketing template ACCEPTED run_id=%s series=%s class=%s source=%s trail=%s "
+                                "formats=%s logos=%d/%d in %.1fs", run_id, series, output.get("content_class"),
+                                ref, _trail_text(trail), output.get("post_formats"),
+                                sum(1 for lg in output.get("logos") or () if lg.get("url")),
+                                len(output.get("logos") or ()), _mono() - started)
+                else:
+                    logger.info("marketing template day ADOPTED a concurrent writer's row run_id=%s status=%s "
+                                "source=%s (ours was %s)", run_id, row.get("status"), row.get("source_ref"), ref)
+                return row
+            if refused:
+                logger.error("marketing series %s refused every candidate run_id=%s codes=%s", series, run_id,
+                             sorted(set(refused)))
+                self._fell_back(run_id, trail, series, "all_refused", sorted(set(refused))[0], nxt)
+            elif records:   # unreachable: a record either composes or is refused
+                self._fell_back(run_id, trail, series, "all_refused", "unknown", nxt)
+            elif rejections and set(k for k, n in rejections.items() if n) == {"already_posted"}:
+                self._fell_back(run_id, trail, series, "all_recent", str(getattr(got, "skip_reason", "") or ""), nxt)
+            else:
+                self._fell_back(run_id, trail, series, "no_candidates",
+                                str(getattr(got, "skip_reason", "") or ""), nxt)
+        # Unreachable while every chain ends in the lesson (`selection.enabled_chain`); never a silent day.
+        logger.error("marketing template day: the chain %s ended without the lesson run_id=%s — selecting the "
+                     "lesson", list(chain), run_id)
+        return await self._select_lesson(run, run_date, recent, classes=classes,
+                                         selection_block=block({"series": selection.LESSON, "outcome": "chosen"}))
+
+    @staticmethod
+    def _fell_back(run_id: str, trail: List[Dict[str, str]], series: str, outcome: str, reason: str,
+                   nxt: Optional[str]) -> None:
+        entry = {"series": series, "outcome": outcome}
+        reason = str(reason or "")[:60]
+        if reason:
+            entry["reason"] = reason
+        trail.append(entry)
+        logger.warning("marketing series FELL BACK run_id=%s from=%s outcome=%s reason=%s next=%s", run_id, series,
+                       outcome, reason or "-", nxt)
+
+    async def _compose_candidate(
+        self, run: Dict[str, Any], run_date: date, series: str, rec: Any, rejections: Dict[str, Any],
+        selection_block: Dict[str, Any], *, store_state: str, allow_x_url: bool, image_posts: bool,
+        deadline: float, news: Any, refused: List[str],
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], str]]:
+        """(output, fact sheet, ledger key) of ONE candidate record, as stored — or None, its refusal code
+        appended to `refused` (logged). Never raises but for a cancellation: a candidate the template
+        cannot write is the next candidate's turn."""
+        run_id = str(run["id"])
+        try:
+            if getattr(rec, "series", None) != series:
+                raise news_templates.NewsTemplateRefused(
+                    "record_invalid", f"a {getattr(rec, 'series', None)!r} record offered for {series}")
+            # Compose from the JSON round trip of the record — exactly what the fact sheet stores and
+            # create_posts' re-check reads back: no float / date / key-order drift between the two.
+            rec = news_rules.record_from_dict(json.loads(json.dumps(news_rules.record_to_dict(rec), allow_nan=False)))
+            sheet = news_rules.fact_sheet(rec, rejections=rejections, selection=selection_block)
+            sheet = json.loads(json.dumps(sheet, allow_nan=False))
+            ref = news_rules.ledger_key(rec)
+            out = news_templates.compose(rec, run_date=run_date, store_state=store_state, allow_x_url=allow_x_url)
+        except asyncio.CancelledError:
+            raise
+        except news_templates.NewsTemplateRefused as e:
+            logger.info("marketing series %s candidate REFUSED run_id=%s code=%s (%s)", series, run_id, e.code,
+                        str(getattr(e, "detail", ""))[:160])
+            refused.append(str(e.code))
+            return None
+        except Exception as e:  # noqa: BLE001 — a malformed record is a refused candidate, never a crash
+            logger.exception("marketing series %s candidate FAILED to compose run_id=%s (%s: %s)", series,
+                             run_id, type(e).__name__, e)
+            refused.append("internal_error")
+            return None
+        problems = news_templates.revalidate(out, fact_sheet=sheet, run_date=run_date)
+        if problems:
+            codes = sorted({str(p.get("code")) for p in problems})
+            logger.error("marketing series %s candidate %s failed its own re-check run_id=%s codes=%s", series,
+                         ref, run_id, codes)
+            refused.extend(codes)
+            return None
+        out["logos"] = await self._attach_logos(out, deadline=deadline, news=news, run_id=run_id)
+        out = await self._frozen_output(out, run_date, run_id=run_id, gen_id=f"template:{series}",
+                                        image_posts=image_posts)
+        try:
+            stored = json.loads(json.dumps(out, allow_nan=False))   # what JSONB will hold
+        except (TypeError, ValueError) as e:
+            logger.error("marketing series %s candidate %s is not JSON-safe run_id=%s (%s: %s)", series, ref,
+                         run_id, type(e).__name__, e)
+            refused.append("schema")
+            return None
+        problems = news_templates.revalidate(stored, fact_sheet=sheet, run_date=run_date)
+        if problems:
+            codes = sorted({str(p.get("code")) for p in problems})
+            logger.error("marketing series %s candidate %s failed the re-check AS STORED run_id=%s codes=%s",
+                         series, ref, run_id, codes)
+            refused.extend(codes)
+            return None
+        return stored, sheet, ref
+
+    async def _attach_logos(self, output: Dict[str, Any], *, deadline: float, news: Any,
+                            run_id: str) -> List[Dict[str, Any]]:
+        """`output.logos` (contract D10): one entry per `news_templates.logo_refs(output)` — that key and
+        that company name, in draw order — with the stored logo's `{url, sha256, bytes, width, height}`,
+        or all None (the worker draws the company's wordmark tile). Fetched through the adapter
+        (`fetch_logo`), checked by `logo_check.inspect_logo`, stored by `runs.store_logo`; bytes are never
+        altered. A logo NEVER refuses a candidate: every failure is a wordmark + a WARNING."""
+        refs = news_templates.logo_refs(output)
+        sem = asyncio.Semaphore(LOGO_FETCH_CONCURRENCY)
+
+        async def one(ref: Dict[str, str]) -> Dict[str, Any]:
+            key, name = ref.get("key"), ref.get("name")
+            entry: Dict[str, Any] = {"key": key, "name": name, "url": None, "sha256": None, "bytes": None,
+                                     "width": None, "height": None}
+            async with sem:
+                left = deadline - _mono()
+                if left < 1.0:
+                    logger.warning("marketing logo: no time left for %s run_id=%s — wordmark", key, run_id)
+                    return entry
+                limit = min(LOGO_FETCH_TIMEOUT_SECONDS, left)
+                try:
+                    got = await asyncio.wait_for(
+                        news.fetch_logo(key, max_bytes=logo_check.LOGO_MAX_BYTES, timeout=limit), limit + 2.0)
+                    if got is None:
+                        logger.warning("marketing logo: none fetched for %s run_id=%s — wordmark", key, run_id)
+                        return entry
+                    data, content_type = got
+                    info = logo_check.inspect_logo(data, content_type)
+                    stored = await self.runs.store_logo(data, info)
+                except asyncio.CancelledError:
+                    raise
+                except logo_check.LogoRejected as e:
+                    logger.warning("marketing logo: %s refused (%s) run_id=%s — wordmark", key,
+                                   getattr(e, "reason", "?"), run_id)
+                    return entry
+                except Exception as e:  # noqa: BLE001 — a logo never refuses a candidate
+                    logger.warning("marketing logo: %s failed run_id=%s (%s: %s) — wordmark", key, run_id,
+                                   type(e).__name__, str(e)[:160])
+                    return entry
+            if not stored:
+                return entry
+            entry.update({k: stored.get(k) for k in ("url", "sha256", "bytes", "width", "height")})
+            return entry
+
+        return list(await asyncio.gather(*(one(r) for r in refs)))
 
     def _rejected_body(self, row: Dict[str, Any]) -> Dict[str, Any]:
         reason = row.get("reject_reason")
@@ -1117,10 +1854,17 @@ class MarketingScriptService:
                     "failures %d/%d) source=%s template=%s", run_id, gen_id, _int(row.get("generations")),
                     _int(row.get("content_rejections")), MAX_GENERATIONS, _failures(row) - 1,
                     MAX_WRITER_FAILURES, source_ref, template.id)
+        # The image-posts switch, read ONCE for this generation (drop-1 review, server:F4): the writer
+        # is told it (off: an image problem alone buys no repair round and never decides which round
+        # is kept),
+        # and `_frozen_output` freezes the formats with the SAME value — a flip during a slow
+        # generation lands on the next one, never half on this one.
+        image_posts = bool(settings.MARKETING_IMAGE_POSTS)
         try:
             result = await generate(
                 item, template, run_date, generation_id=gen_id,
                 allow_x_url=bool(settings.MARKETING_X_ALLOW_URLS),
+                image_posts=image_posts,
                 # What the captions' code-owned value line may say about the app (nothing /
                 # pre-order / on the App Store), read at WRITE time like allow_x_url: the accepted
                 # package is immutable and create_posts copies its captions word for word. Inside
@@ -1144,22 +1888,28 @@ class MarketingScriptService:
         if result.status == ACCEPTED and result.package:
             sheet = _fact_sheet_snapshot(item)
             frozen = row.get("fact_sheet") if isinstance(row.get("fact_sheet"), dict) else {}
+            if isinstance(frozen.get("selection"), dict):
+                # Drop 2: the day's series plan + fallback trail, written at selection — kept, so the
+                # run mirror and the posts can still say why the day became a lesson.
+                sheet["selection"] = frozen["selection"]
             if frozen.get("sentences") is not None and frozen.get("sentences") != sheet["sentences"]:
                 logger.warning("marketing script: the fact sheet of %s changed since selection "
                                "run_id=%s generation=%s — recording the one the package was grounded on",
                                source_ref, run_id, gen_id)
+            output = await self._frozen_output(result.package, run_date, run_id=run_id, gen_id=gen_id,
+                                               image_posts=image_posts)
             outcome = await self._finish(run_id, gen_id, {
-                "status": ACCEPTED, "output": result.package, "violations": result.violations,
+                "status": ACCEPTED, "output": output, "violations": result.violations,
                 "model": result.model, "prompt_version": result.prompt_version,
                 "tokens_used": prior_tokens + _int(result.tokens_used),
                 "fact_sheet": sheet, "last_error": None,
             })
             if outcome == WRITTEN:
                 logger.info("marketing script ACCEPTED run_id=%s generation=%s source=%s outlets=%s "
-                            "dropped=%s tokens=%d in %.1fs", run_id, gen_id, source_ref,
+                            "dropped=%s formats=%s tokens=%d in %.1fs", run_id, gen_id, source_ref,
                             sorted((result.package.get("posts") or {}).keys()),
                             sorted((result.package.get("dropped_outlets") or {}).keys()),
-                            _int(result.tokens_used), elapsed)
+                            output.get("post_formats"), _int(result.tokens_used), elapsed)
             else:
                 logger.error("marketing script: an ACCEPTED package was NOT recorded run_id=%s "
                              "generation=%s source=%s (%s) tokens=%d — a later generation re-bills it",
@@ -1184,6 +1934,81 @@ class MarketingScriptService:
         else:
             logger.error("marketing script: a content rejection was NOT recorded run_id=%s "
                          "generation=%s (%s) codes=%s", run_id, gen_id, outcome, _codes(result.violations))
+
+    async def _frozen_output(self, package: Dict[str, Any], run_date: date, *, run_id: str,
+                             gen_id: str, image_posts: bool) -> Dict[str, Any]:
+        """`freeze_post_formats` at write time, once. `image_posts` is MARKETING_IMAGE_POSTS as the
+        caller read it ONCE when the generation started — the very value the writer was given
+        (drop-1 review, server:F4), so it is never read again here; MARKETING_X_IMAGES and the
+        holder's capability are read NOW. An unexpected
+        raise must not throw away a paid, accepted package: it is logged at ERROR and the package is
+        stored WITHOUT `post_formats` — which reads back exactly as a script accepted before image
+        posts existed (every post text or video, as before).
+
+        With MARKETING_IMAGE_POSTS on, `image` is frozen only when the worker that HOLDS the run now
+        declared it can render the post image (`_holder_renders_images`): an older worker image sends
+        text specs, and `create_posts` would refuse every post of the day — the videos included — if
+        the formats said image. With the switch off the run is not read at all (as before). A TEMPLATE
+        output's image is its `image_spec`, which only a holder that also declared
+        WORKER_CAPABILITY_NEWS_TEMPLATES can draw (a re-claim by an older image during the build) — and,
+        for a drop-2b layout (WORKER_LAYOUTS_2B: `pair`, `grid`), WORKER_CAPABILITY_LAYOUTS_2B too."""
+        image_posts = bool(image_posts)
+        if image_posts:
+            template = package.get("authorship") == TEMPLATE_AUTHORSHIP
+            spec = package.get("image_spec") if template else None
+            image_posts = await self._holder_renders_images(
+                run_id, gen_id, template=template,
+                image_layout=spec.get("layout") if isinstance(spec, Mapping) else None)
+        try:
+            return freeze_post_formats(
+                package, run_date, image_posts=image_posts,
+                x_images=bool(settings.MARKETING_X_IMAGES), run_id=run_id,
+            )
+        except Exception as e:
+            logger.error("marketing script: could not freeze the post formats run_id=%s generation=%s "
+                         "(%s: %s) — storing the package without them (no image posts this run)",
+                         run_id, gen_id, type(e).__name__, e, exc_info=True)
+            # A template's own image_footer is part of what create_posts re-checks: never dropped here.
+            drop = (("post_formats",) if package.get("authorship") == TEMPLATE_AUTHORSHIP
+                    else ("post_formats", "image_footer"))
+            return {k: v for k, v in package.items() if k not in drop}
+
+    async def _holder_renders_images(self, run_id: str, gen_id: str, *, template: bool = False,
+                                     image_layout: Any = None) -> bool:
+        """Did the worker that holds `run_id` declare WORKER_CAPABILITY_POST_IMAGE on its claim (the
+        server-owned `metadata.worker_capabilities`, replaced by every claim that takes the run) — and,
+        for a `template` output, WORKER_CAPABILITY_NEWS_TEMPLATES too (only that worker draws an
+        `image_spec`; an older one would draw the alt text, which the server refuses), plus
+        WORKER_CAPABILITY_LAYOUTS_2B when its `image_layout` is a drop-2b layout (WORKER_LAYOUTS_2B: a
+        drop-2a image refuses a `pair` / `grid` loudly, failing the day)? Read at write
+        time, so a re-claim by another worker during a slow generation is honoured. False — text posts,
+        which every worker makes — when it did not, or when the run cannot be read (both logged
+        WARNING)."""
+        try:
+            run = await self.runs.get_run(run_id)
+        except Exception as e:
+            logger.warning("marketing script: could not read run_id=%s generation=%s to check its worker can "
+                           "render the post image (%s: %s) — this run's posts are frozen as text",
+                           run_id, gen_id, type(e).__name__, e)
+            return False
+        if run is None:
+            logger.warning("marketing script: run_id=%s generation=%s not found when its formats were frozen — "
+                           "this run's posts are frozen as text", run_id, gen_id)
+            return False
+        declared = run_worker_capabilities(run)
+        layouts_2b = template and image_layout in WORKER_LAYOUTS_2B
+        needed = ([WORKER_CAPABILITY_POST_IMAGE] + ([WORKER_CAPABILITY_NEWS_TEMPLATES] if template else [])
+                  + ([WORKER_CAPABILITY_LAYOUTS_2B] if layouts_2b else []))
+        missing = [c for c in needed if c not in declared]
+        if not missing:
+            return True
+        drop = ("drop-2b" if WORKER_CAPABILITY_LAYOUTS_2B in missing else "drop-2" if template else "drop-1")
+        logger.warning("marketing script: MARKETING_IMAGE_POSTS is on, but the worker holding run_id=%s "
+                       "(worker_version=%r, attempt %s) did not declare %s on its claim — an older worker "
+                       "image; this run's posts are frozen as TEXT (deploy the %s marketing worker)",
+                       run_id, str(run.get("worker_version") or "")[:64], run.get("attempts"),
+                       " + ".join(repr(c) for c in missing), drop)
+        return False
 
     async def _record_failure(self, run_id: str, row: Dict[str, Any], gen_id: str, e: Exception) -> None:
         """A generation that ended without a content verdict. Counts against MAX_WRITER_FAILURES

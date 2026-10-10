@@ -201,9 +201,11 @@ struct PerformanceBenchmarkRow: View {
                         .foregroundColor(badgeColor)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.xs)
+                        // Opaque: gain/loss on their own 15% tint are 4.39/4.34:1 in
+                        // light even on a white card (test_ios_theme_parity §6c).
                         .background(
                             Capsule()
-                                .fill(badgeColor.opacity(0.15))
+                                .fill(AppColors.cardBackgroundLight)
                         )
 
                     Spacer()

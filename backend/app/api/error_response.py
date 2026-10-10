@@ -304,6 +304,12 @@ class ErrorCode(str, Enum):
     # (MARKETING_JUDGE_MODE=shadow/off on the web). 409, deterministic for the run: the worker
     # closes the day `skipped` (skip_reason judge_not_enforced) instead of retrying.
     MARKETING_JUDGE_NOT_ENFORCED = "MARKETING_JUDGE_NOT_ENFORCED"
+    # create_posts for a Company Weekly TEMPLATE script (classes C/F, drop 2) that fails its
+    # re-check: `news_templates.revalidate` no longer composes the stored output from its stored
+    # fact sheet (a deploy changed the template, a hand edit), or MARKETING_CONTENT_CLASSES no longer
+    # lists its class. 409, deterministic for the run: the worker closes the day `skipped`
+    # (skip_reason template_refused) instead of retrying. Worker-only like the rest of this family.
+    MARKETING_TEMPLATE_REFUSED = "MARKETING_TEMPLATE_REFUSED"
     # The Telegram review bot (app/integrations/telegram.py, design doc §12.9) failed: flood
     # control, an outage, or a refused request. WEB-SIDE ONLY — raised inside the review sweep
     # and the webhook, which log it and never return it (the webhook answers 200 after its
@@ -338,6 +344,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ),
     ErrorCode.MARKETING_JUDGE_NOT_ENFORCED: (
         "The day's script was not checked by the compliance judge in enforce mode; no post is recorded."
+    ),
+    ErrorCode.MARKETING_TEMPLATE_REFUSED: (
+        "The day's template post failed its re-check; nothing was recorded."
     ),
     ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: (
         "The Telegram review bot could not reach Telegram; the review sweep retries on its next cycle."
@@ -712,6 +721,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.MARKETING_RUN_NOT_HELD: 409,
     ErrorCode.MARKETING_REQUEST_INVALID: 422,
     ErrorCode.MARKETING_JUDGE_NOT_ENFORCED: 409,
+    ErrorCode.MARKETING_TEMPLATE_REFUSED: 409,
     ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: 503,
     ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE: 503,
 }
@@ -859,6 +869,17 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
         return ErrorCode.MARKETING_ASSET_MISSING, _DEFAULT_STATUS[ErrorCode.MARKETING_ASSET_MISSING]
     if "marketingrunnotfound" in cls or "marketingassetnotfound" in cls:
         return ErrorCode.MARKETING_NOT_FOUND, _DEFAULT_STATUS[ErrorCode.MARKETING_NOT_FOUND]
+    if "marketingtemplaterefused" in cls:
+        # run_service.MarketingTemplateRefused (drop 2): a template script that fails its create_posts
+        # re-check, or whose class was switched off. Ahead of "marketingrunerror" (its base class's
+        # name is not a substring of it, but a future rename could make it one).
+        return ErrorCode.MARKETING_TEMPLATE_REFUSED, _DEFAULT_STATUS[ErrorCode.MARKETING_TEMPLATE_REFUSED]
+    if ("marketingnewsunavailable" in cls or "newstemplaterefused" in cls
+            or (cls == "logorejected" and "marketing" in cls_module)):
+        # Company Weekly's adapter / template / logo-header refusals (drop 2). They never cross the
+        # API — the template build catches each one and falls down its chain — and are named here for
+        # the classifier walk: "the script is not ready" is the honest answer if one ever did.
+        return ErrorCode.MARKETING_SCRIPT_NOT_READY, _DEFAULT_STATUS[ErrorCode.MARKETING_SCRIPT_NOT_READY]
     if "marketingrunerror" in cls:
         return ErrorCode.MARKETING_LEDGER_ERROR, _DEFAULT_STATUS[ErrorCode.MARKETING_LEDGER_ERROR]
     if "marketingpublishrefused" in cls:

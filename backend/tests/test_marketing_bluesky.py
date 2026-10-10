@@ -14,6 +14,7 @@ Hermetic: every request goes to an `httpx.MockTransport` (backend/conftest.py bl
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -1157,3 +1158,114 @@ def test_exception_hierarchy():
     assert not issubclass(bluesky.BlueskyExpiredTokenError, bluesky.BlueskyAuthError)
     e = bluesky.BlueskyRateLimitError("x")
     assert e.retry_at is None and e.method == "" and e.status is None and e.error is None and e.detail is None
+
+
+# ── the image post: blob CIDs and uploadBlob (drop 1, contract C9) ──────────────────────────────
+
+IMG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8 + b"\xff\xd9"
+IMG_CID = bluesky.raw_cid_for_sha256(hashlib.sha256(IMG).hexdigest())
+
+
+def _blob_answer(cid: str = IMG_CID, size: int = len(IMG), mime: str = "image/jpeg") -> tuple:
+    return 200, {"blob": {"$type": "blob", "ref": {"$link": cid}, "mimeType": mime, "size": size}}
+
+
+@pytest.mark.parametrize("data, cid", [
+    # The well-known CIDv1 (raw, sha2-256) of the empty input — computed elsewhere, not by this module.
+    (b"", "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"),
+    (b"hello world", "bafkreifzjut3te2nhyekklss27nh3k72ysco7y32koao5eei66wof36n5e"),
+])
+def test_raw_cid_for_sha256_matches_known_vectors(data, cid):
+    digest = hashlib.sha256(data).hexdigest()
+    assert bluesky.raw_cid_for_sha256(digest) == cid
+    assert bluesky.raw_cid_for_sha256(digest.upper()) == cid      # hex case does not matter
+    assert bluesky.raw_cid_for_sha256(f"  {digest}\n") == cid
+
+
+@pytest.mark.parametrize("digest", ["", "abc", "g" * 64, "0" * 63, "0" * 65, None, 12, b"0" * 64])
+def test_raw_cid_for_sha256_refuses_a_malformed_digest(digest):
+    with pytest.raises(ValueError, match="64 hex"):
+        bluesky.raw_cid_for_sha256(digest)
+
+
+def test_blob_ref_is_the_json_shape_a_record_names():
+    assert bluesky.blob_ref(IMG_CID, "image/jpeg", 12) == {
+        "$type": "blob", "ref": {"$link": IMG_CID}, "mimeType": "image/jpeg", "size": 12}
+
+
+@pytest.mark.asyncio
+async def test_upload_blob_sends_the_raw_bytes_with_their_type(bsky):
+    bsky.answers = [_blob_answer()]
+    out = await bluesky.upload_blob(PDS, ACCESS, data=IMG, mime_type="image/jpeg")
+    assert out == {"cid": IMG_CID, "mime_type": "image/jpeg", "size": len(IMG)}
+    req = bsky.last
+    assert req.method == "POST" and str(req.url) == f"{PDS}/xrpc/com.atproto.repo.uploadBlob"
+    assert req.headers["content-type"] == "image/jpeg" and req.content == IMG
+    assert req.headers["authorization"] == f"Bearer {ACCESS}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw, exc, why", [
+    ({"data": b""}, bluesky.BlueskyRefusedError, "blob must be"),
+    ({"data": None}, bluesky.BlueskyRefusedError, "blob must be"),
+    ({"data": "text"}, bluesky.BlueskyRefusedError, "blob must be"),
+    ({"data": b"x" * 1_000_001}, bluesky.BlueskyRefusedError, "blob must be"),
+    ({"mime_type": "image/jpeg\r\nX-Evil: 1"}, bluesky.BlueskyRefusedError, "blob type"),
+    ({"mime_type": "text/html"}, bluesky.BlueskyRefusedError, "blob type"),
+    ({"token": ""}, bluesky.BlueskyNotConfiguredError, "no access token"),
+])
+async def test_upload_blob_refuses_before_sending(bsky, kw, exc, why):
+    args = {"data": IMG, "mime_type": "image/jpeg", "token": ACCESS, **kw}
+    with pytest.raises(exc, match=why) as ei:
+        await bluesky.upload_blob(PDS, args["token"], data=args["data"], mime_type=args["mime_type"])
+    assert type(ei.value) is exc and bsky.requests == []
+
+
+@pytest.mark.asyncio
+async def test_upload_blob_accepts_exactly_the_lexicon_maximum(bsky):
+    data = b"x" * 1_000_000
+    bsky.answers = [_blob_answer(bluesky.raw_cid_for_sha256(hashlib.sha256(data).hexdigest()), len(data))]
+    assert (await bluesky.upload_blob(PDS, ACCESS, data=data, mime_type="image/jpeg"))["size"] == 1_000_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {}, {"blob": None}, {"blob": {"ref": {"$link": IMG_CID}, "mimeType": "image/jpeg"}},
+    {"blob": {"ref": {"$link": "not a cid"}, "mimeType": "image/jpeg", "size": 5}},
+    {"blob": {"ref": IMG_CID, "mimeType": "image/jpeg", "size": 5}},
+    {"blob": {"ref": {"$link": IMG_CID}, "mimeType": "image/jpeg", "size": True}},
+    {"blob": {"ref": {"$link": IMG_CID}, "mimeType": "image/jpeg", "size": -1}},
+    {"blob": {"ref": {"$link": IMG_CID}, "size": 5}},
+])
+async def test_upload_blob_without_a_readable_blob_is_ambiguous(bsky, body):
+    bsky.answers = [(200, body)]
+    with pytest.raises(bluesky.BlueskyAmbiguousError, match="without a readable blob"):
+        await bluesky.upload_blob(PDS, ACCESS, data=IMG, mime_type="image/jpeg")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, exc", [
+    ((400, {"error": "ExpiredToken", "message": "Token has expired"}), bluesky.BlueskyExpiredTokenError),
+    ((401, {"error": "AuthenticationRequired"}), bluesky.BlueskyAuthError),
+    ((400, {"error": "BlobTooLarge", "message": "too big"}), bluesky.BlueskyRefusedError),
+    ((429, {"error": "RateLimitExceeded"}, {"ratelimit-reset": str(int(time.time()) + 60)}),
+     bluesky.BlueskyRateLimitError),
+    ((502, {"error": "UpstreamFailure"}), bluesky.BlueskyAmbiguousError),
+    (_raiser(httpx.ConnectError), bluesky.BlueskyNotSentError),
+    (_raiser(httpx.ReadTimeout), bluesky.BlueskyAmbiguousError),
+])
+async def test_upload_blob_keeps_the_outcome_split_and_no_secret(bsky, answer, exc):
+    bsky.answers = [answer]
+    with pytest.raises(exc) as ei:
+        await bluesky.upload_blob(PDS, ACCESS, data=IMG, mime_type="image/jpeg")
+    assert type(ei.value) is exc and ei.value.__context__ is None
+    for secret in SECRETS:
+        assert secret not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_a_json_and_a_binary_body_at_once_is_refused_unsent(bsky):
+    with pytest.raises(bluesky.BlueskyRefusedError, match="nothing was sent"):
+        await bluesky._xrpc("POST", PDS, "com.atproto.repo.uploadBlob", bearer=ACCESS, payload={"a": 1},
+                            raw=(IMG, "image/jpeg"))
+    assert bsky.requests == []

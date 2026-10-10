@@ -341,12 +341,14 @@ def stage_voice(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *,
     script = ctx["script"]
     # A day with no video outlet needs no narration: voicing it anyway loaded Kokoro, minted an
     # unused public audio object, and — when the narration was too long or the child was killed —
-    # skipped or failed a day whose text posts were fine (review 2026-09-29).
+    # skipped or failed a day whose text posts were fine (review 2026-09-29). An image-only day
+    # (drop 1) needs none either: the post image is drawn, never narrated. Formats are the run's
+    # frozen ones when the script carries them (render.outlet_formats).
     from marketing import render
 
-    if not render.video_outlets(script.get("outlets") or []):
-        logger.info("narration SKIPPED run_id=%s: no outlet needs media (%s)", run["id"],
-                    script.get("outlets"))
+    if not render.video_needed(script):
+        logger.info("narration SKIPPED run_id=%s: no outlet needs the video (%s)", run["id"],
+                    render.outlet_formats(script))
         return {}
     lines = tm.narrated_lines(script)
     if not lines:

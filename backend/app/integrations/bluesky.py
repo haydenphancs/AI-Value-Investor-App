@@ -2,8 +2,8 @@
 Bluesky (atproto XRPC) — a thin client for the marketing PUBLISHER (design doc §12.10).
 
 Two callers, both driven by the publisher loop in `app/services/marketing/publisher_service.py`, in
-the WEB process: `app/services/marketing/outlet_bluesky.py` (publish, reconcile, retract — the
-account session) and `app/services/marketing/metrics_service.py` (the measure step: `get_posts` /
+the WEB process: `app/services/marketing/outlet_bluesky.py` (publish — an image post's blob first —,
+reconcile, retract — the account session) and `app/services/marketing/metrics_service.py` (the measure step: `get_posts` /
 `get_profile` on the PUBLIC AppView, which take no credential at all). The media worker never holds
 these credentials — it holds no social secret at all (rules/marketing.md §2).
 
@@ -77,10 +77,26 @@ The metrics reads — VERIFIED 2026-10-01 against the lexicons (`lexicons/app/bs
     quoteCount, bookmarkCount. A post that no longer exists is simply absent from `posts`.
   * app.bsky.actor.getProfile?actor=<handle or DID> → profileViewDetailed: did and handle are
     required; followersCount, followsCount and postsCount are optional integers.
+
+The image post (drop 1, 2026-10-09) — against the lexicons (`lexicons/com/atproto/repo/uploadBlob.json`,
+`lexicons/app/bsky/embed/images.json`, `embed/defs.json#aspectRatio`) and the data-model spec
+(https://atproto.com/specs/data-model — "blob" type and CIDs); recorded with the plan's research:
+  * com.atproto.repo.uploadBlob is a PROCEDURE whose input is the raw bytes ("*/*", sent with the
+    blob's own Content-Type) and whose output is `{"blob": <blob>}`; a blob in JSON is
+    `{"$type": "blob", "ref": {"$link": <CID>}, "mimeType", "size"}`. An uploaded blob that no record
+    references is garbage-collected by the PDS, so it is uploaded right before the record is written
+    (and again on every resend).
+  * A blob's CID is CIDv1, codec raw (0x55), sha2-256 multihash, base32 multibase ("bafkrei…"): it
+    depends on the bytes only, so a record can name its blob BEFORE the upload
+    (`raw_cid_for_sha256`) — which is what keeps the Bluesky record built once, in the claim.
+  * app.bsky.embed.images: `{"images": [{"image": <blob> (accept image/*, maxSize 1,000,000 in the
+    lexicon; the 2026-10-09 research note says 2 MB since April 2026 — the lower one is kept),
+    "alt": <string, required>, "aspectRatio": {"width", "height"}}]}`, at most 4 images.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import math
@@ -106,6 +122,19 @@ _GET_RECORD = "com.atproto.repo.getRecord"
 _DELETE_RECORD = "com.atproto.repo.deleteRecord"
 _GET_POSTS = "app.bsky.feed.getPosts"
 _GET_PROFILE = "app.bsky.actor.getProfile"
+_UPLOAD_BLOB = "com.atproto.repo.uploadBlob"
+
+#: The blob types `upload_blob` sends — a fixed allow-list, so a caller's value can never put a
+#: line break (or anything else) into the Content-Type header.
+BLOB_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+#: The largest blob sent: app.bsky.embed.images' image `maxSize` in the lexicon.
+MAX_BLOB_BYTES = 1_000_000
+#: The CIDv1 prefix of a raw-codec, sha2-256 block: version 1, codec raw (0x55), multihash sha2-256
+#: (0x12), digest length 32 (0x20).
+_RAW_SHA256_CID_PREFIX = bytes((0x01, 0x55, 0x12, 0x20))
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+#: A base32-lower CIDv1 as `upload_blob` reads it back ("b" + 58 characters for a sha2-256 one).
+_CID_RE = re.compile(r"b[a-z2-7]{20,120}")
 
 #: The PUBLIC Bluesky AppView: unauthenticated, cached reads of post views and profiles. Nothing here
 #: ever sends it a credential — it needs none, and the account session belongs to the PDS alone.
@@ -370,16 +399,24 @@ async def _xrpc(
     params: Optional[Union[Mapping[str, str], Sequence[Tuple[str, str]]]] = None,
     secrets: Iterable[str] = (),
     empty_ok: bool = False,
+    raw: Optional[Tuple[bytes, str]] = None,
 ) -> Dict[str, Any]:
     """One XRPC call. Returns the JSON object of a 2xx answer (`{}` for an empty 2xx when
     `empty_ok`); raises the typed exception family otherwise. `params` is a mapping, or a sequence
-    of (name, value) pairs for a query ARRAY (XRPC repeats the parameter name: `uris=a&uris=b`)."""
+    of (name, value) pairs for a query ARRAY (XRPC repeats the parameter name: `uris=a&uris=b`).
+    `raw` = (bytes, content type) sends a binary body instead of JSON (uploadBlob); never both."""
     secrets = tuple(s for s in secrets if s)
     url = f"{_https_base(host, method)}/xrpc/{method}"
     headers = {"Accept": "application/json"}
     if bearer is not None:
         headers["Authorization"] = f"Bearer {bearer}"
     content: Optional[bytes] = None
+    if raw is not None:
+        if payload is not None:
+            raise BlueskyRefusedError(f"bluesky {method}: a JSON and a binary body at once; nothing was sent",
+                                      method=method)
+        content = bytes(raw[0])
+        headers["Content-Type"] = raw[1]
     if payload is not None:
         try:
             # Serialised here (not httpx's `json=`) so the bytes are pinned — `"swapRecord":null`
@@ -590,6 +627,55 @@ async def get_record(host: str, *, repo: str, collection: str, rkey: str) -> Opt
         raise BlueskyAmbiguousError(f"bluesky {_GET_RECORD}: HTTP 200 without uri / value",
                                     method=_GET_RECORD, status=200)
     return {"uri": uri, "cid": cid if isinstance(cid, str) and cid else None, "value": value}
+
+
+def raw_cid_for_sha256(sha256_hex: str) -> str:
+    """The CID atproto gives a blob whose bytes have this sha256 (64 hex characters): CIDv1, codec
+    raw, sha2-256 multihash, base32-lower multibase — "bafkrei…". Pure; the empty input's is the
+    well-known "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku". ValueError for a
+    digest that is not 64 hex characters."""
+    digest = sha256_hex.strip().lower() if isinstance(sha256_hex, str) else ""
+    if not _SHA256_HEX_RE.fullmatch(digest):
+        raise ValueError("a blob CID needs a sha256 of 64 hex characters")
+    encoded = base64.b32encode(_RAW_SHA256_CID_PREFIX + bytes.fromhex(digest)).decode("ascii")
+    return "b" + encoded.lower().rstrip("=")
+
+
+def blob_ref(cid: str, mime_type: str, size: int) -> Dict[str, Any]:
+    """A blob as a record names it: `{"$type": "blob", "ref": {"$link": cid}, "mimeType", "size"}`."""
+    return {"$type": "blob", "ref": {"$link": cid}, "mimeType": mime_type, "size": int(size)}
+
+
+async def upload_blob(pds: str, access_jwt: str, *, data: bytes, mime_type: str) -> Dict[str, Any]:
+    """com.atproto.repo.uploadBlob — the bytes as the body, `Content-Type: <mime_type>`, on the
+    account's PDS. Returns {"cid": str, "mime_type": str, "size": int} read from the answer's blob.
+
+    An upload is never a post: nothing is visible until a record names the blob, and the same bytes
+    always get the same CID (a repeat upload is harmless). Empty bytes, more than 1,000,000 bytes, a
+    type outside BLOB_MIME_TYPES or no access token raise BEFORE anything is sent (Refused /
+    NotConfigured); a 2xx without a readable `blob` raises BlueskyAmbiguousError."""
+    method = _UPLOAD_BLOB
+    if not access_jwt:
+        raise BlueskyNotConfiguredError(f"bluesky {method}: no access token", method=method)
+    if mime_type not in BLOB_MIME_TYPES:
+        raise BlueskyRefusedError(f"bluesky {method}: blob type must be one of {sorted(BLOB_MIME_TYPES)}; "
+                                  "nothing was sent", method=method)
+    if not isinstance(data, (bytes, bytearray)) or not data or len(data) > MAX_BLOB_BYTES:
+        size = len(data) if isinstance(data, (bytes, bytearray)) else type(data).__name__
+        raise BlueskyRefusedError(f"bluesky {method}: blob must be 1-{MAX_BLOB_BYTES} bytes (got {size}); "
+                                  "nothing was sent", method=method)
+    body = await _xrpc("POST", pds, method, bearer=access_jwt, raw=(bytes(data), mime_type),
+                       secrets=(access_jwt, _app_password()))
+    blob = body.get("blob")
+    ref = blob.get("ref") if isinstance(blob, dict) else None
+    cid = ref.get("$link") if isinstance(ref, dict) else None
+    answered_type = blob.get("mimeType") if isinstance(blob, dict) else None
+    size = blob.get("size") if isinstance(blob, dict) else None
+    if not (isinstance(cid, str) and _CID_RE.fullmatch(cid) and isinstance(answered_type, str)
+            and isinstance(size, int) and not isinstance(size, bool) and size >= 0):
+        raise BlueskyAmbiguousError(f"bluesky {method}: HTTP 200 without a readable blob",
+                                    method=method, status=200)
+    return {"cid": cid, "mime_type": answered_type[:100], "size": size}
 
 
 async def delete_record(pds: str, access_jwt: str, *, repo: str, collection: str, rkey: str) -> Dict[str, Any]:

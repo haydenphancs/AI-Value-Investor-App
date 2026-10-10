@@ -21,6 +21,15 @@ Order is fixed: body → hashtags → CTA → disclaimer, and `check_composed` a
 with the disclaimer, fits the platform and carries no character the platform refuses — nothing
 is ever sliced to fit, and nothing is stripped at publish time.
 
+**Authorship** (drop 2, owner decision 4 of 2026-10-09): every disclaimer function, the budget and
+the composer take `authorship` — "ai" (the default: the class-A lesson writer; every Learn call
+site is unchanged, byte for byte) or "template" (the code-owned news templates of classes C/F,
+whose words come from a fixed template filled with public data). Template copy never says
+"Written with AI assistance" / "AI-assisted": it says "Built by a fixed template from public
+data." (+ "; narration voiced with AI." wherever a video is narrated) and always carries
+NON_AFFILIATION. An unknown authorship raises ValueError — never a disclaimer that drops (or
+invents) an AI line.
+
 Pure; stdlib only (plus the Violation type).
 """
 
@@ -90,6 +99,12 @@ _CATEGORY_TAG: Dict[str, str] = {
     # Journey levels
     "foundation": "#moneybasics", "analysis": "#investingbasics",
     "strategies": "#longterminvesting", "mastery": "#investorpsychology",
+    # Company Weekly news series (drop 2): category "news:<series id>" (`news_templates.SeriesSpec`).
+    # Never a person, ticker or cashtag; a series with no row here falls back to "#investing".
+    "news:ceo_buys": "#secfilings", "news:insider_buys": "#secfilings",
+    "news:thirteen_f": "#secfilings", "news:congress_count": "#congress",
+    "news:company_stakes": "#businessnews", "news:earnings": "#earnings",
+    "news:money_map": "#businessmodel", "news:theme_explainer": "#industrytrends",
 }
 _BASE_TAGS = ("#investing", "#financialliteracy")
 _TAGS_PER_PLATFORM: Dict[str, int] = {
@@ -101,33 +116,143 @@ def _date_label(run_date: date) -> str:
     return f"{run_date:%b} {run_date.day}, {run_date.year}"
 
 
-def disclaimer_long(run_date: date, *, video: bool = False) -> str:
-    ai = "Script and narration generated with AI." if video else "Written with AI assistance."
+#: Who wrote a post's words (drop 2, owner decision 4 of 2026-10-09). "ai": the class-A writer's
+#: lesson — every disclaimer says AI wrote it. "template": the code-owned news templates (classes
+#: C/F) — the words come from a fixed template filled with public data, so the copy says exactly
+#: that, and only a narrated video discloses AI (its Kokoro voice). Mirrors
+#: `schemas.marketing.TEMPLATE_AUTHORSHIP`; the default is "ai" everywhere.
+AUTHORSHIP_AI = "ai"
+AUTHORSHIP_TEMPLATE = "template"
+AUTHORSHIPS: Tuple[str, ...] = (AUTHORSHIP_AI, AUTHORSHIP_TEMPLATE)
+#: Template copy carries it ALWAYS (deterministic, and true for a company too): the disclaimer
+#: of every caption, the video's disclaimer card and the image footer (without its full stop).
+NON_AFFILIATION = "Not affiliated with anyone named."
+#: What a template disclaimer says instead of an AI line (owner wording, 2026-10-09): the text
+#: note on text/image captions, the video note wherever a narrated video is described.
+TEMPLATE_NOTE_TEXT = "Built by a fixed template from public data."
+TEMPLATE_NOTE_VIDEO = "Built by a fixed template from public data; narration voiced with AI."
+#: The AI lines of "ai" copy. A template caption carrying one is an authorship mismatch
+#: (`check_composed`): it would claim an AI wrote words a template wrote.
+AI_DISCLOSURES: Tuple[str, ...] = (
+    "Written with AI assistance", "AI-assisted", "Script and narration generated with AI",
+)
+
+
+def _authorship(value: Any, where: str) -> str:
+    """`value` when it is one of AUTHORSHIPS, exactly; ValueError otherwise (a typo, wrong case,
+    padding, None or a non-string) — never a disclaimer worded for a guess."""
+    if isinstance(value, str) and value in AUTHORSHIPS:
+        return value
+    raise ValueError(f"{where}: unknown authorship {str(value)[:40]!r} (one of {AUTHORSHIPS})")
+
+
+def disclaimer_long(run_date: date, *, video: bool = False, authorship: str = AUTHORSHIP_AI) -> str:
+    if _authorship(authorship, "disclaimer_long") == AUTHORSHIP_TEMPLATE:
+        note = f"{TEMPLATE_NOTE_VIDEO if video else TEMPLATE_NOTE_TEXT} {NON_AFFILIATION}"
+    else:
+        note = "Script and narration generated with AI." if video else "Written with AI assistance."
     return (
         f"{PUBLISHER} · Educational, impersonal information — not investment advice, "
         f"not a recommendation, not an offer. Investing involves risk, including loss of "
-        f"principal. {ai} {_date_label(run_date)}."
+        f"principal. {note} {_date_label(run_date)}."
     )
 
 
-def disclaimer_short() -> str:
+def disclaimer_short(authorship: str = AUTHORSHIP_AI) -> str:
+    if _authorship(authorship, "disclaimer_short") == AUTHORSHIP_TEMPLATE:
+        return f"Educational only, not investment advice. {NON_AFFILIATION} {PUBLISHER}"
     return f"Educational only, not investment advice. AI-assisted. {PUBLISHER}"
 
 
-def disclaimer_card(run_date: date) -> str:
-    """The text Phase 4 burns into the last video card (returned to the worker verbatim)."""
+def disclaimer_card(run_date: date, authorship: str = AUTHORSHIP_AI) -> str:
+    """The text Phase 4 burns into the last video card (returned to the worker verbatim). A video
+    is always narrated (Kokoro), so the template card carries the video note."""
+    if _authorship(authorship, "disclaimer_card") == AUTHORSHIP_TEMPLATE:
+        note = f"{TEMPLATE_NOTE_VIDEO} {NON_AFFILIATION}"
+    else:
+        note = "Script and narration generated with AI."
     return (
         "Educational, impersonal information — not investment advice. Investing involves "
-        f"risk. Script and narration generated with AI. {PUBLISHER} · {_date_label(run_date)}"
+        f"risk. {note} {PUBLISHER} · {_date_label(run_date)}"
     )
 
 
-def disclaimer_for(field: str, run_date: date) -> Optional[str]:
+#: Who wrote an image's words: "ai" — the class-A writer's lesson (drop 1). "template" — the
+#: code-owned news templates (drop 2), whose footer names its source and its as-of label instead of AI.
+IMAGE_AUTHORSHIPS: Tuple[str, ...] = AUTHORSHIPS
+#: A template footer's `source` / `as_of` slot: one line, no padding, no link, never the data
+#: vendor's name (rules §1: never name or credit FMP on a public asset).
+FOOTER_SLOT_MAX_CHARS = 160
+_FOOTER_SLOT_BANNED_RE = re.compile(
+    r"\bfmp\b|financial\s*modeling\s*prep|://|\bwww\.", re.IGNORECASE)
+_SLOT_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _footer_slot(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"image_footer: the template footer needs a non-blank {name}")
+    if value != value.strip() or "  " in value or _SLOT_CONTROL_RE.search(value):
+        raise ValueError(f"image_footer: {name} must be one plain line with no padding")
+    if len(value) > FOOTER_SLOT_MAX_CHARS:
+        raise ValueError(f"image_footer: {name} is {len(value)} chars (max {FOOTER_SLOT_MAX_CHARS})")
+    if _FOOTER_SLOT_BANNED_RE.search(value):
+        raise ValueError(f"image_footer: {name} names the data vendor or carries a link")
+    return value
+
+
+def image_footer(run_date: date, authorship: str = AUTHORSHIP_AI, *, source: Optional[str] = None,
+                 as_of: Optional[str] = None) -> str:
+    """The footer the worker burns into every post image (drop 1, 2026-10-09) — code-owned copy the
+    server then requires among the image's declared on-screen text. Pinned verbatim and run through
+    the public-copy scan in tests/test_marketing_post_copy.py (nothing scans it at runtime).
+
+    "ai" (a lesson image): the AI line and the run date; `source` / `as_of` are refused there.
+    "template" (a news image, drop 2): no AI line — the image's words are a template's — but its
+    `source` (a `company_news_rules.source_label`, never the data vendor) and its `as_of` label,
+    both REQUIRED, and NON_AFFILIATION. ValueError for an unknown authorship or a bad slot: a
+    template image must never carry an AI line it does not need, nor an AI image lose it."""
+    if _authorship(authorship, "image_footer") == AUTHORSHIP_AI:
+        if source is not None or as_of is not None:
+            raise ValueError("image_footer: source / as_of belong to the 'template' footer only")
+        return (f"Educational only · not investment advice · Written with AI assistance · "
+                f"{_date_label(run_date)} · {PUBLISHER}")
+    src = _footer_slot(source, "source")
+    when = _footer_slot(as_of, "as_of")
+    return (f"Educational only · not investment advice · Source: {src} · {when} · {PUBLISHER} · "
+            f"{NON_AFFILIATION.rstrip('.')}")
+
+
+#: Every `marketing_posts.format` (mirrors `schemas.marketing.POST_FORMATS`; a test pins them equal)
+#: and the ones a template post can take (`schemas.marketing.FROZEN_POST_FORMATS`).
+_POST_FORMATS: Tuple[str, ...] = ("video", "carousel", "image", "text", "podcast", "article")
+_TEMPLATE_FORMATS: Tuple[str, ...] = ("video", "image", "text")
+
+
+def made_with_ai(authorship: str, fmt: str) -> bool:
+    """The platform "made with AI" flag a post of this authorship and format carries
+    (`marketing_posts.metadata.made_with_ai`, stamped by create_posts; the X outlet ANDs it with
+    MARKETING_X_MADE_WITH_AI). "ai" → always True (an AI wrote the words). "template" → True only
+    for a video (its narration is voiced with AI); a template image or text post was written by a
+    fixed template from public data (owner decision 4, 2026-10-09). ValueError for an unknown
+    authorship or format, and for a format no template post takes — never a guessed flag."""
+    who = _authorship(authorship, "made_with_ai")
+    if not isinstance(fmt, str) or fmt not in _POST_FORMATS:
+        raise ValueError(f"made_with_ai: unknown format {str(fmt)[:40]!r}")
+    if who == AUTHORSHIP_AI:
+        return True
+    if fmt not in _TEMPLATE_FORMATS:
+        raise ValueError(f"made_with_ai: a template post is never a {fmt!r} post")
+    return fmt == "video"
+
+
+def disclaimer_for(field: str, run_date: date, authorship: str = AUTHORSHIP_AI) -> Optional[str]:
+    _authorship(authorship, "disclaimer_for")
     if field == "youtube_title":
         return None  # the description carries it; a 100-char title cannot
     if field in _COMPUTED_BUDGET:
-        return disclaimer_short()
-    return disclaimer_long(run_date, video=field in ("tiktok", "youtube_description", "instagram"))
+        return disclaimer_short(authorship)
+    return disclaimer_long(run_date, video=field in ("tiktok", "youtube_description", "instagram"),
+                           authorship=authorship)
 
 
 def hashtags_for(field: str, category: str) -> List[str]:
@@ -222,7 +347,8 @@ def carries_go_link(platform: Any, caption: Any) -> bool:
 
 
 def _suffix(field: str, category: str, run_date: date, allow_x_url: bool,
-            store_state: Any = STORE_PRELAUNCH) -> str:
+            store_state: Any = STORE_PRELAUNCH, *, authorship: str = AUTHORSHIP_AI) -> str:
+    _authorship(authorship, "_suffix")
     parts: List[str] = []
     tags = hashtags_for(field, category)
     if tags:
@@ -230,7 +356,7 @@ def _suffix(field: str, category: str, run_date: date, allow_x_url: bool,
     cta = cta_for(field, allow_x_url=allow_x_url, store_state=store_state)
     if cta:
         parts.append(cta)
-    disc = disclaimer_for(field, run_date)
+    disc = disclaimer_for(field, run_date, authorship)
     if disc:
         parts.append(disc)
     return "".join("\n\n" + p for p in parts)
@@ -333,13 +459,15 @@ def measured_length(field: str, text: str) -> int:
 
 
 def body_budget(field: str, category: str, run_date: date, *, allow_x_url: bool = False,
-                store_state: Any = STORE_PRELAUNCH) -> int:
-    """Maximum model-written body length for `field`, after the code-owned suffix (which carries the
-    run's value line, so the budget depends on `store_state` too)."""
+                store_state: Any = STORE_PRELAUNCH, authorship: str = AUTHORSHIP_AI) -> int:
+    """Maximum body length for `field` (model-written, or a template's), after the code-owned
+    suffix (which carries the run's value line and the authorship's disclaimer, so the budget
+    depends on `store_state` and `authorship` too)."""
+    _authorship(authorship, "body_budget")
     if field in _COMPUTED_BUDGET:
         # The suffix already starts with its own "\n\n" separator and its length is additive
         # (it is whitespace-separated from the body), so the budget is exactly what is left.
-        suffix = _suffix(field, category, run_date, allow_x_url, store_state)
+        suffix = _suffix(field, category, run_date, allow_x_url, store_state, authorship=authorship)
         return max(_MIN_BODY, LIMITS[field] - measured_length(field, suffix))
     return _BODY_CAPS[field]
 
@@ -358,13 +486,17 @@ class ComposedPost:
 
 
 def compose(platform: str, bodies: Dict[str, str], *, category: str, run_date: date,
-            allow_x_url: bool = False, store_state: Any = STORE_PRELAUNCH) -> ComposedPost:
+            allow_x_url: bool = False, store_state: Any = STORE_PRELAUNCH,
+            authorship: str = AUTHORSHIP_AI) -> ComposedPost:
+    _authorship(authorship, "compose")
     if platform == "youtube":
         desc = bodies["youtube_description"] + _suffix(
-            "youtube_description", category, run_date, allow_x_url, store_state)
+            "youtube_description", category, run_date, allow_x_url, store_state, authorship=authorship)
         return ComposedPost("youtube", bodies["youtube_title"], desc)
     return ComposedPost(
-        platform, None, bodies[platform] + _suffix(platform, category, run_date, allow_x_url, store_state),
+        platform, None,
+        bodies[platform] + _suffix(platform, category, run_date, allow_x_url, store_state,
+                                   authorship=authorship),
     )
 
 
@@ -387,12 +519,15 @@ def _forbidden_chars(field: str, text: Optional[str]) -> List[Violation]:
     return [Violation(field, "platform_forbidden_char", "; ".join(fixes))]
 
 
-def check_composed(post: ComposedPost, run_date: date) -> List[Violation]:
-    """The composed caption ends with its disclaimer exactly once, fits the platform, and
-    carries no character the platform's API refuses (`FORBIDDEN_CHARS`)."""
+def check_composed(post: ComposedPost, run_date: date, authorship: str = AUTHORSHIP_AI) -> List[Violation]:
+    """The composed caption ends with its disclaimer (the one `authorship` words) exactly once,
+    fits the platform, and carries no character the platform's API refuses (`FORBIDDEN_CHARS`).
+    A template post also must not carry an AI line ("authorship_mismatch"): it would claim an AI
+    wrote what a template wrote. The "ai" checks are unchanged."""
+    who = _authorship(authorship, "check_composed")
     out: List[Violation] = []
     field = "youtube_description" if post.platform == "youtube" else post.platform
-    disc = disclaimer_for(field, run_date)
+    disc = disclaimer_for(field, run_date, who)
     if disc and (not post.caption.endswith(disc) or post.caption.count(disc) != 1):
         out.append(Violation(post.platform, "disclaimer_missing", "must end with the disclaimer once"))
     n = measured_length(field, post.caption)
@@ -404,4 +539,10 @@ def check_composed(post: ComposedPost, run_date: date) -> List[Violation]:
         if not post.title or t > LIMITS["youtube_title"]:
             out.append(Violation("youtube", "over_platform_limit", f"title {t}"))
         out.extend(_forbidden_chars("youtube_title", post.title))
+    if who == AUTHORSHIP_TEMPLATE:
+        text = f"{post.title or ''}\n{post.caption}".casefold()
+        said = [line for line in AI_DISCLOSURES if line.casefold() in text]
+        if said:
+            out.append(Violation(post.platform, "authorship_mismatch",
+                                 f"a template post says {said[0]!r} - its words are a template's"))
     return out

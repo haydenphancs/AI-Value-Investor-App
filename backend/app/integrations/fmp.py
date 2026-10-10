@@ -2315,14 +2315,18 @@ class FMPClient:
         symbol: Optional[str] = None,
         page_size: int = 1000,
         max_pages: int = 10,
+        company_cik: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Insider (Form 4) rows filed on or after ``since_date``, newest-first.
 
         ``insider-trading/search`` with NO ``symbol`` is the market-wide feed (verified
         live 2026-09-23 against the Order Form's "10 Insider & Senate" package:
         ``transactionType=P-Purchase&limit=1000`` → 200, ~14 days per page). With
-        ``symbol`` it is the per-ticker feed. The path is already entitled, so this adds
-        no manifest entry.
+        ``symbol`` it is the per-ticker feed. With ``company_cik`` it is the per-ISSUER
+        feed — every row whose issuer is that CIK, every share class and symbol spelling
+        (verified live 2026-10-10: ``companyCik=0001326380`` returns only GME rows,
+        ``0000320193`` only AAPL, ``0000014693`` only BF-A / BF-B). The path is already
+        entitled, so this adds no manifest entry.
 
         Why this is NOT ``get_insider_trading``: that method swallows every failure to
         ``[]``, so an outage reads as "no insider bought anything" — and a card built on
@@ -2342,10 +2346,10 @@ class FMPClient:
             the tail is contiguous but the window is NOT covered, so a total built on it
             would be an under-count;
           * MARKET-WIDE only: a short or empty page (after page 0) while the oldest row is
-            still inside the window → ``FMPPartialPageException`` too. For one ticker a short
-            page is the normal end of its feed; for the whole market it means FMP served
-            fewer rows than asked (e.g. a silently lowered per-page cap), and returning would
-            publish a few days as "30 days".
+            still inside the window → ``FMPPartialPageException`` too. For one ticker or one
+            issuer a short page is the normal end of its feed; for the whole market it means
+            FMP served fewer rows than asked (e.g. a silently lowered per-page cap), and
+            returning would publish a few days as "30 days".
 
         Pages are walked SEQUENTIALLY because each stop decision needs the previous
         page. The walk stops on an empty page, on a short page, or once a page's OLDEST
@@ -2364,14 +2368,27 @@ class FMPClient:
             since_date: inclusive ``YYYY-MM-DD`` lower bound on ``filingDate``.
             transaction_type: e.g. ``"P-Purchase"``; omitted when None.
             symbol: a ticker for the per-ticker feed; None = market-wide.
+            company_cik: an issuer CIK (digits, e.g. ``"0001326380"``) for the per-issuer
+                feed, sent as ``companyCik``; None = not filtered by issuer. A value that is
+                not a digit string is a ValueError — silently dropping it would turn an
+                issuer read into a market-wide one.
         """
         try:
             since = datetime.strptime(since_date, "%Y-%m-%d").date().isoformat()
         except (TypeError, ValueError) as e:
             raise ValueError(f"since_date must be YYYY-MM-DD, got {since_date!r}") from e
+        cik: Optional[str] = None
+        if company_cik is not None:
+            cik = company_cik.strip() if isinstance(company_cik, str) else ""
+            if not (cik.isascii() and cik.isdigit() and len(cik) <= 10 and int(cik) > 0):
+                raise ValueError(f"company_cik must be a non-zero CIK digit string, got {company_cik!r}")
 
         endpoint = "insider-trading/search"
         sym = symbol.strip().upper() if isinstance(symbol, str) and symbol.strip() else None
+        # A per-ticker or per-issuer read ends on a short page; only the market-wide walk
+        # treats one inside the window as a lost tail.
+        scoped = sym is not None or cik is not None
+        scope = sym or (f"companyCik={cik}" if cik else "market-wide")
         rows: List[Dict[str, Any]] = []
         seen_before: set = set()   # row identities from EARLIER pages (see page-shift note)
         pages_done = 0
@@ -2381,6 +2398,8 @@ class FMPClient:
                 params["transactionType"] = transaction_type
             if sym:
                 params["symbol"] = sym
+            if cik:
+                params["companyCik"] = cik
             try:
                 # A LITERAL path (not `endpoint`): test_fmp_entitlement_parity reads the
                 # call sites to prove every reachable FMP path is on the Order Form.
@@ -2390,7 +2409,7 @@ class FMPClient:
                 if page == 0 and status in (403, 404):
                     logger.warning(
                         "%s unavailable (HTTP %s on page 0, symbol=%s) — returning empty",
-                        endpoint, status, sym or "market-wide",
+                        endpoint, status, scope,
                     )
                     return []
                 if page == 0:
@@ -2421,7 +2440,7 @@ class FMPClient:
 
             pages_done = page + 1
             if not data:
-                if sym is None and page > 0:
+                if not scoped and page > 0:
                     # The previous market-wide page was FULL and still inside the window;
                     # an empty next page means the feed stopped short, not that it ended.
                     raise FMPPartialPageException(
@@ -2448,7 +2467,7 @@ class FMPClient:
             if filed and min(filed) < since:
                 return rows
             if len(data) < page_size:
-                if sym is None:
+                if not scoped:
                     # Market-wide, a short page whose oldest row is still INSIDE the window is
                     # not the end of the feed (the whole market files far more than one page
                     # per month): FMP served fewer rows than asked — e.g. a silently lowered
@@ -2472,7 +2491,7 @@ class FMPClient:
         )
         logger.warning(
             "%s: page cap %d hit; oldest filingDate seen %s is still >= since %s — window "
-            "NOT covered (symbol=%s)", endpoint, max_pages, oldest, since, sym or "market-wide",
+            "NOT covered (symbol=%s)", endpoint, max_pages, oldest, since, scope,
         )
         raise FMPPartialPageException(
             f"{endpoint}: {pages_done} page(s) did not reach {since} (oldest {oldest})",

@@ -2212,8 +2212,9 @@ class WhaleHydrator:
 def _activity_signals(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Denormalized activity columns for `whales` (migration 145).
 
-    `last_activity_date` is MAX over the trade groups' OWN dates — the 13F filing date or
-    the congressional disclosure date — so it reflects the filer, not this job. Using
+    `last_activity_date` is MAX over the trade groups' OWN dates — the 13F QUARTER END
+    (FMP's institutional-ownership `date`, never the day the 13F was filed) or the
+    congressional disclosure date — so it reflects the filer, not this job. Using
     `datetime.now()` here (or leaning on `last_hydrated_at`) would make every monthly
     congressional snapshot rollover look like fresh activity even when zero trades were
     disclosed.

@@ -80,6 +80,10 @@ def _rebuild(fields: List[List[str]]) -> Dict[str, Any]:
             rows[int(m.group(2))][m.group(3)] = text
         elif lab.startswith("captions."):
             obj["captions"][lab[len("captions."):]] = text
+        elif lab == "image_post.title":
+            obj.setdefault("image_post", {"title": "", "paragraphs": []})["title"] = text
+        elif re.fullmatch(r"image_post\.paragraphs\[\d+\]", lab):
+            obj.setdefault("image_post", {"title": "", "paragraphs": []})["paragraphs"].append(text)
         else:
             raise AssertionError(f"unknown label {lab!r}")
     return obj
@@ -564,9 +568,35 @@ def test_shape_stats_on_the_0926_fixture():
         "yes_no_youtube_titles": 0,
         "mm_investor_framed_hooks": 0,
         "mm_investor_framed_youtube_titles": 0,
+        # The 09-26 run predates the post image (Drop 1): no package has an image title.
+        "image_titles": "0/32",
+        "yes_no_image_titles": 0,
+        "mm_image_titles_naming_company": "0/15",
+        "mm_investor_framed_image_titles": 0,
         "rounds_outside_enforced_window": 0,
     }
     assert not any(ch.isdigit() for p in _accepted() for ch in _fields(p)["hook"])
+
+
+def test_shape_stats_counts_the_post_image_title_under_the_hook_rules():
+    """Drop 1: the image title follows HOOK AND TITLES, so the acceptance counters read it — a counter
+    that never saw it would report a clean "0" for a rule nobody measured."""
+    prev = _preview_module()
+    row = next(p for p in _packages() if p.get("accepted"))
+    yes_no = dict(row, fields=list(row["fields"]) + [["image_post.title", "Is this the best stock to own?"],
+                                                     ["image_post.paragraphs[0]", "A paragraph."]])
+    plain = dict(row, fields=list(row["fields"]) + [["image_post.title", "How a balance sheet works"]])
+    stats = prev.shape_stats([yes_no, plain])
+    assert stats["image_titles"] == "2/2"
+    assert stats["yes_no_image_titles"] == 1
+    none = prev.shape_stats([row])
+    assert none["image_titles"] == "0/1" and none["yes_no_image_titles"] == 0
+
+
+def test_rebuild_reads_the_post_image_labels_back():
+    obj = _rebuild([["hook", "h"], ["image_post.title", "T"], ["image_post.paragraphs[0]", "P1"],
+                    ["image_post.paragraphs[1]", "P2"]])
+    assert obj["image_post"] == {"title": "T", "paragraphs": ["P1", "P2"]}
 
 
 def test_shape_stats_measures_lines_under_the_asked_floor_by_default():

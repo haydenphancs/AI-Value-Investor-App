@@ -58,7 +58,9 @@ tick (a 429 inside the send spends that claimed attempt — `run_day_job` counts
 while the back-off is open no attempt is claimed at all). Neither cycle raises (except
 CancelledError).
 
-What may reach a message: counts, dates, statuses, platform names, links to our own posts, and
+What may reach a message: counts, dates, statuses, platform names, post formats (video / image / text —
+a "Formats:" line under the per-platform counts, and the format closing each rejected / failed row;
+drop 1), links to our own posts, and
 SCRUBBED (`outlet_base.scrub`), single-line, length-capped server strings — never a caption, a title or
 any other model text. A value that cannot be read is left out or reported "unreadable"; it is never
 shown as 0.
@@ -79,7 +81,7 @@ from typing import Any, Awaitable, Dict, Iterable, List, Optional, Tuple
 from app.config import settings
 from app.integrations import telegram
 from app.integrations.telegram import MAX_MESSAGE_CHARS, TelegramException, TelegramRateLimitException
-from app.schemas.marketing import RUN_STAGES
+from app.schemas.marketing import POST_FORMATS, RUN_STAGES
 from app.services.marketing import metrics_service, outlets, review_service, selection, smart_link
 from app.services.marketing.outlet_base import scrub
 from app.services.marketing.outlet_upload_post import PLATFORMS as UPLOAD_POST_PLATFORMS
@@ -187,8 +189,29 @@ _SKIP_HINTS: Dict[str, str] = {
     "source_ineligible": "the selected lesson left the content pool — check content_pool's eligibility",
     "empty_narration": "the video stage had nothing to narrate — check the voice stage in the worker logs",
     "narration_too_long": "the narration ran past MARKETING_MAX_VIDEO_SECONDS — check the voice stage",
-    "unrenderable_text": "the video stage could not draw the script (a glyph Inter lacks, e.g. an emoji) — "
-                         "check the render stage",
+    "unrenderable_text": "the render stage could not draw the script or the post image (a glyph Inter lacks, "
+                         "e.g. an emoji, or text that cannot fit) — check the render stage",
+    # Drop 1: the post image stayed over its byte cap at every JPEG quality step (marketing/render.py).
+    "image_too_large": "the post image stayed over its byte cap at every JPEG quality — check the render "
+                       "stage in the worker logs",
+    # Drop 2: create_posts answered 409 MARKETING_TEMPLATE_REFUSED (marketing/render.py stage_posts). Every
+    # switch a `MarketingTemplateRefused` raise names is named here too (pinned by test_marketing_metrics.py):
+    # the class switch (drop 2a) and the per-series switch (drop 2b).
+    "template_refused": "the day's company post failed the template re-check, or MARKETING_CONTENT_CLASSES / "
+                        "MARKETING_NEWS_SERIES no longer lists its class or series (or this deploy no longer "
+                        "ships the series) — read the web log 'create_posts TEMPLATE REFUSED' for this run",
+}
+
+#: A fallback step's outcome (`script_service.SERIES_OUTCOMES`) → the words the owner reads in
+#: `_series_note`. An outcome missing here is shown as its sanitised code.
+_SERIES_OUTCOME_WORDS: Dict[str, str] = {
+    "no_candidates": "nothing qualified",
+    "all_recent": "everything was already posted",
+    "all_refused": "every candidate failed the template checks",
+    "unavailable": "its data source was unavailable",
+    "timeout": "its data source timed out",
+    "error": "an error",
+    "budget": "out of time",
 }
 
 _STATUS_ORDER = ("published", "retracted", "rejected", "failed", "skipped", "queued", "approved",
@@ -269,6 +292,37 @@ def _meta(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _metrics(row: Dict[str, Any]) -> Dict[str, Any]:
     return row["metrics"] if isinstance(row.get("metrics"), dict) else {}
+
+
+def _series_name(series: Any) -> Optional[str]:
+    """A series id's operator label (`selection.SERIES` names; "lesson" → "Lesson"), or None for a value
+    that is not a known id — a stored string is never shown verbatim."""
+    if series == selection.LESSON:
+        return "Lesson"
+    known = selection.SERIES_BY_ID.get(series) if isinstance(series, str) else None
+    return known.name if known is not None else None
+
+
+def _series_note(run: Any) -> str:
+    """What the day posted, from the server-owned run metadata the selection mirror writes (drop 2,
+    contract D13): "Money Map", or "Money Map (fell back from CEO Buys: nothing qualified)" when the day's
+    first series did not post. "" when the run records no known series (a lesson-only plan, or a run from
+    before drop 2). Pure; only operator labels and fixed words reach the text — never a stored string —
+    so it is safe in the digest day line and in a review-bundle message."""
+    meta = run.get("metadata") if isinstance(run, dict) and isinstance(run.get("metadata"), dict) else {}
+    series = meta.get("series")
+    name = _series_name(series)
+    if name is None:
+        return ""
+    trail = meta.get("series_trail") if isinstance(meta.get("series_trail"), list) else []
+    first = next((t for t in trail if isinstance(t, dict) and t.get("outcome") != "chosen"
+                  and t.get("series") != series and _series_name(t.get("series")) is not None), None)
+    if first is None:
+        return name
+    outcome = first.get("outcome")
+    words = _SERIES_OUTCOME_WORDS.get(outcome) if isinstance(outcome, str) else None
+    why = words or _key(outcome) or "it did not post"
+    return f"{name} (fell back from {_series_name(first.get('series'))}: {why})"
 
 
 def _platform(row: Dict[str, Any]) -> Optional[str]:
@@ -868,6 +922,28 @@ def _status_counts(posts: List[Dict[str, Any]]) -> Dict[str, int]:
     return dict(out)
 
 
+#: The order formats are listed in (drop 1: a platform posts a video, an image card, or text);
+#: any other ledger format follows, sorted.
+_FORMAT_ORDER = ("video", "image", "text")
+
+
+def _post_format(post: Dict[str, Any]) -> str:
+    """The post's format when it is one the ledger knows (POST_FORMATS), else "unknown" — never a raw
+    column value in the message."""
+    fmt = post.get("format")
+    return fmt if isinstance(fmt, str) and fmt in POST_FORMATS else "unknown"
+
+
+def _format_counts(posts: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    """{format: {status: n}} over `posts` (the live ones) — the digest's "Formats:" line."""
+    out: Dict[str, Dict[str, int]] = {}
+    for p in posts:
+        counts = out.setdefault(_post_format(p), {})
+        status = _key(p.get("status")) or "unknown"
+        counts[status] = counts.get(status, 0) + 1
+    return out
+
+
 def _expired_kind(post: Dict[str, Any]) -> Optional[str]:
     """For an expired post: `approved` (approved, never sent), `asked` (sent with buttons, never
     decided), `preview` (its platform was not enabled — a read-only preview), `unshown` (never reached
@@ -1033,6 +1109,10 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
                 stage = _key(run.get("stage"))
                 text = ("failed before any stage completed" if stage == RUN_STAGES[0]
                         else f"failed after {stage or '?'}")
+            note = _series_note(run) if text else ""
+            if note:
+                # Drop 2: which series the day took, and what it fell back from.
+                text = f"{text} · {note}"
             if text:
                 rows.append((d, text))
             for mb, stage in _memory_peaks(run):
@@ -1295,8 +1375,9 @@ def summarize_week(
 
     expired: Counter = Counter()
     reasons: Counter = Counter()
-    rejected_rows: List[Tuple[str, str, str]] = []
-    failed_rows: List[Tuple[str, str, str]] = []
+    # (platform, run day, why, format) — the format (video / image / text) closes each row.
+    rejected_rows: List[Tuple[str, str, str, str]] = []
+    failed_rows: List[Tuple[str, str, str, str]] = []
     for p in live:
         kind = _expired_kind(p)
         if kind:
@@ -1308,13 +1389,15 @@ def summarize_week(
             reason = review.get("reason")
             code = reason if isinstance(reason, str) and reason in REJECT_REASONS else None
             reasons[code or "none"] += 1
-            rejected_rows.append((_label(_platform(p)), run_txt, REJECT_REASONS[code] if code else "no reason"))
+            rejected_rows.append((_label(_platform(p)), run_txt, REJECT_REASONS[code] if code else "no reason",
+                                  _post_format(p)))
         elif p.get("status") == "failed":
             pub = _meta(p).get("publish") if isinstance(_meta(p).get("publish"), dict) else {}
             category = _key(pub.get("category"))
             err = p.get("last_error") or pub.get("error")
             detail = _clean(err, _ERROR_CAP) if err not in (None, "") else "no error recorded"
-            failed_rows.append((_label(_platform(p)), run_txt, f"{category}: {detail}" if category else detail))
+            failed_rows.append((_label(_platform(p)), run_txt, f"{category}: {detail}" if category else detail,
+                                _post_format(p)))
 
     escalated_rows = None
     if escalated is not None:
@@ -1355,7 +1438,7 @@ def summarize_week(
     return {
         "now": now, "week_start": week_start, "week_end": week_end, "posts_capped": bool(posts_capped),
         "rehearsal": len(rows) - len(live), "live": len(live), "status_totals": _status_counts(live),
-        "by_platform": by_platform, "expired": dict(expired),
+        "by_platform": by_platform, "by_format": _format_counts(live), "expired": dict(expired),
         "rejections": {"by_reason": dict(reasons), "rows": rejected_rows}, "failed_rows": failed_rows,
         "engagement": _engagement(live), "metrics_enabled": bool(metrics_enabled),
         "followers": _followers([p for p in measured if isinstance(p, dict)], now=now) if measured is not None else None,
@@ -1470,6 +1553,11 @@ def _render_digest(r: Dict[str, Any], cap: int) -> str:
             lines.append(f"  (only the first {_n(WEEK_POST_LIMIT)} posts were read)")
         lines += _capped([f"• {platform}: {_ordered_statuses(counts)}"
                           for platform, counts in sorted(r["by_platform"].items())], cap, indent="")
+        formats = r.get("by_format") or {}
+        if formats:
+            keys = [f for f in _FORMAT_ORDER if f in formats] + sorted(f for f in formats if f not in _FORMAT_ORDER)
+            lines.append("Formats: " + " · ".join(
+                f"{f} {_n(sum(formats[f].values()))} ({_ordered_statuses(formats[f])})" for f in keys))
         exp = r.get("expired") or {}
         parts = [(exp.get("approved"), "approved but never sent", "approved but never sent"),
                  (exp.get("asked"), "not reviewed", "not reviewed"),
@@ -1485,10 +1573,10 @@ def _render_digest(r: Dict[str, Any], cap: int) -> str:
             if by.get("none"):
                 reason_parts.append(f"no reason {_n(by['none'])}")
             lines.append(f"Rejected {_n(len(rej['rows']))}: " + " · ".join(reason_parts))
-            lines += _capped([f"❌ {p} · run {d} · {why}" for p, d, why in rej["rows"]], cap)
+            lines += _capped([f"❌ {p} · run {d} · {why} · {fmt}" for p, d, why, fmt in rej["rows"]], cap)
         if r["failed_rows"]:
             lines.append(f"Failed {_n(len(r['failed_rows']))}:")
-            lines += _capped([f"✖ {p} · run {d} · {why}" for p, d, why in r["failed_rows"]], cap)
+            lines += _capped([f"✖ {p} · run {d} · {why} · {fmt}" for p, d, why, fmt in r["failed_rows"]], cap)
     if r.get("rehearsal"):
         lines.append(f"(+{_n(r['rehearsal'])} rehearsal rows — dry run, never publishable; not counted)")
     lines.append("")

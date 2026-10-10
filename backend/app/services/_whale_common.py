@@ -1285,8 +1285,9 @@ def compute_activity(
     ``last_filing_period`` is a 13F quarter (``"2026-Q2"``); congressional snapshots key on
     a wall-clock month (``"2026-08"``) and must NOT parse as a quarter, or a politician
     would be rendered as having filed a 13F they never file.
-    ``last_activity_date`` is ``MAX(whale_trade_groups.date)`` — the one field whose
-    meaning is consistent across both sources (13F filing date / congressional disclosure).
+    ``last_activity_date`` is ``MAX(whale_trade_groups.date)``: for a congressional filer
+    the disclosure date, for a 13F filer the QUARTER END the filing reports (FMP's
+    institutional-ownership ``date``) — never the day the 13F was filed.
     """
     # `str(...)` before `.strip()`: this reads a Supabase row where a column could be any
     # JSON scalar, and `(123 or "").strip()` is an AttributeError, not a fallback.

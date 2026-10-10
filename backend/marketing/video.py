@@ -4,8 +4,9 @@ and ffmpeg argv builder, a runner with a timeout and a heartbeat, and an ffprobe
 must pass before a single byte is uploaded. Stdlib only (ffmpeg/ffprobe are subprocesses); nothing
 here imports app.* (tests/test_marketing_worker.py scans it).
 
-The video: N card PNGs (1080×1920 — card 0 the brand card during the hook, then the text cards,
-the LAST one the disclaimer card), the narration m4a (AAC 48 kHz stereo) of duration D, and
+The video: N card PNGs (1080×1920 — the content cards, the first of them on screen from frame 0
+through the hook (drop 1: no brand card opens a video any more), the LAST one the disclaimer
+card), the narration m4a (AAC 48 kHz stereo) of duration D, and
 captions.ass timed on the narration's absolute clock. The output lasts D + tail: the disclaimer
 card fills [D, D + tail] and the audio is PADDED with silence (`apad`) to the same length.
 
@@ -240,25 +241,34 @@ def _split_line_starts(lines: List[int], starts: Dict[int, int], k: int, end_ms:
 
 
 def timeline(words: Sequence[Mapping[str, Any]], n_cards: int, narration_seconds: float,
-             tail_seconds: float) -> List[Segment]:
+             tail_seconds: float, *, hook_card: bool = True) -> List[Segment]:
     """Which card is on screen when. PURE.
 
-    `n_cards` INCLUDES the brand card (index 0) and the disclaimer card (index n_cards − 1); the
-    text cards are 1 … n_cards − 2 (there may be none). `words` is the narration's word table
-    (`{w, s, e, line}`, line 0 = the hook, 1 … L = the script lines).
+    `n_cards` INCLUDES the disclaimer card (index n_cards − 1). `words` is the narration's word
+    table (`{w, s, e, line}`, line 0 = the hook, 1 … L = the script lines). Two openings:
 
-    * Card 0 covers the hook: [0, first word of the first script line), or [0, D] when no script
-      line has words.
-    * The text cards split the script lines that HAVE words into contiguous groups, as evenly as
-      possible by line count; a card switches at the first word of its group's first line. With
-      more text cards than lines, every line opens a card and the extra cards split the lines'
-      time (in proportion to each line's span).
+    * `hook_card=False` — what the render uses since drop 1 (2026-10-09: "videos open on the
+      content, never on our logo"): there is NO hook card. Cards 0 … n_cards − 2 are the content
+      cards; card 0 opens at 0 and stays through the hook AND its own group's lines, so the first
+      frame is content. With 6 lines and 3 cards a card still switches on lines 3 and 5 (the
+      prompt's "lines 1-2, 3-4 and 5-6"; tests/test_marketing_video.py pins it).
+    * `hook_card=True` — the pre-drop-1 shape, kept for callers that still model it: card 0 is a
+      card shown over the hook alone (it was the brand card), [0, first word of the first script
+      line), and the text cards are 1 … n_cards − 2 (there may be none).
+
+    Either way:
+
+    * The cards after the opening one split the script lines that HAVE words into contiguous
+      groups, as evenly as possible by line count (the first len % k groups carry one extra
+      line); a card switches at the first word of its group's first line. With more cards than
+      lines, every line opens a card and the extra cards split the lines' time (in proportion to
+      each line's span). When no script line has words, card 0 covers [0, D] alone.
     * Every segment lasts at least MIN_SEGMENT_SECONDS: a boundary too close to the one before is
       pushed later, then one too close to the next (or to D) is pulled earlier — each by as
       little as needed, so a switch can land a little off its line's first word. When the cards
-      cannot ALL get the minimum inside D ((k + 1)·MIN > D), the TRAILING text cards are dropped —
-      k = ⌊D / MIN⌋ − 1 text cards at most — and the lines are regrouped over the cards left.
-      Deterministic; a dropped card appears in no segment; the brand and disclaimer cards are
+      cannot ALL get the minimum inside D, the TRAILING cards are dropped — at most ⌊D / MIN⌋
+      cards before the disclaimer — and the lines are regrouped over the cards left.
+      Deterministic; a dropped card appears in no segment; card 0 and the disclaimer card are
       never dropped. The one exception to the minimum: a narration shorter than 2·MIN shows card 0
       alone over [0, D] (shorter than MIN when D is).
     * The disclaimer segment is exactly [D, D + tail] — `tail` is the caller's (the disclaimer
@@ -270,7 +280,9 @@ def timeline(words: Sequence[Mapping[str, Any]], n_cards: int, narration_seconds
     ValueError: n_cards < 2, D ≤ 0, tail ≤ 0 (or non-finite), a malformed word, a word past
     D + WORD_OVERRUN_SECONDS, or lines that do not start in line order."""
     if isinstance(n_cards, bool) or not isinstance(n_cards, int) or n_cards < 2:
-        raise ValueError(f"n_cards must be an int >= 2 (brand + disclaimer), got {n_cards!r}")
+        raise ValueError(f"n_cards must be an int >= 2 (an opening card + the disclaimer), got {n_cards!r}")
+    if not isinstance(hook_card, bool):
+        raise ValueError(f"hook_card must be a bool, got {hook_card!r}")
     narration = _finite("narration_seconds", narration_seconds)
     tail = _finite("tail_seconds", tail_seconds)
     if narration <= 0:
@@ -281,23 +293,38 @@ def timeline(words: Sequence[Mapping[str, Any]], n_cards: int, narration_seconds
     lines = [ln for ln in sorted(starts) if ln >= 1]
     min_ms = _ms(MIN_SEGMENT_SECONDS)
     end_ms = int(math.floor(narration * 1000.0 + 1e-6))        # never past D
-    n_text = n_cards - 2
-    # k text cards + the brand card, each ≥ MIN, must fit in D: (k + 1)·MIN ≤ D. That is the
-    # ONLY reason a card is dropped — the two clamps below always succeed within it.
-    k = max(min(n_text, end_ms // min_ms - 1), 0) if lines else 0
+    # `chosen` = the switch times after card 0 (card i+1 starts at chosen[i]). Every shown card
+    # needs ≥ MIN inside D — that is the ONLY reason a card is dropped; the two clamps below
+    # always succeed within it.
     chosen: List[int] = []
-    if k:
-        chosen = (_even_group_starts(lines, starts, k) if k <= len(lines)
-                  else _split_line_starts(lines, starts, k, end_ms))
-        prev = 0                              # forward: each ≥ MIN after the previous (brand ≥ MIN)
+    if hook_card:
+        n_grouped = n_cards - 2               # the text cards; the hook card is card 0
+        # k text cards + the hook card: (k + 1)·MIN ≤ D.
+        k = max(min(n_grouped, end_ms // min_ms - 1), 0) if lines else 0
+        if k:
+            chosen = (_even_group_starts(lines, starts, k) if k <= len(lines)
+                      else _split_line_starts(lines, starts, k, end_ms))
+        shown_grouped = len(chosen)
+    else:
+        n_grouped = n_cards - 1               # every card before the disclaimer; card 0 opens at 0
+        # k cards: k·MIN ≤ D (card 0 is always shown).
+        k = max(min(n_grouped, end_ms // min_ms), 1) if lines else 1
+        if k > 1:
+            groups = (_even_group_starts(lines, starts, k) if k <= len(lines)
+                      else _split_line_starts(lines, starts, k, end_ms))
+            chosen = groups[1:]               # group 0 starts at 0: the hook is card 0's too
+        shown_grouped = len(chosen) + 1
+    if chosen:
+        prev = 0                              # forward: each ≥ MIN after the previous (card 0 ≥ MIN)
         for i, b in enumerate(chosen):
             chosen[i] = prev = max(b, prev + min_ms)
         nxt = end_ms                          # backward: each ≥ MIN before the next (last ≤ D − MIN)
-        for i in range(k - 1, -1, -1):
+        for i in range(len(chosen) - 1, -1, -1):
             chosen[i] = nxt = min(chosen[i], nxt - min_ms)
-    if n_text and len(chosen) < n_text:
-        logger.info("timeline: %d of %d text cards fit %.3fs of narration over %d timed lines "
-                    "(trailing cards dropped)", len(chosen), n_text, narration, len(lines))
+    if n_grouped and shown_grouped < n_grouped:
+        logger.info("timeline: %d of %d %s cards fit %.3fs of narration over %d timed lines "
+                    "(trailing cards dropped)", shown_grouped, n_grouped,
+                    "text" if hook_card else "content", narration, len(lines))
     segments: List[Segment] = []
     prev_t = 0.0
     for card, b in enumerate(chosen):

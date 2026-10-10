@@ -165,7 +165,7 @@ async def test_posted_message_replies_to_the_review_message_with_a_retract_butto
     (msg,) = tg.of("sendMessage")
     assert [m for m, _ in tg.calls] == ["sendMessage"]
     assert msg["chat_id"] == OWNER
-    assert msg["text"] == f"✅ Posted on X · run 2026-09-29\n{X_URL}"
+    assert msg["text"] == f"✅ Posted on X · text · run 2026-09-29\n{X_URL}"
     assert msg["reply_parameters"] == {"message_id": REVIEW_MID, "allow_sending_without_reply": True}
     assert msg["reply_markup"] == {"inline_keyboard": [[{"text": "🗑 Retract", "callback_data": f"d:{pid}"}]]}
     assert msg["link_preview_options"] == {"is_disabled": True}
@@ -217,7 +217,7 @@ async def test_the_retract_button_needs_a_delete_api_and_an_id(ledger, tg, monke
     await feed.feed_cycle()
     (msg,) = tg.of("sendMessage")
     lines = msg["text"].split("\n")
-    assert lines[0] == f"✅ Posted on {platform.upper()} · run 2026-09-29"
+    assert lines[0] == f"✅ Posted on {platform.upper()} · text · run 2026-09-29"
     assert lines[1] == url_line
     if button:
         assert msg["reply_markup"] == rs.retract_keyboard(pid)
@@ -316,7 +316,7 @@ async def test_a_post_that_changed_status_before_the_stamp_is_not_stamped(ledger
     assert any("changed before the stamp" in r.getMessage() for r in caplog.records)
     posted, retracted = tg.of("sendMessage")
     assert posted["text"].startswith("✅ Posted on X")
-    assert re.fullmatch(_RETRACTED_RE + r" · X · run 2026-09-29", retracted["text"])
+    assert re.fullmatch(_RETRACTED_RE + r" · X · text · run 2026-09-29", retracted["text"])
     assert tg.of("editMessageText") == []
     tg.calls.clear()
     assert await feed.feed_cycle() == {"posted": 0, "retracted": 0, "alerts": 0, "failed": 0, "rate_limited": 0}
@@ -382,7 +382,7 @@ async def test_a_retract_edits_the_posted_message_and_removes_its_keyboard(ledge
     (edit,) = tg.of("editMessageText")
     assert edit["chat_id"] == OWNER and edit["message_id"] == 777
     assert edit["reply_markup"] == {"inline_keyboard": []}
-    assert re.fullmatch(rf"✅ Posted on X · run 2026-09-29\n{re.escape(X_URL)}\n\n{_RETRACTED_RE}", edit["text"])
+    assert re.fullmatch(rf"✅ Posted on X · text · run 2026-09-29\n{re.escape(X_URL)}\n\n{_RETRACTED_RE}", edit["text"])
     _no_parse_mode(tg)
     row = _post(ledger, pid)
     assert row["status"] == "retracted" and row["metadata"]["retract_notified_at"]
@@ -399,7 +399,7 @@ async def test_a_retract_without_an_editable_message_is_a_new_message(ledger, tg
     assert (await feed.feed_cycle())["retracted"] == 1
     assert tg.of("editMessageText") == []
     (msg,) = tg.of("sendMessage")
-    assert re.fullmatch(_RETRACTED_RE + r" · X · run 2026-09-29", msg["text"])
+    assert re.fullmatch(_RETRACTED_RE + r" · X · text · run 2026-09-29", msg["text"])
     assert "reply_markup" not in msg
     assert _post(ledger, pid)["metadata"]["retract_notified_at"]
 
@@ -414,7 +414,7 @@ async def test_a_failed_edit_falls_back_to_a_new_message(ledger, tg, edit_answer
     tg.script["editMessageText"] = [edit_answer]
     assert (await feed.feed_cycle())["retracted"] == 1
     assert [m for m, _ in tg.calls] == ["editMessageText", "sendMessage"]
-    assert re.fullmatch(_RETRACTED_RE + r" · X · run 2026-09-29", tg.of("sendMessage")[0]["text"])
+    assert re.fullmatch(_RETRACTED_RE + r" · X · text · run 2026-09-29", tg.of("sendMessage")[0]["text"])
     assert _post(ledger, pid)["metadata"]["retract_notified_at"]
 
 
@@ -761,3 +761,33 @@ def test_feed_uses_the_review_sweeps_shared_state():
     src = feed.__loader__.get_source(feed.__name__)  # type: ignore[union-attr]
     assert "review_service._rate_limited_until = " in src
     assert outlets.retract_capable is feed.outlets.retract_capable
+
+
+# ── the format in every feed message (drop 1, contract C12) ───────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, fmt, shown", [
+    ("bluesky", "image", "image"), ("x", "text", "text"), ("tiktok", "video", "video"),
+    # a value outside the ledger's formats is never echoed into a message
+    ("x", "<b>image</b>", "?"), ("x", None, "?"), ("x", 7, "?"),
+])
+async def test_the_posted_message_names_the_posts_format(ledger, tg, platform, fmt, shown):
+    _seed(ledger, platform=platform, fmt=fmt, external_id="7300000000000000000",
+          external_url="https://example.invalid/post/1")
+    await feed.feed_cycle()
+    (msg,) = tg.of("sendMessage")
+    assert msg["text"].split("\n")[0] == f"✅ Posted on {platform.upper()} · {shown} · run 2026-09-29"
+    if shown == "?":
+        assert "<b>" not in msg["text"] and "None" not in msg["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fmt, shown", [("image", "image"), ("<script>", "?")])
+async def test_alerts_and_retract_notes_name_the_format_too(ledger, tg, fmt, shown):
+    _seed(ledger, status="failed", fmt=fmt, extra_meta={"alert_kind": "failed", "alert_text": "boom"})
+    _seed(ledger, status="retracted", fmt=fmt)
+    await feed.feed_cycle()
+    texts = [m["text"] for m in tg.of("sendMessage")]
+    assert re.fullmatch(_RETRACTED_RE + rf" · X · {re.escape(shown)} · run 2026-09-29", texts[0])
+    assert texts[1] == f"boom\n(X · {shown} · run 2026-09-29)"

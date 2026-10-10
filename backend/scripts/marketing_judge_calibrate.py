@@ -468,9 +468,14 @@ async def run_calls(calls: List[Call], config: str, samples: int, concurrency: i
 
 
 def _flagged_labels(o: Outcome) -> Dict[str, List[jd.Verdict]]:
+    """Every field a verdict ACTS on, as production enforces it (`jd.verdict_targets`: the label the
+    judge named plus every field holding a 3+-word copy of its quote, or a short quote's single
+    home) — not only the named label, which since the drop-1 review rounds is never moved: scoring
+    the label alone would count a mislabelled verdict as a miss plus a false positive."""
     out: Dict[str, List[jd.Verdict]] = defaultdict(list)
     for v in o.verdicts:
-        out[jd.base_label(v.label)].append(v)
+        for target in jd.verdict_targets(v, o.call.fields):
+            out[jd.base_label(target)].append(v)
     return out
 
 

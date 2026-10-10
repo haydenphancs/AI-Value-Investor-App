@@ -32,6 +32,7 @@ from app.services.marketing import content_pool
 from app.services.marketing import grounding as g
 from app.services.marketing import writer_prompts as wp
 from app.services.marketing import writer_service as ws
+from test_marketing_content_a_writer_gate import image_post_of
 
 RUN_DATE = date(2026, 9, 21)
 
@@ -88,6 +89,8 @@ def _baseline(key: str) -> Tuple[content_pool.ContentItem, Dict[str, Any]]:
             "facebook": " ".join(gs[4:6]), "x": short, "threads": gs[6], "bluesky": short,
             "linkedin": " ".join(gs[:3]),
         },
+        # Drop 1: the post image's text is a required field; the clean baseline carries one.
+        "image_post": image_post_of(gs),
     }
     base = ws.validate_package(pkg, item, RUN_DATE)
     assert base.ok and not base.violations, (key, [(v.field, v.code, v.detail)

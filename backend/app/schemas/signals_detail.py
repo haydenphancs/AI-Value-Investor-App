@@ -26,14 +26,14 @@ class SignalHolderResponse(BaseModel):
     whale_id: Optional[str] = None
     name: str                              # fund or member name
     subtitle: str = ""                     # whale: "13F fund" · congress: role "Senator (KY)" · ceo: officer title
-    transaction_date: Optional[str] = None  # ISO; congress/ceo = traded date
-    disclosure_date: Optional[str] = None   # ISO; congress = filed date; whale = filing date; ceo = Form 4 filing date
+    transaction_date: Optional[str] = None  # ISO; congress/ceo = traded date; whale = the 13F QUARTER END (never a filing date)
+    disclosure_date: Optional[str] = None   # ISO; congress = filed date; ceo = Form 4 filing date; whale = None (13F rows carry none)
 
     # ── whale (13F): allocation headline + $ estimate ──
     allocation_percent: Optional[float] = None   # portfolio weight (%)
-    allocation_change: Optional[float] = None    # QoQ change in allocation points
+    allocation_change: Optional[float] = None    # QoQ portfolio-WEIGHT change; NOT sent for whale rows since 2026-10-09 (it moves with price — the card counts share increases)
     is_new_position: Optional[bool] = None        # brand-new position this filing
-    amount_est: Optional[float] = None            # whale: implied-price $ ESTIMATE · ceo: EXACT Σ shares × price
+    amount_est: Optional[float] = None            # whale: shares ADDED × implied price (an ESTIMATE) · ceo: EXACT Σ shares × price
 
     # ── ceo: shares bought (iOS derives the average price as amount_est ÷ shares) ──
     shares: Optional[float] = None
@@ -54,5 +54,5 @@ class SignalTickerDetailResponse(BaseModel):
     company_name: str = ""                 # header
     price: Optional[float] = None          # header (may be null if the profile fetch failed)
     market_cap: Optional[float] = None     # header
-    as_of_date: Optional[str] = None       # whale: latest filing/hydration · congress: latest disclosure · ceo: latest Form 4 filing
+    as_of_date: Optional[str] = None       # whale: latest registry hydration · congress: latest disclosure · ceo: latest Form 4 filing
     holders: List[SignalHolderResponse] = []

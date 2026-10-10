@@ -1329,6 +1329,92 @@ class Settings(BaseSettings):
     # fee: above it the digest adds a ⚠️ line. 0 = no alert. A negative, non-finite or absurd value
     # (either setting) fails the deploy at boot — Railway keeps the previous deployment running.
     MARKETING_WEEKLY_COST_WARN_USD: float = Field(1.0, ge=0, le=10_000, allow_inf_nan=False)
+    # ── Drop 1 (2026-10-09): image posts and review bundles. All fail-closed. ──────────────────
+    # Review BUNDLES (services/marketing/review_service.py): one Telegram decision per bundle (the
+    # run's video posts; its image/text posts) instead of one per post. Off = today's per-post review.
+    MARKETING_REVIEW_BUNDLES: bool = False
+    # Image posts: Facebook, LinkedIn, Threads, Bluesky (and X, below) post the day's 4:5 image card
+    # (title + 2-4 paragraphs, rendered by the worker) with their existing caption, instead of text
+    # alone. Read at WRITE time (script_service, when the accepted output is assembled) and frozen into
+    # it as `post_formats`, like the store state: the worker learns the formats only from the script
+    # read-back — it has no environment variable of its own for this. Off = every such post is text.
+    MARKETING_IMAGE_POSTS: bool = False
+    # X image posts, on top of MARKETING_IMAGE_POSTS (X's media upload and alt text are billed and its
+    # image price is unconfirmed until the one live test post — OWNER_TASKS). Off = X stays text.
+    MARKETING_X_IMAGES: bool = False
+    # What one X IMAGE post is journaled and reserved at, in micro-dollars, until the console confirms
+    # the real price (the text-post price is outlet_x's own constant). 0..$1.00; anything else fails
+    # the deploy at boot.
+    MARKETING_X_IMAGE_POST_MICROS: int = Field(200_000, ge=0, le=1_000_000)
+    # ── Drop 2 (Company Weekly, 2026-10-09): which content classes selection may pick ───────────
+    # "A" = the Learn lesson (writer + judge); "C" = filings templates (CEO Buys, Insider Buys, 13F
+    # Season, Congress Count); "F" = fundamentals templates (Company Stakes, Earnings vs Estimates,
+    # Money Map, theme explainer). Comma-separated, case- and space-insensitive; normalised to the
+    # sorted set ("c, f" -> "A,C,F"). "A" is always on (every chain ends in the lesson); an unknown
+    # token is dropped and logged at ERROR — fail-closed, never a failed deploy. Read at kick time AND
+    # at create_posts (schemas.marketing.parse_content_classes). Default "A" = today's lesson-only
+    # selection, byte for byte. The owner sets "A,C,F" after migration 190.
+    MARKETING_CONTENT_CLASSES: str = "A"
+
+    @field_validator("MARKETING_CONTENT_CLASSES", mode="before")
+    @classmethod
+    def _content_classes_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_CONTENT_CLASSES` to the sorted, comma-joined set of known classes,
+        always including "A". The inline literal mirrors `schemas.marketing.CONTENT_CLASSES` (config
+        imports no app module; tests/test_marketing_run_service.py pins the two equal)."""
+        import logging
+
+        known = ("A", "C", "F")
+        if value is None:
+            return "A"
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_CONTENT_CLASSES: not a string (%s) — using A only", type(value).__name__)
+            return "A"
+        tokens = {t.strip().upper() for t in value.split(",") if t.strip()}
+        unknown = sorted(tokens - set(known))
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_CONTENT_CLASSES: ignored unknown class(es) %s",
+                ",".join(t[:16] for t in unknown[:10]))
+        return ",".join(sorted((tokens & set(known)) | {"A"}))
+
+    # ── Drop 2b (Company Weekly): the per-series switch, under the class switch above ────────────
+    # Which NEWS SERIES selection may use. A series runs only when its class is in
+    # MARKETING_CONTENT_CLASSES, its id is listed HERE and its code has shipped
+    # (selection.SHIPPED_SERIES); a series off here falls through to the next step of its day's
+    # chain, which always ends in the lesson. Ids: ceo_buys, insider_buys, thirteen_f, congress_count,
+    # company_stakes, earnings, money_map, theme_explainer. Comma-separated, case- and
+    # space-insensitive, normalised to the sorted set. An unknown id is dropped here, and a listed
+    # series that has not shipped yet is dropped at kick time — both logged at ERROR, never a failed
+    # deploy. Empty = no news series (every posting day is the lesson). Read at kick time
+    # (selection.parse_news_series), and only while a news class is on: with the classes at "A"
+    # nothing reads it. The default is the Drop-2a series, so a series shipped later stays OFF until
+    # the owner adds its id here (a Railway variable) — one series at a time.
+    MARKETING_NEWS_SERIES: str = "ceo_buys,insider_buys,thirteen_f,money_map"
+
+    @field_validator("MARKETING_NEWS_SERIES", mode="before")
+    @classmethod
+    def _news_series_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_NEWS_SERIES` to the sorted, comma-joined set of known series ids. The
+        inline literal mirrors `selection.SERIES` (config imports no app module;
+        tests/test_marketing_news_series_switch.py pins the two equal). Whether a series has SHIPPED is
+        code, not configuration: it is decided at kick time, never here. A non-string is no series."""
+        import logging
+
+        known = ("ceo_buys", "insider_buys", "thirteen_f", "congress_count", "company_stakes", "earnings",
+                 "money_map", "theme_explainer")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_NEWS_SERIES: not a string (%s) — no news series", type(value).__name__)
+            return ""
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        unknown = sorted(tokens - set(known))
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_NEWS_SERIES: ignored unknown series %s",
+                ",".join(t[:24] for t in unknown[:10]))
+        return ",".join(sorted(tokens & set(known)))
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

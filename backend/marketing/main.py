@@ -100,17 +100,21 @@ SCRIPT_POLL_BUDGET_SECONDS = 15 * 60
 WORKER_DEADLINE_SECONDS = 30 * 60
 #: A stage may START only with its margin of the tick left (STAGE_START_MARGINS). The media stages
 #: get the largest: their worst case — voice: its shared synthesis budget + encode + probe +
-#: upload (`voice.worst_case_seconds`); render: its ffmpeg timeout + download + probes + upload
-#: (`render.worst_case_seconds`) — plus their backend calls (BACKEND_CALL_WORST_SECONDS each,
+#: upload (`voice.worst_case_seconds`); render: its ffmpeg timeout + download + probes + upload,
+#: plus the post image's render and upload, plus the logo downloads of a template day
+#: (`render.worst_case_seconds`) — plus their backend
+#: calls (BACKEND_CALL_WORST_SECONDS each,
 #: retries included) ends well inside MARKETING_RUN_STALE_SECONDS even when it starts at the
 #: latest moment allowed, and the stage heartbeats every minute meanwhile, so its claim never looks
 #: abandoned. (It can end past WORKER_DEADLINE_SECONDS on a slow backend; the stale window is the
 #: bound that matters.) A stage that cannot start in time is deferred to the next tick.
-#: tests/test_marketing_worker.py pins the relation for every stage.
-STAGE_START_MARGIN_SECONDS = 12 * 60
+#: tests/test_marketing_worker.py pins the relation for every stage. 13 min since drop 2a: the
+#: render's worst case grew by a template day's logo downloads (render.worst_case_seconds: 771.25 s).
+STAGE_START_MARGIN_SECONDS = 13 * 60
 #: A quick stage (one or two backend calls) needs only a small margin: gating it on the media
 #: stages' 12 minutes closed a finished day `failed` and spent an attempt for a one-second stage
-#: (review 2026-09-29). `voiced`/`rendered` use the small margin on a day with no video outlet.
+#: (review 2026-09-29). `voiced`/`rendered` use the small margin on a day with nothing to make
+#: (`stage_start_margin`: no video for `voiced`; no video and no post image for `rendered`).
 QUICK_STAGE_MARGIN_SECONDS = 2 * 60
 STAGE_START_MARGINS: Dict[str, int] = {
     "selected": QUICK_STAGE_MARGIN_SECONDS,
@@ -301,6 +305,19 @@ class BackendClient:
             return resp.json()
         raise WorkerAPIError(f"{method} {path} failed after {_HTTP_ATTEMPTS} attempts: {last}")
 
+    #: What THIS worker image can render, declared on every claim (drop 1). The server records it on
+    #: the run it hands over and freezes `image` post formats only for a run whose holder declared
+    #: "post_image" (`render.py` renders the 4:5 post image) — an older image, which declares nothing,
+    #: keeps getting text posts. "news_templates" (drop 2a): this image draws a TEMPLATE script (the
+    #: per-line video with its opening card, the `image_spec` post image, the logos) — the server
+    #: starts a company-news day only for a run whose holder declared it; an older image gets the
+    #: lesson. "layouts_2b" (drop 2b): this image also draws the `pair` and `grid` template images
+    #: (cards.SHIPPED_LAYOUTS lists them) — without it the server drops company_stakes and
+    #: theme_explainer from the day's chain (a drop-2a image would refuse their image and fail the day).
+    #: Mirrors app.schemas.marketing.WORKER_CAPABILITIES (standalone: no `app.*` import);
+    #: tests/test_marketing_worker.py pins the two equal.
+    WORKER_CAPABILITIES = ("post_image", "news_templates", "layouts_2b")
+
     def claim_run(
         self, run_date: date, worker_version: str, dry_run: bool, *,
         claim_nonce: Optional[str] = None, resume_only: bool = False,
@@ -308,6 +325,7 @@ class BackendClient:
         body: Dict[str, Any] = {
             "run_date": run_date.isoformat(), "worker_version": worker_version,
             "dry_run": dry_run, "resume_only": resume_only,
+            "capabilities": list(self.WORKER_CAPABILITIES),
         }
         if claim_nonce:
             body["claim_nonce"] = claim_nonce
@@ -633,7 +651,8 @@ def stage_voice(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) ->
 
 
 def stage_render(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Phase 4: the day's video (marketing/render.py), lazily imported like the voice stage."""
+    """Phase 4: the day's video, and (drop 1) its 4:5 post image (marketing/render.py), lazily
+    imported like the voice stage."""
     from marketing import render
 
     return render.stage_render(api, run, ctx, skip=SkipRun, uploader=upload_signed, hasher=sha256_hex)
@@ -662,14 +681,23 @@ def _close_skipped(api: BackendClient, run: Dict[str, Any], reason: str) -> str:
 
 
 def stage_start_margin(name: str, ctx: Dict[str, Any]) -> int:
-    """How much of the tick a stage needs left to START (STAGE_START_MARGINS). A media stage on a
-    day with no video outlet does nothing, so it takes the quick margin."""
+    """How much of the tick a stage needs left to START (STAGE_START_MARGINS). A media stage with
+    nothing to make takes the quick margin: `voiced` on a day no outlet gets the video, `rendered`
+    on a day no outlet gets the video or the post image (drop 1; an image-only day keeps the full
+    margin — its render and upload are not a one-second stage)."""
     margin = STAGE_START_MARGINS.get(name, STAGE_START_MARGIN_SECONDS)
     if name in ("voiced", "rendered"):
         from marketing import render
 
         script = ctx.get("script") if isinstance(ctx.get("script"), dict) else {}
-        if not render.video_outlets(script.get("outlets") or []):
+        try:
+            used = set(render.outlet_formats(script).values())
+        except render.RenderInputError as e:
+            # The stage itself fails loudly on it; never start it short of time meanwhile.
+            logger.warning("stage %s: the script's formats do not read (%s) — keeping the full margin", name, e)
+            return margin
+        needs = {"video"} if name == "voiced" else {"video", "image"}
+        if not used & needs:
             return QUICK_STAGE_MARGIN_SECONDS
     return margin
 

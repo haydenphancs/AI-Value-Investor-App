@@ -9,15 +9,17 @@ The worker half of the marketing engine (design doc §12). It is its **own Railw
 | `requirements.txt` | the worker's direct Python deps: httpx, torch 2.6 (CPU), kokoro/misaki 0.9.4, spaCy's English model (hash-pinned), Pillow, fontTools |
 | `constraints.txt` | EVERY package of the image pinned to the versions the 2026-09-26 spike measured (applied with `-c`); keep it in step with `requirements.txt` |
 | `main.py` | entrypoint: ET gate → claim → preflight → stages → checkpoint → exit. Stages: `selected` and `scripted` (kick-and-poll the web side for the day's script), `voiced` (Phase 3), `rendered` and `assets_ready` (Phase 4). A finished run closes `media_ready` |
-| `voice.py` | the `voiced` stage: Kokoro in a child process (`python -m marketing.voice child …`), seeded, bit-exact AAC, word timings in the audio asset's metadata, the pointer in the checkpoint PATCH. Skipped on a day with no video outlet |
-| `render.py` | the `rendered` stage (read back the verified narration, download + sha check, cards, captions, one ffmpeg call, register the video with what it drew) and the `assets_ready` stage (record the day's posts) |
-| `cards.py` | pure: the 1080×1920 PNG cards (brand, text, stat, disclaimer) in the brand colours; never truncates |
+| `voice.py` | the `voiced` stage: Kokoro in a child process (`python -m marketing.voice child …`), seeded, bit-exact AAC, word timings in the audio asset's metadata, the pointer in the checkpoint PATCH. Skipped on a day no outlet gets the video (an image-only day included) |
+| `render.py` | the `rendered` stage (read back the verified narration, download + sha check, cards, captions, one ffmpeg call, register the video with what it drew; since drop 1 also the 4:5 post image, registered as a `card` with `image_role` `post_image`) and the `assets_ready` stage (record each outlet in the run's FROZEN `post_formats`, falling back to `POST_FORMAT` for an older script) |
+| `cards.py` | pure: the 1080×1920 PNG cards (text, stat, disclaimer; the brand card only when a script has no text card — videos open on the first text card since drop 1; a TEMPLATE script's video opens on its company `opening` card — kicker, logo plate(s), chip, figure, headline — then one text card per narration line, drop 2a) and the 1080×1350 baseline-JPEG post image (title + paragraphs + footer, ≤ 950,000 bytes) in the brand colours; company logos are drawn unaltered on light plates, a wordmark (the company name) when a logo is missing; never truncates. `LAYOUTS` and the closed `image_spec` schema mirror `app/services/marketing/template_onscreen.py` (pinned by tests) |
+| `news_layouts.py` | pure: a template script's post image from its closed `image_spec` — the `rows`, `spotlight` and `bars` layouts (drop 2a; `pair`/`grid` are refused until 2b), declaring exactly the server's allowed strings; never draws the `image_post` alt text |
+| `logos.py` | the template day's company logos: only `https://<bucket origin>/storage/v1/object/public/marketing-media/logos/<sha[:32]>.<png|jpg>` is fetched (origin = the run's verified narration URL), sha256-checked, decoded under a 2048² pixel bound, within one 60 s budget; any failure is a wordmark, never a skipped day |
 | `video.py` | the timeline, the ffmpeg argv, the runner and the ffprobe gate — never `-shortest` |
 | `timings.py` | pure: engine tokens → the script's own display words with times |
 | `captions.py` | pure: timed words → the ASS caption file libass burns |
 | `preview.py` | local check: `./venv_marketing/bin/python -m marketing.preview` (from `backend/`) renders the full video — voice, cards, captions — into the gitignored `out/` |
 | `assets/fonts/` | Inter Bold (static, OFL) for the cards, the caption burn and measuring |
-| `assets/brand/` | the Caydex logo for the brand and disclaimer cards (the image copies only `marketing/`) |
+| `assets/brand/` | the Caydex logo for the disclaimer card (and the fallback brand card; the image copies only `marketing/`) |
 
 Railway setup (service `marketing-worker`, all in the DASHBOARD — Railway lets no new service use a
 config file, and it ignored a custom Dockerfile path): **Root Directory `/backend/marketing`** (the
@@ -52,7 +54,9 @@ row with `metadata.preflight.voice.ready` and `metadata.preflight.render.ready` 
 `<stage>_cgroup_peak_mb` where the kernel reports it). A day can also close `skipped` with a
 reason that says why: `rest_day`, `content_rejected`, `writer_unavailable`, `empty_pool`,
 `source_ineligible`, `narration_too_long`, `unrenderable_text` (a glyph the font lacks, or a card
-that cannot fit), `judge_not_enforced` (the web runs MARKETING_JUDGE_MODE other than `enforce`). A
+that cannot fit), `judge_not_enforced` (the web runs MARKETING_JUDGE_MODE other than `enforce`),
+`template_refused` (the day's template post failed the server's re-check at `create_posts`, or
+MARKETING_CONTENT_CLASSES no longer lists its class). A
 409 `MARKETING_RUN_NOT_HELD` means this tick no longer holds the run; the worker logs a WARNING and
 exits 0. Never set `MARKETING_RUN_DATE` to a future date: the backend refuses it (a claim is a
 UNIQUE row, so a sample run would consume the real day).

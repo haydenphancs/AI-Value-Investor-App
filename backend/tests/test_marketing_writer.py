@@ -36,6 +36,16 @@ What is pinned:
   every composed post but the YouTube title carries that state's code-owned value line exactly
   once, the package records the state, X stays link-free, and the draft AND repair prompts ask for
   that state's own X budget — an unknown state (or none) is the prelaunch line that claims least.
+* **The image post** (drop 1, contract C8, 2026-10-09): a required `image_post {title,
+  paragraphs}` whose limits sit inside the server's bounds; every shape guard fires alone with its
+  boundary accepted; a broken rule anywhere in it (person, link, emoji, promise, a question its
+  next paragraph answers yes) drops ONLY the image — never the package, never an outlet — and the
+  one repair hears it; a myth title frames only the first paragraph; line breaks fold; an endless
+  list is cut before the scan; the candidate that kept its image wins a tie on outlets; and what
+  is stored reads back through the server's normaliser and `freeze_post_formats` (image formats
+  when kept, text when dropped). With image posts OFF (`image_posts=False`, drop-1 review
+  2026-10-09) an image-only problem buys no repair, the tie-break ignores the image, the drop is
+  INFO, and the image is still validated and stored.
 
 The fake drafts are built from a REAL eligible item's fact sheet (`journey:mr_market`), so the
 grounding validator passes on their own merits — a precondition test proves the base package is
@@ -92,6 +102,14 @@ def _usable_sentences(item: content_pool.ContentItem) -> List[str]:
     return out
 
 
+def _image_of(g: List[str]) -> Dict[str, Any]:
+    """A clean `image_post` (drop 1) from usable fact sentences: a card-title-shaped title cut from
+    the seventh and the first two sentences from there on that fit a paragraph."""
+    paras = [s for s in g[6:] if len(s) <= 200][:2]
+    assert len(paras) == 2, g
+    return {"title": " ".join(g[6].split()[:4]).rstrip(",.:;"), "paragraphs": paras}
+
+
 def _clean_package() -> Dict[str, Any]:
     g = _usable_sentences(_item())
     return {
@@ -112,6 +130,7 @@ def _clean_package() -> Dict[str, Any]:
             "bluesky": g[7],
             "linkedin": " ".join(g[:5]),
         },
+        "image_post": _image_of(g),
     }
 
 
@@ -154,10 +173,13 @@ JUDGE_OFF = "off"
 
 
 async def _run(client: FakeClient, *, generation_id: str = "gen-0001", allow_x_url: bool = False,
-               store_state: Any = post_copy.STORE_PRELAUNCH):
+               store_state: Any = post_copy.STORE_PRELAUNCH, image_posts: bool = True):
+    # `image_posts` stated, never left to the writer's default: the image repair and tie-break tests
+    # below are about a run that WILL draw the image.
     return await ws.generate_package(
         _item(), TEMPLATE, RUN_DATE, generation_id=generation_id, client=client,
         allow_x_url=allow_x_url, store_state=store_state, judge_mode=JUDGE_OFF,
+        image_posts=image_posts,
     )
 
 
@@ -195,10 +217,17 @@ def _walk_schema(node: Dict[str, Any], path: str = "$") -> None:
 def test_response_schema_is_well_formed_at_every_level():
     _walk_schema(wp.RESPONSE_SCHEMA)
     top = wp.RESPONSE_SCHEMA
-    assert set(top["required"]) == set(top["properties"]) == set(ws.SHARED_FIELDS) | {"captions"}
+    assert (set(top["required"]) == set(top["properties"])
+            == set(ws.SHARED_FIELDS) | {"captions", wp.IMAGE_FIELD})
     caps = top["properties"]["captions"]
     assert list(caps["properties"]) == list(post_copy.CAPTION_FIELDS)
     assert caps["required"] == list(post_copy.CAPTION_FIELDS)
+    # Drop 1: the image post is {title: str, paragraphs: [str]}, both required (counts and
+    # lengths are enforced by the validator, never by the schema).
+    img = top["properties"][wp.IMAGE_FIELD]
+    assert img["required"] == ["title", "paragraphs"]
+    assert img["properties"]["title"] == {"type": "STRING"}
+    assert img["properties"]["paragraphs"] == {"type": "ARRAY", "items": {"type": "STRING"}}
     # Code-owned or out-of-phase parts never appear in what the model is asked to write.
     names = set()
 
@@ -1341,6 +1370,7 @@ def _mm_package(key: str):
             "facebook": " ".join(g[4:6]), "x": short, "threads": g[6], "bluesky": short,
             "linkedin": " ".join(g[:3]),
         },
+        "image_post": _image_of(g),
     }
     return item, pkg
 
@@ -1379,3 +1409,431 @@ def test_the_gate_passes_the_items_company_terms():
                                                    "Kirkland looked like a bargain to many.")
     assert "class_b_evaluative" not in _hook_codes_for(
         item, pkg, "Bulk packs looked like a bargain to shoppers.")
+
+
+# ── the image post (drop 1, contract C8, 2026-10-09) ─────────────────────────────────────────
+
+from app.schemas import marketing as sch  # noqa: E402
+
+#: The five platforms whose posts carry the image (contract C2); video platforms never do.
+_IMAGE_PLATFORMS = {"facebook", "linkedin", "x", "threads", "bluesky"}
+_MISSING = object()
+
+
+def _img_pool(min_len: int = 1, max_len: int = 99) -> List[str]:
+    """Fact-sheet words with their edge punctuation stripped, and none with a digit or an inner
+    dot — so no sentence end, no number and no dotted token enters a filler by accident."""
+    pool = [w.strip(".,;:!?\"'()") for w in _word_stream()]
+    pool = [w for w in pool if w and "." not in w and not any(ch.isdigit() for ch in w)
+            and min_len <= len(w) <= max_len]
+    assert len(pool) >= 10, pool
+    return pool
+
+
+def _img_words(n: int, *, max_len: int = 99) -> str:
+    pool = _img_pool(max_len=max_len)
+    return " ".join(pool[i % len(pool)] for i in range(n))
+
+
+def _img_chars(n: int, *, min_len: int = 1) -> str:
+    """Fact-sheet words joined to EXACTLY `n` characters: whole words (of at least `min_len`
+    letters) while that leaves room, then one closing word of the exact remaining length."""
+    body = _img_pool(min_len=min_len)
+    closers: Dict[int, str] = {}
+    for w in _img_pool():
+        closers.setdefault(len(w), w)
+    out, i = "", 0
+    for _ in range(10_000):
+        sep = 1 if out else 0
+        room = n - len(out) - sep
+        if room in closers and room <= 12:
+            out += " " * sep + closers[room]
+            break
+        w = body[i % len(body)]
+        i += 1
+        if room - len(w) - 1 >= 2:
+            out += " " * sep + w
+    assert len(out) == n, (n, len(out), out)
+    return out
+
+
+def _paras() -> List[str]:
+    return list(_clean_package()["image_post"]["paragraphs"])
+
+
+def _img(title: Any = None, paragraphs: Any = None) -> Dict[str, Any]:
+    base = _clean_package()["image_post"]
+    return {"title": base["title"] if title is None else title,
+            "paragraphs": list(base["paragraphs"]) if paragraphs is None else paragraphs}
+
+
+def _with_image(value: Any) -> Dict[str, Any]:
+    pkg = copy.deepcopy(_clean_package())
+    if value is _MISSING:
+        del pkg[wp.IMAGE_FIELD]
+    else:
+        pkg[wp.IMAGE_FIELD] = value
+    return pkg
+
+
+def _short_sentences(n: int) -> str:
+    """`n` whole fact sentences that fit one 220-character paragraph together."""
+    short = [s for s in _usable_sentences(_item()) if len(s) <= 70][:n]
+    assert len(short) == n, short
+    text = " ".join(short)
+    assert len(text) <= wp.IMAGE_PARAGRAPH_MAX_CHARS, text
+    return text
+
+
+def _bad_image_pkg() -> Dict[str, Any]:
+    """The clean package with ONE broken rule, in the image only (a link in paragraph 2)."""
+    return _with_image(_img(paragraphs=[_paras()[0], BAD_CAPTION]))
+
+
+def test_the_image_limits_are_the_contracts_and_sit_inside_the_servers_bounds():
+    assert wp.IMAGE_FIELD == "image_post"
+    assert (wp.IMAGE_TITLE_MAX_CHARS, wp.IMAGE_TITLE_MAX_WORDS) == (70, 10)
+    assert (wp.IMAGE_PARAGRAPHS_MIN, wp.IMAGE_PARAGRAPHS_MAX) == (2, 4)
+    assert (wp.IMAGE_PARAGRAPH_MAX_CHARS, wp.IMAGE_PARAGRAPH_MAX_SENTENCES) == (220, 2)
+    # Whatever the writer accepts, the server's normaliser and on-screen check accept too.
+    assert (sch.IMAGE_POST_PARAGRAPHS_MIN <= wp.IMAGE_PARAGRAPHS_MIN
+            <= wp.IMAGE_PARAGRAPHS_MAX <= sch.IMAGE_POST_PARAGRAPHS_MAX)
+    assert max(wp.IMAGE_TITLE_MAX_CHARS, wp.IMAGE_PARAGRAPH_MAX_CHARS) <= sch.ONSCREEN_TEXT_MAX_CHARS
+    assert 1 + wp.IMAGE_PARAGRAPHS_MAX + 1 <= sch.ONSCREEN_TEXT_MAX      # title + paragraphs + footer
+
+
+def test_precondition_the_base_package_carries_a_clean_image_stored_as_scanned():
+    vr = ws.validate_package(_clean_package(), _item(), RUN_DATE)
+    assert vr.ok and vr.image_ok and vr.image == []
+    img = vr.package[wp.IMAGE_FIELD]
+    raw = _clean_package()[wp.IMAGE_FIELD]
+    assert img == {"title": clean(raw["title"]), "paragraphs": [clean(p) for p in raw["paragraphs"]]}
+    assert vr.package[ws.DROPPED_IMAGE] == []
+    # The server reads it back string for string (the worker draws it verbatim).
+    assert sch.image_post_problem(img) is None and sch.normalize_image_post(img) == img
+
+
+def test_only_the_title_and_paragraphs_are_stored_never_a_model_written_extra():
+    """A model-written "footer" or "subtitle" would be text nothing scanned and nothing declared:
+    it never rides along to the worker (the footer is code-owned, `post_copy.image_footer`)."""
+    extra = {**_img(), "footer": "Not investment advice. Written by AI.", "subtitle": "Buy now"}
+    vr = ws.validate_package(_with_image(extra), _item(), RUN_DATE)
+    assert vr.image_ok and set(vr.package[wp.IMAGE_FIELD]) == {"title", "paragraphs"}
+
+
+_IMAGE_SHAPE_CASES = [
+    # (id, the image_post value, (field, code) that must fire — None for the accepted boundary)
+    ("missing", lambda: _MISSING, ("image_post", "schema")),
+    ("null", lambda: None, ("image_post", "schema")),
+    ("a_list", lambda: [_img()["title"]], ("image_post", "schema")),
+    ("a_string", lambda: "Mood swings", ("image_post", "schema")),
+    ("title_not_a_string", lambda: _img(title=7), ("image_post.title", "schema")),
+    ("paragraphs_a_string", lambda: _img(paragraphs="one block"), ("image_post.paragraphs", "schema")),
+    ("paragraph_not_a_string", lambda: _img(paragraphs=[_paras()[0], 3]), ("image_post.paragraphs", "schema")),
+    ("paragraphs_under", lambda: _img(paragraphs=_paras()[:1]), ("image_post.paragraphs", "count")),
+    ("paragraphs_at_min", lambda: _img(paragraphs=_paras()[:2]), None),
+    ("paragraphs_at_max", lambda: _img(paragraphs=(_paras() * 2)[:4]), None),
+    ("paragraphs_over", lambda: _img(paragraphs=(_paras() * 3)[:5]), ("image_post.paragraphs", "count")),
+    ("title_empty", lambda: _img(title=""), ("image_post.title", "empty")),
+    ("title_punctuation", lambda: _img(title="..."), ("image_post.title", "empty")),
+    ("paragraph_blank", lambda: _img(paragraphs=[_paras()[0], "  \n "]), ("image_post.paragraphs[1]", "empty")),
+    ("paragraph_punctuation", lambda: _img(paragraphs=[_paras()[0], "?!"]), ("image_post.paragraphs[1]", "empty")),
+    ("title_words_over", lambda: _img(title=_img_words(wp.IMAGE_TITLE_MAX_WORDS + 1, max_len=5)),
+     ("image_post.title", "too_long")),
+    ("title_words_at_max", lambda: _img(title=_img_words(wp.IMAGE_TITLE_MAX_WORDS, max_len=5)), None),
+    ("title_chars_over", lambda: _img(title=_img_chars(wp.IMAGE_TITLE_MAX_CHARS + 1, min_len=7)),
+     ("image_post.title", "too_long")),
+    ("title_chars_at_max", lambda: _img(title=_img_chars(wp.IMAGE_TITLE_MAX_CHARS, min_len=7)), None),
+    ("paragraph_chars_over", lambda: _img(paragraphs=[_img_chars(wp.IMAGE_PARAGRAPH_MAX_CHARS + 1),
+                                                      _paras()[1]]), ("image_post.paragraphs[0]", "too_long")),
+    ("paragraph_chars_at_max", lambda: _img(paragraphs=[_img_chars(wp.IMAGE_PARAGRAPH_MAX_CHARS),
+                                                        _paras()[1]]), None),
+    ("paragraph_three_sentences", lambda: _img(paragraphs=[_short_sentences(3), _paras()[1]]),
+     ("image_post.paragraphs[0]", "too_long")),
+    ("paragraph_two_sentences", lambda: _img(paragraphs=[_short_sentences(2), _paras()[1]]), None),
+    # "Mr." is an abbreviation, not a sentence end: two sentences, not three.
+    ("an_abbreviation_is_no_sentence_end", lambda: _img(paragraphs=[
+        "Mr. Market offers a price every day. You may ignore it.", _paras()[1]]), None),
+    # A word the worker cannot wrap (it never breaks one) would skip the whole day: refused here.
+    ("title_word_too_long", lambda: _img(title="A business-partner-business"), ("image_post.title", "too_long")),
+    ("title_word_at_max", lambda: _img(title="A partner-business-partner"), None),
+    ("paragraph_word_too_long", lambda: _img(paragraphs=[
+        _paras()[0] + " business-partner-business", _paras()[1]]), ("image_post.paragraphs[0]", "too_long")),
+    ("paragraph_word_at_max", lambda: _img(paragraphs=[
+        _paras()[0] + " partner-business-partner", _paras()[1]]), None),
+]
+
+
+@pytest.mark.parametrize("build, expected", [(b, e) for _, b, e in _IMAGE_SHAPE_CASES],
+                         ids=[i for i, _, _ in _IMAGE_SHAPE_CASES])
+def test_each_image_shape_guard_fires_alone_drops_only_the_image_and_its_boundary_passes(build, expected):
+    vr = ws.validate_package(_with_image(build()), _item(), RUN_DATE)
+    # Never the package and never an outlet: the shared fields and every caption are untouched.
+    assert vr.ok and vr.shared == [] and vr.outlets == {}, [(v.field, v.code) for v in vr.violations]
+    assert set(vr.posts) == set(post_copy.PLATFORMS)
+    got = [(v.field, v.code) for v in vr.image]
+    if expected is None:
+        assert got == [] and vr.image_ok, got
+        assert vr.package[wp.IMAGE_FIELD] is not None and vr.package[ws.DROPPED_IMAGE] == []
+    else:
+        assert got == [expected], got            # its OWN guard, and nothing else
+        assert not vr.image_ok and vr.package[wp.IMAGE_FIELD] is None
+        assert [(v["field"], v["code"]) for v in vr.package[ws.DROPPED_IMAGE]] == [expected]
+        assert expected in {(v.field, v.code) for v in vr.violations}     # the repair hears it
+
+
+def test_the_filler_builders_make_what_the_boundary_cases_claim():
+    """The boundary cases are only as good as their fillers: exact lengths, word counts in range."""
+    for n in (wp.IMAGE_TITLE_MAX_CHARS, wp.IMAGE_TITLE_MAX_CHARS + 1):
+        t = _img_chars(n, min_len=7)
+        assert len(t) == n and len(t.split()) <= wp.IMAGE_TITLE_MAX_WORDS, t
+    short_title = _img_words(wp.IMAGE_TITLE_MAX_WORDS + 1, max_len=5)
+    assert len(short_title) <= wp.IMAGE_TITLE_MAX_CHARS, short_title
+    assert len(_img_chars(wp.IMAGE_PARAGRAPH_MAX_CHARS)) == wp.IMAGE_PARAGRAPH_MAX_CHARS
+    assert len("business-partner-business") == wp.IMAGE_WORD_MAX_CHARS + 1
+    assert len("partner-business-partner") == wp.IMAGE_WORD_MAX_CHARS
+
+
+def test_every_code_the_image_guards_emit_has_a_repair_hint():
+    codes = {e[1] for _i, _b, e in _IMAGE_SHAPE_CASES if e is not None}
+    assert codes == {"schema", "count", "empty", "too_long"}
+    assert all(code in wp.REPAIR_HINTS for code in codes)
+
+
+@pytest.mark.parametrize("where, text, field, code", [
+    ("title", BAD_HOOK, "image_post.title", "person_named"),
+    ("paragraph", BAD_CAPTION, "image_post.paragraphs[1]", "link"),
+    # Emoji is refused in the image, unlike in a caption: Inter cannot draw one, and an
+    # unrenderable glyph is a worker SkipRun that would lose the whole day.
+    ("title", "Mood swings \U0001F680", "image_post.title", "emoji"),
+    ("paragraph", "Stocks always go up.", "image_post.paragraphs[1]", "promissory"),
+])
+def test_a_rule_broken_in_the_image_drops_only_the_image(where, text, field, code):
+    value = _img(title=text) if where == "title" else _img(paragraphs=[_paras()[0], text])
+    vr = ws.validate_package(_with_image(value), _item(), RUN_DATE)
+    assert vr.ok and vr.regex_ok and vr.shared == [] and vr.outlets == {}
+    assert set(vr.posts) == set(post_copy.PLATFORMS)
+    assert (field, code) in {(v.field, v.code) for v in vr.image}, [(v.field, v.code) for v in vr.image]
+    assert vr.package[wp.IMAGE_FIELD] is None
+    assert code in {v["code"] for v in vr.package[ws.DROPPED_IMAGE]}
+
+
+def test_the_image_is_one_reading_chain_a_title_question_is_answered_by_the_first_paragraph():
+    answered_yes = _img(title="Does the market always recover?",
+                        paragraphs=["It always has, every single time.", _paras()[1]])
+    vr = ws.validate_package(_with_image(answered_yes), _item(), RUN_DATE)
+    assert ("image_post.title", "promissory") in {(v.field, v.code) for v in vr.image}
+    assert vr.ok and vr.package[wp.IMAGE_FIELD] is None
+    answered_no = _img(title="Do stocks always go up?",
+                       paragraphs=["Not always. Some years they fall.", _paras()[1]])
+    vr = ws.validate_package(_with_image(answered_no), _item(), RUN_DATE)
+    assert vr.image == [] and vr.image_ok, [(v.field, v.code) for v in vr.image]
+
+
+def test_a_myth_title_frames_only_the_first_paragraph():
+    first = _img(title="The myth", paragraphs=["Stocks always go up.", _paras()[1]])
+    vr = ws.validate_package(_with_image(first), _item(), RUN_DATE)
+    assert vr.image == [] and vr.image_ok, [(v.field, v.code) for v in vr.image]
+    later = _img(title="The myth", paragraphs=[_paras()[0], "Stocks always go up."])
+    vr = ws.validate_package(_with_image(later), _item(), RUN_DATE)
+    assert ("image_post.paragraphs[1]", "promissory") in {(v.field, v.code) for v in vr.image}
+
+
+def test_line_breaks_in_the_image_fold_to_one_space_and_are_stored_folded():
+    p = _paras()
+    assert all("  " not in s and "\n" not in s for s in p)
+    broken = {"title": "One\nmorning \t it is",
+              "paragraphs": [p[0].replace(" ", "\n", 2), "\n" + p[1].replace(" ", "  ") + "\n"]}
+    vr = ws.validate_package(_with_image(broken), _item(), RUN_DATE)
+    assert vr.image == [] and vr.image_ok, [(v.field, v.code, v.detail) for v in vr.image]
+    assert vr.package[wp.IMAGE_FIELD] == {"title": "One morning it is", "paragraphs": p}
+
+
+def test_an_endless_paragraph_list_is_cut_to_the_maximum_before_it_is_scanned(monkeypatch):
+    scanned: List[str] = []
+    real = ws._scan
+
+    def spy(name, text, item, **kw):
+        scanned.append(name)
+        return real(name, text, item, **kw)
+
+    monkeypatch.setattr(ws, "_scan", spy)
+    vr = ws.validate_package(_with_image(_img(paragraphs=_paras() * 5000)), _item(), RUN_DATE)
+    assert [(v.field, v.code) for v in vr.image] == [("image_post.paragraphs", "count")]
+    assert [n for n in scanned if n.startswith("image_post.paragraphs")] == [
+        f"image_post.paragraphs[{i}]" for i in range(wp.IMAGE_PARAGRAPHS_MAX)]
+    assert vr.ok and vr.package[wp.IMAGE_FIELD] is None
+
+
+@pytest.mark.asyncio
+async def test_an_image_only_violation_triggers_one_repair_that_names_it():
+    client = FakeClient(_result(_bad_image_pkg()), _result(_clean_package()))
+    res = await _run(client)
+    assert len(client.calls) == 2
+    repair = client.prompts[1]
+    assert "image_post.paragraphs[1]: link" in repair and wp.REPAIR_HINTS["link"] in repair
+    assert res.status == "accepted" and res.violations == []
+    assert res.package[wp.IMAGE_FIELD] == ws.validate_package(
+        _clean_package(), _item(), RUN_DATE).package[wp.IMAGE_FIELD]
+    assert res.package[ws.DROPPED_IMAGE] == []
+
+
+@pytest.mark.asyncio
+async def test_an_image_still_failing_after_the_repair_is_dropped_never_the_package(caplog):
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    client = FakeClient(_result(_bad_image_pkg()), _result(_bad_image_pkg()))
+    res = await _run(client)
+    assert len(client.calls) == 2
+    assert res.status == "accepted" and res.package[wp.IMAGE_FIELD] is None
+    assert [(v["field"], v["code"]) for v in res.package[ws.DROPPED_IMAGE]] == [
+        ("image_post.paragraphs[1]", "link")]
+    assert set(res.package["posts"]) == set(post_copy.PLATFORMS) and res.package["dropped_outlets"] == {}
+    assert ("image_post.paragraphs[1]", "link") in {(v["field"], v["code"]) for v in res.violations}
+    # Loud but codes-only: the log line feeds Sentry and the digest, so no model text in it.
+    dropped = [r.getMessage() for r in caplog.records if "image post was DROPPED" in r.getMessage()]
+    assert len(dropped) == 1 and "'link'" in dropped[0] and "example.com" not in dropped[0], dropped
+
+
+@pytest.mark.asyncio
+async def test_a_draft_with_no_image_post_at_all_is_repaired_then_publishes_without_one():
+    none = _with_image(_MISSING)
+    client = FakeClient(_result(none), _result(none))
+    res = await _run(client)
+    assert len(client.calls) == 2 and "image_post: schema" in client.prompts[1]
+    assert res.status == "accepted" and res.package[wp.IMAGE_FIELD] is None
+    assert set(res.package["posts"]) == set(post_copy.PLATFORMS)
+
+
+@pytest.mark.parametrize("order", ["kept_first", "dropped_first"])
+@pytest.mark.asyncio
+async def test_on_equal_outlets_the_candidate_that_kept_its_image_wins_over_fewer_violations(order):
+    kept = _with(_clean_package(), x=MANY_BAD_X)            # 7 outlets, image kept, many violations
+    lost = _with(_bad_image_pkg(), x=BAD_CAPTION)           # 7 outlets, image dropped, two
+    vk, vl = (ws.validate_package(p, _item(), RUN_DATE) for p in (kept, lost))
+    assert len(vk.posts) == len(vl.posts) == 7 and vk.image_ok and not vl.image_ok
+    assert len(vl.violations) < len(vk.violations)      # fewer violations alone would pick `lost`
+    rounds = (kept, lost) if order == "kept_first" else (lost, kept)
+    res = await _run(FakeClient(_result(rounds[0]), _result(rounds[1])))
+    assert res.status == "accepted" and res.package[wp.IMAGE_FIELD] is not None
+    assert res.package["captions"]["x"] == clean(MANY_BAD_X)
+
+
+@pytest.mark.parametrize("order", ["eight_first", "seven_first"])
+@pytest.mark.asyncio
+async def test_more_outlets_still_beat_a_kept_image(order):
+    eight = _bad_image_pkg()                                # 8 outlets, image dropped
+    seven = _with(_clean_package(), x=BAD_CAPTION)          # 7 outlets, image kept
+    rounds = (eight, seven) if order == "eight_first" else (seven, eight)
+    res = await _run(FakeClient(_result(rounds[0]), _result(rounds[1])))
+    assert res.status == "accepted" and len(res.package["posts"]) == 8
+    assert res.package[wp.IMAGE_FIELD] is None
+
+
+@pytest.mark.asyncio
+async def test_the_stored_image_freezes_into_image_formats_and_a_dropped_one_into_text():
+    """Across the C3 seam: what the writer stores is what `freeze_post_formats` reads."""
+    from app.services.marketing import script_service as ss
+
+    res = await _run(FakeClient(_result(_clean_package())))
+    out = ss.freeze_post_formats(res.package, RUN_DATE, image_posts=True, x_images=True)
+    assert out[wp.IMAGE_FIELD] == res.package[wp.IMAGE_FIELD] is not None
+    assert {p for p, f in out["post_formats"].items() if f == "image"} == _IMAGE_PLATFORMS
+    assert out["image_footer"] == post_copy.image_footer(RUN_DATE)
+
+    res = await _run(FakeClient(_result(_bad_image_pkg()), _result(_bad_image_pkg())))
+    out = ss.freeze_post_formats(res.package, RUN_DATE, image_posts=True, x_images=True)
+    assert out[wp.IMAGE_FIELD] is None and "image" not in out["post_formats"].values()
+    assert {p for p, f in out["post_formats"].items() if f == "text"} == _IMAGE_PLATFORMS
+    assert "image_footer" not in out
+
+
+#: The image rules (2026-10-09): the IMAGE POST paragraph, the image title's clause in HOOK AND
+#: TITLES, and rule 6's emoji list — each read inside the part of SYSTEM_BODY that owns it.
+_IMAGE_PARAGRAPH = ("IMAGE POST:", "\n\n")
+_IMAGE_PROMPT_RULES = [
+    (_IMAGE_PARAGRAPH, "posted on its own"),
+    (_IMAGE_PARAGRAPH, "with no video and no narration"),
+    (_IMAGE_PARAGRAPH, "must make sense without them"),
+    (_IMAGE_PARAGRAPH, "each one or two short sentences"),
+    (_IMAGE_PARAGRAPH, "every hard rule above applies to every word of it"),
+    (_IMAGE_PARAGRAPH, "no person, no opinion or forecast about any company, no call to action, no emoji"),
+    (_IMAGE_PARAGRAPH, "exactly as rule 9 says"),
+    (_IMAGE_PARAGRAPH, "never chain words with dashes into one word of more than 24 characters"),
+    (_HOOK_PARAGRAPH, "the image post's title follows the hook's rules too"),
+    (_HOOK_PARAGRAPH, "never a yes/no question and never a number"),
+    (("\n6. ", "\n7. "), "no emoji in the hook, the script, the cards, the slides or the image post"),
+]
+
+
+@pytest.mark.parametrize("where, phrase", _IMAGE_PROMPT_RULES, ids=[p[:40] for _w, p in _IMAGE_PROMPT_RULES])
+def test_the_system_body_states_the_image_rules(where, phrase):
+    assert phrase in _system_body_part(*where), phrase
+
+
+def test_the_prompt_version_records_the_image_post_and_the_emoji_hint_names_it():
+    assert wp.PROMPT_VERSION >= "2026-10-09.1"
+    assert "image post" in wp.REPAIR_HINTS["emoji"]
+    # Both prompts carry the ask, so the repair rebuilds the image too.
+    item = _item()
+    draft = wp.draft_prompt(item, TEMPLATE, RUN_DATE, generation_id="g")
+    repair = wp.repair_prompt(item, TEMPLATE, RUN_DATE, generation_id="g", round_no=2,
+                              previous=_clean_package(), violations=[])
+    assert all("- image_post:" in p for p in (draft, repair))
+
+
+
+# ── image posts OFF (drop-1 review, server:F4, 2026-10-09) ────────────────────────────────────
+#
+# script_service passes `image_posts=settings.MARKETING_IMAGE_POSTS` (read once, the same value it
+# freezes the formats with). Off, nothing will draw the image, so it must cost nothing: no repair
+# round bought by the image alone (a writer call plus, in enforce, a judge call), no preference for a
+# candidate that kept it, no WARNING when it is dropped — while the package shape stays the same.
+
+
+def test_image_posts_is_a_keyword_that_defaults_to_the_drop_1_behaviour():
+    param = inspect.signature(ws.generate_package).parameters["image_posts"]
+    assert param.kind is param.KEYWORD_ONLY and param.default is True
+
+
+@pytest.mark.asyncio
+async def test_with_image_posts_off_an_image_only_problem_never_buys_a_repair(caplog):
+    caplog.set_level(logging.INFO, logger=_LOGGER)
+    client = FakeClient(_result(_bad_image_pkg()))          # one answer queued: a repair would show
+    res = await _run(client, image_posts=False)
+    assert len(client.calls) == 1, "an image-only problem bought a repair round with image posts off"
+    # Still validated and stored, shape unchanged: the image dropped with its reasons.
+    assert res.status == "accepted" and res.package[wp.IMAGE_FIELD] is None
+    assert [(v["field"], v["code"]) for v in res.package[ws.DROPPED_IMAGE]] == [
+        ("image_post.paragraphs[1]", "link")]
+    assert set(res.package["posts"]) == set(post_copy.PLATFORMS)
+    # Logged, but at INFO: nothing would have drawn the image, so it is not a degradation.
+    dropped = [r for r in caplog.records if "image post was DROPPED" in r.getMessage()]
+    assert [r.levelno for r in dropped] == [logging.INFO], [(r.levelname, r.getMessage()) for r in dropped]
+    assert "'link'" in dropped[0].getMessage() and "example.com" not in dropped[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_with_image_posts_off_a_clean_image_is_still_stored_and_a_real_problem_still_repairs():
+    res = await _run(FakeClient(_result(_clean_package())), image_posts=False)
+    assert res.package[wp.IMAGE_FIELD] == ws.validate_package(
+        _clean_package(), _item(), RUN_DATE).package[wp.IMAGE_FIELD] is not None
+    assert res.package[ws.DROPPED_IMAGE] == []
+    # An outlet problem next to the image one still buys the repair, which hears both.
+    client = FakeClient(_result(_with(_bad_image_pkg(), x=BAD_CAPTION)), _result(_clean_package()))
+    res = await _run(client, image_posts=False)
+    assert len(client.calls) == 2 and "image_post.paragraphs[1]: link" in client.prompts[1]
+    assert res.status == "accepted" and res.violations == []
+
+
+@pytest.mark.parametrize("order", ["kept_first", "dropped_first"])
+@pytest.mark.asyncio
+async def test_with_image_posts_off_the_tie_break_ignores_the_image(order):
+    """The twin of `test_on_equal_outlets_the_candidate_that_kept_its_image_wins_over_fewer_violations`:
+    with image posts off the pick is the one made before the image existed — fewer (non-image)
+    violations — so a switch-off day accepts the same package it would have before drop 1."""
+    kept = _with(_clean_package(), x=MANY_BAD_X)            # 7 outlets, image kept, many violations
+    lost = _with(_bad_image_pkg(), x=BAD_CAPTION)           # 7 outlets, image dropped, one + the image's
+    rounds = (kept, lost) if order == "kept_first" else (lost, kept)
+    res = await _run(FakeClient(_result(rounds[0]), _result(rounds[1])), image_posts=False)
+    assert res.status == "accepted" and res.package[wp.IMAGE_FIELD] is None
+    assert res.package["captions"]["x"] == clean(BAD_CAPTION)

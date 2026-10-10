@@ -148,8 +148,10 @@ struct AIMessageContent: View {
                     .padding(.horizontal, AppSpacing.md)
                     .padding(.vertical, AppSpacing.sm)
                     .background(
+                        // Opaque: `primaryBlue` on its own 10% tint is 4.50 on white and
+                        // 3.97 on `cardBackgroundLight` (test_ios_theme_parity §6c).
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                            .fill(AppColors.primaryBlue.opacity(0.10))
+                            .fill(AppColors.cardBackgroundLight)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)

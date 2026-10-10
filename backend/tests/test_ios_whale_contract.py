@@ -274,7 +274,11 @@ def test_congressional_activity_dates_are_not_relative():
     assert fn, "formattedDate not found"
     assert "politicians" in fn, "congressional rows still use relative wording"
     assert "Disclosed" in fn, "congressional rows must be labelled as disclosures"
-    assert "days > 0" in fn, "a future date still renders a negative 'days ago'"
+    # This used to pin the `days > 0` guard (a future date rendered "-3 days ago"). Since
+    # 2026-10-09 no row is relative at all — 13F rows name their quarter
+    # (test_ios_whale_13f_quarter_label.py) — so a negative count has nowhere to appear.
+    for relative in ('"Today"', '"Yesterday"', ' ago"'):
+        assert relative not in fn, f"a whale activity date is relative again ({relative})"
 
 
 def test_risk_badge_hides_when_the_backend_has_no_classification():

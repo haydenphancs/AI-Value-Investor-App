@@ -25,6 +25,8 @@ matching turns every other assertion in this file green.
 Source-level on both sides: no app build, no simulator, no network.
 """
 
+import copy
+import functools
 import json
 import re
 import subprocess
@@ -2328,6 +2330,738 @@ def test_a_faded_fill_still_deserves_the_ink_its_contract_declares():
         violations += _faded_fill_violations(
             _rel(path), _code_lines(path), members, tokens, contracts)
     assert not violations, "\n".join(sorted(set(violations)))
+
+
+# ── 6c. Text on a translucent TINT ───────────────────────────────────────────
+#
+# THE HOLE THIS CLOSES. `.foregroundColor(AppColors.gain).background(AppColors.gain
+# .opacity(0.15))` passed every guard above. `ThemeContrastAudit` measures DECLARED opaque
+# surfaces, `_ink_on_surface_pairings` keys on `surfaceRegistry` names, and §6b anchors on the
+# three contract inks — and a same-hue chip uses none of them (§6b's own header excludes the
+# "tinted chips" population by construction). Measured, it is not a corner case: every text
+# token is tuned to ~4.5–4.9 on `cardBackgroundLight`, so ANY tint of its own hue eats the
+# margin. On its own 15% tint, in LIGHT, ON A WHITE CARD — the best case there is:
+# `gain` 4.39, `loss` 4.34, `caution` 4.20, `primaryBlue` 4.19, `alertOrange` 4.16. On
+# `cardBackgroundLight` no alpha that still reads as a tint passes at all. The sweep that
+# wrote this section found 40+ text sites; `SectorPerformanceSnapshotCard`'s "N up · N down"
+# badge (gain 4.41 / loss 4.39 on `primaryBlue@0.15`) is the one that was reported.
+#
+# WHAT IT MEASURES. The tint is flattened onto the PARENT before the ink is measured
+# (`_composite`, sRGB, the audit's order) — and the parent is not knowable from one view's
+# source, so a site passes outright only if it clears the floor on EVERY content surface
+# (`_CONTENT_SURFACES`). A site that passes only on the surface it really sits on is legal,
+# but it must SAY so: an entry in `_TINT_ON_PARENT` naming that parent and the ratios it
+# measures there. The test recomputes the entry and fails on a mismatch, so a stale or
+# hopeful number cannot sit in the list — the same "declaring forces a measurement" design
+# as `TokenSpec(on:)` in §6.
+#
+# FLOORS. 4.5 when the ink reaches text (`Text`/`Label`/a container holding one); 3.0 for an
+# ink that colours only an `Image` — WCAG 1.4.11's non-text bar, which every icon tile in
+# the tree clears (worst: `alertOrange@0.2` 3.42 on `cardBackgroundLight`).
+#
+# WHAT IT PAIRS. An ink sits ON a tint when (a) the tint is a `.background(`/`.cardSurface(`
+# modifier and the ink is inside the view expression it modifies (walked back to the head of
+# the chain, plus the bodies of same-file `some View` members that expression names), with no
+# nearer surface in between; (b) the tint `.fill`s a shape inside a `ZStack` and the ink is a
+# later sibling; or (c) the ink is in an `.overlay(` on the tinted shape's own chain.
+#
+# FIX, don't allow-list, when a site fails: an inset chip takes `cardBackgroundLight`, a chip
+# on a `cardBackgroundLight` inset takes `cardBackground`, a card nested in a card takes
+# `cardBackgroundNested` — every text token is audited on all three.
+_STRING_LIT = re.compile(r'"(?:\\.|[^"\\])*"')
+_TINT_INK = re.compile(r"\.(?:foregroundColor|foregroundStyle)\s*\(")
+_OWN_SURFACE = re.compile(r"^\s*\.(?:background|cardSurface|cardFill)\s*\(")
+_TINT_SURFACE_ARG = re.compile(r"\.(?:background|fill|cardFill|cardSurface)\s*$")
+_TYPE_DECL = re.compile(r"^\s*(?:[\w@]+\s+)*(?:enum|struct|class|extension)\s+(\w+)")
+_COLOUR_MEMBER = re.compile(
+    r"^\s*(?:(?:private|fileprivate|internal|public|static)\s+)*var\s+(\w+)\s*:\s*Color\??\s*\{")
+_VIEW_MEMBER = re.compile(
+    r"^\s*(?:(?:private|fileprivate|internal|public)\s+)*var\s+(\w+)\s*:\s*some\s+View\s*\{")
+_CASE_ARM = re.compile(r"^\s*(?:case\s+((?:\.\w+\s*,?\s*)+)|(default)):\s*(?:return\s+)?(.*)$")
+# A palette token, or a literal adaptive pair, each with an optional inline opacity.
+_TINT_COLOUR = re.compile(
+    r'AppColors\.(\w+)(?:\s*\.opacity\(\s*([0-9.]+)\s*\))?'
+    r'|Color\(\s*lightHex:\s*"([0-9A-Fa-f]{6})"\s*,\s*darkHex:\s*"([0-9A-Fa-f]{6})"\s*\)'
+    r'(?:\s*\.opacity\(\s*([0-9.]+)\s*\))?')
+_DECL_TYPE = re.compile(r"(?:\b(?:let|var)\s+|[(,]\s*(?:_\s+)?)(\w+)\s*:\s*\[?([A-Z]\w*)")
+_OPACITY_CALL = re.compile(r"((?:AppColors\.)?[A-Za-z_][\w?]*(?:\.[A-Za-z_]\w*)*)\s*\.opacity\(")
+_NON_TINTS = ("white", "black", "clear", "primary", "secondary", "Color")
+
+
+def _bare(line: str) -> str:
+    """`line` with string literals emptied, so a quoted paren cannot move a depth count."""
+    return _STRING_LIT.sub('""', line)
+
+
+def _depth_delta(line: str) -> int:
+    b = _bare(line)
+    return sum(b.count(o) for o in "([{") - sum(b.count(c) for c in ")]}")
+
+
+def _balanced_arg(text: str, open_idx: int) -> str:
+    """The text inside the bracket that opens at `text[open_idx]`."""
+    depth = 0
+    for j in range(open_idx, len(text)):
+        if text[j] in "([{":
+            depth += 1
+        elif text[j] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1:j]
+    return text[open_idx + 1:]
+
+
+def _opener_before(body, idx: int, prefix: str):
+    """(lineIdx, col, char, bareLine) of the innermost bracket still open at the end of
+    `prefix` (a leading slice of line `idx`), walking upward."""
+    depth = 0
+    for i, seg in [(idx, _bare(prefix))] + [(i, _bare(body[i][1])) for i in range(idx - 1, -1, -1)]:
+        for j in range(len(seg) - 1, -1, -1):
+            if seg[j] in ")]}":
+                depth += 1
+            elif seg[j] in "([{":
+                if depth == 0:
+                    return i, j, seg[j], seg
+                depth -= 1
+    return None
+
+
+def _view_head(body, anchor: int) -> int:
+    """First line of the view expression the modifier on line `anchor` applies to: walk up
+    over modifier lines (`.x(`), closing lines and anything nested, to the first line that
+    starts a view at the same depth."""
+    depth = 0
+    for i in range(anchor - 1, -1, -1):
+        line = _bare(body[i][1])
+        depth -= _depth_delta(line)
+        s = line.strip()
+        if depth < 0:
+            return i + 1
+        if depth == 0 and s and s[0] not in ".})":
+            return i
+    return 0
+
+
+def _reaches_own_surface(body, start: int, stop: int) -> bool:
+    """True when the chain the ink on `start` belongs to paints a surface of its own before
+    `stop` — the ink then sits on THAT, not on the tint further out."""
+    d = low = 0
+    for i in range(start, stop):
+        line = _bare(body[i][1])
+        if i > start and d == low and _OWN_SURFACE.search(line):
+            return True
+        d += _depth_delta(line)
+        low = min(low, d)
+    return False
+
+
+def _brace_block(lines, start: int) -> list:
+    out, depth = [], 0
+    for item in lines[start:]:
+        out.append(item)
+        depth += _depth_delta(item[1])
+        if depth <= 0 and len(out) > 1:
+            break
+    return out
+
+
+def _enclosing_type_names(lines) -> list:
+    out, stack, depth = [], [], 0
+    for _, line in lines:
+        if (m := _TYPE_DECL.match(line)) and "{" in line:
+            stack.append((m.group(1), depth))
+        out.append(stack[-1][0] if stack else None)
+        depth += _depth_delta(line)
+        while stack and depth <= stack[-1][1]:
+            stack.pop()
+    return out
+
+
+def _top_ternary(expr: str):
+    """`_ternary_split(expr)` only when the ternary IS the expression — not one nested in an
+    argument, as in `color.opacity(isOn ? 0.2 : 0.1)`."""
+    t = _ternary_split(expr)
+    return t if t and " ".join(expr.split()).startswith(t[0]) else None
+
+
+def _colour_key(m) -> tuple[str, float]:
+    """(palette token | "#light/#dark" literal, inline alpha) for one `_TINT_COLOUR` match."""
+    if m.group(1):
+        return _canon(m.group(1)), float(m.group(2) or 1.0)
+    return f"#{m.group(3).upper()}/#{m.group(4).upper()}", float(m.group(5) or 1.0)
+
+
+def _colour_members_in(rel: str, lines) -> tuple[dict, dict]:
+    """({name: [(file, type, [(caseKey, colour, alpha)])]}, {name: [(file, type, expr, alpha)]})
+    for one file's `var x: Color { … }` members.
+
+    The first table holds members whose arms name palette tokens or literal pairs, one arm per
+    `case` (`caseKey` = the frozenset of cases it answers, so `status.color` can be paired
+    with `status.backgroundColor` case by case instead of as a cross product). The second
+    holds DERIVED members — `var backgroundColor: Color { rating.color.opacity(0.15) }` —
+    resolved at use, through whatever `rating.color` resolves to.
+    """
+    arms_by, derived_by = {}, {}
+    owners = _enclosing_type_names(lines)
+    for i, (_, line) in enumerate(lines):
+        if not (m := _COLOUR_MEMBER.match(line)):
+            continue
+        block = _brace_block(lines, i)
+        texts = [line[line.index("{") + 1:]] + [b for _, b in block[1:]]
+        arms, key = [], None
+        for b in texts:
+            # A `case .x:` line sets the key for every arm until the next case — its `return`
+            # is as often on the NEXT line as on its own.
+            if cm := _CASE_ARM.match(b):
+                key = frozenset(re.findall(r"\.(\w+)", cm.group(1))) if cm.group(1) else None
+                b = cm.group(3)
+            arms += [(key, *_colour_key(t)) for t in _TINT_COLOUR.finditer(b)]
+        if arms:
+            arms_by.setdefault(m.group(1), []).append((rel, owners[i], arms))
+            continue
+        flat = " ".join(" ".join(texts).split()).rstrip("}").strip()
+        if (d := re.fullmatch(r"(?:return\s+)?([A-Za-z_][\w?.]*)(?:\s*\.opacity\(\s*([0-9.]+)\s*\))?", flat)):
+            derived_by.setdefault(m.group(1), []).append(
+                (rel, owners[i], d.group(1), float(d.group(2) or 1.0)))
+    return arms_by, derived_by
+
+
+def _colour_members() -> tuple[dict, dict]:
+    members, derived = {}, {}
+    for path in _swift_files():
+        a, d = _colour_members_in(_rel(path), _code_lines(path))
+        for k, v in a.items():
+            members.setdefault(k, []).extend(v)
+        for k, v in d.items():
+            derived.setdefault(k, []).extend(v)
+    return members, derived
+
+
+def _declared_types() -> tuple[dict, dict]:
+    """({identifier: {Type}} tree-wide, {file: {identifier: {Type}}}) from `let/var x: T` and
+    `x: T` parameters — enough to tell WHICH `backgroundColor` a `status.backgroundColor` is."""
+    tree, per_file = {}, {}
+    for path in _swift_files():
+        rel = _rel(path)
+        for _, line in _code_lines(path):
+            for name, typ in _DECL_TYPE.findall(line):
+                tree.setdefault(name, set()).add(typ)
+                per_file.setdefault(rel, {}).setdefault(name, set()).add(typ)
+    return tree, per_file
+
+
+def _literal_alphas(src: str, rel_lines) -> list | None:
+    """Every alpha an `.opacity(src)` can take: its numeric literals, or — for an identifier —
+    the literals it is declared or bound with anywhere in the tree (`tintOpacity: 0.14`)."""
+    nums = re.findall(r"(?<![\w.])(?:\d*\.\d+|\d+)(?![\w.])", src)
+    if nums:
+        return [float(n) for n in nums]
+    if not re.fullmatch(r"\s*[A-Za-z_]\w*\s*", src):
+        return None
+    pat = re.compile(rf"\b{re.escape(src.strip())}\s*(?::\s*\w+\s*)?[:=]\s*(\d*\.\d+|\d+)\b")
+    found = [float(v) for lines in rel_lines for _, l in lines for v in pat.findall(l)]
+    return sorted(set(found)) or None
+
+
+class _TintCtx:
+    """Tree-wide tables the per-file scan needs, built once."""
+
+    def __init__(self):
+        palette, _, manifest = _sections()
+        self.tokens = _declared_tokens(palette)
+        specs = _specs(manifest)
+        self.text_inks = {s["name"] for s in specs if s["role"] == "text" and s["name"] not in _FILL_TOKENS}
+        # The inks a same-hue chip of UNKNOWN colour is measured with: every text token that
+        # is declared for the content surfaces (`textInverse` and friends live elsewhere).
+        self.universal = sorted(s["name"] for s in specs
+                                if s["name"] in self.text_inks
+                                and set(_CONTENT_SURFACES) <= set(s["surfaces"]))
+        self.members, self.derived = _colour_members()
+        self.types, self.file_types = _declared_types()
+        self.all_lines = [_code_lines(p) for p in _swift_files()]
+        self.tint_names = sorted({n for n, decls in self.members.items()
+                                  if any(a < 1 for _, _, arms in decls for _, _, a in arms)}
+                                 | {n for n, decls in self.derived.items()
+                                    if any(a < 1 for *_, a in decls)})
+
+    def token(self, key: str) -> Token:
+        if key in self.tokens:
+            return self.tokens[key]
+        light, dark = key.split("/")
+        return Token(key, light, 1.0, dark, 1.0)
+
+    def ratio(self, ink: str, ink_alpha: float, tint: str, alpha: float, parent: str,
+              style: str) -> float:
+        """`ink` (at `ink_alpha`) on `tint` faded to `alpha` over `parent`, each flattened
+        onto the one below it before the next is measured."""
+        base = _resolved(self.tokens[parent], style, (1.0, 1.0, 1.0))
+        surface = _resolved(self.token(tint), style, base, alpha)
+        return _ratio(_resolved(self.token(ink), style, surface, ink_alpha), surface)
+
+
+def _resolve_derived(entry, ctx: _TintCtx, depth: int) -> list | None:
+    """Arms of a derived member — `var bgColor: Color { color.opacity(0.15) }` — resolved
+    INSIDE its declaring type, so `color` means that type's own `color`."""
+    rel, owner, base, alpha = entry
+    if depth > 3:
+        return None
+    if "." not in base:
+        same = [d for d in ctx.members.get(base, []) if d[:2] == (rel, owner)]
+        if same:
+            return [((f, t), k, c, a * alpha) for f, t, arms in same for k, c, a in arms]
+        nested = [d for d in ctx.derived.get(base, []) if d[:2] == (rel, owner)]
+        if not nested:
+            return None
+        res = [_resolve_derived(d, ctx, depth + 1) for d in nested]
+    else:
+        res = [_resolve_colour(base, rel, ctx, {}, depth + 1)]
+    if any(r is None for r in res):
+        return None
+    return [(o, k, c, a * alpha) for r in res for o, k, c, a in r]
+
+
+def _resolve_colour(expr: str, rel: str, ctx: _TintCtx, bindings, depth: int = 0) -> list | None:
+    """[(owner, caseKey, colour, alpha)] an expression may paint, or None if unresolvable.
+    `owner` is (file, type) for a member arm — the key case-matching pairs on."""
+    expr = expr.strip()
+    if "??" in expr:                           # `level?.color ?? AppColors.textMuted`: both
+        sides = [_resolve_colour(x, rel, ctx, bindings, depth) for x in expr.split("??")]
+        return None if any(x is None for x in sides) else [a for x in sides for a in x]
+    lit = [(None, None, *_colour_key(m)) for m in _TINT_COLOUR.finditer(expr)]
+    if lit:
+        return lit
+    if not (m := re.fullmatch(r"(?:([\w?.]+?)\??\.)?(\w+)", expr)):
+        return None
+    prefix, name = m.group(1), m.group(2)
+    if not prefix and name in bindings:
+        return [(None, None, t, 1.0) for t in sorted(bindings[name])]
+    decls, derived = ctx.members.get(name, []), ctx.derived.get(name, [])
+    if prefix:
+        # Narrow by the declared type of the last prefix component (`status: ReportStatus`):
+        # this file's declarations first, then the tree's.
+        last = prefix.replace("?", "").split(".")[-1]
+        here = ctx.file_types.get(rel, {}).get(last, set())
+        tree = ctx.types.get(last, set())
+        owners = [d for d in decls if d[1] in here] or [d for d in decls if d[1] in tree]
+        derived = ([d for d in derived if d[1] in here] or [d for d in derived if d[1] in tree]
+                   if not owners else [])
+    else:
+        owners = [d for d in decls if d[0] == rel]
+        derived = [d for d in derived if d[0] == rel] if not owners else []
+    if owners:
+        return [((f, t), k, c, a) for f, t, arms in owners for k, c, a in arms]
+    if not derived:
+        return None
+    res = [_resolve_derived(d, ctx, depth) for d in derived]
+    return None if any(r is None for r in res) else [x for r in res for x in r]
+
+
+def _split_opacity(expr: str) -> tuple[str, str | None]:
+    """(`color`, `0.15`) for `color.opacity(0.15)`; (expr, None) when there is no opacity."""
+    expr = expr.strip()
+    if expr.endswith(")") and (i := expr.rfind(".opacity(")) > 0 and \
+            _balanced_arg(expr, i + len(".opacity")) == expr[i + len(".opacity("):-1]:
+        return expr[:i].strip(), expr[i + len(".opacity("):-1]
+    return expr, None
+
+
+def _tint_pairs(ink_expr: str, tint_expr: str, rel: str, ctx: _TintCtx, bindings):
+    """[(ink, inkAlpha, tint, tintAlpha)] that can co-render, or None when either side is
+    unresolvable. An ink keeps its own alpha: `bullish.opacity(0.7)` as TEXT is a defect of
+    its own, and measuring it as opaque would hide it."""
+    it, tt = _top_ternary(ink_expr), _top_ternary(tint_expr)
+    if it and tt and it[0] == tt[0]:           # one condition drives both: pair arm with arm
+        a = _tint_pairs(it[1], tt[1], rel, ctx, bindings)
+        b = _tint_pairs(it[2], tt[2], rel, ctx, bindings)
+        return None if a is None or b is None else a + b
+    if tt:                                     # ink is not split the same way: both arms
+        a = _tint_pairs(ink_expr, tt[1], rel, ctx, bindings)
+        b = _tint_pairs(ink_expr, tt[2], rel, ctx, bindings)
+        return None if a is None or b is None else a + b
+    if it:
+        a = _tint_pairs(it[1], tint_expr, rel, ctx, bindings)
+        b = _tint_pairs(it[2], tint_expr, rel, ctx, bindings)
+        return None if a is None or b is None else a + b
+    base, alpha_src = _split_opacity(tint_expr)
+    alphas = [1.0]
+    if alpha_src is not None:
+        alphas = _literal_alphas(alpha_src, ctx.all_lines)
+        if alphas is None:
+            return None
+    ink_expr = ink_expr.strip()
+    same = ink_expr == base
+    ink = _resolve_colour(ink_expr, rel, ctx, bindings)
+    tint = _resolve_colour(base, rel, ctx, bindings)
+    if same and (ink is None or tint is None):
+        # A same-hue chip whose colour cannot be resolved (`color.opacity(0.15)` on an atom's
+        # parameter): measure every text token. Sound, because the answer cannot be better
+        # than the worst token a caller could pass.
+        return [(t, 1.0, t, a) for t in ctx.universal for a in alphas]
+    if ink is None or tint is None:
+        return None
+    tint = [(o, k, c, a * x) for o, k, c, a in tint for x in alphas]
+    if same:
+        return [(c, ia, c2, a) for _, _, c, ia in ink for _, _, c2, a in tint if c2 == c]
+    shared = {o for o, *_ in ink if o} & {o for o, *_ in tint if o}
+    if shared:                                 # `x.color` on `x.backgroundColor`: by case
+        return [(c1, a1, c2, a2)
+                for o in shared
+                for o1, k1, c1, a1 in ink if o1 == o
+                for o2, k2, c2, a2 in tint if o2 == o
+                if k1 is None or k2 is None or k1 & k2]
+    return [(c1, a1, c2, a2) for _, _, c1, a1 in ink for _, _, c2, a2 in tint]
+
+
+def _ink_target(body, idx: int) -> str:
+    """'text' if the ink on `idx` colours any text, 'icon' if it colours only an Image."""
+    head = _view_head(body, idx)
+    span = "\n".join(_bare(l) for _, l in body[head:idx + 1])
+    if re.search(r"\b(?:Text|Label|TextField|SecureField|Button)\(", span):
+        return "text"
+    if re.match(r"\s*(?:Image|Circle|RoundedRectangle|Rectangle|Capsule)\b", _bare(body[head][1])):
+        return "icon"
+    return "text"                               # unknown → the strict floor
+
+
+def _with_members(body, start: int, stop: int, view_members: dict, seen: set) -> list:
+    """[(lineIdx, stop)] for `body[start:stop]` plus the bodies of the same-file `some View`
+    members it names — a container's text usually lives in a `header`/`content` var. `stop`
+    bounds the search for a surface nearer than the tint: the span's own end, or the end of
+    the member body a line came from."""
+    out = [(i, stop) for i in range(start, stop)]
+    for i in range(start, stop):
+        # A bare reference only — `AppTypography.body` names a FONT, not `var body`.
+        for name in re.findall(r"(?<![.\w])(\w+)(?![\w(:])", _bare(body[i][1])):
+            j = view_members.get(name) if name != "body" else None
+            if j is not None and j not in seen and not start <= j < stop:
+                seen.add(j)
+                out += _with_members(body, j, j + len(_brace_block(body, j)), view_members, seen)
+    return out
+
+
+def _tint_sites(rel: str, lines, ctx: _TintCtx) -> list:
+    """[(file, inkLine, tintLine, target, inkExpr, tintExpr, pairs|None)] for one file's
+    comment-stripped `lines`. Pure, so synthetic Swift can drive it."""
+    preview = next((i for i, (_, l) in enumerate(lines) if l.startswith("#Preview")), len(lines))
+    body = lines[:preview]
+    bindings = _color_bindings(lines)
+    view_members = {m.group(1): i for i, (_, l) in enumerate(body) if (m := _VIEW_MEMBER.match(l))}
+    member_tint = (re.compile(rf"(?<![\w.])((?:[\w?]+\.)*(?:{'|'.join(ctx.tint_names)}))\b(?!\s*[.(\w])")
+                   if ctx.tint_names else None)
+    out = []
+    for idx, (lineno, line) in enumerate(body):
+        bare = _bare(line)
+        if bare.strip().startswith(".opacity("):         # a VIEW's opacity, not a colour's
+            continue
+        found = [(m.start(), f"{m.group(1)}.opacity({_balanced_arg(bare, m.end() - 1)})")
+                 for m in _OPACITY_CALL.finditer(bare)
+                 if m.group(1).split(".")[-1] not in _NON_TINTS]
+        if member_tint:
+            found += [(m.start(), m.group(1).replace("?", "")) for m in member_tint.finditer(bare)
+                      if not any(c <= m.start() < c + len(e) for c, e in found)]
+        for col, expr in found:
+            op = _opener_before(body, idx, bare[:col])
+            if op is None or op[2] != "(" or not _TINT_SURFACE_ARG.search(op[3][:op[1]]):
+                continue
+            oi, oj, _, oseg = op
+            # The whole argument, so a ternary tint can be arm-matched against a ternary ink.
+            full = _bare(body[oi][1])
+            arg = _balanced_arg(full[oj:] + "\n" + "\n".join(_bare(l) for _, l in body[oi + 1:oi + 6]), 0)
+            tint_expr = " ".join(arg.split()) if _top_ternary(arg) else expr
+            inks, anchor = [], oi
+            if re.search(r"\.(?:fill|cardFill)\s*$", oseg[:oj]):
+                anchor = None
+                k = _opener_before(body, oi, oseg[:oj])
+                for _ in range(6):
+                    if k is None:
+                        break
+                    ki, kj, kc, kseg = k
+                    before = kseg[:kj]
+                    if kc == "(" and re.search(r"\.background\s*$", before):
+                        anchor = ki                                   # (a) via .background(
+                        break
+                    if kc == "{" and re.search(r"\bZStack\b", before):  # (b) ZStack siblings
+                        end = ki + len(_brace_block(body, ki))
+                        inks += [(j, e) for j, e in _with_members(body, idx + 1, end, view_members, set())
+                                 if _TINT_INK.search(body[j][1])]
+                        break
+                    if kc == "{":
+                        break
+                    k = _opener_before(body, ki, before)
+                if anchor is None and not inks:                       # (c) its own .overlay(
+                    d = 0
+                    for j in range(oi, min(oi + 14, len(body))):
+                        b = _bare(body[j][1])
+                        if j > oi and d <= 0 and b.strip() and b.strip()[0] not in ".)":
+                            break
+                        if (".overlay" in b or d > 0) and _TINT_INK.search(b):
+                            inks.append((j, j + 1))
+                        d += _depth_delta(b)
+                        if d < 0:
+                            break
+            prefix_of = {}
+            if anchor is not None:
+                head = _view_head(body, anchor)
+                inks += [(j, e) for j, e in _with_members(body, head, anchor, view_members, set())
+                         if _TINT_INK.search(body[j][1])]
+                # A one-line chain — `Text("x").foregroundColor(c).background(c.opacity(0.15))` —
+                # inks on the modifier's OWN line, before the modifier.
+                if anchor == oi:
+                    inks.append((oi, oi + 1))
+                    prefix_of[oi] = full[:oj]
+            for j in sorted({j for j, e in inks if not _reaches_own_surface(body, j, e)}):
+                ink_line = prefix_of.get(j, _bare(body[j][1]))
+                for m in _TINT_INK.finditer(ink_line):
+                    ink_expr = _balanced_arg(ink_line, m.end() - 1).strip()
+                    pairs = _tint_pairs(ink_expr, tint_expr, rel, ctx, bindings)
+                    out.append((rel, body[j][0], lineno, _ink_target(body, j), ink_expr, tint_expr, pairs))
+    return out
+
+
+# A site that clears its floor ONLY on the surface it really sits on.
+# (file, ink, tint, tintAlpha) -> (parent, light, dark, where the parent comes from).
+# `test_every_tint_allowance_is_measured_and_still_needed` re-measures every entry on its
+# parent, so a number cannot be hopeful or stale, and fails an entry nothing needs any more.
+# A NEW entry needs the parent read from the view tree, not assumed: the same chip on the page
+# or on a `cardBackgroundLight` inset fails.
+_TINT_ON_PARENT = {
+    # Period tiles in TickerDetailPerformanceSection's grid, which is a `.cardFill()`.
+    ("Views/Molecules/PerformanceItem.swift", "textMuted", "gain", 0.1):
+        ("cardBackground", 4.91, 5.22, "TickerDetailPerformanceSection grid .cardFill()"),
+    ("Views/Molecules/PerformanceItem.swift", "textMuted", "loss", 0.1):
+        ("cardBackground", 4.79, 5.36, "TickerDetailPerformanceSection grid .cardFill()"),
+    ("Views/Molecules/PerformanceItem.swift", "gain", "gain", 0.1):
+        ("cardBackground", 4.72, 5.82, "TickerDetailPerformanceSection grid .cardFill()"),
+    ("Views/Molecules/PerformanceItem.swift", "loss", "loss", 0.1):
+        ("cardBackground", 4.72, 4.92, "TickerDetailPerformanceSection grid .cardFill()"),
+    # The "New" chip; ThemeDetailView's company list is one `.cardFill()` card.
+    ("Views/Molecules/ThemeCompanyRow.swift", "primaryBlue", "primaryBlue", 0.08):
+        ("cardBackground", 4.63, 5.40, "ThemeDetailView companyList .cardFill()"),
+}
+
+_STYLES = ("light", "dark")
+
+
+def _tint_floor(target: str) -> float:
+    return 4.5 if target == "text" else 3.0
+
+
+def _tint_problems(rows, ctx: _TintCtx, allowances: dict) -> tuple[list, set]:
+    """(violations, allowance keys a site actually used) for scanner `rows`."""
+    problems, used = [], set()
+    for rel, ink_line, tint_line, target, ink, tint, pairs in rows:
+        if pairs is None:
+            problems.append(
+                f"{rel}:{ink_line}: cannot resolve `{ink}` on `{tint}` (tint line {tint_line}). "
+                f"Name the colours with palette tokens or a same-file member, or make the chip opaque.")
+            continue
+        floor = _tint_floor(target)
+        for i, ia, t, a in sorted(set(pairs)):
+            if not 0 < a < 1 or not (i in ctx.text_inks or i.startswith("#")):
+                continue
+            cells = {(p, st): ctx.ratio(i, ia, t, a, p, st) for p in _CONTENT_SURFACES for st in _STYLES}
+            if min(cells.values()) >= floor:
+                continue
+            key = (rel, i, t, round(a, 4))
+            if ia == 1.0 and key in allowances:
+                used.add(key)                    # measured by its own test
+                continue
+            bad = ", ".join(f"{p} {st} {r:.2f}" for (p, st), r in sorted(cells.items()) if r < floor)
+            ink_shown = f"{i}@{ia:g}" if ia < 1 else i
+            problems.append(
+                f"{rel}:{ink_line}: {target} `{ink_shown}` on `{t}` at {a:g} (tint line {tint_line}) "
+                f"is under {floor} on: {bad}. Make it opaque — `cardBackgroundLight` for an inset "
+                f"chip, `cardBackground` for a chip on a `cardBackgroundLight` inset — or, if it "
+                f"clears {floor} on the one surface it really sits on, record that in _TINT_ON_PARENT.")
+    return problems, used
+
+
+@functools.lru_cache(maxsize=1)
+def _tint_scan() -> tuple:
+    """(ctx, rows) over the whole tree — built once; three tests read it."""
+    ctx = _TintCtx()
+    rows = [r for path in _swift_files() for r in _tint_sites(_rel(path), _code_lines(path), ctx)]
+    return ctx, rows
+
+
+def test_text_on_a_tint_clears_its_floor_on_every_surface_it_can_sit_on():
+    ctx, rows = _tint_scan()
+    problems, _ = _tint_problems(rows, ctx, _TINT_ON_PARENT)
+    assert not problems, "\n".join(sorted(set(problems)))
+
+
+def test_every_tint_allowance_is_measured_and_still_needed():
+    ctx, rows = _tint_scan()
+    _, used = _tint_problems(rows, ctx, _TINT_ON_PARENT)
+    for key, (parent, light, dark, where) in _TINT_ON_PARENT.items():
+        rel, ink, tint, alpha = key
+        assert parent in _CONTENT_SURFACES, f"{key}: {parent} is not a content surface"
+        got = tuple(round(ctx.ratio(ink, 1.0, tint, alpha, parent, st), 2) for st in _STYLES)
+        assert got == (light, dark), (
+            f"{key} records {light}/{dark} on {parent} but measures {got[0]}/{got[1]} — "
+            f"the palette moved; re-measure, and drop the entry if it no longer clears 4.5")
+        assert min(got) >= 4.5, f"{key} is under 4.5 even on {parent} ({where}): fix the site"
+        assert key in used, (
+            f"{key} matches no site that needs it ({where}): the chip was fixed or moved — "
+            f"delete the entry rather than keep an exemption nothing uses")
+
+
+def test_tint_scanner_is_not_vacuous():
+    """Every population the rule decides on, asserted non-trivial — a scanner that quietly
+    stops matching turns the rule permanently green. Each shape is pinned by a real site."""
+    ctx, rows = _tint_scan()
+    measured = [(r, p) for r in rows if r[6] for p in r[6] if 0 < p[3] < 1]
+    # Floors at ~2/3 of the 2026-10-09 counts (86 rows, 49 files, 67 text and 201 icon pairs):
+    # they catch a scanner gone blind, not one site fixed. The shapes below pin each path.
+    assert len(rows) >= 60 and len({r[0] for r in rows}) >= 30, (len(rows), len({r[0] for r in rows}))
+    assert sum(1 for r, _ in measured if r[3] == "text") >= 45
+    assert sum(1 for r, _ in measured if r[3] == "icon") >= 130
+    assert len(ctx.universal) >= 10 and {"gain", "loss", "primaryBlue"} <= set(ctx.universal)
+    assert {"backgroundColor", "bgColor"} <= set(ctx.tint_names), ctx.tint_names
+
+    def found(rel, test):
+        return any(r[0] == rel and test(r) for r in rows)
+    shapes = {
+        # (a) `.background(` on a container; text two levels down in a same-file `some View`
+        # member (`header`), i.e. AFTER the tint line — the member expansion.
+        "member expansion": found("Views/Molecules/ThinkingProcessCard.swift",
+                                  lambda r: r[1] > r[2] and r[3] == "text"),
+        # (b) a `ZStack` sibling on a `.fill`ed shape.
+        "zstack": found("Views/Atoms/AlertIconView.swift", lambda r: r[3] == "icon" and r[6]),
+        # A derived member (`backgroundColor { rating.color.opacity(0.15) }`) through a typed
+        # prefix, paired case by case with its ink.
+        "derived member": found("Views/Atoms/SnapshotRatingIndicator.swift",
+                                lambda r: r[6] and all(p[0] == p[2] for p in r[6])),
+        # An enum member pair (`style.backgroundColor` / literal ink) in a model file.
+        "enum member": found("Views/Molecules/ArticleCalloutBox.swift", lambda r: r[6]),
+        # An unresolvable same-hue chip → measured with every text token.
+        "universal": found("Views/Atoms/AlertCategoryIcon.swift",
+                           lambda r: r[6] and {p[0] for p in r[6]} == set(ctx.universal)),
+        # Both allow-listed sites must still be SEEN, or their entries guard nothing.
+        "allowance PerformanceItem": found("Views/Molecules/PerformanceItem.swift", lambda r: r[6]),
+        "allowance ThemeCompanyRow": found("Views/Molecules/ThemeCompanyRow.swift", lambda r: r[6]),
+    }
+    dead = [k for k, ok in shapes.items() if not ok]
+    assert not dead, f"tint scanner no longer reaches: {dead}"
+
+
+def test_the_tint_rule_fires_on_the_regressions_it_exists_for(tmp_path):
+    """Positive controls through the PRODUCTION path — real comment stripping (`_code_lines`
+    on a file), `_tint_sites`, `_tint_pairs`, the measurement and `_tint_problems`."""
+    base, _ = _tint_scan()
+
+    def problems(src: str, extra_members: str = "") -> list:
+        ctx = copy.copy(base)
+        if extra_members:
+            path = tmp_path / "Models.swift"
+            path.write_text(extra_members)
+            members, derived = _colour_members_in("Probe/Models.swift", _code_lines(path))
+            ctx.members = {**base.members, **{k: base.members.get(k, []) + v for k, v in members.items()}}
+            ctx.derived = {**base.derived, **{k: base.derived.get(k, []) + v for k, v in derived.items()}}
+            ctx.tint_names = sorted(set(base.tint_names) | set(members) | set(derived))
+            ctx.types = {k: set(v) for k, v in base.types.items()}
+            for name, typ in _DECL_TYPE.findall(src):
+                ctx.types.setdefault(name, set()).add(typ)
+        path = tmp_path / "Probe.swift"
+        path.write_text(src)
+        rows = _tint_sites("Probe.swift", _code_lines(path), ctx)
+        return _tint_problems(rows, ctx, {})[0]
+
+    # The reported regression, verbatim in shape: SectorPerformanceSnapshotCard's badge.
+    sector_badge = """
+        HStack(spacing: AppSpacing.xs) {
+            Text("3 up")
+                .foregroundColor(AppColors.bullish)
+            Text("2 down")
+                .foregroundColor(AppColors.bearish)
+        }
+        .padding(.horizontal, AppSpacing.sm)
+        .background(AppColors.primaryBlue.opacity(0.15))
+    """
+    got = problems(sector_badge)
+    assert any("`gain`" in p for p in got) and any("`loss`" in p for p in got), got
+    # ...pinned to the audit's float sRGB composite. The bug report's 4.41/5.33 and 4.51/4.39
+    # differ in the second decimal (another rounding of the composite); the verdict does not.
+    assert round(base.ratio("gain", 1.0, "primaryBlue", 0.15, "cardBackground", "light"), 2) == 4.40
+    assert round(base.ratio("gain", 1.0, "primaryBlue", 0.15, "cardBackground", "dark"), 2) == 5.30
+    assert round(base.ratio("loss", 1.0, "primaryBlue", 0.15, "cardBackground", "light"), 2) == 4.50
+    assert round(base.ratio("loss", 1.0, "primaryBlue", 0.15, "cardBackground", "dark"), 2) == 4.37
+    # The fix is silent.
+    assert not problems(sector_badge.replace("AppColors.primaryBlue.opacity(0.15)",
+                                             "AppColors.cardBackgroundLight"))
+    # Commented out, the regression is not code.
+    assert not problems("\n".join("// " + l for l in sector_badge.splitlines()))
+
+    # A same-hue chip on an atom's PARAMETER — unresolvable, so measured with every text token.
+    assert problems("""
+        struct Chip: View {
+            let color: Color
+            var body: some View {
+                Text("x").foregroundColor(color).background(color.opacity(0.15))
+            }
+        }
+    """)
+    # ZStack: text on a tinted shape fails at 4.5; the same shape under an ICON passes 3:1.
+    zstack = """
+        ZStack {
+            Circle()
+                .fill(AppColors.primaryBlue.opacity(0.2))
+            Text("1")
+                .foregroundColor(AppColors.primaryBlue)
+        }
+    """
+    assert problems(zstack)
+    assert not problems(zstack.replace('Text("1")', 'Image(systemName: "star")'))
+    # A text that paints its OWN surface sits on that, not on the tint further out.
+    assert not problems("""
+        HStack {
+            Text("x")
+                .foregroundColor(AppColors.gain)
+                .background(AppColors.cardBackgroundLight)
+        }
+        .background(AppColors.primaryBlue.opacity(0.15))
+    """)
+    # A translucent INK is measured at its alpha: gain@0.7 on a 5% wash is ~3:1.
+    assert problems("""
+        Text("x")
+            .foregroundColor(AppColors.gain.opacity(0.7))
+            .background(AppColors.gain.opacity(0.05))
+    """)
+    # An enum pair is matched CASE BY CASE: `.flat`'s neutral ink never meets `.up`'s tint,
+    # and the cross product would invent that failure.
+    tone = """
+        enum ProbeTone {
+            case up, flat
+            var ink: Color {
+                switch self {
+                case .up: return AppColors.textPrimary
+                case .flat: return AppColors.textSecondary
+                }
+            }
+            var wash: Color {
+                switch self {
+                case .up: return AppColors.gain.opacity(0.15)
+                case .flat: return AppColors.textSecondary.opacity(0.12)
+                }
+            }
+            var badInk: Color {
+                switch self {
+                case .up: return AppColors.gain
+                case .flat: return AppColors.textSecondary
+                }
+            }
+        }
+    """
+    view = """
+        struct ProbeBadge: View {
+            let tone: ProbeTone
+            var body: some View {
+                Text("x").foregroundColor(tone.ink).background(tone.wash)
+            }
+        }
+    """
+    assert not problems(view, tone)
+    assert problems(view.replace("tone.ink", "tone.badInk"), tone)
 
 
 # ── 7. The shell rules that stayed in the shell ──────────────────────────────

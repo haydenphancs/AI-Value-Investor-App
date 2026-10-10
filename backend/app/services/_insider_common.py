@@ -347,6 +347,11 @@ def _officer_title(type_of_owner: str) -> str:
     return ""
 
 
+def officer_title(type_of_owner: object) -> str:
+    """Public alias of `_officer_title` (Company Weekly's CFO role, `_insider_buys_common`); ``""`` for a non-string."""
+    return _officer_title(type_of_owner) if isinstance(type_of_owner, str) else ""
+
+
 def is_ceo_role(type_of_owner: object) -> bool:
     """True when a Form 4 ``typeOfOwner`` names the issuer's SITTING CEO / co-CEO.
 

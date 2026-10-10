@@ -31,12 +31,12 @@ struct AnalystActionTypeBadge: View {
         }
     }
 
+    /// Opaque, not `bullish`/`bearish.opacity(0.15)`: gain/loss on their own tint are
+    /// 4.39/4.34:1 in light even on a white card (test_ios_theme_parity §6c).
     private var badgeBackground: Color {
         switch actionType {
-        case .upgrade:
-            return AppColors.bullish.opacity(0.15)
-        case .downgrade:
-            return AppColors.bearish.opacity(0.15)
+        case .upgrade, .downgrade:
+            return AppColors.cardBackgroundLight
         case .maintain, .initiated, .reiterated:
             return Color.clear
         }

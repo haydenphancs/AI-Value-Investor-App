@@ -20,6 +20,20 @@ context — `app/integrations/x_api.py`). What makes X different from every othe
   perform this action" on every post (X anti-spam); X staff ask apps not to retry it.
 * At most one cashtag per post on pay-per-use (a second is a billed 403), and unsolicited
   @mentions are blocked for API posts — both refused here, before any spend.
+
+IMAGE posts (drop 1, contract C9), only while MARKETING_X_IMAGES is on (read here at publish time —
+a run that froze "image" for X while it was on is REFUSED if it was turned off since):
+* The send downloads the run's post image from its public URL (byte cap, sha256 checked against the
+  asset row), uploads it (POST /2/media/upload), sets its alt text — the image's title and whole
+  paragraphs (POST /2/media/metadata) — and posts the same caption with the media id. The upload and
+  the alt text are not a post: ANY failure before the create is NOT_SENT (the post cannot exist), and
+  every resend uploads again (a media id expires; uploads are unpriced).
+* Money: the claim reserves the post at MARKETING_X_IMAGE_POST_MICROS (`image_post_micros`, never
+  below the text or URL price) as `x_create`; the alt text is journaled `x_media_alt` ($0.005) by
+  the publisher AFTER the claim and BEFORE the send (`Prepared.pre_send_charge`). Each NOT_SENT /
+  credits-depleted refusal refunds exactly what provably was not billed (`Outcome.refund_micros`).
+* Reconcile: X stores a post with media with the media's t.co link appended, so an image post's
+  timeline copy is matched with that trailing link removed (and as stored, in case X changes).
 """
 
 from __future__ import annotations
@@ -29,11 +43,11 @@ import logging
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from app.config import settings
 from app.integrations import x_api
-from app.services.marketing import post_copy, tlds
+from app.services.marketing import outlet_base, post_copy, tlds
 from app.services.marketing.outlet_base import (
     ABSENT,
     AMBIGUOUS,
@@ -48,10 +62,12 @@ from app.services.marketing.outlet_base import (
     UNKNOWN,
     Adapter,
     MarketingPublishRefused,
+    MediaProblem,
     Outcome,
     Prepared,
     ReconcileResult,
     RetractResult,
+    image_of,
     scrub,
     text_sha256,
 )
@@ -64,6 +80,11 @@ POST_MICROS = 15_000            # POST /2/tweets, text only
 URL_POST_MICROS = 200_000       # a post whose text carries any URL
 OWNED_READ_MICROS = 1_000       # per post returned by GET /2/users/{me}/tweets with our user token
 DELETE_MICROS = 10_000          # bucket undocumented ($0.005 or $0.010) — budget the larger
+#: POST /2/media/metadata (an image's alt text): "Media Metadata $0.005 per request" — the pricing page
+#: maps no row to an endpoint, so this mapping is an inference (research 2026-10-09). A media upload
+#: has no price line.
+MEDIA_ALT_MICROS = 5_000
+MEDIA_ALT_OP = "x_media_alt"
 RECONCILE_MAX_RESULTS = 5       # the endpoint's minimum page size
 #: Look back this far before the send's start when reading our timeline (X documents no
 #: read-after-write ordering; created_at can differ from our clock).
@@ -98,6 +119,8 @@ _SCHEME_RE = re.compile(r"(?i)(?:https?://|\bwww\.)\S+")
 _GLUED_RE = re.compile(r"(?<![\w.@＠/-])([A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*)\.([A-Za-z]{2,24})(?![A-Za-z0-9-])")
 _ANY_URL_RE = re.compile(r"(?i)https?://\S+")
 _LINK_PLACEHOLDER = "\u0000link\u0000"
+#: The media link X appends to a post with media: ONE t.co URL at the very end of the stored text.
+_TRAILING_MEDIA_LINK_RE = re.compile(r"\s*https?://t\.co/[A-Za-z0-9]{1,40}\s*$")
 
 
 def budget_micros() -> int:
@@ -114,12 +137,45 @@ def budget_micros() -> int:
     return int(round(micros))
 
 
+def image_post_micros(links: bool) -> int:
+    """What the claim reserves for one X IMAGE post: MARKETING_X_IMAGE_POST_MICROS (read at call time —
+    the real price is confirmed by the one live test post, OWNER_TASKS), never below the text price,
+    and never below the URL price when the caption carries a link. An unreadable setting reads as the
+    URL price (the largest documented)."""
+    try:
+        configured = int(settings.MARKETING_X_IMAGE_POST_MICROS)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("marketing x: MARKETING_X_IMAGE_POST_MICROS is unreadable — an image post is reserved at "
+                       "the URL price (%d micros)", URL_POST_MICROS)
+        configured = URL_POST_MICROS
+    return max(configured, URL_POST_MICROS if links else POST_MICROS)
+
+
 def metrics_headroom_micros() -> int:
     """The spend a metrics read must leave under the monthly cap beyond its own reserve:
     `METRICS_HEADROOM_POSTS` posts at the price a post would reserve right now — $0.20 each while
     MARKETING_X_ALLOW_URLS is on (read at CALL time, like `prepare`: the switch may change between
-    reads), else $0.015."""
-    per_post = URL_POST_MICROS if settings.MARKETING_X_ALLOW_URLS else POST_MICROS
+    reads), else $0.015; while MARKETING_X_IMAGES is on, an image post's price instead when it is
+    higher (`image_post_micros` plus its $0.005 alt text — $0.205 at the default setting).
+
+    Deliberately keyed on MARKETING_X_IMAGES ALONE, not also on MARKETING_IMAGE_POSTS (review money:F1,
+    kept as a fail-safe choice): with IMAGE_POSTS off and X_IMAGES on, NEW runs freeze X as "text"
+    (`script_service.freeze_post_formats` needs both switches), yet a post frozen as "image" before
+    IMAGE_POSTS was switched off is still published by `prepare` (which checks X_IMAGES only) until it
+    expires — its run day or the next, ET (`run_service.is_fresh`). Pricing the headroom at the text
+    price then would let metrics reads spend what that pending $0.205 post needs. The cost of the
+    choice: while that switch combination lasts, every read reserves the image headroom ($0.82 instead
+    of $0.06 for 4 text posts), so X metrics reads record `capped` about $0.76 earlier in the month;
+    a `capped` record writes no checkpoint, so the post stays due and is read on a later day the
+    headroom allows (a checkpoint is lost only if a later one is crossed first, or the post leaves the
+    30-day listing). It never spends more — it only defers measurement. Fix the switch pair (turn
+    X_IMAGES off with IMAGE_POSTS) rather than narrowing this check."""
+    urls = bool(settings.MARKETING_X_ALLOW_URLS)
+    per_post = URL_POST_MICROS if urls else POST_MICROS
+    # X_IMAGES alone, on purpose (see the docstring): an image post frozen before MARKETING_IMAGE_POSTS
+    # was switched off may still be pending, so over-reserve rather than starve its publish.
+    if settings.MARKETING_X_IMAGES:
+        per_post = max(per_post, image_post_micros(urls) + MEDIA_ALT_MICROS)
     return METRICS_HEADROOM_POSTS * per_post
 
 
@@ -163,6 +219,17 @@ def match_key(text: Any) -> str:
     return _ANY_URL_RE.sub(_LINK_PLACEHOLDER, s)
 
 
+def stored_match_keys(text: Any, *, image: bool) -> set:
+    """The `match_key`s X's stored copy of one of our posts may equal: the text as stored and — for an
+    IMAGE post, which X stores with the media's t.co link appended — the text with that ONE trailing
+    t.co link removed (both, so a caption ending in its own link, or an X that stops appending, still
+    matches)."""
+    keys = {match_key(text)}
+    if image:
+        keys.add(match_key(_TRAILING_MEDIA_LINK_RE.sub("", normalize_text(text), count=1)))
+    return keys
+
+
 def post_url_for(external_id: Any) -> Optional[str]:
     """The public URL of a post. The `/i/web/status/` form needs no handle (none is configured)."""
     return f"https://x.com/i/web/status/{external_id}" if external_id else None
@@ -194,9 +261,20 @@ class XAdapter(Adapter):
         text = post.get("caption") if isinstance(post.get("caption"), str) else ""
         if not text.strip():
             raise MarketingPublishRefused("x: the post has no text")
-        if post.get("format") != "text":
-            raise MarketingPublishRefused(f"x: format {post.get('format')!r} is not published on X (text only)")
-        if post.get("asset_ids"):
+        image = None
+        if post.get("format") == "image":
+            if not settings.MARKETING_X_IMAGES:
+                raise MarketingPublishRefused(
+                    "x: an image post while MARKETING_X_IMAGES is off — X publishes text only", category="media")
+            image = image_of(post)
+            if image is None:
+                raise MarketingPublishRefused("x: the image post's picture was not resolved", category="media")
+            if [str(a) for a in post.get("asset_ids") or [] if a] != [image.asset_id]:
+                raise MarketingPublishRefused("x: an image post carries exactly its one picture", category="media")
+        elif post.get("format") != "text":
+            raise MarketingPublishRefused(
+                f"x: format {post.get('format')!r} is not published on X (text, or image while MARKETING_X_IMAGES)")
+        elif post.get("asset_ids"):
             # The owner reviewed a text post; media that would not be sent must not ride along.
             raise MarketingPublishRefused("x: a text post may not carry media")
         links = link_suspects(text)
@@ -213,30 +291,111 @@ class XAdapter(Adapter):
         weighted = post_copy.x_weighted_length(text)
         if weighted > post_copy.LIMITS["x"]:
             raise MarketingPublishRefused(f"x: {weighted} weighted characters > {post_copy.LIMITS['x']}")
-        payload: Dict[str, Any] = {"text": text, "made_with_ai": bool(settings.MARKETING_X_MADE_WITH_AI)}
+        # The post's own AI flag (drop 2: create_posts stamps `metadata.made_with_ai` — False only on a
+        # template image/text post, written by a fixed template from public data) ANDed with the switch.
+        # Anything but an explicit False (absent, a pre-drop-2 row, a hand-edited value) discloses.
+        post_md = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        payload: Dict[str, Any] = {"text": text, "made_with_ai": bool(settings.MARKETING_X_MADE_WITH_AI)
+                                   and post_md.get("made_with_ai", True) is not False}
         sha = text_sha256(text)
-        reserve = URL_POST_MICROS if links else POST_MICROS
+        meta: Dict[str, Any] = {"weighted_len": weighted, "links": len(links), "made_with_ai": payload["made_with_ai"]}
+        if image is None:
+            reserve = URL_POST_MICROS if links else POST_MICROS
+            return Prepared(
+                payload=payload, text_sha256=sha, reserve_micros=reserve, publish_meta={"x": meta},
+                summary=(f"x text weighted_len={weighted} links={len(links)} made_with_ai={payload['made_with_ai']} "
+                         f"cost_micros={reserve} sha256={sha[:12]}"),
+            )
+        reserve = image_post_micros(bool(links))
+        payload["image"] = {**image.meta(), "alt": image.alt(x_api.ALT_TEXT_MAX)}
+        meta.update({"image": image.meta(), "alt_micros": MEDIA_ALT_MICROS})
         return Prepared(
-            payload=payload, text_sha256=sha, reserve_micros=reserve,
-            publish_meta={"x": {"weighted_len": weighted, "links": len(links),
-                                "made_with_ai": payload["made_with_ai"]}},
-            summary=(f"x text weighted_len={weighted} links={len(links)} made_with_ai={payload['made_with_ai']} "
-                     f"cost_micros={reserve} sha256={sha[:12]}"),
+            payload=payload, text_sha256=sha, reserve_micros=reserve, publish_meta={"x": meta},
+            pre_send_charge=(MEDIA_ALT_OP, MEDIA_ALT_MICROS),
+            summary=(f"x image weighted_len={weighted} links={len(links)} made_with_ai={payload['made_with_ai']} "
+                     f"asset={image.asset_id} bytes={image.size} cost_micros={reserve}+{MEDIA_ALT_MICROS} "
+                     f"sha256={sha[:12]}"),
         )
 
+    async def _upload_image(self, prepared: Prepared) -> Union[str, Outcome]:
+        """The image's media id on X — downloaded from its public URL and checked, uploaded, its alt
+        text set — or the Outcome that ends this attempt. Nothing here creates a post, so every
+        failure is NOT_SENT (or a definite refusal of the picture / the account), and each refunds
+        exactly what provably was not billed: before the alt-text call nothing was (an upload has no
+        price), after it the alt text may have been."""
+        image = prepared.payload["image"]
+        post_only = -int(prepared.reserve_micros)               # the create was never made
+        nothing_billed = post_only - MEDIA_ALT_MICROS           # …nor the alt text
+        data = await outlet_base.fetch_post_image(image["url"], size=image["size"], sha256=image["sha256"])
+        if isinstance(data, MediaProblem):
+            if data.definite:
+                return Outcome(REFUSED, "media", error=scrub(f"x: {data.error}"), refund_micros=nothing_billed,
+                               alert="failed")
+            return Outcome(NOT_SENT, "media", error=scrub(f"x: {data.error}"), refund_micros=nothing_billed)
+        try:
+            uploaded = await x_api.upload_media(data)
+        except x_api.XApiNotSentError as e:
+            return Outcome(NOT_SENT, "transport", error=scrub(e), refund_micros=nothing_billed)
+        except x_api.XApiRateLimitError as e:
+            return Outcome(NOT_SENT, "rate_limited", error=scrub(e), retry_at=getattr(e, "retry_at", None),
+                           refund_micros=nothing_billed)
+        except (x_api.XApiAuthError, x_api.XApiNotConfiguredError) as e:
+            return Outcome(NOT_SENT, "auth", error=scrub(e), refund_micros=nothing_billed, alert="auth",
+                           retry_at=datetime.now(timezone.utc) + timedelta(seconds=AUTH_BACKOFF_SECONDS))
+        except x_api.XApiCreditsDepletedError as e:
+            return Outcome(REFUSED, "credits", error=scrub(e), refund_micros=nothing_billed, alert="failed")
+        except x_api.XApiException as e:
+            # Refused, forbidden, ambiguous: the media may or may not exist on X, the POST cannot.
+            return Outcome(NOT_SENT, "media", error=scrub(e), refund_micros=nothing_billed)
+        if uploaded.get("state") in ("pending", "in_progress"):
+            return Outcome(NOT_SENT, "media", refund_micros=nothing_billed,
+                           error=f"x: media {uploaded.get('id')} is still processing ({uploaded.get('state')})")
+        media_id = str(uploaded["id"])
+        try:
+            await x_api.create_media_metadata(media_id, alt_text=image["alt"])
+        except (x_api.XApiNotSentError, x_api.XApiNotConfiguredError) as e:
+            category = "transport" if isinstance(e, x_api.XApiNotSentError) else "auth"
+            return Outcome(NOT_SENT, category, error=scrub(e), refund_micros=nothing_billed,
+                           alert="auth" if category == "auth" else None)
+        except x_api.XApiRateLimitError as e:
+            return Outcome(NOT_SENT, "rate_limited", error=scrub(e), retry_at=getattr(e, "retry_at", None),
+                           refund_micros=post_only)
+        except x_api.XApiAuthError as e:
+            return Outcome(NOT_SENT, "auth", error=scrub(e), refund_micros=post_only, alert="auth",
+                           retry_at=datetime.now(timezone.utc) + timedelta(seconds=AUTH_BACKOFF_SECONDS))
+        except x_api.XApiCreditsDepletedError as e:
+            return Outcome(REFUSED, "credits", error=scrub(e), refund_micros=nothing_billed, alert="failed")
+        except x_api.XApiException as e:
+            # The alt-text call may have been billed (an ambiguous or refused write) — kept.
+            return Outcome(NOT_SENT, "media", error=scrub(e), refund_micros=post_only)
+        return media_id
+
     async def send(self, post: Dict[str, Any], prepared: Prepared) -> Outcome:
+        image = prepared.payload.get("image")
+        media_ids = None
+        if image:
+            uploaded = await self._upload_image(prepared)
+            if isinstance(uploaded, Outcome):
+                return uploaded
+            media_ids = [uploaded]
+        # The media id rides on every outcome that may be live (merged with the claim's `x` record —
+        # `metadata.publish` merges one level deep).
+        media_meta = {"x": {**prepared.publish_meta.get("x", {}), "media_id": media_ids[0]}} if media_ids else {}
         try:
             res = await x_api.create_post(prepared.payload["text"],
-                                          made_with_ai=bool(prepared.payload.get("made_with_ai")))
+                                          made_with_ai=bool(prepared.payload.get("made_with_ai")),
+                                          media_ids=media_ids)
         except x_api.XApiNotSentError as e:
-            return Outcome(NOT_SENT, "transport", error=scrub(e))
+            # Never left: X did not bill the create (an image post's alt text, before it, may be).
+            return Outcome(NOT_SENT, "transport", error=scrub(e),
+                           refund_micros=-int(prepared.reserve_micros) if image else 0)
         except x_api.XApiRateLimitError as e:
             return Outcome(NOT_SENT, "rate_limited", error=scrub(e), retry_at=getattr(e, "retry_at", None))
         except x_api.XApiDuplicateContentError as e:
             # NOT proof either way (verified 2026-09-30): reconcile reads the timeline.
-            return Outcome(AMBIGUOUS, "duplicate", error=scrub(e))
+            return Outcome(AMBIGUOUS, "duplicate", error=scrub(e), publish_meta=media_meta)
         except x_api.XApiAmbiguousError as e:
-            return Outcome(AMBIGUOUS, "server", error=scrub(e))
+            return Outcome(AMBIGUOUS, "server", error=scrub(e), publish_meta=media_meta)
         except x_api.XApiAuthError as e:
             # The request was refused before anything was created — but the owner must fix the
             # credential first, so wait an hour and say so.
@@ -256,12 +415,12 @@ class XAdapter(Adapter):
                            retry_at=datetime.now(timezone.utc) + timedelta(seconds=AUTH_BACKOFF_SECONDS),
                            alert="auth")
         except x_api.XApiException as e:
-            return Outcome(AMBIGUOUS, "server", error=scrub(e))
+            return Outcome(AMBIGUOUS, "server", error=scrub(e), publish_meta=media_meta)
         post_id = str(res.get("id") or "")
         if not post_id:
-            return Outcome(AMBIGUOUS, "server", error="x: create answered without a post id")
+            return Outcome(AMBIGUOUS, "server", error="x: create answered without a post id", publish_meta=media_meta)
         return Outcome(PUBLISHED, external_id=post_id, external_url=post_url_for(post_id),
-                       published_at=datetime.now(timezone.utc).isoformat())
+                       published_at=datetime.now(timezone.utc).isoformat(), publish_meta=media_meta)
 
     async def reconcile(self, post: Dict[str, Any]) -> ReconcileResult:
         user_id = x_api.user_id_from_access_token()
@@ -280,8 +439,9 @@ class XAdapter(Adapter):
         posts = res.get("posts") or []
         cost = _billed_reads(res.get("result_count"), len(posts)) * OWNED_READ_MICROS
         wanted = match_key(post.get("caption"))
+        image = post.get("format") == "image"
         for item in posts:
-            if isinstance(item, dict) and match_key(item.get("text")) == wanted and item.get("id"):
+            if isinstance(item, dict) and wanted in stored_match_keys(item.get("text"), image=image) and item.get("id"):
                 pid = str(item["id"])
                 return ReconcileResult(FOUND, external_id=pid, external_url=post_url_for(pid),
                                        published_at=str(item.get("created_at") or "") or None, cost_micros=cost)

@@ -850,7 +850,9 @@ _ENFORCED = {"mode": "enforce"}
 @pytest.mark.asyncio
 async def test_create_posts_refuses_an_unusable_script_and_writes_nothing(svc, script):
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
-    await svc.insert_script({"run_id": row["id"], **script})
+    # A lesson template id (drop 2: the post gate reads the class from the SCRIPT's template id, so a row
+    # without one is the 422 class refusal — tested below — not the unusable-copy refusal under test here).
+    await svc.insert_script({"run_id": row["id"], "template_id": "checklist", **script})
     # Even a worker caption cannot stand in for the missing server copy.
     with pytest.raises(mrs.MarketingScriptNotReady):
         await svc.create_posts(row["id"], [{"platform": "x", "format": "text", "caption": "hi"}], claim=_holder(svc, row["id"]))
@@ -972,7 +974,10 @@ def test_schema_constants_match_the_migration_check_constraints():
 
     assert check_values("status") == set(schemas.RUN_STATUSES)  # first `status` CHECK is runs
     assert check_values("stage") == set(schemas.RUN_STAGES)
-    assert check_values("content_class") == set(schemas.CONTENT_CLASSES)
+    # content_class: 170's inline CHECK is SUPERSEDED by 190's named one (drop 2 widened it to A/C/F),
+    # so it is compared against the LATEST migration that ADDs the named constraint —
+    # test_content_class_check_reads_the_latest_migration_that_adds_it. 170's list must stay a subset.
+    assert check_values("content_class") <= set(schemas.CONTENT_CLASSES)
     assert check_values("kind") == set(schemas.ASSET_KINDS)
     assert check_values("platform") == set(schemas.POST_PLATFORMS)
     assert check_values("format") == set(schemas.POST_FORMATS)
@@ -1260,8 +1265,13 @@ async def test_the_worker_writes_only_its_own_in_progress_run(svc):
 
 def test_the_server_owned_run_metadata_keys():
     """K1: `claim_nonce` (trusted by decide_claim ahead of the attempts cap) and `closed` (why
-    close_finished_runs closed the day — printed by the weekly digest) are written by the server only."""
-    assert set(schemas.SERVER_OWNED_RUN_METADATA) == {"claim_nonce", "closed"}
+    close_finished_runs closed the day — printed by the weekly digest) are written by the server only.
+    Drop 1 (compat F2): so is `worker_capabilities` — what the claiming worker declared it can render."""
+    # Drop 2: `series` / `series_trail` (the day's news series and its fallback chain, mirrored from
+    # the script's fact sheet) are the server's too.
+    assert set(schemas.SERVER_OWNED_RUN_METADATA) == {"claim_nonce", "closed", "worker_capabilities",
+                                                      "series", "series_trail"}
+    assert schemas.RUN_WORKER_CAPABILITIES_KEY in schemas.SERVER_OWNED_RUN_METADATA
 
 
 @pytest.mark.asyncio
@@ -1705,7 +1715,8 @@ async def test_create_posts_refuses_a_script_the_judge_did_not_enforce(svc, judg
     output = {"posts": {"x": _server_copy("x")}}
     if judge is not None:
         output["judge"] = judge
-    await svc.insert_script({"run_id": row["id"], "status": "accepted", "output": output})
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "checklist",
+                             "output": output})
     with pytest.raises(mrs.MarketingJudgeNotEnforced):
         await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
     assert svc.fake.tables[mrs.POSTS].rows == []
@@ -4046,38 +4057,45 @@ async def test_script_tokens_between_raises_when_the_read_fails_never_a_silent_e
         await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))
 
 
-# ══ 2026-10-05 — create_posts dispatches on the content class (C5) ════════════════════════════════
+# ══ create_posts dispatches on the SCRIPT's content class (2026-10-05 C5; drop 2 D12, 2026-10-09) ═════
 #
-# "A" gets the judge gate; every other value is refused with the existing 422 MarketingRequestInvalid
-# (the worker fails the run), AFTER the hold and accepted-script checks and BEFORE any asset read or
-# INSERT. It used to read None / "" as "A" and let every other value through with no gate at all.
+# The class is `selection.content_class_of(script.template_id)` — a lesson template → "A" (the judge
+# gate), a news series → "C"/"F" (the template gate) — and the accepted output must say the same.
+# `marketing_runs.content_class` is a MIRROR: a mismatch is a WARNING, never obeyed. Anything else (an
+# unknown / retired / mis-cased id, a NULL, an output that contradicts its id) is the 422
+# MarketingRequestInvalid, AFTER the hold and accepted-script checks and BEFORE any asset read or INSERT.
+# (Before drop 2 the gate read the run's mirror, and every non-"A" mirror was refused.)
 
-_UNGATED_CLASSES = ["C", None, "", "a", "B", " A", "A ", 1, True, ["A"], "class-C-template-" * 6]
+_UNGATED_TEMPLATE_IDS = [None, "", "x", "CHECKLIST", " checklist", "checklist ", "lesson", "news:ceo_buys",
+                         "ceo-buys", 1, True, ["checklist"], "class-C-template-" * 6]
 
 
-async def _class_run(svc, content_class: Any):
+async def _class_run(svc, template_id: Any, *, mirror: Any = "A", output_extra: Optional[Dict[str, Any]] = None):
     """A real (non-dry-run) run with an ACCEPTED script judged in `enforce` mode and a ready video —
-    everything a class-A run needs to become posts — whose stored class is then hand-edited (the only
-    code writer, `_heal_mirror`, always writes "A")."""
+    everything a class-A run needs to become posts — whose script's template id (and optionally its
+    run's mirror and its output) is then hand-edited."""
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     rid = row["id"]
     await _accept_script(svc, rid, ["x", "tiktok"])
     video = await _ready_asset(svc, rid)
-    _stored(svc, rid)["content_class"] = content_class
+    script = next(r for r in svc.fake.tables[mrs.SCRIPTS].rows if r["run_id"] == rid)
+    script["template_id"] = template_id
+    script["output"].update(output_extra or {})
+    _stored(svc, rid)["content_class"] = mirror
     specs = [{"platform": "x", "format": "text"},
              {"platform": "tiktok", "format": "video", "asset_ids": [video["id"]]}]
     return rid, specs
 
 
-@pytest.mark.parametrize("content_class", _UNGATED_CLASSES, ids=lambda v: repr(v)[:24])
+@pytest.mark.parametrize("template_id", _UNGATED_TEMPLATE_IDS, ids=lambda v: repr(v)[:24])
 @pytest.mark.asyncio
-async def test_create_posts_refuses_every_content_class_but_a_and_writes_nothing(svc, monkeypatch, caplog,
-                                                                                content_class):
+async def test_create_posts_refuses_a_script_whose_template_has_no_class_and_writes_nothing(
+        svc, monkeypatch, caplog, template_id):
     import logging
 
     from app.api.error_response import ErrorCode, classify_exception
 
-    rid, specs = await _class_run(svc, content_class)
+    rid, specs = await _class_run(svc, template_id)
 
     async def no_asset_read(run_id):
         raise AssertionError("the class refusal must come before any asset read")
@@ -4089,51 +4107,276 @@ async def test_create_posts_refuses_every_content_class_but_a_and_writes_nothing
             await svc.create_posts(rid, specs, claim=_holder(svc, rid))
         with pytest.raises(mrs.MarketingRequestInvalid):          # a text-only request, no asset read either way
             await svc.create_posts(rid, specs[:1], claim=_holder(svc, rid))
-    shown = str(content_class)[:20]
+    shown = str(template_id)[:40]
     assert type(ei.value) is mrs.MarketingRequestInvalid
-    assert str(ei.value) == (f"run {rid}: content_class {shown!r} has no post gate — only class A, judged in "
-                             "enforce mode, becomes a post; nothing recorded")
+    assert str(ei.value) == (f"run {rid}: the script's template {shown!r} (class None, output class None) has "
+                             "no post gate; nothing recorded")
     assert classify_exception(ei.value) == (ErrorCode.MARKETING_REQUEST_INVALID, 422)
     assert svc.fake.tables[mrs.POSTS].rows == []
     assert {name: t.rows for name, t in svc.fake.tables.items()} == before        # nothing written anywhere
     refused = [r for r in caplog.records if r.levelno == logging.ERROR and "REFUSED" in r.getMessage()]
     assert len(refused) == 2
-    assert all(rid in r.getMessage() and f"content_class {shown!r}" in r.getMessage() for r in refused)
+    assert all(rid in r.getMessage() and f"template {shown!r}" in r.getMessage() for r in refused)
+
+
+@pytest.mark.parametrize("template_id, output_class", [
+    ("checklist", "C"), ("checklist", "F"), ("checklist", "a"), ("checklist", "B"), ("checklist", ["A"]),
+    ("ceo_buys", None), ("ceo_buys", "A"), ("ceo_buys", "F"), ("money_map", "C"), ("thirteen_f", " C"),
+])
+@pytest.mark.asyncio
+async def test_an_output_whose_class_contradicts_its_template_is_refused(svc, monkeypatch, template_id,
+                                                                          output_class):
+    """The output's own class must be the one its template id decides: a lesson package claiming "C",
+    or a template package with no class / another class, is a hand edit — 422, nothing written, and
+    never the judge's 409 or the template's re-check (both would name the wrong cause)."""
+    rid, specs = await _class_run(svc, template_id, output_extra={"content_class": output_class})
+
+    async def no_asset_read(run_id):
+        raise AssertionError("the class refusal must come before any asset read")
+
+    monkeypatch.setattr(svc, "list_assets", no_asset_read)
+    with pytest.raises(mrs.MarketingRequestInvalid) as ei:
+        await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    assert type(ei.value) is mrs.MarketingRequestInvalid and "has no post gate" in str(ei.value)
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.parametrize("mirror", ["C", "F", None, "", "a", "B", 1])
+@pytest.mark.asyncio
+async def test_the_runs_mirror_never_gates_a_lesson_it_is_only_a_warning(svc, caplog, mirror):
+    """The run's `content_class` is the mirror `_heal_mirror` writes: a lesson script whose run says "C"
+    (or anything else) still records its posts — the SCRIPT decides — and the disagreement is logged."""
+    import logging
+
+    rid, specs = await _class_run(svc, "checklist", mirror=mirror)
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    assert [(p["platform"], p["format"], p["status"]) for p in posts] == [
+        ("x", "text", "pending_review"), ("tiktok", "video", "pending_review")]
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING and "the script decides" in r.getMessage()]
+    assert len(warned) == 1 and rid in warned[0].getMessage()
 
 
 @pytest.mark.asyncio
 async def test_class_a_judged_in_enforce_mode_still_becomes_posts(svc, caplog):
-    """The control for the refusals above: the same run with the class left at "A" records its posts."""
+    """The control for the refusals above: a lesson script, its run mirroring "A", records its posts
+    with no warning — and each post carries what it is and its AI flag (drop 2)."""
     import logging
 
-    rid, specs = await _class_run(svc, "A")
-    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+    rid, specs = await _class_run(svc, "checklist")
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
         posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
     assert [(p["platform"], p["format"], p["status"]) for p in posts] == [
         ("x", "text", "pending_review"), ("tiktok", "video", "pending_review")]
     assert len(svc.fake.tables[mrs.POSTS].rows) == 2
-    assert not [r for r in caplog.records if "REFUSED" in r.getMessage()]
+    assert not [r for r in caplog.records if "REFUSED" in r.getMessage() or "the script decides" in r.getMessage()]
+    for p in posts:
+        md = p["metadata"]
+        assert (md["content_class"], md["series"], md["authorship"], md["series_trail"], md["made_with_ai"]) == (
+            "A", "lesson", "ai", [], True)
+
+
+@pytest.mark.asyncio
+async def test_a_lesson_output_claiming_template_authorship_is_refused(svc):
+    rid, specs = await _class_run(svc, "checklist", output_extra={"authorship": "template"})
+    with pytest.raises(mrs.MarketingRequestInvalid, match="claims authorship 'template'"):
+        await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["live", "rehearsal"])
 @pytest.mark.parametrize("judge", [{"mode": "enforce"}, {"mode": "shadow"}, {"mode": "off"}, None])
 @pytest.mark.asyncio
-async def test_an_ungated_class_is_refused_whatever_the_judge_said(svc, judge, dry_run):
-    """The judge decides only inside the class-A branch. A class-C run is the 422 (the worker fails the
-    run), never the 409 judge refusal, whose hint would tell the owner to set MARKETING_JUDGE_MODE=enforce
-    — false while the judge is enforcing. A rehearsal (dry-run) run is refused the same way: the class
-    dispatch has no dry-run branch."""
+async def test_a_template_script_is_never_judged_its_recheck_decides(svc, monkeypatch, judge, dry_run):
+    """The judge decides only inside the class-A branch. A class-C script whose output is not what the
+    template composes from its fact sheet is the 409 MarketingTemplateRefused (the worker skips the day
+    `template_refused`), never the judge refusal — whose hint would tell the owner to set
+    MARKETING_JUDGE_MODE=enforce, false while the judge is enforcing. A rehearsal is refused the same
+    way: the class dispatch has no dry-run branch."""
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=dry_run, now=NOW, claim_nonce=_n())
-    output: Dict[str, Any] = {"posts": {"x": _server_copy("x")}}
+    output: Dict[str, Any] = {"posts": {"x": _server_copy("x")}, "content_class": "C", "authorship": "template",
+                              "series": "ceo_buys"}
     if judge is not None:
         output["judge"] = judge
-    await svc.insert_script({"run_id": row["id"], "status": "accepted", "output": output})
-    _stored(svc, row["id"])["content_class"] = "C"
-    with pytest.raises(mrs.MarketingRequestInvalid) as ei:
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "ceo_buys",
+                             "source_ref": "news:ceo_buys:2026-09-07", "fact_sheet": {}, "output": output})
+    with pytest.raises(mrs.MarketingTemplateRefused) as ei:
         await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
-    assert type(ei.value) is mrs.MarketingRequestInvalid
-    assert f"run {row['id']}: content_class 'C' has no post gate" in str(ei.value)
+    assert type(ei.value) is mrs.MarketingTemplateRefused and "failed its re-check" in str(ei.value)
     assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.parametrize("classes", ["A", "", "A,F", "a, f", "C", "X"])
+@pytest.mark.asyncio
+async def test_a_template_whose_class_is_switched_off_is_refused_before_its_recheck(svc, monkeypatch, caplog,
+                                                                                    classes):
+    """Rollback (contract D17): switching MARKETING_CONTENT_CLASSES back to "A" refuses the day's
+    accepted template at create_posts (409 → skipped `template_refused`), before any re-check or read."""
+    import logging
+
+    from app.api.error_response import ErrorCode, classify_exception
+
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", classes)
+    expect_off = "C" not in mrs.parse_content_classes(classes)
+
+    def recheck(*_a, **_k):
+        raise AssertionError("a switched-off class is refused before its re-check")
+
+    monkeypatch.setattr(mrs.news_templates, "revalidate", recheck if expect_off else (lambda *_a, **_k: []))
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "ceo_buys",
+                             "source_ref": "news:ceo_buys:2026-09-07", "fact_sheet": {},
+                             "output": {"posts": {"x": _server_copy("x")}, "content_class": "C",
+                                        "authorship": "template", "series": "ceo_buys"}})
+    spec = [{"platform": "x", "format": "text"}]
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        if expect_off:
+            with pytest.raises(mrs.MarketingTemplateRefused, match="switched off") as ei:
+                await svc.create_posts(row["id"], spec, claim=_holder(svc, row["id"]))
+            assert classify_exception(ei.value) == (ErrorCode.MARKETING_TEMPLATE_REFUSED, 409)
+            assert any("TEMPLATE REFUSED" in r.getMessage() and row["id"] in r.getMessage() for r in caplog.records)
+            assert svc.fake.tables[mrs.POSTS].rows == []
+        else:
+            (post,) = await svc.create_posts(row["id"], spec, claim=_holder(svc, row["id"]))
+            assert post["status"] == "pending_review"
+
+
+_NEWS_SERIES_DEFAULT = "ceo_buys,insider_buys,thirteen_f,money_map"      # Settings' default (the 2a four)
+
+
+@pytest.mark.parametrize("series, raw, withdrawn, expect_on", [
+    ("congress_count", _NEWS_SERIES_DEFAULT, (), False),     # shipped (2b) but off by default
+    ("company_stakes", _NEWS_SERIES_DEFAULT, (), False),
+    ("earnings", _NEWS_SERIES_DEFAULT, (), False),
+    ("theme_explainer", _NEWS_SERIES_DEFAULT, (), False),
+    ("congress_count", "congress_count", (), True),
+    ("theme_explainer", " THEME_EXPLAINER ,money_map", (), True),
+    ("ceo_buys", _NEWS_SERIES_DEFAULT, (), True),
+    ("ceo_buys", "insider_buys,money_map", (), False),       # a 2a series switched off
+    ("money_map", "", (), False),
+    ("earnings", "earnings", ("earnings",), False),          # listed, but this deploy no longer ships it
+])
+@pytest.mark.asyncio
+async def test_a_template_whose_series_is_switched_off_is_refused_before_its_recheck(
+        svc, monkeypatch, caplog, series, raw, withdrawn, expect_on):
+    """Drop 2b: the per-series switch is read at create_posts too, like the class switch. A template whose
+    series MARKETING_NEWS_SERIES no longer lists — or this deploy no longer ships — is refused 409
+    MARKETING_TEMPLATE_REFUSED (the worker skips the day `template_refused`), before its re-check and any
+    asset read; nothing is recorded. Listed and shipped, the same script records its post."""
+    import logging
+
+    from app.api.error_response import ErrorCode, classify_exception
+    from app.services.marketing import selection
+
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", raw)
+    if withdrawn:
+        monkeypatch.setattr(selection, "SHIPPED_SERIES", selection.SHIPPED_SERIES - set(withdrawn))
+
+    def recheck(*_a, **_k):
+        raise AssertionError("a switched-off series is refused before its re-check")
+
+    monkeypatch.setattr(mrs.news_templates, "revalidate", (lambda *_a, **_k: []) if expect_on else recheck)
+    klass = selection.content_class_of(series)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": series,
+                             "source_ref": f"news:{series}:x", "fact_sheet": {},
+                             "output": {"posts": {"x": _server_copy("x")}, "content_class": klass,
+                                        "authorship": "template", "series": series}})
+
+    async def no_asset_read(run_id):
+        raise AssertionError("the series refusal comes before any asset read")
+
+    monkeypatch.setattr(svc, "list_assets", no_asset_read)
+    spec = [{"platform": "x", "format": "text"}]
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        if not expect_on:
+            with pytest.raises(mrs.MarketingTemplateRefused, match="switched off") as ei:
+                await svc.create_posts(row["id"], spec, claim=_holder(svc, row["id"]))
+            assert classify_exception(ei.value) == (ErrorCode.MARKETING_TEMPLATE_REFUSED, 409)
+            assert series in str(ei.value) and "MARKETING_NEWS_SERIES" in str(ei.value)
+            assert any("TEMPLATE REFUSED" in r.getMessage() and row["id"] in r.getMessage()
+                       and series in r.getMessage() for r in caplog.records)
+            assert svc.fake.tables[mrs.POSTS].rows == []
+        else:
+            (post,) = await svc.create_posts(row["id"], spec, claim=_holder(svc, row["id"]))
+            assert post["status"] == "pending_review" and post["metadata"]["series"] == series
+            assert not [r for r in caplog.records if "REFUSED" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_the_class_switch_is_checked_before_the_series_switch(svc, monkeypatch):
+    """Both switches off: the refusal names the CLASS (the coarser switch, the documented rollback)."""
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A")
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "")
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "congress_count",
+                             "source_ref": "news:congress_count:2026-08", "fact_sheet": {},
+                             "output": {"posts": {"x": _server_copy("x")}, "content_class": "C",
+                                        "authorship": "template", "series": "congress_count"}})
+    with pytest.raises(mrs.MarketingTemplateRefused, match="MARKETING_CONTENT_CLASSES"):
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.parametrize("authorship", [None, "ai", "Template", "templates", 1])
+@pytest.mark.asyncio
+async def test_a_template_script_without_template_authorship_is_a_422(svc, monkeypatch, authorship):
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "money_map",
+                             "output": {"posts": {"x": _server_copy("x")}, "content_class": "F",
+                                        "authorship": authorship, "series": "money_map"}})
+    with pytest.raises(mrs.MarketingRequestInvalid, match="must carry template authorship"):
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.asyncio
+async def test_a_template_whose_output_names_another_series_is_refused(svc, monkeypatch):
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])     # the series check alone
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "insider_buys",
+                             "output": {"posts": {"x": _server_copy("x")}, "content_class": "C",
+                                        "authorship": "template", "series": "ceo_buys"}})
+    with pytest.raises(mrs.MarketingTemplateRefused, match="series_mismatch"):
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.parametrize("auto", [True, False])
+@pytest.mark.asyncio
+async def test_a_template_post_is_never_auto_approved_and_carries_its_metadata(svc, monkeypatch, auto):
+    """MARKETING_AUTO_PUBLISH approves a media-less TEXT post of a JUDGED (class A) script only. A
+    template (C/F) text post stays pending_review: a human approves every one. Its metadata records the
+    class, the series, the authorship, the selection's trail (≤ 8) and `made_with_ai` False (a fixed
+    template wrote it; only a narrated template video is made with AI)."""
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", auto)
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])
+    trail = [{"series": f"s{i}", "outcome": "no_candidates", "reason": "r"} for i in range(11)]
+    trail.insert(1, "junk")
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": "money_map",
+                             "source_ref": "news:money_map:COST:2025",
+                             "fact_sheet": {"selection": {"plan": "thursday_off", "chain": ["money_map", "lesson"],
+                                                          "trail": trail}},
+                             "output": {"posts": {"x": _server_copy("x")}, "content_class": "F",
+                                        "authorship": "template", "series": "money_map"}})
+    (post,) = await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
+    assert post["status"] == "pending_review" and post["approved_by"] is None
+    md = post["metadata"]
+    assert (md["content_class"], md["series"], md["authorship"], md["made_with_ai"]) == (
+        "F", "money_map", "template", False)
+    assert md["series_trail"] == trail[:1] + trail[2:9] and len(md["series_trail"]) == mrs.SERIES_TRAIL_MAX
+    # the control: the same switch DOES approve a class-A text post
+    real, _ = await svc.claim_run(date(2026, 9, 18), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, real["id"], ["x"])
+    (lesson,) = await svc.create_posts(real["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, real["id"]))
+    assert lesson["status"] == ("approved" if auto else "pending_review")
 
 
 @pytest.mark.asyncio
@@ -4142,13 +4385,12 @@ async def test_the_class_refusal_comes_after_the_hold_and_the_script(svc, caplog
 
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     rid = row["id"]
-    _stored(svc, rid)["content_class"] = "C"
     spec = [{"platform": "x", "format": "text"}]
     with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
         # no accepted script yet: the script refusal (409 — the worker waits for the writer)
         with pytest.raises(mrs.MarketingScriptNotReady):
             await svc.create_posts(rid, spec, claim=_holder(svc, rid))
-        await _accept_script(svc, rid, ["x"])
+        await _accept_script(svc, rid, ["x"], template_id="retired_template")
         # a zombie whose claim was taken over: not held (409), whatever the class
         with pytest.raises(MarketingRunNotHeld):
             await svc.create_posts(rid, spec, claim=mrs.CallerClaim(1, "f" * 32))
@@ -4166,8 +4408,1104 @@ async def test_the_class_refusal_comes_after_the_hold_and_the_script(svc, caplog
     assert svc.fake.tables[mrs.POSTS].rows == []
 
 
-def test_an_ungated_class_is_a_422_never_a_retried_5xx():
+def test_an_ungated_class_is_a_422_and_a_refused_template_a_409_never_a_retried_5xx():
     from app.api.error_response import ErrorCode, classify_exception
 
-    assert classify_exception(mrs.MarketingRequestInvalid("run r: content_class 'C' has no post gate")) == (
+    assert classify_exception(mrs.MarketingRequestInvalid("run r: the script's template 'x' has no post gate")) == (
         ErrorCode.MARKETING_REQUEST_INVALID, 422)
+    assert classify_exception(mrs.MarketingTemplateRefused("run r: failed its re-check (timeout, 503)")) == (
+        ErrorCode.MARKETING_TEMPLATE_REFUSED, 409)
+    assert ErrorCode.MARKETING_TEMPLATE_REFUSED.value == "MARKETING_TEMPLATE_REFUSED"
+
+
+# ══ Drop 1 — image posts: the frozen formats, the post image's text, one post per platform ══════
+#
+# Contract C2/C6/C7 (2026-10-09). The accepted output freezes each platform's format at write time
+# (`post_formats`, script_service); the worker renders ONE post image from `image_post` + the
+# code-owned `image_footer` and declares what it drew; the server checks that text at registration,
+# verifies the run's pointer to it, and records each platform in exactly its frozen format.
+
+_IMAGE_POST = {"title": "Three habits that compound",
+               "paragraphs": ["Small, steady saving adds up over the years.",
+                              "Costs you avoid keep working for you."]}
+_IMAGE_FOOTER = "Educational only · not investment advice · Written with AI assistance · Sep 17, 2026 · Caydex"
+_TEXT_PLATFORMS = ("facebook", "linkedin", "x", "threads", "bluesky")
+
+
+async def _accept_image_script(svc, run_id: str, formats: Dict[str, str], **output_extra) -> Dict[str, Any]:
+    """An accepted script whose output froze `formats` (with copy for each platform), carrying the
+    image post and its footer — what `script_service.freeze_post_formats` stores."""
+    row = {
+        "run_id": run_id, "status": "accepted", "source_ref": "money_moves:test-item",
+        "template_id": "checklist", "generation_id": str(uuid.uuid4()),
+        "output": {"posts": {p: _server_copy(p) for p in formats}, "judge": {"mode": "enforce"},
+                   "cards": [dict(_CARD)], "disclaimer_card": _DISCLAIMER_CARD,
+                   "post_formats": dict(formats), "image_post": copy.deepcopy(_IMAGE_POST),
+                   "image_footer": _IMAGE_FOOTER, **output_extra},
+    }
+    created, ours = await svc.insert_script(row)
+    assert ours
+    return created
+
+
+def _drawn() -> List[str]:
+    return [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"], _IMAGE_FOOTER]
+
+
+def _image_meta(**extra) -> Dict[str, Any]:
+    return {"onscreen_text": _drawn(), "image_role": schemas.IMAGE_ROLE_POST, **extra}
+
+
+async def _post_image(svc, run_id: str, sha: str = "c" * 64, *, metadata=None, size: int = 1,
+                      point: bool = True) -> Dict[str, Any]:
+    """The run's post image: registered (checked), uploaded, verified READY — and, with `point`,
+    named by the run's `metadata.image_asset_id` the way the worker's `rendered` PATCH names it."""
+    asset, _ = await svc.register_asset(run_id, kind="card", ext="jpg", sha256=sha, size_bytes=size,
+                                        metadata=_image_meta() if metadata is None else metadata,
+                                        claim=_holder(svc, run_id))
+    svc.fake.objects.add(asset["storage_path"])
+    ready = await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
+    if point:
+        await svc.update_run(run_id, metadata={"image_asset_id": ready["id"]}, worker=True,
+                             claim=_holder(svc, run_id))
+    return ready
+
+
+async def _point_video(svc, run_id: str, video_id: str) -> None:
+    """Name `video_id` as the run's video the way the worker's `rendered` PATCH does
+    (`metadata.video_asset_id`) — the verified pointer every video post of a run must carry (F1)."""
+    await svc.update_run(run_id, metadata={"video_asset_id": video_id}, worker=True, claim=_holder(svc, run_id))
+
+
+async def _image_run(svc, formats: Optional[Dict[str, str]] = None, *, dry_run: bool = False):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=dry_run, now=NOW, claim_nonce=_n())
+    formats = formats or {"x": "image", "bluesky": "image", "facebook": "text", "tiktok": "video"}
+    await _accept_image_script(svc, row["id"], formats)
+    return row["id"]
+
+
+# ── C2: the format map ────────────────────────────────────────────────────────
+
+
+def test_the_five_text_platforms_may_take_an_image_and_the_video_platforms_only_video():
+    assert schemas.POST_FORMATS_BY_PLATFORM == {
+        "tiktok": ("video",), "youtube": ("video",), "instagram": ("video",),
+        "facebook": ("text", "image"), "linkedin": ("text", "image"), "x": ("text", "image"),
+        "threads": ("text", "image"), "bluesky": ("text", "image"),
+    }
+    assert set(schemas.FROZEN_POST_FORMATS) == {"video", "image", "text"} <= set(schemas.POST_FORMATS)
+    # An image post carries exactly a card (the post image) — never a video or a manifest.
+    assert schemas.POST_MEDIA_KINDS["image"] == ("card",) and "image" in schemas.MEDIA_REQUIRED_FORMATS
+    assert schemas.ASSET_KIND_EXTENSIONS["card"] == ("png", "jpg") and schemas.POST_IMAGE_EXT == "jpg"
+    assert schemas.POST_IMAGE_MAX_BYTES == 950_000 and schemas.IMAGE_ROLES == ("post_image",)
+
+
+# ── the image_post shape ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("value, problem", [
+    (None, "not an object"),
+    (["t", "p"], "not an object"),
+    ("a title", "not an object"),
+    ({"paragraphs": ["a", "b"]}, "title"),
+    ({"title": "", "paragraphs": ["a", "b"]}, "title"),
+    ({"title": "   ", "paragraphs": ["a", "b"]}, "title"),
+    ({"title": 7, "paragraphs": ["a", "b"]}, "title"),
+    ({"title": "x" * (schemas.ONSCREEN_TEXT_MAX_CHARS + 1), "paragraphs": ["a", "b"]}, "title"),
+    ({"title": "t"}, "paragraphs must be a list"),
+    ({"title": "t", "paragraphs": "a b"}, "paragraphs must be a list"),
+    ({"title": "t", "paragraphs": ["only one"]}, "1 entries"),
+    ({"title": "t", "paragraphs": []}, "0 entries"),
+    ({"title": "t", "paragraphs": ["a", "b", "c", "d", "e"]}, "5 entries"),
+    ({"title": "t", "paragraphs": ["a", None]}, "paragraphs[1]"),
+    ({"title": "t", "paragraphs": ["a", " \n"]}, "paragraphs[1]"),
+    ({"title": "t", "paragraphs": [{"text": "a"}, "b"]}, "paragraphs[0]"),
+    ({"title": "t", "paragraphs": ["a", "x" * (schemas.ONSCREEN_TEXT_MAX_CHARS + 1)]}, "paragraphs[1]"),
+])
+def test_an_unusable_image_post_names_its_problem_and_normalizes_to_none(value, problem):
+    got = schemas.image_post_problem(value)
+    assert got is not None and problem in got
+    assert schemas.normalize_image_post(value) is None
+
+
+@pytest.mark.parametrize("n", [2, 3, 4])
+def test_a_usable_image_post_keeps_its_strings_verbatim_and_drops_extra_keys(n):
+    value = {"title": "  Spaced title ", "paragraphs": [f"Paragraph {i}. " for i in range(n)],
+             "verdicts": ["ignored"], "font": "Comic Sans"}
+    assert schemas.image_post_problem(value) is None
+    got = schemas.normalize_image_post(value)
+    assert got == {"title": "  Spaced title ", "paragraphs": value["paragraphs"]}
+    got["paragraphs"].append("mutated")   # a copy: the stored package is never aliased
+    assert len(value["paragraphs"]) == n
+
+
+# ── frozen_post_formats ───────────────────────────────────────────────────────
+
+
+def _with_formats(formats, **extra):
+    return {"post_formats": formats, "image_post": copy.deepcopy(_IMAGE_POST), "image_footer": _IMAGE_FOOTER,
+            **extra}
+
+
+@pytest.mark.parametrize("output", [None, [], "x", {}, {"posts": {}}, {"post_formats": None}])
+def test_an_output_without_frozen_formats_reads_as_none(output):
+    assert mrs.frozen_post_formats(output) is None
+
+
+def test_frozen_formats_read_back_exactly():
+    formats = {"x": "image", "bluesky": "text", "tiktok": "video", "youtube": "video"}
+    assert mrs.frozen_post_formats(_with_formats(formats)) == formats
+    # text and video alone need no image post beside them
+    assert mrs.frozen_post_formats({"post_formats": {"x": "text", "tiktok": "video"}}) == {
+        "x": "text", "tiktok": "video"}
+
+
+@pytest.mark.parametrize("output, match", [
+    (_with_formats(["x", "image"]), "not an object"),
+    (_with_formats("image"), "not an object"),
+    (_with_formats({"x": "carousel"}), "not a format"),
+    (_with_formats({"x": "IMAGE"}), "not a format"),
+    (_with_formats({"x": None}), "not a format"),
+    (_with_formats({"x": ["image"]}), "not a format"),
+    (_with_formats({"x": "video"}), "not a format"),           # X never takes a video
+    (_with_formats({"tiktok": "image"}), "not a format"),      # TikTok never takes an image here
+    (_with_formats({"myspace": "text"}), "not a format"),
+    (_with_formats({1: "text"}), "not a format"),
+    ({"post_formats": {"x": "image"}}, "no usable image_post"),
+    (_with_formats({"x": "image"}, image_post=None), "no usable image_post"),
+    (_with_formats({"x": "image"}, image_post={"title": "t", "paragraphs": ["one"]}), "no usable image_post"),
+    (_with_formats({"x": "image"}, image_footer=None), "no usable image_post"),
+    (_with_formats({"x": "image"}, image_footer="  "), "no usable image_post"),
+])
+def test_frozen_formats_that_do_not_read_back_raise_never_guess(output, match):
+    with pytest.raises(ValueError, match=match):
+        mrs.frozen_post_formats(output)
+
+
+# ── C6: the request schema bounds the post image ──────────────────────────────
+
+
+def test_the_request_schema_bounds_the_post_image():
+    base = {"kind": "card", "ext": "jpg", "sha256": SHA, "bytes": 900_000}
+    ok = schemas.AssetRegisterRequest(**base, metadata=_image_meta(render_key="k", card_version=3))
+    assert ok.metadata["image_role"] == "post_image"
+    assert schemas.AssetRegisterRequest(**{**base, "bytes": schemas.POST_IMAGE_MAX_BYTES}, metadata=_image_meta())
+    # an ordinary card (no role, no text) is unchanged
+    assert schemas.AssetRegisterRequest(kind="card", ext="png", sha256=SHA, bytes=10).metadata == {}
+    bad = [
+        (base, {"image_role": "post_image"}, "must declare metadata.onscreen_text"),
+        (base, {"image_role": "post_image", "onscreen_text": []}, "non-empty"),
+        (base, {"image_role": "post_image", "onscreen_text": [1]}, "characters"),
+        ({**base, "ext": "png"}, _image_meta(), r"must be a \.jpg"),
+        ({**base, "bytes": schemas.POST_IMAGE_MAX_BYTES + 1}, _image_meta(), "max 950000"),
+        (base, {"onscreen_text": _drawn()}, "only a video or a post image"),
+        (base, {"onscreen_text": _drawn(), "image_role": "cover"}, "image_role must be one of"),
+        (base, {"onscreen_text": _drawn(), "image_role": None}, "image_role must be one of"),
+        (base, {"onscreen_text": _drawn(), "image_role": ["post_image"]}, "image_role must be one of"),
+        ({"kind": "video", "ext": "mp4", "sha256": SHA, "bytes": 1},
+         {"onscreen_text": ["a"], "voice_asset_id": "v", "image_role": "post_image"}, "only a card"),
+        ({"kind": "carousel", "ext": "jpg", "sha256": SHA, "bytes": 1}, _image_meta(), "only a card"),
+        ({"kind": "audio", "ext": "m4a", "sha256": SHA, "bytes": 1}, {"onscreen_text": ["a"]},
+         "only a video or a post image"),
+    ]
+    for req, metadata, match in bad:
+        with pytest.raises(ValueError, match=match):
+            schemas.AssetRegisterRequest(**req, metadata=metadata)
+
+
+# ── C6: what the post image draws ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_post_image_drawing_the_accepted_text_and_its_footer_registers(svc):
+    rid = await _image_run(svc)
+    image = await _post_image(svc, rid)
+    assert image["status"] == "ready" and image["kind"] == "card"
+    assert image["metadata"]["image_role"] == "post_image" and image["storage_path"].endswith(".jpg")
+    # The footer alone (with nothing else) is a legal, if empty, image.
+    rid2 = (await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=False, now=NOW,
+                                claim_nonce=_n()))[0]["id"]
+    await _accept_image_script(svc, rid2, {"x": "image"})
+    await _post_image(svc, rid2, sha="d" * 64, metadata=_image_meta(onscreen_text=[_IMAGE_FOOTER]))
+
+
+@pytest.mark.parametrize("drawn, match", [
+    (_drawn() + ["Buy now"], "not the accepted image post"),
+    ([t.upper() if i == 0 else t for i, t in enumerate(_drawn())], "not the accepted image post"),
+    (_drawn() + [_CARD["title"]], "not the accepted image post"),        # a VIDEO card is not image text
+    (_drawn() + [_DISCLAIMER_CARD], "not the accepted image post"),
+    (_drawn() + ["Caydex"], "not the accepted image post"),              # the video's end card neither
+    (_drawn()[:-1], "does not draw its footer"),
+    ([_IMAGE_POST["title"]], "does not draw its footer"),
+    (_drawn() + [{"t": "x"}], "not the accepted image post"),            # never a TypeError
+    ([], "must declare"),
+    ("not a list", "must declare"),
+])
+@pytest.mark.asyncio
+async def test_a_post_image_declaring_other_text_or_no_footer_is_refused(svc, drawn, match):
+    rid = await _image_run(svc)
+    with pytest.raises(MarketingRequestInvalid, match=match):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(onscreen_text=drawn), claim=_holder(svc, rid))
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "card"]
+
+
+@pytest.mark.parametrize("output_patch, match", [
+    ({"image_post": None}, "carries no image post"),
+    ({"image_footer": None}, "carries no image post"),
+    ({"image_post": {"title": "t", "paragraphs": ["only one"]}}, "carries no image post"),
+])
+@pytest.mark.asyncio
+async def test_a_post_image_needs_an_accepted_image_post_to_be_checked_against(svc, output_patch, match):
+    rid = await _image_run(svc)
+    script = next(r for r in svc.fake.tables[mrs.SCRIPTS].rows if r["run_id"] == rid)
+    script["output"].update(output_patch)
+    with pytest.raises(MarketingRequestInvalid, match=match):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(), claim=_holder(svc, rid))
+
+
+@pytest.mark.asyncio
+async def test_a_post_image_before_the_script_is_accepted_is_not_ready(svc):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    with pytest.raises(mrs.MarketingScriptNotReady):
+        await svc.register_asset(row["id"], kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(), claim=_holder(svc, row["id"]))
+
+
+@pytest.mark.parametrize("ext, size, metadata, match", [
+    ("png", 1, _image_meta(), r"\.jpg"),
+    ("jpg", schemas.POST_IMAGE_MAX_BYTES + 1, _image_meta(), "at most"),
+    ("jpg", 1, {"onscreen_text": _drawn()}, "only as the post image"),
+    ("jpg", 1, {"onscreen_text": _drawn(), "image_role": "cover"}, "only as the post image"),
+    ("jpg", 1, {"image_role": "post_image"}, "must declare"),
+])
+@pytest.mark.asyncio
+async def test_the_service_fences_the_post_image_even_without_the_request_schema(svc, ext, size, metadata, match):
+    """The endpoint's schema checks these first; the service is its own fence (a direct caller)."""
+    rid = await _image_run(svc)
+    with pytest.raises(MarketingRequestInvalid, match=match):
+        await svc.register_asset(rid, kind="card", ext=ext, sha256="c" * 64, size_bytes=size,
+                                 metadata=metadata, claim=_holder(svc, rid))
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "card"]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_card_is_not_checked_as_a_post_image(svc):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    # no accepted script at all, and still fine: a card that declares nothing is not text the server
+    # vouches for (it can never be an image post's media — that needs the verified pointer)
+    asset, upload = await svc.register_asset(row["id"], kind="card", ext="png", sha256="e" * 64,
+                                             size_bytes=10, metadata={"render_key": "k"},
+                                             claim=_holder(svc, row["id"]))
+    assert asset["status"] == "pending_upload" and upload is not None
+
+
+# ── C6: the read-back's image pointer ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_read_back_verifies_the_image_pointer_kind_role_and_readiness(svc):
+    rid = await _image_run(svc)
+    image = await _post_image(svc, rid)
+    back = await svc.read_back(rid, claim=_holder(svc, rid))
+    assert back["image_asset_id"] == image["id"]
+    assert back["voice_asset_id"] is None and back["video_asset_id"] is None
+    run_row = next(r for r in svc.fake.tables[mrs.RUNS].rows if r["id"] == rid)
+    video = await _ready_asset(svc, rid)
+    plain = await _asset_of(svc, rid, "card", "png", "f" * 64)
+    pending, _ = await svc.register_asset(rid, kind="card", ext="jpg", sha256="9" * 64, size_bytes=1,
+                                          metadata=_image_meta(), claim=_holder(svc, rid))
+    for wrong in (video["id"], plain["id"], pending["id"], str(uuid.uuid4()), ""):
+        run_row["metadata"]["image_asset_id"] = wrong
+        assert (await svc.read_back(rid, claim=_holder(svc, rid)))["image_asset_id"] is None, wrong
+    # a ready card whose role was edited away no longer verifies
+    run_row["metadata"]["image_asset_id"] = image["id"]
+    stored = next(a for a in svc.fake.tables[mrs.ASSETS].rows if a["id"] == image["id"])
+    stored["metadata"] = {**stored["metadata"], "image_role": "cover"}
+    assert (await svc.read_back(rid, claim=_holder(svc, rid)))["image_asset_id"] is None
+
+
+def test_the_assets_route_carries_the_image_pointer(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.api.v1.endpoints.marketing_internal as mi
+    from app.main import app
+
+    monkeypatch.setattr(mi.settings, "MARKETING_WORKER_TOKEN", "tok")
+
+    class Svc:
+        def __init__(self, back):
+            self.back = back
+
+        async def read_back(self, run_id, *, claim):
+            return self.back
+
+    headers = {"X-Marketing-Worker-Token": "tok", "X-Marketing-Claim": "1." + "a" * 32}
+    client = TestClient(app)
+    monkeypatch.setattr(mi, "get_marketing_run_service", lambda: Svc(
+        {"voice_asset_id": None, "video_asset_id": None, "image_asset_id": "img-1", "assets": []}))
+    r = client.get("/api/v1/internal/marketing/runs/r1/assets", headers=headers)
+    assert r.status_code == 200 and r.json()["image_asset_id"] == "img-1"
+    # a service that predates the pointer (no key) still answers, with None
+    monkeypatch.setattr(mi, "get_marketing_run_service", lambda: Svc(
+        {"voice_asset_id": None, "video_asset_id": None, "assets": []}))
+    r = client.get("/api/v1/internal/marketing/runs/r1/assets", headers=headers)
+    assert r.status_code == 200 and r.json()["image_asset_id"] is None
+
+
+# ── C7: create_posts records each platform in its frozen format ───────────────
+
+
+@pytest.mark.asyncio
+async def test_image_posts_carry_the_runs_verified_image_and_are_born_pending_review(svc, monkeypatch):
+    monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", True)   # a real run, auto-publish on
+    rid = await _image_run(svc)
+    image = await _post_image(svc, rid)
+    video = await _ready_asset(svc, rid)
+    await _point_video(svc, rid, video["id"])
+    posts = await svc.create_posts(rid, [
+        {"platform": "x", "format": "image", "asset_ids": [image["id"]]},
+        {"platform": "bluesky", "format": "image", "asset_ids": [image["id"]]},
+        {"platform": "facebook", "format": "text"},
+        {"platform": "tiktok", "format": "video", "asset_ids": [video["id"]]},
+    ], claim=_holder(svc, rid))
+    by = {p["platform"]: p for p in posts}
+    assert {p: by[p]["format"] for p in by} == {"x": "image", "bluesky": "image", "facebook": "text",
+                                               "tiktok": "video"}
+    # media posts always wait for a reviewer; only the media-less text post is born approved
+    assert by["x"]["status"] == by["bluesky"]["status"] == by["tiktok"]["status"] == "pending_review"
+    assert by["facebook"]["status"] == "approved" and by["facebook"]["approved_by"] == "auto"
+    assert by["x"]["asset_ids"] == by["bluesky"]["asset_ids"] == [image["id"]]
+    # captions unchanged: the platform's own accepted copy
+    assert by["x"]["caption"] == _server_copy("x")["caption"] and by["x"]["idempotency_key"] == "2026-09-17:x:image"
+    # a resumed worker re-sending the same pairs gets the same rows back, untouched
+    before = [dict(r) for r in svc.fake.tables[mrs.POSTS].rows]
+    again = await svc.create_posts(rid, [{"platform": "x", "format": "image", "asset_ids": [image["id"]]}],
+                                   claim=_holder(svc, rid))
+    assert again[0]["id"] == by["x"]["id"] and svc.fake.tables[mrs.POSTS].rows == before
+
+
+@pytest.mark.parametrize("label, spec", [
+    ("text where the run froze an image", {"platform": "x", "format": "text"}),
+    ("an image where the run froze text", {"platform": "facebook", "format": "image", "asset_ids": ["IMAGE"]}),
+    ("a video platform asked for an image", {"platform": "tiktok", "format": "image", "asset_ids": ["IMAGE"]}),
+    ("an image without its asset", {"platform": "x", "format": "image"}),
+    ("an image carrying another card", {"platform": "x", "format": "image", "asset_ids": ["CARD"]}),
+    ("an image carrying the video", {"platform": "x", "format": "image", "asset_ids": ["VIDEO"]}),
+    ("an image carrying two cards", {"platform": "x", "format": "image", "asset_ids": ["IMAGE", "CARD"]}),
+    ("an image carrying an unchecked card of the right shape", {"platform": "x", "format": "image",
+                                                               "asset_ids": ["UNPOINTED"]}),
+])
+@pytest.mark.asyncio
+async def test_a_spec_off_the_frozen_format_or_the_verified_image_is_refused_and_writes_nothing(svc, label, spec):
+    rid = await _image_run(svc)
+    ids = {"IMAGE": (await _post_image(svc, rid))["id"],
+           "CARD": (await _asset_of(svc, rid, "card", "png", "3" * 64))["id"],
+           "VIDEO": (await _ready_asset(svc, rid))["id"],
+           "UNPOINTED": (await _post_image(svc, rid, sha="8" * 64, point=False))["id"]}
+    bad = {**spec, "asset_ids": [ids[a] for a in spec.get("asset_ids", [])]}
+    good = [{"platform": "bluesky", "format": "image", "asset_ids": [ids["IMAGE"]]}]
+    with pytest.raises(MarketingRequestInvalid):
+        await svc.create_posts(rid, [*good, bad], claim=_holder(svc, rid))   # the invalid spec LAST
+    assert svc.fake.tables[mrs.POSTS].rows == [], label
+
+
+@pytest.mark.parametrize("pointer", ["missing", "a plain card", "the video", "another run's image"])
+@pytest.mark.asyncio
+async def test_an_image_post_needs_the_runs_own_verified_pointer(svc, pointer):
+    rid = await _image_run(svc)
+    image = await _post_image(svc, rid, point=False)
+    run_row = next(r for r in svc.fake.tables[mrs.RUNS].rows if r["id"] == rid)
+    if pointer == "a plain card":
+        run_row["metadata"]["image_asset_id"] = (await _asset_of(svc, rid, "card", "png", "3" * 64))["id"]
+    elif pointer == "the video":
+        run_row["metadata"]["image_asset_id"] = (await _ready_asset(svc, rid))["id"]
+    elif pointer == "another run's image":
+        # A ready post image of ANOTHER run (one run per day: its row is seeded directly).
+        foreign = dict(image, id=str(uuid.uuid4()), run_id=str(uuid.uuid4()))
+        svc.fake.tables[mrs.ASSETS].rows.append(foreign)
+        run_row["metadata"]["image_asset_id"] = foreign["id"]
+    with pytest.raises(MarketingRequestInvalid, match="no verified post image"):
+        await svc.create_posts(rid, [{"platform": "x", "format": "image", "asset_ids": [image["id"]]}],
+                               claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.asyncio
+async def test_an_image_post_without_frozen_formats_is_refused_exactly_as_before(svc):
+    """A script accepted before drop 1 carries no `post_formats`: it validates as it always did (text
+    and video), and an `image` spec — newly in the format map — is still refused for it."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    await _accept_script(svc, rid, ["x", "bluesky"])
+    card = await _asset_of(svc, rid, "card", "png", "3" * 64)
+    with pytest.raises(MarketingRequestInvalid, match="froze no post formats"):
+        await svc.create_posts(rid, [{"platform": "bluesky", "format": "text"},
+                                     {"platform": "x", "format": "image", "asset_ids": [card["id"]]}],
+                               claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+    posts = await svc.create_posts(rid, [{"platform": "x", "format": "text"},
+                                         {"platform": "bluesky", "format": "text"}], claim=_holder(svc, rid))
+    assert [p["format"] for p in posts] == ["text", "text"]
+
+
+@pytest.mark.parametrize("bad_formats", [{"x": "carousel"}, ["x"], {"x": "image", "tiktok": "image"}])
+@pytest.mark.asyncio
+async def test_frozen_formats_that_do_not_read_back_refuse_every_post_of_the_run(svc, caplog, bad_formats):
+    rid = await _image_run(svc)
+    script = next(r for r in svc.fake.tables[mrs.SCRIPTS].rows if r["run_id"] == rid)
+    script["output"]["post_formats"] = bad_formats
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="do not read back"):
+            await svc.create_posts(rid, [{"platform": "facebook", "format": "text"}], claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+    assert any("do not read back" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_one_post_per_platform_within_a_request_and_against_the_ledger(svc):
+    # A legacy run (no frozen formats) is where two formats of one platform could otherwise both pass
+    # the format map: text, and a hand-made image row already in the ledger.
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    await _accept_script(svc, rid, ["x", "bluesky"])
+    svc.fake.tables[mrs.POSTS].rows.append({
+        "id": str(uuid.uuid4()), "run_id": rid, "platform": "x", "format": "image", "status": "skipped",
+        "idempotency_key": "2026-09-17:x:image", "asset_ids": [], "metadata": {}})
+    with pytest.raises(MarketingRequestInvalid, match=r"already recorded x as \['image'\]"):
+        await svc.create_posts(rid, [{"platform": "bluesky", "format": "text"},
+                                     {"platform": "x", "format": "text"}], claim=_holder(svc, rid))
+    assert [p["platform"] for p in svc.fake.tables[mrs.POSTS].rows] == ["x"]
+    # another run's rows do not count
+    other, _ = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, other["id"], ["x"])
+    (p,) = await svc.create_posts(other["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, other["id"]))
+    assert p["format"] == "text"
+
+
+@pytest.mark.asyncio
+async def test_one_platform_named_in_two_formats_in_one_request_is_refused(svc, monkeypatch):
+    rid = await _image_run(svc)
+    image = await _post_image(svc, rid)
+    with pytest.raises(MarketingRequestInvalid):
+        await svc.create_posts(rid, [{"platform": "x", "format": "image", "asset_ids": [image["id"]]},
+                                     {"platform": "x", "format": "text"}], claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+    # The rule on its own (every other check passing): a legacy run under a map that would let X take
+    # two media-less formats. Defence in depth — today's map plus the frozen formats already exclude it.
+    legacy, _ = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, legacy["id"], ["x"])
+    monkeypatch.setitem(mrs.POST_FORMATS_BY_PLATFORM, "x", ("text", "article"))
+    with pytest.raises(MarketingRequestInvalid, match="named in 2 formats"):
+        await svc.create_posts(legacy["id"], [{"platform": "x", "format": "text"},
+                                              {"platform": "x", "format": "article"}],
+                               claim=_holder(svc, legacy["id"]))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.asyncio
+async def test_an_outlet_the_script_dropped_is_still_script_not_ready_with_frozen_formats(svc):
+    rid = await _image_run(svc)   # threads has neither copy nor a frozen format
+    with pytest.raises(mrs.MarketingScriptNotReady):
+        await svc.create_posts(rid, [{"platform": "threads", "format": "text"}], claim=_holder(svc, rid))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ledger_read_of_the_recorded_posts_raises_and_writes_nothing(svc, monkeypatch):
+    rid = await _image_run(svc)
+
+    async def boom(run_id):
+        raise mrs.MarketingRunError(f"create_posts.recorded failed (run_id={run_id})")
+
+    monkeypatch.setattr(svc, "_recorded_formats", boom)
+    with pytest.raises(mrs.MarketingRunError, match="recorded"):
+        await svc.create_posts(rid, [{"platform": "facebook", "format": "text"}], claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+# ── server F1: every video post of a run carries the run's ONE verified video ─────
+#
+# The review bundle shows the owner ONE video for all of a run's video posts and one "Approve all"
+# decides them; the server cannot read pixels. So a video post is pinned to the run's verified
+# `metadata.video_asset_id` (as an image post is to `image_asset_id`) once the formats are frozen, and a
+# script accepted before drop 1 must at least name the same video on every video post.
+
+
+@pytest.mark.parametrize("case", ["another ready video", "no pointer", "the pointer names a card",
+                                  "two videos on one post"])
+@pytest.mark.asyncio
+async def test_a_video_post_under_frozen_formats_carries_exactly_the_runs_verified_video(svc, case):
+    rid = await _image_run(svc, {"tiktok": "video", "youtube": "video", "facebook": "text"})
+    video = await _ready_asset(svc, rid)
+    other = await _ready_asset(svc, rid, sha="d" * 64)
+    if case == "the pointer names a card":
+        await _point_video(svc, rid, (await _asset_of(svc, rid, "card", "png", "3" * 64))["id"])
+    elif case != "no pointer":
+        await _point_video(svc, rid, video["id"])
+    youtube = {"another ready video": [other["id"]], "two videos on one post": [video["id"], other["id"]]}.get(
+        case, [video["id"]])
+    with pytest.raises(MarketingRequestInvalid, match="video"):
+        await svc.create_posts(rid, [{"platform": "tiktok", "format": "video", "asset_ids": [video["id"]]},
+                                     {"platform": "youtube", "format": "video", "asset_ids": youtube}],
+                               claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == [], case
+
+
+@pytest.mark.asyncio
+async def test_video_posts_naming_the_runs_verified_video_are_recorded(svc):
+    rid = await _image_run(svc, {"tiktok": "video", "youtube": "video", "facebook": "text"})
+    video = await _ready_asset(svc, rid)
+    await _ready_asset(svc, rid, sha="d" * 64)            # a second ready video nobody names
+    await _point_video(svc, rid, video["id"])
+    posts = await svc.create_posts(rid, [{"platform": "tiktok", "format": "video", "asset_ids": [video["id"]]},
+                                         {"platform": "youtube", "format": "video", "asset_ids": [video["id"]]},
+                                         {"platform": "facebook", "format": "text"}], claim=_holder(svc, rid))
+    assert [(p["platform"], p["asset_ids"]) for p in posts] == [
+        ("tiktok", [video["id"]]), ("youtube", [video["id"]]), ("facebook", [])]
+
+
+@pytest.mark.asyncio
+async def test_a_script_accepted_before_drop_1_still_needs_one_video_for_every_video_post(svc):
+    """No frozen formats: no pointer is required (validated as before) — but two video posts naming
+    different videos are refused, and nothing is written."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    await _accept_script(svc, rid, ["tiktok", "youtube"])
+    a = await _ready_asset(svc, rid)
+    b = await _ready_asset(svc, rid, sha="d" * 64)
+    with pytest.raises(MarketingRequestInvalid, match="different asset lists"):
+        await svc.create_posts(rid, [{"platform": "tiktok", "format": "video", "asset_ids": [a["id"]]},
+                                     {"platform": "youtube", "format": "video", "asset_ids": [b["id"]]}],
+                               claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+    posts = await svc.create_posts(rid, [{"platform": "tiktok", "format": "video", "asset_ids": [a["id"]]},
+                                         {"platform": "youtube", "format": "video", "asset_ids": [a["id"]]}],
+                                   claim=_holder(svc, rid))
+    assert [p["asset_ids"] for p in posts] == [[a["id"]], [a["id"]]]
+
+
+# ── compat F2: the claim records what the holding worker can render ───────────
+
+
+def _run_meta(svc, run_id: str) -> Dict[str, Any]:
+    return next(r for r in svc.fake.tables[mrs.RUNS].rows if r["id"] == run_id)["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_a_claim_records_the_workers_capabilities_and_a_reclaim_replaces_them(svc):
+    day = date(2026, 9, 17)
+    nonce = _n()
+    row, reason = await svc.claim_run(day, worker_version="drop1", dry_run=True, now=NOW, claim_nonce=nonce,
+                                      capabilities=("post_image", "post_image"))
+    assert reason == CLAIMED and row["metadata"] == {"claim_nonce": nonce, "worker_capabilities": ["post_image"]}
+    assert mrs.run_worker_capabilities(row) == {"post_image"}
+    rid = row["id"]
+    await svc.update_run(rid, metadata={"voice_asset_id": "v-1"}, worker=True, claim=_holder(svc, rid))
+    # An OLDER worker re-claims the failed run: the previous holder's capability does not outlive its
+    # claim (the key is removed), everything else in metadata is kept.
+    await svc.update_run(rid, status="failed", last_error="boom", finished=True)
+    old_nonce = _n()
+    re, reason = await svc.claim_run(day, worker_version="phase4", dry_run=True, now=NOW, claim_nonce=old_nonce)
+    assert reason == CLAIMED and re["attempts"] == 2
+    assert _run_meta(svc, rid) == {"claim_nonce": old_nonce, "voice_asset_id": "v-1"}
+    assert mrs.run_worker_capabilities(re) == frozenset()
+    # …and a drop-1 worker re-claiming it after that declares it again.
+    await svc.update_run(rid, status="failed", last_error="boom", finished=True)
+    new_nonce = _n()
+    re, _ = await svc.claim_run(day, worker_version="drop1", dry_run=True, now=NOW, claim_nonce=new_nonce,
+                                capabilities=("post_image",))
+    assert _run_meta(svc, rid) == {"claim_nonce": new_nonce, "voice_asset_id": "v-1",
+                                   "worker_capabilities": ["post_image"]}
+
+
+@pytest.mark.asyncio
+async def test_an_old_workers_claim_leaves_the_run_exactly_as_before_and_unknowns_are_dropped(svc):
+    nonce = _n()
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="phase4", dry_run=True, now=NOW,
+                                 claim_nonce=nonce)
+    assert row["metadata"] == {"claim_nonce": nonce}
+    # A direct caller (the route's schema drops these first) cannot record an unknown capability.
+    row2, _ = await svc.claim_run(date(2026, 9, 18), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n(),
+                                  capabilities=("carousel", "POST_IMAGE"))
+    assert "worker_capabilities" not in row2["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_a_worker_patch_can_never_forge_its_capabilities(svc, caplog):
+    import logging
+
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="phase4", dry_run=True, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        await svc.update_run(rid, stage="selected", metadata={"worker_capabilities": ["post_image"], "note": "kept"},
+                             worker=True, claim=_holder(svc, rid))
+    meta = _run_meta(svc, rid)
+    assert "worker_capabilities" not in meta and meta["note"] == "kept"
+    assert mrs.run_worker_capabilities({"metadata": meta}) == frozenset()
+    assert any("server-owned metadata" in r.getMessage() and "worker_capabilities" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("meta, expected", [
+    ({"worker_capabilities": ["post_image"]}, {"post_image"}),
+    ({"worker_capabilities": ["post_image", "carousel", 7, None]}, {"post_image"}),
+    ({"worker_capabilities": "post_image"}, set()),        # a string is not a list of capabilities
+    ({"worker_capabilities": {"post_image": True}}, set()),
+    ({"worker_capabilities": None}, set()),
+    ({}, set()),
+    (None, set()),
+])
+def test_run_worker_capabilities_reads_only_a_list_of_known_values(meta, expected):
+    assert mrs.run_worker_capabilities({"metadata": meta}) == expected
+    assert mrs.run_worker_capabilities(None) == frozenset()
+
+
+def test_drop_2a_adds_the_news_templates_capability():
+    assert schemas.WORKER_CAPABILITIES[:2] == ("post_image", "news_templates")
+    assert schemas.WORKER_CAPABILITY_NEWS_TEMPLATES == "news_templates"
+    assert mrs.run_worker_capabilities({"metadata": {"worker_capabilities": ["news_templates", "x"]}}) == {
+        "news_templates"}
+
+
+@pytest.mark.asyncio
+async def test_drop_2b_adds_the_layouts_2b_capability_and_a_claim_records_it(svc):
+    """Review R9 (critic): the drop-2b worker declares `layouts_2b` (it draws the `pair` / `grid` template
+    images); the server knows it, records it on the claim like any capability, and a re-claim by a drop-2a
+    image (news_templates only) removes it — `script_service` then drops the 2b-layout series."""
+    assert schemas.WORKER_CAPABILITIES == ("post_image", "news_templates", "layouts_2b")
+    assert schemas.WORKER_CAPABILITY_LAYOUTS_2B == "layouts_2b" and schemas.WORKER_LAYOUTS_2B == ("pair", "grid")
+    day = date(2026, 9, 17)
+    nonce = _n()
+    row, reason = await svc.claim_run(day, worker_version="drop2b", dry_run=True, now=NOW, claim_nonce=nonce,
+                                      capabilities=("post_image", "news_templates", "layouts_2b"))
+    assert reason == CLAIMED
+    assert row["metadata"]["worker_capabilities"] == ["layouts_2b", "news_templates", "post_image"]
+    assert mrs.run_worker_capabilities(row) == {"post_image", "news_templates", "layouts_2b"}
+    rid = row["id"]
+    await svc.update_run(rid, status="failed", last_error="boom", finished=True)
+    re, reason = await svc.claim_run(day, worker_version="drop2a", dry_run=True, now=NOW, claim_nonce=_n(),
+                                     capabilities=("post_image", "news_templates"))
+    assert reason == CLAIMED and mrs.run_worker_capabilities(re) == {"post_image", "news_templates"}
+    assert _run_meta(svc, rid)["worker_capabilities"] == ["news_templates", "post_image"]
+
+
+_CLAIM_BASE = {"run_date": "2026-11-16", "worker_version": "drop3", "claim_nonce": "ab" * 16}
+
+
+@pytest.mark.parametrize("declared, kept", [
+    (["post_image", "news_templates", "carousel_v2"], ["news_templates", "post_image"]),
+    (["carousel_v2"], []),
+    (["POST_IMAGE", "post_image"], ["post_image"]),
+    (["post_image", "post_image"], ["post_image"]),
+])
+def test_a_claim_declaring_a_capability_this_web_does_not_know_keeps_the_claim(declared, kept, caplog):
+    """Review PW-1: a NEWER worker against an older web (the "web back" rollback) must not lose every
+    claim to a 422 — an unknown capability is dropped with a WARNING, never recorded, never credited."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger=schemas.logger.name):
+        req = schemas.RunClaimRequest.model_validate({**_CLAIM_BASE, "capabilities": declared})
+    assert req.capabilities == kept
+    unknown = sorted({c for c in declared if c not in schemas.WORKER_CAPABILITIES})
+    warned = [r.getMessage() for r in caplog.records if "does not know" in r.getMessage()]
+    assert len(warned) == (1 if unknown else 0)
+    assert all(repr(c) in warned[0] for c in unknown)
+
+
+@pytest.mark.parametrize("bad", [[42], "post_image", ["post_image"] * 9, None, [None], [["post_image"]]])
+def test_a_claim_with_a_malformed_capability_list_is_still_refused(bad):
+    """Typed and bounded as before: only an unknown STRING is forgiven."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        schemas.RunClaimRequest.model_validate({**_CLAIM_BASE, "capabilities": bad})
+
+
+# ── Drop 2 D1: migration 190 widens marketing_runs.content_class to A/C/F ─────────────────
+
+import re as _re_d1  # noqa: E402  (kept local to this block: the file's own `re` import is shared)
+from pathlib import Path as _Path_d1  # noqa: E402
+
+_MIGRATIONS_D1 = _Path_d1(__file__).resolve().parents[1] / "database" / "migrations"
+_MIGRATION_190 = _MIGRATIONS_D1 / "190_marketing_company_classes.sql"
+_CC_CONSTRAINT = "marketing_runs_content_class_check"
+
+
+def _strip_sql_comments(text: str) -> str:
+    """Drop `--` line comments and `/* */` blocks — but never inside a string literal (the table
+    comments carry prose). A small scanner, not a regex, so a quote in a comment cannot confuse it."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'" and j + 1 < n and text[j + 1] == "'":
+                    j += 2
+                    continue
+                if text[j] == "'":
+                    break
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+_ADD_CC_RE = _re_d1.compile(
+    rf"ADD\s+CONSTRAINT\s+{_CC_CONSTRAINT}\s+CHECK\s*\(\s*content_class\s+IN\s*\(([^)]*)\)\s*\)", _re_d1.I)
+_DROP_CC_RE = _re_d1.compile(rf"DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+{_CC_CONSTRAINT}\b", _re_d1.I)
+
+
+def _latest_content_class_check(migrations: _Path_d1):
+    """(file name, class set) of the LATEST migration that ADDs the named content-class CHECK."""
+    found = []
+    for path in sorted(migrations.glob("[0-9][0-9][0-9]_*.sql")):
+        for m in _ADD_CC_RE.finditer(_strip_sql_comments(path.read_text())):
+            found.append((path.name, set(_re_d1.findall(r"'([A-Za-z_]+)'", m.group(1)))))
+    return found[-1] if found else None
+
+
+_SAME_LINE = "<same-line literals>"
+
+
+def _comment_literal(sql: str, target: str) -> Optional[str]:
+    """The text of `COMMENT ON <target> IS '…' '…' …;` (adjacent literals joined, '' unescaped), or
+    None. Postgres joins adjacent string constants ONLY across a newline — a same-line pair is a
+    syntax error — so a separator without one returns `_SAME_LINE`."""
+    m = _re_d1.search(rf"COMMENT\s+ON\s+{_re_d1.escape(target)}\s+IS\s+((?:'(?:[^']|'')*'\s*)+);", sql, _re_d1.I)
+    if not m:
+        return None
+    body = m.group(1)
+    lits = list(_re_d1.finditer(r"'((?:[^']|'')*)'", body))
+    for a, b in zip(lits, lits[1:]):
+        if "\n" not in body[a.end():b.start()]:
+            return _SAME_LINE
+    return "".join(x.group(1).replace("''", "'") for x in lits)
+
+
+def _without_literals(sql: str) -> str:
+    """`sql` with every string literal emptied, so a keyword inside comment prose is not a statement."""
+    return _re_d1.sub(r"'(?:[^']|'')*'", "''", sql)
+
+
+def _static_190_problems(text: str) -> List[str]:
+    """Why a migration-190 text breaks its contract (D1), or [] — every check names itself."""
+    sql = _strip_sql_comments(text)
+    bare = _without_literals(sql)
+    stmts = [s.strip() for s in bare.split(";") if s.strip()]
+    problems: List[str] = []
+    if not stmts or stmts[0].upper() != "BEGIN":
+        problems.append("does not open with BEGIN")
+    if not stmts or stmts[-1].upper() != "COMMIT":
+        problems.append("does not end with COMMIT")
+    drop = _DROP_CC_RE.search(sql)
+    add = _ADD_CC_RE.search(sql)
+    if not drop:
+        problems.append("no DROP CONSTRAINT IF EXISTS of the named CHECK (not idempotent)")
+    if not add:
+        problems.append("no ADD of the named CHECK")
+    elif set(_re_d1.findall(r"'([A-Za-z_]+)'", add.group(1))) != set(schemas.CONTENT_CLASSES):
+        problems.append("the CHECK does not list exactly CONTENT_CLASSES")
+    if drop and add and drop.start() > add.start():
+        problems.append("ADD before DROP")
+    for bad in (r"\bINSERT\s+INTO\b", r"\bUPDATE\s+\w", r"\bDELETE\s+FROM\b", r"\bDROP\s+TABLE\b",
+                r"\bTRUNCATE\b", r"\bGRANT\b", r"\bREVOKE\b", r"\bCREATE\s+TRIGGER\b",
+                r"ALTER\s+TABLE\s+(?:public\.)?marketing_scripts\b"):
+        if _re_d1.search(bad, bare, _re_d1.I):
+            problems.append(f"unexpected statement {bad}")
+    assets = _comment_literal(sql, "TABLE public.marketing_assets")
+    scripts_c = _comment_literal(sql, "TABLE public.marketing_scripts")
+    column = _comment_literal(sql, "COLUMN public.marketing_runs.content_class")
+    for name, got in (("marketing_assets", assets), ("marketing_scripts", scripts_c),
+                      ("marketing_runs.content_class", column)):
+        if got is None:
+            problems.append(f"no comment on {name}")
+        elif got == _SAME_LINE:
+            problems.append(f"the {name} comment joins string literals on one line (a syntax error)")
+    if assets and assets != _SAME_LINE:
+        if "nothing fmp-licensed" in assets.lower():
+            problems.append("the marketing_assets comment still says 'Nothing FMP-licensed'")
+        for must in ("never a market price", "price chart", "FMP credit", "logos/"):
+            if must.lower() not in assets.lower():
+                problems.append(f"the marketing_assets comment does not say {must!r}")
+    if scripts_c and scripts_c != _SAME_LINE:
+        if "template" not in scripts_c or "accepted" not in scripts_c:
+            problems.append("the marketing_scripts comment does not describe template rows")
+    if column and column != _SAME_LINE and "mirror" not in column.lower():
+        problems.append("the content_class column comment does not call it a mirror")
+    return problems
+
+
+def test_content_class_check_reads_the_latest_migration_that_adds_it():
+    """D1: the CHECK the database enforces is the LATEST migration that ADDs the named constraint
+    (170 created it inline with A, C; 190 widens it), and it must equal CONTENT_CLASSES — or the 'F'
+    mirror write 23514s with a message that names nothing."""
+    latest = _latest_content_class_check(_MIGRATIONS_D1)
+    assert latest is not None, "no migration ADDs marketing_runs_content_class_check"
+    name, classes = latest
+    assert int(name[:3]) >= 190, name
+    assert classes == set(schemas.CONTENT_CLASSES) == {"A", "C", "F"}, (name, classes)
+    # Every migration that ADDs it DROPs it IF EXISTS first (a re-run must not fail 42710).
+    for path in sorted(_MIGRATIONS_D1.glob("[0-9][0-9][0-9]_*.sql")):
+        sql = _strip_sql_comments(path.read_text())
+        add = _ADD_CC_RE.search(sql)
+        if add:
+            drop = _DROP_CC_RE.search(sql)
+            assert drop and drop.start() < add.start(), path.name
+    # The DROP names the constraint Postgres actually generated for 170's inline CHECK.
+    snapshot = (_MIGRATIONS_D1.parent / "schema_snapshot.sql").read_text()
+    assert f"CONSTRAINT {_CC_CONSTRAINT} CHECK" in snapshot
+
+
+def test_migration_190_is_transactional_idempotent_and_rewords_the_assets_comment():
+    text = _MIGRATION_190.read_text()
+    assert _static_190_problems(text) == []
+    # The why-header is there (the rules require one) and names the deploy order.
+    assert text.startswith("-- 190_marketing_company_classes.sql")
+    assert "apply BEFORE the drop-2 web deploy" in text
+
+
+@pytest.mark.parametrize("mutate, expect", [
+    (lambda t: t.replace("BEGIN;", "", 1), "does not open with BEGIN"),
+    (lambda t: t.replace("COMMIT;", "", 1), "does not end with COMMIT"),
+    (lambda t: _re_d1.sub(r"ALTER TABLE public\.marketing_runs DROP CONSTRAINT IF EXISTS "
+                          r"marketing_runs_content_class_check;", "", t), "not idempotent"),
+    (lambda t: t.replace("('A', 'C', 'F')", "('A', 'C')"), "exactly CONTENT_CLASSES"),
+    (lambda t: t.replace("'verified the object (size and content type). Since",
+                         "'verified the object. Nothing FMP-licensed may be rendered. Since"),
+     "Nothing FMP-licensed"),
+    (lambda t: t.replace("COMMIT;", "UPDATE public.marketing_runs SET content_class = 'A';\nCOMMIT;"),
+     "unexpected statement"),
+    (lambda t: t.replace("'Informational mirror of the day''s content class, written best-effort by "
+                         "script_service._heal_mirror: '\n",
+                         "'Informational mirror of the day''s content class, written best-effort by "
+                         "script_service._heal_mirror: ' "), "one line"),
+])
+def test_the_190_static_check_fails_on_each_broken_variant(mutate, expect):
+    """Guard against the guard: each mutation of the real file is caught, by the named check."""
+    original = _MIGRATION_190.read_text()
+    broken = mutate(original)
+    assert broken != original, "the mutation did not apply — the fixture text moved"
+    assert any(expect in p for p in _static_190_problems(broken)), _static_190_problems(broken)
+
+
+def test_add_before_drop_is_refused_by_the_static_check():
+    original = _MIGRATION_190.read_text()
+    drop = ("ALTER TABLE public.marketing_runs DROP CONSTRAINT IF EXISTS "
+            "marketing_runs_content_class_check;\n")
+    moved = original.replace(drop, "", 1).replace("COMMENT ON COLUMN", drop + "COMMENT ON COLUMN", 1)
+    assert moved != original
+    assert "ADD before DROP" in _static_190_problems(moved)
+
+
+# ── Drop 2 D2: content classes, the setting, server-owned keys, WorkerScript ───────────────
+
+
+def test_content_class_constants():
+    assert schemas.CONTENT_CLASSES == ("A", "C", "F")
+    assert schemas.NEWS_CLASSES == ("C", "F")
+    assert set(schemas.NEWS_CLASSES) < set(schemas.CONTENT_CLASSES) and "A" not in schemas.NEWS_CLASSES
+    assert schemas.TEMPLATE_AUTHORSHIP == "template"
+    assert schemas.VIDEO_LAYOUT_PER_LINE == "per_line"
+
+
+@pytest.mark.parametrize("raw, expected, logs_error", [
+    (" a , c ", {"A", "C"}, False),
+    ("C,F", {"A", "C", "F"}, False),
+    ("A,X", {"A"}, True),
+    ("f", {"A", "F"}, False),
+    ("c,C, c ,f,F", {"A", "C", "F"}, False),
+    (",, ,", {"A"}, False),
+    ("A;C", {"A"}, True),                 # one unknown token "A;C" — never half-parsed
+    ("B,C", {"A", "C"}, True),            # there is no class B, ever
+    ("", {"A"}, False),
+    (None, {"A"}, False),
+    (1, {"A"}, True),
+    (True, {"A"}, True),
+    (["C", "F"], {"A"}, True),
+])
+def test_parse_content_classes_fails_closed_to_a(raw, expected, logs_error, caplog):
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger=schemas.logger.name):
+        got = schemas.parse_content_classes(raw)
+    assert isinstance(got, frozenset) and got == expected
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR and r.name == schemas.logger.name]
+    assert bool(errors) == logs_error, [r.getMessage() for r in errors]
+    for r in errors:
+        assert "MARKETING_CONTENT_CLASSES" in r.getMessage()
+
+
+def test_parse_content_classes_never_echoes_an_unbounded_value(caplog):
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger=schemas.logger.name):
+        schemas.parse_content_classes(",".join(f"Z{i}{'q' * 500}" for i in range(50)))
+    (rec,) = [r for r in caplog.records if r.name == schemas.logger.name]
+    assert len(rec.getMessage()) < 400
+
+
+def test_the_content_classes_setting_is_declared_with_a_lesson_only_default():
+    from app.config import Settings, settings
+
+    assert hasattr(settings, "MARKETING_CONTENT_CLASSES")
+    assert Settings.model_fields["MARKETING_CONTENT_CLASSES"].default == "A"
+    assert schemas.parse_content_classes(Settings.model_fields["MARKETING_CONTENT_CLASSES"].default) == {"A"}
+
+
+@pytest.mark.parametrize("raw, expected, logs_error", [
+    (" c , f ", "A,C,F", False),
+    ("C,X", "A,C", True),
+    ("", "A", False),
+    ("f,F,a", "A,F", False),
+    ("A", "A", False),
+    ("nope", "A", True),
+])
+def test_the_setting_normalises_to_the_sorted_set_and_never_fails_the_deploy(monkeypatch, caplog, raw,
+                                                                              expected, logs_error):
+    import logging
+
+    from app.config import Settings
+
+    monkeypatch.setenv("MARKETING_CONTENT_CLASSES", raw)
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        got = Settings().MARKETING_CONTENT_CLASSES
+    assert got == expected
+    assert schemas.parse_content_classes(got) == set(expected.split(","))
+    errors = [r for r in caplog.records if r.name == "app.config" and r.levelno >= logging.ERROR]
+    assert bool(errors) == logs_error
+    for r in errors:
+        assert "MARKETING_CONTENT_CLASSES" in r.getMessage()
+
+
+def test_a_non_string_setting_reads_as_a(caplog):
+    import logging
+
+    from app.config import Settings
+
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        assert Settings(MARKETING_CONTENT_CLASSES=1).MARKETING_CONTENT_CLASSES == "A"
+    assert any("MARKETING_CONTENT_CLASSES" in r.getMessage() for r in caplog.records if r.name == "app.config")
+
+
+def test_the_config_literal_equals_content_classes():
+    """config.py imports no app module, so its validator carries an inline copy of CONTENT_CLASSES.
+    Read by AST (the literal itself) and by behaviour (every class survives the validator)."""
+    import ast
+
+    from app.config import Settings
+
+    src = (_Path_d1(__file__).resolve().parents[1] / "app" / "config.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_content_classes_fail_closed")
+    literals = [ast.literal_eval(a.value) for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "known" for t in a.targets)]
+    assert literals == [schemas.CONTENT_CLASSES]
+    assert Settings(MARKETING_CONTENT_CLASSES=",".join(schemas.CONTENT_CLASSES)).MARKETING_CONTENT_CLASSES \
+        == ",".join(sorted(schemas.CONTENT_CLASSES))
+
+
+@pytest.mark.asyncio
+async def test_a_worker_patch_can_never_write_the_days_series(svc, caplog):
+    """D2: `series` / `series_trail` are mirrored by the server from the script's fact sheet; a
+    worker PATCH carrying them is stripped (logged WARNING) and every other key lands."""
+    import logging
+
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    planted = {"series": "ceo_buys", "series_trail": [{"series": "ceo_buys", "outcome": "chosen"}], "note": "kept"}
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        await svc.update_run(rid, stage="selected", metadata=planted, worker=True, claim=_holder(svc, rid))
+    meta = _run_meta(svc, rid)
+    assert "series" not in meta and "series_trail" not in meta and meta["note"] == "kept"
+    assert any("server-owned metadata" in r.getMessage() and "series" in r.getMessage() for r in caplog.records)
+
+
+_D2_WORKER_FIELDS = {
+    "content_class": "C",
+    "authorship": "template",
+    "series": "ceo_buys",
+    "video_layout": "per_line",
+    "opening_card": {"kicker": "FILED LAST WEEK · FORM 4", "logos": ["GME"], "figure": "$74.4M",
+                     "headline": "GameStop's CEO disclosed buying GameStop stock"},
+    "image_spec": {"layout": "spotlight", "version": 1, "kicker": "FORM 4", "footer": "f",
+                   "header": {"logo": "GME", "name": "GameStop"}, "figure": "$74.4M", "headline": "h",
+                   "lines": ["one", "two"]},
+    "logos": [{"key": "GME", "name": "GameStop", "url": None, "sha256": None, "bytes": None,
+               "width": None, "height": None},
+              {"key": "AAPL", "name": "Apple", "url": "https://x.supabase.co/storage/v1/object/public/"
+               "marketing-media/logos/" + "a" * 32 + ".png", "sha256": "a" * 64, "bytes": 1234,
+               "width": 200, "height": 200}],
+}
+
+
+def test_the_kick_response_round_trip_keeps_every_new_worker_script_field():
+    """D2: Pydantic DROPS undeclared keys from ScriptKickResponse, so a worker field missing from
+    WorkerScript never reaches the worker. Every drop-2 field survives a dict and a JSON round trip,
+    beside the drop-1 ones."""
+    script = {"hook": "h", "video_script": ["a", "b", "c", "d"], "cards": [{"title": "t", "body": "b"}] * 4,
+              "carousel_slides": [], "disclaimer_card": "d", "outlets": ["x"],
+              "post_formats": {"x": "image"}, "image_post": {"title": "t", "paragraphs": ["p", "q"]},
+              "image_footer": "Educational only", **_D2_WORKER_FIELDS}
+    body = {"status": "accepted", "source_ref": "news:ceo_buys:2026-11-09", "template_id": "ceo_buys",
+            "script": script}
+    once = schemas.ScriptKickResponse.model_validate(body)
+    for key, value in _D2_WORKER_FIELDS.items():
+        assert getattr(once.script, key) == value, key
+    dumped = once.model_dump()["script"]
+    assert {k: dumped[k] for k in _D2_WORKER_FIELDS} == _D2_WORKER_FIELDS
+    again = schemas.ScriptKickResponse.model_validate_json(once.model_dump_json())
+    assert again.model_dump() == once.model_dump()
+    assert set(_D2_WORKER_FIELDS) <= set(schemas.WorkerScript.model_fields)
+
+
+def test_a_lesson_script_without_the_new_fields_keeps_their_absent_defaults():
+    minimal = {"hook": "h", "video_script": ["a"], "cards": [], "carousel_slides": [], "disclaimer_card": "d"}
+    got = schemas.WorkerScript.model_validate(minimal)
+    assert (got.content_class, got.authorship, got.series, got.video_layout, got.opening_card,
+            got.image_spec, got.logos) == (None, None, None, None, None, None, [])
+    # A mutable default is never shared between two scripts.
+    got.logos.append({"key": "X"})
+    assert schemas.WorkerScript.model_validate(minimal).logos == []
+
+
+# ══ Drop 2 (D13): the worker-only error codes ═══════════════════════════════════════════════════════
+#
+# /list-error-codes, by hand: every MARKETING_* ErrorCode is emitted only to the media worker (or never
+# leaves the web process) — iOS never reaches those routes, so none has an AppError branch BY DESIGN.
+# The list below is that set, pinned: a new marketing code must be added here deliberately (and to the
+# command's "no iOS branch by design" list), and none may grow a dead iOS branch.
+
+WORKER_ONLY_ERROR_CODES = (
+    "MARKETING_NOT_FOUND", "MARKETING_ASSET_MISSING", "MARKETING_LEDGER_ERROR", "MARKETING_SCRIPT_NOT_READY",
+    "MARKETING_RUN_NOT_HELD", "MARKETING_REQUEST_INVALID", "MARKETING_JUDGE_NOT_ENFORCED",
+    "MARKETING_TEMPLATE_REFUSED", "MARKETING_REVIEW_BOT_UNAVAILABLE", "MARKETING_PUBLISHER_UNAVAILABLE",
+)
+
+
+def test_the_marketing_error_codes_are_exactly_the_worker_only_list_and_none_is_mapped_on_ios():
+    from pathlib import Path
+
+    from app.api.error_response import _DEFAULT_STATUS, _USER_MESSAGES, ErrorCode
+
+    marketing = sorted(c.value for c in ErrorCode if c.value.startswith("MARKETING_"))
+    assert marketing == sorted(WORKER_ONLY_ERROR_CODES)
+    for value in WORKER_ONLY_ERROR_CODES:
+        code = ErrorCode(value)
+        assert code in _USER_MESSAGES and code in _DEFAULT_STATUS
+    assert _DEFAULT_STATUS[ErrorCode.MARKETING_TEMPLATE_REFUSED] == 409          # deterministic: never retried
+    swift = Path(__file__).resolve().parents[2] / "frontend/ios/ios/Core/Utilities/AppError.swift"
+    src = re.sub(r"//[^\n]*", "", swift.read_text(encoding="utf-8"))           # comments may name a code
+    assert [v for v in WORKER_ONLY_ERROR_CODES if f'"{v}"' in src] == []

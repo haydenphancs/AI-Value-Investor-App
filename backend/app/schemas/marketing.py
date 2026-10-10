@@ -13,18 +13,51 @@ strings — the same conventions as every other schema in this folder.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import date
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+logger = logging.getLogger(__name__)
+
 # Kept in lockstep with the CHECK constraints in migration 170. The service validates against
 # these before touching the database so a typo fails with a 422 that names the field rather
 # than a 23514 that names nothing.
 RUN_STATUSES = ("planned", "in_progress", "media_ready", "published", "failed", "skipped")
 RUN_STAGES = ("planned", "selected", "scripted", "voiced", "rendered", "assets_ready")
-CONTENT_CLASSES = ("A", "C")
+#: `marketing_runs.content_class` — the LATEST migration that ADDs
+#: `marketing_runs_content_class_check` (190; 170 created it inline with A and C). A = the Learn
+#: lesson (writer + judge); C = reportorial-filings templates; F = company-fundamentals templates
+#: (drop 2, "Company Weekly"). The column is an informational MIRROR: the class that gates a post is
+#: `selection.content_class_of(marketing_scripts.template_id)`.
+CONTENT_CLASSES = ("A", "C", "F")
+#: The template ("news") classes: composed by code from an as-filed record, never by the writer.
+NEWS_CLASSES = ("C", "F")
+#: `output.authorship` of a template package (the writer's packages are "ai", or carry none).
+TEMPLATE_AUTHORSHIP = "template"
+#: The one `output.video_layout` value: one text card per narration line, after an opening card.
+VIDEO_LAYOUT_PER_LINE = "per_line"
+
+
+def parse_content_classes(raw: Any) -> FrozenSet[str]:
+    """The enabled content classes from a `MARKETING_CONTENT_CLASSES` value. Pure, never raises.
+
+    Comma-separated, each token stripped and upper-cased; an unknown token is DROPPED (logged
+    ERROR) and "A" is ALWAYS included — the lesson is every chain's tail and Saturday's series, so
+    a typo can only narrow the week to lessons, never open a class or fail the request. A non-string
+    (or None) reads as {"A"}."""
+    if not isinstance(raw, str):
+        if raw is not None:
+            logger.error("MARKETING_CONTENT_CLASSES: not a string (%s) — using A only", type(raw).__name__)
+        return frozenset({"A"})
+    tokens = {t.strip().upper() for t in raw.split(",") if t.strip()}
+    unknown = sorted(tokens - set(CONTENT_CLASSES))
+    if unknown:
+        logger.error("MARKETING_CONTENT_CLASSES: ignored unknown class(es) %s",
+                     ",".join(t[:16] for t in unknown[:10]))
+    return frozenset((tokens & set(CONTENT_CLASSES)) | {"A"})
 ASSET_KINDS = (
     "manifest", "script", "audio", "podcast_audio", "video", "card", "carousel", "caption", "blog",
 )
@@ -83,8 +116,44 @@ WORKER_RUN_STATUSES = ("failed", "skipped", "media_ready")
 #: them (`run_service.update_run` drops them, logged WARNING). `claim_nonce` is trusted by
 #: `decide_claim` AHEAD of the attempts cap; `closed` is `close_finished_runs`' record of why it
 #: closed a run (`close_summary`), which the weekly digest prints — a worker-written one would
-#: let the least-trusted process explain a day it did not close.
-SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed")
+#: let the least-trusted process explain a day it did not close. `worker_capabilities` is what the
+#: worker HOLDING the run declared it can render, recorded by the claim (below) — a PATCH that could
+#: rewrite it would let any worker talk the server into freezing formats it cannot produce.
+#: `series` / `series_trail` (drop 2) are the day's news series and the fallback chain that reached
+#: it, mirrored from the script's fact sheet by `script_service._heal_mirror` — the digest and the
+#: review bundle print them, so the worker must not be able to rewrite why the day says what it says.
+SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed", "worker_capabilities", "series", "series_trail")
+
+#: What a worker may declare it can render (`RunClaimRequest.capabilities`; drop 1, 2026-10-09). The
+#: claim records the declaration on the run (`metadata.worker_capabilities`, server-owned), REPLACING
+#: the previous holder's on a re-claim, and `script_service` freezes `image` formats only for a run
+#: whose holder declared WORKER_CAPABILITY_POST_IMAGE when the accepted output is written — an older
+#: worker image (no declaration) keeps the text posts it can make instead of losing the day to a 422.
+#: WORKER_CAPABILITY_NEWS_TEMPLATES (drop 2a): the worker draws a TEMPLATE script — the per-line video
+#: with its opening card, the `image_spec` post image, the logos. `script_service._select` starts a
+#: news chain only for a run whose holder declared it; any other holder (a drop-1 image: a rollback, or
+#: the web deployed first) gets the day's LESSON, never a template it would draw as a lesson (the
+#: person's name on the first frame, alt text on the image).
+#: WORKER_CAPABILITY_LAYOUTS_2B (drop 2b, 2026-10-10): the worker also draws the template image layouts
+#: WORKER_LAYOUTS_2B (`pair` — company_stakes, `grid` — theme_explainer). A drop-2a image declares
+#: `news_templates` but not this, and refuses a pair / grid image loudly (a failed day): so
+#: `script_service._select` drops every series whose image is a 2b layout from the day's chain when the
+#: holder did not declare it (WARNING; the chain falls through to its next series, as a refused series
+#: does), and `_frozen_output` freezes a 2b-layout template's posts as TEXT under such a holder (a
+#: re-claim by an older image during the build). The deploy order of the web and the worker then never
+#: matters: a missing capability costs the series, never the day.
+#: Mirrored by `marketing/main.py` WORKER_CAPABILITIES (pinned equal by tests/test_marketing_worker.py).
+#: Known values only: `RunClaimRequest` DROPS an unknown value with a WARNING (a newer worker against
+#: an older web keeps its claims and is simply not credited with it) — never recorded on the run.
+WORKER_CAPABILITY_POST_IMAGE = "post_image"
+WORKER_CAPABILITY_NEWS_TEMPLATES = "news_templates"
+WORKER_CAPABILITY_LAYOUTS_2B = "layouts_2b"
+WORKER_CAPABILITIES: Tuple[str, ...] = (WORKER_CAPABILITY_POST_IMAGE, WORKER_CAPABILITY_NEWS_TEMPLATES,
+                                        WORKER_CAPABILITY_LAYOUTS_2B)
+#: The template image layouts only a WORKER_CAPABILITY_LAYOUTS_2B worker draws (template_onscreen.LAYOUTS
+#: members; pinned ⊆ template_onscreen.SHIPPED_LAYOUTS and the worker's cards.SHIPPED_LAYOUTS by the tests).
+WORKER_LAYOUTS_2B: Tuple[str, ...] = ("pair", "grid")
+RUN_WORKER_CAPABILITIES_KEY = "worker_capabilities"
 
 #: The formats the server will record a post in, per platform. The accepted package composes
 #: ONE caption per platform (`post_copy.PLATFORMS`) and carries no format, so this map is what
@@ -93,21 +162,46 @@ SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed")
 #:
 #: The caption's AI disclaimer is composed per PLATFORM, not per format (`post_copy.disclaimer_for`):
 #: TikTok, YouTube and Instagram say "Script and narration generated with AI", Facebook and
-#: LinkedIn "Written with AI assistance". So the server — not the worker — allows only the pairs
-#: whose disclaimer fits (review 2026-09-29): a narrated video on Facebook/LinkedIn would
-#: under-disclose, an Instagram image carousel would claim narration it does not have. Re-open
-#: facebook/linkedin video and instagram carousel only with a per-FORMAT disclaimer
+#: LinkedIn "Written with AI assistance", X/Threads/Bluesky "AI-assisted". So the server — not the
+#: worker — allows only the pairs whose disclaimer fits (review 2026-09-29): a narrated video on
+#: Facebook/LinkedIn would under-disclose, an Instagram image carousel would claim narration it does
+#: not have. Re-open facebook/linkedin video and instagram carousel only with a per-FORMAT disclaimer
 #: (tests/test_marketing_run_service.py pins the agreement).
+#:
+#: `image` (drop 1, 2026-10-09) on the five text platforms: the post is that platform's EXISTING
+#: caption plus the day's image card (title + 2-4 paragraphs from the accepted output, rendered by
+#: the worker). The caption's "Written with AI assistance" / "AI-assisted" is true for an AI-written
+#: lesson image, and nothing in it is narrated. Which of `text` / `image` a run's post takes is not
+#: the worker's choice: it is frozen per run into the accepted output's `post_formats` at write time
+#: (`script_service`), and `create_posts` refuses any other — an `image` post without frozen formats
+#: (a script accepted before this change) is refused too. Video platforms are unchanged.
 POST_FORMATS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
     "tiktok": ("video",),
     "youtube": ("video",),
     "instagram": ("video",),
-    "facebook": ("text",),
-    "linkedin": ("text",),
-    "x": ("text",),
-    "threads": ("text",),
-    "bluesky": ("text",),
+    "facebook": ("text", "image"),
+    "linkedin": ("text", "image"),
+    "x": ("text", "image"),
+    "threads": ("text", "image"),
+    "bluesky": ("text", "image"),
 }
+
+#: The values an accepted output's frozen `post_formats` may hold, one per platform it has copy for.
+FROZEN_POST_FORMATS: Tuple[str, ...] = ("video", "image", "text")
+
+#: `metadata.image_role` of the one `card` asset a run's image posts carry (the 4:5 JPEG the worker
+#: renders from the accepted output's `image_post`). The only role a card may declare today.
+IMAGE_ROLE_POST = "post_image"
+IMAGE_ROLES: Tuple[str, ...] = (IMAGE_ROLE_POST,)
+#: The post image is a baseline JPEG of at most this many bytes (the worker steps its quality down to
+#: fit): it is under every outlet's photo limit (Bluesky's ~1 MB blob, Instagram's API) — so the
+#: server refuses a larger one at registration rather than letting a publish fail on it.
+POST_IMAGE_EXT = "jpg"
+POST_IMAGE_MAX_BYTES = 950_000
+#: `image_post.paragraphs` bounds (the writer's own limits are tighter; these are what the server and
+#: the worker can rely on).
+IMAGE_POST_PARAGRAPHS_MIN = 2
+IMAGE_POST_PARAGRAPHS_MAX = 4
 
 #: Asset kinds a post of each format may carry. `manifest`, `audio`, `script`, `caption` and
 #: `blog` are never post media.
@@ -169,6 +263,39 @@ def validate_onscreen_text(entries: Any) -> None:
     for i, t in enumerate(entries):
         if not isinstance(t, str) or not t.strip() or len(t) > ONSCREEN_TEXT_MAX_CHARS:
             raise ValueError(f"metadata.onscreen_text[{i}] must be 1-{ONSCREEN_TEXT_MAX_CHARS} characters")
+
+
+def _drawable(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= ONSCREEN_TEXT_MAX_CHARS
+
+
+def image_post_problem(value: Any) -> Optional[str]:
+    """Why `value` is not a usable `image_post` — `{"title": str, "paragraphs": [2-4 str]}`, every
+    string non-blank and short enough to be declared as on-screen text — or None when it is. Pure.
+    Shape only: WHAT it says was validated and judged by the writer (and is read back by the
+    server's on-screen check against the stored copy, string for string)."""
+    if not isinstance(value, dict):
+        return f"not an object ({type(value).__name__})"
+    if not _drawable(value.get("title")):
+        return f"title must be 1-{ONSCREEN_TEXT_MAX_CHARS} non-blank characters"
+    paragraphs = value.get("paragraphs")
+    if not isinstance(paragraphs, list):
+        return "paragraphs must be a list"
+    if not IMAGE_POST_PARAGRAPHS_MIN <= len(paragraphs) <= IMAGE_POST_PARAGRAPHS_MAX:
+        return (f"paragraphs has {len(paragraphs)} entries "
+                f"({IMAGE_POST_PARAGRAPHS_MIN}-{IMAGE_POST_PARAGRAPHS_MAX} required)")
+    for i, p in enumerate(paragraphs):
+        if not _drawable(p):
+            return f"paragraphs[{i}] must be 1-{ONSCREEN_TEXT_MAX_CHARS} non-blank characters"
+    return None
+
+
+def normalize_image_post(value: Any) -> Optional[Dict[str, Any]]:
+    """A usable `image_post` reduced to exactly `{"title", "paragraphs"}` (strings untouched — the
+    worker must draw them verbatim), or None when `value` is absent or unusable (the caller logs)."""
+    if value is None or image_post_problem(value) is not None:
+        return None
+    return {"title": value["title"], "paragraphs": list(value["paragraphs"])}
 
 
 def capped_metadata(v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -286,6 +413,23 @@ class RunClaimRequest(BaseModel):
     # True = resume an existing resumable run only; never create one. Used by ticks outside
     # the ET window to finish a run killed after the last in-window tick.
     resume_only: bool = False
+    # What this worker image can render (WORKER_CAPABILITIES; drop 1). Optional: an older worker
+    # sends none and keeps today's text posts. Bounded (≤ 8) and typed — a non-list or a non-string
+    # value is a 422 — but an UNKNOWN string is dropped with a WARNING, never a 422: a newer worker
+    # (one that declares a capability this web does not know yet) must not lose every claim to a web
+    # rollback; it is simply not credited with what this web cannot use.
+    capabilities: List[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("capabilities")
+    @classmethod
+    def _capabilities(cls, v: List[str]) -> List[str]:
+        unknown = sorted({c for c in v if c not in WORKER_CAPABILITIES})
+        if unknown:
+            logger.warning("marketing claim: the worker declared %d capabilit%s this web does not know (%s) — "
+                           "dropped, the claim proceeds with %s", len(unknown), "y" if len(unknown) == 1 else "ies",
+                           ", ".join(repr(c[:40]) for c in unknown[:8]),
+                           sorted({c for c in v if c in WORKER_CAPABILITIES}) or "none")
+        return sorted({c for c in v if c in WORKER_CAPABILITIES})
 
     @field_validator("run_date")
     @classmethod
@@ -392,14 +536,34 @@ class AssetRegisterRequest(BaseModel):
             if self.kind != "audio":
                 raise ValueError("only an audio asset carries metadata.words")
             validate_audio_words(self.metadata["words"], self.duration_seconds)
+        role = self.metadata.get("image_role")
+        if "image_role" in self.metadata:
+            if self.kind != "card":
+                raise ValueError("only a card asset carries metadata.image_role")
+            if role not in IMAGE_ROLES:
+                raise ValueError(f"metadata.image_role must be one of {IMAGE_ROLES}")
+        post_image = self.kind == "card" and role == IMAGE_ROLE_POST
+        if post_image:
+            # The image every image post of the run carries: a JPEG under every outlet's photo limit.
+            if self.ext != POST_IMAGE_EXT:
+                raise ValueError(f"a post image must be a .{POST_IMAGE_EXT}, not .{self.ext}")
+            if self.bytes > POST_IMAGE_MAX_BYTES:
+                raise ValueError(f"a post image is {self.bytes} bytes (max {POST_IMAGE_MAX_BYTES})")
         if "onscreen_text" in self.metadata:
-            if self.kind != "video":
-                raise ValueError("only a video asset carries metadata.onscreen_text")
+            # A video, or the post image: the two assets whose drawn text the server checks against
+            # the accepted output (`run_service`). Any other asset declaring text would be text
+            # nothing checks.
+            if self.kind != "video" and not post_image:
+                raise ValueError("only a video or a post image (a card with image_role "
+                                 f"{IMAGE_ROLE_POST!r}) carries metadata.onscreen_text")
             validate_onscreen_text(self.metadata["onscreen_text"])
         elif self.kind == "video":
             # Mandatory: without it the server cannot say what a video draws, and video could
             # never become auto-publishable (§12.8).
             raise ValueError("a video asset must declare metadata.onscreen_text")
+        elif post_image:
+            # Mandatory for the same reason: an image post's picture IS its words.
+            raise ValueError("a post image must declare metadata.onscreen_text")
         return self
 
 
@@ -434,6 +598,10 @@ class RunAssetsResponse(BaseModel):
     #: `stage=rendered`), verified the same way: kind `video`, `ready`, this run. Added in
     #: Phase 4 (add-only: an older worker ignores it).
     video_asset_id: Optional[str] = None
+    #: The run's post image (`metadata.image_asset_id`, written in the `rendered` checkpoint PATCH),
+    #: verified the same way: kind `card` with `metadata.image_role` IMAGE_ROLE_POST, `ready`, this
+    #: run. What every image post of the run carries. Drop 1 (add-only).
+    image_asset_id: Optional[str] = None
     assets: List[MarketingAssetView] = Field(default_factory=list)
 
 
@@ -500,6 +668,34 @@ class WorkerScript(BaseModel):
     carousel_slides: List[Dict[str, str]]
     disclaimer_card: str
     outlets: List[str] = Field(default_factory=list)
+    # Drop 1 (add-only). All three are None for a script accepted before image posts existed: the
+    # worker then falls back to its own render.POST_FORMAT and the server validates as before.
+    #: {platform: "video" | "image" | "text"} for every outlet the script carries copy for — frozen
+    #: at write time; `create_posts` records each platform only in this format.
+    post_formats: Optional[Dict[str, str]] = None
+    #: {"title": str, "paragraphs": [2-4 str]} — what the post image draws (with `image_footer`).
+    image_post: Optional[Dict[str, Any]] = None
+    #: The code-owned footer burned into the post image (`post_copy.image_footer`); set only when
+    #: some format is "image".
+    image_footer: Optional[str] = None
+    # Drop 2 (add-only; "Company Weekly" templates). Pydantic DROPS undeclared keys from this
+    # response model, so every field the worker reads is declared here. All default to "absent": a
+    # lesson script (or one accepted before drop 2) renders exactly as before.
+    #: CONTENT_CLASSES value of the day's script ("A" for a lesson; "C"/"F" for a template).
+    content_class: Optional[str] = None
+    #: "ai" (the writer) or TEMPLATE_AUTHORSHIP; decides the disclaimer wording the worker burns in.
+    authorship: Optional[str] = None
+    #: The news series id of a template script (`selection.SERIES`), else None.
+    series: Optional[str] = None
+    #: VIDEO_LAYOUT_PER_LINE or None (the lesson layout).
+    video_layout: Optional[str] = None
+    #: A template video's opening card ({kicker, logos, chip?, figure?, headline}), validated by the
+    #: server before it is sent (`template_onscreen.validate_opening_card`).
+    opening_card: Optional[Dict[str, Any]] = None
+    #: A template post image's closed layout spec (`template_onscreen.validate_image_spec`).
+    image_spec: Optional[Dict[str, Any]] = None
+    #: Stored company logos: [{key, name, url|None, sha256|None, bytes|None, width|None, height|None}].
+    logos: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ScriptKickResponse(BaseModel):

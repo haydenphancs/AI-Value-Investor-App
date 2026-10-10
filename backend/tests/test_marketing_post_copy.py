@@ -1056,3 +1056,590 @@ def test_the_composed_bluesky_caption_has_exactly_one_go_link_and_no_hashtag(cat
         assert post.caption.count("https://") == 1 and post.caption.count("/go/") == 1
         assert not re.search(r"(?<!\S)#\w", post.caption), post.caption
         assert pc.carries_go_link("bluesky", post.caption)
+
+
+# ── the post image's footer (drop 1, 2026-10-09) ──────────────────────────────
+#
+# Code-owned copy burned into every post image (`pc.image_footer`), required by the server among the
+# image's declared on-screen text. Nothing scans it at runtime — like the value line, these tests are
+# its only guard: pinned verbatim, and scanned exactly like the caption disclaimers it stands beside.
+
+_FOOTER_GOLDEN = {
+    date(2026, 10, 9): ("Educational only · not investment advice · Written with AI assistance · "
+                        "Oct 9, 2026 · Caydex"),
+    date(2027, 1, 5): ("Educational only · not investment advice · Written with AI assistance · "
+                       "Jan 5, 2027 · Caydex"),
+    date(2028, 2, 29): ("Educational only · not investment advice · Written with AI assistance · "
+                        "Feb 29, 2028 · Caydex"),
+}
+
+
+@pytest.mark.parametrize("run_date", sorted(_FOOTER_GOLDEN))
+def test_the_image_footer_is_pinned_verbatim(run_date):
+    assert pc.image_footer(run_date) == _FOOTER_GOLDEN[run_date]
+    assert pc.image_footer(run_date, "ai") == _FOOTER_GOLDEN[run_date]
+    assert pc.image_footer(run_date, authorship="ai") == _FOOTER_GOLDEN[run_date]
+
+
+def test_the_image_footer_discloses_ai_and_claims_no_narration():
+    """An AI-written lesson image says so; nothing in an image is narrated (the video's own
+    disclaimer card says "Script and narration generated with AI" — never the image)."""
+    footer = pc.image_footer(DATE)
+    low = footer.lower()
+    assert "Written with AI assistance" in footer and re.search(r"\bAI\b", footer)
+    assert "narrat" not in low and "voice" not in low
+    assert "not investment advice" in low and "educational" in low
+    assert footer.endswith(f"· {pc.PUBLISHER}") and pc.PUBLISHER == "Caydex"
+    assert not re.search(r"caydex,?\s+inc", low)
+    for banned in ("financial advisor", "financial adviser", "investment advisor", "investment adviser"):
+        assert banned not in low
+
+
+@pytest.mark.parametrize("authorship", ["template", "AI", "Ai", "", "human", None, 1, "ai "])
+def test_the_image_footer_refuses_any_authorship_but_ai(authorship):
+    """`template` (drop 2) words a footer only with its required `source` and `as_of` (tests at the
+    end of this file), so a bare "template" call still raises; anything else is a typo — never a
+    footer that drops (or invents) the AI line."""
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, authorship)
+
+
+#: What the public-copy scan finds in the footer — exactly what it finds in the short caption
+#: disclaimer: the disclaimer's own "investment advice", the brand, and nothing else.
+_FOOTER_SCAN = [("banned_phrase", "investment advice"), ("brand_mention", "caydex"), ("code_owned", "advice")]
+
+
+@pytest.mark.parametrize("run_date", sorted(_FOOTER_GOLDEN))
+def test_the_image_footer_passes_the_public_copy_scan(run_date):
+    from app.schemas.marketing import ONSCREEN_TEXT_MAX_CHARS
+
+    footer = pc.image_footer(run_date)
+    for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
+               {"allow_emoji": False, "strict_instruments": False}):
+        assert [(v.code, v.detail) for v in scan_text("f", clean(footer), **kw)] == _FOOTER_SCAN, kw
+    # Anti-vacuity: the scan reads the caption disclaimer the same way.
+    assert [(v.code, v.detail) for v in scan_text("f", clean(pc.disclaimer_short()))] == _FOOTER_SCAN
+    assert clean(footer) == footer                    # what is stored is what was pinned
+    assert not re.search(r"[%$]", footer)             # no price, no percentage
+    assert pc.x_link_tokens(footer) == []             # no link
+    assert "\n" not in footer and footer.count("·") == 4
+    assert len(footer) <= ONSCREEN_TEXT_MAX_CHARS     # declarable as on-screen text
+    low = footer.lower()
+    for word in ("pick", "signal", "guarantee", "return", "profit", "beat", "recommend", "fmp",
+                 "download", "free", "buy", "sell", "stock", "price", "app store"):
+        assert not re.search(rf"(?<![a-z]){re.escape(word)}", low), word
+
+
+def test_the_image_footer_scans_like_a_disclaimer_under_every_items_own_settings():
+    """It rides on every lesson's image, so it is scanned as a body of that item would be."""
+    from app.services.marketing import content_pool
+
+    footer = clean(pc.image_footer(DATE))
+    items = [content_pool.get_item(k) for k in content_pool.eligible_keys()]
+    assert len(items) >= 30 and any(i.company_terms for i in items)
+    for item in items:
+        got = scan_text("x", footer, allow_emoji=True,
+                        strict_instruments=content_pool.strict_instruments(item.kind),
+                        company_terms=item.company_terms, sheet_words=item.grounding.tokens)
+        assert [(v.code, v.detail) for v in got] == _FOOTER_SCAN, item.key
+
+
+# ── authorship (drop 2, contract D8; owner decision 4 of 2026-10-09) ─────────────────────────────
+#
+# "ai" is the class-A lesson writer — every call above uses the default. "template" is the
+# code-owned news templates of classes C/F: their copy says a fixed template built it from public
+# data and never claims an AI wrote it; a narrated video discloses its AI voice; the non-affiliation
+# line rides on every template disclaimer, card and footer. Nothing scans this copy at runtime, so
+# these tests are its only guard.
+
+import hashlib  # noqa: E402
+
+from app.services.trillion_club.copy_rules import contains_banned_copy, contains_forecast  # noqa: E402
+
+TEMPLATE = "template"
+NEWS_CATEGORIES = ("news:ceo_buys", "news:insider_buys", "news:thirteen_f", "news:congress_count",
+                   "news:company_stakes", "news:earnings", "news:money_map", "news:theme_explainer")
+JUNK_AUTHORSHIPS = ("AI", "Template", "template ", " ai", "", "human", "writer", None, 1, True,
+                    ["ai"], ("template",), b"ai")
+
+
+def _ai_outputs(**kw):
+    """Every output the module produces for an "ai" lesson, in a fixed order (`kw` is {} or
+    {"authorship": "ai"}): disclaimers, footer, hashtags, budgets, suffixes, composed captions and
+    their violations (clean and broken bodies, the right and a wrong date)."""
+    rows = []
+    for d in (date(2026, 9, 23), date(2027, 1, 5), date(2028, 2, 29)):
+        rows.append(["long", str(d), pc.disclaimer_long(d, **kw)])
+        rows.append(["long_video", str(d), pc.disclaimer_long(d, video=True, **kw)])
+        rows.append(["card", str(d), pc.disclaimer_card(d, **kw)])
+        rows.append(["footer", str(d), pc.image_footer(d, **kw)])
+        for field in pc.CAPTION_FIELDS:
+            rows.append(["disclaimer_for", field, str(d), pc.disclaimer_for(field, d, **kw)])
+    rows.append(["short", pc.disclaimer_short(**kw)])
+    bad_bodies = dict(BODIES, youtube_title="Price > value\nnow", x="a" * 300,
+                      youtube_description="Patience > timing.")
+    for category in CATEGORIES + HOSTILE_CATEGORIES:
+        for field in pc.CAPTION_FIELDS:
+            rows.append(["tags", category, field, pc.hashtags_for(field, category)])
+        for state in STATES + ("junk",):
+            for allow in (False, True):
+                for field in pc.CAPTION_FIELDS:
+                    rows.append(["budget", category, state, allow, field,
+                                 pc.body_budget(field, category, DATE, allow_x_url=allow,
+                                                store_state=state, **kw)])
+                    rows.append(["suffix", category, state, allow, field,
+                                 pc._suffix(field, category, DATE, allow, state, **kw)])
+                for platform in pc.PLATFORMS:
+                    for bodies in (BODIES, bad_bodies):
+                        post = pc.compose(platform, bodies, category=category, run_date=DATE,
+                                          allow_x_url=allow, store_state=state, **kw)
+                        for checked_on in (DATE, date(2026, 9, 24)):
+                            rows.append(["compose", category, state, allow, platform, post.as_dict(),
+                                         [v.as_dict() for v in pc.check_composed(post, checked_on, **kw)]])
+    return rows
+
+
+def _ai_digest(**kw) -> str:
+    blob = json.dumps(_ai_outputs(**kw), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+#: sha256 of `_ai_outputs()` computed on the drop-1 module BEFORE the authorship keyword existed
+#: (2026-10-09). Any change to an ai-authored output — a disclaimer, the footer, a suffix, a budget,
+#: a composed caption or a violation — fails here: Learn's copy stays byte for byte what it was.
+_AI_DIGEST_BEFORE_AUTHORSHIP = "2300ab6a9d9db454f974f9189e0c9536225fcafa5d3cf18c1dd0aabec2be794e"
+
+
+def test_every_ai_output_is_byte_identical_to_before_authorship():
+    assert len(_ai_outputs()) == 6584   # anti-vacuity: the whole matrix is really walked
+    assert _ai_digest() == _AI_DIGEST_BEFORE_AUTHORSHIP
+    assert _ai_digest(authorship="ai") == _AI_DIGEST_BEFORE_AUTHORSHIP
+
+
+def test_the_authorship_names_and_lines_are_pinned():
+    assert pc.AUTHORSHIPS == ("ai", "template")
+    assert (pc.AUTHORSHIP_AI, pc.AUTHORSHIP_TEMPLATE) == pc.AUTHORSHIPS
+    assert pc.IMAGE_AUTHORSHIPS == pc.AUTHORSHIPS
+    assert pc.NON_AFFILIATION == "Not affiliated with anyone named."
+    assert pc.TEMPLATE_NOTE_TEXT == "Built by a fixed template from public data."
+    assert pc.TEMPLATE_NOTE_VIDEO == "Built by a fixed template from public data; narration voiced with AI."
+    assert pc.AI_DISCLOSURES == ("Written with AI assistance", "AI-assisted",
+                                 "Script and narration generated with AI")
+
+
+def test_the_template_authorship_name_matches_the_schema():
+    from app.schemas import marketing as sch
+
+    if not hasattr(sch, "TEMPLATE_AUTHORSHIP"):
+        pytest.skip("schemas.marketing.TEMPLATE_AUTHORSHIP (contract D2) is not declared yet")
+    assert sch.TEMPLATE_AUTHORSHIP == pc.AUTHORSHIP_TEMPLATE
+
+
+def _template_disclaimers(run_date: date):
+    return {
+        "long": pc.disclaimer_long(run_date, authorship=TEMPLATE),
+        "long_video": pc.disclaimer_long(run_date, video=True, authorship=TEMPLATE),
+        "short": pc.disclaimer_short(TEMPLATE),
+        "card": pc.disclaimer_card(run_date, TEMPLATE),
+    }
+
+
+_TEMPLATE_GOLDEN = {
+    "long": ("Caydex · Educational, impersonal information — not investment advice, not a "
+             "recommendation, not an offer. Investing involves risk, including loss of principal. "
+             "Built by a fixed template from public data. Not affiliated with anyone named. "
+             "Sep 23, 2026."),
+    "long_video": ("Caydex · Educational, impersonal information — not investment advice, not a "
+                   "recommendation, not an offer. Investing involves risk, including loss of "
+                   "principal. Built by a fixed template from public data; narration voiced with AI. "
+                   "Not affiliated with anyone named. Sep 23, 2026."),
+    "short": "Educational only, not investment advice. Not affiliated with anyone named. Caydex",
+    "card": ("Educational, impersonal information — not investment advice. Investing involves "
+             "risk. Built by a fixed template from public data; narration voiced with AI. Not "
+             "affiliated with anyone named. Caydex · Sep 23, 2026"),
+}
+
+
+@pytest.mark.parametrize("variant", sorted(_TEMPLATE_GOLDEN))
+def test_the_template_disclaimers_are_pinned_verbatim(variant):
+    assert _template_disclaimers(DATE)[variant] == _TEMPLATE_GOLDEN[variant]
+    # Keyword and positional spellings agree (callers use both).
+    assert pc.disclaimer_short(authorship=TEMPLATE) == _TEMPLATE_GOLDEN["short"]
+    assert pc.disclaimer_card(DATE, authorship=TEMPLATE) == _TEMPLATE_GOLDEN["card"]
+
+
+@pytest.mark.parametrize("variant", sorted(_TEMPLATE_GOLDEN))
+def test_template_copy_never_claims_an_ai_wrote_it(variant):
+    text = _template_disclaimers(DATE)[variant]
+    for line in pc.AI_DISCLOSURES:
+        assert line.casefold() not in text.casefold(), (variant, line)
+    assert "generated with ai" not in text.lower() and "ai assistance" not in text.lower()
+    assert text.count(pc.NON_AFFILIATION) == 1
+    assert pc.PUBLISHER in text and "not investment advice" in text
+    if variant in ("long_video", "card"):   # a narrated video says its voice is AI, once
+        assert text.count("narration voiced with AI") == 1
+        assert len(re.findall(r"\bAI\b", text)) == 1
+    else:                                    # a template's text/image copy has no AI in it at all
+        assert not re.search(r"\bAI\b", text)
+        assert "narrat" not in text.lower() and "voice" not in text.lower()
+    if variant != "short":                   # the long forms keep the ai forms' legal sentences
+        assert "Investing involves risk" in text
+        assert "Sep 23, 2026" in text
+    if variant.startswith("long"):
+        assert "not a recommendation, not an offer" in text
+
+
+@pytest.mark.parametrize("variant", sorted(_TEMPLATE_GOLDEN))
+def test_the_template_disclaimers_keep_the_ai_forms_legal_text(variant):
+    """The template forms differ from the ai forms ONLY in the AI line (and the non-affiliation
+    line beside it): the legal sentences around it are the same characters."""
+    ai = _all_disclaimers(DATE)[variant]
+    tpl = _template_disclaimers(DATE)[variant]
+    old = {"long": "Written with AI assistance.", "long_video": "Script and narration generated with AI.",
+           "short": "AI-assisted.", "card": "Script and narration generated with AI."}[variant]
+    new = {"long": f"{pc.TEMPLATE_NOTE_TEXT} {pc.NON_AFFILIATION}",
+           "long_video": f"{pc.TEMPLATE_NOTE_VIDEO} {pc.NON_AFFILIATION}",
+           "short": pc.NON_AFFILIATION,
+           "card": f"{pc.TEMPLATE_NOTE_VIDEO} {pc.NON_AFFILIATION}"}[variant]
+    assert ai.count(old) == 1
+    assert ai.replace(old, new) == tpl
+
+
+#: What the public-copy scan finds in the long disclaimers — template and ai alike: the disclaimer's
+#: own legal phrases and the brand, nothing else.
+_LONG_SCAN = [("banned_phrase", "investment advice"), ("banned_phrase", "not a recommendation"),
+              ("brand_mention", "caydex"), ("code_owned", "advice"), ("code_owned", "not a recommendation")]
+
+
+@pytest.mark.parametrize("variant", sorted(_TEMPLATE_GOLDEN))
+def test_the_template_disclaimers_pass_the_public_copy_scan(variant):
+    text = _template_disclaimers(DATE)[variant]
+    want = _LONG_SCAN if variant.startswith("long") else _FOOTER_SCAN
+    for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
+               {"allow_emoji": False, "strict_instruments": False}):
+        assert [(v.code, v.detail) for v in scan_text("f", clean(text), **kw)] == want, kw
+        # Anti-vacuity: the ai form of the same variant scans the same way.
+        assert [(v.code, v.detail) for v in scan_text("f", clean(_all_disclaimers(DATE)[variant]), **kw)] == want
+    assert clean(text) == text
+    assert "\n" not in text
+    assert pc.x_link_tokens(text) == []
+    assert not re.search(r"[%$]", text)
+    assert not re.search(r"caydex,?\s+inc", text.lower())
+
+
+def _template_copy_strings():
+    """Every code-owned string a template post can carry: the disclaimers, card, footer, value lines,
+    CTAs and the news hashtags."""
+    out = list(_template_disclaimers(DATE).values())
+    out.append(pc.image_footer(DATE, TEMPLATE, source="SEC Form 4 filings", as_of="Filed Oct 5–9, 2026"))
+    out += [pc.value_line(s) for s in STATES]
+    out += [c for f in pc.CAPTION_FIELDS for s in STATES for a in (False, True)
+            if (c := pc.cta_for(f, allow_x_url=a, store_state=s))]
+    out += [pc._CATEGORY_TAG[c] for c in NEWS_CATEGORIES]
+    return out
+
+
+def test_template_copy_passes_the_news_templates_runtime_word_rules():
+    """`news_templates` scans every output string with `copy_rules.BANNED_COPY` + `FORECAST_COPY`
+    (contract D7 A8), the code-owned suffix included: none of it may trip either."""
+    strings = _template_copy_strings()
+    assert len(strings) > 20   # anti-vacuity
+    for s in strings:
+        assert not contains_banned_copy(s), s
+        assert not contains_forecast(s), s
+
+
+@pytest.mark.parametrize("field", pc.CAPTION_FIELDS)
+def test_disclaimer_for_words_the_authorship(field):
+    got = pc.disclaimer_for(field, DATE, TEMPLATE)
+    assert got == pc.disclaimer_for(field, DATE, authorship=TEMPLATE)
+    if field == "youtube_title":
+        assert got is None
+    elif field in COMPUTED:
+        assert got == _TEMPLATE_GOLDEN["short"]
+    elif field in VIDEO_FIELDS:
+        assert got == _TEMPLATE_GOLDEN["long_video"]
+    else:
+        assert got == _TEMPLATE_GOLDEN["long"]
+
+
+@pytest.mark.parametrize("platform", pc.PLATFORMS)
+@pytest.mark.parametrize("category", NEWS_CATEGORIES)
+@pytest.mark.parametrize("allow_x_url", [False, True])
+@pytest.mark.parametrize("state", STATES)
+def test_a_template_caption_ends_with_the_template_disclaimer_once(platform, category, allow_x_url, state):
+    post = pc.compose(platform, BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state, authorship=TEMPLATE)
+    field = _field(platform)
+    disc = pc.disclaimer_for(field, DATE, TEMPLATE)
+    assert post.caption.startswith(BODIES[field])                 # never sliced
+    assert post.caption.endswith(disc) and post.caption.count(disc) == 1
+    assert post.caption.count(pc.value_line(state)) == 1
+    assert pc.check_composed(post, DATE, TEMPLATE) == []
+    assert pc.check_composed(post, DATE, authorship=TEMPLATE) == []
+    for line in pc.AI_DISCLOSURES:
+        assert line not in post.caption
+    # Checked as an ai caption it is missing the ai disclaimer: the two can never be confused.
+    assert "disclaimer_missing" in [v.code for v in pc.check_composed(post, DATE)]
+    # And an ai caption checked as a template one is refused the same way.
+    ai_post = pc.compose(platform, BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                         store_state=state)
+    assert "disclaimer_missing" in [v.code for v in pc.check_composed(ai_post, DATE, TEMPLATE)]
+    tags = re.findall(r"#\w+", post.caption)
+    assert tags == pc.hashtags_for(field, category)
+    if tags:
+        assert tags[0] == pc._CATEGORY_TAG[category]
+
+
+@pytest.mark.parametrize("line", pc.AI_DISCLOSURES + ("written with ai assistance", "AI-ASSISTED"))
+@pytest.mark.parametrize("platform", ["x", "facebook", "youtube"])
+def test_a_template_post_that_says_an_ai_wrote_it_is_an_authorship_mismatch(line, platform):
+    field = _field(platform)
+    bodies = dict(BODIES, **{field: f"Three CEOs disclosed purchases. {line}."})
+    post = pc.compose(platform, bodies, category="news:ceo_buys", run_date=DATE, authorship=TEMPLATE)
+    got = [(v.field, v.code) for v in pc.check_composed(post, DATE, TEMPLATE)]
+    assert got == [(platform, "authorship_mismatch")]
+    if platform == "youtube":   # the title is read too
+        post = pc.compose("youtube", dict(BODIES, youtube_title=f"CEO purchases ({line})"),
+                          category="news:ceo_buys", run_date=DATE, authorship=TEMPLATE)
+        assert [(v.field, v.code) for v in pc.check_composed(post, DATE, TEMPLATE)] == \
+            [("youtube", "authorship_mismatch")]
+    # The ai check is untouched: a lesson body may mention AI (its own disclaimer says so anyway).
+    ai_post = pc.compose(platform, bodies, category="blueprints", run_date=DATE)
+    assert "authorship_mismatch" not in [v.code for v in pc.check_composed(ai_post, DATE)]
+
+
+#: body_budget(field, "news:ceo_buys", DATE, authorship="template") per state (allow_x_url off), by
+#: hand: the template short disclaimer is 81 characters (the ai one 60), the tag "#secfilings" 11.
+#: X 280 − ("\n\n#secfilings" 13 + "\n\n" + line + "\n\n" 2 + 81) → live 123, prelaunch 142, preorder 113.
+_TEMPLATE_BUDGET_GOLDEN = {
+    "x": {"prelaunch": 142, "preorder": 113, "live": 123},
+    "threads": {"prelaunch": 314, "preorder": 285, "live": 295},
+    "bluesky": {"prelaunch": 127, "preorder": 98, "live": 108},
+}
+
+
+@pytest.mark.parametrize("field", sorted(_TEMPLATE_BUDGET_GOLDEN))
+@pytest.mark.parametrize("state", STATES)
+def test_the_template_computed_budgets_are_pinned(field, state):
+    assert len(pc.disclaimer_short(TEMPLATE)) == 81
+    assert pc.body_budget(field, "news:ceo_buys", DATE, store_state=state, authorship=TEMPLATE) == \
+        _TEMPLATE_BUDGET_GOLDEN[field][state]
+    # A body of exactly the budget fits; one more character does not.
+    budget = _TEMPLATE_BUDGET_GOLDEN[field][state]
+    for n, ok in ((budget, True), (budget + 1, False)):
+        post = pc.compose(field, {**BODIES, field: _body_of_length(field, n)}, category="news:ceo_buys",
+                          run_date=DATE, store_state=state, authorship=TEMPLATE)
+        assert (pc.check_composed(post, DATE, TEMPLATE) == []) is ok, (field, state, n)
+
+
+@pytest.mark.parametrize("field", pc.CAPTION_FIELDS)
+def test_a_template_body_cap_is_the_editorial_cap_where_there_is_room(field):
+    if field in COMPUTED:
+        assert pc.body_budget(field, "news:money_map", DATE, authorship=TEMPLATE) < \
+            pc.body_budget(field, "news:money_map", DATE)   # the longer disclaimer costs room
+    else:
+        assert pc.body_budget(field, "news:money_map", DATE, authorship=TEMPLATE) == pc._BODY_CAPS[field]
+
+
+@pytest.mark.parametrize("allow_x_url", [False, True])
+@pytest.mark.parametrize("state", STATES)
+def test_every_template_budget_plus_its_suffix_fits_and_never_hits_the_floor(allow_x_url, state):
+    for category in NEWS_CATEGORIES + ("news:unknown_series",):
+        for field in pc.CAPTION_FIELDS:
+            suffix = pc._suffix(field, category, DATE, allow_x_url, state, authorship=TEMPLATE)
+            budget = pc.body_budget(field, category, DATE, allow_x_url=allow_x_url, store_state=state,
+                                    authorship=TEMPLATE)
+            assert budget + pc.measured_length(field, suffix) <= pc.LIMITS[field], (field, category)
+            if field in COMPUTED:
+                assert pc.LIMITS[field] - pc.measured_length(field, suffix) > pc._MIN_BODY, (field, category)
+            for bad in pc.FORBIDDEN_CHARS.get(field, ""):
+                assert bad not in suffix, (field, repr(bad))
+
+
+def test_the_tightest_template_budget_is_the_measured_one():
+    """Preorder (the longest value line) with X URLs on, in the series with the longest tag
+    (#industrytrends): 85 — still above _MIN_BODY. Every template SHORT headline is designed to fit it."""
+    worst = min(pc.body_budget(f, c, DATE, allow_x_url=a, store_state=s, authorship=TEMPLATE)
+                for f in COMPUTED for c in NEWS_CATEGORIES for a in (False, True) for s in STATES)
+    assert worst == 85 == pc.body_budget("x", "news:theme_explainer", DATE, allow_x_url=True,
+                                         store_state=pc.STORE_PREORDER, authorship=TEMPLATE)
+    assert worst > pc._MIN_BODY
+
+
+_NEWS_TAGS = {
+    "news:ceo_buys": "#secfilings", "news:insider_buys": "#secfilings", "news:thirteen_f": "#secfilings",
+    "news:congress_count": "#congress", "news:company_stakes": "#businessnews",
+    "news:earnings": "#earnings", "news:money_map": "#businessmodel",
+    "news:theme_explainer": "#industrytrends",
+}
+
+
+def test_the_news_hashtags_are_pinned():
+    assert {k: v for k, v in pc._CATEGORY_TAG.items() if k.startswith("news:")} == _NEWS_TAGS
+    assert set(_NEWS_TAGS) == set(NEWS_CATEGORIES)
+
+
+@pytest.mark.parametrize("category", NEWS_CATEGORIES)
+def test_a_news_category_gets_its_tag_and_the_base_tags_per_platform(category):
+    tag = _NEWS_TAGS[category]
+    assert pc.hashtags_for("x", category) == [tag]
+    assert pc.hashtags_for("threads", category) == [tag]
+    for field in ("tiktok", "instagram", "youtube_description", "linkedin"):
+        assert pc.hashtags_for(field, category) == [tag, "#investing", "#financialliteracy"]
+    for field in ("bluesky", "facebook", "youtube_title"):
+        assert pc.hashtags_for(field, category) == []
+    assert pc.hashtags_for("x", "news:unknown_series") == ["#investing"]
+
+
+def test_every_shipped_series_has_its_news_tag():
+    from app.services.marketing import selection
+
+    series = getattr(selection, "SERIES", None)
+    if series is None:
+        pytest.skip("selection.SERIES (contract D3) is not declared yet")
+    assert {f"news:{s.id}" for s in series} == set(NEWS_CATEGORIES)
+
+
+# ── made_with_ai ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("fmt", ["video", "carousel", "image", "text", "podcast", "article"])
+def test_an_ai_post_is_always_made_with_ai(fmt):
+    assert pc.made_with_ai("ai", fmt) is True
+
+
+@pytest.mark.parametrize("fmt, expected", [("video", True), ("image", False), ("text", False)])
+def test_a_template_post_is_made_with_ai_only_as_a_narrated_video(fmt, expected):
+    assert pc.made_with_ai(TEMPLATE, fmt) is expected
+
+
+@pytest.mark.parametrize("fmt", ["carousel", "podcast", "article"])
+def test_a_template_post_never_takes_a_format_the_templates_do_not_make(fmt):
+    with pytest.raises(ValueError):
+        pc.made_with_ai(TEMPLATE, fmt)
+
+
+@pytest.mark.parametrize("fmt", ["", "Video", "video ", "reel", None, 1, ["video"], b"video"])
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+def test_made_with_ai_refuses_an_unknown_format(fmt, authorship):
+    with pytest.raises(ValueError):
+        pc.made_with_ai(authorship, fmt)
+
+
+def test_the_made_with_ai_format_tables_mirror_the_schema():
+    from app.schemas import marketing as sch
+
+    assert pc._POST_FORMATS == sch.POST_FORMATS
+    assert pc._TEMPLATE_FORMATS == sch.FROZEN_POST_FORMATS
+
+
+# ── an unknown authorship is a ValueError everywhere ─────────────────────────
+
+
+@pytest.mark.parametrize("junk", JUNK_AUTHORSHIPS)
+def test_every_function_refuses_an_unknown_authorship(junk):
+    post = pc.compose("x", BODIES, category="news:ceo_buys", run_date=DATE)
+    calls = [
+        lambda: pc.disclaimer_long(DATE, authorship=junk),
+        lambda: pc.disclaimer_long(DATE, video=True, authorship=junk),
+        lambda: pc.disclaimer_short(junk),
+        lambda: pc.disclaimer_card(DATE, junk),
+        lambda: pc.disclaimer_for("x", DATE, junk),
+        lambda: pc.disclaimer_for("youtube_title", DATE, junk),   # even where no disclaimer is worded
+        lambda: pc._suffix("x", "news:ceo_buys", DATE, False, authorship=junk),
+        lambda: pc.body_budget("x", "news:ceo_buys", DATE, authorship=junk),
+        lambda: pc.body_budget("tiktok", "news:ceo_buys", DATE, authorship=junk),   # a fixed cap too
+        lambda: pc.compose("x", BODIES, category="news:ceo_buys", run_date=DATE, authorship=junk),
+        lambda: pc.compose("youtube", BODIES, category="news:ceo_buys", run_date=DATE, authorship=junk),
+        lambda: pc.check_composed(post, DATE, junk),
+        lambda: pc.image_footer(DATE, junk, source="SEC Form 4 filings", as_of="Filed Oct 5–9, 2026"),
+        lambda: pc.made_with_ai(junk, "video"),
+    ]
+    for i, call in enumerate(calls):
+        with pytest.raises(ValueError):
+            call()
+
+
+# ── the template image footer ────────────────────────────────────────────────
+
+_TEMPLATE_FOOTER_GOLDEN = [
+    ("SEC Form 4 filings", "Filed Oct 5–9, 2026",
+     "Educational only · not investment advice · Source: SEC Form 4 filings · Filed Oct 5–9, 2026 · "
+     "Caydex · Not affiliated with anyone named"),
+    ("SEC Form 13F", "Quarter ended Sep 30, 2026 · filed Nov 14, 2026",
+     "Educational only · not investment advice · Source: SEC Form 13F · Quarter ended Sep 30, 2026 · "
+     "filed Nov 14, 2026 · Caydex · Not affiliated with anyone named"),
+    ("company financial statements", "Fiscal 2025",
+     "Educational only · not investment advice · Source: company financial statements · Fiscal 2025 · "
+     "Caydex · Not affiliated with anyone named"),
+    ("Nscale Form S-1 (Sep 18, 2026)", "As of Mar 27, 2026",
+     "Educational only · not investment advice · Source: Nscale Form S-1 (Sep 18, 2026) · "
+     "As of Mar 27, 2026 · Caydex · Not affiliated with anyone named"),
+]
+
+
+@pytest.mark.parametrize("source, as_of, golden", _TEMPLATE_FOOTER_GOLDEN)
+def test_the_template_image_footer_is_pinned_verbatim(source, as_of, golden):
+    from app.schemas.marketing import ONSCREEN_TEXT_MAX_CHARS, validate_onscreen_text
+
+    for run_date in (DATE, date(2028, 2, 29)):   # the as-of label carries the date, not the run date
+        assert pc.image_footer(run_date, TEMPLATE, source=source, as_of=as_of) == golden
+        assert pc.image_footer(run_date, authorship=TEMPLATE, source=source, as_of=as_of) == golden
+    assert golden.endswith(f"· {pc.PUBLISHER} · {pc.NON_AFFILIATION.rstrip('.')}")
+    assert len(golden) <= ONSCREEN_TEXT_MAX_CHARS
+    validate_onscreen_text([golden])   # declarable as on-screen text
+
+
+@pytest.mark.parametrize("source, as_of, golden", _TEMPLATE_FOOTER_GOLDEN)
+def test_the_template_image_footer_passes_the_public_copy_scan(source, as_of, golden):
+    for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
+               {"allow_emoji": False, "strict_instruments": False}):
+        assert [(v.code, v.detail) for v in scan_text("f", clean(golden), **kw)] == _FOOTER_SCAN, kw
+    assert clean(golden) == golden and "\n" not in golden
+    assert not re.search(r"\bAI\b", golden) and "Written with AI" not in golden
+    assert pc.x_link_tokens(golden) == []
+    assert not contains_banned_copy(golden) and not contains_forecast(golden)
+    low = golden.lower()
+    for word in ("fmp", "financial modeling prep", "pick", "signal", "recommend", "buy", "sell", "price"):
+        assert not re.search(rf"(?<![a-z]){re.escape(word)}", low), word
+
+
+@pytest.mark.parametrize("kw", [
+    {}, {"source": "SEC Form 4 filings"}, {"as_of": "Filed Oct 5–9, 2026"},
+    {"source": None, "as_of": "Fiscal 2025"}, {"source": "SEC Form 13F", "as_of": None},
+])
+def test_the_template_image_footer_needs_its_source_and_as_of(kw):
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, TEMPLATE, **kw)
+
+
+@pytest.mark.parametrize("bad", [
+    "", "   ", " SEC Form 4 filings", "SEC Form 4 filings ", "SEC  Form 4", "SEC Form 4\nfilings",
+    "SEC Form 4\tfilings", "SEC\x00Form 4", "SEC Form 4\u2028filings", "a" * (pc.FOOTER_SLOT_MAX_CHARS + 1),
+    "FMP", "Data from fmp", "Financial Modeling Prep", "financialmodelingprep.com data",
+    "https://www.sec.gov/edgar", "www.sec.gov", 4, b"SEC", ["SEC Form 4 filings"],
+])
+@pytest.mark.parametrize("slot", ["source", "as_of"])
+def test_a_bad_template_footer_slot_is_refused(bad, slot):
+    good = {"source": "SEC Form 4 filings", "as_of": "Filed Oct 5–9, 2026"}
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, TEMPLATE, **dict(good, **{slot: bad}))
+
+
+def test_a_template_footer_slot_at_the_cap_is_accepted():
+    from app.schemas.marketing import ONSCREEN_TEXT_MAX_CHARS
+
+    footer = pc.image_footer(DATE, TEMPLATE, source="a" * pc.FOOTER_SLOT_MAX_CHARS,
+                             as_of="b" * pc.FOOTER_SLOT_MAX_CHARS)
+    assert len(footer) <= ONSCREEN_TEXT_MAX_CHARS   # two full slots still declarable on screen
+
+
+@pytest.mark.parametrize("kw", [{"source": "SEC Form 4 filings"}, {"as_of": "Fiscal 2025"},
+                                {"source": "SEC Form 13F", "as_of": "Fiscal 2025"}])
+def test_the_ai_image_footer_refuses_a_source_or_as_of(kw):
+    """The ai footer has no slot for them: a caller passing one has confused the two authorships."""
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, **kw)
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, "ai", **kw)

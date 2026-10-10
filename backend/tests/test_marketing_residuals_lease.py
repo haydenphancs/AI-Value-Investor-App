@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from app.config import Settings
+from app.schemas.marketing import RUN_WORKER_CAPABILITIES_KEY, WORKER_CAPABILITY_POST_IMAGE
 from app.services.marketing import content_pool, selection
 from app.services.marketing import generation_budget as gb
 from app.services.marketing import run_service as mrs
@@ -296,20 +297,33 @@ async def test_the_real_terminal_write_never_exceeds_its_worst_case_and_reaches_
 # ── a whole generation on the real code path ───────────────────────────────────────────────
 
 
-def _worst_writer(clock: _Clock, calls: List[str]):
+#: An accepted package as the writer hands it back: one video platform, one image platform and a usable
+#: image post, so `freeze_post_formats` really freezes "image" when the holder can render it.
+_ACCEPTED_PACKAGE = {
+    "posts": {"tiktok": {"caption": "Video words."}, "bluesky": {"caption": "Image words."}},
+    "image_post": {"title": "A title", "paragraphs": ["One short paragraph.", "Another short paragraph."]},
+}
+
+
+def _worst_writer(clock: _Clock, calls: List[str], *, accept: bool = False):
     """Makes MODEL_CALLS_PER_GENERATION calls, each behind `before_call`, each at the worst
     case — and ignores a False from `before_call` (the contract allows the call when nothing
     publishable is in hand), so every refresh and every call happens. It takes every keyword the
-    real `generate_package` is called with (`store_state` since 2026-10-05): an unknown keyword
-    would be a TypeError, recorded as a writer FAILURE, and the call sequence below would break."""
+    real `generate_package` is called with (`store_state` since 2026-10-05, `image_posts` since
+    drop 1: the image switch read once per generation): an unknown keyword would be a TypeError,
+    recorded as a writer FAILURE, and the call sequence below would break. `accept` returns an
+    ACCEPTED package (the path `_frozen_output` runs on) instead of a content rejection."""
 
     async def writer(item, template, run_date, *, generation_id, allow_x_url, judge_mode, before_call,
-                     store_state=None):
+                     store_state=None, image_posts=None):
         for _ in range(gb.MODEL_CALLS_PER_GENERATION):
             calls.append("before_call")
             await before_call()
             calls.append("model")
             clock.t += ss.worst_case_model_call_seconds()
+        if accept:
+            return SimpleNamespace(status=ss.ACCEPTED, package=json.loads(json.dumps(_ACCEPTED_PACKAGE)),
+                                   violations=[], tokens_used=0, model="m", prompt_version="p")
         return SimpleNamespace(status="rejected", package=None, violations=[{"code": "judge_x"}],
                                tokens_used=0, model="m", prompt_version="p")
 
@@ -317,29 +331,58 @@ def _worst_writer(clock: _Clock, calls: List[str]):
 
 
 @pytest.mark.asyncio
-async def test_a_whole_worst_case_generation_fits_inside_owner_alive(clock, caplog):
+@pytest.mark.parametrize("path", ["rejected", "accepted_image"])
+async def test_a_whole_worst_case_generation_fits_inside_owner_alive(clock, caplog, monkeypatch, path):
     """The REAL `_generate`: acquire, the run-date read (the row carries none), four refreshes
     that each time out three times, four worst-case model calls, and a terminal write that times
-    out twice then matches nothing and re-reads. Its virtual life is exactly
-    `worst_case_generation_seconds()` — and the old OWNER_ALIVE_SECONDS (3 × the lease) did not
-    cover it."""
+    out twice then matches nothing and re-reads — and the old OWNER_ALIVE_SECONDS (3 × the lease)
+    did not cover it.
+
+    `accepted_image` is the longest path (drop-1 re-review, OWNER_ALIVE): an ACCEPTED package with
+    MARKETING_IMAGE_POSTS on and a holder that declared the post image adds `_holder_renders_images`'
+    run read between the last model call and the terminal write. Its virtual life is exactly
+    `worst_case_generation_seconds()`; the content rejection never reads the holder, so it ends one
+    statement short of the bound. Before that read was counted the bound was 4577 s, the accepted path
+    lived 4697 s and OWNER_ALIVE_SECONDS (4637 s) declared a live owner wedged."""
+    accept = path == "accepted_image"
+    monkeypatch.setattr(ss.settings, "MARKETING_IMAGE_POSTS", accept)
+    froze: List[bool] = []
+    real_freeze = ss.freeze_post_formats
+
+    def spy_freeze(output, run_date, *, image_posts, **kw):
+        froze.append(image_posts)
+        return real_freeze(output, run_date, image_posts=image_posts, **kw)
+
+    monkeypatch.setattr(ss, "freeze_post_formats", spy_freeze)
     refreshes = [RAISE] * (ss._REFRESH_ATTEMPTS * gb.MODEL_CALLS_PER_GENERATION)
     terminal = [RAISE] * (ss._FINISH_ATTEMPTS - 1) + [NONE]
-    ledger = _Ledger(clock, _row(), _run(), refresh=refreshes, terminal=terminal)
+    run = _run(metadata={"claim_nonce": _NONCE,
+                         RUN_WORKER_CAPABILITIES_KEY: [WORKER_CAPABILITY_POST_IMAGE]})
+    ledger = _Ledger(clock, _row(), run, refresh=refreshes, terminal=terminal)
     calls: List[str] = []
-    svc = ss.MarketingScriptService(ledger, writer=_worst_writer(clock, calls))
+    svc = ss.MarketingScriptService(ledger, writer=_worst_writer(clock, calls, accept=accept))
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
         await svc._generate("run-1")
     assert calls == ["before_call", "model"] * gb.MODEL_CALLS_PER_GENERATION
+    holder_read = ["get_run"] * ss._HOLDER_STATEMENTS if accept else []
     assert ledger.log == (["get_script", "acquire", "get_run"]
                           + ["refresh"] * ss._REFRESH_ATTEMPTS * gb.MODEL_CALLS_PER_GENERATION
+                          + holder_read
                           + ["terminal"] * ss._FINISH_ATTEMPTS + ["get_script"])
     assert ledger.refresh == [] and ledger.terminal == []  # every scripted outcome was consumed
-    assert clock.t == pytest.approx(ss.worst_case_generation_seconds())
+    # The accepted path really froze image formats off the holder's capability (the read answered True).
+    assert froze == ([True] if accept else [])
+    if accept:
+        assert clock.t == pytest.approx(ss.worst_case_generation_seconds())   # tight: the bound is reached
+    else:
+        assert clock.t == pytest.approx(ss.worst_case_generation_seconds() - ss._HOLDER_STATEMENTS * S)
+    assert clock.t <= ss.worst_case_generation_seconds() + 1e-9
     assert clock.t + ss.LEASE_MARGIN_SECONDS <= ss.OWNER_ALIVE_SECONDS
     assert clock.t > 3 * ss.LEASE_SECONDS, "sentinel: the old bound really was too short"
     if S == 120.0 and ss.worst_case_model_call_seconds() == 572.0:
-        assert clock.t == 4577.0 and ss.OWNER_ALIVE_SECONDS == 4637
+        # (2 acquire + 1 run-date + 1 holder read) × 120 + 4 × (572 + 361.5) + 483 = 4697; + 60 margin = 4757.
+        # The content rejection skips the holder read: 4697 − 120 = 4577.
+        assert clock.t == (4697.0 if accept else 4577.0) and ss.OWNER_ALIVE_SECONDS == 4757
 
 
 # ── the twins: at a cap, the owner's age decides ───────────────────────────────────────────

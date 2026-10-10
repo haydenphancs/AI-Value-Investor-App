@@ -36,7 +36,6 @@ struct ClubStakeChip: View {
             text: chip.label,
             color: AppColors.textSecondary,
             systemImage: chip.systemImage,
-            backgroundOpacity: 0.10,
             font: AppTypography.captionEmphasis,
             // "Listed since Jun 12, 2026 — not on a 13F yet" is a short sentence; two lines
             // keep it from truncating to "Listed since Jun 12…" on a narrow card. They only

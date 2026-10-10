@@ -26,8 +26,10 @@ struct ReportStatusBadge: View {
         .padding(.horizontal, AppSpacing.sm)
         .padding(.vertical, AppSpacing.xs)
         .background(
+            // Opaque, not `status.backgroundColor` (each status colour on its own 20% tint
+            // is 3.89–4.08:1 in light even on a white card — test_ios_theme_parity §6c).
             Capsule()
-                .fill(status.backgroundColor)
+                .fill(AppColors.cardBackgroundLight)
         )
     }
 }

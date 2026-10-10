@@ -37,8 +37,10 @@ struct ReportPeerComparisonRow: View {
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xxs)
                     .background(
+                        // Opaque: caution/alertOrange on their own 12% tint are under
+                        // 4.5:1 in light (test_ios_theme_parity §6c).
                         RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                            .fill(competitor.threatLevel.color.opacity(0.12))
+                            .fill(AppColors.cardBackgroundLight)
                     )
                     // A long name truncates; the badge never squeezes.
                     .fixedSize()

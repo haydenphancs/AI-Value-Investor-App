@@ -400,8 +400,10 @@ struct TradeTickerLogo: View {
 
     private var letterFallback: some View {
         ZStack {
+            // Opaque: the letter is TEXT, and a text colour on its own 15% tint
+            // fails AA in light (test_ios_theme_parity §6c).
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(backgroundColor.opacity(0.15))
+                .fill(AppColors.cardBackgroundLight)
                 .frame(width: 48, height: 48)
 
             Text(String(ticker.prefix(1)))

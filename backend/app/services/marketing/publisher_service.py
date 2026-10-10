@@ -25,7 +25,8 @@ social secrets live, is the ONLY thing that ever calls a platform (rules/marketi
    the engagement counts of our published posts into `marketing_posts.metrics`
    (`metrics_service.measure_cycle`): Bluesky from the public AppView (free); X BILLED, charged
    before each read and held under the X cap with four posts of headroom at the current post price
-   ($0.015 a text post, $0.20 while MARKETING_X_ALLOW_URLS is on — `outlet_x.metrics_headroom_micros`),
+   ($0.015 a text post, $0.20 while MARKETING_X_ALLOW_URLS is on, an image post's price plus its alt
+   text while MARKETING_X_IMAGES is on — `outlet_x.metrics_headroom_micros`),
    never under DRY_RUN; Upload-Post best-effort.
 7. **Reports** (bot configured) — the run-health alert (`digest_service.health_cycle`, two day jobs
    timed from the web's mirror of the worker's MARKETING_RUN_HOUR_ET): the nightly check at the first
@@ -52,6 +53,14 @@ proves it safe, otherwise the owner decides. A ledger failure AFTER a platform a
 post leaves the row `queued`/`sending` — reconcile finds the post; nothing is ever re-sent on a
 guess. Every write is a fenced, merging `run_service.transition_post`.
 
+IMAGE posts (drop 1, contract C9): before `prepare` (pure) the post's picture is resolved from our own
+ledger (`outlet_base.load_post_image`) and attached to a COPY of the row (the claim stays fenced on the
+row as read): a read that failed skips the post this tick, a picture that can never be right (the
+wrong asset, no accepted image_post) refuses it like any guard. A billed call besides the post itself
+(X's alt text) is journaled by its own fenced write AFTER the claim and BEFORE the send
+(`Prepared.pre_send_charge`); the spend cap is checked for both before the claim, and if that write
+fails nothing is sent (the row goes back to `approved`, its reserve refunded).
+
 The loop wakes early on an Approve / confirmed Retract (`publisher_wake`).
 """
 
@@ -60,11 +69,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from app.config import settings
 from app.schemas.marketing import POST_PLATFORMS
-from app.services.marketing import outlets, post_copy, publish_clock, publish_feed, publisher_wake, review_service
+from app.services.marketing import (
+    outlet_base,
+    outlets,
+    post_copy,
+    publish_clock,
+    publish_feed,
+    publisher_wake,
+    review_service,
+)
 from app.services.marketing.outlet_base import (
     ABSENT,
     AMBIGUOUS,
@@ -81,6 +98,7 @@ from app.services.marketing.outlet_base import (
     SUBMITTED,
     Adapter,
     MarketingPublishRefused,
+    MediaProblem,
     Outcome,
     Prepared,
     RetractResult,
@@ -114,6 +132,16 @@ HISTORY_MAX = 10
 #: asked — "Not posted" on a job that later publishes would record a live post as failed.
 PENDING_REPOLL = timedelta(hours=2)
 PENDING_CEILING = timedelta(hours=24)
+
+#: A reconcile check that found an ABSENT post it could resend safely, but whose picture's ledger rows
+#: could not be read (a non-definite MediaProblem), is NOT counted against the schedule — or the last
+#: check would hand a resendable post to the owner, whose only answers are live / not posted. Bounded:
+#: at most MAX_RESEND_DEFERRALS such checks per post (counted across the whole schedule, carried in
+#: `metadata.publish.reconcile.resend_deferrals`), each at least RESEND_DEFERRAL_RETRY after the last;
+#: past that a deferral counts like any check, so a picture that never loads still reaches the owner
+#: (with its error), and `is_fresh` still expires the post at the end of its window.
+MAX_RESEND_DEFERRALS = 3
+RESEND_DEFERRAL_RETRY = timedelta(minutes=10)
 
 #: In-memory: escalated posts already logged today (one ERROR per post per day, not per tick).
 _escalation_logged: Dict[str, str] = {}
@@ -287,7 +315,11 @@ async def record_outcome(svc: Any, adapter: Adapter, row: Dict[str, Any], outcom
             return "published"
         if outcome.kind == NOT_SENT:
             charge = None
-            if reserve_micros and outcome.category == "transport":
+            if outcome.refund_micros:
+                # The adapter knows which of its calls went out (an X image post: the alt text may be
+                # billed while the post itself never left) — its correction replaces the default.
+                charge = ("refund_not_sent", int(outcome.refund_micros), _charge_at(row, "_create"))
+            elif reserve_micros and outcome.category == "transport":
                 # It never left: X did not bill it. Dated at the claim's charge (same month).
                 charge = ("refund_not_sent", -int(reserve_micros), _charge_at(row, "_create"))
             alert = _alert(outcome.alert, f"{str(platform).upper()} post not sent ({outcome.category}): "
@@ -368,6 +400,60 @@ async def record_outcome(svc: Any, adapter: Adapter, row: Dict[str, Any], outcom
         return "queued"
 
 
+async def _with_image(post: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[MediaProblem]]:
+    """(the row to `prepare`, a problem with its picture). A non-image post is returned as it is. An
+    image post gets a COPY with its resolved picture attached (`outlet_base.POST_IMAGE_KEY`) — the
+    claim and every write stay fenced on the row as read. A bug in the loader reads as a retryable
+    problem (logged with the stack), never as a picture."""
+    if post.get("format") != "image":
+        return post, None
+    try:
+        image = await outlet_base.load_post_image(post)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("marketing publisher: post image loader BUG post_id=%s platform=%s (%s: %s)", post.get("id"),
+                     post.get("platform"), type(e).__name__, e, exc_info=True)
+        return post, MediaProblem(f"the picture could not be resolved ({type(e).__name__})")
+    if isinstance(image, MediaProblem):
+        return post, image
+    return {**post, outlet_base.POST_IMAGE_KEY: image}, None
+
+
+async def _pre_send(svc: Any, adapter: Adapter, row: Dict[str, Any], prepared: Prepared,
+                    budget: Optional["_Budget"]) -> Optional[Dict[str, Any]]:
+    """Journal `prepared.pre_send_charge` (a billed call the send makes besides the post — X's alt
+    text) in its own fenced write on the CLAIMED row, before the send: the write-ahead of that call.
+    Returns the row to send, or None when nothing may be sent — then a failed write puts the row back
+    to `approved` (NOT_SENT, the claim's reserve refunded; nothing left this process), and a row no
+    longer queued is left to whoever moved it."""
+    op, micros = prepared.pre_send_charge or ("", 0)
+    error: Optional[str] = None
+    charged: Optional[Dict[str, Any]] = None
+    try:
+        charged = await svc.transition_post(str(row["id"]), expect_status="queued", observed=row, retries=1,
+                                            charge=(str(op), int(micros)))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        logger.error("marketing publisher: pre-send charge %s NOT journaled post_id=%s platform=%s key=%s (%s) — "
+                     "nothing sent", op, row.get("id"), row.get("platform"), row.get("idempotency_key"), error,
+                     exc_info=True)
+    if charged is not None:
+        if budget is not None:
+            budget.add(int(micros))
+        return charged
+    if error is None:
+        logger.error("marketing publisher: post_id=%s platform=%s left `queued` before its pre-send charge %s — "
+                     "nothing sent", row.get("id"), row.get("platform"), op)
+        return None
+    await record_outcome(svc, adapter, row, Outcome(
+        NOT_SENT, "ledger", error=scrub(f"the {op} charge could not be journaled ({error}); nothing was sent"),
+        refund_micros=-int(prepared.reserve_micros)), reserve_micros=prepared.reserve_micros)
+    return None
+
+
 async def _refuse(svc: Any, post: Dict[str, Any], err: MarketingPublishRefused) -> None:
     """The adapter's guard refused an approved post: `failed` without a claim or a platform call."""
     text = scrub(err)
@@ -429,8 +515,17 @@ async def publish_cycle() -> Dict[str, int]:
             counters["retry"] += 1
             continue
         dry = dry_switch or is_rehearsal(post)
+        target, media_problem = await _with_image(post)
+        if media_problem is not None and not media_problem.definite:
+            # A ledger read that failed: nothing claimed, nothing written — the next tick tries again.
+            logger.warning("marketing publisher: post_id=%s platform=%s — its picture could not be resolved "
+                           "this tick: %s", post_id, platform, media_problem.error)
+            counters["retry"] += 1
+            continue
         try:
-            prepared = adapter.prepare(post)
+            if media_problem is not None:
+                raise MarketingPublishRefused(f"{platform}: {media_problem.error}", category="media")
+            prepared = adapter.prepare(target)
         except MarketingPublishRefused as e:
             if dry:
                 logger.info("marketing publisher DRY_RUN: would REFUSE post_id=%s platform=%s: %s",
@@ -463,7 +558,9 @@ async def publish_cycle() -> Dict[str, int]:
             counters["skipped"] += 1
             continue
         budget = budgets.get(platform)
-        if budget is not None and prepared.reserve_micros > 0 and not await budget.allows(prepared.reserve_micros):
+        # The claim's reserve PLUS a pre-send charge (X's alt text): both are spent before the send.
+        need = int(prepared.reserve_micros) + int((prepared.pre_send_charge or ("", 0))[1])
+        if budget is not None and need > 0 and not await budget.allows(need):
             counters["capped"] += 1
             if platform not in alerted and not budget.unreadable:
                 alerted.add(platform)
@@ -492,6 +589,12 @@ async def publish_cycle() -> Dict[str, int]:
             continue
         if budget is not None and prepared.reserve_micros:
             budget.add(prepared.reserve_micros)
+        if prepared.pre_send_charge:
+            charged = await _pre_send(svc, adapter, claimed, prepared, budget)
+            if charged is None:
+                counters["retry"] += 1
+                continue
+            claimed = charged
         outcome = await _send(adapter, claimed, prepared)
         state = await record_outcome(svc, adapter, claimed, outcome, reserve_micros=prepared.reserve_micros)
         if outcome.kind == PUBLISHED:
@@ -605,6 +708,16 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
     except (TypeError, ValueError):
         n = len(adapter.reconcile_schedule)   # corrupt counter: go straight to the owner
     schedule = adapter.reconcile_schedule
+    # Checks whose safe resend waited only on the picture so far (MAX_RESEND_DEFERRALS). A value that
+    # is not a plain count reads as spent: the bound never resets on a corrupt record.
+    raw_deferrals = rec.get("resend_deferrals")
+    deferrals = (raw_deferrals if isinstance(raw_deferrals, int) and not isinstance(raw_deferrals, bool)
+                 and raw_deferrals >= 0 else (0 if raw_deferrals is None else MAX_RESEND_DEFERRALS))
+    carry = {"resend_deferrals": deferrals} if deferrals else {}
+    # Set only by an UNCOUNTED deferral (at most MAX_RESEND_DEFERRALS of them): the check it did not
+    # count is made again — after RESEND_DEFERRAL_RETRY, not on the next tick. A stamp in the future
+    # (a skewed or hand-edited row) never holds a post back.
+    deferred_at = _parse_ts(rec.get("deferred_at"))
     if n >= len(schedule):
         last_result, last_error = rec.get("last_result"), rec.get("error")
         if last_result == PENDING and now - started < PENDING_CEILING:
@@ -612,6 +725,8 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
             if now < last_at + PENDING_REPOLL:
                 return None
             # …and fall through to one more (free) check of the still-processing job.
+        elif deferred_at is not None:
+            pass   # an uncounted deferred resend: that check is made again (the spacing is below)
         else:
             if last_result == PENDING:
                 reason = (f"still processing on the platform's side after {int(PENDING_CEILING.total_seconds() // 3600)} h "
@@ -622,6 +737,8 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
             await _escalate(svc, row, reason)
             return "escalated"
     elif now < started + max(timedelta(seconds=schedule[n]), after):
+        return None
+    if deferred_at is not None and deferred_at <= now < deferred_at + RESEND_DEFERRAL_RETRY:
         return None
     platform = str(row.get("platform"))
     reserve = int(adapter.reconcile_reserve_micros or 0)
@@ -641,7 +758,7 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
     # Write-ahead the check (and its worst-case cost) BEFORE the call.
     checking = await svc.transition_post(
         str(row["id"]), expect_status="queued", observed=row, retries=0,
-        publish={"reconcile": {"n": n + 1, "last_at": now.isoformat()}},
+        publish={"reconcile": {"n": n + 1, "last_at": now.isoformat(), **carry}},
         charge=(f"{platform}_read", reserve) if reserve else None,
     )
     if checking is None:
@@ -659,7 +776,8 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
     correction = int(result.cost_micros) - reserve if reserve else int(result.cost_micros)
     charge = ((f"{platform}_read_correction", correction, _charge_at(checking, "_read"))
               if correction else None)
-    rec_meta = {"n": n + 1, "last_at": now.isoformat(), "last_result": result.kind, "error": result.error}
+    rec_meta = {"n": n + 1, "last_at": now.isoformat(), "last_result": result.kind, "error": result.error,
+                **carry}
     if result.kind == FOUND:
         await svc.transition_post(
             str(row["id"]), expect_status="queued", observed=checking, status="published", retries=1,
@@ -695,9 +813,34 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
         resends = int(pub.get("resends") or 0) if str(pub.get("resends") or "0").isdigit() else MAX_RESENDS
         can_resend = (settings.MARKETING_ENABLED and not settings.MARKETING_DRY_RUN and not is_rehearsal(checking)
                       and platform in outlets.enabled_platforms() and resends < MAX_RESENDS)
+        target, media_problem = (await _with_image(checking)) if can_resend else (checking, None)
+        if can_resend and media_problem is not None and not media_problem.definite:
+            # The picture's ledger rows could not be read this tick: no resend now. The first
+            # MAX_RESEND_DEFERRALS such checks are not counted (`n` stays; the check is made again
+            # after RESEND_DEFERRAL_RETRY); past that the schedule goes on, and its end reaches the
+            # owner with the picture's error. The read correction is journaled below either way.
+            deferrals += 1
+            uncounted = deferrals <= MAX_RESEND_DEFERRALS
+            rec_meta = {**rec_meta, "resend_deferrals": deferrals,
+                        "error": f"resend deferred, the picture could not be read: {media_problem.error}"}
+            if uncounted:
+                rec_meta.update(n=n, deferred_at=now.isoformat())
+                then = f"check not counted, made again in {int(RESEND_DEFERRAL_RETRY.total_seconds() // 60)} min"
+            else:
+                then = "deferrals spent, the check counts"
+            logger.warning("marketing reconcile: post_id=%s platform=%s absent, resend deferred (%d of %d) — its "
+                           "picture could not be resolved: %s — %s", row.get("id"), platform, deferrals,
+                           MAX_RESEND_DEFERRALS, media_problem.error, then)
+            can_resend = False
         if can_resend:
             try:
-                prepared = adapter.prepare(checking)   # reuses the stored key + record
+                if media_problem is not None:
+                    raise MarketingPublishRefused(f"{platform}: {media_problem.error}", category="media")
+                prepared = adapter.prepare(target)   # reuses the stored key + record
+                if prepared.pre_send_charge:
+                    # A resend writes ONE fenced row update before its call; a second write-ahead charge
+                    # has no place in it (only X has one, and X is never resent).
+                    raise MarketingPublishRefused(f"{platform}: a resend cannot carry a pre-send charge")
             except asyncio.CancelledError:
                 raise
             except Exception as e:

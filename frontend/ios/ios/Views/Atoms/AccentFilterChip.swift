@@ -44,7 +44,9 @@ struct AccentFilterChip: View {
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xs)
                 .background(
-                    Capsule().fill(isSelected ? accentFill : accent.opacity(0.15))
+                    // Unselected is OPAQUE: an accent on its own 15% tint is 4.16–4.35:1 in
+                    // light (test_ios_theme_parity §6c); on `cardBackgroundLight` it is audited.
+                    Capsule().fill(isSelected ? accentFill : AppColors.cardBackgroundLight)
                 )
                 .fixedSize(horizontal: true, vertical: false)   // keep natural width in the scroll
         }

@@ -148,11 +148,11 @@ struct ClubHoldingRow: View {
     }
 
     private func changePill(_ label: String, change: ClubChangeKind) -> some View {
-        // TEXT-role inks. `primaryBlue` on its own 8% tint measures 4.63:1 in light (14% was
-        // 4.25 — ThemeChangesCard's measurement); `textSecondary` at 10% is ≈6.6:1.
+        // TEXT-role inks on `TintedTagBadge`'s opaque `cardBackgroundLight` capsule
+        // (`primaryBlue` 4.52 / 5.55, `textSecondary` 6.62 / 7.37). The 8% `primaryBlue`
+        // tint this replaced passed only on a white card (4.63) — 4.08 on `cardBackgroundLight`.
         let ink = change == .newlyReported ? AppColors.primaryBlue : AppColors.textSecondary
-        return TintedTagBadge(text: label, color: ink,
-                              backgroundOpacity: change == .newlyReported ? 0.08 : 0.10)
+        return TintedTagBadge(text: label, color: ink)
     }
 }
 

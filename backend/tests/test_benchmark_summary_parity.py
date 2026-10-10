@@ -293,5 +293,15 @@ def test_the_table_uses_data_tier_fonts_and_a_real_divider_token():
 
 
 def test_the_section_no_longer_separates_with_a_surface_token():
+    """No 1pt SEPARATOR in the section is painted with `cardBackgroundLight`.
+
+    Scoped to separators since 2026-10-09: the summary badge is now an inset chip FILLED with
+    `cardBackgroundLight` — the surface's actual job, and the fix for gain/loss on their own
+    15% tint (test_ios_theme_parity §6c). A token-presence check would forbid that fix too.
+    """
     section = _code(_SECTION_FILE)
-    assert "AppColors.cardBackgroundLight" not in section
+    assert "AppColors.divider" in section
+    for m in re.finditer(r"AppColors\.cardBackgroundLight", section):
+        nearby = section[max(0, m.start() - 60):m.end() + 80]
+        assert not re.search(r"\.frame\((?:height|width):\s*1\b", nearby), (
+            f"a 1pt line painted with the SURFACE token cardBackgroundLight: {nearby!r}")

@@ -202,6 +202,9 @@ async def claim_run(body: RunClaimRequest):
             dry_run=body.dry_run,
             claim_nonce=body.claim_nonce,
             resume_only=body.resume_only,
+            # What this worker image can render, recorded on the run (server-owned) by the claim
+            # that takes it — `script_service` freezes image formats only for such a run.
+            capabilities=tuple(body.capabilities),
         )
     except Exception as e:
         _log_ledger_failure("claim_run", e, run_date=body.run_date)
@@ -290,7 +293,10 @@ async def complete_asset(asset_id: str, claim: CallerClaim = Depends(_claim)):
 @router.post("/runs/{run_id}/script", response_model=ScriptKickResponse)
 async def kick_script(run_id: str, claim: CallerClaim = Depends(_claim)):
     """Idempotent kick-and-poll for the day's script (see `script_service`). Answers at once —
-    the Gemini work runs in the background, never inside this request."""
+    the Gemini work runs in the background, never inside this request. A Company Weekly template
+    build (drop 2) also runs in the background; the kick waits for it at most
+    `script_service.TEMPLATE_KICK_WAIT_SECONDS` (under the worker's HTTP timeout) and otherwise
+    answers `generating` with no source yet."""
     svc = get_marketing_script_service()
     try:
         state = await svc.kick(run_id, claim=claim)
@@ -317,8 +323,9 @@ async def create_posts(run_id: str, body: PostsCreateRequest, claim: CallerClaim
 
 @router.get("/runs/{run_id}/assets", response_model=RunAssetsResponse)
 async def list_run_assets(run_id: str, claim: CallerClaim = Depends(_claim)):
-    """The run's `ready` assets (with public URLs) and its verified narration and video pointers — how a
-    resumed or re-claimed stage re-derives media instead of trusting an earlier stage's memory."""
+    """The run's `ready` assets (with public URLs) and its verified narration, video and post-image
+    pointers — how a resumed or re-claimed stage re-derives media instead of trusting an earlier
+    stage's memory."""
     svc = get_marketing_run_service()
     try:
         back = await svc.read_back(run_id, claim=claim)
@@ -327,4 +334,5 @@ async def list_run_assets(run_id: str, claim: CallerClaim = Depends(_claim)):
         return error_response_from_exception(e, step="marketing_list_run_assets")
     return RunAssetsResponse(voice_asset_id=back["voice_asset_id"],
                              video_asset_id=back["video_asset_id"],
+                             image_asset_id=back.get("image_asset_id"),
                              assets=[MarketingAssetView.model_validate(r) for r in back["assets"]])

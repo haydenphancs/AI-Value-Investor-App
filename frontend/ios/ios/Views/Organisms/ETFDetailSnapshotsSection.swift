@@ -776,9 +776,11 @@ struct ETFSnapshotBadge: View {
             .foregroundColor(color)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xxs)
+            // Opaque: a text colour on its own 15% tint fails AA in light
+            // (test_ios_theme_parity §6c). The hue stays in the stroke.
             .background(
                 Capsule()
-                    .fill(color.opacity(0.15))
+                    .fill(AppColors.cardBackgroundLight)
             )
             .overlay(
                 Capsule()

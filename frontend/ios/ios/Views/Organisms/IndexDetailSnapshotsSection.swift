@@ -123,7 +123,9 @@ struct ValuationSnapshotCard: View {
                             .foregroundColor(level.color)
                             .padding(.horizontal, AppSpacing.sm)
                             .padding(.vertical, AppSpacing.xxs)
-                            .background(level.bgColor)
+                            // Opaque, not `level.bgColor` (the ink's own 15% tint: 4.16–4.39:1
+                            // in light even on a white card — test_ios_theme_parity §6c).
+                            .background(AppColors.cardBackgroundLight)
                             .cornerRadius(AppCornerRadius.small)
                     }
 
@@ -279,21 +281,24 @@ struct SectorPerformanceSnapshotCard: View {
 
                     Spacer()
 
-                    // Advancing/declining badge
+                    // Advancing/declining badge. An inset chip, not a nested card, so it sits on
+                    // `cardBackgroundLight` — the surface every text token is audited against
+                    // (gain 4.75/6.20, loss 4.86/5.10). A `primaryBlue.opacity(0.15)` tint here
+                    // put gain/loss under 4.5:1 in three of four cells, and no guard sees a tint.
                     HStack(spacing: AppSpacing.xs) {
                         Text("\(sectorPerformance.advancingSectors) up")
                             .font(AppTypography.caption)
-                            .foregroundColor(AppColors.bullish)
+                            .foregroundColor(AppColors.gain)
                         Text("\u{00B7}")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
                         Text("\(sectorPerformance.decliningSectors) down")
                             .font(AppTypography.caption)
-                            .foregroundColor(AppColors.bearish)
+                            .foregroundColor(AppColors.loss)
                     }
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, AppSpacing.xxs)
-                    .background(AppColors.primaryBlue.opacity(0.15))
+                    .background(AppColors.cardBackgroundLight)
                     .cornerRadius(AppCornerRadius.small)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -337,6 +342,13 @@ struct SectorPerformanceSnapshotCard: View {
 struct SectorPerformanceBlock: View {
     let sector: SectorPerformanceEntry
 
+    /// `sector.color` without its alpha. The model fades a sub-1% move to 70%, which is an
+    /// intensity cue for a fill and illegible as TEXT: `gain@0.7` on its own tint measured
+    /// ~3:1. Same hue split as the model (`> 0` gains, the rest losses), always opaque.
+    private var ink: Color {
+        sector.changePercent > 0 ? AppColors.gain : AppColors.loss
+    }
+
     var body: some View {
         HStack {
             Text(sector.sector)
@@ -348,11 +360,13 @@ struct SectorPerformanceBlock: View {
 
             Text(sector.formattedChange)
                 .font(AppTypography.labelSmallEmphasis)
-                .foregroundColor(sector.color)
+                .foregroundColor(ink)
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.sm)
-        .background(sector.bgColor)
+        // Opaque, not `sector.bgColor`: gain/loss on their own 15% tint are 4.39/4.34:1 in
+        // light even on a white card (test_ios_theme_parity §6c).
+        .background(AppColors.cardBackgroundLight)
         .cornerRadius(AppCornerRadius.medium)
     }
 }
@@ -396,7 +410,9 @@ struct MacroForecastSnapshotCard: View {
                         .foregroundColor(AppColors.accentCyan)
                         .padding(.horizontal, AppSpacing.sm)
                         .padding(.vertical, AppSpacing.xxs)
-                        .background(AppColors.accentCyan.opacity(0.15))
+                        // Opaque: `accentCyan` on its own 15% tint is 4.35:1 in light
+                        // (test_ios_theme_parity §6c).
+                        .background(AppColors.cardBackgroundLight)
                         .cornerRadius(AppCornerRadius.small)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -458,8 +474,14 @@ struct MacroForecastItemCard: View {
                     .foregroundColor(indicator.signal.color)
                     .padding(.horizontal, AppSpacing.sm)
                     .padding(.vertical, 2)
-                    .background(indicator.signal.bgColor)
-                    .cornerRadius(AppCornerRadius.small)
+                    // `cardBackground`, not `cardBackgroundLight`: this card IS
+                    // `cardBackgroundLight`, so the chip steps the other way to stay visible
+                    // (with `cardFill`'s edge in light). The `signal.bgColor` tint it replaces
+                    // was 3.68–3.89:1 in light here (test_ios_theme_parity §6c).
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                            .cardFill()
+                    )
             }
 
             Text(indicator.description)

@@ -34,9 +34,11 @@ Supabase is reached through `sb_exec` (never a bare `.execute()` on the loop —
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import re
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -48,18 +50,33 @@ from app.schemas.marketing import (
     ASSET_EXTENSIONS,
     ASSET_KIND_EXTENSIONS,
     ASSET_KINDS,
+    FROZEN_POST_FORMATS,
+    IMAGE_ROLE_POST,
     MEDIA_REQUIRED_FORMATS,
+    NEWS_CLASSES,
     POST_FORMATS,
     POST_FORMATS_BY_PLATFORM,
+    POST_IMAGE_EXT,
+    POST_IMAGE_MAX_BYTES,
     POST_MEDIA_KINDS,
     POST_PLATFORMS,
     POST_STATUSES,
     RUN_STAGES,
     RUN_STATUSES,
+    RUN_WORKER_CAPABILITIES_KEY,
     SERVER_OWNED_RUN_METADATA,
+    TEMPLATE_AUTHORSHIP,
     VIDEO_BRAND_TEXT,
+    WORKER_CAPABILITIES,
     WORKER_RUN_STATUSES,
+    normalize_image_post,
+    parse_content_classes,
 )
+# Company Weekly (drop 2): the class a script's frozen template id decides, the template re-check and
+# the on-screen allow-lists of a template's video and post image, the per-post AI flag, the logo path.
+# All pure and FMP-free (tests/test_marketing_import_boundary.py PURE_MODULES).
+from app.services.marketing import news_templates, post_copy, selection, template_onscreen
+from app.services.marketing.logo_check import LogoInfo, logo_path
 from app.utils.market_hours import ET
 from app.utils.postgrest_paging import PAGE_SIZE as POSTGREST_MAX_ROWS
 from app.utils.supabase_async import sb_exec
@@ -105,6 +122,12 @@ _POST_WRITABLE = frozenset({
     "external_id", "external_url", "attempts", "last_error", "cost_micros",
     "metadata", "claimed_at", "published_at", "approved_at", "approved_by",
 })
+
+#: The `metadata` keys that mark a post as already offered for review (the bundle stamp and the
+#: review bot's notified stamps). `review_bundle` clears them from a member whose text changed after it
+#: was shown, so the next sweep offers it again.
+_REVIEW_OFFER_STAMPS: Tuple[str, ...] = ("review_bundle", "review_notified_at", "review_message_id",
+                                         "review_message_ids")
 
 #: Why the owner rejected a post (`metadata.review.reason`, written by `record_reject_reason` from the
 #: review bot's reason keyboard). The bot's labels (`review_service.REJECT_REASONS`) are keyed by
@@ -153,8 +176,9 @@ class MarketingRunNotHeld(MarketingRunError):
 class MarketingRequestInvalid(MarketingRunError):
     """The worker asked for something the contract forbids — a (platform, format) the server
     does not record, a media post with no media, a stage moving backwards, a status only the
-    claim or the publisher may write — or `create_posts` met a run whose content class has no
-    post gate (anything but class A, until another class gets its own branch). 422
+    claim or the publisher may write — or `create_posts` met a script whose content class has no
+    post gate (a template id `selection.content_class_of` does not know, or an output whose own
+    class disagrees with it). 422
     MARKETING_REQUEST_INVALID: the same request can never succeed, so it must not be retried as a
     5xx."""
 
@@ -165,7 +189,17 @@ class MarketingJudgeNotEnforced(MarketingRunError):
     and rendered for inspection, but it never becomes a post — the judge is the gate that makes a
     reviewed, and later an auto-published, post safe (§12.5). 409 MARKETING_JUDGE_NOT_ENFORCED:
     deterministic for the run, so the worker closes the day `skipped` instead of retrying. The
-    class-A branch only: any other content class is `MarketingRequestInvalid`."""
+    class-A branch only: a template class (C/F) has its own gate, `MarketingTemplateRefused`."""
+
+
+class MarketingTemplateRefused(MarketingRunError):
+    """`create_posts` for a Company Weekly TEMPLATE script (class C or F, drop 2) whose output no longer
+    passes `news_templates.revalidate` against its stored fact sheet (a deploy changed the template
+    version, a hand edit), whose class MARKETING_CONTENT_CLASSES no longer lists, or whose series the
+    per-series switch no longer leaves on (MARKETING_NEWS_SERIES ∩ the shipped series). 409
+    MARKETING_TEMPLATE_REFUSED: deterministic for the run, so the worker closes the day `skipped`
+    (skip_reason template_refused) instead of retrying it six times. Raised before any asset read or
+    INSERT: nothing is recorded."""
 
 
 class MarketingAssetMismatch(MarketingRunError):
@@ -316,6 +350,91 @@ def storage_path_for(run_date: date, kind: str, sha256: str, ext: str) -> str:
     if len(sha256) != 64:
         raise ValueError("sha256 must be 64 hex chars")
     return f"{run_date.isoformat()}/{kind}-{sha256[:16].lower()}.{ext}"
+
+
+def frozen_post_formats(output: Any) -> Optional[Dict[str, str]]:
+    """The accepted output's frozen `post_formats` (drop 1: `{platform: "video"|"image"|"text"}`,
+    written once by `script_service.freeze_post_formats`), or None when it carries none — a script
+    accepted before image posts existed, which validates exactly as before. Pure.
+
+    Raises ValueError when they are present but do not read back — not a dict, a format outside
+    FROZEN_POST_FORMATS or outside the platform's POST_FORMATS_BY_PLATFORM, or an "image" format
+    without a usable `image_post` and `image_footer` beside it (a hand-edited row). Never guessed:
+    the caller refuses the run's posts."""
+    if not isinstance(output, dict):
+        return None
+    raw = output.get("post_formats")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"post_formats is a {type(raw).__name__}, not an object")
+    out: Dict[str, str] = {}
+    for platform, fmt in raw.items():
+        if (not isinstance(platform, str) or not isinstance(fmt, str) or fmt not in FROZEN_POST_FORMATS
+                or fmt not in POST_FORMATS_BY_PLATFORM.get(platform, ())):
+            raise ValueError(f"post_formats[{str(platform)[:40]!r}] = {str(fmt)[:40]!r} is not a format "
+                             "the server records for that platform")
+        out[platform] = fmt
+    if "image" in out.values():
+        footer = output.get("image_footer")
+        if normalize_image_post(output.get("image_post")) is None or not isinstance(footer, str) or not footer.strip():
+            raise ValueError("post_formats names an image post but the output carries no usable "
+                             "image_post and image_footer")
+    return out
+
+
+def _template_script(run_id: str, script: Dict[str, Any], output: Dict[str, Any], *, what: str) -> bool:
+    """Is the accepted script a Company Weekly TEMPLATE (drop 2)? Decided by the SCRIPT's frozen
+    `template_id` (`selection.content_class_of`: a news series → C/F), never by the run's mirror or the
+    worker. A template script must carry template authorship, and a lesson script must not — either
+    disagreement is a hand-edited row whose on-screen check has no honest allow-list (422)."""
+    klass = selection.content_class_of(script.get("template_id"))
+    authorship = output.get("authorship")
+    if klass in NEWS_CLASSES:
+        if authorship != TEMPLATE_AUTHORSHIP:
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the accepted script is class {klass} (template {script.get('template_id')!r}) "
+                f"but its output's authorship is {str(authorship)[:20]!r}; no {what} is checked against it")
+        return True
+    if authorship == TEMPLATE_AUTHORSHIP:
+        raise MarketingRequestInvalid(
+            f"run {run_id}: the accepted output claims template authorship under the non-template id "
+            f"{str(script.get('template_id'))[:40]!r}; no {what} is checked against it")
+    return False
+
+
+def _series_trail(script: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The fallback trail the selection recorded in the script's fact sheet (`fact_sheet.selection.trail`,
+    drop 2), as JSON-safe `{series, outcome, reason?}` string entries — at most 8, anything malformed
+    skipped. [] for a script with no selection block (a lesson-only plan, or written before drop 2)."""
+    sheet = script.get("fact_sheet") if isinstance(script.get("fact_sheet"), dict) else {}
+    block = sheet.get("selection") if isinstance(sheet.get("selection"), dict) else {}
+    out: List[Dict[str, str]] = []
+    for entry in block.get("trail") if isinstance(block.get("trail"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kept = {k: str(entry[k])[:60] for k in ("series", "outcome", "reason")
+                if isinstance(entry.get(k), str) and entry[k]}
+        if "series" in kept and "outcome" in kept:
+            out.append(kept)
+        if len(out) >= SERIES_TRAIL_MAX:
+            break
+    return out
+
+
+#: How many fallback steps a run's / a post's `series_trail` keeps (the longest plan has 6 steps).
+SERIES_TRAIL_MAX = 8
+
+
+def run_worker_capabilities(run: Any) -> frozenset:
+    """What the worker that HOLDS `run` declared it can render — `metadata.worker_capabilities`, written
+    only by `claim_run` (server-owned) — limited to WORKER_CAPABILITIES. Empty for a run claimed by a
+    worker that declared nothing (an older image), and for anything that does not read back. Pure."""
+    meta = run.get("metadata") if isinstance(run, dict) and isinstance(run.get("metadata"), dict) else {}
+    raw = meta.get(RUN_WORKER_CAPABILITIES_KEY)
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(c for c in raw if isinstance(c, str) and c in WORKER_CAPABILITIES)
 
 
 def idempotency_key_for(run_date: date, platform: str, fmt: str) -> str:
@@ -739,6 +858,53 @@ def _one(result: Any) -> Optional[Dict[str, Any]]:
     return data or None
 
 
+# ── review bundles (drop 1, 2026-10-09; MARKETING_REVIEW_BUNDLES) ──────────────────────────────
+# The review bot (`review_service`) may offer a run's posts as two BUNDLES — its video posts, and its
+# image/text posts — each decided with ONE tap. Each member carries `metadata.review_bundle` =
+# {id, kind, members, caption_sha}, written by the bot's fenced stamp BEFORE the decision message is
+# sent; `review_bundle` below decides exactly the members that still carry that id.
+
+#: `metadata.review_bundle.kind`: "video" = the run's video posts, "post" = its image / text posts.
+REVIEW_BUNDLE_KINDS = ("video", "post")
+#: Posts one bundle read returns. A bundle holds at most one post per platform (8 today).
+_BUNDLE_READ_LIMIT = 50
+
+
+def _canonical_uuid(value: Any) -> Optional[str]:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def review_caption_sha(post: Dict[str, Any]) -> str:
+    """sha256 (hex) of the title and caption the owner is shown for `post` — stamped into
+    `metadata.review_bundle.caption_sha` when its bundle is sent, and compared again by
+    `review_bundle`: a decision never applies to text the owner did not see. Pure."""
+    title = post.get("title") if isinstance(post.get("title"), str) else ""
+    caption = post.get("caption") if isinstance(post.get("caption"), str) else ""
+    return hashlib.sha256(json.dumps([title, caption], ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def review_bundle_of(post: Any) -> Optional[Dict[str, Any]]:
+    """`metadata.review_bundle` of `post` when it reads back — a canonical uuid `id`, a kind from
+    REVIEW_BUNDLE_KINDS, `members` a list of canonical uuids, `caption_sha` a string — else None (a
+    hand-edited or half-written stamp is no bundle at all). Pure."""
+    meta = post.get("metadata") if isinstance(post, dict) and isinstance(post.get("metadata"), dict) else {}
+    raw = meta.get("review_bundle")
+    if not isinstance(raw, dict):
+        return None
+    bid, kind, members, sha = raw.get("id"), raw.get("kind"), raw.get("members"), raw.get("caption_sha")
+    if not isinstance(bid, str) or _canonical_uuid(bid) != bid or kind not in REVIEW_BUNDLE_KINDS:
+        return None
+    if not isinstance(members, list) or not isinstance(sha, str):
+        return None
+    ids = [m for m in members if isinstance(m, str) and _canonical_uuid(m) == m]
+    if len(ids) != len(members):
+        return None
+    return {"id": bid, "kind": kind, "members": ids, "caption_sha": sha}
+
+
 # ── the service ────────────────────────────────────────────────────────────────
 
 
@@ -779,8 +945,15 @@ class MarketingRunService:
         now: Optional[datetime] = None,
         claim_nonce: Optional[str] = None,
         resume_only: bool = False,
+        capabilities: Tuple[str, ...] = (),
     ) -> Tuple[Optional[Dict[str, Any]], str]:
         """INSERT the day's row, or decide against the one that exists. Returns (row, reason).
+
+        `capabilities` (drop 1) is what the CLAIMING worker declared it can render
+        (WORKER_CAPABILITIES). A claim that takes the run records it as the server-owned
+        `metadata.worker_capabilities`, REPLACING the previous holder's (an older worker that
+        declares nothing removes the key), so `run_worker_capabilities` always answers for the
+        worker that holds the run. A worker that declares nothing leaves the row exactly as before.
 
         The INSERT is the claim: a UNIQUE violation means someone got there first and we
         fall through to the decision matrix on THEIR row. A re-claim of a stale/failed row is
@@ -797,7 +970,10 @@ class MarketingRunService:
         """
         now = now or datetime.now(timezone.utc)
         stamp = now.isoformat()
-        nonce_meta = {"claim_nonce": claim_nonce} if claim_nonce else {}
+        claim_meta: Dict[str, Any] = {"claim_nonce": claim_nonce} if claim_nonce else {}
+        declared = sorted({c for c in capabilities if c in WORKER_CAPABILITIES})
+        if declared:
+            claim_meta[RUN_WORKER_CAPABILITIES_KEY] = declared
         await self._sweep_abandoned(now=now)
 
         if not resume_only:
@@ -810,7 +986,7 @@ class MarketingRunService:
                 "attempts": 1,
                 "started_at": stamp,
                 "updated_at": stamp,
-                "metadata": nonce_meta,
+                "metadata": claim_meta,
             }
             try:
                 inserted = _one(await _exec(self.sb.table(RUNS).insert(fresh), op="claim_run.insert", run_date=run_date))
@@ -871,7 +1047,9 @@ class MarketingRunService:
             "worker_version": worker_version,
             "dry_run": bool(dry_run),
             "updated_at": stamp,
-            "metadata": {**(meta if isinstance(meta, dict) else {}), **nonce_meta},
+            # The previous holder's capabilities never outlive its claim: this worker's replace them.
+            "metadata": {**{k: v for k, v in (meta if isinstance(meta, dict) else {}).items()
+                            if k != RUN_WORKER_CAPABILITIES_KEY}, **claim_meta},
         }
         updated = _one(
             await _exec(
@@ -1037,9 +1215,16 @@ class MarketingRunService:
         finished: bool = False,
         worker: bool = False,
         claim: Optional[CallerClaim] = None,
-    ) -> Dict[str, Any]:
+        cas: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Write the fields that were given; merge `timings`/`metadata` into the JSONB
         rather than replacing it, so each stage reports only its own numbers.
+
+        `cas=True` (a SERVER write only — the selection mirror, drop 2) fences the UPDATE on the
+        `updated_at` this call read: the metadata merge is read-then-write, and a claim or a worker
+        PATCH landing in between would otherwise be overwritten with the stale copy (a reverted
+        `claim_nonce` locks the run's new holder out). A miss writes nothing and returns None — the
+        caller retries on its next pass; every other path returns the row or raises, as before.
 
         `worker=True` is the internal PATCH route: the least-trusted process in the engine
         may only write its OWN live run — `in_progress`, fenced in the UPDATE itself, not
@@ -1133,7 +1318,16 @@ class MarketingRunService:
             if stage is not None and observed_stage is not None:
                 query = (query.eq("stage", stage) if observed_stage == stage
                          else query.in_("stage", [observed_stage, stage]))
+        elif cas:
+            observed_touch = current.get("updated_at")
+            query = (query.is_("updated_at", "null") if observed_touch is None
+                     else query.eq("updated_at", _ts_filter(observed_touch)))
         updated = _one(await _exec(query, op="update_run", run_id=run_id))
+        if updated is None and cas and not worker:
+            logger.info("marketing update_run: run %s changed between the read and the fenced write "
+                        "(updated_at %s) — nothing written; the caller retries", run_id,
+                        current.get("updated_at"))
+            return None
         if updated is None:
             fresh = await self.get_run(run_id) if worker else None
             if fresh is not None:
@@ -1185,6 +1379,9 @@ class MarketingRunService:
             await self._check_timed_words(run_id, metadata["words"])
         if kind == "video":
             await self._check_onscreen_text(run, metadata if isinstance(metadata, dict) else {})
+        if kind == "card" and isinstance(metadata, dict) and (
+                "image_role" in metadata or "onscreen_text" in metadata):
+            await self._check_post_image_text(run, metadata, ext=ext, size_bytes=size_bytes)
         try:
             path = storage_path_for(run_date, kind, sha256, ext)
         except ValueError as e:
@@ -1312,6 +1509,7 @@ class MarketingRunService:
         drawn = metadata.get("onscreen_text")
         if not isinstance(drawn, list) or not drawn:   # the request schema requires it; defence in depth
             raise MarketingRequestInvalid(f"run {run_id}: a video must declare metadata.onscreen_text")
+        template = _template_script(run_id, script, output, what="video")
         allowed = set(VIDEO_BRAND_TEXT)
         for card in output.get("cards") or []:
             if isinstance(card, dict):
@@ -1319,13 +1517,44 @@ class MarketingRunService:
         disclaimer = str(output.get("disclaimer_card") or "")
         if disclaimer:
             allowed.add(disclaimer)
+        opening: Dict[str, Any] = {}
+        if template:
+            # Drop 2 (contract D12): a template video also draws its OPENING card — the kicker, each
+            # referenced logo's company name (its wordmark when the logo is missing), the chip, the
+            # figure and the headline. Never a URL or a hash: they are not drawable. A card that does
+            # not validate against the run's own logos allows nothing — fail closed, 422.
+            opening = output.get("opening_card") if isinstance(output.get("opening_card"), dict) else {}
+            problem = template_onscreen.validate_opening_card(
+                output.get("opening_card"), template_onscreen.logo_keys(output.get("logos")))
+            if problem is not None:
+                logger.error("marketing video REFUSED run_id=%s: the accepted template's opening_card does not "
+                             "validate (%s)", run_id, str(problem)[:200])
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: the accepted template's opening_card does not validate "
+                    f"({str(problem)[:120]}); no template video can be checked against it")
+            allowed.update(template_onscreen.opening_strings(opening, output.get("logos")))
         extra = [t for t in drawn if t not in allowed]
         if extra:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the video declares {len(extra)} on-screen string(s) that are not the "
-                f"accepted script's cards, its disclaimer card or the end card (first: {extra[0][:80]!r})")
+                f"accepted script's cards, its disclaimer card{', its opening card' if template else ''} or "
+                f"the end card (first: {str(extra[0])[:80]!r})")
         if not disclaimer or disclaimer not in drawn:
             raise MarketingRequestInvalid(f"run {run_id}: the video does not draw the disclaimer card")
+        if template:
+            # The opening card MUST be drawn — its kicker and headline, the two strings it always draws
+            # (a verified logo draws no wordmark name, so the whole `opening_strings` set is not
+            # required). A worker that renders the template as a LESSON (an older image that ignores
+            # `video_layout` / `opening_card`) opens on cards[0] — on a Form 4 day, the person's name,
+            # which then becomes the platforms' cover frame. Refused: the day fails closed.
+            missing = [opening[k] for k in ("kicker", "headline") if opening[k] not in drawn]
+            if missing:
+                logger.error("marketing video REFUSED run_id=%s: a template video that does not draw its opening "
+                             "card (%d of its kicker/headline missing) — a worker that drew the template as a "
+                             "lesson?", run_id, len(missing))
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: the template video does not draw its opening card "
+                    f"(first missing: {str(missing[0])[:80]!r})")
         # The captions it burns: a READY audio asset of THIS run carrying a timing table — which
         # `_check_timed_words` compared with the script when that asset registered. Not the run's
         # `metadata.voice_asset_id`: the worker writes that itself.
@@ -1337,26 +1566,104 @@ class MarketingRunService:
                 f"run {run_id}: the video's captions must come from a ready, checked narration of this "
                 f"run (voice_asset_id={voice_id!r})")
 
+    async def _check_post_image_text(self, run: Dict[str, Any], metadata: Dict[str, Any], *,
+                                     ext: str, size_bytes: int) -> None:
+        """The check of WHAT THE POST IMAGE DRAWS (drop 1, contract C6) — `_check_onscreen_text` for
+        the one card every image post of the run carries. The worker declares every string it drew
+        (`metadata.onscreen_text`); each must be the accepted output's `image_post` title or one of
+        its paragraphs, or its code-owned `image_footer` — and the footer MUST be among them (it is
+        the image's disclaimer). A card declaring text is only ever a post image. As for video, the
+        server cannot read pixels: this bounds what a well-behaved worker can claim. The request
+        schema checks the same shape first; this is the service's own fence (422, never retried)."""
+        run_id = run["id"]
+        if metadata.get("image_role") != IMAGE_ROLE_POST:
+            raise MarketingRequestInvalid(
+                f"run {run_id}: a card declares on-screen text only as the post image "
+                f"(image_role {IMAGE_ROLE_POST!r}, got {str(metadata.get('image_role'))[:40]!r})")
+        if str(ext).lower().lstrip(".") != POST_IMAGE_EXT or int(size_bytes) > POST_IMAGE_MAX_BYTES:
+            raise MarketingRequestInvalid(
+                f"run {run_id}: a post image must be a .{POST_IMAGE_EXT} of at most "
+                f"{POST_IMAGE_MAX_BYTES} bytes (got .{ext}, {size_bytes} bytes)")
+        script = await self.get_script(run_id)
+        output = (script or {}).get("output")
+        if not script or script.get("status") != "accepted" or not isinstance(output, dict):
+            raise MarketingScriptNotReady(f"run {run_id}: no accepted script to check the post image against")
+        drawn = metadata.get("onscreen_text")
+        if not isinstance(drawn, list) or not drawn:
+            raise MarketingRequestInvalid(f"run {run_id}: a post image must declare metadata.onscreen_text")
+        if _template_script(run_id, script, output, what="post image"):
+            self._check_template_image_text(run_id, output, drawn)
+            return
+        image_post = normalize_image_post(output.get("image_post"))
+        footer = output.get("image_footer")
+        if image_post is None or not isinstance(footer, str) or not footer.strip():
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the accepted script carries no image post (image_post + image_footer) "
+                "to check the post image against")
+        allowed = {image_post["title"], *image_post["paragraphs"], footer}
+        extra = [t for t in drawn if not isinstance(t, str) or t not in allowed]
+        if extra:
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the post image declares {len(extra)} on-screen string(s) that are not the "
+                f"accepted image post's title, paragraphs or footer (first: {str(extra[0])[:80]!r})")
+        if footer not in drawn:
+            raise MarketingRequestInvalid(f"run {run_id}: the post image does not draw its footer")
+
     @staticmethod
-    def _verified_pointer(run: Dict[str, Any], ready: List[Dict[str, Any]], key: str, kind: str) -> Optional[str]:
-        """`run.metadata[key]` if it names a `ready` asset of `kind` of THIS run, else None (logged)."""
+    def _check_template_image_text(run_id: str, output: Dict[str, Any], drawn: List[Any]) -> None:
+        """The template branch of `_check_post_image_text` (drop 2, contract D12). A template post image
+        draws its closed `image_spec` (`template_onscreen`): the allowed strings are exactly that spec's
+        drawable strings — each referenced logo's company name included, for its wordmark tile — plus
+        the code-owned `image_footer`, which MUST be drawn. Never `image_post`: on a template that is the
+        name-free ALT TEXT, which may describe more than the picture shows, so a Drop-1-shaped image
+        (alt title + paragraphs drawn) is refused. A spec that does not validate against the run's own
+        logos and footer allows nothing (422)."""
+        footer = output.get("image_footer")
+        if not isinstance(footer, str) or not footer.strip():
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the accepted template script carries no image_footer to check the post "
+                "image against")
+        spec, logos = output.get("image_spec"), output.get("logos")
+        problem = template_onscreen.validate_image_spec(spec, template_onscreen.logo_keys(logos), footer=footer)
+        if problem is not None:
+            logger.error("marketing post image REFUSED run_id=%s: the accepted template's image_spec does not "
+                         "validate (%s)", run_id, str(problem)[:200])
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the accepted template's image_spec does not validate ({str(problem)[:120]}); "
+                "no post image can be checked against it")
+        allowed = set(template_onscreen.image_strings(spec, logos)) | {footer}
+        extra = [t for t in drawn if not isinstance(t, str) or t not in allowed]
+        if extra:
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the template post image declares {len(extra)} on-screen string(s) that are "
+                f"not its image_spec's strings, its logos' names or its footer (first: {str(extra[0])[:80]!r})")
+        if footer not in drawn:
+            raise MarketingRequestInvalid(f"run {run_id}: the template post image does not draw its footer")
+
+    @staticmethod
+    def _verified_pointer(run: Dict[str, Any], ready: List[Dict[str, Any]], key: str, kind: str,
+                          *, role: Optional[str] = None) -> Optional[str]:
+        """`run.metadata[key]` if it names a `ready` asset of `kind` of THIS run — and, with `role`,
+        one whose `metadata.image_role` is `role` — else None (logged)."""
         meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
         pointer = meta.get(key)
         if not pointer:
             return None
         match = next((a for a in ready if a.get("id") == pointer), None)
-        if match is not None and match.get("kind") == kind:
+        match_md = (match or {}).get("metadata") if isinstance((match or {}).get("metadata"), dict) else {}
+        if match is not None and match.get("kind") == kind and (role is None or match_md.get("image_role") == role):
             return pointer
-        logger.warning("marketing run %s: metadata.%s=%r is not a ready %s asset of this run — "
-                       "ignored", run.get("id"), key, pointer, kind)
+        logger.warning("marketing run %s: metadata.%s=%r is not a ready %s asset%s of this run — "
+                       "ignored", run.get("id"), key, pointer, kind,
+                       f" with image_role {role!r}" if role else "")
         return None
 
     async def read_back(self, run_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
-        """`{voice_asset_id, video_asset_id, assets}` for the run's HOLDER — the read-back a
-        resumed or re-claimed stage derives its media from (rules marketing.md §2). Each pointer
-        comes from the run's metadata and is returned only if it names a `ready` asset of the
-        right kind of THIS run; anything else is logged and returned as None. `assets` are the
-        run's ready rows with their public URL."""
+        """`{voice_asset_id, video_asset_id, image_asset_id, assets}` for the run's HOLDER — the
+        read-back a resumed or re-claimed stage derives its media from (rules marketing.md §2). Each
+        pointer comes from the run's metadata and is returned only if it names a `ready` asset of the
+        right kind of THIS run (the image: a `card` whose image_role is the post image); anything
+        else is logged and returned as None. `assets` are the run's ready rows with their public URL."""
         run = await self.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
@@ -1368,6 +1675,8 @@ class MarketingRunService:
             a["public_url"] = self.public_url(str(a.get("storage_path")))
         return {"voice_asset_id": self._verified_pointer(run, ready, "voice_asset_id", "audio"),
                 "video_asset_id": self._verified_pointer(run, ready, "video_asset_id", "video"),
+                "image_asset_id": self._verified_pointer(run, ready, "image_asset_id", "card",
+                                                         role=IMAGE_ROLE_POST),
                 "assets": ready}
 
     async def list_ready_assets(self, run_id: str, *, claim: CallerClaim) -> Tuple[Optional[str], List[Dict[str, Any]]]:
@@ -1401,6 +1710,84 @@ class MarketingRunService:
                 size = md.get("size", md.get("contentLength"))
                 return {"size": size, "mimetype": md.get("mimetype")}
         return None
+
+    async def store_logo(self, data: bytes, info: LogoInfo) -> Optional[Dict[str, Any]]:
+        """Store a company logo the template build fetched and `logo_check.inspect_logo` accepted (drop 2,
+        contract D10): `{path, url, sha256, bytes, width, height}`, or None — the caller then draws the
+        company's wordmark tile. Never raises for a logo (a logo never refuses a candidate).
+
+        Content-addressed at `logos/<sha256[:32]>.<png|jpg>` in the PUBLIC media bucket, with NO asset
+        row: one object serves every run that names the company. So it is never overwritten and never
+        deleted — the object is shared and may already be in a published post. Stat first: the same size
+        and content type → reuse it; anything else at that key → None + ERROR (left in place). Absent →
+        upload with `x-upsert: false` and a one-year cache; a conflict (another process won the race) is
+        stat'ed again under the same rule. The bytes are stored exactly as fetched."""
+        if not isinstance(data, (bytes, bytearray)) or not data or not isinstance(info, LogoInfo):
+            logger.warning("marketing logo: nothing storable (data %s, info %s) — wordmark",
+                           type(data).__name__, type(info).__name__)
+            return None
+        data = bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != info.sha256:
+            logger.error("marketing logo: the bytes' sha256 %s… is not the inspected logo's %s… — not stored, "
+                         "wordmark", digest[:12], str(info.sha256)[:12])
+            return None
+        try:
+            path, content_type = logo_path(info), info.content_type
+            entry = {"path": path, "url": self.public_url(path), "sha256": digest, "bytes": len(data),
+                     "width": int(info.width), "height": int(info.height)}
+        except Exception as e:  # noqa: BLE001 — a malformed LogoInfo is a wordmark, never a 500
+            logger.warning("marketing logo: no storage path for sha256 %s… (%s: %s) — wordmark",
+                           digest[:12], type(e).__name__, e)
+            return None
+
+        async def _existing() -> Optional[bool]:
+            """True: the object at `path` is these bytes (size + type); False: something else is there
+            (ERROR); None: absent. Raises MarketingRunError when Storage cannot be read."""
+            stat = await self._object_stat(path)
+            if stat is None:
+                return None
+            size, mimetype = stat.get("size"), stat.get("mimetype")
+            got_type = str(mimetype or "").split(";", 1)[0].strip().lower()
+            try:
+                same_size = size is not None and int(size) == len(data)
+            except (TypeError, ValueError):
+                same_size = False
+            if same_size and got_type == content_type:
+                return True
+            logger.error("marketing logo: %s already holds another object (size %r, type %r; want %d bytes "
+                         "of %s) — left in place (shared, maybe published), wordmark instead", path, size,
+                         mimetype, len(data), content_type)
+            return False
+
+        bucket = settings.MARKETING_MEDIA_BUCKET
+        try:
+            there = await _existing()
+            if there is True:
+                logger.info("marketing logo: reusing %s (%d bytes)", path, len(data))
+                return entry
+            if there is False:
+                return None
+            try:
+                await sb_exec_storage(lambda: self.sb.storage.from_(bucket).upload(
+                    path, data, {"content-type": content_type, "cache-control": "31536000", "upsert": "false"}))
+            except Exception as e:
+                if not _is_storage_conflict(e):
+                    logger.warning("marketing logo: upload of %s failed (%s: %s) — wordmark", path,
+                                   type(e).__name__, str(e)[:200])
+                    return None
+                logger.info("marketing logo: %s was stored by a concurrent writer — checking it", path)
+                there = await _existing()
+                if there is not True:
+                    if there is None:
+                        logger.warning("marketing logo: %s answered a conflict but is not listed — wordmark", path)
+                    return None
+                return entry
+        except MarketingRunError as e:
+            logger.warning("marketing logo: Storage could not be read for %s (%s) — wordmark", path, e)
+            return None
+        logger.info("marketing logo: stored %s (%d bytes, %dx%d)", path, len(data), entry["width"], entry["height"])
+        return entry
 
     async def _verify_object(self, asset: Dict[str, Any], stat: Dict[str, Any]) -> None:
         """The object in the bucket must be the one registered: same byte size, same content type
@@ -1508,6 +1895,18 @@ class MarketingRunService:
         res = await _exec(self.sb.table(ASSETS).select("*").eq("run_id", run_id), op="list_assets", run_id=run_id)
         return list(getattr(res, "data", None) or [])
 
+    async def _recorded_formats(self, run_id: str) -> Dict[str, set]:
+        """{platform: {formats}} of the posts already recorded for `run_id` (any status) — what
+        `create_posts`' one-post-per-platform rule is checked against. A failed read raises
+        (`MarketingRunError`, retried by the worker), never reads as "nothing recorded"."""
+        res = await _exec(self.sb.table(POSTS).select("platform,format").eq("run_id", run_id),
+                          op="create_posts.recorded", run_id=run_id)
+        out: Dict[str, set] = {}
+        for row in getattr(res, "data", None) or []:
+            if isinstance(row, dict) and row.get("platform"):
+                out.setdefault(str(row["platform"]), set()).add(str(row.get("format")))
+        return out
+
     # posts -----------------------------------------------------------------
 
     async def create_posts(
@@ -1532,7 +1931,25 @@ class MarketingRunService:
         (409/422, never retried) leaves no partial ledger behind — a later spec that is invalid
         used to leave the earlier ones recorded, and publishable, under a run that then failed.
         A transient failure mid-loop can still leave a prefix; the re-send adopts those rows
-        through the idempotency key, so that heals itself."""
+        through the idempotency key, so that heals itself.
+
+        Drop 1 (contract C7): when the accepted output froze `post_formats`, each spec's format must
+        be its platform's frozen one; an `image` post carries exactly the run's verified post image
+        (`metadata.image_asset_id` → a ready card whose image_role is the post image) and is born
+        `pending_review` like any media post; an output with no frozen formats takes no image post.
+        A `video` post is pinned the same way, to exactly the run's verified `metadata.video_asset_id`
+        (without frozen formats its video posts must at least all name the same assets): the review
+        bundle shows ONE video and one tap approves every video post.
+        At most one post per (run, platform), in the request and against the ledger (a read before
+        the INSERTs — not atomic with them, but the claim fence makes the holder the only writer and
+        the frozen formats leave each platform one valid format anyway).
+
+        Drop 2 (contract D12): the post gate is dispatched on the SCRIPT's class (its frozen
+        `template_id`): "A" → the judge gate; "C"/"F" (a Company Weekly template) → the class switch, the
+        per-series switch (drop 2b), the template authorship and `news_templates.revalidate` (409
+        `MarketingTemplateRefused` on a miss; 422 for the authorship);
+        anything else → 422. A template post is never auto-approved. Every post's metadata records its
+        `content_class`, `series`, `authorship`, `series_trail` and its `made_with_ai` flag."""
         run = await self.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
@@ -1552,31 +1969,134 @@ class MarketingRunService:
                 f"run {run_id} has no accepted script (status={(script or {}).get('status')})"
             )
         # Every content class needs its OWN post gate, dispatched explicitly — never "not A → pass".
-        # Class A: the semantic judge (§12.5): `shadow` accepts drafts it flagged and `off` never asks
-        # it, so a package it did not check in `enforce` mode never becomes a post — whatever
-        # MARKETING_AUTO_PUBLISH or a reviewer later says. The writer records the mode IN the package
-        # (`output.judge.mode`; absent means off). Any other value — class C before its template gate
-        # exists as its own branch, a NULL, an unknown or mis-cased letter — is refused before any
-        # asset read or INSERT. (Today only `_heal_mirror` writes the class, always "A", so this is
-        # reachable only through a hand edit; it used to let every non-A value through ungated.)
-        content_class = run.get("content_class")
-        if content_class == "A":
+        # Drop 2 (contract D12): the class is the SCRIPT's — `selection.content_class_of` of its frozen
+        # `template_id` (a lesson template → "A", a news series → "C"/"F") — and the output must say
+        # the same (`output.content_class`; a writer package carries none, which reads as "A" only for
+        # a lesson id). `marketing_runs.content_class` is a MIRROR nothing gates on: a mismatch is
+        # logged, never obeyed. Anything else (an unknown or retired id, a NULL, a class the output
+        # contradicts) is refused before any asset read or INSERT.
+        template_id = script.get("template_id")
+        klass = selection.content_class_of(template_id)
+        stored_class = output.get("content_class") or ("A" if klass == "A" else None)
+        if klass is None or stored_class != klass:
+            shown_id = str(template_id)[:40]
+            shown_class = None if stored_class is None else str(stored_class)[:20]
+            logger.error("marketing create_posts REFUSED run_id=%s: the script's template %r gives content "
+                         "class %r and its output says %r — no post gate; nothing recorded",
+                         run_id, shown_id, klass, shown_class)
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the script's template {shown_id!r} (class {klass!r}, output class "
+                f"{shown_class!r}) has no post gate; nothing recorded")
+        if run.get("content_class") != klass:
+            logger.warning("marketing create_posts run_id=%s: the run mirrors content_class %r but its script "
+                           "is class %r (template %r) — the script decides", run_id,
+                           str(run.get("content_class"))[:20], klass, str(template_id)[:40])
+        authorship = post_copy.AUTHORSHIP_AI
+        series = selection.LESSON
+        if klass == "A":
+            # The semantic judge (§12.5): `shadow` accepts drafts it flagged and `off` never asks it,
+            # so a package it did not check in `enforce` mode never becomes a post — whatever
+            # MARKETING_AUTO_PUBLISH or a reviewer later says. The writer records the mode IN the
+            # package (`output.judge.mode`; absent means off).
+            if output.get("authorship") not in (None, post_copy.AUTHORSHIP_AI):
+                logger.error("marketing create_posts REFUSED run_id=%s: a lesson script whose output claims "
+                             "authorship %r — nothing recorded", run_id, str(output.get("authorship"))[:20])
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: a lesson script's output claims authorship "
+                    f"{str(output.get('authorship'))[:20]!r}; nothing recorded")
             judge = output.get("judge") if isinstance(output.get("judge"), dict) else {}
             if judge.get("mode") != "enforce":
                 raise MarketingJudgeNotEnforced(
                     f"run {run_id}: the accepted script was judged in mode {judge.get('mode') or 'off'!r}, "
                     "not 'enforce' — no post is recorded (set MARKETING_JUDGE_MODE=enforce on the web)")
-        else:
-            shown = str(content_class)[:20]
-            logger.error("marketing create_posts REFUSED run_id=%s: content_class %r has no post gate "
-                         "(only class A, judged in enforce mode, becomes a post) — nothing recorded",
-                         run_id, shown)
-            raise MarketingRequestInvalid(
-                f"run {run_id}: content_class {shown!r} has no post gate — only class A, judged in "
-                "enforce mode, becomes a post; nothing recorded")
+        elif klass in NEWS_CLASSES:
+            # A Company Weekly TEMPLATE (drop 2): never judged — composed by code from an as-filed record.
+            # Its gate is the switch, the authorship and a full re-check: `news_templates.revalidate`
+            # re-composes the stored output from the stored fact sheet on this run date and compares every
+            # public field, then re-runs every template rule (placement, Congress names, the verb table,
+            # banned words, the disclaimer, the footer). A template the current code would not write is
+            # never recorded (409, the worker skips the day `template_refused`).
+            enabled = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+            if klass not in enabled:
+                logger.error("marketing create_posts TEMPLATE REFUSED run_id=%s series=%s: class %s is not in "
+                             "MARKETING_CONTENT_CLASSES (%s) — nothing recorded", run_id, str(template_id)[:40],
+                             klass, ",".join(sorted(enabled)))
+                raise MarketingTemplateRefused(
+                    f"run {run_id}: content class {klass} is switched off (MARKETING_CONTENT_CLASSES); "
+                    "nothing recorded")
+            # The per-series switch (drop 2b), read NOW like the class switch: the series must still be
+            # listed in MARKETING_NEWS_SERIES AND shipped (`selection.parse_news_series` is that
+            # intersection). A series switched off after its day was built — or one this deploy no longer
+            # ships — is never recorded (409, the worker skips the day `template_refused`).
+            series_on = selection.parse_news_series(settings.MARKETING_NEWS_SERIES)
+            if template_id not in series_on:
+                logger.error("marketing create_posts TEMPLATE REFUSED run_id=%s series=%s: the series is not "
+                             "on (MARKETING_NEWS_SERIES ∩ shipped = %s) — nothing recorded", run_id,
+                             str(template_id)[:40], ",".join(sorted(series_on)) or "none")
+                raise MarketingTemplateRefused(
+                    f"run {run_id}: series {str(template_id)[:40]} is switched off (MARKETING_NEWS_SERIES) "
+                    "or not shipped; nothing recorded")
+            if output.get("authorship") != TEMPLATE_AUTHORSHIP:
+                logger.error("marketing create_posts REFUSED run_id=%s: a class-%s script whose output's "
+                             "authorship is %r — nothing recorded", run_id, klass,
+                             str(output.get("authorship"))[:20])
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: a class-{klass} script must carry template authorship "
+                    f"(got {str(output.get('authorship'))[:20]!r}); nothing recorded")
+            if output.get("series") != template_id:
+                codes = ["series_mismatch"]
+            else:
+                codes = sorted({str(v.get("code")) for v in news_templates.revalidate(
+                    output, fact_sheet=script.get("fact_sheet"), run_date=run_date)})
+            if codes:
+                logger.error("create_posts TEMPLATE REFUSED run_id=%s series=%s codes=%s — nothing recorded",
+                             run_id, str(template_id)[:40], codes)
+                raise MarketingTemplateRefused(
+                    f"run {run_id}: the {str(template_id)[:40]} template failed its re-check ({', '.join(codes)[:200]}); "
+                    "nothing recorded")
+            authorship = TEMPLATE_AUTHORSHIP
+            series = str(template_id)
+        else:   # unreachable: content_class_of answers "A", a NEWS_CLASSES value or None (refused above)
+            logger.error("marketing create_posts REFUSED run_id=%s: content class %r has no post gate — "
+                         "nothing recorded", run_id, klass)
+            raise MarketingRequestInvalid(f"run {run_id}: content class {klass!r} has no post gate; nothing recorded")
+        series_trail = _series_trail(script)
         copy_by_platform = output.get("posts") if isinstance(output.get("posts"), dict) else {}
+        # Drop 1 (contract C7): the formats frozen into the accepted output at write time. None = a
+        # script accepted before image posts existed: validated exactly as before, and never an
+        # image post. Present but unreadable (a hand-edited row) = nothing is recorded.
+        try:
+            formats = frozen_post_formats(output)
+        except ValueError as e:
+            logger.error("marketing create_posts REFUSED run_id=%s: the accepted script's post_formats "
+                         "do not read back (%s) — nothing recorded", run_id, e)
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the accepted script's post_formats do not read back ({e}); nothing recorded"
+            ) from e
         wants_assets = any(spec.get("asset_ids") for spec in specs)
-        assets = {a.get("id"): a for a in await self.list_assets(run_id)} if wants_assets else {}
+        wants_image = any(spec.get("format") == "image" for spec in specs)
+        wants_video = any(spec.get("format") == "video" for spec in specs)
+        asset_rows = (await self.list_assets(run_id)
+                      if (wants_assets or wants_image or (wants_video and formats is not None)) else [])
+        assets = {a.get("id"): a for a in asset_rows}
+        ready_rows = [a for a in asset_rows if a.get("status") == "ready"]
+        # The ONE image every image post of the run carries: the run's verified post-image pointer
+        # (`metadata.image_asset_id` → a ready card of this run whose image_role is the post image,
+        # whose drawn text `_check_post_image_text` checked at registration).
+        image_id = (self._verified_pointer(run, ready_rows, "image_asset_id", "card", role=IMAGE_ROLE_POST)
+                    if wants_image and formats is not None else None)
+        # The ONE video every video post of the run carries, pinned the same way: the run's verified
+        # `metadata.video_asset_id` (a ready video of this run, whose on-screen text and voice
+        # `_check_onscreen_text` checked). The review bundle shows the owner ONE video for all the
+        # video posts and one "Approve all" decides them — the server cannot read pixels, so a second
+        # ready video on another post would be approved unseen. A script accepted before drop 1 (no
+        # frozen formats) is not pinned to the pointer, but its video posts must still agree.
+        video_id = (self._verified_pointer(run, ready_rows, "video_asset_id", "video")
+                    if wants_video and formats is not None else None)
+        video_lists: set = set()
+        # At most ONE post per (run, platform): the ledger's UNIQUE is (run, platform, format), so
+        # a platform already recorded in another format would otherwise take a second post.
+        recorded = await self._recorded_formats(run_id)
 
         # ── validate EVERYTHING first ──────────────────────────────────────────
         bad_pairs: List[str] = []
@@ -1584,19 +2104,54 @@ class MarketingRunService:
         not_ready: List[str] = []
         bad_media: List[str] = []
         seen: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+        ai_flags: Dict[Tuple[str, str], bool] = {}
+        formats_named: Dict[str, set] = {}
         planned: List[Tuple[str, str, Dict[str, Any], List[str]]] = []
         for spec in specs:
             platform, fmt = spec["platform"], spec["format"]
             allowed = POST_FORMATS_BY_PLATFORM.get(platform, ())
+            copy = copy_by_platform.get(platform)
+            has_copy = isinstance(copy, dict) and bool(copy.get("caption"))
             if fmt not in allowed:
                 bad_pairs.append(f"{platform}/{fmt} (allowed: {', '.join(allowed) or 'none'})")
-            copy = copy_by_platform.get(platform)
-            if not isinstance(copy, dict) or not copy.get("caption"):
+            elif formats is not None and (platform in formats or has_copy) and formats.get(platform) != fmt:
+                # (An outlet the script dropped has neither copy nor a frozen format: that stays the
+                # `no_copy` refusal below, exactly as before.)
+                bad_pairs.append(f"{platform}/{fmt} (this run's format for {platform} is "
+                                 f"{formats.get(platform) or 'none'})")
+            elif formats is None and fmt == "image":
+                bad_pairs.append(f"{platform}/{fmt} (the accepted script froze no post formats; an "
+                                 "image post needs them)")
+            if not has_copy:
                 no_copy.append(platform)
+            if fmt in allowed:
+                # The post's platform "made with AI" flag (drop 2): an AI-written lesson always; a
+                # template only as a narrated video. Decided here, before any INSERT, so a format no
+                # template post takes is a refusal of the whole request — never a guessed flag.
+                try:
+                    ai_flags[(platform, fmt)] = post_copy.made_with_ai(authorship, fmt)
+                except ValueError as e:
+                    bad_pairs.append(f"{platform}/{fmt} ({e})")
             asset_ids = list(dict.fromkeys(spec.get("asset_ids") or []))
             previous = seen.setdefault((platform, fmt), tuple(asset_ids))
             if previous != tuple(asset_ids):
                 bad_media.append(f"{platform}/{fmt} named twice with different assets")
+            formats_named.setdefault(platform, set()).add(fmt)
+            other = sorted(recorded.get(platform, set()) - {fmt})
+            if other:
+                bad_media.append(f"{platform}/{fmt}: this run already recorded {platform} as {other}")
+            if fmt == "image" and formats is not None:
+                if image_id is None:
+                    bad_media.append(f"{platform}/image: the run has no verified post image")
+                elif asset_ids != [image_id]:
+                    bad_media.append(f"{platform}/image must carry exactly the run's post image ({image_id})")
+            if fmt == "video" and formats is not None:
+                if video_id is None:
+                    bad_media.append(f"{platform}/video: the run has no verified video")
+                elif asset_ids != [video_id]:
+                    bad_media.append(f"{platform}/video must carry exactly the run's video ({video_id})")
+            elif fmt == "video":
+                video_lists.add(tuple(asset_ids))
             kinds = POST_MEDIA_KINDS.get(fmt, ())
             matching = 0
             for aid in asset_ids:
@@ -1611,6 +2166,12 @@ class MarketingRunService:
                 bad_media.append(f"{platform}/{fmt} carries no ready {'/'.join(kinds)} asset")
             if isinstance(copy, dict):
                 planned.append((platform, fmt, copy, asset_ids))
+        for platform, named in formats_named.items():
+            if len(named) > 1:
+                bad_media.append(f"{platform} named in {len(named)} formats {sorted(named)} (one post per platform)")
+        if len(video_lists) > 1:
+            bad_media.append(f"the video posts name {len(video_lists)} different asset lists "
+                             "(every video post of a run carries the same video)")
         if bad_pairs:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the server records no post for {sorted(set(bad_pairs))}"
@@ -1633,9 +2194,11 @@ class MarketingRunService:
         auto = settings.MARKETING_AUTO_PUBLISH and not run_dry
         out: List[Dict[str, Any]] = []
         for platform, fmt, copy, asset_ids in planned:
-            # Only a media-less TEXT post is born approved: the server has verified every word
-            # of it, and the format map allows `text` only on text-native outlets.
-            initial = "approved" if (auto and fmt == "text" and not asset_ids) else "pending_review"
+            # Only a media-less TEXT post of a class-A (judged) script is born approved: the server
+            # has verified every word of it, and the format map allows `text` only on text-native
+            # outlets. A template post (C/F) is NEVER auto-approved — a human approves every one.
+            initial = ("approved" if (auto and fmt == "text" and not asset_ids and klass == "A")
+                       else "pending_review")
             key = idempotency_key_for(run_date, platform, fmt)
             row = {
                 "run_id": run_id,
@@ -1651,6 +2214,13 @@ class MarketingRunService:
                     "generation_id": script.get("generation_id"),
                     "source_ref": script.get("source_ref"),
                     "template_id": script.get("template_id"),
+                    # Drop 2: what the post is (the script decides) and the platform AI flag it
+                    # carries (`post_copy.made_with_ai`; the X outlet ANDs it with its setting).
+                    "content_class": klass,
+                    "series": series,
+                    "authorship": authorship,
+                    "series_trail": [dict(step) for step in series_trail],   # flat str entries
+                    "made_with_ai": ai_flags[(platform, fmt)],
                 },
                 "approved_at": _now_iso() if initial == "approved" else None,
                 "approved_by": "auto" if initial == "approved" else None,
@@ -1671,8 +2241,8 @@ class MarketingRunService:
                 raise MarketingRunError(f"create_posts: no row for {key}")
             out.append(created)
         logger.info(
-            "marketing posts recorded run_id=%s n=%d auto_publish=%s",
-            run_id, len(out), auto,
+            "marketing posts recorded run_id=%s n=%d auto_publish=%s class=%s series=%s authorship=%s",
+            run_id, len(out), auto, klass, series, authorship,
         )
         return out
 
@@ -1736,6 +2306,178 @@ class MarketingRunService:
         logger.info("marketing post %s post_id=%s platform=%s by=%s", status.upper(), post_id,
                     updated.get("platform"), reviewed_by)
         return status, updated
+
+    async def bundle_posts(self, bundle_id: str) -> List[Dict[str, Any]]:
+        """Every post stamped with review bundle `bundle_id` (`metadata->review_bundle->>id`, the
+        filter IN the query), any status, oldest first — only rows whose stamp reads back
+        (`review_bundle_of`). A bundle id that is not a canonical uuid raises ValueError before any
+        read; a failed read raises MarketingRunError (never "no such bundle")."""
+        bid = _canonical_uuid(bundle_id)
+        if bid is None or bid != bundle_id:
+            raise ValueError(f"bundle id {str(bundle_id)[:60]!r} is not a canonical uuid")
+        res = await _exec(
+            self.sb.table(POSTS).select("*").eq("metadata->review_bundle->>id", bid)
+            .order("created_at").limit(_BUNDLE_READ_LIMIT),
+            op="bundle_posts", bundle_id=bid,
+        )
+        return [r for r in (getattr(res, "data", None) or [])
+                if isinstance(r, dict) and (review_bundle_of(r) or {}).get("id") == bid]
+
+    async def _posts_by_id(self, ids: List[str], *, op: str, bundle_id: str) -> Dict[str, Dict[str, Any]]:
+        if not ids:
+            return {}
+        res = await _exec(self.sb.table(POSTS).select("*").in_("id", list(ids)).limit(_BUNDLE_READ_LIMIT),
+                          op=op, bundle_id=bundle_id)
+        return {(_canonical_uuid(r.get("id")) or str(r.get("id"))): r
+                for r in (getattr(res, "data", None) or []) if isinstance(r, dict)}
+
+    @staticmethod
+    def _bundle_member_outcome(row: Optional[Dict[str, Any]], bundle_id: str) -> str:
+        """Why a member was NOT decided by this bundle's tap: `not_found`; `moved` (still pending but it
+        carries no stamp or another bundle's — it was, or will be, offered in a newer message);
+        `already_<status>`; `changed` (pending, this bundle's, but its text is no longer what was shown)."""
+        if row is None:
+            return "not_found"
+        if row.get("status") != "pending_review":
+            return f"already_{row.get('status')}"
+        if (review_bundle_of(row) or {}).get("id") != bundle_id:
+            return "moved"
+        return "changed"
+
+    async def review_bundle(self, bundle_id: str, decision: str, *,
+                            reviewed_by: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """The owner's ONE verdict on a review bundle (the review bot's ✅ Approve all / ❌ Reject all):
+        `approve` → `approved` (approved_at / approved_by), `reject` → `rejected`, for every member
+        that is still `pending_review`, still carries THIS bundle's stamp and, when the members are
+        read, still shows the text the owner was shown (its `caption_sha`).
+
+        A member whose text CHANGED since it was shown (only a hand edit in Studio can do that: caption
+        and title are not in `_POST_WRITABLE`) is not decided, and its review stamps are cleared
+        (`_release_changed_member`) so the next sweep offers its new text as a new bundle — the tap's
+        keyboard is gone, so without that it could never be approved and would expire unseen. Best
+        effort: a release that does not land is logged and reported (`reoffered` False).
+        Residual, accepted: the text is compared at READ time only. An edit landing between that read
+        and the UPDATE below is decided unseen; an `updated_at` fence would not catch it either (a
+        Studio edit does not bump `updated_at`, and `marketing_posts` must never get a trigger).
+
+        The decision is ONE conditional UPDATE — `id IN (those members) AND status = pending_review AND
+        metadata->review_bundle->>id = <bundle id>` — so a member decided meanwhile (its own ✂ drop, a
+        per-post button), re-sent in a newer bundle, or expired, is never flipped, and a replayed tap
+        decides nothing. That UPDATE writes columns only: PostgREST cannot MERGE a different metadata
+        document into each row of one statement, and replacing it would drop each row's own
+        `dry_run` / `review_bundle` / review stamps. The `metadata.review` record ({decision, by, at,
+        bundle_id}) is then merged into each decided row by the fenced `transition_post` — best effort:
+        a member the publisher claimed in between keeps its decision without the record (logged).
+
+        Returns (outcome, results). outcome: `decided` (this call decided at least one member),
+        `nothing` (no member was left to decide), `not_found` (no post carries the bundle). results:
+        one per member, in the bundle's own order — {post_id, platform, format, outcome, row, reoffered}
+        with outcome `approved` / `rejected` / `already_<status>` / `moved` / `changed` / `not_found`;
+        `reoffered` is True only for a `changed` member whose review stamps were cleared.
+        A failed read or UPDATE raises MarketingRunError (nothing was decided by a failed UPDATE)."""
+        if decision not in ("approve", "reject"):
+            raise ValueError(f"unknown review decision {decision!r}")
+        carriers = await self.bundle_posts(bundle_id)
+        bid = bundle_id
+        if not carriers:
+            return "not_found", []
+        by_id = {(_canonical_uuid(r.get("id")) or str(r.get("id"))): r for r in carriers}
+        order: List[str] = []
+        for row in carriers:
+            for pid in (review_bundle_of(row) or {}).get("members", []):
+                if pid not in order:
+                    order.append(pid)
+        order += [pid for pid in by_id if pid not in order]
+        others = await self._posts_by_id([pid for pid in order if pid not in by_id],
+                                         op="review_bundle.members", bundle_id=bid)
+
+        eligible: List[str] = []
+        for pid in order:
+            row = by_id.get(pid)
+            if row is None or row.get("status") != "pending_review":
+                continue
+            if review_caption_sha(row) != (review_bundle_of(row) or {}).get("caption_sha"):
+                logger.warning("marketing bundle %s: post_id=%s platform=%s changed since it was shown "
+                               "(caption_sha differs) — not decided", bid, pid, row.get("platform"))
+                continue
+            eligible.append(pid)
+
+        status = "approved" if decision == "approve" else "rejected"
+        now = _now_iso()
+        decided: Dict[str, Dict[str, Any]] = {}
+        if eligible:
+            patch: Dict[str, Any] = {"status": status, "updated_at": now}
+            if status == "approved":
+                patch.update({"approved_at": now, "approved_by": reviewed_by})
+            res = await _exec(
+                self.sb.table(POSTS).update(patch).in_("id", eligible).eq("status", "pending_review")
+                .eq("metadata->review_bundle->>id", bid),
+                op="review_bundle", bundle_id=bid,
+            )
+            decided = {(_canonical_uuid(r.get("id")) or str(r.get("id"))): r
+                       for r in (getattr(res, "data", None) or []) if isinstance(r, dict)}
+            review = {"decision": status, "by": reviewed_by, "at": now, "bundle_id": bid}
+            for pid, row in list(decided.items()):
+                try:
+                    merged = await self.transition_post(pid, expect_status=status, observed=row,
+                                                        meta={"review": review}, retries=1)
+                except Exception as e:   # the decision stands; only its record is missing
+                    logger.warning("marketing bundle %s: post_id=%s is %s but its review record was not "
+                                   "written (%s: %s)", bid, pid, status, type(e).__name__, e)
+                    continue
+                if merged is None:
+                    logger.warning("marketing bundle %s: post_id=%s is %s but moved on before its review "
+                                   "record was written (the publisher took it) — record skipped", bid, pid, status)
+                else:
+                    decided[pid] = merged
+        lost = [pid for pid in eligible if pid not in decided]
+        fresh = await self._posts_by_id(lost, op="review_bundle.reread", bundle_id=bid)
+
+        results: List[Dict[str, Any]] = []
+        for pid in order:
+            if pid in decided:
+                row, outcome = decided[pid], status
+            elif pid in lost:
+                row = fresh.get(pid)
+                outcome = self._bundle_member_outcome(row, bid)
+            else:
+                row = by_id.get(pid) or others.get(pid)
+                outcome = self._bundle_member_outcome(row, bid)
+            reoffered = False
+            if outcome == "changed" and row is not None:
+                released = await self._release_changed_member(pid, row, bid)
+                if released is not None:
+                    row, reoffered = released, True
+            results.append({"post_id": pid, "platform": (row or {}).get("platform"),
+                            "format": (row or {}).get("format"), "outcome": outcome, "row": row,
+                            "reoffered": reoffered})
+        logger.info("marketing bundle %s bundle_id=%s decided=%d of %d by=%s (%s)", status.upper(), bid,
+                    len(decided), len(order), reviewed_by,
+                    ", ".join(f"{r['platform']}={r['outcome']}" for r in results))
+        return ("decided" if decided else "nothing"), results
+
+    async def _release_changed_member(self, post_id: str, row: Dict[str, Any],
+                                      bundle_id: str) -> Optional[Dict[str, Any]]:
+        """Clear the review stamps of a bundle member that was NOT decided because its text changed
+        after it was shown, so the next review sweep (which offers only posts with no
+        `review_notified_at`) offers the new text under a new bundle. Fenced on the row as it was read
+        (status AND updated_at, no retry): a member that moved meanwhile — decided, or re-stamped in a
+        newer bundle — is left alone. Best effort: returns the released row, or None (logged WARNING)."""
+        try:
+            released = await self.transition_post(post_id, expect_status="pending_review", observed=row,
+                                                  unset=_REVIEW_OFFER_STAMPS, retries=0)
+        except Exception as e:
+            logger.warning("marketing bundle %s: post_id=%s changed since it was shown and its review stamps "
+                           "were NOT cleared (%s: %s) — it will not be offered again by itself", bundle_id,
+                           post_id, type(e).__name__, e)
+            return None
+        if released is None:
+            logger.warning("marketing bundle %s: post_id=%s changed since it was shown but moved on before its "
+                           "review stamps were cleared — not re-offered from here", bundle_id, post_id)
+            return None
+        logger.info("marketing bundle %s: post_id=%s platform=%s changed since it was shown — review stamps "
+                    "cleared; the next sweep offers its new text", bundle_id, post_id, released.get("platform"))
+        return released
 
     async def claim_post(
         self, post_id: str, *, observed: Optional[Dict[str, Any]] = None,
@@ -2284,18 +3026,36 @@ class MarketingRunService:
                            "short", len(rows), start, end)
         return rows
 
-    async def record_reject_reason(self, post_id: str, reason: str, *, by: str) -> str:
+    async def record_reject_reason(self, post_id: str, reason: str, *, by: str,
+                                   bundle_id: Optional[str] = None) -> str:
         """The owner's reason for a rejection (the review bot's reason keyboard) — only on a
         `rejected` post. `metadata.review` is rebuilt from a FRESH read (its decision / by / at kept)
         with `reason`, `reason_at` and `reason_by`, written by the fenced, merging `transition_post`;
         two tries.
 
+        With `bundle_id` (a bundle reason after ❌ Reject all) the FRESH row must be that bundle's
+        rejection: a review record naming `bundle_id`, or NO review record at all on a row stamped with
+        that bundle — `review_bundle`'s record merge is best effort, and only it (fenced on the stamp)
+        and `review_post` (which writes the record in the same UPDATE) ever write `rejected`. Such a row
+        gets `decision` rejected and `bundle_id` in the same write as the reason, so a later reason still
+        matches it. Anything else (a ✂ drop's record, another bundle) answers `not_this_bundle`, writing
+        nothing.
+
         Returns `recorded`, `unchanged` (that reason is already there — a double tap writes nothing),
-        `already_<status>` (the post is not rejected; nothing written), `not_found`, or `busy` (the
-        fence was lost twice). A different later reason wins. A reason outside
+        `already_<status>` (the post is not rejected; nothing written), `not_found`, `not_this_bundle`,
+        or `busy` (the fence was lost twice). A different later reason wins. A reason outside
         REJECT_REASON_CODES raises ValueError before any read."""
         if reason not in REJECT_REASON_CODES:
             raise ValueError(f"unknown reject reason {reason!r} (expected one of {REJECT_REASON_CODES})")
+
+        def _of_bundle(row: Dict[str, Any], meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            """The review record to build on for `bundle_id`, or None when the row is not its rejection."""
+            if isinstance(meta.get("review"), dict):
+                return dict(meta["review"]) if meta["review"].get("bundle_id") == bundle_id else None
+            if meta.get("review") is None and (review_bundle_of(row) or {}).get("id") == bundle_id:
+                return {"decision": "rejected", "bundle_id": bundle_id}
+            return None
+
         for _ in range(2):
             row = await self.get_post(post_id)
             if row is None:
@@ -2304,6 +3064,11 @@ class MarketingRunService:
                 return f"already_{row.get('status')}"
             meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             review = dict(meta["review"]) if isinstance(meta.get("review"), dict) else {}
+            if bundle_id is not None:
+                owned = _of_bundle(row, meta)
+                if owned is None:
+                    return "not_this_bundle"
+                review = owned
             was = review.get("reason")
             if was == reason:
                 return "unchanged"
@@ -2313,6 +3078,10 @@ class MarketingRunService:
             if updated is not None:
                 logger.info("marketing post REJECT REASON post_id=%s platform=%s reason=%s by=%s (was %r)",
                             post_id, row.get("platform"), reason, by, was)
+                if bundle_id is not None and not isinstance(meta.get("review"), dict):
+                    logger.warning("marketing post post_id=%s platform=%s: rejected by bundle %s with no review "
+                                   "record (its best-effort write had failed) — rebuilt with the reason", post_id,
+                                   row.get("platform"), bundle_id)
                 return "recorded"
         row = await self.get_post(post_id)
         if row is None:
@@ -2320,6 +3089,8 @@ class MarketingRunService:
         if row.get("status") != "rejected":
             return f"already_{row.get('status')}"
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if bundle_id is not None and _of_bundle(row, meta) is None:
+            return "not_this_bundle"
         review = meta.get("review") if isinstance(meta.get("review"), dict) else {}
         return "unchanged" if review.get("reason") == reason else "busy"
 
@@ -2410,6 +3181,14 @@ class MarketingRunService:
                 f"script_tokens_between: {len(rows)} scripts for the {days} days {start}..{end} and a day "
                 "holds two — the cost line refuses to sum them")
         return rows
+
+
+def _is_storage_conflict(exc: BaseException) -> bool:
+    """A Storage upload refused because the key already holds an object (`x-upsert: false`): storage3's
+    `StorageApiError` with status 409 / error "Duplicate" (the status arrives as an int or a string)."""
+    status = str(getattr(exc, "status", "") or getattr(exc, "statusCode", "") or "").strip()
+    code = str(getattr(exc, "code", "") or "").lower()
+    return status == "409" or code in ("duplicate", "409") or "'statuscode': 409" in str(exc).lower()
 
 
 async def sb_exec_storage(fn):

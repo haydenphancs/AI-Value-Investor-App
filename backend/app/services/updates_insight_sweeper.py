@@ -502,11 +502,14 @@ class InsightSweeper:
         self,
         scope: str,
         decision: "Decision",
-        card: Dict[str, Any],
+        card: Optional[Dict[str, Any]],
         now: datetime,
         quote: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Push a fresh insight to the people watching this ticker.
+
+        ``card`` is None when the price guard refused the card — the alert never reads it
+        (the body is the move itself, see `_alert_body`).
 
         Gated on the Unusual/Extreme materiality tiers (`_CATALYST_TIERS`). That is deliberate: a routine 0.4% drift already
         regenerates a card, and notifying on those would train users to ignore the app
@@ -602,7 +605,7 @@ class InsightSweeper:
             )
         except Exception as e:
             logger.warning(
-                "Push notify failed for %s (%s: %s) — card was still generated",
+                "Push notify failed for %s (%s: %s) — the card outcome is unaffected",
                 scope, type(e).__name__, e,
             )
 
@@ -1017,6 +1020,8 @@ class InsightSweeper:
                         # sweep start (a sweep can run for minutes).
                         now=datetime.now(timezone.utc),
                         earnings=statuses.get(scope),
+                        # Lets the price guard read "CoreWeave Gains 4%" as CRWV's price.
+                        company_name=names.get(scope),
                     )
                     if card is None:
                         # "conclusion_guard: figure $5,000" is a very different
@@ -1061,7 +1066,11 @@ class InsightSweeper:
                 # Deliberately NOT awaited into the sweep's critical path failure
                 # modes: `_notify_watchers` never raises, and a push problem must not
                 # mark a successfully generated card as failed.
-                if card is not None and not is_market:
+                # Also after a price_guard rejection: a big mover's coverage is often
+                # nothing BUT price talk, which is exactly the day the guard refuses the
+                # card — and the alert never reads the card (its body is the move itself).
+                price_refused = card is None and str(error or "").startswith("price_guard")
+                if (card is not None or price_refused) and not is_market:
                     await self._notify_watchers(
                         scope, decision, card, now,
                         quote=quotes_by_symbol.get(scope),

@@ -56,6 +56,7 @@ from app.services.insight_conclusion import (
     ConclusionCheck,
     check_conclusion,
     pct_figure,
+    price_claims,
     repair_note,
     unsupported_figures,
 )
@@ -174,6 +175,8 @@ _TABLE = "ai_insight_cache"
 # bump must not blank every card until it is regenerated. Migration 189 deletes the old rows.
 _MIN_SERVABLE_PROMPT_VERSION = 7
 _unservable_logged: set = set()
+# (scope, generated_at) pairs whose stored card the price net already logged — once per card.
+_price_net_logged: set = set()
 
 
 # ── Sentiment normalization ───────────────────────────────────────────
@@ -399,6 +402,12 @@ class NewsInsightService:
             if not headline:
                 raise ValueError("empty headline")
 
+            scope_key = str(row.get("scope") or "")
+            if price_rule_applies(scope_key):
+                bullets = _price_net(scope_key, headline, bullets, row.get("generated_at"))
+                if bullets is None:
+                    return None
+
             # `is_stale` means "the inputs may have moved on and the sweeper
             # has not caught up yet" — it is a statement about the SWEEPER,
             # whose full pass only runs while `is_market_active()` (04:00–20:00
@@ -464,6 +473,13 @@ class NewsInsightService:
         fabricated one.
         """
         usable = [r for r in corpus if isinstance(r, dict) and (r.get("headline") or "").strip()]
+        if price_rule_applies(scope):
+            # The fallback sits in the AI card's slot, undated, beside a live % chip — so the
+            # ticker card's price rule holds here too: "CoreWeave Stock Slips 2.2%" from a
+            # day-old story is exactly the contradiction the rule removes. The stories stay
+            # in the timeline below, each under its own timestamp.
+            terms = price_terms(scope)
+            usable = [r for r in usable if not price_claims(r.get("headline") or "", terms)]
         if not usable:
             return None
 
@@ -543,6 +559,7 @@ class NewsInsightService:
         *,
         now: Optional[datetime] = None,
         earnings: Optional[EarningsStatus] = None,
+        company_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Generate a card with Gemini and persist it. Returns ``None`` on any
         failure, **without writing anything** (the reason is kept for
@@ -550,7 +567,9 @@ class NewsInsightService:
 
         ``now`` stamps the prompt's Now line and the article ages (defaults to the
         wall clock). ``earnings`` is the ticker's calendar status — the prompt's
-        EARNINGS line; ignored for the market scope and coins.
+        EARNINGS line; ignored for the market scope and coins. ``company_name`` (the
+        watchlist's) lets the price guard recognise "CoreWeave Gains 4%" as well as
+        "CRWV"; without it the guard still knows the symbol.
 
         The corpus passed here MUST be the same corpus the materiality gate
         evaluated — otherwise we can regenerate because of a story the summary
@@ -572,6 +591,7 @@ class NewsInsightService:
             scope, articles, inputset_id, price_band, quote,
             now=_as_utc(now),
             earnings=earnings,
+            company_name=company_name,
         )
         if card is None:
             failures[scope] = reason or "generation returned no card"
@@ -598,6 +618,56 @@ class NewsInsightService:
         self._cache.pop(scope, None)
         return card
 
+    async def scopes_failed_after_their_card(
+        self, cards: Dict[str, Optional[Dict[str, Any]]],
+    ) -> set:
+        """Scopes whose served card is from an EARLIER ET day than the sweeper's latest failed
+        attempt on it — the sweeper had newer news and could not write a card from it.
+
+        A card is "the sweeper's latest word" only while no later attempt failed. Since the
+        price guard (v8) a big mover whose coverage is all price talk is refused, so
+        yesterday's card stays — and a reader that takes "no card from today" as "no news
+        today" (the widget, Ask Cay's move attribution) would announce "No company news
+        today" about a +12% day with plenty of news. Those readers treat these scopes as
+        unchecked instead. Best-effort: a failed read logs and returns nothing (the old
+        behaviour). The state table is the sweeper's (`updates_insight_state`).
+        """
+        candidates = {
+            s: c for s, c in (cards or {}).items()
+            if isinstance(c, dict) and _parse_ts(c.get("generated_at")) is not None
+        }
+        if not candidates:
+            return set()
+
+        def _query() -> List[Dict[str, Any]]:
+            res = (
+                self.supabase.table("updates_insight_state")
+                .select("scope,last_failure_at")
+                .in_("scope", list(candidates))
+                .execute()
+            )
+            return res.data or []
+
+        try:
+            rows = await asyncio.to_thread(_query)
+        except Exception as e:
+            logger.warning(
+                "insight: could not read the sweeper's failures for %d scope(s) (%s: %s) — "
+                "cards are served as the latest word", len(candidates), type(e).__name__, e,
+            )
+            return set()
+        out = set()
+        for row in rows:
+            scope = row.get("scope") if isinstance(row, dict) else None
+            card = candidates.get(scope)
+            failed = _parse_ts(row.get("last_failure_at")) if card else None
+            if failed is None:
+                continue
+            made = _parse_ts(card.get("generated_at"))
+            if failed > made and failed.astimezone(ET).date() > made.astimezone(ET).date():
+                out.add(scope)
+        return out
+
     def pop_failure_reason(self, scope: str) -> Optional[str]:
         """Why the last :meth:`generate_and_store` for ``scope`` wrote nothing, once.
 
@@ -619,6 +689,7 @@ class NewsInsightService:
         *,
         now: datetime,
         earnings: Optional[EarningsStatus],
+        company_name: Optional[str] = None,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Return ``(stored-shape card, None)`` or ``(None, reason)``. Never stores.
 
@@ -629,11 +700,23 @@ class NewsInsightService:
         a new fact from them). If the calendar says the report HAS happened but the
         headline or points still call it upcoming, the one retry is a full card.
 
-        Write policy: a new figure that no article supports either is the only
-        rejection (a fabricated number on a finance card). Everything else is
-        stripped, written and logged — the previous card is never better than a
-        slightly imperfect new one, and a rejection would cost one of the scope's
-        four daily failures.
+        PRICE (every scope but the market card — the chip beside it shows the live %):
+        a point that talks about the price is dropped deterministically, before anything
+        else is checked, so the conclusion is judged against the points the reader will
+        actually see. Price talk in the headline, or no point left, takes the one retry
+        as a full card; price talk in the conclusion takes the conclusion repair. The
+        TestFlight CRWV card (2026-10-06) is the reason: "shares experienced a 2.2% slip"
+        and "recent price declines" under a +6.3% chip, written that same session.
+
+        Write policy: rejected — nothing written, the previous card keeps serving — when
+        the conclusion carries a figure no article supports (a fabricated number on a
+        finance card), when it brings an unrelated story (a new figure AND a new event),
+        or when price talk survives in the headline or the conclusion (or no point is
+        left). Everything else is stripped, written and logged — the previous card is
+        never better than a slightly imperfect new one, and a rejection costs one of the
+        scope's four daily failures. ``_would_reject`` is that test, and it is also the
+        first key of ``_rank``, so a retry is never chosen for being "better" at a test
+        that does not decide the write.
         """
         started = time.monotonic()
         earnings = earnings if _earnings_applies(scope, earnings) else None
@@ -646,11 +729,41 @@ class NewsInsightService:
         if first is None:
             return None, error
 
-        extra = [
+        price_rule = price_rule_applies(scope)
+        p_terms = price_terms(scope, company_name) if price_rule else []
+        # The live move is an allowed figure only where the prompt states it — the market
+        # card. A ticker prompt carries no price line, so a conclusion citing the session's
+        # % on a ticker card is a figure from nowhere.
+        extra = [] if price_rule else [
             pct_figure(finite((quote or {}).get("changePercentage"))
                        if isinstance(quote, dict) else None),
         ]
         subject_terms = _subject_terms(scope)
+
+        def _strip(card: Dict[str, Any]) -> Dict[str, Any]:
+            """Drop the points that talk about the price; remember what went (and why)."""
+            if not price_rule:
+                return {**card, "_price_dropped": []}
+            kept: List[str] = []
+            dropped: List[str] = []
+            for i, point in enumerate(card["points"]):
+                hits = price_claims(point, p_terms)
+                if hits:
+                    dropped.append(f'point {i + 1}: "{hits[0]}"')
+                else:
+                    kept.append(point)
+            return {**card, "points": kept, "_price_dropped": dropped}
+
+        def _price_blockers(card: Dict[str, Any]) -> List[str]:
+            """Price talk no deterministic edit can remove: the headline, the conclusion,
+            or a card with no point left."""
+            if not price_rule:
+                return []
+            out = [f'headline: "{t}"' for t in price_claims(card["headline"], p_terms)]
+            out += [f'conclusion: "{t}"' for t in price_claims(card["conclusion"], p_terms)]
+            if not card["points"]:
+                out.append("no point left without price talk")
+            return out
 
         def _check(card: Dict[str, Any]) -> ConclusionCheck:
             return check_conclusion(
@@ -671,6 +784,14 @@ class NewsInsightService:
                 extra,
             )
 
+        def _would_reject(card: Dict[str, Any], check: ConclusionCheck) -> bool:
+            """The write policy's ONLY rejection test (see the docstring)."""
+            return (
+                bool(_fabricated(card))
+                or (check.hard and bool(check.novelty))
+                or bool(_price_blockers(card))
+            )
+
         def _rank(card: Dict[str, Any], check: ConclusionCheck) -> Tuple[int, ...]:
             """Lower is better; the SAME tests the write decision below applies.
 
@@ -678,40 +799,66 @@ class NewsInsightService:
             timing retry that fixed "set to report" was thrown away for citing an
             article figure, a repair that rounded "$455 billion" to "above $450 billion"
             replaced a writable draft with a rejectable one, and a clean sentence with
-            one harmless name could be swapped for "Investors should watch…".
+            one harmless name could be swapped for "Investors should watch…". So the
+            first key is the rejection itself: a writable draft is never replaced by a
+            rejectable one, whatever the later keys say.
             """
             return (
+                int(_would_reject(card, check)),
                 len(_fabricated(card)),
                 len(check.timing),
+                len(card.get("_price_dropped") or ()),
                 int(check.hard and bool(check.novelty)),
                 int(check.framing),
                 len(check.novelty) + int(check.duplicate),
                 len(check.figures),
             )
 
+        first = _strip(first)
         first_check = _check(first)
+        head_price = price_claims(first["headline"], p_terms) if price_rule else []
+        conclusion_price = price_claims(first["conclusion"], p_terms) if price_rule else []
+        needs_full = bool(first_check.timing) or bool(head_price) or (
+            price_rule and not first["points"]
+        )
+        needs_conclusion = bool(conclusion_price) or not first_check.clean
         chosen, chosen_check = first, first_check
         repaired = False
-        if not first_check.clean:
+        if needs_full or needs_conclusion:
+            price_issues = (
+                [f'headline: "{t}"' for t in head_price]
+                + list(first["_price_dropped"])
+                + [f'conclusion: "{t}"' for t in conclusion_price]
+            )
             candidate: Optional[Dict[str, Any]] = None
             if time.monotonic() - started > _REPAIR_BUDGET_SECONDS:
                 logger.warning(
-                    "Insight conclusion for %s needs repair (%s) but the generation "
-                    "already took %.0fs — skipping the repair",
-                    scope, "; ".join(first_check.reasons()), time.monotonic() - started,
+                    "Insight for %s needs repair (%s) but the generation already took "
+                    "%.0fs — skipping the repair",
+                    scope, "; ".join([*first_check.reasons(), *price_issues]),
+                    time.monotonic() - started,
                 )
-            elif first_check.timing:
-                candidate, _ = await self._call_card(
-                    scope,
-                    prompt + "\n\nREPAIR. " + repair_note(first_check) + (
+            elif needs_full:
+                note = ""
+                if first_check.timing:
+                    note = repair_note(first_check) + (
                         " The EARNINGS line says the report has HAPPENED: rewrite the "
                         "whole brief so no part of it describes that report as upcoming "
                         "or repeats a pre-report prediction."
-                    ),
-                )
+                    )
+                elif not first_check.clean:
+                    note = repair_note(first_check)
+                if price_issues:
+                    note = (note + " " if note else "") + _price_repair_note(price_issues)
+                raw, _ = await self._call_card(scope, prompt + "\n\nREPAIR. " + note)
+                candidate = _strip(raw) if raw is not None else None
             else:
                 fixed = await self._repair_conclusion(
                     scope, first, first_check, now=now, earnings=earnings,
+                    extra_note=(
+                        _price_repair_note([f'conclusion: "{t}"' for t in conclusion_price])
+                        if conclusion_price else ""
+                    ),
                 )
                 if fixed:
                     candidate = {**first, "conclusion": fixed}
@@ -721,6 +868,22 @@ class NewsInsightService:
                 if _rank(candidate, candidate_check) < _rank(first, first_check):
                     chosen, chosen_check, repaired = candidate, candidate_check, True
 
+        # Price first: once price points are dropped, a conclusion that summed them up
+        # carries their figure and name, which reads as a fabrication or an unrelated story
+        # — but the cause is the price talk, and the sweeper alerts watchers only on a
+        # `price_guard` refusal (a big mover's coverage is often nothing but price talk).
+        blockers = _price_blockers(chosen)
+        if blockers:
+            also = [
+                f"conclusion figure(s) {', '.join(_fabricated(chosen))} found nowhere"
+            ] if _fabricated(chosen) else []
+            logger.warning(
+                "price_guard: insight for %s rejected — price talk the guard cannot remove "
+                "(%s; repaired=%s)%s; nothing written",
+                scope, "; ".join(blockers), repaired,
+                f" — also {also[0]}" if also else "",
+            )
+            return None, f"price_guard: {'; '.join(blockers)}"[:500]
         fabricated = _fabricated(chosen)
         if fabricated:
             logger.warning(
@@ -743,6 +906,13 @@ class NewsInsightService:
             return None, (
                 f"conclusion_guard: unrelated story {', '.join(chosen_check.figures)}"
             )[:500]
+        if chosen["_price_dropped"]:
+            logger.warning(
+                "price_guard: insight for %s written without %d point(s) that talked about "
+                "the price (%s; repaired=%s)",
+                scope, len(chosen["_price_dropped"]), "; ".join(chosen["_price_dropped"]),
+                repaired,
+            )
         if chosen_check.hard:
             logger.warning(
                 "Insight conclusion for %s cites %s from the articles but not from its "
@@ -809,12 +979,13 @@ class NewsInsightService:
         *,
         now: datetime,
         earnings: Optional[EarningsStatus],
+        extra_note: str = "",
     ) -> Optional[str]:
         """Ask for a new conclusion over the card's OWN headline and points. Never raises."""
         try:
             response = await self.gemini.generate_json(
                 prompt=self._repair_prompt(
-                    scope, card, check, now=now, earnings=earnings,
+                    scope, card, check, now=now, earnings=earnings, extra_note=extra_note,
                 ),
                 system_instruction=_SYSTEM_INSTRUCTION,
                 model_name=INSIGHT_MODEL,
@@ -1049,10 +1220,18 @@ class NewsInsightService:
         ``now`` and ``earnings`` give the model a sense of time (TestFlight ORCL,
         2026-09-10: "set to report" hours after the release — the prompt did not say
         what day it was, and article stamps were bare UTC).
+
+        Only the MARKET card gets the session's move ("Price context"). Every other
+        scope gets the PRICE rule instead: its chip already shows the live %, and the
+        line was an invitation — on the TestFlight CRWV card (2026-10-06) the model was
+        told "up ~6%" and still copied an older article's "shares experienced a 2.2%
+        slip". It cannot copy what it is told never to write, and the guard in
+        ``_generate_card`` removes what slips through.
         """
         now = _as_utc(now)
         is_market = scope.startswith("__")
         subject = "the overall US stock market" if is_market else _prompt_subject(scope)
+        price_rule = price_rule_applies(scope)
 
         # Fenced, like the enrichment prompt: headlines and summaries are third-party text
         # that feeds the Updates AI Insight card and `get_market_snapshot` — a planted
@@ -1072,7 +1251,9 @@ class NewsInsightService:
             )
 
         price_line = ""
-        if quote:
+        if price_rule:
+            price_line = _price_rule_text(subject, scope)
+        elif quote:
             pct = finite(quote.get("changePercentage"))
             if pct is not None:
                 price_line = (
@@ -1088,8 +1269,8 @@ class NewsInsightService:
         context = _now_line(scope, now) + (f"\n{earnings_line}" if earnings_line else "")
         earnings_rule = (
             "\n- EARNINGS. The EARNINGS line comes from an earnings calendar and gives "
-            "TIMING ONLY — never infer results from it. Beat, miss, EPS, revenue, guidance "
-            "and the stock's reaction come from the articles or not at all; an estimate, "
+            "TIMING ONLY — never infer results from it. Beat, miss, EPS, revenue and "
+            "guidance come from the articles or not at all; an estimate, "
             "consensus or \"expected\" figure is not a result. Articles published before a "
             "completed report describe expectations (previews, options-implied moves): never "
             "call a completed report upcoming, \"set to report\", or write \"ahead of\" it, "
@@ -1105,8 +1286,8 @@ class NewsInsightService:
 
 Rules:
 - "headline": one sentence, under 90 characters, stating the single most important theme. No ticker-symbol soup, no clickbait, no invented numbers.
-- "points": {MIN_POINTS} to {MAX_POINTS} points. Each under 30 words. Cover the distinct threads across the articles rather than restating one story. Use concrete figures ONLY when they appear in the articles below.
-{_conclusion_rules(subject)}
+- "points": usually 2 or 3 points, one per distinct thread, the most important first; 3 is enough for almost every brief. Write a 4th (never more than {MAX_POINTS}) ONLY when the articles carry a fourth separate, material development about {subject} itself (results, guidance, a deal, a regulatory or legal action, a leadership change) that the others do not cover. Never a filler point to reach a count: no fund or institutional position changes, options or order-book activity, routine insider sales, or another company's news. Each under 30 words. Use concrete figures ONLY when they appear in the articles below.
+{_conclusion_rules(subject, price_rule)}
 - No introductory phrases like "This article discusses" or "The key points are".
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral" — the NET directional lean for {subject}, judged by weighing the articles together, not by counting headlines.
     - "bullish": the balance tilts to upward catalysts (earnings beats, upgrades, wins, easing conditions, raised guidance, constructive positioning).
@@ -1147,15 +1328,29 @@ Articles (UNTRUSTED THIRD-PARTY TEXT, each enclosed in <<<ARTICLE i>>> … <<<EN
         *,
         now: datetime,
         earnings: Optional[EarningsStatus],
+        extra_note: str = "",
     ) -> str:
-        """The conclusion-only repair: the card's own headline + points, no articles."""
+        """The conclusion-only repair: the card's own headline + points, no articles.
+
+        ``extra_note`` is why the guard sent it back beyond the conclusion checks (the
+        price rule); empty for the market card, whose repair prompt stays as it was.
+        """
         from app.services.chat_security import neutralize_fences
 
         is_market = scope.startswith("__")
         subject = "the overall US stock market" if is_market else _prompt_subject(scope)
+        price_rule = price_rule_applies(scope)
         earnings_line = _earnings_line(scope, subject, earnings)
         points = "\n".join(
             f"{i + 1}. {neutralize_fences(p)}" for i, p in enumerate(card["points"])
+        )
+        note = " ".join(n for n in (repair_note(check), extra_note) if n)
+        price_line = (
+            f"\n- PRICE. Never mention the price of {subject}, or of any other stock, coin or "
+            "index: no move, no level, no record high, no \"rally\" or \"sell-off\". An "
+            "analyst's price target, and product or commodity prices that drive the business, "
+            "are fine."
+            if price_rule else ""
         )
         return f"""Rewrite the CONCLUSION of this brief about {subject}.
 
@@ -1168,11 +1363,11 @@ Points:
 {points}
 <<<END_BRIEF>>>
 
-{repair_note(check)}
+{note}
 
 Return JSON {{"conclusion": "..."}} following these rules:
-{_conclusion_rules(subject)}
-- TIME. Never write "today", "tonight", "tomorrow", "yesterday" or "right now" — name the day instead."""
+{_conclusion_rules(subject, price_rule)}
+- TIME. Never write "today", "tonight", "tomorrow", "yesterday" or "right now" — name the day instead.{price_line}"""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -1274,11 +1469,16 @@ def _earnings_line(scope: str, subject: str, earnings: Optional[EarningsStatus])
     )
 
 
-def _conclusion_rules(subject: str) -> str:
-    """The conclusion rules — shared verbatim by the card prompt and the repair prompt."""
+def _conclusion_rules(subject: str, price_rule: bool = False) -> str:
+    """The conclusion rules — shared verbatim by the card prompt and the repair prompt.
+
+    ``price_rule`` (every scope but the market card) drops "its price" from what the
+    conclusion may be about: a ticker card states no price at all.
+    """
+    about = "its business or the market" if price_rule else "its business, its price or the market"
     return f"""- "conclusion": ONE sentence, under 30 words, saying what the points ADD UP TO for {subject} — how they connect, offset or reinforce each other, or what they leave unresolved. It is a synthesis, not another point.
     * Build it ONLY from your headline and points. No fact, figure, name, date or event that is not already in them — if a detail matters, make it a point instead.
-    * NO LEAD-IN: start with the point itself. Its subject is {subject}, its business, its price or the market — never a person or group ("Investors", "Everyday investors", "Shareholders", "Holders", "Traders", "You").
+    * NO LEAD-IN: start with the point itself. Its subject is {subject}, {about} — never a person or group ("Investors", "Everyday investors", "Shareholders", "Holders", "Traders", "You").
     * Never open with "Investors should care because", "This matters because", "Why it matters", "For investors,", or any transition: not "In short,", "The takeaway,", "The takeaway for everyday investors,", "Ultimately,", "So,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?". The app marks this sentence with its own icon, so a lead-in is redundant and is stripped before display.
     * Describe, don't direct: no "should", no "consider", never a call to buy, sell, hold or watch."""
 
@@ -1301,6 +1501,139 @@ def _subject_terms(scope: str) -> List[str]:
         name = crypto_display_name(scope)
         terms.extend(t for t in (base, name) if t)
     return terms
+
+
+# ── The price rule (ticker cards state no price) ───────────────────────
+#
+# Owner decisions 2026-10-09, from the TestFlight CRWV card (+6.3% chip over "shares
+# experienced a 2.2% slip"): every card but the market card covers the NEWS and never the
+# price — no move, no level, no record high — because the chip beside it shows the live %
+# and any move an article reports is out of date by the time the card is read. Market cap
+# as a size and valuation multiples stay. The market card is exempt: index moves are its
+# subject and it has no chip. Detector: `insight_conclusion.price_claims`.
+
+# Derived single-word heads of multi-word company names that are ordinary words or
+# sector/commodity nouns: "Energy rose 2%" or "Gold climbed" on an Energy Transfer or Gold
+# Fields card is the sector or the metal, not the stock. A one-word FULL name (Target, Visa,
+# Strategy) is never dropped — it is how the press names the company.
+_GENERIC_NAME_HEADS = frozenset({
+    "first", "new", "general", "american", "united", "national", "international",
+    "global", "energy", "gold", "silver", "oil", "copper", "digital", "advanced",
+    "applied", "home", "live", "public", "bank", "super", "best", "royal", "standard",
+    "western", "eastern", "southern", "northern", "pacific", "atlantic", "capital",
+    "financial", "health", "tech", "technology", "consumer", "industrial",
+    # Heads that only ever appear as part of the longer name the press uses ("Rocket Lab",
+    # "Five Below", "Taiwan Semiconductor", "Walt Disney") — the two-word prefix covers them.
+    "rocket", "five", "hong", "taiwan", "walt",
+})
+# A two-word prefix ending on one of these is a fragment, not a name ("bank of", "chase &").
+_NAME_PREFIX_STOPS = frozenset({"of", "&", "and", "the", "de", "la", "for"})
+# What the press calls a coin besides its registry name.
+_PRICE_TERM_ALIASES = {"ETH": ("Ether",)}
+
+
+def price_rule_applies(scope: str) -> bool:
+    """Every scope whose chip shows a live % — all but the market card (``__``-prefixed)."""
+    return bool(scope) and not scope.startswith("__")
+
+
+def price_terms(scope: str, company_name: Optional[str] = None) -> List[str]:
+    """The names a price claim about ``scope`` may use, for ``price_claims``.
+
+    The symbol (matched case-sensitively, so "NET"/"ON"/"HAS" never match prose), a coin's
+    base and name, and — when the caller knows it — the company's name: the full form, its
+    first two words for a long one ("rocket lab usa" → "rocket lab"), and its head word
+    unless that is an ordinary word (``_GENERIC_NAME_HEADS``). Names match only when
+    capitalised and in the verb's subject position, so "first quarter revenue rose" is
+    never "First Solar rose".
+    """
+    terms: List[str] = list(_subject_terms(scope))
+    if is_crypto_scope(scope):
+        terms.extend(_PRICE_TERM_ALIASES.get(crypto_base_symbol(scope) or "", ()))
+    # `company_name_variants` lists the full name first, then its derived head word.
+    for i, variant in enumerate(company_name_variants(company_name)):
+        if i > 0 and variant in _GENERIC_NAME_HEADS:
+            continue
+        # "JPMorgan Chase & Co." loses "co." upstream and leaves a dangling "&".
+        variant = re.sub(r"(?:\s+(?:&|and))+$", "", variant)
+        terms.append(variant)
+        words = variant.split()
+        if len(words) >= 3 and words[1] not in _NAME_PREFIX_STOPS:
+            terms.append(" ".join(words[:2]))
+    return list(dict.fromkeys(t for t in terms if t))
+
+
+def _price_rule_text(subject: str, scope: str = "") -> str:
+    """The prompt's PRICE rule — every scope but the market card (which keeps its line).
+
+    A commodity or index scope IS a price, so the allowance for "commodity prices that
+    drive the business" would invite exactly what the rule bans (review 2026-10-09: "Never
+    describe the price of GCUSD … Commodity prices … are news"); it is left out there.
+    """
+    from app.services.asset_class import detect_asset_class
+
+    allowance = (
+        "" if detect_asset_class(scope) in ("commodity", "index") else
+        f" Commodity prices and interest rates that drive the business are news,\n  not the "
+        f"price of {subject}."
+    )
+    return f"""- PRICE. Never describe the price of {subject} — or of any other stock, coin or index the
+  articles mention. That covers moves (rose, fell, slipped, rallied, pulled back, a percentage
+  change), levels ("closed at $145", "near $60,000", "a 52-week high", "an all-time high"),
+  performance against an index or peers, and trading activity (volatility, selling pressure,
+  profit-taking, a losing streak, "the rally", "the sell-off"). The app shows the live price
+  right beside this brief, and a move an article reports belongs to the moment it was written,
+  so it is out of date by the time this is read. Report the news itself: results, guidance,
+  deals, products, contracts, ratings and analyst actions. Allowed: an analyst's price target,
+  the size of the business by market value ("a $50 billion company") and valuation multiples
+  ("30 times earnings").{allowance}"""
+
+
+def _price_repair_note(issues: Sequence[str]) -> str:
+    """The retry's price sentence: which fields talked about the price, never article text."""
+    return (
+        "The previous draft described the price (" + "; ".join(issues) + "). Rewrite it with "
+        "no mention of the price, of any price move or of any price level, in any wording — "
+        "cover the news itself."
+    )
+
+
+def _price_net(
+    scope: str, headline: str, bullets: List[str], generated_at: Any,
+) -> Optional[List[str]]:
+    """Read-time price rule for a STORED card: the points left, or None to hide the card.
+
+    Cards written before the rule (prompt v7, the "Price context" era) and anything that
+    slips past the write guard. A point is dropped; price talk in the headline or the
+    conclusion (always the last bullet), or no point left, hides the card — the feed then
+    serves the headline fallback (filtered the same way) until the sweeper regenerates it.
+    Only the symbol and coin names are known here (no company name), so this net is the
+    generic half of the guard.
+    """
+    terms = price_terms(scope)
+    head = price_claims(headline, terms)
+    conclusion = price_claims(bullets[-1], terms)
+    kept = [b for b in bullets[:-1] if not price_claims(b, terms)]
+    key = (scope, str(generated_at))
+    first_time = key not in _price_net_logged
+    if first_time:
+        if len(_price_net_logged) > 5000:
+            _price_net_logged.clear()
+        _price_net_logged.add(key)
+    if head or conclusion or not kept:
+        if first_time:
+            logger.warning(
+                "price_net: stored card for %s (generated %s) hidden — headline %s, "
+                "conclusion %s, %d point(s) left; serving the fallback until it is "
+                "regenerated", scope, generated_at, head, conclusion, len(kept),
+            )
+        return None
+    if len(kept) < len(bullets) - 1 and first_time:
+        logger.warning(
+            "price_net: dropped %d point(s) that talk about the price from the stored "
+            "card for %s (generated %s)", len(bullets) - 1 - len(kept), scope, generated_at,
+        )
+    return kept + [bullets[-1]]
 
 
 def _clip(text: str, limit: int) -> str:

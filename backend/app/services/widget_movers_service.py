@@ -2431,7 +2431,16 @@ class WidgetMoversService:
         news_available = True
         if card_syms:
             try:
-                cards = await get_news_insight_service().get_cards(card_syms)
+                insights = get_news_insight_service()
+                cards = await insights.get_cards(card_syms)
+                # A card from an earlier day than a FAILED attempt on newer news is not "no
+                # news today": the sweeper had news and could not write a card (since v8 the
+                # price guard refuses a big mover whose coverage is all price talk). Read it
+                # as unchecked, never as "No company news today."
+                behind = getattr(insights, "scopes_failed_after_their_card", None)
+                if cards and callable(behind):
+                    for scope in await behind(cards):
+                        cards[scope] = None
             except Exception as e:
                 news_available = False
                 logger.warning(

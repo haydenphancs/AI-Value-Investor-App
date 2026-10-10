@@ -100,7 +100,10 @@ def _stored_card():
     card = svc._row_to_card({
         "scope": "ORCL",
         "headline": "Oracle reports results after the close",
-        "bullets": ["Cloud revenue rose.", "Backlog grew.", "Shares moved after hours."],
+        # The conclusion is a synthesis, never price talk: since prompt v8 a ticker card that
+        # talks about its price is hidden by `_row_to_card` (the read-time price net).
+        "bullets": ["Cloud revenue rose.", "Backlog grew.",
+                    "Cloud growth and backlog point the same way."],
         "sentiment": "bullish",
         "article_count": 3,
         "generated_at": _iso(timedelta(hours=3)),
@@ -115,6 +118,20 @@ def _stored_card():
 
 
 CARD = _stored_card()
+
+
+def test_a_stored_card_that_talks_about_its_price_never_reaches_the_chat_context():
+    """The read-time price net sits in `_row_to_card`, which every `get_cards` reader goes
+    through — the chat's Updates context included (owner, 2026-10-09: ticker cards state
+    no price; TestFlight CRWV, "shares experienced a 2.2% slip" under a +6.3% chip)."""
+    svc = NewsInsightService.__new__(NewsInsightService)
+    row = {
+        "scope": "ORCL", "headline": "Oracle reports results after the close",
+        "bullets": ["Cloud revenue rose.", "Backlog grew.", "Shares moved higher after hours."],
+        "sentiment": "bullish", "article_count": 3, "generated_at": _iso(timedelta(hours=3)),
+        "prompt_version": 7,
+    }
+    assert svc._row_to_card(row, market_active=False) is None
 
 
 def _row(headline, *, hours=1, sentiment="bullish", processed=True, tickers=("ORCL",)):

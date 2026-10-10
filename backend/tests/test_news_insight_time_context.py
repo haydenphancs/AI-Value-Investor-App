@@ -172,16 +172,25 @@ def test_prompts_a_minute_apart_differ(svc):
 
 
 def test_price_line_names_the_latest_regular_session(svc):
+    """The market card's line (since v8 a ticker prompt carries no price line at all)."""
     prompt = svc._build_prompt(
-        "ORCL", [{"headline": "A"}], "x", "notable", {"changePercentage": -5.2}, now=NOW,
+        "__MARKET__", [{"headline": "A"}], "x", "notable", {"changePercentage": -5.2}, now=NOW,
     )
     assert "in the latest regular session" in prompt
     assert "in the current session" not in prompt
+    ticker = svc._build_prompt(
+        "ORCL", [{"headline": "A"}], "x", "notable", {"changePercentage": -5.2}, now=NOW,
+    )
+    assert "in the latest regular session" not in ticker
 
 
 def test_the_points_count_is_the_schemas_max(svc):
     from app.services.news_insight_service import _INSIGHT_SCHEMA, MAX_POINTS
 
     prompt = svc._build_prompt("ORCL", [{"headline": "A"}], "x", None, None, now=NOW)
-    assert f'"points": 1 to {MAX_POINTS} points.' in prompt
+    # Owner, 2026-10-09: "ideally to have 2 - 3 bullet points. unless there are important so we
+    # can have 4" — "1 to 4 points … cover the distinct threads" read as "fill all four".
+    assert '"points": usually 2 or 3 points' in prompt
+    assert f"Write a 4th (never more than {MAX_POINTS}) ONLY when" in prompt
+    assert "1 to 4 points" not in prompt
     assert _INSIGHT_SCHEMA["properties"]["points"]["maxItems"] == MAX_POINTS == 4

@@ -114,7 +114,15 @@ logger = logging.getLogger(__name__)
 # code kept writing such cards after 188 was applied. The bump changes every fingerprint,
 # so each card is rewritten once (bounded by the usual per-cycle + global caps) from
 # licensed inputs only.
-PROMPT_VERSION = 7
+# v8: ticker cards state NO price (owner, 2026-10-09; TestFlight CRWV 2026-10-06: a +6.3% chip
+# over "shares experienced a 2.2% slip" and "recent price declines", written that same session
+# with the "Price context" line in the prompt). Every scope but the market card loses that line
+# and gains a PRICE rule — no move, no level, no record high — and `_generate_card` drops or
+# repairs what slips through (`insight_conclusion.price_claims`). The market card's prompt is
+# byte-identical (tests/data/insight_market_prompt_golden.json). The read-time floor
+# (`_MIN_SERVABLE_PROMPT_VERSION`) stays at 7: v7 cards keep serving through the price net in
+# `_row_to_card` until this wave rewrites them.
+PROMPT_VERSION = 8
 
 
 # ── Thresholds ────────────────────────────────────────────────────────
@@ -584,9 +592,11 @@ def compute_inputset_id(
     """Stable digest of everything that can change the generated card.
 
     Sorted so that FMP reordering the same articles is not mistaken for new
-    news. ``band`` is included because the prompt embeds the price context, and
-    ``model`` / ``prompt_version`` because either changes the output for
-    identical articles.
+    news. ``band`` is included because a band change is what regenerates a card on
+    a big move — which is what sends the watchers' Unusual/Extreme alert — and
+    because the MARKET prompt still embeds the price context (since v8 a ticker
+    prompt does not). ``model`` / ``prompt_version`` because either changes the
+    output for identical articles.
     """
     keys = sorted(str(a) for a in article_ids if a is not None and str(a) != "")
     payload = "\n".join(keys) + f"|band={band}|pv={prompt_version}|m={model}"

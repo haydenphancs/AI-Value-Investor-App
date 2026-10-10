@@ -22,9 +22,12 @@ struct UpdatesTabBar: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: AppSpacing.sm) {
                     ForEach(tabs) { tab in
+                        // Equality is by SCOPE: the UUID `id` is re-minted whenever the tabs
+                        // are rebuilt, so a selection held from before a rebuild would match
+                        // no chip by id.
                         UpdatesTabButton(
                             tab: tab,
-                            isSelected: selectedTab?.id == tab.id
+                            isSelected: selectedTab == tab
                         ) {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 selectedTab = tab
@@ -57,8 +60,9 @@ struct UpdatesTabBar: View {
         UpdatesTabBar(
             tabs: [
                 NewsFilterTab(title: "Market", ticker: nil, changePercent: nil, isMarketTab: true),
-                NewsFilterTab(title: "AAPL", ticker: "AAPL", changePercent: 2.4, isMarketTab: false),
-                NewsFilterTab(title: "TSLA", ticker: "TSLA", changePercent: -1.2, isMarketTab: false)
+                // A scope each: `==` compares scope, and the default is the Market scope.
+                NewsFilterTab(title: "AAPL", ticker: "AAPL", changePercent: 2.4, isMarketTab: false, scope: "AAPL"),
+                NewsFilterTab(title: "TSLA", ticker: "TSLA", changePercent: -1.2, isMarketTab: false, scope: "TSLA")
             ],
             selectedTab: .constant(NewsFilterTab(title: "Market", ticker: nil, changePercent: nil, isMarketTab: true)),
             onManageAssets: {}

@@ -423,12 +423,38 @@ def test_prompt_embeds_the_inputset_id(svc):
 
 
 def test_prompt_includes_price_context_only_when_the_quote_is_usable(svc):
+    """The MARKET card's price line. Since v8 it is the only card that has one."""
     rows = [{"headline": "A", "summary": "s"}]
-    with_quote = svc._build_prompt("AAPL", rows, "x", "notable", {"changePercentage": -3.2})
+    with_quote = svc._build_prompt("__MARKET__", rows, "x", "notable", {"changePercentage": -3.2})
     assert "3.20%" in with_quote and "down" in with_quote
 
     for bad in (None, {}, {"changePercentage": None}, {"changePercentage": float("nan")}):
-        assert "Price context" not in svc._build_prompt("AAPL", rows, "x", "notable", bad)
+        assert "Price context" not in svc._build_prompt("__MARKET__", rows, "x", "notable", bad)
+
+
+@pytest.mark.parametrize("scope", ["AAPL", "CRWV", "ETHUSD", "SPY", "GCUSD"])
+def test_a_ticker_prompt_never_states_the_move_and_carries_the_price_rule(svc, scope):
+    """TestFlight CRWV (2026-10-06): told "up ~6%", the model still copied an older
+    article's "shares experienced a 2.2% slip" under a +6.3% chip. Every scope whose chip
+    shows a live % gets the PRICE rule and no move at all — the live % never reaches it."""
+    rows = [{"headline": "A", "summary": "s"}]
+    prompt = svc._build_prompt(scope, rows, "x", "Extreme", {"changePercentage": 6.31})
+    assert "Price context" not in prompt
+    assert "6.31" not in prompt and "6.3%" not in prompt
+    assert "- PRICE. Never describe the price of" in prompt
+    assert "an analyst's price target" in prompt          # still allowed
+    assert "its business or the market" in prompt          # the conclusion may not be about price
+    assert "its business, its price or the market" not in prompt
+
+
+@pytest.mark.parametrize("scope, allowed", [
+    ("CRWV", True), ("ETHUSD", True), ("GCUSD", False), ("^GSPC", False),
+])
+def test_a_commodity_or_index_card_is_not_told_commodity_prices_are_news(svc, scope, allowed):
+    """For gold, "commodity prices are news, not the price of GCUSD" contradicts itself."""
+    prompt = svc._build_prompt(scope, [{"headline": "A"}], "x", None, None)
+    assert ("Commodity prices and interest rates that drive the business are news" in prompt) is allowed
+    assert "- PRICE. Never describe the price of" in prompt
 
 
 def test_prompt_bans_the_conclusion_lead_in(svc):
@@ -470,9 +496,49 @@ def test_market_scope_prompt_describes_the_market_not_the_key(svc):
 
 def test_a_big_move_gets_the_price_line_and_no_already_explained_block(svc):
     rows = [{"headline": "A", "summary": "s"}]
-    prompt = svc._build_prompt("CRM", rows, "x", "Extreme", {"changePercentage": 20.4})
-    assert "Price context: CRM is up 20.40% in the latest regular session (Extreme move)." in prompt
+    prompt = svc._build_prompt("__MARKET__", rows, "x", "Extreme", {"changePercentage": 20.4})
+    assert (
+        "Price context: the overall US stock market is up 20.40% in the latest regular "
+        "session (Extreme move)." in prompt
+    )
     assert "ALREADY EXPLAINED" not in prompt and "DO NOT REPEAT" not in prompt
+    ticker = svc._build_prompt("CRM", rows, "x", "Extreme", {"changePercentage": 20.4})
+    assert "Price context" not in ticker and "20.40%" not in ticker
+
+
+def test_the_market_prompts_are_byte_identical_to_the_golden_capture(svc):
+    """The price rule is for tickers only (owner, 2026-10-09: "Tickers only"). The market
+    card's card and repair prompts were captured BEFORE the v8 edit; any drift here means
+    the ticker change leaked into the market card. The ONE intended market change since:
+    the points line (owner, 2026-10-09: "ideally 2 - 3 bullet points"), re-captured after
+    a diff showed it was the only changed line."""
+    from pathlib import Path
+
+    from app.services.insight_conclusion import ConclusionCheck
+
+    golden = json.loads(
+        (Path(__file__).parent / "data" / "insight_market_prompt_golden.json").read_text()
+    )
+    now = datetime(2026, 10, 6, 18, 47, tzinfo=timezone.utc)
+    rows = [
+        {"headline": "Stocks slip as yields climb",
+         "summary": "The S&P 500 fell 1.2% as Treasury yields rose.",
+         "published_at": "2026-10-06T15:00:00Z"},
+        {"headline": "Fed minutes due Wednesday", "summary": "Investors await the minutes.",
+         "published_at": "2026-10-05T20:00:00Z"},
+    ]
+    assert svc._build_prompt(
+        "__MARKET__", rows, "FP-golden", "notable", {"changePercentage": -1.2}, now=now,
+    ) == golden["card_prompt_quote"]
+    assert svc._build_prompt(
+        "__MARKET__", rows, "FP-golden", None, None, now=now,
+    ) == golden["card_prompt_no_quote"]
+    assert svc._repair_prompt(
+        "__MARKET__",
+        {"headline": "Stocks slip as yields climb",
+         "points": ["The S&P 500 fell 1.2%.", "Yields rose."], "conclusion": "x"},
+        ConclusionCheck(framing=True), now=now, earnings=None,
+    ) == golden["repair_prompt"]
 
 
 # ── regressions found by the adversarial review ───────────────────────

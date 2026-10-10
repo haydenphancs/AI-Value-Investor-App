@@ -432,7 +432,8 @@ def current_session_quote(
     price is still the live price, and the stamp still says why the change is gone.
 
     The single choke point the sweeper applies to its batch, so the materiality gate,
-    the card prompt's "Price context" line and both alert gates all see the same thing.
+    the market card prompt's "Price context" line (ticker prompts have none since v8) and
+    both alert gates all see the same thing.
     """
     if _session_stamp_is_current(quote, now):
         return quote

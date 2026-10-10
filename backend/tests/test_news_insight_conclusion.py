@@ -264,20 +264,40 @@ async def test_a_six_point_answer_keeps_four_and_the_conclusion():
 
 @pytest.mark.asyncio
 async def test_the_quotes_move_is_an_allowed_figure():
-    """The session move from the quote is a trusted figure (the only one left since the
-    grounded catalyst's `change_percent` was retired), so citing it is not a fabrication."""
-    conclusion = "The 5% drop shows how much the guidance reset matters."
-    gem = _Gemini(_card(conclusion, points=["Guidance disappointed."], headline="Oracle slides"))
+    """On the MARKET card the session move from the quote is a trusted figure (its prompt
+    states it), so citing it is not a fabrication."""
+    conclusion = "The 5% drop shows how much the rate reset matters."
+    gem = _Gemini(_card(conclusion, points=["Rate fears returned."], headline="Stocks slide"))
     svc = _Svc(gem)
-    card = await _run(svc, scope="ORCL", quote={"changePercentage": -5.2})
+    card = await _run(svc, scope="__MARKET__", quote={"changePercentage": -5.2})
     assert card["bullets"][-1] == conclusion
     assert len(gem.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_without_the_quote_the_same_figure_is_a_fabrication():
-    """The twin of the test above: nothing else carries "5%", so it is rejected."""
+async def test_a_ticker_card_may_not_cite_the_quotes_move():
+    """The ticker twin (v8): a ticker prompt carries no move, so the quote's % is no longer
+    an allowed figure — and the sentence is price talk besides. One conclusion repair; it
+    repeats the move, so nothing is written."""
     conclusion = "The 5% drop shows how much the guidance reset matters."
+    gem = _Gemini(
+        _card(conclusion, points=["Guidance disappointed."], headline="Oracle cuts its outlook"),
+        json.dumps({"conclusion": conclusion}),
+    )
+    svc = _Svc(gem)
+    assert await _run(svc, scope="ORCL", quote={"changePercentage": -5.2}) is None
+    assert svc.stored == []
+    assert len(gem.calls) == 2
+    assert gem.calls[1]["usage_tag"] == "insight_conclusion_repair"
+    assert "described the price" in gem.calls[1]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_without_the_quote_the_same_figure_is_a_fabrication():
+    """The twin of the test above: nothing else carries "5%", so it is rejected. (Not the
+    market card's "5% drop" sentence: on a ticker card that is price talk, refused first as
+    `price_guard` — see tests/test_news_insight_price_guard.py.)"""
+    conclusion = "A 5% guidance cut shows how much the reset matters."
     gem = _Gemini(
         _card(conclusion, points=["Guidance disappointed."], headline="Oracle slides"),
         json.dumps({"conclusion": conclusion}),

@@ -246,11 +246,14 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     counting = _CountingGemini(gemini)
     svc.gemini = counting
 
+    # The sweeper hands the card the sweep's quote; replaying a big-move day needs it (the
+    # MARKET prompt's "Price context" line, and the ticker guard's figure rules).
+    quote = {"changePercentage": args.quote_pct} if args.quote_pct is not None else None
     for i in range(args.samples):
         before = len(counting.tags)
         card, reason = await svc._generate_card(
-            scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", None, None,
-            now=as_of, earnings=status,
+            scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", args.price_band, quote,
+            now=as_of, earnings=status, company_name=args.name,
         )
         tags = counting.tags[before:]
         if i == 0 and args.show_prompt and counting.prompts:
@@ -270,7 +273,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--scope", required=True, help="ORCL, ETHUSD, __MARKET__ …")
     parser.add_argument("--as-of", default=None, help="ISO instant (UTC if naive); default now")
-    parser.add_argument("--name", default=None, help="company name for the subject filter")
+    parser.add_argument("--name", default=None,
+                        help="company name for the subject filter and the price guard")
+    parser.add_argument("--quote-pct", type=float, default=None,
+                        help="the session's % change the sweeper would pass (e.g. 6.3)")
+    parser.add_argument("--price-band", default=None,
+                        help="the materiality band the sweeper would pass (e.g. Notable)")
     parser.add_argument("--earnings-actuals", choices=("calendar", "absent"), default="calendar")
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--show-prompt", action="store_true")

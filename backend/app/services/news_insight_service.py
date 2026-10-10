@@ -488,10 +488,16 @@ class NewsInsightService:
         # rows with identical headlines — which collapsed to a SINGLE bullet
         # after the pad had already decided no padding was needed, yielding a
         # card below MIN_BULLETS with nothing to raise on it.
-        bullets = list(dict.fromkeys(
-            _clip((r.get("headline") or "").strip(), 180)
-            for r in usable[:6]
-        ))[:3]
+        # The rows behind the shown bullets, kept so the card cites exactly those stories.
+        shown: List[Dict[str, Any]] = []
+        bullets: List[str] = []
+        for r in usable[:6]:
+            text = _clip((r.get("headline") or "").strip(), 180)
+            if text not in bullets:
+                bullets.append(text)
+                shown.append(r)
+            if len(bullets) == 3:
+                break
         # The card contract requires >= 2 bullets. With a single article, add an
         # honest provenance line rather than padding with invented commentary.
         if len(bullets) < MIN_BULLETS:
@@ -540,9 +546,11 @@ class NewsInsightService:
             ),
             "ai_generated": False,
             "trigger_reason": None,
-            # The stories these headlines come from — so the sources screen works
-            # on the deterministic fallback card too (its bullets ARE these).
-            "sources": _corpus_sources(usable),
+            # Exactly the stories these headlines come from, in the same order — the
+            # sources screen works on the fallback too, and its "N sources" count
+            # matches the headlines shown. (It used to cite the whole window, up to 8,
+            # re-ranked: "8 sources" under three headlines — owner, 2026-10-09.)
+            "sources": _corpus_sources(shown, cap=len(shown), rank=False),
         }
 
     # ── Public: generation (sweeper only) ─────────────────────────────
@@ -1661,7 +1669,7 @@ _MAX_SOURCES = 8
 
 
 def _corpus_sources(
-    articles: Sequence[Dict[str, Any]], cap: int = _MAX_SOURCES
+    articles: Sequence[Dict[str, Any]], cap: int = _MAX_SOURCES, *, rank: bool = True,
 ) -> List[Dict[str, Any]]:
     """The source stories a card was built from — ``[{title, url, publisher}]`` —
     from the corpus dicts (headline + article_url + source_name). Drops rows with
@@ -1711,8 +1719,10 @@ def _corpus_sources(
             row["publisher"] = publisher
         out.append(row)
     # Rank AFTER dedup and BEFORE the cap — ranking a list already truncated by
-    # recency would sort the wrong 8 rows and change nothing that matters.
-    out.sort(key=lambda r: 0 if is_material_headline(r.get("title")) else 1)
+    # recency would sort the wrong 8 rows and change nothing that matters. The
+    # headline fallback passes rank=False: its sources are its bullets, in order.
+    if rank:
+        out.sort(key=lambda r: 0 if is_material_headline(r.get("title")) else 1)
     return out[:cap]
 
 

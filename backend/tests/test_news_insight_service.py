@@ -254,6 +254,54 @@ def test_fallback_pads_a_single_article_to_meet_the_minimum(svc):
     assert "AI summary" in card["bullets"][1]
 
 
+def test_fallback_cites_exactly_the_headlines_it_shows(svc):
+    """Owner, 2026-10-09: "fallback with 3 news, but it shows '8 sources'… doesn't make sense".
+    The fallback cited the whole window (up to 8, re-ranked by materiality) under three
+    headlines. Its sources are now its bullets: same stories, same order, same count —
+    even when a later, MATERIAL headline would have been ranked first."""
+    rows = [
+        {"headline": f"Story {i}", "article_url": f"https://x/{i}", "source_name": "Wire"}
+        for i in range(8)
+    ]
+    # material, SHOWN third: ranking would move it to the top of the sources
+    rows[2]["headline"] = "Apple beats earnings estimates and raises guidance"
+    card = svc.build_fallback_card("AAPL", rows, market_active=False)
+    assert card["bullets"] == ["Story 0", "Story 1",
+                               "Apple beats earnings estimates and raises guidance"]
+    assert [x["title"] for x in card["sources"]] == card["bullets"]
+    assert [x["url"] for x in card["sources"]] == ["https://x/0", "https://x/1", "https://x/2"]
+
+
+def test_fallback_sources_skip_a_syndicated_duplicate_like_the_bullets(svc):
+    rows = [
+        {"headline": "A", "article_url": "https://x/a"},
+        {"headline": "A", "article_url": "https://y/a"},     # same story, another outlet
+        {"headline": "B", "article_url": "https://x/b"},
+        {"headline": "C", "article_url": "https://x/c"},
+    ]
+    card = svc.build_fallback_card("AAPL", rows, market_active=False)
+    assert card["bullets"] == ["A", "B", "C"]
+    assert [x["url"] for x in card["sources"]] == ["https://x/a", "https://x/b", "https://x/c"]
+
+
+def test_a_single_story_fallback_cites_one_source(svc):
+    card = svc.build_fallback_card(
+        "AAPL", [{"headline": "Only one", "article_url": "https://x/1"}], market_active=False,
+    )
+    assert len(card["bullets"]) == 2          # the headline + the honest provenance line
+    assert [x["title"] for x in card["sources"]] == ["Only one"]
+
+
+def test_the_ai_card_keeps_its_ranked_window_of_sources():
+    """Only the fallback cites its bullets: an AI card cites what it summarised, material first."""
+    from app.services.news_insight_service import _corpus_sources
+
+    rows = [{"headline": f"Story {i}", "article_url": f"https://x/{i}"} for i in range(10)]
+    rows[9]["headline"] = "Apple beats earnings estimates and raises guidance"
+    cited = _corpus_sources(rows)
+    assert len(cited) == 8 and cited[0]["title"].startswith("Apple beats")
+
+
 def test_fallback_sentiment_abstains_when_nothing_is_enriched(svc):
     # NULL sentiment is an ABSTENTION. Counting it as Neutral would let
     # un-analysed rows outvote the enriched ones.

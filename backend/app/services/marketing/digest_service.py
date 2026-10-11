@@ -76,12 +76,12 @@ import statistics
 import time
 from collections import Counter
 from datetime import date, datetime, time as dtime, timedelta, timezone
-from typing import Any, Awaitable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from app.config import settings
 from app.integrations import telegram
 from app.integrations.telegram import MAX_MESSAGE_CHARS, TelegramException, TelegramRateLimitException
-from app.schemas.marketing import POST_FORMATS, RUN_STAGES
+from app.schemas.marketing import POST_FORMATS, RUN_STAGES, parse_content_classes
 from app.services.marketing import metrics_service, outlets, review_service, selection, smart_link
 from app.services.marketing.outlet_base import scrub
 from app.services.marketing.outlet_upload_post import PLATFORMS as UPLOAD_POST_PLATFORMS
@@ -881,27 +881,53 @@ def evaluate_run_final(
 # ── the pool's runway (pure) ──────────────────────────────────────────────────
 
 
-def pool_runway(pool: Iterable[Any], used: Iterable[Any], *, today: date, today_picked: bool) -> Dict[str, Any]:
+def pool_runway(pool: Iterable[Any], used: Iterable[Any], *, today: date, today_picked: bool,
+                classes: Optional[FrozenSet[str]] = None,
+                news_series: Optional[FrozenSet[str]] = None) -> Dict[str, Any]:
     """How long the content pool lasts. `pool` = the eligible keys (`content_pool.eligible_keys()`);
-    `used` = the picks made so far (`run_service.recent_source_refs`, today's included when it was made);
-    `today_picked` = today's pick is among them. Pure.
+    `used` = the LESSON picks made so far (`selection.lesson_refs` of the window selection reads, today's
+    included when it was made); `today_picked` = today's lesson pick is among them. Pure.
 
     `unused` = pool keys never picked. Selection posts every unused lesson before any repeat (its
-    disjoint rotation plus the recent-picks window), one per posting day, so the first repeat falls on
-    the (unused + 1)-th posting day from the next one without a pick: today when it is a posting day
-    whose pick is still to come, else tomorrow onward. `first_repeat` is None for an empty pool."""
+    disjoint rotation plus the recent-picks window), one per LESSON day, so the first repeat falls on
+    the (unused + 1)-th lesson day from the next one without a pick: today when it is a lesson day
+    whose pick is still to come, else tomorrow onward. `first_repeat` is None for an empty pool.
+
+    Which days are lesson days follows the content classes, as `script_service._select` reads them:
+    - `classes` None or {"A"} (MARKETING_CONTENT_CLASSES unset — lessons only): every posting day. The
+      result is exactly the three keys `pool` / `unused` / `first_repeat`, as before Company Weekly.
+    - a news class on: only a day whose enabled chain is the lesson alone
+      (`selection.enabled_chain(plan_for(day).chain, classes, news_series) == (LESSON,)` — Saturday under
+      the default calendar; `news_series` is the per-series switch, None = every shipped series). A news
+      day uses a lesson only when its whole chain falls through, which brings the repeat FORWARD, so the
+      date is an upper bound: the result also carries `"no_later_than": True` and the digest words it so.
+      No lesson-only day in reach → `first_repeat` None."""
     keys = {k for k in pool if isinstance(k, str) and k}
     seen = {r for r in used if isinstance(r, str)}
     unused = len(keys - seen)
     out: Dict[str, Any] = {"pool": len(keys), "unused": unused, "first_repeat": None}
+    enabled = frozenset({"A"}) if classes is None else frozenset(classes)
+    news_on = enabled != frozenset({"A"})
+    if news_on:
+        out["no_later_than"] = True
     if not keys or not selection.POST_WEEKDAYS:
         return out
-    day = today if (selection.is_posting_day(today) and not today_picked) else today + timedelta(days=1)
+
+    def lesson_day(d: date) -> bool:
+        if not selection.is_posting_day(d):
+            return False
+        if not news_on:
+            return True
+        return selection.enabled_chain(selection.plan_for(d).chain, enabled, shipped=news_series) == (selection.LESSON,)
+
+    day = today if (lesson_day(today) and not today_picked) else today + timedelta(days=1)
     wanted = unused + 1
     found = 0
     try:
-        for _ in range(7 * wanted + 7):   # every 7 days hold at least one posting day
-            if selection.is_posting_day(day):
+        # every 7 days hold at least one posting day — and, with a news class on, one lesson-only day
+        # (Saturday's chain is the lesson alone); a calendar without one leaves `first_repeat` None
+        for _ in range(7 * wanted + 7):
+            if lesson_day(day):
                 found += 1
                 if found == wanted:
                     out["first_repeat"] = day
@@ -1692,6 +1718,12 @@ def _render_digest(r: Dict[str, Any], cap: int) -> str:
         head = f"Content pool: {_n(run['unused'])} of {_n(run['pool'])} lessons unused"
         if run.get("first_repeat") is None:
             lines.append(head)
+        elif run.get("no_later_than"):
+            # Company Weekly on: only the lesson-only days were counted, and a news day that falls back to
+            # the lesson brings the repeat forward — the date is an upper bound (`pool_runway`).
+            what = "lessons repeat" if run["unused"] == 0 else "the first repeat is due"
+            lines.append(f"{head} — {what} no later than {run['first_repeat'].strftime('%a %Y-%m-%d')} "
+                         f"(sooner when a news day falls back to a lesson)")
         elif run["unused"] == 0:
             lines.append(f"{head} — lessons repeat from {run['first_repeat'].strftime('%a %Y-%m-%d')}")
         else:
@@ -1777,14 +1809,29 @@ async def _optional(what: str, coro: Awaitable[Any]) -> Any:
 
 
 async def _runway(svc: Any, today: date) -> Dict[str, Any]:
+    """The pool's runway, from the ledger read exactly as selection reads it (`script_service._select` /
+    `_select_lesson`): the newest NEWS_RECENT_LIMIT refs, of which only the LESSON refs count
+    (`selection.lesson_refs`), on the calendar of the content classes and the per-series switch read NOW
+    (the switch only while a news class is on, as there). An unfiltered `len(pool) + RECENT_WINDOW` read
+    let Company Weekly's `news:` refs push older lessons out of the window: after 39 lesson picks from a
+    pool of 34 it still said "10 of 34 lessons unused". With the classes at "A" the line is unchanged."""
     from app.services.marketing import content_pool
+    from app.services.marketing.script_service import NEWS_RECENT_LIMIT
 
     # The corpus load is CPU work (cached per process after the first call): off the event loop.
     pool = await asyncio.to_thread(content_pool.eligible_keys)
-    limit = len(pool) + selection.RECENT_WINDOW
-    with_today = await svc.recent_source_refs(today + timedelta(days=1), limit)
-    before_today = await svc.recent_source_refs(today, limit)
-    return pool_runway(pool, with_today, today=today, today_picked=list(with_today) != list(before_today))
+    classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+    news_series = (selection.parse_news_series(settings.MARKETING_NEWS_SERIES)
+                   if classes != frozenset({"A"}) else frozenset())
+    with_today = list(await svc.recent_source_refs(today + timedelta(days=1), NEWS_RECENT_LIMIT))
+    before_today = list(await svc.recent_source_refs(today, NEWS_RECENT_LIMIT))
+    # Today has a row exactly when the two reads differ (the later bound shifts every row by one), and it
+    # is the newest; it used a lesson only when that row is one — a news day's row never did. (Comparing
+    # the two lesson-FILTERED lists instead would call a news day "picked" once the ledger outgrows the
+    # read: the one row only `before_today` reaches may be a lesson.) Lessons only, this is the old test.
+    today_picked = with_today != before_today and bool(selection.lesson_refs(with_today[:1]))
+    return pool_runway(pool, selection.lesson_refs(with_today), today=today, today_picked=today_picked,
+                       classes=classes, news_series=news_series)
 
 
 async def _job_state(svc: Any, job: str) -> Dict[str, Any]:

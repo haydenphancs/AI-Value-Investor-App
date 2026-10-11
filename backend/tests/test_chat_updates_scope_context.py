@@ -443,9 +443,9 @@ async def test_every_window_of_the_tone_card_is_grounded_from_one_read(monkeypat
     tone = next(line for line in block.splitlines() if line.startswith("News tone for this feed"))
     assert f"oldest scored headline on file: {trend_mod._fmt_day(since)}" in tone
     assert "Positive / Negative / Neutral are Cay AI's bullish / bearish / neutral labels" in tone
-    assert ("7D: 8 headlines (5 positive, 1 negative, 2 neutral), net +50 (Mostly positive); "
-            "30D: 15 headlines (6 positive, 7 negative, 2 neutral), net -7 (Mixed); "
-            "90D: 25 headlines (15 positive, 7 negative, 3 neutral), net +32 (Mostly positive).") in tone
+    assert ("7D: 8 headlines (5 positive, 1 negative, 2 neutral), net +50% (Mostly positive); "
+            "30D: 15 headlines (6 positive, 7 negative, 2 neutral), net -7% (Mixed); "
+            "90D: 25 headlines (15 positive, 7 negative, 3 neutral), net +32% (Mostly positive).") in tone
     # The window the chart showed gets the day-level detail, after the windows.
     assert block.index("News tone for this feed") < block.index("News tone over the last 7 days")
     assert "over the last 30 days" not in block and "over the last 90 days" not in block
@@ -458,7 +458,7 @@ async def test_a_window_with_no_scored_headline_says_so(monkeypatch):
                            "tracking_since": None}))
     block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
     assert ("7D: no scored headlines; 30D: no scored headlines; "
-            "90D: 4 headlines (2 positive, 2 negative, 0 neutral), net 0 (Mixed).") in block
+            "90D: 4 headlines (2 positive, 2 negative, 0 neutral), net 0% (Mixed).") in block
     assert "on file" not in block and "scored for at least" not in block, (
         "no date is invented when none was served")
     # The 30D detail has nothing to describe; it is left out rather than said as zeros.
@@ -520,9 +520,12 @@ async def test_malformed_rows_cost_only_themselves(monkeypatch, caplog):
         block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
     assert "trend read failed" not in caplog.text, "a bad row must not drop the whole tone block"
     # Counted: `good` once (2/1/0) and the string "3" bullish (its `total` is recomputed).
-    assert "7D: 6 headlines (5 positive, 1 negative, 0 neutral), net +67 (Mostly positive)" in block
+    assert "7D: 6 headlines (5 positive, 1 negative, 0 neutral), net +67% (Mostly positive)" in block
     assert "on file" not in block and "scored for at least" not in block
-    assert "still filling in" not in block, "only a literal true marks a day partial"
+    # The open days come from the read's clock (`open_since`), never from a row's flag: the
+    # "yes" on the day-5 row marks nothing, and the sentence starts where late labels can land.
+    opened = trend_mod.open_since(datetime.now(timezone.utc))
+    assert f"Counts from {trend_mod._fmt_day(opened)} on are still filling in" in block
 
 
 @pytest.mark.asyncio
@@ -543,10 +546,22 @@ def test_the_tone_word_and_sign_match_the_card():
     thresholds = re.findall(r"net (>=|<=) (-?\d+)", word)
     assert thresholds == [(">=", str(trend_mod.TONE_WORD_THRESHOLD)),
                           ("<=", str(-trend_mod.TONE_WORD_THRESHOLD))], thresholds
-    assert re.findall(r'return "([^"]+)"', word) == ["Mostly positive", "Mostly negative", "Mixed"]
-    t = trend_mod.TONE_WORD_THRESHOLD
-    assert [trend_mod.tone_word(n) for n in (t, t - 1, 0, -(t - 1), -t)] == [
-        "Mostly positive", "Mixed", "Mixed", "Mixed", "Mostly negative"]
+    # Owner 2026-10-10 ("Majority-based + %"): the same words in the same ORDER on both sides.
+    assert re.findall(r'return "([^"]+)"', word) == [
+        "Mostly positive", "Mostly negative", "Leaning positive", "Leaning negative",
+        "Mostly neutral", "Mixed"]
+    tw = trend_mod.tone_word
+    assert tw(3, 0, 2) == "Mostly positive", "a real majority"
+    assert tw(2, 0, 2) == "Leaning positive", "net +50 without a majority (2 of 4)"
+    assert tw(2, 0, 6) == "Leaning positive", "net +25 with 75% neutral leans, never 'Mostly positive'"
+    assert tw(1, 0, 9) == "Mostly neutral", "net +10, mostly neutral"
+    assert tw(0, 0, 5) == "Mostly neutral", "all neutral is not 'Mixed'"
+    assert tw(2, 2, 1) == "Mixed"
+    assert tw(1, 1, 0) == "Mixed", "exactly half is never a majority"
+    assert tw(0, 1, 0) == "Mostly negative"
+    assert tw(0, 3, 7) == "Leaning negative", "net -30"
+    assert tw(1, 0, 4) == "Leaning positive", "net +20 is the boundary"
+    assert tw(1, 0, 5) == "Mostly neutral", "net +17"
     sign = _swift_func("signed")
     assert 'value > 0 ? "+\\(value)" : "\\(value)"' in sign
     assert [trend_mod._signed(n) for n in (21, 0, -7)] == ["+21", "0", "-7"]

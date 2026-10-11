@@ -101,7 +101,7 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     # Delivered, but a judge found the reply did not give what the main question asked for
     # (`chat_answer_coverage`, owner decision 2026-10-09). Silent in chat — no badge — so this
     # row is the one place the user sees why the balance did not drop.
-    "chat_unanswered": (KIND_REFUND, "Not charged — Cay AI didn't fully answer", _REF_CHAT),
+    "chat_unanswered": (KIND_REFUND, "Not charged - Cay AI didn't fully answer", _REF_CHAT),
     # grants
     "grant": (KIND_GRANT, "Welcome credits", _REF_NONE),
     "monthly_reset": (KIND_GRANT, "Monthly credits", _REF_NONE),

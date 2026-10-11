@@ -58,8 +58,22 @@ struct CreditHistoryRow: View {
             // one line each; a taller row at large text is still a FIXED height per row (its
             // copy never changes after layout), so this adds no in-place resize.
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                headline
-                    .fixedSize(horizontal: false, vertical: true)
+                // ONE line whenever it can be (owner, 2026-10-10: "Not charged - Cay AI didn't
+                // fully answer" wrapped onto two lines at the default size on a 402pt phone). The
+                // headline steps down 15 → 14 → 13pt (body, bodySmall, label — all Dynamic Type
+                // scaled) and only wraps when even 13pt does not fit. Every one-line candidate is
+                // `.fixedSize` at its IDEAL width, so `ViewThatFits` measures the whole line and a
+                // candidate is either shown whole or skipped: still never truncated (see above).
+                ViewThatFits(in: .horizontal) {
+                    headline(AppTypography.body)
+                        .fixedSize(horizontal: true, vertical: false)
+                    headline(AppTypography.bodySmall)
+                        .fixedSize(horizontal: true, vertical: false)
+                    headline(AppTypography.label)
+                        .fixedSize(horizontal: true, vertical: false)
+                    headline(AppTypography.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 if let meta = item.metaLine {
                     Text(meta)
@@ -105,13 +119,14 @@ struct CreditHistoryRow: View {
     }
 
     /// "Deep research report · AAPL" — the detail in secondary ink so the title still leads.
-    private var headline: Text {
+    /// `font` is one of the sizes the body above steps through to keep the row on one line.
+    private func headline(_ font: Font) -> Text {
         let title = Text(item.title)
-            .font(AppTypography.body)
+            .font(font)
             .foregroundColor(AppColors.textPrimary)
         guard let detail = item.detail else { return title }
         return title + Text(" · \(detail)")
-            .font(AppTypography.body)
+            .font(font)
             .foregroundColor(AppColors.textSecondary)
     }
 

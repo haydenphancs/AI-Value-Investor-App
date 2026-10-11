@@ -56,6 +56,10 @@ async def test_the_gemini_enrichment_call_is_unchanged(monkeypatch, case, ticker
     [kw] = cap.calls
     want = _GOLDEN["cases"][case]
     assert sorted(kw) == want["keys"], "no new argument may reach the Gemini call"
+    # A classifier: temperature 0, and no response cache (a cached wrong-count answer replayed
+    # the same "retryable" failure for an hour). Golden regenerated on purpose 2026-10-10.
+    assert kw["temperature"] == want["temperature"] == 0.0
+    assert kw["cache"] is want["cache"] is False
     assert kw["prompt"] == want["prompt"]
     assert kw["system_instruction"] == want["system_instruction"]
     assert kw["model_name"] == want["model_name"]

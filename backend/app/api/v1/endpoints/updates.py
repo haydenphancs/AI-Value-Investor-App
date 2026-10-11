@@ -94,12 +94,11 @@ _MAX_TABS = 30
 
 
 def _valid_scope(scope: str) -> bool:
-    if not scope or len(scope) > _MAX_SCOPE_LEN:
-        return False
-    if scope == MARKET_SCOPE:
-        return True
-    # FMP symbols: letters, digits, and . - ^ = (indices, crypto pairs, futures).
-    return all(c.isalnum() or c in ".-^=" for c in scope)
+    # ONE rule with the label log (`is_trend_scope`): a scope this endpoint cannot read is
+    # never logged, and one it can is never refused here.
+    from app.services.news_sentiment_trend_service import is_trend_scope
+
+    return len(scope or "") <= _MAX_SCOPE_LEN and is_trend_scope(scope)
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────

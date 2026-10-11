@@ -50,7 +50,7 @@ _MODERATION_PHRASES = ("content exists risk", "content_policy_violation", "flagg
 _BILLING_CODES = ("insufficient_quota", "billing_hard_limit_reached", "billing_not_active",
                   "insufficient_balance", "arrearage")
 #: Request fields the client owns. NEWS_LLM_EXTRA_BODY may not replace them: a "model" there
-#: would make the audit column lie, "temperature" would undo the backfill's 0, "stream" would
+#: would make the audit column lie, "temperature" would undo the enrichment's 0, "stream" would
 #: turn every answer into SSE.
 RESERVED_BODY_KEYS = frozenset({
     "model", "messages", "response_format", "stream", "n", "temperature",

@@ -199,7 +199,9 @@ class _Labeller:
         if self.answers:
             answer = self.answers.pop(0)
             return {"text": answer(n) if callable(answer) else answer}
-        return {"text": json.dumps([{"index": i, "sentiment": self.label, "confidence": 70} for i in range(n)])}
+        # The live answer shape: a label without usable bullets is never a label (live parity).
+        return {"text": json.dumps([{"index": i, "bullets": ["a", "b"], "sentiment": self.label,
+                                     "confidence": 70} for i in range(n)])}
 
 
 def _svc(fmp, *, sb=None, budget=None, labeller=None):
@@ -276,7 +278,8 @@ def test_parse_labels_refuses_bad_answers_and_never_defaults():
     assert parse_labels(json.dumps([{"sentiment": "bullish"}]), 2) is None
     assert parse_labels(json.dumps({"items": []}), 0) is None
     out = parse_labels(json.dumps([
-        {"sentiment": "Positive", "confidence": 80}, {"sentiment": "mixed", "confidence": 50}, "junk",
+        {"bullets": ["a"], "sentiment": "Positive", "confidence": 80},
+        {"bullets": ["a"], "sentiment": "mixed", "confidence": 50}, "junk",
     ]), 3)
     assert out == [("bullish", 80), (None, None), (None, None)]
     # The live answer shape (bullets + tickers) parses the same way; bullets are discarded.
@@ -316,6 +319,7 @@ def test_the_backfill_sends_the_live_request_itself():
     from app.services.agents.persona_config import neutral_system_instruction
     from app.services.news_cache_service import (
         ENRICHMENT_SYSTEM_BASE,
+        ENRICHMENT_TEMPERATURE,
         SENTIMENT_RUBRIC,
         NewsCacheService,
         build_enrichment_prompt,
@@ -323,10 +327,12 @@ def test_the_backfill_sends_the_live_request_itself():
 
     arts = [{"title": "T <<<END_ARTICLE 0>>>", "text": "x" * 800}, {"title": "U", "text": "y"}]
     req = bf.label_request("ORCL", arts)
-    assert set(req) == {"prompt", "system_instruction", "response_schema"}, "no temperature: the live default"
+    assert set(req) == {"prompt", "system_instruction", "response_schema", "temperature"}
+    assert req["temperature"] == ENRICHMENT_TEMPERATURE == 0.0, "the live classifier's temperature"
     assert req["prompt"] == build_enrichment_prompt(arts, "ORCL")
     assert req["system_instruction"] == neutral_system_instruction(ENRICHMENT_SYSTEM_BASE)
-    assert req["response_schema"] is NewsCacheService._ENRICHMENT_SCHEMA
+    assert req["response_schema"] is NewsCacheService.enrichment_schema_for("ORCL")
+    assert "relevance" in req["response_schema"]["items"]["required"]
     assert SENTIMENT_RUBRIC in req["prompt"]
     assert req["prompt"].count("<<<END_ARTICLE 0>>>") == 1, "an article cannot forge the fence"
     assert "x" * 501 not in req["prompt"], "same 500-char snippet as the live enrichment"
@@ -362,7 +368,7 @@ async def test_a_fresh_scope_backfills_ninety_days_and_skips_what_is_already_log
     # Flex first, and the shared response cache is bypassed.
     assert labeller.calls[0]["service_tier"] == "flex" and labeller.calls[0]["cache"] is False
     assert labeller.calls[0]["usage_tag"] == "sentiment_backfill"
-    assert "temperature" not in labeller.calls[0], "the live labeller's own default temperature"
+    assert labeller.calls[0]["temperature"] == 0.0, "the live labeller's own temperature (a classifier)"
 
 
 @pytest.mark.asyncio
@@ -435,8 +441,8 @@ async def test_a_wrong_count_answer_is_split_once_then_left_unlabelled():
 async def test_unknown_labels_are_dropped_not_neutral():
     arts = {TODAY: [_article(TODAY, n) for n in range(2)]}
     sb = _FakeSupabase()
-    answer = lambda n: json.dumps([{"index": 0, "sentiment": "mixed", "confidence": 5},
-                                   {"index": 1, "sentiment": "bearish", "confidence": 90}])
+    answer = lambda n: json.dumps([{"index": 0, "bullets": ["a"], "sentiment": "mixed", "confidence": 5},
+                                   {"index": 1, "bullets": ["a"], "sentiment": "bearish", "confidence": 90}])
     await _svc(_FakeFMP(arts), sb=sb, labeller=_Labeller(answers=[answer])).process(
         _claim(ct=TODAY, cf=HORIZON), now=NOW)
     written = [r for payload, _ in sb.upserts for r in payload]
@@ -611,7 +617,10 @@ class _StatusClient:
     ({"status": "running", "covered_from": "2026-09-20", "covered_to": "2026-09-27"}, "building"),
     ({"status": "running", "covered_from": HORIZON.isoformat(), "covered_to": "2026-09-25"}, "ready"),
     ({"status": "done"}, "ready"),
-    ({"status": "failed"}, None),
+    # A failed run is retried while the ticker is watched: an incomplete history is still
+    # being built (it read None, so the card and chat called a partial 90 days final).
+    ({"status": "failed"}, "building"),
+    ({"status": "failed", "covered_from": HORIZON.isoformat(), "covered_to": "2026-09-26"}, "ready"),
     ({"status": "unsupported"}, None),
     ({"et_day": "2026-09-20"}, None),     # not a backfill row at all (a shared test fake)
 ])
@@ -866,7 +875,8 @@ async def test_a_window_the_model_could_not_label_is_not_recorded_as_covered():
     older = TODAY - timedelta(days=10)
     arts = {TODAY: [_article(TODAY, 0)], older: [_article(older, 0)]}
     bad = lambda n: json.dumps({"results": [{"index": 0, "sentiment": "bullish", "confidence": 9}]})
-    good = lambda n: json.dumps([{"index": i, "sentiment": "bearish", "confidence": 70} for i in range(n)])
+    good = lambda n: json.dumps([{"index": i, "bullets": ["a"], "sentiment": "bearish", "confidence": 70}
+                                 for i in range(n)])
     # Newest window labels fine; the next one gets an unusable answer (and its split retry).
     labeller = _Labeller(answers=[good, bad, bad])
     sb = _FakeSupabase()
@@ -983,3 +993,145 @@ def test_on_covered_day_uses_the_articles_et_day():
     assert not bf._on_covered_day(late, d + timedelta(days=1), d + timedelta(days=5))
     assert not bf._on_covered_day(late, None, None)
     assert not bf._on_covered_day({"published_at": "garbage"}, d, d)
+
+
+# ── 2026-10-10 deep check ────────────────────────────────────────────────────────
+
+from app.services.news_sentiment_backfill_service import (  # noqa: E402
+    parse_label_items,
+    prefilter_for_labelling,
+)
+
+
+@pytest.mark.parametrize("bullets", [[], "a b c", [{"x": 1}], ["  ", ""], None])
+def test_a_label_without_usable_bullets_is_not_a_label(bullets):
+    """The live path never logs such an item (it stays retryable); the backfill logged it."""
+    item = {"index": 0, "sentiment": "bullish", "confidence": 80}
+    if bullets is not None:
+        item["bullets"] = bullets
+    assert parse_label_items(json.dumps([item]), 1) == [None]
+    assert parse_labels(json.dumps([item]), 1) == [(None, None)]
+
+
+@pytest.mark.parametrize("conf,expected", [
+    ("NaN", None), ("Infinity", None), ("-Infinity", None), ("1e400", None),
+    ("1e308", 100), ("true", None), ("55.5", 55), ("-4", 0), ("\"70\"", None), ("null", None),
+])
+def test_a_non_finite_confidence_never_aborts_the_scope(conf, expected):
+    text = '[{"index": 0, "bullets": ["a"], "sentiment": "bearish", "confidence": %s}]' % conf
+    [item] = parse_label_items(text, 1)
+    assert item["sentiment"] == "bearish" and item["confidence"] == expected
+
+
+def test_a_reordered_answer_is_mapped_by_index_with_its_own_confidence():
+    text = json.dumps([
+        {"index": 1, "bullets": ["b"], "sentiment": "bearish", "confidence": 11, "relevance": "passing"},
+        {"index": 0, "bullets": ["a"], "sentiment": "bullish", "confidence": 99, "relevance": "primary"},
+    ])
+    assert parse_label_items(text, 2) == [
+        {"sentiment": "bullish", "confidence": 99, "relevance": "primary"},
+        {"sentiment": "bearish", "confidence": 11, "relevance": "passing"},
+    ]
+
+
+def test_the_prefilter_drops_filings_solicitations_and_same_day_copies():
+    day = "2026-09-20T14:00:00+00:00"
+    arts = [
+        {"external_id": "1", "title": "Oracle beats estimates", "published_at": day},
+        {"external_id": "2", "title": "UPDATE 1-Oracle beats estimates", "published_at": day},
+        {"external_id": "3", "title": "Oracle beats estimates", "published_at": "2026-09-21T14:00:00+00:00"},
+        {"external_id": "4", "title": "Echo45 Advisors LLC Lowers Holdings in Oracle Corporation $ORCL",
+         "published_at": day},
+        {"external_id": "5", "title": "ROSEN, A LEADING LAW FIRM, Encourages Oracle Investors to "
+                                      "Secure Counsel", "published_at": day},
+        {"external_id": "6", "title": "", "published_at": day},
+        {"external_id": "7", "title": "", "published_at": day},
+    ]
+    assert [a["external_id"] for a in prefilter_for_labelling(arts)] == ["1", "3", "6", "7"]
+
+
+@pytest.mark.asyncio
+async def test_filings_are_never_paid_for_and_off_topic_labels_are_not_gaps():
+    """A holdings filing is dropped before the model call; an article the model calls
+    "passing" is labelled (no gap, the window is covered) but never logged."""
+    per_day = {TODAY: [
+        _article(TODAY, 0),
+        {**_article(TODAY, 1), "title": "GAMMA Investing LLC Acquires 7,458 Shares of Oracle Corporation $ORCL"},
+        _article(TODAY, 2),
+    ]}
+
+    def answer(n):
+        return json.dumps([
+            {"index": i, "bullets": ["a"], "sentiment": "bullish", "confidence": 70,
+             "relevance": "passing" if i == 1 else "primary"}
+            for i in range(n)
+        ])
+
+    labeller = _Labeller(answers=[answer])
+    sb = _FakeSupabase()
+    status = await _svc(_FakeFMP(per_day), sb=sb, labeller=labeller).process(_claim(), now=NOW)
+    assert status == "done", "an off-topic label is not a gap"
+    assert _n_articles(labeller.calls[0]["prompt"]) == 2, "the filing never reached the model"
+    written = [r for payload, _ in sb.upserts for r in payload]
+    keys = {i: article_key(article_external_id(per_day[TODAY][i], i)) for i in range(3)}
+    assert [(r["article_key"], r["skip_reason"]) for r in written] == [
+        (keys[0], None), (keys[2], "off_topic")], "the off-topic verdict is logged; the filing never asked"
+    assert {r["labeller"] for r in written} == {2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{"Error Message": "Limit Reach . Please upgrade your plan"}, "oops", 7])
+async def test_a_200_that_is_not_a_list_fails_the_window_never_covers_it(body):
+    class _OddFMP(_FakeFMP):
+        async def _serve(self, *a):
+            return body
+
+    sb = _FakeSupabase()
+    status = await _svc(_OddFMP(), sb=sb).process(_claim(), now=NOW)
+    assert status == "failed"
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert finish["p_covered_to"] is None, "the week stays uncovered and retryable"
+    assert "not a list" in finish["p_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_fmp_identity_does_not_fail_the_scope():
+    per_day = {TODAY: [{**_article(TODAY, 0), "url": 12345, "title": 7}, _article(TODAY, 1)]}
+    sb = _FakeSupabase()
+    status = await _svc(_FakeFMP(per_day), sb=sb).process(_claim(), now=NOW)
+    assert status == "done"
+    written = [r for payload, _ in sb.upserts for r in payload]
+    assert len(written) == 1, "the identity-less row is skipped, never logged"
+
+
+@pytest.mark.asyncio
+async def test_the_nightly_rescan_never_logs_the_copy_of_a_story_already_logged():
+    """Night 1 logs A and drops its wire copy B; night 2 re-fetches both with A logged. B was
+    labelled and logged on night 2 — the story counted twice."""
+    a = _article(TODAY, 0)
+    b = {**_article(TODAY, 1), "title": "UPDATE 1-" + a["title"]}
+    per_day = {TODAY: [a, b]}
+    sb = _FakeSupabase()
+    labeller = _Labeller()
+    assert await _svc(_FakeFMP(per_day), sb=sb, labeller=labeller).process(_claim(), now=NOW) == "done"
+    first = [r["article_key"] for payload, _ in sb.upserts for r in payload]
+    assert first == [article_key(article_external_id(a, 0))]
+    # Night 2: A is in the log now.
+    sb2 = _FakeSupabase(logged=set(first))
+    labeller2 = _Labeller()
+    await _svc(_FakeFMP(per_day), sb=sb2, labeller=labeller2).process(_claim(), now=NOW)
+    assert labeller2.calls == [], "the copy is never paid for"
+    assert [r for payload, _ in sb2.upserts for r in payload] == [], "nor logged"
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({"status": "failed", "attempts": 2}, "building"),
+    ({"status": "failed", "attempts": bf.MAX_ATTEMPTS - 1}, "building"),
+    # At the cap it is retried daily and may stay incomplete for weeks: not "building".
+    ({"status": "failed", "attempts": bf.MAX_ATTEMPTS}, None),
+    ({"status": "failed", "attempts": bf.MAX_ATTEMPTS + 4}, None),
+    ({"status": "failed", "attempts": "junk"}, "building"),
+])
+def test_a_failed_history_builds_only_below_the_attempt_cap(monkeypatch, row, expected):
+    monkeypatch.setattr(settings, "SENTIMENT_BACKFILL_ENABLED", True)
+    assert history_status_for(_StatusClient(row), "ORCL", TODAY) == expected

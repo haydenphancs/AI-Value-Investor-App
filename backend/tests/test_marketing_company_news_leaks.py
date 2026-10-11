@@ -465,15 +465,19 @@ async def test_a_theme_explainer_leaks_nothing_but_its_fields():
     for sym, bd in world["revenue"].by_symbol.items():
         if not isinstance(bd, BaseException):
             bd.tax, bd.other_expense = 15151515151.0, 4242424242.0
-    world["fmp"] = T.FakeFMP(profiles={s: _canary_profile(s, p["companyName"], exchange="NASDAQ", price=25.123456,
-                                                          cap=8080808080.0, isEtf=p["isEtf"])
+    # One canary CIK PER company (review round 15): the theme now reads a profile's CIK as the issuer's
+    # identity (share classes of one issuer count once), so a CIK shared by all nine would rightly
+    # make them one company.
+    ciks = {s: str(4242400 + i).zfill(10) for i, s in enumerate(T.theme_profiles())}
+    world["fmp"] = T.FakeFMP(profiles={s: {**_canary_profile(s, p["companyName"], exchange="NASDAQ", price=25.123456,
+                                                             cap=8080808080.0, isEtf=p["isEtf"]), "cik": ciks[s]}
                                        for s, p in T.theme_profiles().items()})
     got = await T.trun(world)
     assert len(got.records[0].members) == 6                                              # anti-vacuity
     for sheet in _sheets(got):
         _assert_clean(sheet)
         low = json.dumps(sheet).lower()
-        for canary in ("zqxcategory", "zqxaccent", "zqxpin"):
+        for canary in ("zqxcategory", "zqxaccent", "zqxpin", *ciks.values()):
             assert canary not in low
 
 

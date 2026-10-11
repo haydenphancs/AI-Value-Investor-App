@@ -270,3 +270,69 @@ def test_183_deletes_only_old_labeller_backfill_rows_and_requeues_first():
     assert "DESTRUCTIVE (bounded)" in _SQL_183.read_text()
     for forbidden in ("DROP ", "TRUNCATE", "CREATE TABLE", "ALTER TABLE"):
         assert forbidden not in code, forbidden
+
+
+# ── 191/192: the labeller column and the v2 re-label (2026-10-10) ───────────────
+
+_SQL_191 = _SQL.parent / "191_news_sentiment_labeller_version.sql"
+_SQL_192 = _SQL.parent / "192_news_sentiment_relabel_v2.sql"
+
+
+def _code(path) -> str:
+    """The SQL without its `--` comments (the header names every token the asserts look for)."""
+    return "\n".join(line.split("--", 1)[0] for line in path.read_text().splitlines())
+
+
+def test_191_adds_the_column_the_writer_sends_with_a_check_it_satisfies():
+    import app.services.news_sentiment_trend_service as trend
+
+    code = _code(_SQL_191)
+    assert code.strip().startswith("BEGIN;") and code.strip().endswith("COMMIT;")
+    assert "SET LOCAL lock_timeout" in code
+    assert "ADD COLUMN IF NOT EXISTS labeller smallint" in code
+    assert "DROP CONSTRAINT IF EXISTS news_sentiment_log_labeller_check" in code
+    m = re.search(r"CHECK \(labeller IS NULL OR labeller BETWEEN (\d+) AND (\d+)\)", code)
+    assert m and int(m.group(1)) <= trend.TONE_LABELLER_VERSION <= int(m.group(2))
+    assert trend._OPTIONAL_COLUMNS["labeller"][1] == 191
+    assert trend._OPTIONAL_COLUMNS["skip_reason"][1] == 191
+    # skip_reason: the CHECK lists exactly the gate's reasons, and the RPC counts only NULL ones.
+    m = re.search(r"skip_reason IN \(([^)]*)\)", code)
+    assert m and sorted(x.strip(" '\n") for x in m.group(1).split(",")) == sorted(
+        ["off_topic", "holdings_filing", "solicitation", "duplicate_title"])
+    rpc = code[code.index("CREATE OR REPLACE FUNCTION public.news_sentiment_daily"):]
+    rpc = rpc[:rpc.index("$$;")]
+    assert "AND l.skip_reason IS NULL" in rpc and "SECURITY INVOKER" in rpc
+    assert "RETURNS TABLE (day DATE, bullish BIGINT, bearish BIGINT, neutral BIGINT)" in rpc
+    assert "GRANT EXECUTE ON FUNCTION public.news_sentiment_daily(TEXT, DATE) TO service_role;" in code
+    assert "FROM PUBLIC, anon, authenticated;" in code
+    for forbidden in ("DROP TABLE", "DROP COLUMN", "DELETE ", "TRUNCATE", "SECURITY DEFINER",
+                      "TO anon", "TO authenticated", "GRANT ALL"):
+        assert forbidden not in code, forbidden
+
+
+def test_192_requeues_first_then_deletes_only_old_rule_rows_of_rebuildable_scopes():
+    import app.services.news_sentiment_trend_service as trend
+
+    code = _code(_SQL_192)
+    assert code.strip().startswith("BEGIN;") and code.strip().endswith("COMMIT;")
+    # Step 0: refuse while an old-rule writer is still live (a deploy's overlap).
+    assert "labeller IS NULL AND labelled_at > now() - interval '15 minutes'" in code
+    assert code.index("RAISE EXCEPTION") < code.index("UPDATE public.news_sentiment_backfill")
+    assert "status = 'running' AND lease_until > now()" in code, "a live old-code run blocks it too"
+    assert "watchlist_items" not in code, "unwatched scopes are re-labelled too (rebuilt on re-watch)"
+    update = code[code.index("UPDATE public.news_sentiment_backfill b"):code.index("DELETE FROM")]
+    for piece in ("status         = 'queued'", "covered_from   = NULL", "covered_to     = NULL",
+                  "claim_token    = NULL", "lease_until    = NULL", "WHERE b.status <> 'unsupported'",
+                  "AND b.scope <> '__MARKET__'", "AND l.labeller IS NULL"):
+        assert piece in update, piece
+    first = code[code.index("DELETE FROM public.news_sentiment_log l"):]
+    first = first[:first.index(";")]
+    for piece in ("l.labeller IS NULL", "l.scope <> '__MARKET__'", "b.status <> 'unsupported'"):
+        assert piece in first, piece
+    assert r"WHERE scope LIKE 'COMMODITY\_%'" in code
+    assert code.count("DELETE FROM") == 2
+    text = _SQL_192.read_text()
+    assert "DESTRUCTIVE (bounded)" in text and "3. DESTRUCTIVE" in text
+    for forbidden in ("DROP ", "TRUNCATE", "CREATE TABLE", "ALTER TABLE"):
+        assert forbidden not in code, forbidden
+    assert not trend.is_trend_scope("COMMODITY_GC"), "the code must no longer log what 192 deletes"

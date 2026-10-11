@@ -80,7 +80,8 @@ struct NewsSentimentTrendChart: View {
             Spacer(minLength: AppSpacing.sm)
             AnalysisTimeframeToggle(
                 selectedOption: $window,
-                options: SentimentTrendWindow.allCases.map { $0 }
+                options: SentimentTrendWindow.allCases.map { $0 },
+                accessibilityLabelFor: { $0.spokenLabel }
             )
         }
     }
@@ -97,8 +98,13 @@ struct NewsSentimentTrendChart: View {
 
     /// Nothing to draw yet because the 90-day history is still being fetched. The card says
     /// so instead of drawing an empty axis — and never invents a bar to fill the space.
+    ///
+    /// Decided on the 90-day answer the window was cut from (`sourceHasDays`), not on the cut:
+    /// a history filling in newest weeks first can leave 7D empty while 30D has bars, and that
+    /// 7D is an empty chart with its own line (`summaryText`), not "Building…" over a history
+    /// the other windows are already drawing.
     private var showsBuildingPlaceholder: Bool {
-        trend.days.isEmpty && trend.isBuildingHistory
+        !trend.sourceHasDays && trend.days.isEmpty && trend.isBuildingHistory
     }
 
     private var buildingPlaceholder: some View {
@@ -135,9 +141,25 @@ struct NewsSentimentTrendChart: View {
                 + "\(day.positive) positive · \(day.negative) negative · \(day.neutral) neutral"
         }
         let total = trend.total
-        guard total > 0 else { return "No scored headlines in this window yet." }
-        return "\(Self.headlines(total)) · \(Self.toneWord(trend.netScore)) "
-            + "(net \(Self.signed(trend.netScore)))"
+        guard total > 0 else { return emptyWindowText }
+        return "\(Self.headlines(total)) · \(windowToneWord) "
+            + "(net \(Self.signed(trend.netScore))%)"
+    }
+
+    /// The window's line when it has no scored headline — shared by the visible line and
+    /// VoiceOver, which used to read "0 headlines … Mixed" here.
+    private var emptyWindowText: String {
+        guard trend.isBuildingHistory else { return Self.noScoredHeadlinesText }
+        // Only reached with bars in another window (else the placeholder shows): the history
+        // is filling in newest weeks first, so "yet" alone would read as a quiet feed.
+        return "No scored headlines in the last \(trend.window.days) days — "
+            + "the 90-day history is still filling in."
+    }
+
+    static let noScoredHeadlinesText = "No scored headlines in this window yet."
+
+    private var windowToneWord: String {
+        Self.toneWord(positive: trend.positive, negative: trend.negative, neutral: trend.neutral)
     }
 
     // MARK: - Chart
@@ -159,7 +181,9 @@ struct NewsSentimentTrendChart: View {
                 .foregroundStyle(AppColors.borderStrong)
                 .lineStyle(StrokeStyle(lineWidth: 1))
         }
-        .chartXScale(domain: domain)
+        // End padding on 30D only: its newest label is centred under today's bar and runs past
+        // the bar's right edge (see `xAxis`); the padding keeps it clear of the y-axis column.
+        .chartXScale(domain: domain, range: .plotDimension(startPadding: 0, endPadding: xEndPadding))
         .chartYScale(domain: Double(-peak)...Double(peak))
         .chartPlotStyle { plot in plot.clipped() }
         .chartXAxis { xAxis }
@@ -198,8 +222,42 @@ struct NewsSentimentTrendChart: View {
         .accessibilityElement(children: .ignore)
         // Says who scored them: the visible "Headlines Cay AI scored" footer is gone.
         .accessibilityLabel("News tone of the headlines Cay AI scored, last \(trend.window.days) days")
-        .accessibilityValue(accessibilitySummary)
+        .accessibilityValue(accessibilityValueText)
+        // The per-day counts are a tap away for a sighted user; VoiceOver swipes up / down
+        // through the days instead (the tap gesture is unreachable on an ignored element).
+        .accessibilityAdjustableAction(adjustSelectedDay)
     }
+
+    /// The selected day's counts, else the window's — in the summary line's words.
+    private var accessibilityValueText: String {
+        if let day = selectedDay { return Self.accessibilityDayLine(day) }
+        return accessibilitySummary
+    }
+
+    private func adjustSelectedDay(_ direction: AccessibilityAdjustmentDirection) {
+        switch direction {
+        case .increment: stepSelectedDay(by: 1)
+        case .decrement: stepSelectedDay(by: -1)
+        @unknown default: break
+        }
+    }
+
+    /// One VoiceOver step through the window's days, oldest → newest. Position 0 is "no day
+    /// selected" (the window's summary), before the oldest day; both ends hold rather than wrap.
+    private func stepSelectedDay(by step: Int) {
+        let keys = trend.days.map(\.dayKey)
+        let current = selectedKey.flatMap { keys.firstIndex(of: $0) }.map { $0 + 1 } ?? 0
+        let next = min(max(current + step, 0), keys.count)
+        selectedKey = next == 0 ? nil : keys[next - 1]
+    }
+
+    private var xEndPadding: CGFloat {
+        trend.window == .month ? Self.monthEndPadding : 0
+    }
+
+    /// Room past the newest 30D bar for the rest of its centred label ("Oct 10" is ~36 pt wide
+    /// over a ~10 pt bar).
+    private static let monthEndPadding: CGFloat = 14
 
     private func barOpacity(_ day: SentimentTrendDay) -> Double {
         selectedKey == nil || selectedKey == day.dayKey ? 1.0 : 0.35
@@ -240,24 +298,26 @@ struct NewsSentimentTrendChart: View {
 
     private var xAxis: some AxisContent {
         AxisMarks(values: axisDates) { value in
-            // The newest 30D tick is today, one day from the axis end: a label starting there
-            // ran into the trailing y-axis column and was cut to "S". Anchoring that one label
-            // at its trailing edge keeps it inside the plot. 90D drops month ticks near the
-            // end instead.
+            // 7D and 30D ticks sit at each day's NOON (`axisDatesUnsorted`), and `.top` centres
+            // the label under its bar. Never `centered: true`: a centred label sits between its
+            // tick and the NEXT one, today's tick has no next one, and Charts dropped today's
+            // label — the newest bar had no day under it (review 2026-10-08).
             //
-            // 7D ticks sit at each day's NOON (`axisDatesUnsorted`), and `.top` centres the
-            // weekday under its bar. Never `centered: true` there: a centred label sits between
-            // its tick and the NEXT one, today's tick has no next one, and Charts dropped
-            // today's label — the newest bar had no day under it (review 2026-10-08).
+            // 30D used to put today's tick at MIDNIGHT anchored `.topTrailing`, so "Oct 10"
+            // ended at the left edge of today's bar — read as Oct 7–9 — and, reaching back
+            // into "Oct 3", got that label dropped (review 2026-10-10). Centred at noon, the
+            // rest of today's label runs past the plot end, into `xEndPadding`, not the y-axis
+            // column (where an un-anchored label was once cut to "S"). 90D keeps month starts,
+            // labelled from the tick rightwards, and drops ticks near the end instead.
             //
             // Greedy collision resolution with today's tick placed FIRST: at large Dynamic
             // Type, on a 375 pt phone or in a locale with longer month names, the trailing
-            // label now reaches back into the today-7 label, and the neighbour is the one
+            // label can reach back into the today-7 label, and the neighbour is the one
             // dropped — never today's.
             AxisValueLabel(
                 format: axisFormat,
                 centered: false,
-                anchor: labelAnchor(value.index, of: value.count),
+                anchor: labelAnchor(),
                 collisionResolution: .greedy(
                     priority: value.index == value.count - 1 ? 1 : 0,
                     minimumSpacing: 4
@@ -268,26 +328,24 @@ struct NewsSentimentTrendChart: View {
         }
     }
 
-    private func labelAnchor(_ index: Int, of count: Int) -> UnitPoint? {
+    /// `.top` centres a 7D / 30D label on its noon tick; nil (90D) starts a month label at its
+    /// month-start tick.
+    private func labelAnchor() -> UnitPoint? {
         if trend.window == .week { return .top }
-        return isTrailingTick(index, of: count) ? .topTrailing : nil
+        return trend.window == .month ? .top : nil
     }
 
-    private func isTrailingTick(_ index: Int, of count: Int) -> Bool {
-        trend.window == .month && count > 0 && index == count - 1
-    }
-
-    /// Explicit tick dates, counted back from today so the newest label is always today:
-    /// every day for 7D (at noon, the middle of the day's bar), weekly for 30D, and each
-    /// month start for 90D. Returned OLDEST FIRST, so `isTrailingTick`'s "last index" is
-    /// today's tick — built newest-first, the trailing anchor landed on the oldest label instead.
+    /// Explicit tick dates, counted back from the trend's own "today" (`asOf`) so the newest
+    /// label is always the window's last day: every day for 7D and every 7th day for 30D, both
+    /// at noon (the middle of the day's bar), and each month start for 90D. Returned OLDEST
+    /// FIRST, so the collision priority's "last index" is today's tick.
     private var axisDates: [Date] {
         axisDatesUnsorted.sorted()
     }
 
     private var axisDatesUnsorted: [Date] {
         let cal = Calendar.current
-        let today = SentimentTrendDayParser.etToday()
+        let today = trend.asOf
         let lower = xDomain.lowerBound
         switch trend.window {
         case .week:
@@ -298,6 +356,7 @@ struct NewsSentimentTrendChart: View {
             return stride(from: 0, through: 28, by: 7)
                 .compactMap { cal.date(byAdding: .day, value: -$0, to: today) }
                 .filter { $0 >= lower }
+                .compactMap { cal.date(bySettingHour: 12, minute: 0, second: 0, of: $0) }
         case .quarter:
             // Month starts, minus any within 7 days of the axis end: a month label there has
             // no room before the y-axis column (the same clipping as the 30D "S").
@@ -321,12 +380,15 @@ struct NewsSentimentTrendChart: View {
     /// scope tracked for five days shows five bars at the right edge of a 30-day axis rather
     /// than five fat bars pretending to be a month.
     ///
-    /// "Today" is the ET calendar day (`etToday`), because the day keys are ET days: anchored
-    /// on the device's own date, the backend's newest bar fell past the end of the axis every
-    /// evening west of New York. The end also stretches to cover the newest bar, as a guard.
+    /// "Today" is the ET calendar day the window was CUT on (`trend.asOf`), because the day
+    /// keys are ET days: anchored on the device's own date, the backend's newest bar fell past
+    /// the end of the axis every evening west of New York. Never a live `etToday()` here: the
+    /// days were cut once, so after ET midnight that drew an 8th / 31st / 91st slot with an
+    /// empty "today" (the ViewModel re-cuts on the new day instead). The end also stretches to
+    /// cover the newest bar, as a guard.
     private var xDomain: ClosedRange<Date> {
         let cal = Calendar.current
-        let today = SentimentTrendDayParser.etToday()
+        let today = trend.asOf
         let start = cal.date(byAdding: .day, value: -(trend.window.days - 1), to: today) ?? today
         let first = trend.days.first.map { cal.startOfDay(for: $0.date) } ?? start
         let lastDay = trend.days.last.map { cal.startOfDay(for: $0.date) } ?? today
@@ -409,7 +471,10 @@ struct NewsSentimentTrendChart: View {
     /// Never a date guessed from the bars, which on 7D would claim a week-old start for a feed
     /// scored since July.
     private var coverageText: String? {
-        if trend.isBuildingHistory && !trend.days.isEmpty {
+        // The legend is drawn only once the placeholder is gone, so a building history here has
+        // scored days on file — in this window or (an empty 7D while it fills) in another.
+        // Never "since <date>" then: the oldest day on file is not where scoring began yet.
+        if trend.isBuildingHistory {
             return "filling in 90 days…"
         }
         guard let since = trend.trackingSince else { return nil }
@@ -417,16 +482,34 @@ struct NewsSentimentTrendChart: View {
         return "since \(Self.shortDate(since))"
     }
 
+    /// The window, for VoiceOver: the visible summary line's words, with the three counts.
     private var accessibilitySummary: String {
-        "\(Self.headlines(trend.total)): \(trend.positive) positive, \(trend.negative) negative, "
-            + "\(trend.neutral) neutral. \(Self.toneWord(trend.netScore))."
+        guard trend.total > 0 else { return emptyWindowText }
+        return "\(Self.headlines(trend.total)): \(trend.positive) positive, \(trend.negative) negative, "
+            + "\(trend.neutral) neutral. \(windowToneWord) (net \(Self.signed(trend.netScore))%)."
+    }
+
+    /// A selected day, for VoiceOver: the tapped-day line's facts, without its separators.
+    static func accessibilityDayLine(_ day: SentimentTrendDay) -> String {
+        "\(dayLabel(day.date))\(day.isPartial ? " (so far)" : ""): \(headlines(day.total)), "
+            + "\(day.positive) positive, \(day.negative) negative, \(day.neutral) neutral."
     }
 
     // MARK: - Formatting
 
-    static func toneWord(_ net: Int) -> String {
-        if net >= 20 { return "Mostly positive" }
-        if net <= -20 { return "Mostly negative" }
+    /// The summary line's word for a window — majority first (owner, 2026-10-10: "Majority-based
+    /// + %"): more than half the headlines one way is "Mostly …"; else a net score at or past ±20
+    /// leans that way; else a neutral majority is "Mostly neutral"; anything else is "Mixed".
+    /// Integer math, in exactly this order: the backend's `tone_word` mirrors it for the Updates
+    /// chat, and `test_chat_updates_scope_context.py` reads the thresholds and words from here.
+    static func toneWord(positive: Int, negative: Int, neutral: Int) -> String {
+        let total = positive + negative + neutral
+        if 2 * positive > total { return "Mostly positive" }
+        if 2 * negative > total { return "Mostly negative" }
+        let net = SentimentTrend.netScore(positive: positive, negative: negative, total: total)
+        if net >= 20 { return "Leaning positive" }
+        if net <= -20 { return "Leaning negative" }
+        if 2 * neutral > total { return "Mostly neutral" }
         return "Mixed"
     }
 
@@ -456,15 +539,16 @@ struct NewsSentimentTrendChart: View {
 
 #Preview("30 days") {
     let cal = Calendar.current
-    let today = cal.startOfDay(for: Date())
+    let today = SentimentTrendDayParser.etToday()
     let counts: [(Int, Int, Int)] = [
         (4, 1, 2), (2, 3, 1), (6, 0, 1), (1, 5, 2), (3, 2, 0), (5, 1, 1), (2, 2, 2),
         (0, 4, 1), (3, 1, 3), (7, 2, 1), (2, 1, 0), (1, 1, 1),
     ]
+    // Real ET day keys: a day's date is derived from its key.
     let days: [SentimentTrendDay] = counts.enumerated().map { i, c in
         let date = cal.date(byAdding: .day, value: -(counts.count - 1 - i), to: today) ?? today
         return SentimentTrendDay(
-            dayKey: "preview-\(i)", date: date,
+            dayKey: SentimentTrendDayParser.dayKey(for: date),
             positive: c.0, negative: c.1, neutral: c.2,
             isPartial: i == counts.count - 1
         )
@@ -472,7 +556,8 @@ struct NewsSentimentTrendChart: View {
     return NewsSentimentTrendChart(
         trend: SentimentTrend(
             scope: "ORCL", window: .month, days: days,
-            trackingSince: days.first?.date
+            trackingSinceKey: days.first?.dayKey,
+            sourceHasDays: true
         ),
         window: .constant(.month)
     )

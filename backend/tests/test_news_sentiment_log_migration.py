@@ -75,8 +75,11 @@ def test_the_primary_key_is_the_writers_conflict_target():
     import inspect
 
     src = inspect.getsource(svc.upsert_log_rows)
-    assert src.count('on_conflict="scope,article_key", ignore_duplicates=True') == 2, (
-        "both the first try and the no-model retry must keep first-label-wins"
+    # One upsert call serves the first try AND every optional-column retry (a loop): every
+    # `.upsert(` in the writer must carry first-label-wins.
+    assert src.count(".upsert(") >= 1
+    assert src.count('on_conflict="scope,article_key", ignore_duplicates=True') == src.count(".upsert("), (
+        "every try, including the optional-column retries, must keep first-label-wins"
     )
     assert "upsert_log_rows" in inspect.getsource(svc.record_labels)
     assert cols == ["scope", "article_key"]

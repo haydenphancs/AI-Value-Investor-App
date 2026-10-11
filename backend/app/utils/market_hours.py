@@ -315,11 +315,13 @@ def to_utc_instant(value: object) -> datetime | None:
         return None
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ET)
+        return dt.astimezone(timezone.utc)
+    # OverflowError: "9999-12-31 23:00:00" parses, but moving it to UTC leaves the
+    # datetime range — one such upstream value aborted a whole batch of labels.
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ET)
-    return dt.astimezone(timezone.utc)
 
 
 # ── Detail-screen market-status wire contract ─────────────────────────

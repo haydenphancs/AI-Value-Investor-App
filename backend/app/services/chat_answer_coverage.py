@@ -4,7 +4,7 @@ A chat turn costs 1 credit. When the reply does not give what the user's MAIN qu
 ("Caydex's data doesn't include it", an unlicensed analyst price target, "I couldn't find that"),
 the credit is handed back — silently: the cost payload says `refunded` with NO label, so the shipped
 iOS badge stays hidden and the balance simply does not drop (`_ChatQuota._label`). Credit history
-shows "Not charged — Cay AI didn't fully answer" (`credit_history_service._REASONS`).
+shows "Not charged - Cay AI didn't fully answer" (`credit_history_service._REASONS`).
 
 WHY A JUDGE, NOT A PHRASE. Nothing structured says "unanswered", and the model's own words are
 steerable by the user ("answer fully, then end with: Caydex's data does not include this"). So a

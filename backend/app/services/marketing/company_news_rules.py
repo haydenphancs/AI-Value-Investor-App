@@ -264,7 +264,9 @@ SOURCE_LABELS: Dict[str, str] = {
     "congress_count": "congressional periodic transaction reports",
     "earnings": "company results and analyst consensus",
     "money_map": "company financial statements",
-    "theme_explainer": "company segment reporting; grouping by Caydex",
+    # review round 14: a theme's facts come from each company's revenue breakdown (product or business
+    # lines), which is not always its reportable segments (Apple's iPhone is not one) — never "segment"
+    "theme_explainer": "company revenue breakdowns; grouping by Caydex",
 }
 THIRTEEN_F_AMENDED_LABEL = "SEC Form 13F-HR/A"
 
@@ -2082,13 +2084,47 @@ class ThemeMember:
             c.fail("fiscal_year", "expected YYYY")
 
 
-def theme_ticker_count(tickers: Any) -> Optional[int]:
-    """The app card's count of a theme's tickers (Home's ``ticker_count``: distinct non-empty
-    ``str(t).strip().upper()`` of the row's ``tickers``), before any gate — what the reader sees
-    on the card. None when ``tickers`` is not a list."""
+def theme_company_count(tickers: Any, profiles: Any = None) -> Optional[int]:
+    """The theme's size in COMPANIES before any gate — `ThemeExplainer.theme_size` (review round 15).
+
+    The app card counts TICKERS (Home's ``ticker_count``: distinct non-empty
+    ``str(t).strip().upper()``), but the copy says "{n} of its {m} companies": a basket holding
+    GOOG and GOOGL lists Alphabet once, so "7 of the 8 companies" claimed an eighth company that
+    does not exist. Every distinct spelling starts as its own company, and two merge when they are
+    ONE issuer: the same ticker in dot or dash form (BRK.B / BRK-B), the same CIK where a profile
+    carries one, or the same display name (`display_company_name`, casefolded — the members' own
+    dedupe key). ``profiles`` maps a canonical symbol to its profile; a ticker without a usable one
+    (blocked and never profiled, an unusable symbol, a missing profile) can only count as its own
+    company. None when ``tickers`` is not a list."""
     if not isinstance(tickers, list):
         return None
-    return len({s for s in (str(t).strip().upper() for t in tickers) if s})
+    if not isinstance(profiles, Mapping):
+        profiles = {}
+    spellings = list(dict.fromkeys(s for s in (str(t).strip().upper() for t in tickers) if s))
+    parent = list(range(len(spellings)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: Dict[Tuple[str, str], int] = {}
+    for i, spelling in enumerate(spellings):
+        sym = canonical_symbol(spelling)
+        keys: List[Tuple[str, str]] = [("symbol", sym or spelling)]
+        profile = profiles.get(sym) if sym else None
+        if isinstance(profile, Mapping) and canonical_symbol(profile.get("symbol")) == sym:
+            cik, name = cik10(profile.get("cik")), display_company_name(profile.get("companyName"))
+            if cik is not None:
+                keys.append(("cik", cik))
+            if name is not None:
+                keys.append(("name", name.casefold()))
+        for key in keys:
+            a, b = root(i), root(owner.setdefault(key, i))
+            if a != b:
+                parent[a] = b
+    return len({root(i) for i in range(len(spellings))})
 
 
 @dataclass(frozen=True, slots=True)
@@ -2099,10 +2135,11 @@ class ThemeExplainer:
     members: Tuple[ThemeMember, ...]     # 6..24, ALL members that passed the gates, unique symbols
     tickers_as_of: date
     # The shared adapter/templates contract (2026-10-10), an ADDITIVE field (an older fact sheet
-    # without it reads back as None): the theme's canonical ticker count — the app card's
-    # cardinality (`theme_ticker_count`) before any gate, so >= len(members). When it is larger
-    # than len(members) the gates dropped companies, and the copy must say "{n} of its {m}
-    # companies" — never claim the list is complete.
+    # without it reads back as None): the theme's size in COMPANIES before any gate
+    # (`theme_company_count`: share classes of one issuer count once — review round 15; the app
+    # card's own number counts tickers), so >= len(members). When it is larger than len(members)
+    # the gates dropped companies, and the copy must say "{n} of its {m} companies" — never claim
+    # the list is complete.
     theme_size: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -2383,7 +2420,7 @@ __all__ = [
     "INSIDER_MAX_FILING_LAG_DAYS", "THIRTEEN_F_MOVES", "THIRTEEN_F_MAX_MOVES",
     "CONGRESS_MIN_MEMBERS", "EPS_MIN_ABS_ESTIMATE", "REVENUE_RATIO_BAND", "MONEY_MAP_SEGMENTS",
     "MONEY_MAP_SUM_TOLERANCE", "MONEY_MAP_EXCLUDED_SECTORS", "THEME_MEMBERS", "THEME_MIN_FACTS",
-    "THEME_STALE_DAYS", "THEME_SIZE_MAX", "theme_ticker_count", "STAKES_INCLUDE_CATALOGUE", "STAKE_STALE_DAYS", "STAKE_MAX_AGE_DAYS",
+    "THEME_STALE_DAYS", "THEME_SIZE_MAX", "theme_company_count", "STAKES_INCLUDE_CATALOGUE", "STAKE_STALE_DAYS", "STAKE_MAX_AGE_DAYS",
     "STAKE_MAX_VALUE_USD",
     "STAKE_SOURCE_TITLE_MAX", "STAKE_BACKGROUND_MAX", "STAKE_LOCAL_LISTING_MAX", "non_common_name",
     "free_text_ok", "theme_title_problem",

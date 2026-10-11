@@ -225,7 +225,8 @@ class SentimentTrendDayResponse(BaseModel):
     total: int = 0
     # (bullish − bearish) / total as a whole percent, −100…100.
     net_score: int = 0
-    # True for today (ET): the day is still filling in.
+    # True for every ET day a late label can still land on: from open_since(now) (the ET day
+    # of now − 96 h, i.e. today and the ~4 days before) through today. Shown "(so far)".
     is_partial: bool = False
 
 

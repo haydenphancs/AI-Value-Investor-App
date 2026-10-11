@@ -91,8 +91,9 @@ async def test_a_moderation_refusal_splits_like_the_backfill_and_other_errors_ab
         if "FORBIDDEN" in kw["prompt"]:
             raise OpenAICompatContentRejected("400 Content Exists Risk")
         n = kw["prompt"].count("<<<END_ARTICLE ") - 1        # minus the instructions' example
-        return {"text": _json.dumps([{"index": i, "sentiment": "bullish", "confidence": 60}
-                                     for i in range(n)])}
+        # The live answer shape: a label without usable bullets is not a label (live parity).
+        return {"text": _json.dumps([{"index": i, "bullets": ["a"], "sentiment": "bullish",
+                                      "confidence": 60} for i in range(n)])}
 
     monkeypatch.setattr(news_llm, "generate_news_json", _gen)
     pairs = await cal.relabel(rows, batch=4)

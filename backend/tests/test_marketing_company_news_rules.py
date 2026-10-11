@@ -801,7 +801,7 @@ def test_source_labels_are_pinned_and_never_name_the_vendor():
     assert R.source_label(stake()) == "NVIDIA Form 10-Q"
     assert R.source_label(earnings()) == "company results and analyst consensus"
     assert R.source_label(money_map()) == "company financial statements"
-    assert R.source_label(theme()) == "company segment reporting; grouping by Caydex"
+    assert R.source_label(theme()) == "company revenue breakdowns; grouping by Caydex"
     import re
     vendor = re.compile(r"fmp|financial\s*modeling\s*prep|financialmodelingprep", re.I)
     assert not [v for v in R.SOURCE_LABELS.values() if vendor.search(v)]
@@ -1476,14 +1476,38 @@ def test_theme_size_round_trips_and_an_older_sheet_still_reads():
         R.record_from_dict(dict(old, theme_count=9))
 
 
-@pytest.mark.parametrize("tickers, n", [
-    (["NVDA", "AMD", "AVGO"], 3),
-    (["NVDA", " nvda ", "AMD"], 2),                 # the card dedupes upper-cased, stripped strings
-    (["BRK.B", "BRK-B"], 2),                        # … but not the dot/dash spelling (one member here)
-    (["NVDA", "", "  ", "AMD"], 2),                 # blanks are not tickers
-    (["ARM", "SMH", "NVDA"], 3),                    # blocked or ETF: still on the card
-    ([], 0),
-    (None, None), ("NVDA", None), ({"NVDA": 1}, None),
+def _p(sym, name, cik):
+    return {"symbol": sym, "companyName": name, "cik": cik}
+
+
+@pytest.mark.parametrize("tickers, profiles, n", [
+    (["NVDA", "AMD", "AVGO"], None, 3),
+    (["NVDA", " nvda ", "AMD"], None, 2),           # upper-cased, stripped strings, as the card dedupes
+    (["BRK.B", "BRK-B"], None, 1),                  # one ticker in dot and dash form (one member too)
+    (["NVDA", "", "  ", "AMD"], None, 2),           # blanks are not tickers
+    (["ARM", "SMH", "NVDA"], None, 3),              # blocked (never profiled) or an ETF: each its own
+    ([], None, 0),
+    (None, None, None), ("NVDA", None, None), ({"NVDA": 1}, None, None),
+    # Review round 15: share classes of ONE issuer count once — the same display name …
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", "Alphabet Inc.", 1), "GOOGL": _p("GOOGL", "Alphabet Inc. Class A Common Stock", 2)},
+     1),
+    # … or the same CIK under another name …
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", "Alphabet Inc.", "1652044"),
+                         "GOOGL": _p("GOOGL", "Google Inc.", "0001652044")}, 1),
+    # … and transitively (A~B by CIK, B~C by name).
+    (["AAA", "BBB", "CCC"], {"AAA": _p("AAA", "Acme Corp", 7), "BBB": _p("BBB", "Acme Holdings", 7),
+                             "CCC": _p("CCC", "Acme Holdings", 9)}, 1),
+    # Another name AND another CIK: two companies.
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", "Alphabet Inc.", 1), "GOOGL": _p("GOOGL", "Google Inc.", 2)}, 2),
+    # Unusable identity never merges: no profile, a profile for another symbol, an all-zero / bool CIK,
+    # an unusable name, profiles that are not a mapping.
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", "Alphabet Inc.", 1)}, 2),
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", "Alphabet Inc.", 1), "GOOGL": _p("GOOG", "Alphabet Inc.", 1)}, 2),
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", None, "0"), "GOOGL": _p("GOOGL", None, "0000000000")}, 2),
+    (["GOOG", "GOOGL"], {"GOOG": _p("GOOG", "Inc.", True), "GOOGL": _p("GOOGL", "Inc.", True)}, 2),
+    (["GOOG", "GOOGL"], [_p("GOOG", "Alphabet Inc.", 1), _p("GOOGL", "Alphabet Inc.", 1)], 2),
+    # A ticker the symbol grammar refuses keeps its own spelling (never merged through a profile).
+    (["GOOG", "GOOG.WS"], {"GOOG": _p("GOOG", "Alphabet Inc.", 1)}, 2),
 ])
-def test_theme_ticker_count_is_the_cards_count(tickers, n):
-    assert R.theme_ticker_count(tickers) == n
+def test_theme_company_count_counts_issuers_not_tickers(tickers, profiles, n):
+    assert R.theme_company_count(tickers, profiles) == n

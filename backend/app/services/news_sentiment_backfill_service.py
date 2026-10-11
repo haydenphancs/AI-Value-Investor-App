@@ -233,35 +233,91 @@ def map_fmp_rows(raw_rows: Iterable[Any], *, window: Tuple[date, date]) -> List[
     return out
 
 
-def label_request(scope: str, articles: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _title_day(art: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """(title_key, ET day) of an article — the key the wire-copy dedup compares — or None."""
+    from app.services.news_tone_filters import title_key
+
+    key = title_key(art.get("title"))
+    if key is None:
+        return None
+    day = str(art.get("published_at") or "")[:10]
+    try:
+        day = datetime.fromisoformat(str(art.get("published_at"))).astimezone(ET).date().isoformat()
+    except (TypeError, ValueError):
+        pass
+    return key, day
+
+
+def prefilter_for_labelling(
+    articles: List[Dict[str, Any]], *, taken: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """The articles worth a model call. Pure.
+
+    Drops what the chart gate would skip whatever the model answered — a quarterly-holdings
+    filing, a law-firm solicitation (`news_sentiment_trend_service.tone_skip_reason`) — and a
+    second wire copy of one story (same title on the same ET day, `title_key`). They are not
+    gaps: nothing about them is ever logged, so they cannot leave a window uncovered.
+
+    ``taken`` seeds the dedup with the (title, ET day) of copies ALREADY in the log: the
+    nightly re-scan fetches both copies again, and without it the copy dropped last night was
+    labelled and logged tonight — the story counted twice."""
+    from app.services.news_sentiment_trend_service import tone_skip_reason
+
+    out: List[Dict[str, Any]] = []
+    seen: set = set(taken or ())
+    for art in articles:
+        if tone_skip_reason(art) is not None:
+            continue
+        td = _title_day(art)
+        if td is not None:
+            if td in seen:
+                continue
+            seen.add(td)
+        out.append(art)
+    return out
+
+
+def label_request(
+    scope: str, articles: List[Dict[str, Any]], *,
+    company_name: Optional[str] = None, is_etf: bool = False,
+) -> Dict[str, Any]:
     """The model request that labels `articles`: the LIVE enrichment's prompt, system
-    instruction and schema, unchanged (`news_cache_service.build_enrichment_prompt`).
+    instruction, schema and temperature, unchanged (`news_cache_service.build_enrichment_prompt`,
+    `NewsCacheService.enrichment_schema_for`, `ENRICHMENT_TEMPERATURE`).
 
     The backfill is the live labeller run on older articles, not a look-alike: a
-    sentiment-only prompt at temperature 0 agreed with the live labels 79.7% against the live
-    labeller's own 85.7% on the same 300 articles (2026-09-28) and leaned bullish — a visible
-    tone jump where backfilled days meet live ones. No temperature is sent, so the model
-    runs at the live default too. The bullets it writes are discarded: only the label is
-    kept (migration 104 — no long-term copy of news text)."""
+    sentiment-only prompt agreed with the live labels 79.7% against the live labeller's own
+    85.7% on the same 300 articles (2026-09-28) and leaned bullish — a visible tone jump where
+    backfilled days meet live ones. So every argument, the temperature included, is the live
+    one — the scope's company name and ETF flag included (`news_cache_service.scope_profile`,
+    which the caller resolves). The bullets it writes are discarded: only the label (and its
+    `relevance`, for the chart gate) is kept (migration 104 — no long-term copy of news text)."""
     from app.services.agents.persona_config import neutral_system_instruction
     from app.services.news_cache_service import (
         ENRICHMENT_SYSTEM_BASE,
+        ENRICHMENT_TEMPERATURE,
         NewsCacheService,
         build_enrichment_prompt,
     )
 
     return {
-        "prompt": build_enrichment_prompt(articles, scope),
+        "prompt": build_enrichment_prompt(articles, scope, company_name=company_name, is_etf=is_etf),
         "system_instruction": neutral_system_instruction(ENRICHMENT_SYSTEM_BASE),
-        "response_schema": NewsCacheService._ENRICHMENT_SCHEMA,
+        "response_schema": NewsCacheService.enrichment_schema_for(scope),
+        "temperature": ENRICHMENT_TEMPERATURE,
     }
 
 
-def parse_labels(text: str, expected: int) -> Optional[List[Tuple[Optional[str], Optional[int]]]]:
-    """Positional (sentiment, confidence) pairs from a live-format answer, or None on a
-    malformed / wrong-count one. Mapped by the live path's own `_map_enrichments`, and a
-    sentiment the model did not actually give is None — never a default "neutral"."""
-    from app.services.news_cache_service import NewsCacheService
+def parse_label_items(text: str, expected: int) -> Optional[List[Optional[Dict[str, Any]]]]:
+    """Per-article ``{sentiment, confidence, relevance}`` from a live-format answer (None for an
+    article without a usable label), or None on a malformed / wrong-count answer.
+
+    Mapped by the live path's own `_map_enrichments` (a clean index permutation is a reorder,
+    `answer_positions`), and held to the live path's own bar: an item with no usable bullets
+    is not a label (the live path never logs one), and a sentiment the model did not actually
+    give is None — never a default "neutral". A confidence that is not a finite number is
+    None: a NaN raised ValueError and an Infinity OverflowError, aborting the whole scope."""
+    from app.services.news_cache_service import NewsCacheService, answer_positions
 
     try:
         parsed = json.loads(text or "")
@@ -270,16 +326,33 @@ def parse_labels(text: str, expected: int) -> Optional[List[Tuple[Optional[str],
     if not isinstance(parsed, list) or len(parsed) != expected:
         return None
     mapped = NewsCacheService._map_enrichments(parsed, expected)
-    out: List[Tuple[Optional[str], Optional[int]]] = []
+    source = {pos: parsed[i] for i, pos in enumerate(answer_positions(parsed, expected))}
+    out: List[Optional[Dict[str, Any]]] = []
     for pos in range(expected):
         item = mapped.get(pos)
-        if not item or not item.get("sentiment_valid"):
-            out.append((None, None))
+        if (not item or not item.get("sentiment_valid")
+                or not NewsCacheService._enrichment_is_usable(item)):
+            out.append(None)
             continue
-        conf = parsed[pos].get("confidence") if isinstance(parsed[pos], dict) else None
-        conf = int(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else None
-        out.append((item["sentiment"], conf))
+        raw = source.get(pos)
+        conf = raw.get("confidence") if isinstance(raw, dict) else None
+        conf = (
+            max(0, min(100, int(conf)))
+            if isinstance(conf, (int, float)) and not isinstance(conf, bool) and math.isfinite(conf)
+            else None
+        )
+        out.append({"sentiment": item["sentiment"], "confidence": conf,
+                    "relevance": item.get("relevance")})
     return out
+
+
+def parse_labels(text: str, expected: int) -> Optional[List[Tuple[Optional[str], Optional[int]]]]:
+    """(sentiment, confidence) pairs per article — :func:`parse_label_items` without the
+    relevance (the calibration script's shape)."""
+    items = parse_label_items(text, expected)
+    if items is None:
+        return None
+    return [(i["sentiment"], i["confidence"]) if i else (None, None) for i in items]
 
 
 def _on_covered_day(article: Dict[str, Any], covered_from: Optional[date],
@@ -498,7 +571,14 @@ class NewsSentimentBackfillService:
         # A failed fetch is NOT "no news": aborting keeps the week uncovered and retryable.
         if getattr(rows, "fetch_failed", False):
             raise _Fail(f"FMP {feed} news fetch failed: {getattr(rows, 'reason', '')}")
-        return list(rows or [])
+        # Neither is a 200 whose body is not a list ({"Error Message": "Limit Reach …"}):
+        # `list(dict)` read as its keys — or as no news — and marked the week covered for good.
+        # (Checked AFTER fetch_failed: `EmptyAfterFailure` is a list subclass.)
+        if rows is None:
+            return []
+        if not isinstance(rows, list):
+            raise _Fail(f"FMP {feed} news returned {type(rows).__name__}, not a list")
+        return list(rows)
 
     async def _fetch_range(self, route: Tuple[str, str], start: date, end: date,
                            max_pages: int, stats: RunStats) -> Tuple[List[Any], bool]:
@@ -592,11 +672,14 @@ class NewsSentimentBackfillService:
         stats.model_calls += 1
         use_flex = bool(getattr(settings, "SENTIMENT_BACKFILL_FLEX", True)) \
             and news_llm_config().provider == PROVIDER_GEMINI and not self._flex_refused
+        from app.services.news_cache_service import scope_profile
+
+        company_name, is_etf = await scope_profile(self.supabase, scope)
         kwargs = dict(
-            **label_request(scope, articles),
+            **label_request(scope, articles, company_name=company_name, is_etf=is_etf),
             usage_tag="sentiment_backfill",
-            # Off the shared response cache (these prompts are never asked twice). No
-            # temperature: the live labeller's default, like every other argument here.
+            # Off the shared response cache (these prompts are never asked twice). The
+            # temperature is in `label_request`: the live labeller's, like every argument.
             cache=False,
         )
         labeller = self._labeller or generate_news_json
@@ -648,7 +731,7 @@ class NewsSentimentBackfillService:
         if not articles:
             return []
         text = await self._call_model(scope, articles, stats, now)
-        labels = parse_labels(text or "", len(articles))
+        labels = parse_label_items(text or "", len(articles))
         if labels is None:
             if split and len(articles) > 1:
                 mid = len(articles) // 2
@@ -658,10 +741,12 @@ class NewsSentimentBackfillService:
                            scope, len(articles))
             return []
         out = []
-        for art, (sentiment, confidence) in zip(articles, labels):
-            if sentiment is None:
+        for art, label in zip(articles, labels):
+            if label is None:
                 continue
-            out.append({**art, "sentiment": sentiment, "sentiment_confidence": confidence})
+            out.append({**art, "sentiment": label["sentiment"],
+                        "sentiment_confidence": label["confidence"],
+                        "relevance": label["relevance"]})
         return out
 
     # one scope -------------------------------------------------------------
@@ -727,7 +812,12 @@ class NewsSentimentBackfillService:
                     fresh.append((key, art))
                 stats.articles += len(fresh)
                 logged = await self.already_logged(claim.scope, [k for k, _ in fresh])
-                todo = [art for key, art in fresh if key not in logged]
+                # Off the chart anyway (`tone_skip_reason`, `title_key`): never paid for. A copy of
+                # a story already logged (last night's run, or the live path) is a copy too.
+                taken = {td for key, art in fresh if key in logged for td in [_title_day(art)] if td}
+                todo = prefilter_for_labelling(
+                    [art for key, art in fresh if key not in logged], taken=taken,
+                )
                 to_label += len(todo)
                 window_gap = 0
                 for i in range(0, len(todo), LABEL_BATCH):

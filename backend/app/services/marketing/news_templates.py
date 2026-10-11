@@ -91,6 +91,8 @@ from app.services.marketing import post_copy
 from app.services.marketing import template_onscreen as onscreen
 from app.services.marketing.compliance import _is_emoji, clean, fold, given_names, scan_text
 from app.services.trillion_club import copy_rules
+# the SEC's federal business-day calendar (pure: stdlib + market_hours, no FMP — selection imports the module)
+from app.services.trillion_club.rules import is_federal_business_day
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +161,62 @@ logger = logging.getLogger(__name__)
 #: single-row headline names the role and company, so the role-only "The filing is by …" paragraph is
 #: left out under the two headlines that carry them (it stays under ".min", which names no company).
 #: The lexicon is unchanged.
-TEMPLATE_VERSION = "news-v11"
+#: news-v12 (post-commit copy check, 2026-10-10): a stake's cover carries its basis and as-of date in the
+#: opening chip (`st.open.chip`) and a headline that never reads as a
+#: value today ("… committed up to this amount to …", "… stake in … as of that date"); a Money Map says
+#: "business" / "product or business line" / "Revenue mix" / "combined sales", never "segment" (FMP's
+#: product breakdown is not always the company's reportable segments); a Form 4 row whose earliest trade is
+#: more than INSIDER_LATE_TRADE_DAYS before its last filing states its trade dates in place of the
+#: two-business-day explainer (`ins.l3.late.*`, `ins.c3.late.*`, `ins.p.trade.*` + `ins.p.form4.late`), and a
+#: roundup with such a row drops the rule from its paragraphs; a roundup's indirect-holding paragraph is
+#: plural (`ins.p.flag.indirect.*.many`) and its image note says the SHARES are held; a theme's one-fact
+#: line says the fact's fiscal year, never "its latest reported year"; the Congress cards keep the
+#: narration's hedges ("Can include …", "Due within 45 days …; some are filed later").
+#: news-v13 (review round 13, 2026-10-10): the stake cover's chip says "as of" ("Committed up to · as of Nov
+#: 18, 2025"): the date is the source's or the period's, never the deal's, and a bare date after "Committed
+#: up to" read as a deadline; a theme says "largest revenue line" / "product or business line", never
+#: "segment" — its facts come from the same product breakdown as Money Map, which is not always the
+#: company's reportable segments (`th.p.facts` "… from each company's revenue breakdown", `th.explainer`
+#: "A revenue line is …"); a Form 4 roundup whose lead row is timely but another row is late narrates and
+#: draws the Form 4 without the two-business-day rule (`ins.l3.form4`, `ins.c3.form4.body`), the same
+#: choice its video paragraph makes — the "At least {m} more …" line right after it covers the late row.
+#: news-v14 (review round 14, 2026-10-10): the 13F explainer states the deadline as a deadline — "is due
+#: about 45 days after the quarter's end" (`f13.l4.explainer`, `.short`, `f13.c4.explainer.body`,
+#: `f13.p.explainer`), never "filed up to 45 days later": the due date rolls past weekends and federal
+#: holidays (47 days for 2026-Q3), the season admits late filers and an amendment can come months later,
+#: so the same post could show a filing date past the stated bound; a theme's source label is "company
+#: revenue breakdowns; grouping by Caydex" (`company_news_rules.SOURCE_LABELS`, burned into the image footer
+#: and the alt text's source line), never "segment reporting"; a Form 4 row is late when MORE than
+#: INSIDER_LATE_BUSINESS_DAYS federal business days follow its earliest trade up to its last filing
+#: (`_late_trades`), not 4 calendar days — a Monday trade filed on Thursday is late, a Friday trade filed on
+#: Tuesday is not, and a federal holiday (Veterans Day, Columbus Day) is not a business day.
+#: news-v15 (review round 15, 2026-10-10): the Congress narration states 45 days as a deadline ("Reports are
+#: due within 45 days of a trade; some come later, …", `cg.l4`), never a bound — the count includes every
+#: in-month disclosure whatever its trade date, so a late report is counted; a 13F caption paragraph and an
+#: alt-text section say how many of their kind they leave out ("…; and 5 more", `f13.p.rest`; the alt joins
+#: the drawn names with `list.*` / `list.more.*`, as the image draws "+5 more"); the Form 4 roundup's alt
+#: text lists each buyer's TOTAL (`ins.alt.rows`: a row adds up all of one person's purchase lines); and a
+#: Form 4 row with ONE filing date but several purchases is worded count-neutrally (`_filing_count`
+#: "neutral": "The filer is …", "on Form 4, filed …", "The purchases are reported with …") — the record
+#: keeps distinct filing DAYS, not documents, so two Form 4s filed the same day would read as "a Form 4";
+#: the amounts line says "each filing's share count" (`ins.l4.amounts`), as the caption does.
+#: news-v16 (review round 16, 2026-10-10): a theme uses a member's revenue-line fact only while it can still
+#: be that company's latest fiscal year (from THEME_FACT_LATE_MONTH, never fiscal run_year - 2) and only
+#: within THEME_FACT_SPREAD_YEARS of the newest fact beside it — a fiscal 2024 share no longer sits, yearless,
+#: beside fiscal 2026 ones on a tile; a narration pair joins two facts of ONE fiscal year and says it
+#: (`th.pair.*` "… in fiscal {fy} …"), as the one-fact line does; the caption list states each fact's year
+#: (`th.item.share` "… 62% of fiscal 2025 revenue", `th.item`); and no stake string — above all the
+#: catalogue background — values a company by a verb or ranks one (`STAKE_CLAIM_RE`: "which values X at $90
+#: billion", "the largest AI startup in Europe", "the fastest-growing cloud company").
+#: news-v17 (review round 17, 2026-10-10): a stake's carrying or fair value is the SOURCE's figure — its
+#: headlines name no filer ("{inv_s} {ee} stake had a carrying value of …" / "… was carried at …", "… had a
+#: fair value of …", each with its ".of" twin; `st.h.*`), never "{inv} reported its … stake" / "{inv} carried
+#: its … stake": a catalogue row's source can be another filer's document (the Berkshire Hathaway Energy 10-Q
+#: rows sit under the investor Berkshire Hathaway, which does not itemize them), and `st.l2.carrying_value`
+#: says "the source says", never "the investor's accounts"; the Form 4 spotlight's alt text states its share
+#: figure as the TOTAL ("in 2 purchases, 3M shares in total", `ins.alt.spot.many`), never "2 purchases of 3M
+#: shares" (read as 3M each) — one purchase keeps "of" (`ins.alt.spot.one`).
+TEMPLATE_VERSION = "news-v18"
 AUTHORSHIP = post_copy.AUTHORSHIP_TEMPLATE
 NEWS_SCRIPT_LINES = 4
 HOOK_WORDS: Tuple[int, int] = (5, 14)
@@ -178,6 +235,16 @@ RATIO_PLACES = 4
 
 #: A record older than this (days from its newest date to the run date) is a stale source.
 INSIDER_MAX_AGE_DAYS = 7
+#: A Form 4 row is "late" for the copy when MORE than this many federal business days (weekdays, federal
+#: holidays excluded: the SEC's calendar, `trillion_club.rules.is_federal_business_day`) follow its
+#: earliest trade up to and including its LAST filing — the Form 4 deadline is the end of the second
+#: business day after the trade. A late row's trade dates are stated, never the two-business-day rule,
+#: which would date the trade to the filing. The record admits a trade up to
+#: `company_news_rules.INSIDER_MAX_FILING_LAG_DAYS` before the first filing (a 10b5-1 plan's deemed
+#: execution date can make that gap legal). The last filing, not the first: every trade of the row then
+#: sits within this bound of its own filing, whichever filing reported it. news-v14: business days, not
+#: the old 4 calendar days, which let a Monday trade filed on Friday (four business days) read as timely.
+INSIDER_LATE_BUSINESS_DAYS = 2
 THIRTEEN_F_MAX_AGE_DAYS = 120
 #: ~18 months: the adapter's `money_map_stale` gate, kept here as the template's own floor.
 MONEY_MAP_MAX_AGE_DAYS = 550
@@ -231,6 +298,16 @@ EARNINGS_MAX_GAP_RATIO = 10.0
 #: `template_onscreen.MAX_TILES` members ("+k more" for the rest), the long captions every member.
 THEME_MAX_AGE_DAYS = 70
 THEME_FACT_MAX_YEARS = 2
+#: news-v16 (review round 16): a fact is used only while it can still be its company's LATEST fiscal year,
+#: and beside the theme's other facts only when it is at most THEME_FACT_SPREAD_YEARS older than the newest
+#: of them. A fiscal year labelled Y ends by about Jan 31 of Y + 1 at the latest (a retailer labels its year
+#: by the year it starts) and its annual report follows within 60-120 days (10-K, 20-F) — so from
+#: THEME_FACT_LATE_MONTH of the run year, every company has reported fiscal run_year - 1 and a fiscal
+#: run_year - 2 fact is a year stale (a Nov 2026 run drew "Gaming · 62%" from fiscal 2024 beside fiscal 2026
+#: facts, no year on the tile, the pair line or the caption). Fiscal calendars alone put the members' latest
+#: years one label apart (a December year end's fiscal 2025 beside a January year end's fiscal 2026), never two.
+THEME_FACT_SPREAD_YEARS = 1
+THEME_FACT_LATE_MONTH = 6
 THEME_SEGMENT_MAX_CHARS = 36
 THEME_NARRATED_MAX = 6
 THEME_MIN_FACTS = 3
@@ -338,6 +415,12 @@ LEXICON: Dict[str, str] = {
     "ins.l1.role.many": "The filings are by {role_np_sp} and were filed from {first_sp} to {last_sp}.",
     "ins.l1.role.short.one": "The filing is by {role_np_sp}.",
     "ins.l1.role.short.many": "The filings are by {role_np_sp}.",
+    # news-v15: ONE filing date but several purchase lines — the record keeps distinct filing DAYS, not
+    # documents, so this may be one Form 4 or several filed the same day: no entry here counts them
+    # (`_filing_count` "neutral"; a single purchase is provably one filing, two dates provably several)
+    "ins.l1.role.neutral": "The filer is {role_np_sp}, and the filing date is {filed_sp}.",
+    # ≥ 8 words for every role (LINE_WORDS), so a long narration can still step down to it
+    "ins.l1.role.short.neutral": "The filer in this case is {role_np_sp}.",
     # the share noun agrees with the figure as written ("1 share", "about 1 share", "850 shares")
     "ins.share.one": "share",
     "ins.share.many": "shares",
@@ -345,15 +428,31 @@ LEXICON: Dict[str, str] = {
     "ins.l2.one.many": "It reports {k} purchases, {shares_w} {share_noun} in total, for {amt}.",
     "ins.l2.many.one": "They report one purchase of {shares_w} {share_noun}, for {amt}.",
     "ins.l2.many.many": "They report {k} purchases, {shares_w} {share_noun} in total, for {amt}.",
+    "ins.l2.neutral.many": "{k} purchases are reported, {shares_w} {share_noun} in total, for {amt}.",
     "ins.l3.indirect.all": "The shares are reported as held indirectly, not in the {role_sp}'s own name.",
     "ins.l3.indirect.some": "Part of the shares are reported as held indirectly.",
     "ins.l3.amended": "The figures shown here include an amended Form 4.",
     "ins.l3.explainer": "Officers and directors must file a Form 4 within two business days of a trade.",
+    # news-v12: the explainer's late twin. A row whose earliest trade is more than INSIDER_LATE_BUSINESS_DAYS
+    # business days before its last filing states the trade dates the record carries instead of the two-business-day
+    # rule, which would date the trade to the filing ("filed Nov 12" + "within two business days").
+    "ins.l3.late.one.date": "The filing gives {first_trade_sp} as the trade date.",
+    "ins.l3.late.one.window": "The filing gives trade dates from {first_trade_sp} to {last_trade_sp}.",
+    "ins.l3.late.many.date": "The filings give {first_trade_sp} as the trade date.",
+    "ins.l3.late.many.window": "The filings give trade dates from {first_trade_sp} to {last_trade_sp}.",
+    "ins.l3.late.neutral.date": "The purchases are reported with {first_trade_sp} as the trade date.",
+    "ins.l3.late.neutral.window": "The purchases are reported with trade dates from {first_trade_sp} to "
+                                  "{last_trade_sp}.",
+    # news-v13: a roundup whose lead row is timely but another row is late — the Form 4 without the rule (the
+    # "At least {m} more …" line after it covers the late row, whose trade the rule would date to its filing)
+    "ins.l3.form4": "A Form 4 is the report officers and directors file on their own trades.",
     # A count of rows is a LOWER BOUND, never the week's total (review round 9): the record holds at most
     # INSIDER_MAX_ROWS rows, after the adapter's dollar, listing, cap, role and amendment gates.
     "ins.l4.more.one": "At least 1 more {role_sp} disclosed buying their own company's stock in the same week.",
     "ins.l4.more.many": "At least {m} more {roles_sp} disclosed buying their own company's stock in the same week.",
-    "ins.l4.amounts": "Amounts are the filing's share count times the cost it reports for each share.",
+    # news-v15: "each filing's", as the caption says (`ins.p.form4`) — never "the filing's" beside a row
+    # whose purchases may come from several Form 4s
+    "ins.l4.amounts": "Amounts are each filing's share count times the cost it reports for each share.",
     "ins.c1.title": "Who filed",
     "ins.c1.noname.officer": "The {role} of {co}",
     "ins.c1.noname.dir": "A director of {co}",
@@ -370,6 +469,10 @@ LEXICON: Dict[str, str] = {
     "ins.c3.amended.body": "The figures include an amended Form 4 (Form 4/A)",
     "ins.c3.explainer.title": "What a Form 4 is",
     "ins.c3.explainer.body": "Filed within two business days of an insider's trade",
+    "ins.c3.form4.body": "The report officers and directors file on their own trades",
+    "ins.c3.late.date.title": "Trade date",
+    "ins.c3.late.window.title": "Trade dates",
+    "ins.c3.late.body": "{trade_window_img} · filed {filed_window_img}",
     "ins.c4.more.title": "Same week",
     "ins.c4.more.one": "At least 1 more {role} disclosed buying their own company's stock",
     "ins.c4.more.many": "At least {m} more {roles} disclosed buying their own company's stock",
@@ -378,8 +481,10 @@ LEXICON: Dict[str, str] = {
     "ins.open.head": "{subj} disclosed buying {co} stock",
     "ins.open.head.min": "{subj} disclosed buying stock",
     "ins.img.title.many": "At least {n} {roles} disclosed buying their own company's stock",
-    "ins.img.note.indirect.all": "The purchases are reported as held indirectly.",
-    "ins.img.note.indirect.some": "Some purchases are reported as held indirectly.",
+    # news-v12: it is the SHARES that are held, not the purchases (never "shares bought": "bought" is
+    # off the verb table)
+    "ins.img.note.indirect.all": "The shares in these purchases are reported as held indirectly.",
+    "ins.img.note.indirect.some": "Some of the shares in these purchases are reported as held indirectly.",
     "ins.img.note.amended": "The figures include an amended Form 4 (Form 4/A).",
     "ins.img.spot.count": "{k_txt} · {shares_s} {share_noun}",
     "ins.img.spot.filed": "Filed {filed_window_img}",
@@ -393,6 +498,7 @@ LEXICON: Dict[str, str] = {
     "ins.ch.many.min": "At least {n} {roles} disclosed buying their own company's stock.",
     "ins.ch.one.long.one": "{subj} disclosed buying {amt} of {co} stock in a Form 4 filed {filed_cap}.",
     "ins.ch.one.long.many": "{subj} disclosed buying {amt} of {co} stock in Form 4s filed {filed_window_cap}.",
+    "ins.ch.one.long.neutral": "{subj} disclosed buying {amt} of {co} stock on Form 4, filed {filed_cap}.",
     "ins.ch.one.short": "{subj} disclosed buying {amt} of the company's stock.",
     "ins.ch.one.min": "A {role} disclosed buying {amt} of their company's stock.",
     "ins.p.rows": "The purchases shown: {rows}.",
@@ -403,12 +509,29 @@ LEXICON: Dict[str, str] = {
     "ins.p.one.name.many": "The filings name {person}, {role_np} of {co}.",
     "ins.p.one.noname.one": "The filing is by {role_np} of {co}.",
     "ins.p.one.noname.many": "The filings are by {role_np} of {co}.",
+    "ins.p.one.name.neutral": "The filer is {person}, {role_np} of {co}.",
+    "ins.p.one.noname.neutral": "The filer is {role_np} of {co}.",
     "ins.p.flag.indirect.all": "The shares are reported as held indirectly rather than in the buyer's own name.",
     "ins.p.flag.indirect.some": "Some of the shares are reported as held indirectly rather than in the buyer's own "
                                 "name.",
+    # news-v12: a roundup (2+ rows) is about several buyers — its flag paragraph is plural
+    "ins.p.flag.indirect.all.many": "The shares are reported as held indirectly rather than in the buyers' own "
+                                    "names.",
+    "ins.p.flag.indirect.some.many": "Some of the shares are reported as held indirectly.",
     "ins.p.flag.amended": "The figures include an amended Form 4 (Form 4/A).",
     "ins.p.form4": "A Form 4 is the report a company's officers and directors file within two business days of a "
                    "trade. Amounts are each filing's share count times the cost it reports for each share.",
+    # news-v12: the late twins (see `ins.l3.late.*`): the trade dates the record carries, then the Form 4
+    # without the two-business-day rule
+    "ins.p.trade.one.date": "The filing gives {first_trade_cap} as the trade date.",
+    "ins.p.trade.one.window": "The filing gives trade dates from {first_trade_cap} to {last_trade_cap}.",
+    "ins.p.trade.many.date": "The filings give {first_trade_cap} as the trade date.",
+    "ins.p.trade.many.window": "The filings give trade dates from {first_trade_cap} to {last_trade_cap}.",
+    "ins.p.trade.neutral.date": "The purchases are reported with {first_trade_cap} as the trade date.",
+    "ins.p.trade.neutral.window": "The purchases are reported with trade dates from {first_trade_cap} to "
+                                  "{last_trade_cap}.",
+    "ins.p.form4.late": "A Form 4 is the report a company's officers and directors file on their own trades. Amounts "
+                        "are each filing's share count times the cost it reports for each share.",
     "ins.vp.more.one": "At least 1 more {role} disclosed buying their own company's stock in Form 4s filed the "
                        "same week.",
     "ins.vp.more.many": "At least {m} more {roles} disclosed buying their own company's stock in Form 4s filed the "
@@ -416,9 +539,13 @@ LEXICON: Dict[str, str] = {
     "ins.yt.long": "{subj} disclosed buying {amt_s} of {co} stock",
     "ins.yt.short": "{subj} disclosed buying {amt_s} of stock",
     "ins.yt.min": "A {role} disclosed buying {amt_s} of stock",
-    "ins.alt.rows": "The image lists each purchase by company, role and amount: {rows}.",
+    # news-v15: a row is one buyer's TOTAL over all their purchase lines in the window, never one purchase
+    "ins.alt.rows": "The image lists each buyer's total by company, role and amount: {rows}.",
     "ins.alt.row": "{co}, {role}, {amt_s}",
-    "ins.alt.spot": "It shows {amt_s} in {k_txt} of {shares_s} {share_noun}.",
+    # news-v17: the spotlight's share figure is the row's TOTAL over all its purchases — "2 purchases of 3M
+    # shares" read as 3M each (6M); one purchase keeps "of" (the narration's own split, `ins.l2.*`)
+    "ins.alt.spot.one": "It shows {amt_s} in {k_txt} of {shares_s} {share_noun}.",
+    "ins.alt.spot.many": "It shows {amt_s} in {k_txt}, {shares_s} {share_noun} in total.",
     # 13F Season
     "f13.kicker": "13F SEASON",
     "f13.asof": "Quarter ended {period_img} · filed {filed_img}",
@@ -459,8 +586,10 @@ LEXICON: Dict[str, str] = {
     "f13.l3.more.count": "It reported more shares of {n} {holdings} than the quarter before.",
     "f13.l3.fewer.count": "It reported fewer shares of {n} {holdings} than the quarter before.",
     "f13.l4.listed": "{co_sp} first appears in this filing; it was listed in {month_sp}.",
-    "f13.l4.explainer": "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days later.",
-    "f13.l4.explainer.short": "A 13F is filed up to 45 days after a quarter's end.",
+    # news-v14: a deadline, never a bound — the due date rolls past weekends and holidays (2026-Q3's is 47
+    # days on), late filers and amendments come later, and the post shows its own filing date beside this
+    "f13.l4.explainer": "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later.",
+    "f13.l4.explainer.short": "A 13F is due about 45 days after a quarter's end.",
     "f13.l.explainer2": "A 13F shows holdings at the quarter's end, not when shares changed hands.",
     "f13.c1.title": "Quarter ended",
     "f13.c1.body": "{period_img} · filed {filed_img}",
@@ -474,7 +603,7 @@ LEXICON: Dict[str, str] = {
     "f13.c4.listed.title": "First appears",
     "f13.c4.listed.body": "{co}, listed {month_img}",
     "f13.c4.explainer.title": "About 13F filings",
-    "f13.c4.explainer.body": "U.S. stock holdings, filed up to 45 days after the quarter",
+    "f13.c4.explainer.body": "U.S. stock holdings, due about 45 days after the quarter",
     "f13.c.explainer2.title": "What a 13F shows",
     "f13.c.explainer2.body": "Holdings at the quarter's end, not trade dates",
     "f13.img.sub.new": "{n} newly reported",
@@ -512,9 +641,12 @@ LEXICON: Dict[str, str] = {
     "f13.p.more": "Reported more shares of: {items}.",
     "f13.p.fewer": "Reported fewer shares of: {items}.",
     "f13.p.listed": "{co} first appears in this filing; it was listed in {month_cap}.",
-    "f13.p.explainer": "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days later; "
+    "f13.p.explainer": "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later; "
                        "it does not show when shares changed hands.",
     "f13.item.value": "{co}, {value}",
+    # news-v15: the moves of a kind the record leaves out of a paragraph (the hook, narration, cards and
+    # image all say "and 5 more" / "+5 more"; a paragraph listing two of seven read as the whole kind)
+    "f13.p.rest": "and {k} more",
     "f13.yt.poss": "{filer_s} 13F: {lead}",
     "f13.yt.of": "13F of {filer}: {lead}",
     "f13.yt.min": "Latest 13F: {lead}",
@@ -532,10 +664,12 @@ LEXICON: Dict[str, str] = {
     "mm.hook.profit.tiny": "{co_sp}: {per100} net income per $100 of revenue.",
     "mm.hook.loss.tiny": "{co_sp}: net loss {per100} per $100 of revenue.",
     "mm.l1": "{co_sp} reported revenue of {rev} in fiscal {fy}.",
-    "mm.l2.two": "Its {s1} segment made up {sh1} of {basis}, and {s2} made up {sh2} of {basis}.",
-    "mm.l2.one": "Its {s1} segment made up {sh1} of {basis} that year.",
+    # news-v12: the breakdown is FMP's product segmentation — product or service lines for some companies,
+    # reportable segments for others — so no line calls a part a "segment" (Apple's iPhone is not one)
+    "mm.l2.two": "Its {s1} business made up {sh1} of {basis}, and {s2} made up {sh2} of {basis}.",
+    "mm.l2.one": "Its {s1} business made up {sh1} of {basis} that year.",
     "mm.basis.revenue": "revenue",
-    "mm.basis.segments": "segment sales",
+    "mm.basis.segments": "combined sales",
     "mm.word.profit": "profit",
     "mm.word.loss": "loss",
     "mm.l3.both": "After the cost of sales, gross {gp_word} was {gp}; after operating costs, operating {op_word} "
@@ -548,7 +682,7 @@ LEXICON: Dict[str, str] = {
     "mm.l4.loss": "After interest, taxes and everything else, the net loss was {ni}.",
     "mm.c1.title": "Revenue",
     "mm.c1.body": "{rev_s} in fiscal {fy}",
-    "mm.c2.title": "Segments",
+    "mm.c2.title": "Revenue mix",
     "mm.c2.two": "{s1}: {sh1} of {basis} · {s2}: {sh2} of {basis}",
     "mm.c2.one": "{s1}: {sh1} of {basis}",
     "mm.c3.title": "After costs",
@@ -562,7 +696,7 @@ LEXICON: Dict[str, str] = {
     "mm.c4.body": "{ni_s} in fiscal {fy}",
     "mm.img.title": "How {co} makes money",
     "mm.img.subtitle": "Fiscal {fy} · as reported",
-    "mm.bar.other": "Other",
+    "mm.bar.other": "Other or not broken out",
     "mm.bar.elim": "Intersegment eliminations",
     "mm.flow.revenue": "Revenue",
     "mm.flow.gross.profit": "Gross profit",
@@ -580,10 +714,10 @@ LEXICON: Dict[str, str] = {
     "mm.ch.long.loss": "How {co} makes money: {rev} of revenue in fiscal {fy}, and a net loss of {per100} for "
                        "every $100.",
     "mm.ch.short": "How {co} makes money, from its fiscal {fy} results.",
-    "mm.p.segments": "Revenue by segment in fiscal {fy}: {items}.",
-    "mm.p.elim": "Sales between its own segments, {elim}, are taken out of that total.",
+    "mm.p.segments": "Revenue by product or business line in fiscal {fy}: {items}.",
+    "mm.p.elim": "Sales between its own business lines, {elim}, are taken out of that total.",
     "mm.item": "{name}, {value}",
-    "mm.item.other": "other, {value}",
+    "mm.item.other": "other or not broken out, {value}",
     "mm.p.costs.both": "After the cost of sales, gross {gp_word} was {gp}. After operating costs, operating "
                        "{op_word} was {op}.",
     "mm.p.costs.gross": "After the cost of sales, gross {gp_word} was {gp}.",
@@ -593,7 +727,7 @@ LEXICON: Dict[str, str] = {
     "mm.p.source": "Figures are as reported in the company's annual financial statements for fiscal {fy}.",
     "mm.yt": "How {co} makes money: fiscal {fy} results",
     "mm.yt.short": "How {co} makes money",
-    "mm.alt.segments": "Bars show revenue by segment: {items}.",
+    "mm.alt.segments": "Bars show revenue by product or business line: {items}.",
     "mm.alt.flow": "A second set of bars shows {items}.",
     "mm.alt.item": "{label} {value}",
     "mm.alt.callout": "{callout}.",
@@ -608,15 +742,20 @@ LEXICON: Dict[str, str] = {
     "cg.l1": "The count covers periodic transaction reports disclosed during {month_long}, as of {as_of_sp}.",
     "cg.l2": "Each member is counted once, however many reports they filed that month.",
     "cg.l3": "These reports can include a spouse's or dependent child's trades, and give amounts only as ranges.",
-    "cg.l4": "A trade can be disclosed up to 45 days after it happens, so the trades may be older.",
+    # news-v15: a deadline, never a bound — the count takes every in-month disclosure whatever its trade
+    # date, so a late report (past 45 days) is counted; the card already says "some are filed later"
+    "cg.l4": "Reports are due within 45 days of a trade; some come later, so the trades may be older.",
     "cg.c1.title": "Disclosed in",
     "cg.c1.body": "{month_long} · as of {as_of_img}",
     "cg.c2.title": "Counted once",
     "cg.c2.body": "Each member, however many reports",
     "cg.c3.title": "What the reports cover",
-    "cg.c3.body": "Spouse and dependent-child trades; amounts as ranges",
+    # news-v12: a card stays on screen for its whole line, so it carries the narration's hedges itself — the
+    # reports CAN include a spouse's or a child's trades (a member's own too), and 45 days is the deadline,
+    # not a bound (late reports exist)
+    "cg.c3.body": "Can include spouse and dependent-child trades; amounts as ranges",
     "cg.c4.title": "Reporting delay",
-    "cg.c4.body": "Up to 45 days after the trade",
+    "cg.c4.body": "Due within 45 days of the trade; some are filed later",
     "cg.headline": "members of Congress disclosed purchases of {co} stock",
     "cg.img.once": "Each member counted once",
     "cg.ch.long": "{n} members of Congress disclosed purchases of {co} stock in {month_long}, counting each member "
@@ -636,16 +775,21 @@ LEXICON: Dict[str, str] = {
     "st.asof": "As of {as_of_img}",
     "st.h.invested": "{inv} invested {amt} in {ee}",
     "st.h.committed_up_to": "{inv} committed up to {amt} to {ee}",
-    "st.h.carrying_value": "{inv} reported its {ee} stake at a carrying value of {amt}",
-    "st.h.carrying_value.short": "{inv} carried its {ee} stake at {amt}",
-    "st.h.fair_value": "{inv} reported its {ee} stake at a fair value of {amt}",
-    "st.h.fair_value.short.poss": "{inv_s} {ee} stake had a fair value of {amt}",
-    "st.h.fair_value.short.of": "The {ee} stake of {inv} had a fair value of {amt}",
+    # news-v17: a carrying or fair value names no filer. The source may be ANOTHER filer's document (the
+    # catalogue's Berkshire Hathaway Energy 10-Q rows sit under the investor Berkshire Hathaway), so no
+    # entry says "{inv} reported its …" or "{inv} carried its …": the figure is the source's — the
+    # caption cites it ("Source: …"), L1 and L2 say "the source".
+    "st.h.carrying_value.poss": "{inv_s} {ee} stake had a carrying value of {amt}",
+    "st.h.carrying_value.of": "The {ee} stake of {inv} had a carrying value of {amt}",
+    "st.h.carrying_value.short.poss": "{inv_s} {ee} stake was carried at {amt}",
+    "st.h.carrying_value.short.of": "The {ee} stake of {inv} was carried at {amt}",
+    "st.h.fair_value.poss": "{inv_s} {ee} stake had a fair value of {amt}",
+    "st.h.fair_value.of": "The {ee} stake of {inv} had a fair value of {amt}",
     "st.hook": "{h}.",
     "st.l1": "The figure is as of {as_of_sp}, from the source named in this post.",
     "st.l2.invested": "That is the amount the source reports as invested, not a figure for today.",
     "st.l2.committed_up_to": "That is the most the agreement allows; the source says up to that amount.",
-    "st.l2.carrying_value": "Carrying value is the amount the stake is recorded at in the investor's accounts.",
+    "st.l2.carrying_value": "Carrying value is the amount the source says the stake was recorded at on that date.",
     "st.l2.fair_value": "Fair value is the amount the source says the stake was measured at on that date.",
     "st.l3.private": "As of that date, {ee} was not listed on a public exchange.",
     "st.l3.non_us": "As of that date, shares of {ee} traded on an exchange outside the U.S.",
@@ -661,7 +805,7 @@ LEXICON: Dict[str, str] = {
     "st.c2.committed_up_to.title": "Committed up to",
     "st.c2.committed_up_to.body": "The most the agreement allows",
     "st.c2.carrying_value.title": "Carrying value",
-    "st.c2.carrying_value.body": "What the stake is recorded at in the accounts",
+    "st.c2.carrying_value.body": "The source's recorded value on that date",
     "st.c2.fair_value.title": "Fair value",
     "st.c2.fair_value.body": "The source's measure of the stake on that date",
     "st.c3.private.title": "Not listed",
@@ -683,8 +827,17 @@ LEXICON: Dict[str, str] = {
     "st.label.carrying_value": "carrying value",
     "st.label.fair_value": "fair value",
     "st.img.source": "Source: {source}",
+    # news-v12: the cover (the opening card, TikTok's and Instagram's pinned frame) states the stake's basis
+    # and as-of date in its chip, over the figure, and its headline never reads as a value today: a
+    # commitment says "up to", a carrying or fair value is "as of that date" (the chip's). news-v13: the chip
+    # says "as of" — the date is the source's or the period's, never the deal's ("Invested · Jul 31, 2026"
+    # read as the day of the investment, "Committed up to · Jun 30, 2026" as a deadline)
+    "st.open.chip": "{basis_title} · as of {as_of_img}",
     "st.open.invested": "{inv} invested in {ee}",
-    "st.open.committed_up_to": "{inv} committed funds to {ee}",
+    "st.open.committed_up_to": "{inv} committed up to this amount to {ee}",
+    "st.open.dated.poss": "{inv_s} stake in {ee} as of that date",
+    "st.open.dated.of": "The stake of {inv} in {ee} as of that date",
+    # the undated twins: the alt title's and the YouTube title's last fallback (never the cover)
     "st.open.value.poss": "{inv_s} stake in {ee}",
     "st.open.value.of": "The stake of {inv} in {ee}",
     "st.ch.long": "{h}, as of {as_of_cap}. Source: {source}.",
@@ -749,9 +902,11 @@ LEXICON: Dict[str, str] = {
     "er.alt.title": "{co}: reported vs analyst estimates",
     "er.alt.eps": "The image shows EPS of {eps_s} against an analyst estimate of {est_s}.",
     "er.alt.revenue": "It shows revenue of {ra_s} against an estimate of {re_s}.",
-    # Theme Explainer (2b-4). What the members of a Caydex grouping report as their largest revenue
-    # segment — no performance, momentum, ETF or AI-written text. ("sell" is a NEWS_BANNED_RE word:
-    # the hook asks where the revenue comes from.)
+    # Theme Explainer (2b-4). Each member's largest revenue line in its revenue breakdown — no performance,
+    # momentum, ETF or AI-written text. ("sell" is a NEWS_BANNED_RE word: the hook asks where the revenue
+    # comes from.) news-v13: the facts come from the same product breakdown as Money Map — product or
+    # service lines for some companies (Apple's iPhone), reportable segments for others — so no string
+    # calls a fact a "segment" or says it is "as each company reports them".
     "th.kicker": "INSIDE A THEME",
     "th.asof": "Members as of {tickers_img}",
     "th.hook": "Where do {n} companies in {theme} get their revenue?",
@@ -762,39 +917,48 @@ LEXICON: Dict[str, str] = {
     "th.hook.part": "Where do {n} of the {m} companies in {theme} get their revenue?",
     "th.hook.part.short": "{theme}: where {n} of its {m} companies get their revenue.",
     "th.hook.part.min": "{theme}: revenue at {n} of its {m} companies.",
-    "th.pair.poss.poss": "{m1_s} largest revenue segment was {g1}, and {m2_s} was {g2}.",
-    "th.pair.poss.of": "{m1_s} largest revenue segment was {g1}, and that of {m2} was {g2}.",
-    "th.pair.of.poss": "The largest revenue segment of {m1} was {g1}, and {m2_s} was {g2}.",
-    "th.pair.of.of": "The largest revenue segment of {m1} was {g1}, and that of {m2} was {g2}.",
-    "th.one.poss": "{m1_s} largest revenue segment in its latest reported year was {g1}.",
-    "th.one.of": "The largest revenue segment of {m1} in its latest reported year was {g1}.",
-    "th.explainer": "A segment is a part of the business a company reports revenue for on its own.",
-    "th.grouping": "This grouping is Caydex's own, based on each company's business.",
+    # news-v16: a pair is two facts of ONE fiscal year, and says it (as the one-fact line does)
+    "th.pair.poss.poss": "{m1_s} largest revenue line in fiscal {fy} was {g1}, and {m2_s} was {g2}.",
+    "th.pair.poss.of": "{m1_s} largest revenue line in fiscal {fy} was {g1}, and that of {m2} was {g2}.",
+    "th.pair.of.poss": "The largest revenue line of {m1} in fiscal {fy} was {g1}, and {m2_s} was {g2}.",
+    "th.pair.of.of": "The largest revenue line of {m1} in fiscal {fy} was {g1}, and that of {m2} was {g2}.",
+    # news-v12: the fact's own fiscal year — up to THEME_FACT_MAX_YEARS old, so never "its latest reported year"
+    "th.one.poss": "{m1_s} largest revenue line in fiscal {fy} was {g1}.",
+    "th.one.of": "The largest revenue line of {m1} in fiscal {fy} was {g1}.",
+    "th.explainer": "A revenue line is one product or business in a company's breakdown of its revenue.",
+    "th.grouping": "This grouping is Caydex's own; its members can change.",
+    # news-v16: a card stays on screen for its whole line, so it keeps the line's fiscal year
     "th.c.pair.title": "{m1} and {m2}",
-    "th.c.pair.body": "{g1} · {g2}",
-    "th.c.pair.title.min": "Largest segments",
-    "th.c.pair.body.min": "{m1}: {g1} · {m2}: {g2}",
+    "th.c.pair.body": "Fiscal {fy}: {g1} · {g2}",
+    "th.c.pair.title.min": "Largest revenue lines",
+    "th.c.pair.body.min": "Fiscal {fy} · {m1}: {g1} · {m2}: {g2}",
     "th.c.one.title": "{m1}",
-    "th.c.one.body": "Largest segment: {g1}",
-    "th.c.one.title.min": "Largest segment",
-    "th.c.one.body.min": "{m1}: {g1}",
-    "th.c.explainer.title": "What a segment is",
-    "th.c.explainer.body": "A part of the business reported on its own",
+    "th.c.one.body": "Largest revenue line in fiscal {fy}: {g1}",
+    "th.c.one.title.min": "Largest revenue line",
+    "th.c.one.body.min": "{m1}, fiscal {fy}: {g1}",
+    "th.c.explainer.title": "What a revenue line is",
+    "th.c.explainer.body": "One product or business in a revenue breakdown",
     "th.c.grouping.title": "A Caydex grouping",
-    "th.c.grouping.body": "Based on each company's business",
-    "th.img.sub": "{n} companies, by largest revenue segment",
-    "th.img.sub.part": "{n} of its {m} companies, by largest revenue segment",
+    "th.c.grouping.body": "Its members can change",
+    "th.img.sub": "{n} companies, by largest revenue line",
+    "th.img.sub.part": "{n} of its {m} companies, by largest revenue line",
+    # news-v16: the tiles' fiscal years (at most two, THEME_FACT_SPREAD_YEARS apart) whenever a tile draws a fact
+    "th.img.sub.fy": "{n} companies, by largest revenue line in fiscal {fys}",
+    "th.img.sub.part.fy": "{n} of its {m} companies, by largest revenue line in fiscal {fys}",
+    "th.fys.2": "{a} or {b}",
     "th.img.line.share": "{seg} · {share}",
     "th.img.line": "{seg}",
     "th.img.more": "+{k} more",
-    "th.open.head": "companies in {theme}, by largest revenue segment",
-    "th.open.head.part": "of the {m} companies in {theme}, by largest revenue segment",
-    # "each one's" only when every listed member has a segment fact in the post
-    "th.ch.long": "{theme}: where {n} companies get their revenue, by largest reported segment.",
-    "th.ch.long.each": "{theme}: where {n} companies get their revenue, by each one's largest reported segment.",
-    "th.ch.long.part": "{theme}: where {n} of its {m} companies get their revenue, by largest reported segment.",
+    "th.open.head": "companies in {theme}, by largest revenue line",
+    "th.open.head.part": "of the {m} companies in {theme}, by largest revenue line",
+    # "each one's" only when every listed member has its revenue-line fact in the post
+    "th.ch.long": "{theme}: where {n} companies get their revenue, by largest product or business line.",
+    "th.ch.long.each": "{theme}: where {n} companies get their revenue, by each one's largest product or "
+                       "business line.",
+    "th.ch.long.part": "{theme}: where {n} of its {m} companies get their revenue, by largest product or "
+                       "business line.",
     "th.ch.long.part.each": "{theme}: where {n} of its {m} companies get their revenue, by each one's largest "
-                            "reported segment.",
+                            "product or business line.",
     "th.ch.short": "{theme}: where {n} companies get their revenue.",
     "th.ch.short.part": "{theme}: where {n} of its {m} companies get their revenue.",
     # "{theme}: {n} companies." reads as the theme's size: offered only when the record says it is
@@ -804,21 +968,22 @@ LEXICON: Dict[str, str] = {
     "th.p.members": "The {n} companies in {theme}: {names}.",
     "th.p.members.part": "{n} of the {m} companies in {theme}: {names}.",
     "th.p.members.some": "{n} companies in {theme}: {names}.",
-    "th.p.facts": "Largest revenue segments, as each company reports them: {items}.",
-    "th.item.share": "{co}, {seg}, {share} of revenue",
-    "th.item": "{co}, {seg}",
+    "th.p.facts": "Largest revenue lines, from each company's revenue breakdown: {items}.",
+    # news-v16: every listed fact says its fiscal year (the members' latest years can differ by one)
+    "th.item.share": "{co}, {seg}, {share} of fiscal {fy} revenue",
+    "th.item": "{co}, {seg}, in fiscal {fy}",
     "th.yt": "{theme}: where {n} companies get their revenue",
     "th.yt.short": "{theme}: {n} companies",
     "th.yt.part": "{theme}: where {n} of its {m} companies get their revenue",
     "th.yt.part.short": "{theme}: {n} of its {m} companies",
     "th.alt.title.min": "Companies in a theme",
     # the alt text: which companies (the whole-theme claim only when the record makes it), then how many
-    # of the shown tiles carry their largest segment ("each one's" only when every tile does)
+    # of the shown tiles carry their largest revenue line ("each one's" only when every tile does)
     "th.alt.body": "The image shows {k} of the {n} companies in {theme}.",
     "th.alt.body.all": "The image shows the {n} companies in {theme}.",
     "th.alt.body.some": "The image shows {k} companies in {theme}.",
-    "th.alt.segs": "It gives the largest revenue segment for {j} of them.",
-    "th.alt.segs.each": "It gives each one's largest revenue segment.",
+    "th.alt.segs": "It gives the largest revenue line in fiscal {fys} for {j} of them.",
+    "th.alt.segs.each": "It gives each one's largest revenue line in fiscal {fys}.",
     "th.alt.names": "Shown: {names}.",
 }
 
@@ -1235,6 +1400,39 @@ STAKES_BANNED_RE = re.compile(
     r"controlling|acquired|owns|stake\s+bought)\b",
     re.IGNORECASE,
 )
+#: news-v16 (review round 16): no stake string — above all the hand-written catalogue BACKGROUND
+#: (`_stake_background`, the first caption paragraph) — states a company's worth by a verb or ranks a
+#: company (rules §1 "Companies": never a verdict, record or worth claim). The noun forms are caught
+#: elsewhere ("valued at" / "valuation": compliance's valuation rows; "worth": STAKES_BANNED_RE; "record":
+#: NEWS_BANNED_RE); "which values Relecloud at $90 billion", "the largest AI startup in Europe" and "the
+#: fastest-growing cloud company" passed every one. Each row is POSITIONAL — a frame, never a bare word
+#: ("Market value was $9.21B", "the largest tranche closed on …" and "the strategic lead of …" stay) —
+#: matched on `fold()` with the stake's names masked, and has a must-reject sample only it matches and an
+#: honest twin it leaves (`STAKE_CLAIM_ROW_SAMPLES` in tests/test_marketing_news_templates.py). Bounded
+#: repetitions only: linear on any input.
+_STAKE_AMOUNT = (r"(?:[a-z]{0,3}\$\s?[0-9]|(?:usd|eur|gbp|jpy|krw|inr|sar|chf|cny|rmb|hkd)\s?[0-9]|"
+                 r"[0-9][0-9.,]{0,15}\s?(?:trillion|billion|million|thousand|tn|bn|mn|[tbmk])\b)")
+_STAKE_SUPERLATIVE = (r"(?:largest|biggest|greatest|richest|wealthiest|strongest|fastest(?:[- ]growing)?|"
+                      r"most[- ](?:valuable|successful|profitable|innovative|advanced|powerful|important|"
+                      r"influential)|highest[- ]valued|leading(?!\s+(?:the|a|an|its|their|his|her)\b)|top|"
+                      r"dominant|foremost|premier|best|no\.\s?1|number[- ]one|(?:world|market|industry)[- ]leading)")
+_STAKE_COMPANY_NOUN = (r"(?:compan(?:y|ies)|start-?ups?|firms?|[a-z]{0,12}makers?|providers?|suppliers?|"
+                       r"manufacturers?|producers?|developers?|labs?|laborator(?:y|ies)|players?|"
+                       r"business(?:es)?|brands?|platforms?|banks?|lenders?|insurers?|operators?|retailers?|"
+                       r"vendors?|carriers?|utilit(?:y|ies)|foundr(?:y|ies)|unicorns?|enterprises?|"
+                       r"corporations?|conglomerates?)")
+STAKE_CLAIM_ROWS: Tuple[str, ...] = (
+    # a valuation by a verb: "which values Relecloud at $90 billion", "valuing it at about $90B" —
+    # "at", up to three qualifiers, then an amount, within six words of the verb
+    r"\bvalu(?:es|ed|ing)\s+(?:[^\s.;:]{1,40}\s+){0,6}?at\s+(?:(?:about|around|roughly|nearly|almost|over|"
+    r"under|some|approximately|more\s+than|less\s+than|up\s+to|as\s+much\s+as|an?)\s+){0,3}" + _STAKE_AMOUNT,
+    # a superlative that ranks a company: "the largest AI startup in Europe", "the fastest-growing cloud
+    # company", "the world's biggest chipmaker" — the rank word, up to three words, a company noun
+    r"\b" + _STAKE_SUPERLATIVE + r"\s+(?:[^\s.;:,]{1,40}\s+){0,3}?" + _STAKE_COMPANY_NOUN + r"\b",
+    # the same rank with no company noun: "Relecloud is the largest in Europe", "the biggest among them"
+    r"\b" + _STAKE_SUPERLATIVE + r"\s+(?:in|among|of\s+all)\b",
+)
+STAKE_CLAIM_RE = re.compile("|".join(f"(?:{r})" for r in STAKE_CLAIM_ROWS), re.IGNORECASE)
 #: A stake background naming a per-share amount ("at $414.79 a share", "$20.00 each") reads as a
 #: price: such a background is dropped (it is optional caption text, never a reason to refuse).
 _PER_SHARE_RE = re.compile(r"\b(?:a|per|each)\s+(?:share|unit|ads)\b|\beach\b|\bshare\s+price\b",
@@ -1397,6 +1595,45 @@ def _distinct_people(rows: Sequence[rules.InsiderPurchase]) -> int:
     return len({k for k in keys if k is not None}) + sum(1 for k in keys if k is None)
 
 
+def _business_days_after(start: date, end: date, *, stop_above: int) -> int:
+    """The federal business days in (start, end] — weekdays, federal holidays excluded — counted only
+    until the count passes ``stop_above`` (the loop is bounded whatever the gap). 0 when end <= start."""
+    count, probe = 0, start
+    while probe < end and count <= stop_above:
+        probe += timedelta(days=1)
+        if is_federal_business_day(probe):
+            count += 1
+    return count
+
+
+def _late_trades(row: rules.InsiderPurchase) -> bool:
+    """A row whose LAST filing comes more than INSIDER_LATE_BUSINESS_DAYS federal business days after its
+    earliest trade (news-v12; business days since news-v14): its copy states the trade dates, never the
+    two-business-day rule."""
+    return _business_days_after(row.earliest_trade_date, row.filing_dates[-1],
+                                stop_above=INSIDER_LATE_BUSINESS_DAYS) > INSIDER_LATE_BUSINESS_DAYS
+
+
+def _filing_count(row: rules.InsiderPurchase) -> str:
+    """How many Form 4 documents a row's lines come from, as far as the record can tell (news-v15):
+    "many" with two filing dates or more; "one" with one date and ONE purchase line (a line belongs to
+    exactly one document); "neutral" with one date and several lines — the record keeps distinct filing
+    DAYS, not documents (no accession number), so two Form 4s filed the same day are one date. A
+    "neutral" row is worded without counting its filings."""
+    if len(row.filing_dates) > 1:
+        return "many"
+    return "one" if row.purchases == 1 else "neutral"
+
+
+def _trade_paragraph(first: date, last: date, *, filings: str, run_date: date) -> str:
+    """The late caption paragraph (news-v12): the trade dates the record carries, then the Form 4
+    without the two-business-day rule. `filings` is a `_filing_count` value."""
+    shape = "date" if first == last else "window"
+    dates = _t(f"ins.p.trade.{filings}.{shape}",
+               first_trade_cap=date_caption(first, run_date), last_trade_cap=date_caption(last, run_date))
+    return f"{dates} {_t('ins.p.form4.late')}"
+
+
 def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: FrozenSet[str]) -> _Parts:
     if not (rec.window_end < run_date and (run_date - rec.window_end).days <= INSIDER_MAX_AGE_DAYS):
         raise NewsTemplateRefused("stale_source", "the Form 4 window does not end in the week before the run")
@@ -1424,7 +1661,8 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
     co_sp = spoken_company(co)
     p0 = person(r0)
     filings = r0.filing_dates
-    one_filing = len(filings) == 1
+    # "one" / "many" / "neutral" (news-v15): one filing DATE is not one filing — see `_filing_count`
+    num = _filing_count(r0)
     amt, amt_s = money_words(r0.amount_usd), money_image(r0.amount_usd)
     shares_w, shares_s = shares_words(r0.shares), shares_image(r0.shares)
     # the share count as written (`shares_words` / `shares_image` round a figure under 10,000 to the
@@ -1454,16 +1692,40 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
     # 2026-10-09 "Role-only video": every narrated word is burned as a caption on a frame, every
     # card is drawn on one, and YouTube Shorts picks its own cover frame). The name stays only in
     # the caption paragraphs after the headline; `p0` never reaches the video.
-    l1 = ([_t("ins.l1.role.one", role_np_sp=role_np_sp, filed_sp=first_sp),
-           _t("ins.l1.role.short.one", role_np_sp=role_np_sp)] if one_filing else
+    l1 = ([_t(f"ins.l1.role.{num}", role_np_sp=role_np_sp, filed_sp=first_sp),
+           _t(f"ins.l1.role.short.{num}", role_np_sp=role_np_sp)] if num != "many" else
           [_t("ins.l1.role.many", role_np_sp=role_np_sp, first_sp=first_sp, last_sp=last_sp),
            _t("ins.l1.role.short.many", role_np_sp=role_np_sp)])
     c1 = (_t("ins.c1.title"), _t("ins.c1.noname.dir", co=co) if r0.role == "director"
           else _t("ins.c1.noname.officer", role=_role(r0.role, "word"), co=co))
-    l2_id = f"ins.l2.{'one' if one_filing else 'many'}.{'one' if k == 1 else 'many'}"
+    # a "neutral" row has two purchases or more by construction (`_filing_count`)
+    l2_id = f"ins.l2.{num}.{'one' if k == 1 else 'many'}"
     l2 = [_t(l2_id, k=k, shares_w=shares_w, share_noun=share_noun, amt=amt)]
     c2 = (_t("ins.c2.title.one" if k == 1 else "ins.c2.title.many"),
           _t("ins.c2.body", k_txt=k_txt, shares_s=shares_s, share_noun=share_noun, amt_s=amt_s))
+    # The explainer (line and card), wherever it lands (L3, or L4 after a flag line). news-v12: a LATE
+    # row (`_late_trades`) states its own trade dates instead of the two-business-day rule — beside
+    # "was filed on November 12th", the rule would date a trade from weeks before to about Nov 10.
+    # news-v13: a roundup whose lead row is timely but another row is late draws and narrates the Form 4
+    # WITHOUT the rule (`ins.l3.form4`) — the "At least {m} more … in the same week" line after it covers
+    # the late row, so the rule would date that row's trade to its filing week. The same three-way choice
+    # as the video paragraph (`form4_video` below).
+    late0 = _late_trades(r0)
+    late_other = any(_late_trades(r) for r in rows[1:])
+    if late0:
+        t_first, t_last = r0.earliest_trade_date, r0.latest_trade_date
+        shape = "date" if t_first == t_last else "window"
+        explainer_line = _t(f"ins.l3.late.{num}.{shape}", first_trade_sp=date_spoken(t_first, run_date),
+                            last_trade_sp=date_spoken(t_last, run_date))
+        explainer_card = (_t(f"ins.c3.late.{shape}.title"),
+                          _t("ins.c3.late.body", trade_window_img=window_image(t_first, t_last),
+                             filed_window_img=window_image(filings[0], filings[-1])))
+    elif late_other:
+        explainer_line = _t("ins.l3.form4")
+        explainer_card = (_t("ins.c3.explainer.title"), _t("ins.c3.form4.body"))
+    else:
+        explainer_line = _t("ins.l3.explainer")
+        explainer_card = (_t("ins.c3.explainer.title"), _t("ins.c3.explainer.body"))
     indirect0, amended0 = _ins_flags([r0])
     if indirect0:
         l3_key = f"indirect.{indirect0}"
@@ -1472,10 +1734,13 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
     else:
         l3_key = "explainer"
     role_sp0 = _role(r0.role, "sp")
-    l3 = [_t(f"ins.l3.{l3_key}", role_sp=role_sp0)] if l3_key == "indirect.all" else [_t(f"ins.l3.{l3_key}")]
-    c3 = (_t(f"ins.c3.{l3_key}.title"),
-          _t(f"ins.c3.{l3_key}.body", role=_role(r0.role, "word")) if l3_key == "indirect.all"
-          else _t(f"ins.c3.{l3_key}.body"))
+    if l3_key == "explainer":
+        l3, c3 = [explainer_line], explainer_card
+    else:
+        l3 = [_t(f"ins.l3.{l3_key}", role_sp=role_sp0)] if l3_key == "indirect.all" else [_t(f"ins.l3.{l3_key}")]
+        c3 = (_t(f"ins.c3.{l3_key}.title"),
+              _t(f"ins.c3.{l3_key}.body", role=_role(r0.role, "word")) if l3_key == "indirect.all"
+              else _t(f"ins.c3.{l3_key}.body"))
     others = rows[1:]
     m = len(others)
     if m:
@@ -1496,6 +1761,8 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
         if l4_key == "amounts":
             l4 = [_t("ins.l4.amounts")]
             c4 = (_t("ins.c4.amounts.title"), _t("ins.c4.amounts.body"))
+        elif l4_key == "explainer":
+            l4, c4 = [explainer_line], explainer_card
         else:
             l4 = [_t(f"ins.l3.{l4_key}")]
             c4 = (_t(f"ins.c3.{l4_key}.title"), _t(f"ins.c3.{l4_key}.body"))
@@ -1537,8 +1804,8 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
             "lines": [_t("ins.img.spot.count", k_txt=k_txt, shares_s=shares_s, share_noun=share_noun), line2],
         }
         alt_title = head
-        alt_paragraphs = [_t("ins.alt.spot", amt_s=amt_s, k_txt=k_txt, shares_s=shares_s,
-                             share_noun=share_noun)] + (
+        alt_paragraphs = [_t("ins.alt.spot.one" if k == 1 else "ins.alt.spot.many", amt_s=amt_s, k_txt=k_txt,
+                             shares_s=shares_s, share_noun=share_noun)] + (
             [f"{line2}."] if flags else [])
 
     # captions
@@ -1550,19 +1817,33 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
         return _t("ins.row.noname", co=r.company.name, role=role_lc, amt=money_words(r.amount_usd))
 
     window_cap = window_caption(rec.window_start, rec.window_end, run_date)
-    one_long = (_t("ins.ch.one.long.one", subj=subj, amt=amt, co=co, filed_cap=date_caption(filings[0], run_date))
-                if one_filing else
+    one_long = (_t(f"ins.ch.one.long.{num}", subj=subj, amt=amt, co=co,
+                   filed_cap=date_caption(filings[0], run_date))
+                if num != "many" else
                 _t("ins.ch.one.long.many", subj=subj, amt=amt, co=co,
                    filed_window_cap=window_caption(filings[0], filings[-1], run_date)))
     one_heads = [one_long, _t("ins.ch.one.short", subj=subj, amt=amt),
                  _t("ins.ch.one.min", role=_role(r0.role, "word"), amt=amt)]
     flag_para = []
     if indirect_all:
-        flag_para.append(_t(f"ins.p.flag.indirect.{indirect_all}"))
+        # news-v12: a roundup's paragraph speaks of several buyers ("the buyers' own names")
+        flag_para.append(_t(f"ins.p.flag.indirect.{indirect_all}" + (".many" if n >= 2 else "")))
     if amended_all:
         flag_para.append(_t("ins.p.flag.amended"))
+    # news-v12: the Form 4 paragraph — the two-business-day rule only when no row it speaks for is late;
+    # else the trade dates (the lead row's, or the whole roundup's window) and the Form 4 without the rule
+    form4_r0 = (_trade_paragraph(r0.earliest_trade_date, r0.latest_trade_date, filings=num,
+                                 run_date=run_date) if late0 else _t("ins.p.form4"))
+    if n >= 2 and any(_late_trades(r) for r in rows):
+        form4_image = _trade_paragraph(min(r.earliest_trade_date for r in rows),
+                                       max(r.latest_trade_date for r in rows), filings="many",
+                                       run_date=run_date)
+    else:
+        form4_image = form4_r0
+    # the video paragraphs are about the lead row (and "At least {m} more …"): its dates when it is late;
+    # when only another row is, the Form 4 without the rule and without dates
+    form4_video = form4_r0 if (late0 or not late_other) else _t("ins.p.form4.late")
     role_np0 = _role(r0.role, "np")
-    num = "one" if one_filing else "many"
     vp1 = (_t(f"ins.p.one.name.{num}", person=p0, role_np=role_np0, co=co) if p0
            else _t(f"ins.p.one.noname.{num}", role_np=role_np0, co=co))
     # review round 11: the long and short single-row headlines say the role and the company ("The CEO of
@@ -1583,10 +1864,10 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
         image_paras = [vp1]
     if flag_para:
         image_paras.append(" ".join(flag_para))
-    image_paras.append(_t("ins.p.form4"))
+    image_paras.append(form4_image)
     flags0 = ([_t(f"ins.p.flag.indirect.{indirect0}")] if indirect0 else []) + (
         [_t("ins.p.flag.amended")] if amended0 else [])
-    video_paras = ([vp1] if p0 else []) + [_t("ins.p.form4")] + ([" ".join(flags0)] if flags0 else [])
+    video_paras = ([vp1] if p0 else []) + [form4_video] + ([" ".join(flags0)] if flags0 else [])
     if m:
         roles_rest = [r.role for r in others]
         video_paras.append(_t("ins.vp.more.one", role=_group_role(roles_rest, "word")) if m == 1 else
@@ -1824,6 +2105,7 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
 
     rows_of = _f13_image_rows(ranked, by, long_title=len(subj) > F13_FULL_TITLE_CHARS)
     sections: List[Dict[str, Any]] = []
+    alt: List[str] = []
     for kind in _F13_DISPLAY:
         if kind not in rows_of:
             continue
@@ -1834,6 +2116,10 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
         if more > 0:
             sec["more"] = _t("f13.img.more", k=more)
         sections.append(sec)
+        # news-v15: the alt section names what the image draws AND the "+k more" beside it ("Delta Air
+        # Lines, Macy's and 5 more"); every drawn section is described (at most MAX_SECTIONS == 3)
+        alt.append(_t("f13.alt.section", heading=sec["heading"],
+                      items=_join_list([mv.company.name for mv in shown], total_of(kind), len(shown))))
     # every counted kind, the lead first: a kind past MAX_SECTIONS is never silently missing
     subtitle = " · ".join(_t(f"f13.img.sub.{_F13_SHORT[k]}", n=total_of(k)) for k in order)
     spec: Dict[str, Any] = {"layout": "rows", "version": onscreen.SPEC_VERSION, "kicker": _t("f13.kicker"),
@@ -1880,13 +2166,22 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
     heads = [long_head, _t("f13.ch.short", subj=subj, lead=lead_txt)]
 
     def items(kind: str, *, value: bool) -> str:
+        """Every move of `kind` the record carries, then (news-v15) how many of the kind's count it leaves
+        out — "Delta Air Lines; Macy's; and 5 more" ("Uber and 5 more" for one bare name), as the hook,
+        narration, cards and image say: a paragraph listing two of seven never reads as the whole kind."""
         out = []
         for mv in by[kind]:
             if value and mv.value_usd:
                 out.append(_t("f13.item.value", co=mv.company.name, value=money_words(mv.value_usd)))
             else:
                 out.append(mv.company.name)
-        return "; ".join(out)
+        rest = total_of(kind) - len(by[kind])
+        if rest <= 0:
+            return "; ".join(out)
+        tail = _t("f13.p.rest", k=rest)
+        if len(out) == 1 and out[0] == by[kind][0].company.name:
+            return f"{out[0]} {tail}"
+        return "; ".join([*out, tail])
 
     para_of = {"newly_reported": lambda: _t("f13.p.new", items=items("newly_reported", value=True)),
                "no_longer_reported": lambda: _t("f13.p.gone", items=items("no_longer_reported", value=False)),
@@ -1896,8 +2191,6 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
     paras = [para_of[k]() for k in ranked[:3]] + [_t("f13.p.explainer")]
     yt = ([_t("f13.yt.of", filer=filer, lead=lead_txt)] if poss is None
           else [_t("f13.yt.poss", filer_s=poss, lead=lead_txt)]) + [_t("f13.yt.min", lead=lead_txt)]
-    alt = [_t("f13.alt.section", heading=sec["heading"],
-              items=", ".join(r["cells"][0] for r in sec["rows"])) for sec in sections][:3]
     return _Parts(hook=hook, lines=[l1, l2, l3, l4], cards=[c1, c2, c3, c4], opening=opening, image_spec=spec,
                   alt_title=subj, alt_paragraphs=alt, source=rules.source_label(rec), as_of=as_of,
                   image_headlines=heads, image_paragraphs=paras, video_headlines=heads, video_paragraphs=paras,
@@ -2168,7 +2461,7 @@ def _stake_background(text: Any, names: Sequence[str]) -> Optional[str]:
         return None
     folded = fold(_masked(text, _mask_re(names)))
     if any(rx.search(folded) for rx in (copy_rules.BANNED_COPY, copy_rules.FORECAST_COPY, NEWS_BANNED_RE,
-                                         STAKES_BANNED_RE)):
+                                         STAKES_BANNED_RE, STAKE_CLAIM_RE)):
         return None
     if _names_a_person(text) or scan_text("stake.background", text):
         return None
@@ -2214,8 +2507,15 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
             raise NewsTemplateRefused("slot_rejected", f"{what}: {problem or 'too long to draw whole'}")
     inv_sp, ee_sp = spoken_company(inv), spoken_company(ee)
     amt, amt_s = money_words(rec.value_usd), money_image(rec.value_usd)
-    h_ids = [f"st.h.{basis}"] + (["st.h.carrying_value.short"] if basis == "carrying_value" else []) + (
-        [f"st.h.fair_value.short.{'of' if possessive(inv) is None else 'poss'}"] if basis == "fair_value" else [])
+    # news-v17: a carrying or fair value is the SOURCE's figure, never "{inv} reported its …" (the source may
+    # be another filer's: a subsidiary's 10-Q) — the stake's possessive form, its ".of" twin for "Moody's"
+    poss = "of" if possessive(inv) is None else "poss"
+    if basis == "carrying_value":
+        h_ids = [f"st.h.carrying_value.{poss}", f"st.h.carrying_value.short.{poss}"]
+    elif basis == "fair_value":
+        h_ids = [f"st.h.fair_value.{poss}"]
+    else:
+        h_ids = [f"st.h.{basis}"]
     h_sp = [_t(i, inv=inv_sp, inv_s=possessive(inv_sp), ee=ee_sp, amt=amt) for i in h_ids]
     h_cap = [_t(i, inv=inv, inv_s=possessive(inv), ee=ee, amt=amt) for i in h_ids]
     h_img = [_t(i, inv=inv, inv_s=possessive(inv), ee=ee, amt=amt_s) for i in h_ids]
@@ -2263,8 +2563,17 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
     inv_s = possessive(inv)
     value_head = (_t("st.open.value.poss", inv_s=inv_s, ee=ee) if inv_s is not None
                   else _t("st.open.value.of", inv=inv, ee=ee))
-    head = (_t(f"st.open.{basis}", inv=inv, ee=ee) if basis in ("invested", "committed_up_to") else value_head)
-    opening = {"kicker": _t("st.kicker"), "logos": [inv_sym], "figure": amt_s, "headline": head}
+    # news-v12: the cover (TikTok's and Instagram's pinned frame) carries the basis and as-of date in its
+    # chip, drawn over the figure ("Committed up to · as of Nov 18, 2025" — news-v13: "as of", the date is
+    # the source's or the period's, never the deal's or a deadline), and a headline that never reads as
+    # the stake's value today ("… committed up to this amount to …", "… stake in … as of that date")
+    if basis in ("invested", "committed_up_to"):
+        head = _t(f"st.open.{basis}", inv=inv, ee=ee)
+    else:
+        head = (_t("st.open.dated.poss", inv_s=inv_s, ee=ee) if inv_s is not None
+                else _t("st.open.dated.of", inv=inv, ee=ee))
+    chip = _t("st.open.chip", basis_title=_t(f"st.c2.{basis}.title"), as_of_img=as_of_img)
+    opening = {"kicker": _t("st.kicker"), "logos": [inv_sym], "chip": chip, "figure": amt_s, "headline": head}
     long_heads = [_t("st.ch.long", h=h, as_of_cap=as_of_cap, source=source) for h in h_cap]
     heads = long_heads + [_t("st.ch.short", h=h, as_of_cap=as_of_cap) for h in h_cap]
     background = _stake_background(rec.background, [inv, ee, source] + ([investee.name] if investee else []))
@@ -2419,17 +2728,24 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
         _name_slot(m.company.name, "member name")
     # A member's segment fact: shown and narrated only when it passes the slot rules, fits a tile
     # line and is recent — otherwise the member stays, without the fact (never guessed).
+    # news-v16: "recent" = still possibly the company's latest fiscal year at the run (THEME_FACT_LATE_MONTH)
+    # and no more than THEME_FACT_SPREAD_YEARS older than the newest fact kept beside it.
+    oldest = run_date.year - (THEME_FACT_MAX_YEARS if run_date.month < THEME_FACT_LATE_MONTH
+                              else min(THEME_FACT_MAX_YEARS, 1))
     facts: List[Tuple[rules.ThemeMember, str, Optional[str]]] = []
     for m in members:
         seg, fy = m.top_segment, m.fiscal_year
-        if seg is None or fy is None or not fy.isdigit():
+        if seg is None or fy is None or not fy.isascii() or not fy.isdigit():
             continue
-        if not run_date.year - THEME_FACT_MAX_YEARS <= int(fy) <= run_date.year:
+        if not oldest <= int(fy) <= run_date.year:
             continue
         if (_slot_problem(seg) or len(seg) > THEME_SEGMENT_MAX_CHARS
                 or _char_lines(seg, GRID_LINE_WORD_MAX_CHARS) > GRID_MAX_LINES):
             continue
         facts.append((m, seg, pct(m.top_segment_share) if m.top_segment_share is not None else None))
+    if facts:
+        newest = max(int(f[0].fiscal_year) for f in facts)
+        facts = [f for f in facts if int(f[0].fiscal_year) >= newest - THEME_FACT_SPREAD_YEARS]
     if len(facts) < THEME_MIN_FACTS:
         raise NewsTemplateRefused("too_few_rows", f"fewer than {THEME_MIN_FACTS} members with a segment fact")
     theme_sp = spoken_company(theme)
@@ -2443,21 +2759,26 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
     def line_of(group: Sequence[Tuple[rules.ThemeMember, str, Optional[str]]]) -> str:
         m1, m1_s, g1 = sp(group[0])
         if len(group) == 1:
-            return _t(f"th.one.{'poss' if m1_s else 'of'}", m1=m1, m1_s=m1_s, g1=g1)
+            # news-v12: the fact's own fiscal year (a fact may be THEME_FACT_MAX_YEARS old: never "latest")
+            return _t(f"th.one.{'poss' if m1_s else 'of'}", m1=m1, m1_s=m1_s, g1=g1, fy=group[0][0].fiscal_year)
+        # news-v16: a pair says its fiscal year too — and only facts of ONE fiscal year share a line
+        if group[0][0].fiscal_year != group[1][0].fiscal_year:
+            raise NewsTemplateRefused("record_invalid", "a narration pair of two fiscal years")
         m2, m2_s, g2 = sp(group[1])
         return _t(f"th.pair.{'poss' if m1_s else 'of'}.{'poss' if m2_s else 'of'}",
-                  m1=m1, m1_s=m1_s, g1=g1, m2=m2, m2_s=m2_s, g2=g2)
+                  m1=m1, m1_s=m1_s, g1=g1, m2=m2, m2_s=m2_s, g2=g2, fy=group[0][0].fiscal_year)
 
     def fits(text: str) -> bool:
         return LINE_WORDS[0] <= _words(text) <= LINE_WORDS[1]
 
-    # Narration: the facts in theme order, two to a line when the pair fits, at most three lines and
-    # THEME_NARRATED_MAX facts; a fact whose own line cannot fit is not narrated.
+    # Narration: the facts in theme order, two to a line when they share a fiscal year and the pair fits,
+    # at most three lines and THEME_NARRATED_MAX facts; a fact whose own line cannot fit is not narrated.
     narrated = facts[:THEME_NARRATED_MAX]
     groups: List[Tuple[Tuple[rules.ThemeMember, str, Optional[str]], ...]] = []
     i = 0
     while i < len(narrated) and len(groups) < 3:
-        if i + 1 < len(narrated) and fits(line_of(narrated[i:i + 2])):
+        if (i + 1 < len(narrated) and narrated[i][0].fiscal_year == narrated[i + 1][0].fiscal_year
+                and fits(line_of(narrated[i:i + 2]))):
             groups.append(tuple(narrated[i:i + 2]))
             i += 2
         elif fits(line_of(narrated[i:i + 1])):
@@ -2483,16 +2804,16 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
     def card_of(group: Sequence[Tuple[rules.ThemeMember, str, Optional[str]]]) -> Tuple[str, str]:
         # a title names the members only when it fits CARD_TITLE_MAX_WORDS and every word can be drawn
         # whole in the title's style; else the generic title, the names in the (wider-reaching) body
-        a, s1 = group[0][0].company.name, group[0][1]
+        a, s1, fy = group[0][0].company.name, group[0][1], group[0][0].fiscal_year
         if len(group) == 1:
             if _longest_word(a) > CARD_TITLE_WORD_MAX_CHARS:
-                return _t("th.c.one.title.min"), _t("th.c.one.body.min", m1=a, g1=s1)
-            return _t("th.c.one.title", m1=a), _t("th.c.one.body", g1=s1)
-        b, s2 = group[1][0].company.name, group[1][1]
+                return _t("th.c.one.title.min"), _t("th.c.one.body.min", m1=a, g1=s1, fy=fy)
+            return _t("th.c.one.title", m1=a), _t("th.c.one.body", g1=s1, fy=fy)
+        b, s2 = group[1][0].company.name, group[1][1]       # a pair shares one fiscal year (line_of)
         title = _t("th.c.pair.title", m1=a, m2=b)
         if _words(title) > CARD_TITLE_MAX_WORDS or _longest_word(title) > CARD_TITLE_WORD_MAX_CHARS:
-            return _t("th.c.pair.title.min"), _t("th.c.pair.body.min", m1=a, g1=s1, m2=b, g2=s2)
-        return title, _t("th.c.pair.body", g1=s1, g2=s2)
+            return _t("th.c.pair.title.min"), _t("th.c.pair.body.min", m1=a, g1=s1, m2=b, g2=s2, fy=fy)
+        return title, _t("th.c.pair.body", g1=s1, g2=s2, fy=fy)
 
     lines = [[line_of(g)] for g in groups] + ([[explainer]] if len(groups) < 3 else []) + [[grouping]]
     cards = [card_of(g) for g in groups] + (
@@ -2517,8 +2838,15 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
         tiles.append(tile)
     sfx = ".part" if part else ""
     fill = {"theme": theme, "n": n, "m": size}
+    # news-v16: a tile line names no year (its width is proven at GRID_MAX_LINES), so the subtitle says the
+    # fiscal year(s) of the facts the tiles draw — at most two (THEME_FACT_SPREAD_YEARS), never one implied
+    years = sorted({fact_of[t["logo"]][0].fiscal_year for t in tiles if "line" in t}, key=int)
+    if len(years) > 2 or (years and int(years[-1]) - int(years[0]) > THEME_FACT_SPREAD_YEARS):
+        raise NewsTemplateRefused("record_invalid", "the tiles' facts span more fiscal years than one subtitle states")
+    fys = years[0] if len(years) == 1 else (_t("th.fys.2", a=years[0], b=years[1]) if years else None)
+    subtitle = (_t(f"th.img.sub{sfx}.fy", **fill, fys=fys) if fys is not None else _t(f"th.img.sub{sfx}", **fill))
     spec: Dict[str, Any] = {"layout": "grid", "version": onscreen.SPEC_VERSION, "kicker": _t("th.kicker"),
-                            "title": theme, "subtitle": _t(f"th.img.sub{sfx}", **fill), "tiles": tiles}
+                            "title": theme, "subtitle": subtitle, "tiles": tiles}
     if n > len(tiles):      # every other LISTED member (the long captions list them); never the gated ones
         spec["more"] = _t("th.img.more", k=n - len(tiles))
     first = drawable[0].company           # the cover's logo is the first tile's (among the image's keys)
@@ -2529,8 +2857,9 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
     each = ".each" if len(facts) == n else ""
     heads = [_t(f"th.ch.long{sfx}{each}", **fill), _t(f"th.ch.short{sfx}", **fill)] + (
         [_t(f"th.ch.min{sfx}", **fill)] if size is not None else [])
-    items = "; ".join(_t("th.item.share", co=f[0].company.name, seg=f[1], share=f[2]) if f[2] is not None
-                      else _t("th.item", co=f[0].company.name, seg=f[1]) for f in facts)
+    items = "; ".join(_t("th.item.share", co=f[0].company.name, seg=f[1], share=f[2], fy=f[0].fiscal_year)
+                      if f[2] is not None else _t("th.item", co=f[0].company.name, seg=f[1], fy=f[0].fiscal_year)
+                      for f in facts)
     members_id = "th.p.members.part" if part else ("th.p.members" if size == n else "th.p.members.some")
     paras = [_t(members_id, **fill, names="; ".join(m.company.name for m in members)),
              _t("th.p.facts", items=items), grouping]
@@ -2543,7 +2872,8 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
         alt_body = _t("th.alt.body.all", n=n, theme=theme)
     with_line = sum(1 for t in tiles if "line" in t)
     if with_line:
-        alt_body += " " + (_t("th.alt.segs.each") if with_line == len(tiles) else _t("th.alt.segs", j=with_line))
+        alt_body += " " + (_t("th.alt.segs.each", fys=fys) if with_line == len(tiles)
+                           else _t("th.alt.segs", j=with_line, fys=fys))
     yt = ([_t("th.yt.part", **fill), _t("th.yt.part.short", **fill)] if part
           else [_t("th.yt", **fill)] + ([_t("th.yt.short", **fill)] if size is not None else []))
     return _Parts(hook=hook, lines=lines, cards=cards, opening=opening, image_spec=spec,
@@ -3249,6 +3579,9 @@ def _validate_series_words(series: str, f: str, text: str, folded: str, v: Calla
         m = STAKES_BANNED_RE.search(folded)
         if m:
             v(f, "series_word", f"not the stake's own verb: {m.group(0)[:30]}")
+        m = STAKE_CLAIM_RE.search(folded)
+        if m:
+            v(f, "series_word", f"a worth or rank claim about a company: {m.group(0)[:30]}")
 
 
 _CONGRESS_COUNT_RE = re.compile(r"([0-9]{1,3}) members of Congress disclosed\b")
@@ -3372,4 +3705,8 @@ __all__ = [
     "THEME_SEGMENT_MAX_CHARS", "THEME_NARRATED_MAX", "THEME_MIN_FACTS", "month_name", "eps_image", "eps_words",
     # review round 9
     "revenue_pair", "REVENUE_MAX_PLACES", "REVENUE_GAP_TOLERANCE", "THEME_TITLE_BANNED_RE", "THEME_TITLE_BANNED_ROWS",
+    # news-v12 (business days since news-v14)
+    "INSIDER_LATE_BUSINESS_DAYS",
+    # news-v16
+    "THEME_FACT_SPREAD_YEARS", "THEME_FACT_LATE_MONTH", "STAKE_CLAIM_ROWS", "STAKE_CLAIM_RE",
 ]

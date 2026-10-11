@@ -51,6 +51,9 @@ Pinned here:
     fails the week, the EPS / revenue gates and their boundaries, one report per company;
   - theme_explainer: names and ticker lists only, the full member list, a segment fact only where
     certain, the lookup and evaluation bounds.
+* review round 15 (2026-10-10): Money Map's gross and operating profit are the statement's OWN lines
+  (never revenue − cost of sales or gross − operatingExpenses), cross-checked to rounding; a theme's
+  size counts COMPANIES (GOOG + GOOGL, one CIK, BRK.B / BRK-B are one). Every one mutation-checked.
 """
 
 from __future__ import annotations
@@ -1168,10 +1171,12 @@ def facts_fn(by_symbol=None, default=None):
     return facts
 
 
+# The statement's own gross profit and operating income (review round 15: the bars are published
+# AS REPORTED, from these lines; profit power's margins in `profit()` are the same lines, rounded).
 INCOME_AAPL = [{"fiscalYear": "2025", "date": "2025-09-27", "reportedCurrency": "USD", "revenue": 350e9,
-                "netIncome": 95e9},
+                "grossProfit": 150e9, "operatingIncome": 90e9, "netIncome": 95e9},
                {"fiscalYear": "2024", "date": "2024-09-28", "reportedCurrency": "USD", "revenue": 300e9,
-                "netIncome": 90e9}]
+                "grossProfit": 130e9, "operatingIncome": 80e9, "netIncome": 90e9}]
 
 
 def money_world(*, bd=None, pp=None, facts=None, income=None, profiles=None):
@@ -1249,11 +1254,64 @@ async def test_money_map_breakdown_outage_is_unavailable(seed_aapl):
     assert err.value.reason == "revenue_unavailable"
 
 
+@pytest.mark.parametrize("point, gross, operating", [
+    ({"gross_margin": 50.0}, None, 90e9),                     # each line is checked on its own: operating
+    ({"operating_margin": 30.0}, 150e9, None),                # profit no longer waits on the gross bar
+    ({"gross_margin": 50.0, "operating_margin": 30.0}, None, None),
+    ({"gross_margin": None, "operating_margin": None}, None, None),
+])
 @pytest.mark.asyncio
-async def test_unverifiable_bars_are_none_never_guessed(seed_aapl):
-    world = money_world(pp=profit(point={"gross_margin": 50.0}))
+async def test_unverifiable_bars_are_none_never_guessed(seed_aapl, point, gross, operating):
+    world = money_world(pp=profit(point=point))
     rec = (await run("money_map", world.pop("fmp"), **world)).records[0]
-    assert rec.gross_profit_usd is None and rec.operating_profit_usd is None and rec.net_income_usd == 95e9
+    assert (rec.gross_profit_usd, rec.operating_profit_usd, rec.net_income_usd) == (gross, operating, 95e9)
+
+
+def _probe_world(*, bd=None, row=None, point=None):
+    """Review round 15's probe: revenue $100B, cost of sales $75B, FMP `operatingExpenses` $21B, but
+    the statement's own operating income is $3.1B (3.1%) — e.g. a $0.9B restructuring charge FMP
+    leaves out of operatingExpenses. gross − operatingExpenses = $4.0B sits 0.9 point from the
+    reported margin, inside the old 1-point tolerance, and was published 29% high "as reported"."""
+    breakdown_over = dict(revenue_sources=[src("iPhone", 60e9), src("Services", 30e9), src("Mac", 10e9)],
+                          cost_of_sales=75e9, operating_expense=21e9, tax=0.5e9, net_income=2e9,
+                          reported_revenue=100e9)
+    income_row = {"fiscalYear": "2025", "date": "2025-09-27", "reportedCurrency": "USD", "revenue": 100e9,
+                  "grossProfit": 25e9, "operatingIncome": 3.1e9, "netIncome": 2e9}
+    margins = {"gross_margin": 25.0, "operating_margin": 3.1, "net_margin": 2.0}
+    return money_world(bd=breakdown(**{**breakdown_over, **(bd or {})}), income=[{**income_row, **(row or {})}],
+                       pp=profit(point={**margins, **(point or {})}))
+
+
+@pytest.mark.parametrize("bd, row, point, gross, operating", [
+    # The probe: the statement's $3.1B, never the derived $4.0B.
+    ({}, {}, {}, 25e9, 3.1e9),
+    # Only a derived figure exists (no operating income line, or FMP's 0 fill): omitted, even when
+    # gross − operatingExpenses would match a margin exactly.
+    ({}, {"operatingIncome": None}, {"operating_margin": 4.0}, 25e9, None),
+    ({}, {"operatingIncome": 0}, {"operating_margin": 0.0}, 25e9, None),
+    ({}, {"operatingIncome": "3.1e9"}, {}, 25e9, None),
+    # A reported line that disagrees with profit power beyond rounding (0.3 point): omitted.
+    ({}, {}, {"operating_margin": 3.4}, 25e9, None),
+    ({}, {"operatingIncome": 3.1234e9}, {"operating_margin": 3.12}, 25e9, 3.1234e9),   # profit power's rounding
+    # Larger than what it is carved from (the statement's own gross profit, gross bar not drawn).
+    ({"cost_of_sales": None}, {"operatingIncome": 26e9}, {"operating_margin": 26.0}, None, None),
+    # A reported operating LOSS is published as reported.
+    ({}, {"operatingIncome": -5e9}, {"operating_margin": -5.0}, 25e9, -5e9),
+    # Gross profit too: the statement's line, never revenue − cost of sales ($24.5B here) …
+    ({"cost_of_sales": 75.5e9}, {}, {}, 25e9, 3.1e9),
+    # … omitted when the statement has none — and the operating bar no longer depends on it.
+    ({}, {"grossProfit": None}, {}, None, 3.1e9),
+    # A company with no cost-of-sales line reports no gross profit (FMP fills revenue − 0).
+    ({"cost_of_sales": 0.0}, {"grossProfit": 100e9}, {"gross_margin": 100.0}, None, 3.1e9),
+], ids=["probe_reported", "no_line", "zero_fill", "string", "off_by_0_3pt", "rounding", "above_gross",
+        "operating_loss", "gross_reported", "no_gross_line", "no_cost_of_sales"])
+@pytest.mark.asyncio
+async def test_money_map_bars_are_as_reported_never_derived(seed_aapl, bd, row, point, gross, operating):
+    world = _probe_world(bd=bd, row=row, point=point)
+    got = await run("money_map", world.pop("fmp"), **world)
+    (rec,) = got.records
+    assert (rec.gross_profit_usd, rec.operating_profit_usd, rec.revenue_usd, rec.net_income_usd) == \
+        (gross, operating, 100e9, 2e9)
 
 
 @pytest.mark.asyncio
@@ -5268,17 +5326,28 @@ async def test_a_theme_record_carries_its_full_ticker_count():
     assert R.record_to_dict(rec)["theme_size"] == 8
 
 
+_EIGHT = ["NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC", "GOOG", "GOOGL"]
+
+
 @pytest.mark.parametrize("tickers, profiles_over, members, size", [
     (["NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC", "GOOGL"], {}, 7, 7),                   # nothing dropped
     (["NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC", "GOOGL"], {"INTC": {"exchange": "OTC"}}, 6, 7),  # rr9 probe
     (["NVDA", " nvda ", "AMD", "AVGO", "QCOM", "MRVL", "INTC"], {}, 6, 6),                   # a duplicate spelling
-    (["NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC", "GOOG", "GOOGL"], {}, 7, 8),             # two classes, one member
-], ids=["complete", "otc_member_dropped", "duplicate", "share_classes"])
+    # Review round 15: theme_size counts COMPANIES. Two classes of one issuer are one company listed
+    # once — "7 of the 8 companies" claimed an eighth that does not exist (the old (7, 8)).
+    (_EIGHT, {}, 7, 7),                                         # same display name
+    (_EIGHT, {"GOOGL": {"companyName": "Google Inc.", "cik": issuer_cik("GOOG")}}, 7, 7),   # same CIK, other name
+    (_EIGHT, {"GOOGL": {"exchange": "OTC"}}, 7, 7),           # the other class fails a gate: still one company
+    (_EIGHT, {"GOOGL": {"companyName": "Google Inc."}}, 8, 8),  # another name AND another CIK: two companies
+    (["NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC", "BRK.B", "BRK-B"],
+     {"BRK-B": prof("BRK-B", "Berkshire Hathaway Inc.")}, 7, 7),                             # one ticker, two spellings
+], ids=["complete", "otc_member_dropped", "duplicate", "share_classes", "share_classes_same_cik",
+        "share_class_gated", "two_companies", "dot_dash_spelling"])
 @pytest.mark.asyncio
 async def test_theme_size_is_counted_before_any_gate(tickers, profiles_over, members, size):
     profiles = theme_profiles()
     for sym, over in profiles_over.items():
-        profiles[sym] = {**profiles[sym], **over}
+        profiles[sym] = {**profiles.get(sym, {}), **over}
     got = await trun(theme_world([theme(tickers=tickers, blocked_tickers=[])], profiles=profiles))
     (rec,) = got.records
     assert (len(rec.members), rec.theme_size) == (members, size)
@@ -5456,11 +5525,14 @@ def _hd_member_week():
     return rows, profiles
 
 
+# The age rows pin congress_start to the 119th's (2025-01-03), never `_KEEP`: the shipped file's own
+# congress_start moves at each new Congress (the January 2027 refresh writes 2027-01-03, later than
+# these fetched_on dates, which would refuse the rows for the wrong reason — post-commit check, 2026-10-10).
 @pytest.mark.parametrize("fetched_on, congress_start, named, error", [
-    ("2026-10-09", _KEEP, True, False),           # the shipped roster: 38 days before RUN, the 119th
-    ("2026-05-01", _KEEP, True, True),            # 199 days: still named, ERROR (refresh it)
-    ("2025-10-12", _KEEP, True, True),            # 400 days: the last day it is fresh
-    ("2025-10-11", _KEEP, False, True),           # 401 days: the series is refused
+    ("2026-10-09", "2025-01-03", True, False),    # 38 days before RUN, holding the 119th
+    ("2026-05-01", "2025-01-03", True, True),     # 199 days: still named, ERROR (refresh it)
+    ("2025-10-12", "2025-01-03", True, True),     # 400 days: the last day it is fresh
+    ("2025-10-11", "2025-01-03", False, True),    # 401 days: the series is refused
     ("2019-01-01", "2017-01-03", False, True),
     (None, _KEEP, False, True),                   # no fetched_on: its age is unknown
     ("not-a-date", _KEEP, False, True),

@@ -429,9 +429,20 @@ def test_the_cold_path_judges_every_row_before_writing_it(labels):
     assert len(env["articles"]) == 37
     assert all("ai_model" not in a for a in env["articles"])
     assert all(a["summary_bullets"] and a["ai_processed"] for a in env["articles"])
-    # The news-tone log still hears every label, once, before the write.
+    # The news-tone log hears every label, once, before the write — and the 13 one-company
+    # stories the feed hides are marked off the Market line (owner, 2026-10-10: "match the
+    # feed"), so the log keeps exactly the 37 stories the feed shows, with their confidence.
     [(scope, logged, model_name)] = labels
     assert scope == MARKET_SCOPE and len(logged) == 50 and model_name == MODEL
+    hidden = [r for r in logged if r["relevance"] == "passing"]
+    assert len(hidden) == 13 and all("Aramco" in r["headline"] for r in hidden)
+    assert all(r["relevance"] is None for r in logged if "Aramco" not in r["headline"])
+    assert all(r["sentiment_confidence"] is not None for r in logged), "confidence is carried"
+    from app.services.news_sentiment_trend_service import build_log_rows
+
+    rows = build_log_rows(MARKET_SCOPE, logged, now=datetime.now(timezone.utc), max_age_hours=None)
+    assert sum(1 for r in rows if r["skip_reason"] is None) == 37, "the Market line counts what the Market feed shows"
+    assert sum(1 for r in rows if r["skip_reason"] == "off_topic") == 13
 
 
 def test_the_cold_response_matches_the_next_cached_read(labels):
@@ -931,12 +942,17 @@ def test_one_call_carries_the_market_schema_and_the_scope_comes_back(labels):
     assert [out[0]["scope"], out[1]["scope"]] == ["company", "market"]
 
 
-def test_a_ticker_call_keeps_the_shared_schema(labels):
+def test_a_ticker_call_asks_relevance_not_scope(labels):
+    """A ticker scope asks `relevance` (2026-10-10, the News Tone gate), never the Market's
+    `scope`; a blank scope keeps the shared schema."""
     cap = _CapModel([_item("company"), _item("market")])
     svc = object.__new__(NewsCacheService)
     svc.gemini = cap
     asyncio.run(svc._batch_enrich_articles(_ARTICLES, ticker="ORCL"))
-    assert cap.calls[0]["response_schema"] is NewsCacheService._ENRICHMENT_SCHEMA
+    schema = cap.calls[0]["response_schema"]
+    assert schema is NewsCacheService._SCOPED_ENRICHMENT_SCHEMA
+    assert "relevance" in schema["items"]["required"] and "scope" not in schema["items"]["properties"]
+    assert NewsCacheService.enrichment_schema_for("") is NewsCacheService._ENRICHMENT_SCHEMA
 
 
 @pytest.mark.parametrize("raw,expected", [

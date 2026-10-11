@@ -7,7 +7,7 @@ with a jump at the boundary.
 
 Since 2026-09-28 the backfill sends the LIVE enrichment request itself
 (`news_sentiment_backfill_service.label_request` → `news_cache_service.build_enrichment_prompt`,
-live schema, live default temperature) and keeps only the label. Its first design — a shorter
+live schema, live temperature — 0 since 2026-10-10, `news_cache_service.ENRICHMENT_TEMPERATURE`) and keeps only the label. Its first design — a shorter
 sentiment-only prompt at temperature 0 — passed on 2026-09-27 (84.7% vs baseline 81.7%) and
 failed on the next day's 300 articles (79.7% vs 85.7%), leaning bullish: close to the edge,
 and systematically different. The same request removes that difference by construction; this
@@ -199,7 +199,10 @@ def verdict(backfill_rate: float, baseline_rate: Optional[float]) -> str:
     return "BELOW TARGET"
 
 
-async def relabel(rows: List[Dict[str, Any]], *, batch: Optional[int] = None) -> List[Tuple[str, Optional[str]]]:
+async def relabel(
+    rows: List[Dict[str, Any]], *, batch: Optional[int] = None,
+    profiles: Optional[Dict[str, Tuple[Optional[str], bool]]] = None,
+) -> List[Tuple[str, Optional[str]]]:
     from app.services.news_llm import generate_news_json, is_content_refusal
     from app.services.news_sentiment_backfill_service import (
         LABEL_BATCH,
@@ -218,7 +221,8 @@ async def relabel(rows: List[Dict[str, Any]], *, batch: Optional[int] = None) ->
         nonlocal refused
         try:
             result = await generate_news_json(
-                **label_request(scope, chunk),
+                **label_request(scope, chunk, company_name=(profiles or {}).get(scope, (None, False))[0],
+                                is_etf=(profiles or {}).get(scope, (None, False))[1]),
                 usage_tag="sentiment_backfill_calibration",
                 cache=False,
             )
@@ -265,6 +269,11 @@ async def main(argv: Optional[Sequence[str]] = None) -> int:
     secrets = [settings.GEMINI_API_KEY, getattr(settings, "NEWS_LLM_API_KEY", None),
                getattr(settings, "SUPABASE_SERVICE_ROLE_KEY", None)]
     rows = read_labelled_rows(get_supabase(), limit=args.limit, scope=args.scope)
+    # The backfill sends each scope's company name / ETF flag (`scope_profile`): read them
+    # BEFORE the tripwire, so the request is the backfill's own.
+    from app.services.news_cache_service import scope_profile
+
+    profiles = {sc: await scope_profile(get_supabase(), sc) for sc in {r["scope"] for r in rows}}
     install_supabase_tripwire()
     cfg = news_llm_config()
     print(f"news model: provider={cfg.provider} model={cfg.model}; {len(rows)} live-labelled articles")
@@ -273,7 +282,7 @@ async def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     candidate_live = None
     try:
-        pairs = await relabel(rows)
+        pairs = await relabel(rows, profiles=profiles)
         baseline = None
         if not args.no_baseline:
             with gemini_live_labeller():

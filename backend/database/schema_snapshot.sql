@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zlDPqhz7KayznnNf5tIxDf5mGPKbbFPp0r8DFc8cfeYR1PXvdPImNvzi9dQ4ChT
+\restrict ZeTPGBfGG6aT8CzF0YySPGJVxlhht8nUkPjWwE0T6ygRuWDkw4bihhlYbQcHZmF
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1400,6 +1400,7 @@ CREATE TABLE public.news_sentiment_backfill (
     last_run_at timestamp with time zone,
     last_error text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_failed_at timestamp with time zone,
     CONSTRAINT news_sentiment_backfill_articles_check CHECK ((articles >= 0)),
     CONSTRAINT news_sentiment_backfill_attempts_check CHECK ((attempts >= 0)),
     CONSTRAINT news_sentiment_backfill_labels_check CHECK ((labels >= 0)),
@@ -1417,6 +1418,13 @@ COMMENT ON TABLE public.news_sentiment_backfill IS 'One row per watched ticker f
 
 
 --
+-- Name: COLUMN news_sentiment_backfill.last_failed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_sentiment_backfill.last_failed_at IS 'When the scope last failed (a failed finish, or a lapsed lease taken over). A scope at the attempt cap is retried once this is 24 hours old. Cleared by done / unsupported; a deferral leaves it alone.';
+
+
+--
 -- Name: claim_sentiment_backfill(uuid, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1425,23 +1433,32 @@ CREATE FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p
     SET search_path TO 'public', 'pg_temp'
     AS $$
     UPDATE public.news_sentiment_backfill b
-       SET status      = 'running',
-           claim_token = p_token,
-           lease_until = now() + make_interval(secs => GREATEST(COALESCE(p_lease_seconds, 300), 60)),
-           attempts    = b.attempts + 1,
-           updated_at  = now()
+       SET status         = 'running',
+           claim_token    = p_token,
+           lease_until    = now() + make_interval(secs => GREATEST(COALESCE(p_lease_seconds, 300), 60)),
+           attempts       = b.attempts + 1,
+           -- Taking over a LAPSED lease means the last worker died without finishing: that
+           -- counts as a failure for the cap's clock (a scope that kills the worker must not
+           -- be retried every lease).
+           last_failed_at = CASE WHEN b.status = 'running' THEN now() ELSE b.last_failed_at END,
+           updated_at     = now()
      WHERE b.scope IN (
            SELECT s.scope
              FROM public.news_sentiment_backfill s
             WHERE s.next_run_at <= now()
-              AND s.status IN ('queued', 'done', 'failed', 'running')
+              -- 'unsupported' too: its next_run_at is the 30-day re-check.
+              AND s.status IN ('queued', 'done', 'failed', 'running', 'unsupported')
               -- A running row is claimable only once its lease has lapsed (a dead worker).
               AND (s.status <> 'running' OR s.lease_until IS NULL OR s.lease_until < now())
-              -- A scope that keeps failing is tried at most once a day, never dropped.
+              -- A scope that keeps failing is tried at most once a day after its last
+              -- failure, never dropped; a deferral does not move this clock.
               AND (s.attempts < GREATEST(COALESCE(p_max_attempts, 5), 1)
-                   OR s.updated_at < now() - interval '24 hours')
-              -- Only tickers someone still watches.
-              AND EXISTS (SELECT 1 FROM public.watchlist_items w WHERE w.ticker = s.scope)
+                   OR s.last_failed_at IS NULL
+                   OR s.last_failed_at < now() - interval '24 hours')
+              -- Only tickers someone still watches — normalized exactly like discover and
+              -- enqueue store the scope, or a legacy 'nvda ' row is never claimable.
+              AND EXISTS (SELECT 1 FROM public.watchlist_items w
+                           WHERE upper(btrim(w.ticker)) = s.scope)
             ORDER BY s.next_run_at ASC
             LIMIT LEAST(GREATEST(COALESCE(p_limit, 1), 1), 10)
             FOR UPDATE SKIP LOCKED
@@ -1454,7 +1471,7 @@ $$;
 -- Name: FUNCTION claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer) IS 'Claims up to p_limit (max 10) due, still-watched scopes under token p_token with a lease of p_lease_seconds (min 60) on the database clock. INVOKER: its only caller is service_role.';
+COMMENT ON FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer) IS 'Claims up to p_limit (max 10) due, still-watched scopes (unsupported ones on their 30-day re-check) under token p_token with a lease of p_lease_seconds (min 60) on the database clock. INVOKER: its only caller is service_role.';
 
 
 --
@@ -1651,9 +1668,11 @@ BEGIN
         SELECT w.scope, 'queued', now(), now()
           FROM wanted w
         ON CONFLICT (scope) DO UPDATE
+           -- Never the run timestamps or the cap's clock: a nudge is not a run.
            SET next_run_at  = LEAST(b.next_run_at, now()),
                requested_at = now(),
-               updated_at   = now()
+               -- A stale 'done' is not a finished history any more.
+               status       = CASE WHEN b.status = 'done' THEN 'queued' ELSE b.status END
          -- Re-adding a covered ticker is a no-op; only a stale or never-finished one moves up.
          WHERE b.status IN ('queued', 'done', 'failed')
            AND (b.covered_to IS NULL OR b.covered_to < v_today - 1)
@@ -1669,7 +1688,7 @@ $$;
 -- Name: FUNCTION enqueue_sentiment_backfill(p_scopes text[]); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.enqueue_sentiment_backfill(p_scopes text[]) IS 'Queues (or pulls forward) up to 100 scopes; a scope covered through yesterday is left alone. Returns rows inserted or moved.';
+COMMENT ON FUNCTION public.enqueue_sentiment_backfill(p_scopes text[]) IS 'Queues (or pulls forward) up to 100 scopes; a scope covered through yesterday is left alone, and a stale done row goes back to queued. Never touches updated_at or the attempt cap''s clock. Returns rows inserted or moved.';
 
 
 --
@@ -1873,23 +1892,29 @@ BEGIN
     END IF;
 
     UPDATE public.news_sentiment_backfill
-       SET status       = p_status,
-           next_run_at  = COALESCE(p_next_run_at, now() + interval '1 day'),
-           covered_from = COALESCE(p_covered_from, covered_from),
-           covered_to   = COALESCE(p_covered_to, covered_to),
-           articles     = GREATEST(COALESCE(p_articles, 0), 0),
-           labels       = GREATEST(COALESCE(p_labels, 0), 0),
+       SET status         = p_status,
+           next_run_at    = COALESCE(p_next_run_at, now() + interval '1 day'),
+           covered_from   = COALESCE(p_covered_from, covered_from),
+           covered_to     = COALESCE(p_covered_to, covered_to),
+           articles       = GREATEST(COALESCE(p_articles, 0), 0),
+           labels         = GREATEST(COALESCE(p_labels, 0), 0),
            -- Success clears the failure count; a deferral gives back the attempt it cost.
-           attempts     = CASE
-                              WHEN p_status IN ('done', 'unsupported') THEN 0
-                              WHEN p_status = 'queued' THEN GREATEST(attempts - 1, 0)
-                              ELSE attempts
-                          END,
-           last_error   = CASE WHEN p_error IS NULL THEN NULL ELSE left(p_error, 500) END,
-           last_run_at  = now(),
-           claim_token  = NULL,
-           lease_until  = NULL,
-           updated_at   = now()
+           attempts       = CASE
+                                WHEN p_status IN ('done', 'unsupported') THEN 0
+                                WHEN p_status = 'queued' THEN GREATEST(attempts - 1, 0)
+                                ELSE attempts
+                            END,
+           -- The cap's clock: moved by a failure only, cleared by success, kept by a deferral.
+           last_failed_at = CASE
+                                WHEN p_status = 'failed' THEN now()
+                                WHEN p_status IN ('done', 'unsupported') THEN NULL
+                                ELSE last_failed_at
+                            END,
+           last_error     = CASE WHEN p_error IS NULL THEN NULL ELSE left(p_error, 500) END,
+           last_run_at    = now(),
+           claim_token    = NULL,
+           lease_until    = NULL,
+           updated_at     = now()
      WHERE scope = p_scope
        AND claim_token = p_token;
     RETURN FOUND;
@@ -1901,7 +1926,7 @@ $$;
 -- Name: FUNCTION finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text) IS 'Closes a run for the holder of p_token: done / failed / unsupported / queued (deferred). false = the claim was lost and nothing was written.';
+COMMENT ON FUNCTION public.finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text) IS 'Closes a run for the holder of p_token: done / failed / unsupported / queued (deferred). Only failed moves last_failed_at. false = the claim was lost and nothing was written.';
 
 
 --
@@ -3649,6 +3674,66 @@ $$;
 
 
 --
+-- Name: authorize(text, text, text, text, text, text[], text[]); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.authorize(role_name text, topic_name text, claims text, sub text, headers text, read_extensions text[], write_extensions text[], OUT read_allowed boolean[], OUT write_allowed boolean[]) RETURNS record
+    LANGUAGE plpgsql
+    AS $$
+declare
+  probe_ids uuid[];
+  ext text;
+  allowed boolean;
+begin
+  -- The probe inserts are rolled back, but they still give the transaction an xid, so it ends
+  -- in a commit. Nothing durable was written, so skip waiting on the WAL flush and sync standbys.
+  -- Set outside the block below, whose rollback would undo it.
+  perform set_config('synchronous_commit', 'off', true);
+
+  -- The RAISE at the end of this block rolls back everything in it.
+  begin
+    probe_ids := array(select gen_random_uuid() from unnest(read_extensions));
+
+    insert into realtime.messages (id, topic, extension, inserted_at, updated_at)
+    select p.id, topic_name, p.extension, now() at time zone 'utc', now() at time zone 'utc'
+    from unnest(probe_ids, read_extensions) as p(id, extension);
+
+    perform set_config('role', role_name, true),
+            set_config('realtime.topic', topic_name, true),
+            set_config('request.jwt.claims', claims, true),
+            set_config('request.jwt.claim.sub', sub, true),
+            set_config('request.jwt.claim.role', role_name, true),
+            set_config('request.headers', headers, true);
+
+    read_allowed := array(
+      select exists(select 1 from realtime.messages m where m.id = p.id)
+      from unnest(probe_ids) with ordinality as p(id, n)
+      order by p.n);
+
+    write_allowed := '{}';
+
+    foreach ext in array write_extensions loop
+      begin
+        insert into realtime.messages (topic, extension, inserted_at, updated_at)
+        values (topic_name, ext, now() at time zone 'utc', now() at time zone 'utc');
+
+        allowed := true;
+      exception when insufficient_privilege then
+        allowed := false;
+      end;
+
+      write_allowed := write_allowed || allowed;
+    end loop;
+
+    raise sqlstate 'RTA01';
+  exception when sqlstate 'RTA01' then
+    null;
+  end;
+end;
+$$;
+
+
+--
 -- Name: broadcast_changes(text, text, text, text, text, record, record, text); Type: FUNCTION; Schema: realtime; Owner: -
 --
 
@@ -3941,6 +4026,76 @@ $$;
 
 
 --
+-- Name: list_changes_sync(name, name, integer, integer); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.list_changes_sync(publication name, slot_name name, max_changes integer, max_record_bytes integer) RETURNS TABLE(wal jsonb, is_rls_enabled boolean, subscription_ids uuid[], errors text[], slot_changes_count bigint)
+    LANGUAGE sql
+    SET log_min_messages TO 'fatal'
+    AS $$
+  WITH pub AS (
+    SELECT
+      concat_ws(
+        ',',
+        CASE WHEN bool_or(pubinsert) THEN 'insert' ELSE NULL END,
+        CASE WHEN bool_or(pubupdate) THEN 'update' ELSE NULL END,
+        CASE WHEN bool_or(pubdelete) THEN 'delete' ELSE NULL END
+      ) AS w2j_actions,
+      coalesce(
+        string_agg(
+          realtime.quote_wal2json(format('%I.%I', schemaname, tablename)::regclass),
+          ','
+        ) filter (WHERE ppt.tablename IS NOT NULL),
+        ''
+      ) AS w2j_add_tables
+    FROM pg_publication pp
+    LEFT JOIN pg_publication_tables ppt ON pp.pubname = ppt.pubname
+    WHERE pp.pubname = publication
+    GROUP BY pp.pubname
+    LIMIT 1
+  ),
+  -- MATERIALIZED ensures the slot is read exactly once.
+  consumed AS MATERIALIZED (
+    SELECT x.*, pub.w2j_add_tables
+    FROM pub,
+         realtime.settled_changes(
+           slot_name, max_changes,
+           'include-pk', 'true',
+           'include-transaction', 'false',
+           'include-timestamp', 'true',
+           'include-type-oids', 'true',
+           'format-version', '2',
+           'actions', pub.w2j_actions,
+           'add-tables', pub.w2j_add_tables
+         ) x
+  ),
+  slot_count AS (
+    SELECT count(*)::bigint AS cnt
+    FROM consumed
+    WHERE consumed.w2j_add_tables <> ''
+  ),
+  rls_filtered AS (
+    SELECT xyz.wal, xyz.is_rls_enabled, xyz.subscription_ids, xyz.errors
+    FROM consumed,
+         realtime.apply_rls(
+           wal := consumed.data::jsonb,
+           max_record_bytes := max_record_bytes
+         ) xyz(wal, is_rls_enabled, subscription_ids, errors)
+    WHERE consumed.w2j_add_tables <> ''
+      AND xyz.subscription_ids[1] IS NOT NULL
+  )
+  SELECT rf.wal, rf.is_rls_enabled, rf.subscription_ids, rf.errors, sc.cnt
+  FROM rls_filtered rf, slot_count sc
+
+  UNION ALL
+
+  SELECT null, null, null, null, sc.cnt
+  FROM slot_count sc
+  WHERE NOT EXISTS (SELECT 1 FROM rls_filtered)
+$$;
+
+
+--
 -- Name: quote_wal2json(regclass); Type: FUNCTION; Schema: realtime; Owner: -
 --
 
@@ -4013,6 +4168,97 @@ BEGIN
       RAISE WARNING 'WarnSendingBroadcastMessage: %', SQLERRM;
   END;
 END;
+$$;
+
+
+--
+-- Name: settled_changes(name, integer, text[]); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.settled_changes(slot_name name, max_changes integer, VARIADIC opts text[]) RETURNS TABLE(lsn pg_lsn, xid xid, data text)
+    LANGUAGE plpgsql
+    AS $$
+declare
+  upto pg_lsn;
+  total bigint;
+  xids xid[];
+  starts bigint[];
+  snapshot pg_snapshot;
+  running_xids xid[];
+  xmax_age int;
+  cut bigint;
+begin
+  -- Each statement in a volatile function takes its own snapshot, which is what lets the
+  -- check below see a writer that was still in flight when the peek ran. Under REPEATABLE
+  -- READ the snapshot never advances, so a deferred change would never be released.
+  if current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'realtime.settled_changes requires READ COMMITTED';
+  end if;
+
+  -- The peek and the read below cover the same WAL, so the read cannot reach a commit the
+  -- check never saw.
+  upto := pg_current_wal_flush_lsn();
+
+  -- One entry per transaction, in commit order: its xid and the position of its first
+  -- change. The peek uses the caller's own options, so max_changes counts exactly what the
+  -- read counts. A non-transactional logical message is emitted as soon as it is decoded,
+  -- tagged with the xid of whatever transaction wrote it, so it does not mark where that
+  -- transaction starts.
+  select coalesce(sum(g.n), 0),
+         array_agg(g.x order by g.first) filter (where g.first is not null),
+         array_agg(g.first order by g.first) filter (where g.first is not null)
+    into total, xids, starts
+    from (
+      select p.xid as x, count(*) as n,
+             min(p.ord) filter (where not case
+               when starts_with(p.data, '{"action":"M"') then (p.data::jsonb->>'transactional')::boolean is false
+               else false
+             end) as first
+      from pg_logical_slot_peek_changes(slot_name, upto, max_changes, variadic opts)
+           with ordinality as p(lsn, xid, data, ord)
+      group by p.xid
+    ) g;
+
+  -- Nothing for the caller, but the slot still has to move past what the peek covered.
+  if total = 0 then
+    perform pg_replication_slot_advance(slot_name, upto);
+    return;
+  end if;
+
+  if xids is not null then
+    -- Taken after the peek is materialized, so a writer that was still in flight during
+    -- decoding is guaranteed to show up here.
+    snapshot := pg_current_snapshot();
+
+    -- A commit record reaches the WAL before the writer leaves the proc array, so a change
+    -- can be decoded while its row is invisible. apply_rls would resolve a policy against a
+    -- row it cannot see and authorize it for nobody, while the read consumed it regardless.
+    --
+    -- xip lists transactions running when the snapshot was taken. It does not cover a writer
+    -- whose xid sits at or beyond xmax, which never appears there, so the horizon is checked
+    -- too. age() counts backwards from the current xid and so compares correctly across
+    -- wraparound.
+    select coalesce(array_agg(running.x::xid), array[]::xid[])
+      into running_xids
+      from pg_snapshot_xip(snapshot) running(x);
+    xmax_age := age(pg_snapshot_xmax(snapshot)::xid);
+
+    select min(u.s) into cut
+      from unnest(xids, starts) as u(x, s)
+      where u.x = any(running_xids) or age(u.x) <= xmax_age;
+  end if;
+
+  -- The read stops right after the commit that brings its count to upto_nchanges, so the
+  -- count of changes in front of the first unsettled transaction stops it just before that
+  -- transaction.
+  if cut is null then
+    return query
+      select p.* from pg_logical_slot_get_changes(slot_name, upto, max_changes, variadic opts) p;
+  elsif cut > 1 then
+    return query
+      select p.* from pg_logical_slot_get_changes(slot_name, upto, (cut - 1)::int, variadic opts) p;
+  end if;
+end;
 $$;
 
 
@@ -7090,14 +7336,14 @@ CREATE TABLE public.chat_starter_answers (
 -- Name: TABLE chat_starter_answers; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.chat_starter_answers IS 'Pre-computed answers to the day''s Ask Cay AI suggestion chips, so tapping one replays a stored answer instead of paying a Gemini turn (and possibly a grounded web search). Keyed on the QUESTION, not the chip slot, because the chip set drifts intraday as the hot-ticker and hot-sector slots track the tape. One ET day of retention: yesterday''s answer to a "today" question is wrong, not merely stale. Written by app/services/chat_starter_warm_service.py; read by the chat streaming endpoint.';
+COMMENT ON TABLE public.chat_starter_answers IS 'Pre-computed answers to the day''s Ask Cay AI suggestion chips, so tapping one replays a stored answer instead of paying a Gemini turn. Keyed on a versioned hash of the QUESTION, not the chip slot, because the chip set drifts intraday as the hot-ticker and hot-sector slots track the tape. One ET day of retention: yesterday''s answer to a "today" question is wrong, not merely stale. Written by app/services/chat_starter_warm_service.py; read by the chat streaming endpoint. (Before 2026-10-02 an answer could rest on a Google-grounded web search; that tier is retired and migration 189 purged its rows.)';
 
 
 --
 -- Name: COLUMN chat_starter_answers.question_hash; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.chat_starter_answers.question_hash IS 'SHA-256 of the NFKC-normalised, case-folded question text. Fixed-width key; the raw question is kept alongside so a collision would be visible rather than silent.';
+COMMENT ON COLUMN public.chat_starter_answers.question_hash IS 'SHA-256 of a version prefix (v2) plus the NFKC-normalised, case-folded question text (chat_starter_warm_service.question_hash). Fixed-width key; the raw question is kept alongside so a collision would be visible rather than silent.';
 
 
 --
@@ -7239,6 +7485,13 @@ CREATE TABLE public.competitor_intel_audit (
 
 
 --
+-- Name: TABLE competitor_intel_audit; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.competitor_intel_audit IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
+
+
+--
 -- Name: competitor_intel_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -7267,8 +7520,30 @@ CREATE TABLE public.competitor_intel_cache (
     source_labels text[] DEFAULT '{}'::text[] NOT NULL,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
-    model_version text
+    model_version text,
+    competitor_details jsonb DEFAULT '{}'::jsonb NOT NULL
 );
+
+
+--
+-- Name: TABLE competitor_intel_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.competitor_intel_cache IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
+
+
+--
+-- Name: COLUMN competitor_intel_cache.competitor_tickers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.competitor_intel_cache.competitor_tickers IS 'Validated competitor tickers (FMP profile with positive market cap), ordered by grounded-research directness, most direct first (share of the focal company''s revenue each one contests). Mainly-customer / supplier / design-partner rows are excluded. Not ordered by market cap.';
+
+
+--
+-- Name: COLUMN competitor_intel_cache.competitor_details; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.competitor_intel_cache.competitor_details IS 'Per-competitor detail from the grounded research, keyed by ticker: {"TICKER": {"segment": "<where it competes, <= 48 chars, cleaned>"}}. A ticker with no usable label is absent. Written with model_version ''<model>|cip-v2''; a row stamped ''|cip-v2-nodetails'' was written before this column existed and is re-extracted.';
 
 
 --
@@ -7675,6 +7950,13 @@ CREATE TABLE public.geopolitical_macro_audit (
 
 
 --
+-- Name: TABLE geopolitical_macro_audit; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.geopolitical_macro_audit IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
+
+
+--
 -- Name: geopolitical_macro_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -7704,6 +7986,13 @@ CREATE TABLE public.geopolitical_macro_cache (
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL
 );
+
+
+--
+-- Name: TABLE geopolitical_macro_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.geopolitical_macro_cache IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
 
 
 --
@@ -7930,6 +8219,13 @@ CREATE TABLE public.industry_override_audit (
 
 
 --
+-- Name: TABLE industry_override_audit; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.industry_override_audit IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
+
+
+--
 -- Name: COLUMN industry_override_audit.model_version; Type: COMMENT; Schema: public; Owner: -
 --
 
@@ -8148,7 +8444,7 @@ CREATE TABLE public.marketing_assets (
 -- Name: TABLE marketing_assets; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.marketing_assets IS 'Every artefact the marketing engine produces for a run (script, narration, podcast MP3, MP4, card PNGs, captions, blog HTML), keyed by its content-addressed path in the PUBLIC marketing-media bucket. Two-phase upload: pending_upload while the worker holds a signed upload URL, ready once the API has verified the object exists. Nothing FMP-licensed may be rendered into this bucket (auth.md §1a).';
+COMMENT ON TABLE public.marketing_assets IS 'Every artefact the marketing engine renders for a run (narration, podcast MP3, MP4, the video cards and the 4:5 post image), keyed by its content-addressed path in the PUBLIC marketing-media bucket. Two-phase upload: pending_upload while the worker holds a signed upload URL, ready once the API has verified the object (size and content type). Since 2026-10-09 (rules/marketing.md §1) a rendered asset may carry FMP-derived company facts — statement figures, earnings against estimates, filings as filed, company logos used only to identify the company — but never a market price, a % price move, a price chart, ETF data or an FMP credit, never a person''s photo, and congressional data only as unnamed counts of at least two members. Company logos are stored by the web side under logos/<sha256[:32]>.<png|jpg> in the same bucket, referenced from marketing_scripts.output; they have no row here.';
 
 
 --
@@ -8234,7 +8530,7 @@ CREATE TABLE public.marketing_runs (
     last_error text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT marketing_runs_content_class_check CHECK ((content_class = ANY (ARRAY['A'::text, 'C'::text]))),
+    CONSTRAINT marketing_runs_content_class_check CHECK ((content_class = ANY (ARRAY['A'::text, 'C'::text, 'F'::text]))),
     CONSTRAINT marketing_runs_stage_check CHECK ((stage = ANY (ARRAY['planned'::text, 'selected'::text, 'scripted'::text, 'voiced'::text, 'rendered'::text, 'assets_ready'::text]))),
     CONSTRAINT marketing_runs_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'in_progress'::text, 'media_ready'::text, 'published'::text, 'failed'::text, 'skipped'::text])))
 );
@@ -8245,6 +8541,13 @@ CREATE TABLE public.marketing_runs (
 --
 
 COMMENT ON TABLE public.marketing_runs IS 'One row per ET calendar day of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS the day by inserting this row (UNIQUE run_date) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py); the worker holds no Supabase key.';
+
+
+--
+-- Name: COLUMN marketing_runs.content_class; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_runs.content_class IS 'Informational mirror of the day''s content class, written best-effort by script_service._heal_mirror: A = educational lesson (writer + semantic judge), C = reportorial-filings template, F = company-fundamentals template. The authoritative class derives from marketing_scripts.template_id; create_posts never gates on this column.';
 
 
 --
@@ -8283,7 +8586,7 @@ CREATE TABLE public.marketing_scripts (
 -- Name: TABLE marketing_scripts; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.marketing_scripts IS 'One row per marketing run: the day''s frozen selection (run_date, source_ref, template_id) and the class-A writer''s output with the fact sheet it was grounded on. Written ONLY by the web side (kick-and-poll through the internal API; the worker never writes it). Writer output lives here and never in the public marketing-media bucket or in marketing_runs.metadata, whose key-by-key merge is not atomic and is echoed to the worker on every response. A generation holds the row through lease_until plus a fresh generation_id taken by one conditional UPDATE, and every terminal write is fenced on that generation_id, so a task that lost its lease writes nothing. accepted is terminal and its output immutable: the day''s posts are built from it. Two caps: 4 content rejections (reject_reason content) and 4 generations ending without a verdict (writer_unavailable); a cap reached under an expired lease is closed by the next kick.';
+COMMENT ON TABLE public.marketing_scripts IS 'One row per marketing run: the day''s frozen selection (run_date, source_ref, template_id — whose registry entry decides the content class) and either the class-A writer''s output with the fact sheet it was grounded on, or a class-C/F template''s composed output with the as-filed record it was composed from (inserted accepted by the selecting INSERT: no writer, no lease, tokens_used 0). Written ONLY by the web side (kick-and-poll through the internal API; the worker never writes it). Output lives here and never in the public marketing-media bucket or in marketing_runs.metadata, whose key-by-key merge is not atomic and is echoed to the worker on every response. A writer generation holds the row through lease_until plus a fresh generation_id taken by one conditional UPDATE, and every terminal write is fenced on that generation_id. accepted is terminal and its output immutable: the day''s posts are built from it. Two writer caps: 4 content rejections (reject_reason content) and 4 generations ending without a verdict (writer_unavailable); a cap reached under an expired lease is closed by the next kick.';
 
 
 --
@@ -8357,6 +8660,13 @@ CREATE TABLE public.moat_intel_audit (
 
 
 --
+-- Name: TABLE moat_intel_audit; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.moat_intel_audit IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
+
+
+--
 -- Name: moat_intel_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -8387,6 +8697,13 @@ CREATE TABLE public.moat_intel_cache (
     expires_at timestamp with time zone NOT NULL,
     model_version text
 );
+
+
+--
+-- Name: TABLE moat_intel_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.moat_intel_cache IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
 
 
 --
@@ -8676,6 +8993,13 @@ CREATE TABLE public.price_catalyst_audit (
 
 
 --
+-- Name: TABLE price_catalyst_audit; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.price_catalyst_audit IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
+
+
+--
 -- Name: price_catalyst_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -8709,6 +9033,13 @@ CREATE TABLE public.price_catalyst_cache (
     window_label text,
     change_pct double precision
 );
+
+
+--
+-- Name: TABLE price_catalyst_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.price_catalyst_cache IS 'RETIRED 2026-10-02 (Google Search grounding terms). Purged by migration 188; no code reads or writes it.';
 
 
 --
@@ -8928,7 +9259,7 @@ CREATE TABLE public.sector_benchmarks (
     sample_size integer DEFAULT 0 NOT NULL,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
     industry text DEFAULT ''::text NOT NULL,
-    CONSTRAINT sector_benchmarks_period_type_check CHECK ((period_type = ANY (ARRAY['annual'::text, 'quarterly'::text, 'ttm'::text]))),
+    CONSTRAINT sector_benchmarks_period_type_check CHECK ((period_type = ANY (ARRAY['annual'::text, 'quarterly'::text, 'ttm'::text, 'calendar_quarter'::text]))),
     CONSTRAINT sector_benchmarks_sample_size_nonneg CHECK ((sample_size >= 0))
 );
 
@@ -13858,6 +14189,13 @@ CREATE INDEX idx_watchlist_items_ticker ON public.watchlist_items USING btree (t
 
 
 --
+-- Name: idx_watchlist_items_ticker_norm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_watchlist_items_ticker_norm ON public.watchlist_items USING btree (upper(btrim(ticker)));
+
+
+--
 -- Name: idx_watchlist_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -17507,6 +17845,14 @@ GRANT ALL ON FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer) TO
 
 
 --
+-- Name: FUNCTION authorize(role_name text, topic_name text, claims text, sub text, headers text, read_extensions text[], write_extensions text[], OUT read_allowed boolean[], OUT write_allowed boolean[]); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.authorize(role_name text, topic_name text, claims text, sub text, headers text, read_extensions text[], write_extensions text[], OUT read_allowed boolean[], OUT write_allowed boolean[]) TO postgres;
+GRANT ALL ON FUNCTION realtime.authorize(role_name text, topic_name text, claims text, sub text, headers text, read_extensions text[], write_extensions text[], OUT read_allowed boolean[], OUT write_allowed boolean[]) TO dashboard_user;
+
+
+--
 -- Name: FUNCTION broadcast_changes(topic_name text, event_name text, operation text, table_name text, table_schema text, new record, old record, level text); Type: ACL; Schema: realtime; Owner: -
 --
 
@@ -17578,6 +17924,14 @@ GRANT ALL ON FUNCTION realtime.list_changes(publication name, slot_name name, ma
 
 
 --
+-- Name: FUNCTION list_changes_sync(publication name, slot_name name, max_changes integer, max_record_bytes integer); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.list_changes_sync(publication name, slot_name name, max_changes integer, max_record_bytes integer) TO postgres;
+GRANT ALL ON FUNCTION realtime.list_changes_sync(publication name, slot_name name, max_changes integer, max_record_bytes integer) TO dashboard_user;
+
+
+--
 -- Name: FUNCTION quote_wal2json(entity regclass); Type: ACL; Schema: realtime; Owner: -
 --
 
@@ -17602,6 +17956,14 @@ GRANT ALL ON FUNCTION realtime.send(payload jsonb, event text, topic text, priva
 
 GRANT ALL ON FUNCTION realtime.send_binary(payload bytea, event text, topic text, private boolean) TO postgres;
 GRANT ALL ON FUNCTION realtime.send_binary(payload bytea, event text, topic text, private boolean) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION settled_changes(slot_name name, max_changes integer, VARIADIC opts text[]); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.settled_changes(slot_name name, max_changes integer, VARIADIC opts text[]) TO postgres;
+GRANT ALL ON FUNCTION realtime.settled_changes(slot_name name, max_changes integer, VARIADIC opts text[]) TO dashboard_user;
 
 
 --
@@ -19177,5 +19539,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zlDPqhz7KayznnNf5tIxDf5mGPKbbFPp0r8DFc8cfeYR1PXvdPImNvzi9dQ4ChT
+\unrestrict ZeTPGBfGG6aT8CzF0YySPGJVxlhht8nUkPjWwE0T6ygRuWDkw4bihhlYbQcHZmF
 

@@ -268,13 +268,19 @@ def test_a_failed_window_switch_keeps_the_scope_chart_and_snaps_the_toggle_back(
 
 
 def test_the_chart_axis_ends_on_the_et_day():
+    """The ET day the window was CUT on (`trend.asOf`, stamped by `trimmed` from etToday()),
+    never a live etToday() (review 2026-10-10: after ET midnight that drew an 8th / 31st / 91st
+    slot with an empty "today") and never the device's own date."""
     chart = _read(CHART)
     domain = _decl_block(chart, "private var xDomain: ClosedRange<Date>")
-    assert "SentimentTrendDayParser.etToday()" in domain
+    assert "let today = trend.asOf" in domain
+    assert "etToday(" not in domain
     assert "Calendar.current.startOfDay(for: Date())" not in domain
     assert "max(today, lastDay)" in domain
     axis = _decl_block(chart, "private var axisDatesUnsorted: [Date]")
-    assert "SentimentTrendDayParser.etToday()" in axis
+    assert "let today = trend.asOf" in axis and "etToday(" not in axis
+    trimmed = _decl_block(_read(MODELS), "func trimmed(")
+    assert "asOfDayKey: SentimentTrendDayParser.dayKey(for: today, in: calendar.timeZone)" in trimmed
     parser = _decl_block(_read(MODELS), "enum SentimentTrendDayParser")
     assert 'TimeZone(identifier: "America/New_York")' in parser
 
@@ -306,18 +312,25 @@ def test_a_short_history_opens_on_7d_and_every_window_is_cut_from_the_90d_answer
     assert "userPickedWindow = true" in _decl_block(vm, "func setTrendWindow(")
 
 
-def test_the_last_30d_label_is_anchored_inside_the_plot():
+def test_the_last_30d_label_is_centred_under_todays_bar():
+    """Review 2026-10-10: today's 30D tick sat at MIDNIGHT anchored `.topTrailing`, so "Oct 10"
+    ended at the left edge of today's bar (read as Oct 7-9) and pushed "Oct 3" out. Now every
+    30D tick sits at its day's noon, `.top` centres the label under its bar, and 30D gets end
+    padding so the rest of today's label clears the y-axis column."""
     chart = _read(CHART)
     axis = _decl_block(chart, "private var xAxis: some AxisContent")
-    assert "anchor: labelAnchor(value.index, of: value.count)" in axis
+    assert "anchor: labelAnchor()," in axis
     anchor = _decl_block(chart, "private func labelAnchor(")
-    assert "return isTrailingTick(index, of: count) ? .topTrailing : nil" in anchor
-    trailing = _decl_block(chart, "private func isTrailingTick(")
-    assert "trend.window == .month" in trailing and "index == count - 1" in trailing
+    assert "return trend.window == .month ? .top : nil" in anchor
+    assert ".topTrailing" not in _strip_comments(chart)
     dates = _decl_block(chart, "private var axisDates: [Date]")
     assert "axisDatesUnsorted.sorted()" in dates, "oldest first, so the last index is today"
     unsorted = _decl_block(chart, "private var axisDatesUnsorted: [Date]")
+    month = unsorted[unsorted.index("case .month:"):unsorted.index("case .quarter:")]
+    assert "bySettingHour: 12, minute: 0, second: 0" in month, "30D ticks at each tick day's noon"
     assert "$0 >= lower && $0 <= latest" in unsorted, "90D drops a month tick near the axis end"
+    view = _decl_block(chart, "private var chart: some View")
+    assert ".plotDimension(startPadding: 0, endPadding: xEndPadding)" in view
 
 
 def test_building_history_shows_a_placeholder_never_invented_bars():
@@ -513,11 +526,13 @@ def test_trimming_uses_the_backend_window_rule():
     """`trimmed` must cut exactly what the endpoint would have served for that window:
     today and the N − 1 ET days before it, from the ET day the backend counts in."""
     fn = _decl_block(_read(MODELS), "func trimmed(")
-    assert "guard target.days < window.days else { return self }" in fn
+    # Every window is cut, 90D included (`window_slice`: start <= day <= today).
+    assert "guard target.days <= window.days else { return self }" in fn
     assert "value: -(target.days - 1)" in fn
     assert "to: calendar.startOfDay(for: today)" in fn
     assert "days.filter { calendar.startOfDay(for: $0.date) >= start }" in fn
-    assert "trackingSince: trackingSince, historyStatus: historyStatus" in fn
+    assert ".filter { calendar.startOfDay(for: $0.date) <= end }" in fn
+    assert "trackingSinceKey: trackingSinceKey, historyStatus: historyStatus" in fn
     header = _read(MODELS).split("func trimmed(")[1][:300]
     assert "today: Date = SentimentTrendDayParser.etToday()" in header
 

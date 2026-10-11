@@ -772,6 +772,9 @@ enum SentimentTrendWindow: String, CaseIterable, Equatable {
     /// (`SentimentTrend.trimmed`). TestFlight 1.0 (11): one request per window made the first
     /// tap on each window lag behind a spinner and the previous window's numbers.
     static let widest: SentimentTrendWindow = allCases.max { $0.days < $1.days } ?? .quarter
+
+    /// What VoiceOver reads for the toggle's option: "7D" alone is read as "seven D".
+    var spokenLabel: String { "\(days) days" }
 }
 
 extension SentimentTrendWindow {
@@ -811,17 +814,19 @@ extension SentimentTrendWindow {
 /// One ET day of headlines Cay AI scored. The backend sends only days with at least one
 /// scored headline — a missing day means "nothing scored", never zero news.
 struct SentimentTrendDay: Identifiable, Equatable {
-    /// "yyyy-MM-dd", the backend's ET calendar day.
+    /// "yyyy-MM-dd", the backend's ET calendar day — the day's identity and its only stored date.
     let dayKey: String
-    /// Local midnight of that calendar day, so the chart labels the same date the backend
-    /// meant in every time zone.
-    let date: Date
     let positive: Int
     let negative: Int
     let neutral: Int
     let isPartial: Bool
 
     var id: String { dayKey }
+    /// Local midnight of that calendar day, so the chart labels the same date the backend
+    /// meant in every time zone. DERIVED from `dayKey` at each use, never stored: a Date parsed
+    /// before the device changed zone sat a day off every axis tick built after the change.
+    /// `.distantPast` only for a key `parse` refuses, which `init(dto:)` never builds.
+    var date: Date { SentimentTrendDayParser.parse(dayKey) ?? .distantPast }
     var total: Int { positive + negative + neutral }
 
     /// (positive − negative) / total as a whole percent, −100…100. Recomputed from the
@@ -843,13 +848,33 @@ struct SentimentTrend: Equatable {
     let window: SentimentTrendWindow
     /// Oldest first.
     let days: [SentimentTrendDay]
-    /// The OLDEST ET day this scope has a scored headline on file (not just in this window). The
-    /// backend log keeps `retentionDays`, so past that edge it is just the oldest day still kept;
-    /// the card shows it only for a history SHORTER than the selected window, which is always
-    /// younger than the edge — so a date the card shows is the day scoring began.
-    let trackingSince: Date?
+    /// "yyyy-MM-dd" of the OLDEST ET day this scope has a scored headline on file (not just in
+    /// this window). Stored as the key; `trackingSince` derives the Date at use, like
+    /// `SentimentTrendDay.date`.
+    let trackingSinceKey: String?
     /// A `var` with a default so the memberwise init (previews) keeps compiling.
     var historyStatus: SentimentHistoryStatus? = nil
+    /// Whether the 90-day answer this window was CUT from holds any scored day (`init(dto:)`
+    /// sets it, `trimmed` carries it). The "Building 90-day history…" placeholder is decided on
+    /// it, not on the cut: a history that is filling in newest-weeks-first can leave 7D empty
+    /// while 30D has bars, and that 7D is an empty chart, not "nothing yet". The memberwise
+    /// default (false) keeps the old per-window rule, since the placeholder also needs this
+    /// window to be empty.
+    var sourceHasDays: Bool = false
+    /// The ET day ("yyyy-MM-dd") this window ENDS on — "today" when it was cut (`trimmed`
+    /// stamps it; a fetched answer is stamped when decoded). The chart's axis ends here, never
+    /// on a live `etToday()`: the days were cut once, and after ET midnight a live "today" drew
+    /// an 8th / 31st / 91st slot with an empty newest day. The ViewModel re-cuts on a new day.
+    var asOfDayKey: String = SentimentTrendDayParser.etTodayKey()
+
+    /// The OLDEST ET day this scope has a scored headline on file. The backend log keeps
+    /// `retentionDays`, so past that edge it is just the oldest day still kept; the card shows
+    /// it only for a history SHORTER than the selected window, which is always younger than the
+    /// edge — so a date the card shows is the day scoring began.
+    var trackingSince: Date? { trackingSinceKey.flatMap { SentimentTrendDayParser.parse($0) } }
+    /// Local midnight of `asOfDayKey` (`etToday()` only for a key `parse` refuses, which no
+    /// code path builds).
+    var asOf: Date { SentimentTrendDayParser.parse(asOfDayKey) ?? SentimentTrendDayParser.etToday() }
 
     /// Below this many calendar days of tracking the chart is hidden: two bars is not a trend.
     static let minimumTrackedDays = 3
@@ -893,20 +918,26 @@ struct SentimentTrend: Equatable {
         return max(0, span + 1)
     }
 
-    /// The same trend cut to a shorter window: today and the `target.days − 1` ET days before
-    /// it — the backend's own window rule — so every window the toggle offers is cut from the
-    /// one 90-day answer at no request. Never widens: asking for a longer window returns self.
+    /// The same trend cut to a window: today and the `target.days − 1` ET days before it, and
+    /// nothing after today — the backend's own window rule (`window_slice`) — so every window
+    /// the toggle offers is cut from the one 90-day answer at no request. The widest window is
+    /// cut too (a new ET day drops its oldest day), and the cut is stamped with `today` as its
+    /// `asOfDayKey`. Never widens: asking for a longer window returns self.
     func trimmed(
         to target: SentimentTrendWindow,
         today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
     ) -> SentimentTrend {
-        guard target.days < window.days else { return self }
+        guard target.days <= window.days else { return self }
+        let end = calendar.startOfDay(for: today)
         let start = calendar.date(byAdding: .day, value: -(target.days - 1),
-                                  to: calendar.startOfDay(for: today)) ?? today
+                                  to: calendar.startOfDay(for: today)) ?? end
         return SentimentTrend(
             scope: scope, window: target,
-            days: days.filter { calendar.startOfDay(for: $0.date) >= start },
-            trackingSince: trackingSince, historyStatus: historyStatus
+            days: days.filter { calendar.startOfDay(for: $0.date) >= start }
+                .filter { calendar.startOfDay(for: $0.date) <= end },
+            trackingSinceKey: trackingSinceKey, historyStatus: historyStatus,
+            sourceHasDays: sourceHasDays,
+            asOfDayKey: SentimentTrendDayParser.dayKey(for: today, in: calendar.timeZone)
         )
     }
 
@@ -950,39 +981,85 @@ struct SentimentTrendResponse: Codable, Sendable {
 }
 
 enum SentimentTrendDayParser {
-    /// "yyyy-MM-dd" → local midnight of that calendar day, or nil. Parsed in the DEVICE's
-    /// zone on purpose: the key is already an ET calendar date, and Charts labels dates in
-    /// the device zone — a UTC midnight would read as the previous day west of Greenwich.
-    static func parse(_ raw: String?) -> Date? {
-        guard let raw, raw.count >= 10 else { return nil }
-        return formatter.date(from: String(raw.prefix(10)))
+    /// "yyyy-MM-dd" (a longer ISO string is cut to its first 10 characters) → local midnight of
+    /// that calendar day, or nil for anything that is not a real day. Mapped in the DEVICE's
+    /// zone on purpose: the key is already an ET calendar date, and Charts labels dates in the
+    /// device zone — a UTC midnight would read as the previous day west of Greenwich.
+    ///
+    /// Built from the key's own year / month / day at CALL time, in the zone `Calendar.current`
+    /// has NOW — never a cached formatter: a static DateFormatter froze `TimeZone.current` at
+    /// first use while `Calendar.current` (the chart's `startOfDay` and tick arithmetic) follows
+    /// the device, so after a zone change every bar sat a day off its tick. The components are
+    /// Gregorian whatever calendar the device uses (a Buddhist-calendar phone would otherwise
+    /// read 2026 as year 2026 BE).
+    static func parse(_ raw: String?, in timeZone: TimeZone = Calendar.current.timeZone) -> Date? {
+        guard let parts = keyParts(raw) else { return nil }
+        let calendar = gregorian(in: timeZone)
+        guard let date = calendar.date(from: DateComponents(year: parts.year, month: parts.month, day: parts.day))
+        else { return nil }
+        // A key like "2026-02-31" rolls over to March 3 — refused, as the strict formatter did.
+        let back = calendar.dateComponents([.year, .month, .day], from: date)
+        guard back.year == parts.year, back.month == parts.month, back.day == parts.day else { return nil }
+        return date
+    }
+
+    /// The canonical "yyyy-MM-dd" key of `raw` — what the app stores and compares (keys sort
+    /// chronologically as strings) — or nil when `parse` refuses it.
+    static func validKey(_ raw: String?) -> String? {
+        guard let parts = keyParts(raw), parse(raw) != nil else { return nil }
+        return key(year: parts.year, month: parts.month, day: parts.day)
+    }
+
+    /// The "yyyy-MM-dd" key of the calendar day `date` falls on in `timeZone` — the inverse of
+    /// `parse` for a date `parse` (or `etToday`) produced.
+    static func dayKey(for date: Date, in timeZone: TimeZone = Calendar.current.timeZone) -> String {
+        let c = gregorian(in: timeZone).dateComponents([.year, .month, .day], from: date)
+        return key(year: c.year ?? 0, month: c.month ?? 0, day: c.day ?? 0)
     }
 
     /// Local midnight of the CURRENT ET calendar day — "today" as the backend counts it,
-    /// in the same mapping as `parse`. The chart's axis must end here, not at the device's
-    /// own today: at 22:30 in Denver it is already tomorrow in New York, and the backend's
-    /// newest bar would otherwise sit past the end of the axis.
+    /// in the same mapping as `parse`. The chart's axis must end on an ET day, not the device's
+    /// own: at 22:30 in Denver it is already tomorrow in New York, and the backend's newest bar
+    /// would otherwise sit past the end of the axis.
     static func etToday(now: Date = Date()) -> Date {
-        parse(etKeyFormatter.string(from: now)) ?? Calendar.current.startOfDay(for: now)
+        parse(etTodayKey(now: now)) ?? Calendar.current.startOfDay(for: now)
     }
 
-    private static let etKeyFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "America/New_York")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
+    /// The CURRENT ET calendar day as a "yyyy-MM-dd" key.
+    static func etTodayKey(now: Date = Date()) -> String {
+        let c = etCalendar.dateComponents([.year, .month, .day], from: now)
+        return key(year: c.year ?? 0, month: c.month ?? 0, day: c.day ?? 0)
+    }
+
+    /// The ET calendar the backend counts days in. A fixed zone is correct HERE: it decides
+    /// which ET day it is, never how a day is mapped onto the device's clock.
+    private static let etCalendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "America/New_York") ?? c.timeZone
+        return c
     }()
 
-    private static let formatter: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
+    private static func gregorian(in timeZone: TimeZone) -> Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = timeZone
+        return c
+    }
+
+    private static func key(year: Int, month: Int, day: Int) -> String {
+        String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    /// Strict "yyyy-MM-dd": four, two and two ASCII digits. A sign, a space or a one-digit
+    /// month is refused, never guessed.
+    private static func keyParts(_ raw: String?) -> (year: Int, month: Int, day: Int)? {
+        guard let raw, raw.count >= 10 else { return nil }
+        let parts = raw.prefix(10).split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              parts.allSatisfy({ part in part.allSatisfy { $0.isASCII && $0.isWholeNumber } }),
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2])
+        else { return nil }
+        return (year, month, day)
+    }
 }
 
 extension SentimentTrend {
@@ -991,21 +1068,24 @@ extension SentimentTrend {
     init(dto: SentimentTrendResponse, window: SentimentTrendWindow) {
         self.scope = dto.scope
         self.window = window
-        self.trackingSince = SentimentTrendDayParser.parse(dto.trackingSince)
+        self.trackingSinceKey = SentimentTrendDayParser.validKey(dto.trackingSince)
         self.historyStatus = dto.historyStatus.flatMap { SentimentHistoryStatus(rawValue: $0.lowercased()) }
         var seen = Set<String>()
-        self.days = (dto.series ?? []).compactMap { d in
-            guard let date = SentimentTrendDayParser.parse(d.date),
-                  !seen.contains(String(d.date.prefix(10))) else { return nil }
+        let days: [SentimentTrendDay] = (dto.series ?? []).compactMap { d in
+            guard let key = SentimentTrendDayParser.validKey(d.date), !seen.contains(key) else { return nil }
             let pos = d.bullish ?? 0, neg = d.bearish ?? 0, neu = d.neutral ?? 0
             guard pos >= 0, neg >= 0, neu >= 0, pos + neg + neu > 0 else { return nil }
-            seen.insert(String(d.date.prefix(10)))
+            seen.insert(key)
             return SentimentTrendDay(
-                dayKey: String(d.date.prefix(10)), date: date,
+                dayKey: key,
                 positive: pos, negative: neg, neutral: neu,
                 isPartial: d.isPartial ?? false
             )
         }
-        .sorted { $0.date < $1.date }
+        // Canonical "yyyy-MM-dd" keys sort chronologically as strings (no Date parse per compare).
+        .sorted { $0.dayKey < $1.dayKey }
+        self.days = days
+        self.sourceHasDays = !days.isEmpty
+        // `asOfDayKey` keeps its default: the ET day this answer was decoded on.
     }
 }

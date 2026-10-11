@@ -79,8 +79,9 @@ class Settings(BaseSettings):
     NEWS_LLM_MAX_TOKENS: int = 8192
     NEWS_LLM_MAX_TOKENS_FIELD: str = "max_tokens"
     # False for OpenAI reasoning models (gpt-5, o-series): they refuse any temperature but
-    # their default, so the backfill's temperature 0 would 400 on every batch. The
-    # calibration must then PASS at the model's default temperature.
+    # their default, so the enrichment's temperature 0 (news_cache_service.
+    # ENRICHMENT_TEMPERATURE, sent by the live feed AND the backfill) would 400 on every
+    # batch. The calibration must then PASS at the model's default temperature.
     NEWS_LLM_SEND_TEMPERATURE: bool = True
     # openai_compat only: a TOTAL deadline per call (httpx's timeout bounds each read, and a
     # busy provider can hold a request open with keep-alive lines). Not retried when hit.
@@ -969,7 +970,7 @@ class Settings(BaseSettings):
     # The unanswered-turn refund (owner decision 2026-10-09, `services/chat_answer_coverage.py`):
     # when a cheap judge finds the reply did not give what the user's MAIN question asked for, the
     # turn's credit is handed back — silently (no label under the answer; credit history reads
-    # "Not charged — Cay AI didn't fully answer"). "on" judges and refunds; "shadow" judges and
+    # "Not charged - Cay AI didn't fully answer"). "on" judges and refunds; "shadow" judges and
     # logs one `CHAT_UNANSWERED` line, never refunds; "off" does nothing. Any other value reads
     # as "off" (here and again at read time). Never judged: a turn whose web results reached the
     # answer or whose model history holds such an answer (Brave's terms), a turn whose web search

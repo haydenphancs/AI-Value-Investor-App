@@ -47,7 +47,7 @@ np = pytest.importorskip("numpy")
 from PIL import Image, ImageDraw  # noqa: E402
 
 from app.schemas import marketing as sch  # noqa: E402
-from app.services.marketing import post_copy, selection  # noqa: E402
+from app.services.marketing import company_news_rules, post_copy, selection  # noqa: E402
 from app.services.marketing import template_onscreen as tos  # noqa: E402
 from marketing import cards  # noqa: E402
 from marketing import news_layouts as nl  # noqa: E402
@@ -58,8 +58,9 @@ _ONSCREEN = _BACKEND / "app" / "services" / "marketing" / "template_onscreen.py"
 
 STAKES_FOOTER = post_copy.image_footer(date(2026, 12, 29), "template", source="Nscale Form S-1 (Sep 18, 2026)",
                                        as_of="As of Mar 27, 2026")
+# The theme source label is read from the rules (review round 14 renamed it), never restated here.
 THEME_FOOTER = post_copy.image_footer(date(2026, 10, 15), "template",
-                                      source="company segment reporting; grouping by Caydex", as_of="Oct 15, 2026")
+                                      source=company_news_rules.SOURCE_LABELS["theme_explainer"], as_of="Oct 15, 2026")
 CONGRESS_FOOTER = post_copy.image_footer(date(2026, 12, 8), "template",
                                          source="congressional periodic transaction reports",
                                          as_of="November 2026 · as of Dec 8, 2026")

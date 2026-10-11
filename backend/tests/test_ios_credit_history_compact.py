@@ -362,6 +362,26 @@ def test_the_rows_text_is_never_truncated():
     assert text_stack.count(".fixedSize(horizontal: false, vertical: true)") == 2
 
 
+def test_the_headline_stays_on_one_line_by_stepping_down_never_by_truncating():
+    """Owner, 2026-10-10: "Not charged - Cay AI didn't fully answer" wrapped onto two lines at the
+    default size. The headline tries ONE line at body → bodySmall → label, each `.fixedSize` at its
+    ideal width (shown whole or skipped by `ViewThatFits`), and only the LAST candidate wraps — so
+    the row is still never truncated (the test above)."""
+    body = _flat(_decl_block(_ROW.read_text(), "var body: some View"))
+    assert "ViewThatFits(in: .horizontal) {" in body
+    ladder = body[body.index("ViewThatFits(in: .horizontal) {"):body.index("if let meta")]
+    sizes = re.findall(r"headline\(AppTypography\.(\w+)\)", ladder)
+    assert sizes == ["body", "bodySmall", "label", "body"], sizes
+    one_line = ".fixedSize(horizontal: true, vertical: false)"
+    wrap = ".fixedSize(horizontal: false, vertical: true)"
+    assert ladder.count(one_line) == 3
+    # The wrapping fallback is the LAST child, so nothing can overflow or be cut.
+    assert ladder.rindex(wrap) > ladder.rindex(one_line)
+    assert "lineLimit" not in ladder and "minimumScaleFactor" not in ladder and "truncationMode" not in ladder
+    head = _flat(_decl_block(_ROW.read_text(), "private func headline(_ font: Font) -> Text"))
+    assert head.count(".font(font)") == 2, "the title AND its detail must follow the stepped size"
+
+
 def test_the_amount_is_never_squeezed_and_is_spoken():
     body = _flat(_decl_block(_ROW.read_text(), "var body: some View"))
     badge = body[body.index("TintedTagBadge("):]

@@ -1862,6 +1862,7 @@ class ChatContextResolver:
         from app.services.news_sentiment_trend_service import (
             TREND_DAYS,
             get_news_sentiment_trend_service,
+            open_since,
             summarize_tone,
         )
         from app.utils.market_hours import ET
@@ -1895,7 +1896,10 @@ class ChatContextResolver:
             data = await get_news_sentiment_trend_service().get_trend(
                 scope, max(TREND_DAYS), now=now,
             )
-            return summarize_tone(data, focus_days=window, today=now.astimezone(ET).date())
+            return summarize_tone(
+                data, focus_days=window, today=now.astimezone(ET).date(),
+                partial_from=open_since(now),
+            )
 
         card, feed_recent, trend_text = await asyncio.gather(
             _card(), _feed_window(), _trend(), return_exceptions=True,

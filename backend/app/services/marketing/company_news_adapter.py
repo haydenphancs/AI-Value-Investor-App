@@ -82,8 +82,9 @@ API (contract D6):
     or when that read fails: the profile's currency is only the trading currency).
   - ``theme_explainer``: an Emerging Frontiers theme's name and ticker list only, every member
     through the company gate, the largest revenue segment of the first members (a member with no
-    segment fact is still listed); the record carries the theme's full ticker count (the app
-    card's, before any gate — ``theme_size``) so the copy never calls a gated list complete.
+    segment fact is still listed); the record carries the theme's full size in COMPANIES before
+    any gate (``theme_size``: share classes of one issuer count once) so the copy never calls a
+    gated list complete, nor counts one company twice.
 
 The memo (CLAUDE.md invariant 4, process-local only — the durable copy of what was used is the
 run's `marketing_scripts.fact_sheet`): insider raw rows 30 min (the market-wide P walk, and the
@@ -227,8 +228,15 @@ MONEY_MAP_STALE_DAYS = 548
 MONEY_MAP_STATEMENT_TOLERANCE = 0.005
 #: |100·net/revenue − profit power's net margin| above this (points) → inconsistent.
 MONEY_MAP_NET_MARGIN_TOLERANCE_PT = 0.5
-#: A gross / operating bar is drawn only when it matches profit power within this (points).
-MONEY_MAP_BAR_TOLERANCE_PT = 1.0
+#: Gross and operating profit are published only AS REPORTED (review round 15): the income
+#: statement row's own `grossProfit` / `operatingIncome`, never a derived figure (revenue − cost of
+#: sales, gross − FMP `operatingExpenses`: that line can leave out a charge the statement's
+#: operating income includes, and a derived bar 1 point of revenue off read 29% high for a
+#: 3%-margin company under "as reported"). Each is cross-checked against profit power's margin for
+#: the same year — the same statement line, rounded to 0.01 point there — within this many points:
+#: rounding, never judgment. A line that misses it, or is missing or zero (FMP's fill for a line it
+#: does not have), or larger than what it is carved from, is None: its bar and sentence are omitted.
+MONEY_MAP_BAR_TOLERANCE_PT = 0.05
 #: A map whose "Other" (unnamed and folded revenue) is larger than its largest named segment, or
 #: more than this share of revenue, explains too little of the company (review round 7, live L2:
 #: Microsoft FY2026 drew "Other" at $143.7B, 43% of revenue, above its largest segment) —
@@ -2629,6 +2637,22 @@ def _annual_point(profit: Any, fy: str) -> Any:
     return None
 
 
+def _reported_line(sym: str, fy: str, line: str, value: Any, revenue: float, margin: Any) -> Optional[float]:
+    """The statement row's own ``line`` (``grossProfit`` / ``operatingIncome``) AS REPORTED, or
+    None: missing, zero (FMP's fill for a line it does not have), non-finite, or more than
+    `MONEY_MAP_BAR_TOLERANCE_PT` points of ``revenue`` (the row's own) away from profit power's
+    margin for the year. Never derived from other lines."""
+    v, m = _num(value), _num(margin)
+    if v is None or v == 0:
+        return None
+    if m is None or abs(100.0 * v / revenue - m) > MONEY_MAP_BAR_TOLERANCE_PT:
+        logger.warning("company news money_map: %s FY%s %s %.0f disagrees with profit power's margin %r "
+                       "(tolerance %.2f pt) — omitted, never guessed", sym, fy, line, v, m,
+                       MONEY_MAP_BAR_TOLERANCE_PT)
+        return None
+    return v
+
+
 async def _money_map_record(ctx: _Ctx, sym: str, bd: Any, fy: str) -> Any:
     """The gates of contract D6 / adapter design §3.6 → `MoneyMap`, or a rejection reason."""
     if list(getattr(bd, "degraded", None) or ()):
@@ -2708,18 +2732,23 @@ async def _money_map_record(ctx: _Ctx, sym: str, bd: Any, fy: str) -> Any:
                               or other > MONEY_MAP_MAX_OTHER_SHARE * reported):
         return "money_map_mostly_other"
 
+    # Gross and operating profit AS REPORTED (review round 15): the statement row's own lines,
+    # each cross-checked to rounding against profit power — never revenue − cost of sales or
+    # gross − operating expenses, and operating profit never waits on the gross bar.
     gross = operating = None
     cos = _num(getattr(bd, "cost_of_sales", None))
-    gm = _num(getattr(point, "gross_margin", None))
-    if cos is not None and cos > 0 and gm is not None:
-        g = reported - cos
-        if abs(100.0 * g / reported - gm) <= MONEY_MAP_BAR_TOLERANCE_PT:
-            gross = g
-    opex = _num(getattr(bd, "operating_expense", None))
-    om = _num(getattr(point, "operating_margin", None))
-    if gross is not None and opex is not None and opex > 0 and om is not None:
-        o = gross - opex
-        if abs(100.0 * o / reported - om) <= MONEY_MAP_BAR_TOLERANCE_PT:
+    g = _reported_line(sym, fy, "grossProfit", row.get("grossProfit"), revenue,
+                       getattr(point, "gross_margin", None))
+    if g is not None and cos is not None and cos > 0 and g <= reported:
+        gross = g                            # a company with no cost-of-sales line reports no gross profit
+    o = _reported_line(sym, fy, "operatingIncome", row.get("operatingIncome"), revenue,
+                       getattr(point, "operating_margin", None))
+    statement_gross = _num(row.get("grossProfit"))
+    if o is not None:
+        if o > reported or (statement_gross not in (None, 0.0) and o > statement_gross):
+            logger.warning("company news money_map: %s FY%s operatingIncome %.0f is above the statement's "
+                           "revenue or gross profit — omitted, never guessed", sym, fy, o)
+        else:
             operating = o
     try:
         return R.MoneyMap(
@@ -3618,7 +3647,8 @@ async def _reporting_currency(ctx: _Ctx, sym: str) -> str:
 # member through the company gate, and the largest revenue segment of the first members (the
 # revenue breakdown service, its own two-tier cache first). A member without a segment fact is
 # still listed: the record keeps every member that passed the gates (6..24), and the theme's full
-# ticker count before any gate (`theme_size`, the app card's number).
+# size in companies before any gate (`theme_size`, `R.theme_company_count`: the app card counts
+# tickers, but GOOG and GOOGL are one company — review round 15).
 
 
 def _segment_fact(bd: Any, run_date: date) -> Optional[Tuple[str, float, str]]:
@@ -3732,9 +3762,6 @@ async def _collect_theme_explainer(ctx: _Ctx) -> Candidates:
         if not isinstance(tickers, list) or (blocked_raw is not None and not isinstance(blocked_raw, list)):
             ctx.reject("record_invalid")
             continue
-        # The theme's size as the app card shows it, BEFORE any gate (the shared contract's
-        # `theme_size`): the copy says "{n} of its {m} companies" whenever a gate dropped one.
-        size = R.theme_ticker_count(tickers)
         blocked = {_sym_key(b) for b in (blocked_raw or ()) if isinstance(b, str)}
         members: List[str] = []
         for t in tickers:
@@ -3762,16 +3789,26 @@ async def _collect_theme_explainer(ctx: _Ctx) -> Candidates:
             profiles = await _profiles(ctx, members)
             refs: List[Any] = []
             names: Set[str] = set()
+            ciks: Set[str] = set()
             for sym in members:
                 company = R.company_from_profile(profiles.get(sym), sym, purpose="listing")
                 if isinstance(company, str):
                     ctx.reject(company)
                     continue
-                if company.name.casefold() in names:
-                    ctx.reject("share_class_overlap")     # GOOG beside GOOGL: one company, listed once
+                # GOOG beside GOOGL: one company, listed once — the same display name, or the same
+                # issuer CIK under another name (review round 15; the size below merges the same way).
+                cik = R.cik10(profiles[sym].get("cik"))
+                if company.name.casefold() in names or (cik is not None and cik in ciks):
+                    ctx.reject("share_class_overlap")
                     continue
                 names.add(company.name.casefold())
+                if cik is not None:
+                    ciks.add(cik)
                 refs.append(company)
+            # The theme's size in COMPANIES before any gate (the shared contract's `theme_size`):
+            # the copy says "{n} of its {m} companies" whenever a gate dropped one, so share classes
+            # of one issuer count once (review round 15: GOOG + GOOGL read "7 of the 8 companies").
+            size = R.theme_company_count(tickers, profiles)
             if len(refs) < lo:
                 ctx.reject("theme_members_thin")
                 continue

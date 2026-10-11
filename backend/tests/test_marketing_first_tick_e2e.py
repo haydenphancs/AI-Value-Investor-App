@@ -997,3 +997,74 @@ def test_a_2b_day_whose_series_is_switched_off_before_its_posts_is_skipped_templ
     assert world.posts() == [] and len(posts_calls) == 1
     assert _ready(world, "video") and _the_card(world)             # it was built and rendered first
 
+
+# ══ Today's production lesson day (post-commit check, 2026-10-10) ═══════════════════════════════════
+# What production runs since eba8ddcc: MARKETING_CONTENT_CLASSES unset (lessons only), MARKETING_IMAGE_POSTS
+# and MARKETING_X_IMAGES off, both dry-run switches off. Every accepted lesson now goes through
+# `_frozen_output` → `freeze_post_formats(image_posts=False)`, so the stored output carries `post_formats`
+# for all eight outlets — and still the writer's `image_post` (validated and stored either way), which
+# nothing may draw. The tests above seed a pre-drop-1 package (no formats, two outlets, a dry run) or an
+# image day; this one drives the shape the daily run writes today, through the real worker and app, and
+# then has each outlet's REAL publisher adapter build its request from the rows the worker left.
+
+_EVERY_OUTLET = ("bluesky", "x", "youtube", "facebook", "linkedin", "threads", "instagram", "tiktok")
+
+
+def test_todays_lesson_day_records_all_eight_outlets_in_their_frozen_formats_through_the_real_app(monkeypatch):
+    from app.services.marketing import outlet_upload_post as oup
+    from app.services.marketing import outlets
+    from marketing import cards
+
+    for name in ("MARKETING_IMAGE_POSTS", "MARKETING_X_IMAGES", "MARKETING_DRY_RUN"):
+        monkeypatch.setattr(settings, name, False)
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", "A")     # its default: lessons only (unset)
+    copy = {p: {"platform": p, "title": "Your moody business partner" if p == "youtube" else None,
+                "caption": f"server {p} copy"} for p in _EVERY_OUTLET}
+    run_date = mrs.run_date_et(datetime.now(timezone.utc))
+    frozen = ss.freeze_post_formats({**_PACKAGE, "posts": copy, "image_post": dict(_IMAGE_POST)}, run_date,
+                                    image_posts=False, x_images=False)
+    assert frozen["post_formats"] == {"tiktok": "video", "youtube": "video", "instagram": "video",
+                                      "x": "text", "bluesky": "text", "threads": "text",
+                                      "facebook": "text", "linkedin": "text"}
+    assert frozen["image_post"] == _IMAGE_POST and "image_footer" not in frozen
+    world = World(monkeypatch, frozen)
+    monkeypatch.setenv("MARKETING_DRY_RUN", "false")                    # the worker reads it in main()
+
+    def never_drawn(*_a, **_k):
+        raise AssertionError("image posts are off: the post image is never drawn")
+
+    monkeypatch.setattr(cards, "image_for_script", never_drawn)
+    monkeypatch.setattr(cards, "render_image", never_drawn)
+    assert world.worker.main() == 0
+    run = world._run_row()
+    assert run["status"] == "media_ready" and run["stage"] == "assets_ready" and run["dry_run"] is False
+    (video,) = _ready(world, "video")
+    assert run["metadata"]["video_asset_id"] == video["id"] and not run["metadata"].get("image_asset_id")
+    # No post image: none drawn, registered or uploaded — one video for the three video outlets.
+    assert world.assets("card") == [] and not [c for c in world.calls if "/card-" in c[2]]
+    assert world.renders == 1
+    # Posts: exactly one per frozen (platform, format), each held for review, not a rehearsal.
+    assert len(world.posts()) == len(_EVERY_OUTLET)
+    posts = {(p["platform"], p["format"]): p for p in world.posts()}
+    assert set(posts) == set(frozen["post_formats"].items())
+    fields: Dict[str, Dict[str, Any]] = {}
+    for (platform, fmt), p in posts.items():
+        md = p["metadata"]
+        assert p["status"] == "pending_review" and md["dry_run"] is False
+        assert (md["content_class"], md["made_with_ai"]) == ("A", True)
+        assert p["caption"] == copy[platform]["caption"]
+        assert p["asset_ids"] == ([video["id"]] if fmt == "video" else [])
+        # What the publisher would send: the outlet's REAL adapter builds the request from this row.
+        prepared = outlets.adapter_for(platform).prepare(p)
+        if platform in oup.ADAPTERS:
+            assert prepared.payload["kind"] == ("video" if fmt == "video" else "text")
+            assert prepared.payload["asset_id"] == (video["id"] if fmt == "video" else None)
+            fields[platform] = prepared.payload["fields"]
+    assert sorted(fields) == ["facebook", "instagram", "linkedin", "threads", "tiktok", "youtube"]
+    # The cover is pinned to the opening card where Upload-Post can: TikTok and Instagram; no other
+    # outlet's request carries a pin (YouTube Shorts pick their own frame; text posts have none).
+    assert fields["tiktok"]["cover_timestamp"] == oup.VIDEO_COVER_MS
+    assert fields["instagram"]["thumb_offset"] == str(oup.VIDEO_COVER_MS)
+    pins = {"cover_timestamp", "thumb_offset"}
+    assert [p for p in ("youtube", "facebook", "linkedin", "threads") if pins & set(fields[p])] == []
+

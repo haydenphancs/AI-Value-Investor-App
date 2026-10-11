@@ -10,6 +10,9 @@ import SwiftUI
 struct AnalysisTimeframeToggle<T: RawRepresentable & CaseIterable & Equatable>: View where T.RawValue == String, T.AllCases: RandomAccessCollection {
     @Binding var selectedOption: T
     let options: [T]
+    /// What VoiceOver reads for an option; nil reads its visible label (`rawValue`). For
+    /// abbreviated labels — "7D" is read as "seven D" — pass spoken ones ("7 days").
+    var accessibilityLabelFor: ((T) -> String)? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -30,6 +33,9 @@ struct AnalysisTimeframeToggle<T: RawRepresentable & CaseIterable & Equatable>: 
                         )
                         .cornerRadius(AppCornerRadius.small)
                 }
+                .accessibilityLabel(spokenLabel(option))
+                // The fill is the only visual cue besides the ink, so VoiceOver must hear it.
+                .accessibilityAddTraits(selectedOption == option ? [.isButton, .isSelected] : .isButton)
             }
         }
         .cardSurface(cornerRadius: AppCornerRadius.small)
@@ -37,6 +43,10 @@ struct AnalysisTimeframeToggle<T: RawRepresentable & CaseIterable & Equatable>: 
             RoundedRectangle(cornerRadius: AppCornerRadius.small)
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
         )
+    }
+
+    private func spokenLabel(_ option: T) -> String {
+        accessibilityLabelFor?(option) ?? option.rawValue
     }
 }
 

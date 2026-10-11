@@ -81,7 +81,8 @@ def test_a_row_becomes_one_log_row():
     assert out == {
         "scope": "ORCL", "article_key": article_key("https://x/1"), "et_day": "2026-09-27",
         "sentiment": "bullish", "confidence": 80, "source": "live",
-        "labelled_at": NOW.isoformat(),
+        "labelled_at": NOW.isoformat(), "labeller": trend.TONE_LABELLER_VERSION,
+        "skip_reason": None,
     }
 
 
@@ -367,14 +368,19 @@ async def test_market_articles_are_judged_for_the_market_not_a_stock():
 
 
 @pytest.mark.asyncio
-async def test_a_ticker_prompt_is_unchanged():
+async def test_a_ticker_prompt_names_the_ticker_as_the_subject():
+    """2026-10-10: "the stock" scored whichever company an article covered, and counted it on
+    this ticker's chart. The subject is the ticker itself, and relevance is asked."""
     gem = _CapturingGemini()
     svc = object.__new__(NewsCacheService)
     svc.gemini = gem
     await svc._batch_enrich_articles([{"title": "Oracle beats", "text": "x"}], ticker="ORCL")
     prompt = gem.prompts[0]
-    assert "These articles were fetched for ticker ORCL. Always include ORCL" in prompt
-    assert "NET directional lean for the stock," in prompt
+    assert "NET directional lean for the stock ORCL (\"the subject\" below)" in prompt
+    assert "Judge each article's sentiment for ORCL only" in prompt
+    assert "Always include ORCL in related_tickers" in prompt
+    assert '"relevance": exactly one of "primary" | "secondary" | "passing"' in prompt
+    assert "NET directional lean for the stock," not in prompt
 
 
 # ── shape_series / net_score / summarize_trend ────────────────────────────────
@@ -447,7 +453,7 @@ def test_summarize_trend_states_the_charted_numbers():
     ], today=TODAY, since=TODAY - timedelta(days=29))
     text = summarize_trend(series, days=30, today=TODAY, tracking_since=date(2026, 9, 1))
     assert "26 scored — 13 bullish, 11 bearish, 2 neutral" in text
-    assert "Last 7 days net -5 vs the 7 days before +50." in text
+    assert "Last 7 days net -5% vs the 7 days before +50%." in text
     assert "oldest scored headline on file: Tue Sep 1 (the log keeps 120 days)" in text
     assert "tracked since" not in text, "never a start the 120-day log cannot vouch for"
     assert "Most bearish day: Tue Sep 22 (9 bearish vs 2 bullish)." in text
@@ -935,7 +941,7 @@ def test_window_slice_is_today_and_the_n_minus_one_days_before():
 def test_summarize_tone_windows_edges():
     one = [{"date": TODAY.isoformat(), "bullish": 0, "bearish": 1, "neutral": 0}]
     text = trend.summarize_tone_windows(one, today=TODAY)
-    assert "7D: 1 headline (0 positive, 1 negative, 0 neutral), net -100 (Mostly negative)" in text
+    assert "7D: 1 headline (0 positive, 1 negative, 0 neutral), net -100% (Mostly negative)" in text
     assert "on file" not in text and "at least" not in text, "no date clause without a date"
     assert trend.summarize_tone_windows([], today=TODAY) is None
     stale = [{"date": (TODAY - timedelta(days=90)).isoformat(), "bullish": 5}]
@@ -948,7 +954,7 @@ def test_summarize_tone_refuses_what_is_not_a_trend_answer():
     data = {"series": [{"date": TODAY.isoformat(), "bullish": 1, "is_partial": True}]}
     # A focus window the card does not offer gets no detail — never a guessed one.
     text = trend.summarize_tone(data, focus_days=14, today=TODAY)
-    assert text.startswith("News tone for this feed") and "\n" not in text
+    assert text.startswith("News tone for this feed") and "News tone over the last" not in text
     assert "News tone over the last 7 days" in trend.summarize_tone(data, focus_days=7, today=TODAY)
 
 
@@ -1092,7 +1098,7 @@ async def test_a_fresh_scope_with_one_day():
     data, text = await _tone_after_sweep(_MemLog(_labels("NEWCO", [0])), today=TODAY, scope="NEWCO", focus=7)
     assert data["tracking_since"] == TODAY.isoformat()
     assert [d["date"] for d in data["series"]] == [TODAY.isoformat()]
-    assert ("7D: 1 headline (1 positive, 0 negative, 0 neutral), net +100 (Mostly positive); "
+    assert ("7D: 1 headline (1 positive, 0 negative, 0 neutral), net +100% (Mostly positive); "
             "30D: 1 headline") in text
     assert f"oldest scored headline on file: {trend._fmt_day(TODAY)}" in text
     assert "News tone over the last 7 days" in text
@@ -1118,3 +1124,314 @@ async def test_the_real_status_path_raises_into_the_short_ttl(monkeypatch):
     out = await svc.get_trend("ORCL", 30, now=NOW)
     assert out["history_status"] == "building"
     assert ("ORCL", 30, first_today()) in svc._status_unknown
+
+
+# ── 2026-10-10 deep check: the chart gate, the labeller version, the hardening ──
+
+
+def _gated(**kw):
+    row = _row(ext=kw.pop("ext", "https://x/g"), published=kw.pop("published", NOW.isoformat()))
+    row.update(kw)
+    return row
+
+
+@pytest.mark.parametrize("row,reason", [
+    ({"relevance": "passing", "headline": "Samsung, TSMC profits say the AI trade is intact"}, "off_topic"),
+    ({"relevance": " PASSING ", "headline": "x"}, "off_topic"),
+    ({"relevance": "primary",
+      "headline": "GAMMA Investing LLC Acquires 7,458 Shares of Meta Platforms, Inc. $META"}, "holdings_filing"),
+    ({"title": "ROSEN, A LEADING LAW FIRM, Encourages Alphabet Inc. Investors to Secure Counsel"},
+     "solicitation"),
+    ({"relevance": "primary", "headline": "Oracle beats estimates"}, None),
+    ({"relevance": "secondary", "headline": "Joby vs. Archer: the race to certify"}, None),
+    # A missing or off-list answer counts, as before: a schema hiccup never empties the chart.
+    ({"relevance": None, "headline": "Oracle beats estimates"}, None),
+    ({"relevance": "irrelevant", "headline": "Oracle beats estimates"}, None),
+    ({"relevance": ["passing"], "headline": None}, None),
+    ({}, None),
+])
+def test_the_chart_gate(row, reason):
+    assert trend.tone_skip_reason(row) == reason
+
+
+def test_the_gate_logs_off_topic_filings_and_solicitations_with_their_reason():
+    """Kept off the chart but STILL logged, with the reason: the verdict is first-label-wins
+    (the nightly backfill re-scan never re-asks, and a later answer cannot put it back)."""
+    skipped = {}
+    out = build_log_rows("ORCL", [
+        _gated(ext="a", headline="Oracle beats", relevance="primary"),
+        _gated(ext="b", headline="Samsung capex surges", relevance="passing"),
+        _gated(ext="c", headline="Echo45 Advisors LLC Lowers Holdings in Oracle Corporation $ORCL"),
+        _gated(ext="d", headline="Faruqi & Faruqi, LLP Reminds Oracle Investors of Securities Class Action Deadline"),
+    ], now=NOW, skipped=skipped)
+    assert [(r["article_key"], r["skip_reason"]) for r in out] == [
+        (article_key("a"), None), (article_key("b"), "off_topic"),
+        (article_key("c"), "holdings_filing"), (article_key("d"), "solicitation")]
+    assert skipped == {"off_topic": 1, "holdings_filing": 1, "solicitation": 1}
+
+
+def test_wire_copies_count_once_but_a_recurring_title_on_another_day_counts():
+    out = build_log_rows("__MARKET__", [
+        _gated(ext="a", headline="UPDATE 1-Fed holds rates steady"),
+        _gated(ext="b", headline="Fed Holds Rates Steady!"),                          # same day: a copy
+        _gated(ext="c", headline="Stock market today", published="2026-09-26T15:00:00+00:00"),
+        _gated(ext="d", headline="Stock market today", published="2026-09-27T14:00:00+00:00"),
+    ], now=NOW)
+    assert [(r["article_key"], r["skip_reason"]) for r in out] == [
+        (article_key("a"), None), (article_key("b"), "duplicate_title"),
+        (article_key("c"), None), (article_key("d"), None)]
+
+
+@pytest.mark.parametrize("scope,logged", [
+    ("ORCL", True), ("__MARKET__", True), ("BTCUSD", True), ("^GSPC", True), ("BRK.B", True),
+    ("COMMODITY_GC", False), ("THEME_x", False), ("", False), ("A" * 33, False), ("OR CL", False),
+])
+def test_only_a_scope_the_endpoint_can_read_is_logged(scope, logged):
+    """The commodity detail screen logged under COMMODITY_GC, which the endpoint refuses."""
+    assert bool(build_log_rows(scope, [_row()], now=NOW)) is logged
+    assert updates_ep._valid_scope(scope) is logged, "one rule for the writer and the reader"
+
+
+def test_every_row_records_the_labeller_version():
+    [row] = build_log_rows("ORCL", [_row()], now=NOW)
+    assert row["labeller"] == trend.TONE_LABELLER_VERSION == 2
+
+
+def test_a_label_written_late_in_the_et_day_never_lands_on_tomorrow():
+    late = datetime(2026, 9, 28, 3, 30, tzinfo=timezone.utc)                # 23:30 ET Sep 27
+    [row] = build_log_rows("ORCL", [_row(published="2026-09-28T05:00:00+00:00")], now=late)
+    assert row["et_day"] == "2026-09-27", "inside the 2 h skew, clamped to the labelling day"
+
+
+@pytest.mark.parametrize("conf", [float("inf"), float("-inf"), float("nan"), 1e999, True, "x", None])
+def test_a_non_finite_confidence_costs_the_confidence_not_the_batch(conf):
+    rows = build_log_rows("ORCL", [_row(ext="a", conf=conf), _row(ext="b", conf=70)], now=NOW)
+    assert [r["confidence"] for r in rows] == [None, 70]
+
+
+@pytest.mark.asyncio
+async def test_record_labels_skips_undated_rows(caplog):
+    client = _WriteClient()
+    with caplog.at_level(logging.INFO):
+        n = await record_labels(client, "ORCL", [_row(ext="a", published=None),
+                                                 _row(ext="b", published="garbage"),
+                                                 _row(ext="c")], now=NOW)
+    [(_, payload, _)] = client.upserts
+    assert [r["article_key"] for r in payload] == [article_key("c")], \
+        "an undated story cannot be placed on a day"
+    assert n == 1
+    assert "kept 2 label(s) off the chart" in caplog.text and "'undated': 2" in caplog.text
+
+
+class _FlakyTable(_Table):
+    def execute(self):
+        self.client.tries += 1
+        if self.client.tries == 1:
+            raise RuntimeError("Server disconnected without sending a response.")
+        return super().execute()
+
+
+class _FlakyClient(_WriteClient):
+    def __init__(self):
+        super().__init__()
+        self.tries = 0
+
+    def table(self, name):
+        return _FlakyTable(self, name)
+
+
+@pytest.mark.asyncio
+async def test_a_transient_log_failure_is_retried_not_lost(monkeypatch):
+    import app.utils.supabase_errors as se
+
+    monkeypatch.setattr(se.time, "sleep", lambda *_: None)
+    client = _FlakyClient()
+    assert await record_labels(client, "ORCL", [_row()], now=NOW) == 1
+    assert client.tries == 2, "replayed once: ON CONFLICT DO NOTHING makes the replay harmless"
+
+
+class _NoLabellerColumn(_WriteClient):
+    def table(self, name):
+        client = self
+
+        class _T(_Table):
+            def execute(self):
+                client.payloads.append(self._payload)
+                if any("labeller" in r for r in self._payload):
+                    raise RuntimeError("{'code': 'PGRST204', 'message': \"Could not find the "
+                                       "'labeller' column of 'news_sentiment_log' in the schema cache\"}")
+                return _Result(self._payload)
+        return _T(self, name)
+
+
+def test_a_deploy_ahead_of_migration_191_still_writes_its_labels(monkeypatch, caplog):
+    monkeypatch.setattr(trend, "_labeller_column_missing", False)
+    monkeypatch.setattr(trend, "_model_column_missing", False)
+    client = _NoLabellerColumn()
+    client.payloads = []
+    rows = build_log_rows("ORCL", [_row()], now=NOW, model="m")
+    with caplog.at_level(logging.WARNING):
+        assert trend.upsert_log_rows(client, rows) == 1
+        assert trend.upsert_log_rows(client, rows) == 1
+    assert len(client.payloads) == 3, "one failed try, one retry, then straight without it"
+    assert all("model" in p[0] for p in client.payloads), "only the missing column is dropped"
+    assert "migration 191 not applied" in caplog.text
+    monkeypatch.setattr(trend, "_labeller_column_missing", False)
+
+
+def test_an_unrelated_write_error_is_not_healed():
+    client = _WriteClient(raise_on_execute=True)
+    with pytest.raises(RuntimeError):
+        trend.upsert_log_rows(client, build_log_rows("ORCL", [_row()], now=NOW))
+
+
+def test_a_datetime_day_from_the_rpc_is_refused_not_a_500():
+    series = shape_series([
+        {"day": datetime(2026, 9, 27, 4, 0, tzinfo=timezone.utc), "bullish": 1},
+        {"day": "2026-09-27", "bearish": 2},
+    ], today=TODAY, since=TODAY - timedelta(days=6))
+    assert [(d["date"], d["bearish"]) for d in series] == [("2026-09-27", 2)]
+
+
+def test_a_zero_net_is_never_printed_plus_zero():
+    series = shape_series([_raw(TODAY - timedelta(days=d), 1, 1, 0) for d in range(14)],
+                          today=TODAY, since=TODAY - timedelta(days=29))
+    text = summarize_trend(series, days=30, today=TODAY)
+    assert "net tone 0% on a -100..+100 scale" in text
+    assert "Last 7 days net 0% vs the 7 days before 0%." in text
+    assert "+0" not in text
+
+
+def test_the_open_days_sentence_starts_where_late_labels_can_land():
+    """Rows only on Sep 20 and Sep 25; the open window starts Sep 23. The sentence used to
+    start at the first partial row (Sep 25) and call Sep 23-24 final."""
+    series = shape_series([_raw("2026-09-20", 1, 0, 0), _raw("2026-09-25", 0, 1, 0)],
+                          today=TODAY, since=TODAY - timedelta(days=29),
+                          partial_from=date(2026, 9, 23))
+    text = summarize_trend(series, days=30, today=TODAY, partial_from=date(2026, 9, 23))
+    assert "Counts from Wed Sep 23 on are still filling in" in text
+    # A 7D focus whose window starts after the open day: the sentence starts at the window.
+    text7 = summarize_trend([d for d in series if d["date"] >= "2026-09-21"], days=7,
+                            today=TODAY, partial_from=date(2026, 9, 18))
+    assert "Counts from Mon Sep 21 on are still filling in" in text7
+
+
+@pytest.mark.asyncio
+async def test_a_full_trend_cache_keeps_its_hot_keys(monkeypatch):
+    monkeypatch.setattr(trend, "_CACHE_MAX_ENTRIES", 8)
+    svc = NewsSentimentTrendService(supabase=object())
+    fetched = []
+
+    async def _fetch(scope, days, today, now=None):
+        fetched.append((scope, days, today))
+        return {"scope": scope, "days": days, "series": [], "tracking_since": None,
+                "history_status": None}
+
+    monkeypatch.setattr(svc, "_fetch", _fetch)
+    yesterday = NOW - timedelta(days=1)
+    for i in range(7):
+        await svc.get_trend(f"OLD{i}", 30, now=yesterday)
+    await svc.get_trend("__MARKET__", 30, now=NOW)       # hot, today
+    await svc.get_trend("NEW", 30, now=NOW)              # the cap is reached here
+    assert ("__MARKET__", 30, TODAY) in svc._cache, "a hot key survives the eviction"
+    assert not any(k[2] != TODAY for k in svc._cache), "earlier days go first"
+    before = len(fetched)
+    await svc.get_trend("__MARKET__", 30, now=NOW)
+    assert len(fetched) == before, "served from memory, not re-read"
+
+
+@pytest.mark.parametrize("counts,word", [
+    ((3, 0, 2), "Mostly positive"),     # a real majority
+    ((0, 4, 3), "Mostly negative"),
+    ((2, 0, 2), "Leaning positive"),    # net +50 without a majority (exactly half is not one)
+    ((2, 0, 6), "Leaning positive"),    # net +25 with 75% neutral — the old rule said "Mostly positive"
+    ((1, 0, 4), "Leaning positive"),    # net +20: the boundary leans
+    ((0, 3, 7), "Leaning negative"),    # net -30
+    ((1, 0, 5), "Mostly neutral"),      # net +17
+    ((0, 0, 5), "Mostly neutral"),      # all neutral is not "Mixed"
+    ((2, 2, 1), "Mixed"),
+    ((1, 1, 0), "Mixed"),
+    ((0, 0, 0), "Mixed"),               # never shown (the card says "No scored headlines")
+    ((-3, True, "x"), "Mixed"),         # malformed counts are zero, never a crash
+])
+def test_the_tone_word_needs_a_real_majority(counts, word):
+    assert trend.tone_word(*counts) == word
+
+
+def test_the_labeller_heal_rechecks_so_191_landing_later_needs_no_restart(monkeypatch):
+    """Healed once, the flag used to hold until a restart: rows kept landing without
+    `labeller` after 191 was applied, read as old rules, and survived 192's re-label."""
+    rows = [{"scope": "ORCL", "labeller": 2, "model": "m"}]
+    monkeypatch.setattr(trend, "_labeller_column_missing", True)
+    monkeypatch.setattr(trend, "_labeller_missing_at", trend.time.monotonic())
+    assert "labeller" not in trend._strip_missing(rows)[0], "still healing inside the window"
+    monkeypatch.setattr(trend, "_labeller_missing_at", trend.time.monotonic() - 601)
+    assert trend._strip_missing(rows)[0]["labeller"] == 2, "re-checked after 10 minutes"
+    assert trend._labeller_column_missing is False
+
+
+def test_the_chat_is_told_where_the_labelling_rules_changed():
+    """Scopes the re-label cannot rebuild (Market) keep older-rule days: never compare across."""
+    after = trend.TONE_RULES_SINCE + timedelta(days=5)
+    def _day(d, bull, bear, neut):
+        return {"date": d.isoformat(), "bullish": bull, "bearish": bear, "neutral": neut}
+
+    straddles = {"series": [_day(trend.TONE_RULES_SINCE - timedelta(days=3), 3, 1, 0),
+                            _day(after, 1, 1, 2)], "history_status": None}
+    text = trend.summarize_tone(straddles, focus_days=30, today=after)
+    assert "labelling rules changed on Sat Oct 10, 2026" in text
+    only_new = {"series": [_day(after, 1, 1, 2)], "history_status": None}
+    assert "labelling rules changed" not in trend.summarize_tone(only_new, focus_days=30, today=after)
+    assert "The card leaves out headlines that are not mainly about this feed's subject" in text
+
+
+class _GatedRowsClient(_WriteClient):
+    """PostgREST without migration 191's `skip_reason` (and `labeller`) columns."""
+
+    def table(self, name):
+        client = self
+
+        class _T(_Table):
+            def execute(self):
+                client.payloads.append(self._payload)
+                for col in ("skip_reason", "labeller"):
+                    if any(col in r for r in self._payload):
+                        raise RuntimeError("{'code': 'PGRST204', 'message': \"Could not find the "
+                                           f"'{col}' column of 'news_sentiment_log' in the schema cache\"}}")
+                return _Result(self._payload)
+        return _T(self, name)
+
+
+def test_without_191_a_gated_row_is_dropped_never_written_unflagged(monkeypatch):
+    for flag in ("_labeller_column_missing", "_skip_reason_column_missing", "_model_column_missing"):
+        monkeypatch.setattr(trend, flag, False)
+    client = _GatedRowsClient()
+    client.payloads = []
+    rows = build_log_rows("ORCL", [
+        _gated(ext="a", headline="Oracle beats", relevance="primary"),
+        _gated(ext="b", headline="Samsung capex surges", relevance="passing"),
+    ], now=NOW)
+    assert trend.upsert_log_rows(client, rows) == 1
+    final = client.payloads[-1]
+    assert [r["article_key"] for r in final] == [article_key("a")], "the off-topic row never counts"
+    assert all("skip_reason" not in r and "labeller" not in r for r in final)
+
+
+@pytest.mark.parametrize("message", [
+    'null value in column "model" violates not-null constraint',
+    'new row violates check constraint "news_sentiment_log_labeller_check"',
+    "duplicate key value violates unique constraint",
+])
+def test_a_constraint_error_naming_a_column_is_never_healed(message, monkeypatch):
+    monkeypatch.setattr(trend, "_model_column_missing", False)
+
+    class _Boom(_WriteClient):
+        def table(self, name):
+            class _T(_Table):
+                def execute(self):
+                    raise RuntimeError(message)
+            return _T(self, name)
+
+    with pytest.raises(RuntimeError):
+        trend.upsert_log_rows(_Boom(), build_log_rows("ORCL", [_row()], now=NOW, model="m"))
+    assert trend._model_column_missing is False

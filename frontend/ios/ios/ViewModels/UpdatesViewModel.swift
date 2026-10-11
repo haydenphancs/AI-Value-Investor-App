@@ -105,6 +105,13 @@ final class UpdatesViewModel: ObservableObject {
     /// A live or cached feed of THIS identity has painted. Until then a snapshot may be seeded;
     /// after it, never again (a seed would overwrite a live answer).
     @Published private(set) var hasShownFeed = false
+    /// The scope whose live (or cached) feed is the one painted now — `hasShownFeed` per scope.
+    /// Set beside every `hasShownFeed = true`; cleared when another scope's feed is asked for
+    /// (never by a pull-to-refresh of the same scope) and on identity change. The news-tone
+    /// chart waits on it (`UpdatesView.visibleTrend`): gated on the once-per-identity flag, a
+    /// chip switch drew the new scope's chart over its skeleton, then pushed it down when the
+    /// Insights card landed.
+    @Published private(set) var shownFeedScope: String?
 
     /// "Updated 4:02 PM" / "Updated Sep 28, 4:02 PM" while a snapshot is on screen. One wording
     /// source for every tab (`AccountSnapshotPolicy.updatedLabel`).
@@ -629,6 +636,7 @@ final class UpdatesViewModel: ObservableObject {
         seededAt = nil
         snapshotInsightID = nil
         hasShownFeed = false
+        shownFeedScope = nil
         error = nil
         // The next identity's first frame is its skeleton (or its snapshot), never "No recent
         // stories" from a cleared list.
@@ -851,6 +859,10 @@ final class UpdatesViewModel: ObservableObject {
         inFlightScope = scope
         // Which account this selection belongs to (see `selectionEpoch`).
         selectionEpoch = snapshotStore.epoch
+        // Another scope's painted feed must not open the news-tone chart's gate for this one; a
+        // forced reload of the SAME scope (pull-to-refresh) keeps it, so the chart stays over its
+        // own refresh. The paint below sets it to this scope.
+        if shownFeedScope != scope { shownFeedScope = nil }
         // The news-tone chart loads beside the feed, never in front of it: its own task,
         // its own staleness check, and a failure only hides the chart.
         startTrendLoad(scope: scope, force: force)
@@ -894,6 +906,7 @@ final class UpdatesViewModel: ObservableObject {
             // A cached feed is this session's live answer, never the snapshot (the snapshot
             // never enters `feedCache`), so the label goes with it.
             snapshotSavedAt = nil
+            shownFeedScope = scope
             hasShownFeed = true
             loadedOffset = cached.offset
             hasMorePages = cached.hasMore
@@ -973,6 +986,7 @@ final class UpdatesViewModel: ObservableObject {
             snapshotSavedAt = nil
             seededAt = nil
             hasShownFeed = true
+            shownFeedScope = scope
             applyFiltersAndGroup()
             // Page off what was REQUESTED, not what rendered: `dtos.count` may
             // exceed `articles.count` when rows are unrenderable, and paging off
@@ -1067,7 +1081,10 @@ final class UpdatesViewModel: ObservableObject {
             trendPollTask = nil
         } else if let trend = sentimentTrend, trend.isBuildingHistory,
                   trend.scope == selectedTab?.scope {
+            // Also covers a new ET day: the forced load re-cuts the chart before it fetches.
             startTrendLoad(scope: trend.scope, force: true)
+        } else {
+            refreshTrendIfDayRolledOver()
         }
         // A load that painted while the tab was hidden starts its post-paint work now — only if
         // it is still the load on screen (a newer load, or an identity change, owns the token).
@@ -1077,6 +1094,24 @@ final class UpdatesViewModel: ObservableObject {
                 startPostPaintWork(scope: pending.scope, token: pending.token, pollInsight: pending.pollInsight)
             }
         }
+    }
+
+    /// The ET day turned over since the chart was cut (ET midnight is 9 PM on the US west
+    /// coast). Every window was cut once, ending on the day it was cut (`asOfDayKey`), and the
+    /// axis ends there — so without this the card kept yesterday's window. Re-cut on the new
+    /// day at once (no request), then refresh the 90-day answer, which is the old day's: its
+    /// newest day was partial and today has no bar yet. Called on a tab return
+    /// (`setTabActive(true)`) and on app foreground (`UpdatesView`); a hidden tab only re-cuts,
+    /// and its return refreshes. Not keyed on `significantTimeChangeNotification`: that fires
+    /// at LOCAL midnight, not ET.
+    func refreshTrendIfDayRolledOver() {
+        guard let source = trendSource, source.scope == selectedTab?.scope else { return }
+        let today = SentimentTrendDayParser.etTodayKey()
+        if sentimentTrend?.asOfDayKey != today { show(source) }
+        guard isTabActive, source.asOfDayKey != today else { return }
+        let scope = source.scope, fetchedDay = source.asOfDayKey
+        Self.log.info("updates: news-tone trend \(scope, privacy: .public) is from ET day \(fetchedDay, privacy: .public) — refreshing for \(today, privacy: .public)")
+        startTrendLoad(scope: scope, force: true)
     }
 
     func setTrendWindow(_ window: SentimentTrendWindow) {
@@ -1108,7 +1143,9 @@ final class UpdatesViewModel: ObservableObject {
         let isNewScope = sentimentTrend?.scope != scope
         // Auto mode opens a NEW scope on 30D; the answer then decides whether to show 7D.
         if !userPickedWindow && isNewScope { trendWindow = .month }
-        if !force, let hit = trendCache[scope], Date().timeIntervalSince(hit.fetchedAt) < trendCacheTTL {
+        // A cached answer from before ET midnight is the old day's window (no bar for today).
+        if !force, let hit = trendCache[scope], Date().timeIntervalSince(hit.fetchedAt) < trendCacheTTL,
+           hit.trend.asOfDayKey == SentimentTrendDayParser.etTodayKey() {
             present(hit.trend)
             trendTask = nil
             return

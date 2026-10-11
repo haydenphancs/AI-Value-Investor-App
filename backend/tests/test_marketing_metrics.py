@@ -3537,6 +3537,82 @@ def test_runway_of_a_huge_pool_is_quick_and_exact():
     assert out["first_repeat"] > date(2122, 1, 1) and selection.is_posting_day(out["first_repeat"])
 
 
+# Company Weekly on (post-commit check of eba8ddcc): a lesson is certain only on a day whose enabled chain is
+# the lesson alone, and a news day that falls back to one brings the repeat forward — so the date is an upper
+# bound, flagged `no_later_than`.
+
+#: MARKETING_NEWS_SERIES's default, spelled out so a developer's .env can never move a pinned date: with
+#: classes A,C,F it makes Mon / Tue / Thu news days and leaves Saturday the lesson alone.
+_DEFAULT_NEWS_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map"
+_NEWS_CLASSES = frozenset({"A", "C", "F"})
+_NEWS_SERIES = selection.parse_news_series(_DEFAULT_NEWS_SERIES)
+
+
+def test_runway_with_a_news_class_on_counts_only_the_lesson_only_days():
+    pool = ["a", "b", "c"]
+    news = dict(classes=_NEWS_CLASSES, news_series=_NEWS_SERIES)
+    mon = date(2026, 10, 5)
+    # Sat 10-10, 10-17, 10-24 take a, b, c — Sat 10-31 repeats (lessons only it is Sat 10-10, above)
+    out = ds.pool_runway(pool, [], today=mon, today_picked=False, **news)
+    assert out == {"pool": 3, "unused": 3, "first_repeat": date(2026, 10, 31), "no_later_than": True}
+    # Monday is a news day: the count starts tomorrow whatever `today_picked` says
+    assert ds.pool_runway(pool, [], today=mon, today_picked=True, **news) == out
+    # a Saturday whose lesson is still to come counts itself; once made, the count starts next Saturday
+    sat = date(2026, 10, 10)
+    assert ds.pool_runway(pool, [], today=sat, today_picked=False, **news)["first_repeat"] == date(2026, 10, 31)
+    assert ds.pool_runway(pool, ["a"], today=sat, today_picked=True, **news) == {
+        "pool": 3, "unused": 2, "first_repeat": date(2026, 10, 31), "no_later_than": True}
+    # the walk lands only on lesson-only days, whatever the start
+    for offset in range(21):
+        start = mon + timedelta(days=offset)
+        day = ds.pool_runway(pool, ["b"], today=start, today_picked=False, **news)["first_repeat"]
+        assert selection.enabled_chain(selection.plan_for(day).chain, _NEWS_CLASSES,
+                                       shipped=_NEWS_SERIES) == (selection.LESSON,), day
+
+
+def test_runway_follows_the_per_series_switch_and_the_season_calendar():
+    """Only `earnings` listed (class F): Mon and Tue chains hold no listed series (the lesson alone), and a
+    Thursday is news only in earnings season — 10..56 days after a quarter end: Thu 10-08 is day 8 (off),
+    Thu 10-15 day 15 (in)."""
+    out = ds.pool_runway([str(i) for i in range(6)], [], today=date(2026, 10, 5), today_picked=False,
+                         classes=frozenset({"A", "F"}), news_series=frozenset({"earnings"}))
+    # Mon 10-05, Tue 10-06, Thu 10-08, Sat 10-10, Mon 10-12, Tue 10-13 take the six; Thu 10-15 is news
+    assert out == {"pool": 6, "unused": 6, "first_repeat": date(2026, 10, 17), "no_later_than": True}
+    # a news class on with every series switched off: every chain is the lesson, every posting day counts
+    # (the lessons-only date) — still flagged, the classes are what says news days may exist
+    lessons_only = ds.pool_runway(["a", "b", "c"], [], today=date(2026, 10, 5), today_picked=False)
+    assert ds.pool_runway(["a", "b", "c"], [], today=date(2026, 10, 5), today_picked=False,
+                          classes=_NEWS_CLASSES, news_series=frozenset()) == {**lessons_only, "no_later_than": True}
+
+
+def test_runway_with_the_classes_at_a_is_exactly_the_lessons_only_count():
+    """Classes None / {"A"} (MARKETING_CONTENT_CLASSES unset): every posting day, the three keys only, and the
+    per-series switch is never consulted."""
+    pool = [str(i) for i in range(9)]
+    for offset in range(21):
+        today = date(2026, 10, 1) + timedelta(days=offset)
+        for picked in (False, True):
+            for used_n in (0, 4, 9):
+                base = ds.pool_runway(pool, pool[:used_n], today=today, today_picked=picked)
+                assert set(base) == {"pool", "unused", "first_repeat"}
+                for classes in (frozenset({"A"}), {"A"}, ("A",)):
+                    for series in (None, frozenset(), _NEWS_SERIES):
+                        assert ds.pool_runway(pool, pool[:used_n], today=today, today_picked=picked,
+                                              classes=classes, news_series=series) == base
+
+
+def test_runway_without_a_lesson_only_day_in_reach_has_no_date(monkeypatch):
+    """A calendar whose every posting day has a news series (POST_WEEKDAYS or the plan changed): no lesson is
+    certain on any day, so no date — the walk stays bounded and the line names no date."""
+    news_day = selection.DayPlan(False, ("money_map", selection.LESSON), "test")
+    monkeypatch.setattr(selection, "plan_for",
+                        lambda d: news_day if selection.is_posting_day(d) else selection.DayPlan(True))
+    out = ds.pool_runway(["a", "b"], [], today=FRI, today_picked=False, classes=_NEWS_CLASSES,
+                         news_series=_NEWS_SERIES)
+    assert out == {"pool": 2, "unused": 2, "first_repeat": None, "no_later_than": True}
+    assert "Content pool: 2 of 2 lessons unused" in _digest([], runway=out).splitlines()
+
+
 # ── schedule ──────────────────────────────────────────────────────────────────
 
 
@@ -4182,6 +4258,23 @@ def test_the_runway_line_in_its_three_shapes():
         [], runway={"pool": 34, "unused": 0, "first_repeat": SAT})
     assert "Content pool: EMPTY" in _digest([], runway={"pool": 0, "unused": 0, "first_repeat": None})
     assert "Content pool: unreadable" in _digest([], runway=None)
+
+
+def test_the_runway_line_with_company_weekly_on_is_an_upper_bound():
+    tail = " (sooner when a news day falls back to a lesson)"
+    lines = _digest([], runway={"pool": 34, "unused": 22, "first_repeat": date(2027, 3, 20),
+                                "no_later_than": True}).splitlines()
+    assert ("Content pool: 22 of 34 lessons unused — the first repeat is due no later than Sat 2027-03-20"
+            + tail) in lines
+    lines = _digest([], runway={"pool": 34, "unused": 0, "first_repeat": date(2027, 4, 24),
+                                "no_later_than": True}).splitlines()
+    assert "Content pool: 0 of 34 lessons unused — lessons repeat no later than Sat 2027-04-24" + tail in lines
+    assert "⚠️ Content pool: EMPTY — every posting day will be skipped (empty_pool)" in _digest(
+        [], runway={"pool": 0, "unused": 0, "first_repeat": None, "no_later_than": True}).splitlines()
+    # without the flag (the classes at "A"): the exact date, never "no later than"
+    text = _digest([], runway={"pool": 34, "unused": 22, "first_repeat": date(2027, 3, 20)})
+    assert "Content pool: 22 of 34 lessons unused — the first repeat is due Sat 2027-03-20" in text.splitlines()
+    assert "no later than" not in text and "falls back" not in text
 
 
 def test_posts_waiting_for_an_unknown_outcome_answer_are_listed_without_text():
@@ -5060,6 +5153,10 @@ def digest_ledger(monkeypatch, platforms_forbidden):
     # a developer's .env can never move an expected cost line. A test that wants the $16 plan sets its own.
     monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 0.0)
     monkeypatch.setattr(settings, "MARKETING_WEEKLY_COST_WARN_USD", 1.0)
+    # The runway's calendar follows the content classes and the per-series switch, read at call time: pin
+    # production's (lessons only; the switch's default) — a test that turns Company Weekly on sets its own.
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", "A")
+    monkeypatch.setattr(settings, "MARKETING_NEWS_SERIES", _DEFAULT_NEWS_SERIES)
     from app.services.marketing import content_pool
     monkeypatch.setattr(content_pool, "eligible_keys", lambda: [f"journey:{i}" for i in range(10)])
     return svc
@@ -5172,6 +5269,178 @@ async def test_gather_counts_todays_pick_once_it_is_made(digest_ledger):
     report = await ds.gather_digest(digest_ledger, NOW)
     # 7 unused from Tue 10-06: Tue, Thu, Sat, Mon, Tue, Thu, Sat — the 8th posting day repeats
     assert report["runway"] == {"pool": 10, "unused": 7, "first_repeat": date(2026, 10, 19)}
+
+
+# ── the runway against a real-shaped ledger (post-commit check of eba8ddcc) ──
+# The digest read `len(pool) + RECENT_WINDOW` (94) refs of ALL kinds and counted every posting day; once
+# Company Weekly stores `news:` refs on Mon/Tue/Thu, those rows pushed older lessons out of the read and
+# most counted days were news days: after 39 lesson picks from a pool of 34 it still said "10 of 34 lessons
+# unused". It now reads what selection reads (NEWS_RECENT_LIMIT refs, lesson refs only) and counts only the
+# lesson-only days. Lessons only (production today) its text must not move by a byte.
+
+#: The production pool's size at the check, as synthetic keys so a new bundled lesson cannot move a date.
+_POOL_34 = [f"journey:{i}" for i in range(34)]
+#: The day Company Weekly turns on in the mixed ledger: lessons every posting day before it (12 picks),
+#: then news on Mon/Tue/Thu and the lesson on Saturday.
+_SWITCH_DAY = date(2026, 10, 12)
+
+
+def _ledger_rows(pool: List[str], last: date, *, news_from: Optional[date] = None) -> List[tuple]:
+    """(run_date, source_ref) for every ET day from selection.EPOCH through `last`, picked the way production
+    picks: a rest day stores NULL; from `news_from` on, a posting day whose chain (classes A,C,F, the default
+    series) still holds a series stores a `news:` ref (its series found a candidate — no fall-back); every other
+    posting day stores the lesson `script_service._select_lesson` picks — `selection.choose` over the lesson refs
+    of the newest NEWS_RECENT_LIMIT refs before it. Causal: a longer run's prefix is a shorter run."""
+    from app.services.marketing.script_service import NEWS_RECENT_LIMIT
+
+    rows: List[tuple] = []
+    picks: List[str] = []
+    day = selection.EPOCH
+    while day <= last:
+        ref: Optional[str] = None
+        if selection.is_posting_day(day):
+            chain = selection.enabled_chain(selection.plan_for(day).chain, _NEWS_CLASSES, shipped=_NEWS_SERIES)
+            if news_from is not None and day >= news_from and chain != (selection.LESSON,):
+                ref = f"news:money_map:T{day.toordinal()}:2026"
+            else:
+                ref = selection.choose(pool, day, selection.lesson_refs(picks[::-1][:NEWS_RECENT_LIMIT])).source_ref
+            picks.append(ref)
+        rows.append((day, ref))
+        day += timedelta(days=1)
+    return rows
+
+
+def _seed_ledger(svc, pool: List[str], today: date, *, made: bool,
+                 news_from: Optional[date] = None) -> Optional[date]:
+    """Seed the scripts through yesterday (through today when `made`) and return the date of the first pick
+    from today on that repeats an earlier one — what selection really does, simulated past today."""
+    rows = _ledger_rows(pool, today + timedelta(days=400), news_from=news_from)
+    last = today if made else today - timedelta(days=1)
+    svc.fake.tables[mrs.SCRIPTS].rows += [
+        {"run_id": str(uuid.uuid4()), "run_date": d.isoformat(), "source_ref": ref, "tokens_used": 0}
+        for d, ref in rows if d <= last]
+    used = {ref for d, ref in rows if d <= last and ref}
+    return next((d for d, ref in rows
+                 if d > last and ref and selection.lesson_refs([ref]) and ref in used), None)
+
+
+def _pool_line(text: str) -> str:
+    (line,) = [ln for ln in text.splitlines() if ln.startswith(("Content pool", "⚠️ Content pool"))]
+    return line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("today, made, unused, first_repeat", [
+    # the switch day, 12 lessons so far: it said Thu 2026-11-19 (22 of the posting days in between are news)
+    (date(2026, 10, 12), False, 22, date(2027, 3, 20)),
+    (date(2027, 2, 15), False, 4, date(2027, 3, 20)),     # it said Mon 2027-02-22 — a news day
+    (date(2027, 2, 15), True, 4, date(2027, 3, 20)),      # Monday's news row is in: it used no lesson
+    (date(2027, 2, 20), False, 4, date(2027, 3, 20)),     # a Saturday still to come counts itself …
+    (date(2027, 2, 20), True, 3, date(2027, 3, 20)),      # … and once made, the count starts next week
+    (date(2027, 4, 19), False, 0, date(2027, 4, 24)),     # 39 picks from 34: it said "10 of 34 lessons unused"
+    (date(2027, 7, 19), False, 0, date(2027, 7, 24)),     # 52 picks: it still said 10 of 34
+    (date(2028, 1, 17), True, 0, date(2028, 1, 22)),      # more rows than the 240 selection reads
+])
+async def test_the_runway_reads_a_mixed_news_and_lesson_ledger_as_selection_does(
+        digest_ledger, monkeypatch, today, made, unused, first_repeat):
+    from app.services.marketing import content_pool
+
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(content_pool, "eligible_keys", lambda: list(_POOL_34))
+    actual = _seed_ledger(digest_ledger, _POOL_34, today, made=made, news_from=_SWITCH_DAY)
+    report = await ds.gather_digest(digest_ledger, datetime(today.year, today.month, today.day, 15,
+                                                            tzinfo=timezone.utc))
+    assert report["runway"] == {"pool": 34, "unused": unused, "first_repeat": first_repeat, "no_later_than": True}
+    # the digest's date is the repeat selection really makes when no news day falls back to a lesson
+    assert actual == first_repeat
+    what = "lessons repeat" if unused == 0 else "the first repeat is due"
+    assert _pool_line(ds.compose_digest(report)) == (
+        f"Content pool: {unused} of 34 lessons unused — {what} no later than "
+        f"{first_repeat.strftime('%a %Y-%m-%d')} (sooner when a news day falls back to a lesson)")
+
+
+#: `compose_digest` of `_seed_week` at NOW as eba8ddcc (deployed, lessons only) printed it, byte for byte.
+_SEED_WEEK_TEXT_AT_EBA8DDCC = "\n".join([
+    "📊 Caydex marketing — weekly digest",
+    "Mon 2026-09-28 → Sun 2026-10-04 (ET)",
+    "💵 Cost last week ≈ $0.091: X $0.030 (our ledger) · Gemini ≈ $0.061 · worker ≈ $0.000 · "
+    "Upload-Post $0.000 (Free plan · 0 uploads)",
+    "Usage (X + Gemini + worker): last week ≈ $0.091 · week before ≈ $0.000",
+    "",
+    "Runs:",
+    "• Mon 09-28 no run (a posting day)",
+    "• Tue 09-29 no run (a posting day)",
+    "• Thu 10-01 no run (a posting day)",
+    "• Sat 10-03 media_ready",
+    "Worker memory peak: 2,500 MB (voiced, Sat 10-03)",
+    "",
+    "Posts: 2 live — published 1 · queued 1",
+    "• X: published 1 · queued 1",
+    "Formats: text 2 (published 1 · queued 1)",
+    "",
+    "Engagement (latest snapshot of this week's published posts):",
+    "• X — 1 of 1 measured: 90 impressions · 4 likes",
+    f"  Top: https://x.com/i/web/status/{X_ID} (4 likes)",
+    "Followers: BLUESKY 7 (as of 09-28; no snapshot 6+ days older yet) · "
+    "X 12 (as of 10-05; no snapshot 6+ days older yet)",
+    "",
+    "/go taps (approximate): bluesky 2 — 2 in total — plus 4 in the first minutes after posting "
+    "(mostly link scanners)",
+    "⚠️ MARKETING_APP_STORE_URL is unset — every /go tap lands on the landing page, which has no App Store link.",
+    "X spend 2026-10 (UTC, to date): $0.020 of the $2.00 cap (1%)",
+    "  x_create $0.015 · x_metrics_read $0.005",
+    "",
+    "Review time: no decisions this week",
+    "Content pool: 8 of 10 lessons unused — the first repeat is due Mon 2026-10-19",
+    "⚠️ Waiting for your answer (outcome unknown): 1",
+    "  X · run 10-03 · since 10-03 16:40 ET",
+    "Metrics job: last completed 2026-10-05 · last attempt 10-05 06:00 ET · 2 posts written",
+])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("classes", ["A", "", " a ,"])
+async def test_lessons_only_the_digest_text_is_byte_identical_to_eba8ddcc(digest_ledger, monkeypatch, caplog,
+                                                                         classes):
+    """MARKETING_CONTENT_CLASSES unset in production (its default "A"; any spelling that parses to A): the whole
+    message is what the deployed digest sent. The per-series switch is not even read (junk in it logs nothing),
+    exactly as `script_service._select` leaves it alone while the classes are A."""
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", classes)
+    monkeypatch.setattr(settings, "MARKETING_NEWS_SERIES", "junk,not_a_series")
+    _seed_week(digest_ledger)
+    with caplog.at_level(logging.DEBUG):
+        text = ds.compose_digest(await ds.gather_digest(digest_ledger, NOW))
+    assert text == _SEED_WEEK_TEXT_AT_EBA8DDCC
+    assert not [r for r in caplog.records if "MARKETING_NEWS_SERIES" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("today, made, runway, line", [
+    # values eba8ddcc printed for the same lesson-only ledgers (the production pool's size, picks since EPOCH)
+    (date(2026, 10, 12), False, {"pool": 34, "unused": 22, "first_repeat": date(2026, 11, 19)},
+     "Content pool: 22 of 34 lessons unused — the first repeat is due Thu 2026-11-19"),
+    (date(2026, 10, 17), True, {"pool": 34, "unused": 18, "first_repeat": date(2026, 11, 19)},
+     "Content pool: 18 of 34 lessons unused — the first repeat is due Thu 2026-11-19"),
+    (date(2027, 4, 19), False, {"pool": 34, "unused": 0, "first_repeat": date(2027, 4, 19)},
+     "Content pool: 0 of 34 lessons unused — lessons repeat from Mon 2027-04-19"),
+    # more rows than both the old read (94) and selection's (240)
+    (date(2027, 11, 22), False, {"pool": 34, "unused": 0, "first_repeat": date(2027, 11, 22)},
+     "Content pool: 0 of 34 lessons unused — lessons repeat from Mon 2027-11-22"),
+    (date(2027, 11, 20), True, {"pool": 34, "unused": 0, "first_repeat": date(2027, 11, 22)},
+     "Content pool: 0 of 34 lessons unused — lessons repeat from Mon 2027-11-22"),
+])
+async def test_lessons_only_the_runway_of_a_long_ledger_is_byte_identical_to_eba8ddcc(
+        digest_ledger, monkeypatch, today, made, runway, line):
+    from app.services.marketing import content_pool
+
+    monkeypatch.setattr(content_pool, "eligible_keys", lambda: list(_POOL_34))
+    actual = _seed_ledger(digest_ledger, _POOL_34, today, made=made)
+    report = await ds.gather_digest(digest_ledger, datetime(today.year, today.month, today.day, 15,
+                                                            tzinfo=timezone.utc))
+    assert report["runway"] == runway
+    assert _pool_line(ds.compose_digest(report)) == line
+    # and it is the truth: selection's own first repeat from today
+    assert actual == runway["first_repeat"]
 
 
 @pytest.mark.asyncio

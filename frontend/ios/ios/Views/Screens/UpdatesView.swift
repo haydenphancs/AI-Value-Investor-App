@@ -232,13 +232,15 @@ struct UpdatesView: View {
                 await viewModel.loadIfNeeded()
             }
             // A snapshot that aged past its display window while the app was in the background
-            // comes down first, whichever tab is showing (Home's rule).
+            // comes down first, whichever tab is showing (Home's rule). Then the news-tone chart
+            // moves to a new ET day if one began meanwhile (it re-fetches only on the active tab).
             .onReceive(
                 NotificationCenter.default.publisher(
                     for: UIApplication.didBecomeActiveNotification
                 )
             ) { _ in
                 viewModel.expireSnapshotIfStale()
+                viewModel.refreshTrendIfDayRolledOver()
             }
             // `loadIfNeeded()` early-returns on `hasLoadedOnce`, which latches on the first
             // successful load and is never reset — and this screen is opacity-mounted, so the
@@ -396,15 +398,22 @@ struct UpdatesView: View {
     /// Kept OUT of `body` on purpose: `test_ios_account_gate_state` reads the gate's branch
     /// order from the first mention of each flag in `body`.
     ///
-    /// Also waits for the first live feed of the identity (`hasShownFeed`): drawn over the
+    /// Also waits for the SELECTED scope's live feed to paint (`shownFeedScope`): drawn over the
     /// skeleton, the chart was pushed down when the Insights card landed above it — one shift
-    /// instead of two. A pull-to-refresh keeps it (the flag stays set). Over SNAPSHOT rows it
-    /// may draw once the snapshot has an Insights card: the live card replaces that card in the
-    /// same slot (the pill's slot is reserved), so the chart is not pushed down, and its own
-    /// arrival — it is a live answer — is not stacked onto the row swap's transaction.
+    /// instead of two. Per scope, not once per identity (`hasShownFeed` alone): after a chip
+    /// switch the new scope's chart sat above that scope's skeleton and then jumped. A
+    /// pull-to-refresh keeps it (the same scope stays shown). Over SNAPSHOT rows it may draw once
+    /// the snapshot has an Insights card: the live card replaces that card in the same slot (the
+    /// pill's slot is reserved), so the chart is not pushed down, and its own arrival — it is a
+    /// live answer — is not stacked onto the row swap's transaction.
+    ///
+    /// Two lines: the first says something the chart may sit under has painted (a live feed, or
+    /// a snapshot with a card); the second that a LIVE one is this scope's (a snapshot is never
+    /// live, and painting any live feed clears it).
     private var visibleTrend: SentimentTrend? {
         guard let trend = viewModel.sentimentTrend,
               viewModel.hasShownFeed || (viewModel.snapshotSavedAt != nil && viewModel.insightSummary != nil),
+              viewModel.snapshotSavedAt != nil || viewModel.shownFeedScope == viewModel.selectedTab?.scope,
               !viewModel.isReconnecting, !viewModel.requiresSignIn,
               trend.scope == viewModel.selectedTab?.scope,
               trend.hasEnoughHistory() || trend.isBuildingHistory else { return nil }

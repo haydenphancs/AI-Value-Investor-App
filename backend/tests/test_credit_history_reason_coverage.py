@@ -261,4 +261,4 @@ def test_the_unanswered_refund_has_its_own_readable_row():
     assert "chat_unanswered" in KNOWN_REASONS
     kind, title, _ref = describe_reason("chat_unanswered")
     assert kind == KIND_REFUND
-    assert title == "Not charged — Cay AI didn't fully answer"
+    assert title == "Not charged - Cay AI didn't fully answer"

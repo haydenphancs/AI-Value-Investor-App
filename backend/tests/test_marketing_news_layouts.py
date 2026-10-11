@@ -1421,7 +1421,7 @@ def test_the_theme_video_cards_fit_whatever_the_member_names(engine, name, shipp
     if _THEME_CARD_NAMES[name]:
         assert all(name in t for t in titles), titles
     else:
-        assert titles == ["Largest segments"] * 3 and all(name in c["body"] for c in out["cards"][:3])
+        assert titles == ["Largest revenue lines"] * 3 and all(name in c["body"] for c in out["cards"][:3])
     _lay_out_everything(out, engine)
 
 

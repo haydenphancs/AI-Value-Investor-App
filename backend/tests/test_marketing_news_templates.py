@@ -32,7 +32,7 @@ import string
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -45,6 +45,7 @@ from app.services.marketing import template_onscreen as onscreen
 from app.services.marketing import writer_prompts as wp
 from app.services.marketing.compliance import clean, fold, scan_text
 from app.services.trillion_club import copy_rules
+from app.services.trillion_club.rules import sec_13f_due_date
 
 _BACKEND = Path(__file__).resolve().parents[1]
 LEXICON_PATH = _BACKEND / "tests" / "data" / "marketing_news_lexicon_v1.json"
@@ -86,6 +87,20 @@ def insider_mixed():
             [date(2026, 11, 12), date(2026, 11, 13)], holding="mixed"),
         buy("HSY", "Hershey", "director", None, 150_000.0, 812.0, 1, [date(2026, 11, 14)]),
         series="insider_buys")
+
+
+def late(sym="HSY", name="Hershey", role="director", person=None, *, traded=(date(2026, 10, 14), date(2026, 10, 17)),
+         filings=(date(2026, 11, 12),), k=2, holding="direct"):
+    """news-v12: a LATE Form 4 row — its trades (the record admits up to INSIDER_MAX_FILING_LAG_DAYS
+    before the first filing) are weeks before its filing, so "within two business days of a trade"
+    beside "filed Nov 12" would date them to about Nov 10."""
+    return R.InsiderPurchase(company=co(sym, name), role=role, person_name=person, amount_usd=150_000.0,
+                             shares=812.0, purchases=k, earliest_trade_date=traded[0], latest_trade_date=traded[-1],
+                             filing_dates=tuple(filings), holding=holding, amended=False)
+
+
+def insider_late():
+    return week(late(), series="insider_buys")
 
 
 def move(sym, name, kind, **kw):
@@ -152,7 +167,7 @@ def rivian(**kw):
 
 
 def comcast(**kw):
-    """Intersegment eliminations (segment shares then read "of segment sales"), an Other bar, no
+    """Intersegment eliminations (the shares then read "of combined sales"), an Other bar, no
     gross-profit figure."""
     base = dict(series="money_map", company=co("CMCSA", "Comcast"), fiscal_year="2025", period_end=date(2025, 12, 31),
                 segments=(R.Segment("Connectivity and Platforms", 82_000_000_000.0),
@@ -214,13 +229,25 @@ def tesla_spacex():
 
 
 def berkadia():
-    """A carrying value (the long hook steps down to "carried its … stake at"); an ownership share
-    beside the figure is never said; the background names another company's 50% (dropped)."""
+    """A carrying value (a caption over budget steps down to "… stake was carried at"); an ownership
+    share beside the figure is never said; the background names another company's 50% (dropped)."""
     return stake(stake_id="2c4e6a8b-0d1f-4a3c-9e5b-7d9f1b3d5f04", investor=co("BRK-B", "Berkshire Hathaway"),
                  investee_name="Berkadia Commercial Mortgage", kind="private", value_usd=461_000_000.0,
                  value_basis="carrying_value", ownership_pct=50.0, as_of=date(2026, 6, 30),
                  source_title="Berkshire Hathaway 10-Q (quarter ended Jun 30, 2026)",
                  background="Jefferies Financial Group owned the other 50%.")
+
+
+def iroquois_bhe():
+    """Review round 17: a catalogue row whose SOURCE is another filer's document
+    (`data/trillion_club_seed.json`, sort_order 8): the investor is Berkshire Hathaway, the figure is
+    Berkshire Hathaway Energy's (a separate SEC registrant) consolidated carrying value in BHE's 10-Q —
+    no string may say Berkshire Hathaway "reported" or "carried" it."""
+    return stake(stake_id="6d8f0a2c-4e6a-4c8e-9a1c-3e5a7c9e1b08", investor=co("BRK-B", "Berkshire Hathaway"),
+                 investee_name="Iroquois Gas Transmission System", kind="private", value_usd=597_000_000.0,
+                 value_basis="carrying_value", ownership_pct=50.0, as_of=date(2026, 6, 30),
+                 source_title="Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026)",
+                 background="Held by BHE's Eastern Energy Gas; the $597M was BHE's consolidated carrying value.")
 
 
 def itochu():
@@ -311,6 +338,7 @@ SAMPLES = [
     ("ceo_spotlight", lambda: week(GME), MON),
     ("ceo_spotlight_of_twin", lambda: week(LOW), MON),
     ("insider_mixed", insider_mixed, MON),
+    ("insider_late", insider_late, MON),
     ("berkshire_13f", berkshire, TUE),
     ("pershing_13f", pershing, TUE),
     ("costco_money_map", costco, THU),
@@ -322,6 +350,7 @@ SAMPLES = [
     ("stake_anthropic_commitment", anthropic_commitment, STAKES_RUN),
     ("stake_spacex_fair_value", tesla_spacex, STAKES_RUN),
     ("stake_berkadia_carrying", berkadia, STAKES_RUN),
+    ("stake_iroquois_bhe_carrying", iroquois_bhe, STAKES_RUN),
     ("stake_itochu_non_us", itochu, STAKES_RUN),
     ("stake_intel_us", intel_stake, STAKES_RUN),
     ("earnings_loss", earnings, EARNINGS_RUN),
@@ -375,15 +404,17 @@ GOLDEN = {
                     'sections': [{'rows': [{'logo': 'GME', 'cells': ['GameStop', 'CEO', '$74.4M']},
                                            {'logo': 'LOW', 'cells': ["Lowe's", 'CEO', '$2.3M']},
                                            {'logo': 'SBUX', 'cells': ['Starbucks', 'CEO', '$410K']}]}],
-                    'notes': ['Some purchases are reported as held indirectly.',
+                    # news-v12: the SHARES are held indirectly, not the purchases
+                    'notes': ['Some of the shares in these purchases are reported as held indirectly.',
                               'The figures include an amended Form 4 (Form 4/A).'],
                     'footer': 'Educational only · not investment advice · Source: SEC Form 4 filings · '
                               'Filed Nov 9–15, 2026 · Caydex · Not affiliated with anyone named'},
      'image_post': {'title': "At least 3 CEOs disclosed buying their own company's stock",
-                    'paragraphs': ['The image lists each purchase by company, role and amount: '
+                    # news-v15: a row is one buyer's total (GameStop's is 2 purchases), never one purchase
+                    'paragraphs': ["The image lists each buyer's total by company, role and amount: "
                                    "GameStop, CEO, $74.4M; Lowe's, CEO, $2.3M; Starbucks, CEO, $410K.",
-                                   'Some purchases are reported as held indirectly. The figures '
-                                   'include an amended Form 4 (Form 4/A).',
+                                   'Some of the shares in these purchases are reported as held '
+                                   'indirectly. The figures include an amended Form 4 (Form 4/A).',
                                    'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']},
      'image_footer': 'Educational only · not investment advice · Source: SEC Form 4 filings · Filed '
                      'Nov 9–15, 2026 · Caydex · Not affiliated with anyone named',
@@ -399,8 +430,9 @@ GOLDEN = {
                  "The purchases shown: GameStop, CEO Ryan Cohen, $74.4 million; Lowe's, CEO, $2.3 "
                  'million; Starbucks, CEO, $410,000.\n'
                  '\n'
-                 "Some of the shares are reported as held indirectly rather than in the buyer's own "
-                 'name. The figures include an amended Form 4 (Form 4/A).\n'
+                 # news-v12: a roundup's flag paragraph speaks of several buyers (no singular "buyer's")
+                 'Some of the shares are reported as held indirectly. The figures include an amended '
+                 'Form 4 (Form 4/A).\n'
                  '\n'
                  "A Form 4 is the report a company's officers and directors file within two business "
                  "days of a trade. Amounts are each filing's share count times the cost it reports for "
@@ -415,7 +447,8 @@ GOLDEN = {
                       'to November 11th.',
                       'They report 2 purchases, 3 million shares in total, for $74.4 million.',
                       'Officers and directors must file a Form 4 within two business days of a trade.',
-                      "Amounts are the filing's share count times the cost it reports for each share."],
+                      # news-v15: "each filing's", as the caption says
+                      "Amounts are each filing's share count times the cost it reports for each share."],
      'cards': [{'title': 'Who filed', 'body': 'The CEO of GameStop'},
                {'title': 'The purchases', 'body': '2 purchases · 3M shares · $74.4M'},
                {'title': 'What a Form 4 is',
@@ -441,7 +474,12 @@ GOLDEN = {
                '10-11.\n'
                '\n'
                'The filings name Ryan Cohen, the CEO of GameStop.',
-     'youtube_title': "GameStop's CEO disclosed buying $74.4M of GameStop stock"},
+     'youtube_title': "GameStop's CEO disclosed buying $74.4M of GameStop stock",
+     # news-v17 (review round 17): the share figure is the TOTAL of the 2 purchases, never "2 purchases of
+     # 3M shares" (read as 3M each), as the narration says it
+     'image_post': {'title': "GameStop's CEO disclosed buying GameStop stock",
+                    'paragraphs': ['It shows $74.4M in 2 purchases, 3M shares in total.',
+                                   'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']}},
     'ceo_spotlight_of_twin': {'hook': "The chief executive of Lowe's disclosed buying $2.3 million of the company's stock.",
      'video_script': ["The filing is by the company's chief executive and was filed on November 12th.",
                       'It reports one purchase of 9,812 shares, for $2.3 million.',
@@ -475,7 +513,11 @@ GOLDEN = {
                "A Form 4 is the report a company's officers and directors file within two business "
                "days of a trade. Amounts are each filing's share count times the cost it reports for "
                'each share.',
-     'youtube_title': "The CEO of Lowe's disclosed buying $2.3M of Lowe's stock"},
+     'youtube_title': "The CEO of Lowe's disclosed buying $2.3M of Lowe's stock",
+     # news-v17: one purchase keeps "of" (the narration's "one purchase of 9,812 shares")
+     'image_post': {'title': "The CEO of Lowe's disclosed buying Lowe's stock",
+                    'paragraphs': ['It shows $2.3M in 1 purchase of 9,812 shares.', 'Held indirectly.',
+                                   'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']}},
     'insider_mixed': {'hook': "Nike's chief financial officer disclosed buying $1.3 million of the company's stock.",
      'video_script': ["The filing is by the company's chief financial officer and was filed on "
                       'November 10th.',
@@ -502,13 +544,13 @@ GOLDEN = {
                                            {'logo': 'CTSO', 'cells': ['Contoso', 'Director', '$640K']},
                                            {'logo': 'HSY',
                                             'cells': ['Hershey', 'Director', '$150K']}]}],
-                    'notes': ['Some purchases are reported as held indirectly.'],
+                    'notes': ['Some of the shares in these purchases are reported as held indirectly.'],
                     'footer': 'Educational only · not investment advice · Source: SEC Form 4 filings · '
                               'Filed Nov 9–15, 2026 · Caydex · Not affiliated with anyone named'},
      'image_post': {'title': "At least 3 company insiders disclosed buying their own company's stock",
-                    'paragraphs': ['The image lists each purchase by company, role and amount: Nike, '
+                    'paragraphs': ["The image lists each buyer's total by company, role and amount: Nike, "
                                    'CFO, $1.3M; Contoso, Director, $640K; Hershey, Director, $150K.',
-                                   'Some purchases are reported as held indirectly.',
+                                   'Some of the shares in these purchases are reported as held indirectly.',
                                    'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']},
      'image_footer': 'Educational only · not investment advice · Source: SEC Form 4 filings · Filed '
                      'Nov 9–15, 2026 · Caydex · Not affiliated with anyone named',
@@ -525,8 +567,7 @@ GOLDEN = {
                  'The purchases shown: Nike, CFO, $1.3 million; Contoso, director Anna Smith-Jones, '
                  '$640,000; Hershey, director, $150,000.\n'
                  '\n'
-                 "Some of the shares are reported as held indirectly rather than in the buyer's own "
-                 'name.\n'
+                 'Some of the shares are reported as held indirectly.\n'
                  '\n'
                  "A Form 4 is the report a company's officers and directors file within two business "
                  "days of a trade. Amounts are each filing's share count times the cost it reports for "
@@ -537,18 +578,52 @@ GOLDEN = {
                "days of a trade. Amounts are each filing's share count times the cost it reports for "
                'each share.',
      'youtube_title': "Nike's CFO disclosed buying $1.3M of Nike stock"},
+    # news-v12: a late filing — its trade dates (Oct 14-17) are said in place of the two-business-day rule
+    'insider_late': {'hook': "A director of Hershey disclosed buying $150,000 of the company's stock.",
+     # news-v15: one filing DATE and 2 purchases — maybe one Form 4, maybe two filed that day: no line counts them
+     'video_script': ['The filer is a director of the company, and the filing date is November 12th.',
+                      '2 purchases are reported, 812 shares in total, for $150,000.',
+                      'The purchases are reported with trade dates from October 14th to October 17th.',
+                      "Amounts are each filing's share count times the cost it reports for each share."],
+     'cards': [{'title': 'Who filed', 'body': 'A director of Hershey'},
+               {'title': 'The purchases', 'body': '2 purchases · 812 shares · $150K'},
+               {'title': 'Trade dates', 'body': 'Oct 14–17, 2026 · filed Nov 12, 2026'},
+               {'title': 'How the amount is counted',
+                'body': 'Shares times the cost of each share, per the filing'}],
+     'opening_card': {'kicker': 'FILED LAST WEEK · FORM 4',
+                      'logos': ['HSY'],
+                      'chip': 'HSY',
+                      'figure': '$150K',
+                      'headline': 'A director of Hershey disclosed buying Hershey stock'},
+     'persons': [],
+     'x': 'A director of Hershey disclosed buying $150,000 of Hershey stock on Form 4, filed Nov 12.',
+     'linkedin': 'A director of Hershey disclosed buying $150,000 of Hershey stock on Form 4, filed Nov 12.\n'
+                 '\n'
+                 "The purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a "
+                 "company's officers and directors file on their own trades. Amounts are each filing's share "
+                 'count times the cost it reports for each share.',
+     'tiktok': 'A director of Hershey disclosed buying $150,000 of Hershey stock on Form 4, filed Nov 12.\n'
+               '\n'
+               "The purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a "
+               "company's officers and directors file on their own trades. Amounts are each filing's share "
+               'count times the cost it reports for each share.',
+     'youtube_title': 'A director of Hershey disclosed buying $150K of Hershey stock',
+     # news-v17: the share figure is the TOTAL of the 2 purchases
+     'image_post': {'title': 'A director of Hershey disclosed buying Hershey stock',
+                    'paragraphs': ['It shows $150K in 2 purchases, 812 shares in total.',
+                                   'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']}},
     'berkshire_13f': {'hook': "Berkshire Hathaway's latest 13F lists 3 newly reported holdings.",
      'video_script': ['It covers the quarter that ended September 30th and was filed on November 13th.',
                       "The holdings newly reported in this filing are Constellation Brands, Domino's "
                       'Pizza and Lennar.',
                       'The holdings no longer reported in this filing are Citigroup and Nu Holdings.',
-                      "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days "
+                      "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days "
                       'later.'],
      'cards': [{'title': 'Quarter ended', 'body': 'Sep 30, 2026 · filed Nov 13, 2026'},
                {'title': 'Newly reported', 'body': "Constellation Brands, Domino's Pizza and Lennar"},
                {'title': 'No longer reported', 'body': 'Citigroup and Nu Holdings'},
                {'title': 'About 13F filings',
-                'body': 'U.S. stock holdings, filed up to 45 days after the quarter'}],
+                'body': 'U.S. stock holdings, due about 45 days after the quarter'}],
      'opening_card': {'kicker': '13F SEASON',
                       'logos': ['BRK-B'],
                       'figure': '3',
@@ -573,8 +648,9 @@ GOLDEN = {
                               'Quarter ended Sep 30, 2026 · filed Nov 13, 2026 · Caydex · Not '
                               'affiliated with anyone named'},
      'image_post': {'title': "Berkshire Hathaway's latest 13F",
-                    'paragraphs': ["Newly reported: Constellation Brands, Domino's Pizza, Lennar.",
-                                   'No longer reported: Citigroup, Nu Holdings.',
+                    # news-v15: the alt joins the drawn names as the cards do (`list.*`)
+                    'paragraphs': ["Newly reported: Constellation Brands, Domino's Pizza and Lennar.",
+                                   'No longer reported: Citigroup and Nu Holdings.',
                                    'Source: SEC Form 13F. Quarter ended Sep 30, 2026 · filed Nov 13, '
                                    '2026.']},
      'image_footer': 'Educational only · not investment advice · Source: SEC Form 13F · Quarter ended '
@@ -596,7 +672,7 @@ GOLDEN = {
                  '\n'
                  'No longer reported: Citigroup; Nu Holdings.\n'
                  '\n'
-                 "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days later; "
+                 "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later; "
                  'it does not show when shares changed hands.',
      'tiktok': "Berkshire Hathaway's 13F for the quarter ended Sep 30: 3 newly reported holdings, 2 no "
                'longer reported, 2 with more shares, 4 with fewer shares.\n'
@@ -633,7 +709,7 @@ GOLDEN = {
                  "Newly reported, with the value the filing gives at the quarter's end: CoreWeave, "
                  '$118 million.\n'
                  '\n'
-                 "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days later; "
+                 "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later; "
                  'it does not show when shares changed hands.',
      'tiktok': "Pershing Square Capital Management's 13F for the quarter ended Sep 30: 1 holding with "
                'more shares, 1 with fewer shares, 1 newly reported.\n'
@@ -642,13 +718,13 @@ GOLDEN = {
      'youtube_title': "Pershing Square Capital Management's 13F: more shares of 1 holding"},
     'costco_money_map': {'hook': 'For every $100 of revenue in fiscal 2025, Costco kept $2.94 as net income.',
      'video_script': ['Costco reported revenue of $275.2 billion in fiscal 2025.',
-                      'Its United States segment made up 73% of revenue, and Canada made up 14% of '
+                      'Its United States business made up 73% of revenue, and Canada made up 14% of '
                       'revenue.',
                       'After the cost of sales, gross profit was $35.4 billion; after operating costs, '
                       'operating profit was $10.4 billion.',
                       'After interest, taxes and everything else, net income was $8.1 billion.'],
      'cards': [{'title': 'Revenue', 'body': '$275.2B in fiscal 2025'},
-               {'title': 'Segments', 'body': 'United States: 73% of revenue · Canada: 14% of revenue'},
+               {'title': 'Revenue mix', 'body': 'United States: 73% of revenue · Canada: 14% of revenue'},
                {'title': 'After costs', 'body': 'Gross profit $35.4B · operating profit $10.4B'},
                {'title': 'Net income', 'body': '$8.1B in fiscal 2025'}],
      'opening_card': {'kicker': 'MONEY MAP',
@@ -692,7 +768,7 @@ GOLDEN = {
                               'statements · Fiscal 2025, ended Aug 31, 2025 · Caydex · Not affiliated '
                               'with anyone named'},
      'image_post': {'title': 'How Costco makes money',
-                    'paragraphs': ['Bars show revenue by segment: United States $200B; Canada $38.5B; '
+                    'paragraphs': ['Bars show revenue by product or business line: United States $200B; Canada $38.5B; '
                                    'Other International $36.7B.',
                                    'A second set of bars shows Revenue $275.2B; Gross profit $35.4B; '
                                    'Operating profit $10.4B; Net income $8.1B.',
@@ -709,7 +785,7 @@ GOLDEN = {
      'linkedin': 'How Costco makes money: $275.2 billion of revenue in fiscal 2025, and $2.94 of every '
                  '$100 kept as net income.\n'
                  '\n'
-                 'Revenue by segment in fiscal 2025: United States, $200 billion; Canada, $38.5 '
+                 'Revenue by product or business line in fiscal 2025: United States, $200 billion; Canada, $38.5 '
                  'billion; Other International, $36.7 billion.\n'
                  '\n'
                  'After the cost of sales, gross profit was $35.4 billion. After operating costs, '
@@ -722,18 +798,18 @@ GOLDEN = {
      'tiktok': 'How Costco makes money: $275.2 billion of revenue in fiscal 2025, and $2.94 of every '
                '$100 kept as net income.\n'
                '\n'
-               'Revenue by segment in fiscal 2025: United States, $200 billion; Canada, $38.5 billion; '
+               'Revenue by product or business line in fiscal 2025: United States, $200 billion; Canada, $38.5 billion; '
                'Other International, $36.7 billion.',
      'youtube_title': 'How Costco makes money: fiscal 2025 results'},
     'rivian_money_map': {'hook': 'Rivian Automotive had a net loss of $66.38 for every $100 of revenue.',
      'video_script': ['Rivian Automotive reported revenue of $5.8 billion in fiscal 2025.',
-                      'Its Automotive segment made up 80% of revenue, and Software and services made '
+                      'Its Automotive business made up 80% of revenue, and Software and services made '
                       'up 20% of revenue.',
                       'After the cost of sales, gross loss was $80 million; after operating costs, '
                       'operating loss was $4 billion.',
                       'After interest, taxes and everything else, the net loss was $3.9 billion.'],
      'cards': [{'title': 'Revenue', 'body': '$5.8B in fiscal 2025'},
-               {'title': 'Segments',
+               {'title': 'Revenue mix',
                 'body': 'Automotive: 80% of revenue · Software and services: 20% of revenue'},
                {'title': 'After costs', 'body': 'Gross loss $80M · operating loss $4B'},
                {'title': 'Net loss', 'body': '$3.9B in fiscal 2025'}],
@@ -748,7 +824,7 @@ GOLDEN = {
      'linkedin': 'How Rivian Automotive makes money: $5.8 billion of revenue in fiscal 2025, and a net '
                  'loss of $66.38 for every $100.\n'
                  '\n'
-                 'Revenue by segment in fiscal 2025: Automotive, $4.6 billion; Software and services, '
+                 'Revenue by product or business line in fiscal 2025: Automotive, $4.6 billion; Software and services, '
                  '$1.2 billion.\n'
                  '\n'
                  'After the cost of sales, gross loss was $80 million. After operating costs, '
@@ -761,18 +837,18 @@ GOLDEN = {
      'tiktok': 'How Rivian Automotive makes money: $5.8 billion of revenue in fiscal 2025, and a net '
                'loss of $66.38 for every $100.\n'
                '\n'
-               'Revenue by segment in fiscal 2025: Automotive, $4.6 billion; Software and services, '
+               'Revenue by product or business line in fiscal 2025: Automotive, $4.6 billion; Software and services, '
                '$1.2 billion.',
      'youtube_title': 'How Rivian Automotive makes money: fiscal 2025 results'},
     'comcast_money_map': {'hook': 'For every $100 of revenue in fiscal 2025, Comcast kept $13.10 as net income.',
      'video_script': ['Comcast reported revenue of $123.7 billion in fiscal 2025.',
-                      'Its Connectivity and Platforms segment made up 64% of segment sales that year.',
+                      'Its Connectivity and Platforms business made up 64% of combined sales that year.',
                       'After all operating costs, operating profit was $23.3 billion that year.',
                       'After interest, taxes and everything else, net income was $16.2 billion.'],
      'cards': [{'title': 'Revenue', 'body': '$123.7B in fiscal 2025'},
-               {'title': 'Segments',
-                'body': 'Connectivity and Platforms: 64% of segment sales · Content and Experiences: '
-                        '34% of segment sales'},
+               {'title': 'Revenue mix',
+                'body': 'Connectivity and Platforms: 64% of combined sales · Content and Experiences: '
+                        '34% of combined sales'},
                {'title': 'After costs', 'body': 'Operating profit $23.3B'},
                {'title': 'Net income', 'body': '$16.2B in fiscal 2025'}],
      'opening_card': {'kicker': 'MONEY MAP',
@@ -786,8 +862,8 @@ GOLDEN = {
      'linkedin': 'How Comcast makes money: $123.7 billion of revenue in fiscal 2025, and $13.10 of '
                  'every $100 kept as net income.\n'
                  '\n'
-                 'Revenue by segment in fiscal 2025: Connectivity and Platforms, $82 billion; Content '
-                 'and Experiences, $43.4 billion; other, $2.6 billion. Sales between its own segments, '
+                 'Revenue by product or business line in fiscal 2025: Connectivity and Platforms, $82 billion; Content '
+                 'and Experiences, $43.4 billion; other or not broken out, $2.6 billion. Sales between its own business lines, '
                  '$4.3 billion, are taken out of that total.\n'
                  '\n'
                  'After operating costs, operating profit was $23.3 billion.\n'
@@ -799,8 +875,8 @@ GOLDEN = {
      'tiktok': 'How Comcast makes money: $123.7 billion of revenue in fiscal 2025, and $13.10 of every '
                '$100 kept as net income.\n'
                '\n'
-               'Revenue by segment in fiscal 2025: Connectivity and Platforms, $82 billion; Content '
-               'and Experiences, $43.4 billion; other, $2.6 billion. Sales between its own segments, '
+               'Revenue by product or business line in fiscal 2025: Connectivity and Platforms, $82 billion; Content '
+               'and Experiences, $43.4 billion; other or not broken out, $2.6 billion. Sales between its own business lines, '
                '$4.3 billion, are taken out of that total.',
      'youtube_title': 'How Comcast makes money: fiscal 2025 results'},
 }
@@ -816,11 +892,14 @@ GOLDEN_2B = {
                       'Each member is counted once, however many reports they filed that month.',
                       "These reports can include a spouse's or dependent child's trades, and give amounts only as "
                       'ranges.',
-                      'A trade can be disclosed up to 45 days after it happens, so the trades may be older.'],
+                      # news-v15: a deadline, never a bound — a late report is counted too
+                      'Reports are due within 45 days of a trade; some come later, so the trades may be older.'],
      'cards': [{'title': 'Disclosed in', 'body': 'November 2026 · as of Dec 8, 2026'},
                {'title': 'Counted once', 'body': 'Each member, however many reports'},
-               {'title': 'What the reports cover', 'body': 'Spouse and dependent-child trades; amounts as ranges'},
-               {'title': 'Reporting delay', 'body': 'Up to 45 days after the trade'}],
+               # news-v12: each card keeps its line's hedge (it stays on screen for the whole line)
+               {'title': 'What the reports cover',
+                'body': 'Can include spouse and dependent-child trades; amounts as ranges'},
+               {'title': 'Reporting delay', 'body': 'Due within 45 days of the trade; some are filed later'}],
      'opening_card': {'kicker': 'CONGRESS · DISCLOSED IN NOVEMBER',
                       'logos': ['ACN'],
                       'chip': 'ACN',
@@ -859,7 +938,7 @@ GOLDEN_2B = {
                  "These reports can include a spouse's or dependent child's trades, and give amounts only as "
                  'ranges.\n'
                  '\n'
-                 'A trade can be disclosed up to 45 days after it happens, so the trades may be older.',
+                 'Reports are due within 45 days of a trade; some come later, so the trades may be older.',
      'tiktok': '3 members of Congress disclosed purchases of Accenture stock in November 2026, counting each '
                'member once.\n'
                '\n'
@@ -874,8 +953,10 @@ GOLDEN_2B = {
                {'title': 'Invested', 'body': 'The amount put in, not a figure for today'},
                {'title': 'Not listed', 'body': 'Not traded on a public exchange as of that date'},
                {'title': 'Source', 'body': 'Nscale Form S-1 (Sep 18, 2026)'}],
+     # news-v12: the cover's chip states the basis and as-of date; the headline never reads as a value today
      'opening_card': {'kicker': 'COMPANY STAKES',
                       'logos': ['NVDA'],
+                      'chip': 'Invested · as of Mar 27, 2026',
                       'figure': '$777.4M',
                       'headline': 'NVIDIA invested in Nscale'},
      'image_spec': {'layout': 'pair',
@@ -919,10 +1000,12 @@ GOLDEN_2B = {
                {'title': 'Committed up to', 'body': 'The most the agreement allows'},
                {'title': 'A commitment', 'body': 'Money agreed to be invested, which may be paid over time'},
                {'title': 'Source', 'body': 'Microsoft, NVIDIA and Anthropic release (Nov 18, 2025)'}],
+     # news-v12: the cover's chip states the basis and as-of date; the headline never reads as a value today
      'opening_card': {'kicker': 'COMPANY STAKES',
                       'logos': ['NVDA'],
+                      'chip': 'Committed up to · as of Nov 18, 2025',
                       'figure': '$10B',
-                      'headline': 'NVIDIA committed funds to Anthropic'},
+                      'headline': 'NVIDIA committed up to this amount to Anthropic'},
      'image_spec': {'layout': 'pair',
                     'version': 1,
                     'kicker': 'COMPANY STAKES',
@@ -958,7 +1041,8 @@ GOLDEN_2B = {
                '\n'
                'That is the most the agreement allows; the source says up to that amount.',
      'youtube_title': 'NVIDIA committed up to $10B to Anthropic'},
-    'stake_spacex_fair_value': {'hook': 'Tesla reported its SpaceX stake at a fair value of $3 billion.',
+    # news-v17: a fair value is the source's figure — the headline names no filer
+    'stake_spacex_fair_value': {'hook': "Tesla's SpaceX stake had a fair value of $3 billion.",
      'video_script': ['The figure is as of June 30th, from the source named in this post.',
                       'Fair value is the amount the source says the stake was measured at on that date.',
                       'Shares of SpaceX are listed on a U.S. exchange.',
@@ -967,10 +1051,12 @@ GOLDEN_2B = {
                {'title': 'Fair value', 'body': "The source's measure of the stake on that date"},
                {'title': 'Listed in the U.S.', 'body': 'Shares trade on a U.S. exchange'},
                {'title': 'Source', 'body': 'Tesla 10-Q (Q2 2026)'}],
+     # news-v12: the cover's chip states the basis and as-of date; the headline never reads as a value today
      'opening_card': {'kicker': 'COMPANY STAKES',
                       'logos': ['TSLA'],
+                      'chip': 'Fair value · as of Jun 30, 2026',
                       'figure': '$3B',
-                      'headline': "Tesla's stake in SpaceX"},
+                      'headline': "Tesla's stake in SpaceX as of that date"},
      'image_spec': {'layout': 'pair',
                     'version': 1,
                     'kicker': 'COMPANY STAKES',
@@ -989,35 +1075,39 @@ GOLDEN_2B = {
      'persons': [],
      'logo_refs': [{'key': 'TSLA', 'name': 'Tesla'}, {'key': 'SPCX', 'name': 'SpaceX'}],
      'source_ref': 'news:company_stakes:7a9e2c44-1b3d-4f5a-8c6e-9d0f1a2b3c03',
-     'x': 'Tesla reported its SpaceX stake at a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q (Q2 '
-          '2026).',
-     'bluesky': 'Tesla reported its SpaceX stake at a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q '
-                '(Q2 2026).',
+     'x': "Tesla's SpaceX stake had a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q (Q2 2026).",
+     'bluesky': "Tesla's SpaceX stake had a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q (Q2 2026).",
      # news-v11 (review round 11): the headline cites the source, so `st.p.source` is not said again
-     'linkedin': 'Tesla reported its SpaceX stake at a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q '
-                 '(Q2 2026).\n'
+     'linkedin': "Tesla's SpaceX stake had a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q (Q2 "
+                 '2026).\n'
                  '\n'
                  'Fair value is the amount the source says the stake was measured at on that date.\n'
                  '\n'
                  'Shares of SpaceX are listed on a U.S. exchange.',
-     'tiktok': 'Tesla reported its SpaceX stake at a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q '
-               '(Q2 2026).\n'
+     'tiktok': "Tesla's SpaceX stake had a fair value of $3 billion, as of Jun 30. Source: Tesla 10-Q (Q2 "
+               '2026).\n'
                '\n'
                'Fair value is the amount the source says the stake was measured at on that date.',
-     'youtube_title': 'Tesla reported its SpaceX stake at a fair value of $3B'},
-    'stake_berkadia_carrying': {'hook': 'Berkshire Hathaway carried its Berkadia Commercial Mortgage stake at $461 million.',
+     'youtube_title': "Tesla's SpaceX stake had a fair value of $3B"},
+    # news-v17: a carrying value is the source's figure — no "Berkshire Hathaway reported / carried its",
+    # and L2 says "the source says", never "the investor's accounts"
+    'stake_berkadia_carrying': {'hook': "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of "
+                                        '$461 million.',
      'video_script': ['The figure is as of June 30th, from the source named in this post.',
-                      "Carrying value is the amount the stake is recorded at in the investor's accounts.",
+                      'Carrying value is the amount the source says the stake was recorded at on that date.',
                       'As of that date, Berkadia Commercial Mortgage was not listed on a public exchange.',
                       'Companies disclose stakes like this in filings and official releases.'],
      'cards': [{'title': 'As of', 'body': 'Jun 30, 2026'},
-               {'title': 'Carrying value', 'body': 'What the stake is recorded at in the accounts'},
+               {'title': 'Carrying value', 'body': "The source's recorded value on that date"},
                {'title': 'Not listed', 'body': 'Not traded on a public exchange as of that date'},
                {'title': 'Source', 'body': 'Berkshire Hathaway 10-Q (quarter ended Jun 30, 2026)'}],
+     # news-v12: the cover's chip states the basis and as-of date; the headline never reads as a value today
      'opening_card': {'kicker': 'COMPANY STAKES',
                       'logos': ['BRK-B'],
+                      'chip': 'Carrying value · as of Jun 30, 2026',
                       'figure': '$461M',
-                      'headline': "Berkshire Hathaway's stake in Berkadia Commercial Mortgage"},
+                      'headline': ("Berkshire Hathaway's stake in Berkadia Commercial Mortgage "
+                                   'as of that date')},
      'image_spec': {'layout': 'pair',
                     'version': 1,
                     'kicker': 'COMPANY STAKES',
@@ -1039,22 +1129,81 @@ GOLDEN_2B = {
      'persons': [],
      'logo_refs': [{'key': 'BRK-B', 'name': 'Berkshire Hathaway'}],
      'source_ref': 'news:company_stakes:2c4e6a8b-0d1f-4a3c-9e5b-7d9f1b3d5f04',
-     'x': 'Berkshire Hathaway reported its Berkadia Commercial Mortgage stake at a carrying value of $461 million, '
-          'as of Jun 30.',
-     'bluesky': 'Berkshire Hathaway carried its Berkadia Commercial Mortgage stake at $461 million, as of Jun 30.',
+     'x': "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461 million, as of "
+          'Jun 30.',
+     'bluesky': "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461 million, as "
+                'of Jun 30.',
      # news-v11 (review round 11): the headline cites the source, so `st.p.source` is not said again
-     'linkedin': 'Berkshire Hathaway reported its Berkadia Commercial Mortgage stake at a carrying value of $461 '
-                 'million, as of Jun 30. Source: Berkshire Hathaway 10-Q (quarter ended Jun 30, 2026).\n'
+     'linkedin': "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461 million, as "
+                 'of Jun 30. Source: Berkshire Hathaway 10-Q (quarter ended Jun 30, 2026).\n'
                  '\n'
-                 "Carrying value is the amount the stake is recorded at in the investor's accounts.\n"
+                 'Carrying value is the amount the source says the stake was recorded at on that date.\n'
                  '\n'
                  'As of that date, Berkadia Commercial Mortgage was not listed on a public exchange.',
-     'tiktok': 'Berkshire Hathaway reported its Berkadia Commercial Mortgage stake at a carrying value of $461 '
-               'million, as of Jun 30. Source: Berkshire Hathaway 10-Q (quarter ended Jun 30, 2026).\n'
+     'tiktok': "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461 million, as "
+               'of Jun 30. Source: Berkshire Hathaway 10-Q (quarter ended Jun 30, 2026).\n'
                '\n'
-               "Carrying value is the amount the stake is recorded at in the investor's accounts.",
-     'youtube_title': 'Berkshire Hathaway carried its Berkadia Commercial Mortgage stake at $461M'},
-    'stake_itochu_non_us': {'hook': 'Berkshire Hathaway reported its Itochu Corporation stake at a fair value of $8.9 billion.',
+               'Carrying value is the amount the source says the stake was recorded at on that date.',
+     'youtube_title': "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461M"},
+    # news-v17 (review round 17): a catalogue row sourced from ANOTHER filer's document (Berkshire Hathaway
+    # Energy's 10-Q, under the investor Berkshire Hathaway) — no string says the investor reported or carried
+    # the figure; the caption cites the source, L2 says "the source says"
+    'stake_iroquois_bhe_carrying': {'hook': ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a "
+                                             'carrying value of $597 million.'),
+     'video_script': ['The figure is as of June 30th, from the source named in this post.',
+                      'Carrying value is the amount the source says the stake was recorded at on that date.',
+                      'As of that date, Iroquois Gas Transmission System was not listed on a public exchange.',
+                      'Companies disclose stakes like this in filings and official releases.'],
+     'cards': [{'title': 'As of', 'body': 'Jun 30, 2026'},
+               {'title': 'Carrying value', 'body': "The source's recorded value on that date"},
+               {'title': 'Not listed', 'body': 'Not traded on a public exchange as of that date'},
+               {'title': 'Source', 'body': 'Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026)'}],
+     'opening_card': {'kicker': 'COMPANY STAKES',
+                      'logos': ['BRK-B'],
+                      'chip': 'Carrying value · as of Jun 30, 2026',
+                      'figure': '$597M',
+                      'headline': "Berkshire Hathaway's stake in Iroquois Gas Transmission System as of that date"},
+     'image_spec': {'layout': 'pair',
+                    'version': 1,
+                    'kicker': 'COMPANY STAKES',
+                    'left': {'logo': 'BRK-B', 'name': 'Berkshire Hathaway'},
+                    'right': {'name': 'Iroquois Gas Transmission System'},
+                    'figure': '$597M',
+                    'label': 'carrying value',
+                    'lines': ['As of Jun 30, 2026',
+                              'Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026)'],
+                    'footer': 'Educational only · not investment advice · Source: Berkshire Hathaway Energy 10-Q '
+                              '(quarter ended Jun 30, 2026) · As of Jun 30, 2026 · Caydex · Not affiliated with '
+                              'anyone named'},
+     'image_post': {'title': "Berkshire Hathaway's stake in Iroquois Gas Transmission System",
+                    'paragraphs': ['The image shows Berkshire Hathaway and Iroquois Gas Transmission System, with '
+                                   '$597M labelled carrying value.',
+                                   'Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026). As of Jun '
+                                   '30, 2026.']},
+     'image_footer': ('Educational only · not investment advice · Source: Berkshire Hathaway Energy 10-Q (quarter '
+                      'ended Jun 30, 2026) · As of Jun 30, 2026 · Caydex · Not affiliated with anyone named'),
+     'persons': [],
+     'logo_refs': [{'key': 'BRK-B', 'name': 'Berkshire Hathaway'}],
+     'source_ref': 'news:company_stakes:6d8f0a2c-4e6a-4c8e-9a1c-3e5a7c9e1b08',
+     'x': ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597 million, as of "
+           'Jun 30.'),
+     'bluesky': ("Berkshire Hathaway's Iroquois Gas Transmission System stake was carried at $597 million, as of Jun "
+                 '30.'),
+     'linkedin': ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597 million, "
+                  'as of Jun 30. Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026).\n'
+                  '\n'
+                  "Held by BHE's Eastern Energy Gas; the $597M was BHE's consolidated carrying value.\n"
+                  '\n'
+                  'Carrying value is the amount the source says the stake was recorded at on that date.\n'
+                  '\n'
+                  'As of that date, Iroquois Gas Transmission System was not listed on a public exchange.'),
+     'tiktok': ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597 million, "
+                'as of Jun 30. Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026).\n'
+                '\n'
+                "Held by BHE's Eastern Energy Gas; the $597M was BHE's consolidated carrying value."),
+     'youtube_title': "Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597M"},
+    # news-v17: a fair value is the source's figure — the headline names no filer
+    'stake_itochu_non_us': {'hook': "Berkshire Hathaway's Itochu Corporation stake had a fair value of $8.9 billion.",
      'video_script': ['The figure is as of December 31st, 2025, from the source named in this post.',
                       'Fair value is the amount the source says the stake was measured at on that date.',
                       'As of that date, shares of Itochu Corporation traded on an exchange outside the U.S.',
@@ -1063,10 +1212,12 @@ GOLDEN_2B = {
                {'title': 'Fair value', 'body': "The source's measure of the stake on that date"},
                {'title': 'Listed outside the U.S.', 'body': 'Japan'},
                {'title': 'Source', 'body': 'Berkshire Hathaway 2025 shareholder letter'}],
+     # news-v12: the cover's chip states the basis and as-of date; the headline never reads as a value today
      'opening_card': {'kicker': 'COMPANY STAKES',
                       'logos': ['BRK-B'],
+                      'chip': 'Fair value · as of Dec 31, 2025',
                       'figure': '$8.9B',
-                      'headline': "Berkshire Hathaway's stake in ITOCHU Corporation"},
+                      'headline': "Berkshire Hathaway's stake in ITOCHU Corporation as of that date"},
      'image_spec': {'layout': 'pair',
                     'version': 1,
                     'kicker': 'COMPANY STAKES',
@@ -1087,24 +1238,23 @@ GOLDEN_2B = {
      'persons': [],
      'logo_refs': [{'key': 'BRK-B', 'name': 'Berkshire Hathaway'}],
      'source_ref': 'news:company_stakes:9b1d3f5a-7c9e-4b2d-8f0a-1c3e5a7b9d05',
-     'x': 'Berkshire Hathaway reported its ITOCHU Corporation stake at a fair value of $8.9 billion, as of Dec 31, '
-          '2025.',
+     'x': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9 billion, as of Dec 31, 2025.",
      'bluesky': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9 billion, as of Dec 31, "
                 '2025.',
      # news-v11 (review round 11): the headline cites the source, so `st.p.source` is not said again
-     'linkedin': 'Berkshire Hathaway reported its ITOCHU Corporation stake at a fair value of $8.9 billion, as of '
-                 'Dec 31, 2025. Source: Berkshire Hathaway 2025 shareholder letter.\n'
+     'linkedin': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9 billion, as of Dec 31, "
+                 '2025. Source: Berkshire Hathaway 2025 shareholder letter.\n'
                  '\n'
                  'Cost basis was $4.17B, per the letter.\n'
                  '\n'
                  'Fair value is the amount the source says the stake was measured at on that date.\n'
                  '\n'
                  'As of that date, shares of ITOCHU Corporation traded on an exchange outside the U.S.',
-     'tiktok': 'Berkshire Hathaway reported its ITOCHU Corporation stake at a fair value of $8.9 billion, as of '
-               'Dec 31, 2025. Source: Berkshire Hathaway 2025 shareholder letter.\n'
+     'tiktok': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9 billion, as of Dec 31, "
+               '2025. Source: Berkshire Hathaway 2025 shareholder letter.\n'
                '\n'
                'Cost basis was $4.17B, per the letter.',
-     'youtube_title': 'Berkshire Hathaway reported its ITOCHU Corporation stake at a fair value of $8.9B'},
+     'youtube_title': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9B"},
     'stake_intel_us': {'hook': 'Nvidia invested $5 billion in Intel.',
      'video_script': ['The figure is as of December 26th, 2025, from the source named in this post.',
                       'That is the amount the source reports as invested, not a figure for today.',
@@ -1114,8 +1264,10 @@ GOLDEN_2B = {
                {'title': 'Invested', 'body': 'The amount put in, not a figure for today'},
                {'title': 'Listed in the U.S.', 'body': 'Shares trade on a U.S. exchange'},
                {'title': 'Source', 'body': 'Intel 8-K (Dec 29, 2025)'}],
+     # news-v12: the cover's chip states the basis and as-of date; the headline never reads as a value today
      'opening_card': {'kicker': 'COMPANY STAKES',
                       'logos': ['NVDA'],
+                      'chip': 'Invested · as of Dec 26, 2025',
                       'figure': '$5B',
                       'headline': 'NVIDIA invested in Intel'},
      'image_spec': {'layout': 'pair',
@@ -1254,24 +1406,26 @@ GOLDEN_2B = {
                'The company reported these figures on Nov 10.',
      'youtube_title': 'Fabrikam results vs estimates: EPS $4.86 vs $4.50'},
     'theme_ai_chips': {'hook': 'Where do 14 companies in AI chips get their revenue?',
-     'video_script': ["Nvidia's largest revenue segment was Data Center, and Broadcom's was Semiconductor "
-                      'Solutions.',
-                      "AMD's largest revenue segment was Data Center, and Marvell Technology's was Data Center.",
-                      "Qualcomm's largest revenue segment was QCT, and Arm Holdings' was Royalty.",
-                      "This grouping is Caydex's own, based on each company's business."],
-     'cards': [{'title': 'NVIDIA and Broadcom', 'body': 'Data Center · Semiconductor Solutions'},
-               {'title': 'AMD and Marvell Technology', 'body': 'Data Center · Data Center'},
-               {'title': 'Qualcomm and Arm Holdings', 'body': 'QCT · Royalty'},
-               {'title': 'A Caydex grouping', 'body': "Based on each company's business"}],
+     # news-v16: a pair is two facts of ONE fiscal year and says it; a card keeps its line's year
+     'video_script': ["Nvidia's largest revenue line in fiscal 2026 was Data Center.",
+                      "Broadcom's largest revenue line in fiscal 2025 was Semiconductor Solutions, and AMD's was "
+                      'Data Center.',
+                      "Marvell Technology's largest revenue line in fiscal 2026 was Data Center.",
+                      "This grouping is Caydex's own; its members can change."],
+     'cards': [{'title': 'NVIDIA', 'body': 'Largest revenue line in fiscal 2026: Data Center'},
+               {'title': 'Broadcom and AMD', 'body': 'Fiscal 2025: Semiconductor Solutions · Data Center'},
+               {'title': 'Marvell Technology', 'body': 'Largest revenue line in fiscal 2026: Data Center'},
+               {'title': 'A Caydex grouping', 'body': "Its members can change"}],
      'opening_card': {'kicker': 'INSIDE A THEME',
                       'logos': ['NVDA'],
                       'figure': '14',
-                      'headline': 'companies in AI chips, by largest revenue segment'},
+                      'headline': 'companies in AI chips, by largest revenue line'},
      'image_spec': {'layout': 'grid',
                     'version': 1,
                     'kicker': 'INSIDE A THEME',
                     'title': 'AI chips',
-                    'subtitle': '14 companies, by largest revenue segment',
+                    # news-v16: the tiles' facts' fiscal years (a tile line names none)
+                    'subtitle': '14 companies, by largest revenue line in fiscal 2025 or 2026',
                     'tiles': [{'logo': 'NVDA', 'name': 'NVIDIA', 'line': 'Data Center · 88%'},
                               {'logo': 'AVGO', 'name': 'Broadcom', 'line': 'Semiconductor Solutions · 58%'},
                               {'logo': 'AMD', 'name': 'AMD', 'line': 'Data Center · 48%'},
@@ -1285,18 +1439,18 @@ GOLDEN_2B = {
                               {'logo': 'SNPS', 'name': 'Synopsys'},
                               {'logo': 'CDNS', 'name': 'Cadence Design Systems', 'line': 'Core EDA · 70%'}],
                     'more': '+2 more',
-                    'footer': 'Educational only · not investment advice · Source: company segment reporting; '
+                    'footer': 'Educational only · not investment advice · Source: company revenue breakdowns; '
                               'grouping by Caydex · Members as of Nov 1, 2026 · Caydex · Not affiliated with '
                               'anyone named'},
      'image_post': {'title': 'AI chips',
                     'paragraphs': ['The image shows 12 of the 14 companies in AI chips. It gives the largest '
-                                   'revenue segment for 10 of them.',
+                                   'revenue line in fiscal 2025 or 2026 for 10 of them.',
                                    'Shown: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm Holdings; '
                                    'Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence '
                                    'Design Systems.',
-                                   'Source: company segment reporting; grouping by Caydex. Members as of Nov 1, '
+                                   'Source: company revenue breakdowns; grouping by Caydex. Members as of Nov 1, '
                                    '2026.']},
-     'image_footer': 'Educational only · not investment advice · Source: company segment reporting; grouping by '
+     'image_footer': 'Educational only · not investment advice · Source: company revenue breakdowns; grouping by '
                      'Caydex · Members as of Nov 1, 2026 · Caydex · Not affiliated with anyone named',
      'persons': [],
      'logo_refs': [{'key': 'NVDA', 'name': 'NVIDIA'},
@@ -1312,47 +1466,50 @@ GOLDEN_2B = {
                    {'key': 'SNPS', 'name': 'Synopsys'},
                    {'key': 'CDNS', 'name': 'Cadence Design Systems'}],
      'source_ref': 'news:theme_explainer:ai-chips:2026-11-01',
-     'x': 'AI chips: where 14 companies get their revenue, by largest reported segment.',
-     'bluesky': 'AI chips: where 14 companies get their revenue, by largest reported segment.',
-     'linkedin': 'AI chips: where 14 companies get their revenue, by largest reported segment.\n'
+     'x': 'AI chips: where 14 companies get their revenue, by largest product or business line.',
+     'bluesky': 'AI chips: where 14 companies get their revenue, by largest product or business line.',
+     'linkedin': 'AI chips: where 14 companies get their revenue, by largest product or business line.\n'
                  '\n'
                  'The 14 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm Holdings; '
                  'Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design Systems; '
                  'Lam Research; KLA.\n'
                  '\n'
-                 'Largest revenue segments, as each company reports them: NVIDIA, Data Center, 88% of revenue; '
-                 'Broadcom, Semiconductor Solutions, 58% of revenue; AMD, Data Center, 48% of revenue; Marvell '
-                 'Technology, Data Center, 74% of revenue; Qualcomm, QCT, 84% of revenue; Arm Holdings, Royalty; '
-                 'Micron Technology, Compute and Networking, 43% of revenue; Texas Instruments, Analog, 77% of '
-                 'revenue; Analog Devices, Industrial, 45% of revenue; Cadence Design Systems, Core EDA, 70% of '
-                 'revenue; Lam Research, Systems, 66% of revenue.\n'
+                 # news-v16: every listed fact says its fiscal year
+                 "Largest revenue lines, from each company's revenue breakdown: NVIDIA, Data Center, 88% of fiscal "
+                 '2026 revenue; Broadcom, Semiconductor Solutions, 58% of fiscal 2025 revenue; AMD, Data Center, 48% '
+                 'of fiscal 2025 revenue; Marvell Technology, Data Center, 74% of fiscal 2026 revenue; Qualcomm, QCT, '
+                 '84% of fiscal 2025 revenue; Arm Holdings, Royalty, in fiscal 2026; Micron Technology, Compute and '
+                 'Networking, 43% of fiscal 2025 revenue; Texas Instruments, Analog, 77% of fiscal 2025 revenue; '
+                 'Analog Devices, Industrial, 45% of fiscal 2025 revenue; Cadence Design Systems, Core EDA, 70% of '
+                 'fiscal 2025 revenue; Lam Research, Systems, 66% of fiscal 2025 revenue.\n'
                  '\n'
-                 "This grouping is Caydex's own, based on each company's business.",
-     'tiktok': 'AI chips: where 14 companies get their revenue, by largest reported segment.\n'
+                 "This grouping is Caydex's own; its members can change.",
+     'tiktok': 'AI chips: where 14 companies get their revenue, by largest product or business line.\n'
                '\n'
                'The 14 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm Holdings; '
                'Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design Systems; Lam '
                'Research; KLA.',
      'youtube_title': 'AI chips: where 14 companies get their revenue'},
     'theme_ai_chips_of_more': {'hook': 'Where do 14 of the 16 companies in AI chips get their revenue?',
-     'video_script': ["Nvidia's largest revenue segment was Data Center, and Broadcom's was Semiconductor "
-                      'Solutions.',
-                      "AMD's largest revenue segment was Data Center, and Marvell Technology's was Data Center.",
-                      "Qualcomm's largest revenue segment was QCT, and Arm Holdings' was Royalty.",
-                      "This grouping is Caydex's own, based on each company's business."],
-     'cards': [{'title': 'NVIDIA and Broadcom', 'body': 'Data Center · Semiconductor Solutions'},
-               {'title': 'AMD and Marvell Technology', 'body': 'Data Center · Data Center'},
-               {'title': 'Qualcomm and Arm Holdings', 'body': 'QCT · Royalty'},
-               {'title': 'A Caydex grouping', 'body': "Based on each company's business"}],
+     # news-v16: a pair is two facts of ONE fiscal year and says it; a card keeps its line's year
+     'video_script': ["Nvidia's largest revenue line in fiscal 2026 was Data Center.",
+                      "Broadcom's largest revenue line in fiscal 2025 was Semiconductor Solutions, and AMD's was "
+                      'Data Center.',
+                      "Marvell Technology's largest revenue line in fiscal 2026 was Data Center.",
+                      "This grouping is Caydex's own; its members can change."],
+     'cards': [{'title': 'NVIDIA', 'body': 'Largest revenue line in fiscal 2026: Data Center'},
+               {'title': 'Broadcom and AMD', 'body': 'Fiscal 2025: Semiconductor Solutions · Data Center'},
+               {'title': 'Marvell Technology', 'body': 'Largest revenue line in fiscal 2026: Data Center'},
+               {'title': 'A Caydex grouping', 'body': "Its members can change"}],
      'opening_card': {'kicker': 'INSIDE A THEME',
                       'logos': ['NVDA'],
                       'figure': '14',
-                      'headline': 'of the 16 companies in AI chips, by largest revenue segment'},
+                      'headline': 'of the 16 companies in AI chips, by largest revenue line'},
      'image_spec': {'layout': 'grid',
                     'version': 1,
                     'kicker': 'INSIDE A THEME',
                     'title': 'AI chips',
-                    'subtitle': '14 of its 16 companies, by largest revenue segment',
+                    'subtitle': '14 of its 16 companies, by largest revenue line in fiscal 2025 or 2026',
                     'tiles': [{'logo': 'NVDA', 'name': 'NVIDIA', 'line': 'Data Center · 88%'},
                               {'logo': 'AVGO', 'name': 'Broadcom', 'line': 'Semiconductor Solutions · 58%'},
                               {'logo': 'AMD', 'name': 'AMD', 'line': 'Data Center · 48%'},
@@ -1366,18 +1523,18 @@ GOLDEN_2B = {
                               {'logo': 'SNPS', 'name': 'Synopsys'},
                               {'logo': 'CDNS', 'name': 'Cadence Design Systems', 'line': 'Core EDA · 70%'}],
                     'more': '+2 more',
-                    'footer': 'Educational only · not investment advice · Source: company segment reporting; '
+                    'footer': 'Educational only · not investment advice · Source: company revenue breakdowns; '
                               'grouping by Caydex · Members as of Nov 1, 2026 · Caydex · Not affiliated with '
                               'anyone named'},
      'image_post': {'title': 'AI chips',
                     'paragraphs': ['The image shows 12 of the 16 companies in AI chips. It gives the largest '
-                                   'revenue segment for 10 of them.',
+                                   'revenue line in fiscal 2025 or 2026 for 10 of them.',
                                    'Shown: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm Holdings; '
                                    'Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence '
                                    'Design Systems.',
-                                   'Source: company segment reporting; grouping by Caydex. Members as of Nov 1, '
+                                   'Source: company revenue breakdowns; grouping by Caydex. Members as of Nov 1, '
                                    '2026.']},
-     'image_footer': 'Educational only · not investment advice · Source: company segment reporting; grouping by '
+     'image_footer': 'Educational only · not investment advice · Source: company revenue breakdowns; grouping by '
                      'Caydex · Members as of Nov 1, 2026 · Caydex · Not affiliated with anyone named',
      'persons': [],
      'logo_refs': [{'key': 'NVDA', 'name': 'NVIDIA'},
@@ -1393,23 +1550,25 @@ GOLDEN_2B = {
                    {'key': 'SNPS', 'name': 'Synopsys'},
                    {'key': 'CDNS', 'name': 'Cadence Design Systems'}],
      'source_ref': 'news:theme_explainer:ai-chips:2026-11-01',
-     'x': 'AI chips: where 14 of its 16 companies get their revenue, by largest reported segment.',
-     'bluesky': 'AI chips: where 14 of its 16 companies get their revenue, by largest reported segment.',
-     'linkedin': 'AI chips: where 14 of its 16 companies get their revenue, by largest reported segment.\n'
+     'x': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.',
+     'bluesky': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.',
+     'linkedin': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.\n'
                  '\n'
                  '14 of the 16 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm '
                  'Holdings; Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design '
                  'Systems; Lam Research; KLA.\n'
                  '\n'
-                 'Largest revenue segments, as each company reports them: NVIDIA, Data Center, 88% of revenue; '
-                 'Broadcom, Semiconductor Solutions, 58% of revenue; AMD, Data Center, 48% of revenue; Marvell '
-                 'Technology, Data Center, 74% of revenue; Qualcomm, QCT, 84% of revenue; Arm Holdings, Royalty; '
-                 'Micron Technology, Compute and Networking, 43% of revenue; Texas Instruments, Analog, 77% of '
-                 'revenue; Analog Devices, Industrial, 45% of revenue; Cadence Design Systems, Core EDA, 70% of '
-                 'revenue; Lam Research, Systems, 66% of revenue.\n'
+                 # news-v16: every listed fact says its fiscal year
+                 "Largest revenue lines, from each company's revenue breakdown: NVIDIA, Data Center, 88% of fiscal "
+                 '2026 revenue; Broadcom, Semiconductor Solutions, 58% of fiscal 2025 revenue; AMD, Data Center, 48% '
+                 'of fiscal 2025 revenue; Marvell Technology, Data Center, 74% of fiscal 2026 revenue; Qualcomm, QCT, '
+                 '84% of fiscal 2025 revenue; Arm Holdings, Royalty, in fiscal 2026; Micron Technology, Compute and '
+                 'Networking, 43% of fiscal 2025 revenue; Texas Instruments, Analog, 77% of fiscal 2025 revenue; '
+                 'Analog Devices, Industrial, 45% of fiscal 2025 revenue; Cadence Design Systems, Core EDA, 70% of '
+                 'fiscal 2025 revenue; Lam Research, Systems, 66% of fiscal 2025 revenue.\n'
                  '\n'
-                 "This grouping is Caydex's own, based on each company's business.",
-     'tiktok': 'AI chips: where 14 of its 16 companies get their revenue, by largest reported segment.\n'
+                 "This grouping is Caydex's own; its members can change.",
+     'tiktok': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.\n'
                '\n'
                '14 of the 16 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm '
                'Holdings; Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design '
@@ -1439,7 +1598,7 @@ def test_every_sample_composes_a_valid_deterministic_json_package(name, factory,
     assert T.validate_package(a, record=factory()) == []
     assert T.validate_package(a) == []          # without the record: stricter, still clean
     assert a["authorship"] == "template" and a["video_layout"] == "per_line"
-    assert a["template_version"] == T.TEMPLATE_VERSION == "news-v11"
+    assert a["template_version"] == T.TEMPLATE_VERSION == "news-v18"
     assert a["content_class"] == R.SERIES_CLASS[a["series"]] == selection.SERIES_BY_ID[a["series"]].content_class
     assert a["source_ref"] == R.ledger_key(factory())
     assert a["carousel_slides"] == [] and a["dropped_outlets"] == {}
@@ -1453,7 +1612,7 @@ def test_every_sample_composes_a_valid_deterministic_json_package(name, factory,
 def test_the_lexicon_is_pinned_verbatim_and_versioned():
     doc = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
     assert set(doc) == {"_about", "version", "entries"}
-    assert doc["version"] == T.TEMPLATE_VERSION == "news-v11"
+    assert doc["version"] == T.TEMPLATE_VERSION == "news-v18"
     assert doc["entries"] == T.LEXICON
     assert list(doc["entries"]) == list(T.LEXICON)
 
@@ -1487,6 +1646,11 @@ NEUTRAL = dict(
     report_sp="November 5th", report_img="Nov 5, 2026", report_cap="Nov 5", x="$1.10", theme="Cloud software",
     m1="Northwind", m1_s="Northwind's", m2="Fabrikam", m2_s="Fabrikam's", g1="Retail", g2="Services",
     seg="Retail", share="57%", names="Northwind; Fabrikam; Contoso", tickers_img="Nov 1, 2026", j=2,
+    # news-v12: a late Form 4 row's trade dates; a stake cover's chip
+    first_trade_sp="October 17th", last_trade_sp="October 24th", first_trade_cap="Oct 17", last_trade_cap="Oct 24",
+    trade_window_img="Oct 17–24, 2026", basis_title="Committed up to",
+    # news-v16: the theme image's fiscal years
+    fys="2025 or 2026",
 )
 #: The 13F subjects are the filer's latest 13F, not a person (their own neutral fills).
 NEUTRAL_13F = dict(NEUTRAL, subj="Northwind Capital's latest 13F", subj_sp="Northwind Capital's latest 13F")
@@ -1549,10 +1713,14 @@ PERSON_NAMED_IDS = frozenset({
     "ins.p.rows", "ins.p.rows2", "ins.row.name", "ins.row.noname",
     "ins.p.one.name.one", "ins.p.one.name.many", "ins.p.one.noname.one", "ins.p.one.noname.many",
     "ins.vp.more.one", "ins.yt.long", "ins.yt.short", "ins.yt.min", "ins.alt.row", "ins.alt.rows",
+    # news-v15: the count-neutral twins of the ".one" entries above (the same role / person slots)
+    "ins.l1.role.neutral", "ins.l1.role.short.neutral", "ins.ch.one.long.neutral",
+    "ins.p.one.name.neutral", "ins.p.one.noname.neutral",
 })
 #: `class_b_valuation` only on the stake's FAIR-VALUE entries (contract D7): the investor's own
 #: accounting measure of its stake, as the source reports it — never Caydex's value of a stock.
-CLASS_B_VALUATION_IDS = frozenset({"st.h.fair_value", "st.h.fair_value.short.poss", "st.h.fair_value.short.of",
+#: news-v17: the fair-value headlines are the possessive form and its ".of" twin (no "reported its").
+CLASS_B_VALUATION_IDS = frozenset({"st.h.fair_value.poss", "st.h.fair_value.of",
                                    "st.l2.fair_value", "st.label.fair_value",
                                    "st.c2.fair_value.title"})
 #: `brand_mention` only on the theme's grouping lines: the grouping IS Caydex's, and says so.
@@ -1723,7 +1891,7 @@ def test_a_near_whole_segment_never_reads_100_percent_beside_less_than_1():
     for text in [out["video_script"][1], out["cards"][1]["body"]]:
         assert "100% of" not in text, text
         assert "more than 99% of revenue" in text and "less than 1% of revenue" in text, text
-    assert out["video_script"][1] == ("Its Products segment made up more than 99% of revenue, and Licensing made up "
+    assert out["video_script"][1] == ("Its Products business made up more than 99% of revenue, and Licensing made up "
                                       "less than 1% of revenue.")
     assert T.validate_package(out, record=rec) == []
 
@@ -2029,9 +2197,9 @@ def test_an_amended_filing_is_only_ever_said_to_be_included():
 
 
 @pytest.mark.parametrize("holdings, note", [
-    (("indirect", "indirect", "indirect"), "The purchases are reported as held indirectly."),
-    (("indirect", "mixed", "indirect"), "Some purchases are reported as held indirectly."),
-    (("direct", "indirect", "direct"), "Some purchases are reported as held indirectly."),
+    (("indirect", "indirect", "indirect"), "The shares in these purchases are reported as held indirectly."),
+    (("indirect", "mixed", "indirect"), "Some of the shares in these purchases are reported as held indirectly."),
+    (("direct", "indirect", "direct"), "Some of the shares in these purchases are reported as held indirectly."),
     (("direct", "direct", "direct"), None),
 ])
 def test_the_roundup_indirect_note_never_understates_an_all_indirect_week(holdings, note):
@@ -2046,8 +2214,8 @@ def test_the_roundup_indirect_note_never_understates_an_all_indirect_week(holdin
     alt = " ".join(out["image_post"]["paragraphs"])
     if note:
         assert note in alt
-        other = ("Some purchases are reported as held indirectly." if note.startswith("The ")
-                 else "The purchases are reported as held indirectly.")
+        other = ("Some of the shares in these purchases are reported as held indirectly." if note.startswith("The ")
+                 else "The shares in these purchases are reported as held indirectly.")
         assert other not in alt and other not in notes
     else:
         assert "indirectly" not in alt
@@ -2541,11 +2709,11 @@ LIVE_GOLDEN = {
                          "5 more.",
                          "Compared with the quarter before, it also reported fewer shares of Capital One Financial, "
                          "The Kroger, Nucor and 3 more.",
-                         "A 13F is filed up to 45 days after a quarter's end."],
+                         "A 13F is due about 45 days after a quarter's end."],
         "cards": [{"title": "Quarter ended", "body": "Jun 30, 2026 · filed Aug 14, 2026"},
                   {"title": "Reported more shares", "body": "Delta Air Lines, Macy's and 5 more"},
                   {"title": "Reported fewer shares", "body": "Capital One Financial, The Kroger, Nucor and 3 more"},
-                  {"title": "About 13F filings", "body": "U.S. stock holdings, filed up to 45 days after the quarter"}],
+                  {"title": "About 13F filings", "body": "U.S. stock holdings, due about 45 days after the quarter"}],
         "opening_card": {"kicker": "13F SEASON", "logos": ["BRK-A"], "figure": "7",
                          "headline": "holdings with more shares in Berkshire Hathaway's 13F", "chip": "BRK-A"},
         "image_spec": {
@@ -2565,21 +2733,23 @@ LIVE_GOLDEN = {
             "footer": "Educational only · not investment advice · Source: SEC Form 13F · Quarter ended Jun 30, "
                       "2026 · filed Aug 14, 2026 · Caydex · Not affiliated with anyone named"},
         "image_post": {"title": "Berkshire Hathaway's latest 13F",
-                       "paragraphs": ["Reported more shares: Delta Air Lines, Macy's.",
-                                      "Reported fewer shares: Capital One Financial, The Kroger, Nucor.",
+                       # news-v15: the alt says the "+5 more" / "+3 more" the image draws
+                       "paragraphs": ["Reported more shares: Delta Air Lines, Macy's and 5 more.",
+                                      "Reported fewer shares: Capital One Financial, The Kroger, Nucor and 3 more.",
                                       "No longer reported: Constellation Brands.",
                                       "Source: SEC Form 13F. Quarter ended Jun 30, 2026 · filed Aug 14, 2026."]},
         "x": "Berkshire Hathaway's latest 13F: more shares of 7 holdings.",
         "linkedin": "Berkshire Hathaway's 13F for the quarter ended Jun 30: 7 holdings with more shares, 6 with "
                     "fewer shares, 1 no longer reported, 1 newly reported.\n\n"
-                    "Reported more shares of: Delta Air Lines; Macy's.\n\n"
-                    "Reported fewer shares of: Capital One Financial; The Kroger; Nucor.\n\n"
+                    # news-v15: a paragraph says how many of its kind it leaves out (7 more, 6 fewer)
+                    "Reported more shares of: Delta Air Lines; Macy's; and 5 more.\n\n"
+                    "Reported fewer shares of: Capital One Financial; The Kroger; Nucor; and 3 more.\n\n"
                     "No longer reported: Constellation Brands.\n\n"
-                    "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days later; it does "
+                    "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later; it does "
                     "not show when shares changed hands.",
         "tiktok": "Berkshire Hathaway's 13F for the quarter ended Jun 30: 7 holdings with more shares, 6 with fewer "
                   "shares, 1 no longer reported, 1 newly reported.\n\n"
-                  "Reported more shares of: Delta Air Lines; Macy's.",
+                  "Reported more shares of: Delta Air Lines; Macy's; and 5 more.",
         "youtube_title": "Berkshire Hathaway's 13F: more shares of 7 holdings",
     },
     "ark": {
@@ -2611,23 +2781,24 @@ LIVE_GOLDEN = {
             "footer": "Educational only · not investment advice · Source: SEC Form 13F · Quarter ended Jun 30, "
                       "2026 · filed Aug 14, 2026 · Caydex · Not affiliated with anyone named"},
         "image_post": {"title": "ARK Invest's latest 13F",
-                       "paragraphs": ["Newly reported: Space Exploration Technologies, Cerebras Systems, X-Energy.",
-                                      "No longer reported: Brera Holdings.",
+                       "paragraphs": ["Newly reported: Space Exploration Technologies, Cerebras Systems, X-Energy "
+                                      "and 12 more.",
+                                      "No longer reported: Brera Holdings and 5 more.",
                                       "Source: SEC Form 13F. Quarter ended Jun 30, 2026 · filed Aug 14, 2026."]},
         "x": "ARK Invest's latest 13F: 15 newly reported holdings.",
         "linkedin": "ARK Invest's 13F for the quarter ended Jun 30: 15 newly reported holdings, 6 no longer "
                     "reported, 78 with more shares, 94 with fewer shares.\n\n"
                     "Newly reported, with the value the filing gives at the quarter's end: Space Exploration "
                     "Technologies, $765.1 million; Cerebras Systems, $169 million; X-Energy, $99.4 million; "
-                    "Snowflake, $68.6 million; Alamar Biosciences, $37.2 million.\n\n"
-                    "No longer reported: Brera Holdings.\n\n"
-                    "A 13F lists U.S. stock holdings at a quarter's end and is filed up to 45 days later; it does "
+                    "Snowflake, $68.6 million; Alamar Biosciences, $37.2 million; and 10 more.\n\n"
+                    "No longer reported: Brera Holdings and 5 more.\n\n"
+                    "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later; it does "
                     "not show when shares changed hands.",
         "tiktok": "ARK Invest's 13F for the quarter ended Jun 30: 15 newly reported holdings, 6 no longer reported, "
                   "78 with more shares, 94 with fewer shares.\n\n"
                   "Newly reported, with the value the filing gives at the quarter's end: Space Exploration "
                   "Technologies, $765.1 million; Cerebras Systems, $169 million; X-Energy, $99.4 million; "
-                  "Snowflake, $68.6 million; Alamar Biosciences, $37.2 million.",
+                  "Snowflake, $68.6 million; Alamar Biosciences, $37.2 million; and 10 more.",
         "youtube_title": "ARK Invest's 13F: 15 newly reported holdings",
     },
 }
@@ -3078,15 +3249,15 @@ def test_money_map_loss_year_reads_as_losses_and_outlines_its_bars():
 
 def test_money_map_eliminations_change_the_basis_and_draw_an_outline_bar():
     out = compose(comcast(), THU)
-    assert "of segment sales" in out["video_script"][1]
+    assert "of combined sales" in out["video_script"][1]
     bars = out["image_spec"]["segments"]
-    assert bars[-2]["label"] == "Other" and bars[-1] == {
+    assert bars[-2]["label"] == "Other or not broken out" and bars[-1] == {
         "label": "Intersegment eliminations", "value": "-$4.3B", "ratio": 0.0524, "style": "outline"}
     assert out["video_script"][2] == "After all operating costs, operating profit was $23.3 billion that year."
     assert all(0 <= b["ratio"] <= 1 for b in bars + out["image_spec"]["flow"])
     # eliminations None (the adapter publishes none it cannot verify): no string claims any
     plain = json.dumps(compose(costco(), THU)).lower()
-    assert "elimination" not in plain and "between its own segments" not in plain
+    assert "elimination" not in plain and "between its own business lines" not in plain
 
 
 @pytest.mark.parametrize("gp, op, l3", [
@@ -3620,7 +3791,7 @@ def test_a_segment_share_never_exceeds_the_whole():
     rec = costco(segments=(R.Segment("Warehouses", 276_000_000_000.0), R.Segment("Online", 3_000_000_000.0)),
                  eliminations_usd=-3_800_000_000.0)                   # 1.4% of revenue, segment > revenue
     out = compose(rec, THU)
-    assert "of segment sales" in out["video_script"][1]
+    assert "of combined sales" in out["video_script"][1]
     shares = [int(x) for x in re.findall(r"(\d+)% of", out["video_script"][1])]
     assert shares and max(shares) <= 100
     small = compose(costco(eliminations_usd=-1_000_000_000.0, other_usd=1_000_000_000.0), THU)
@@ -3847,11 +4018,12 @@ def test_congress_revalidate_refuses_a_count_below_two_in_the_facts():
      "As of that date, Nscale was not listed on a public exchange."),
     (anthropic_commitment, "Nvidia committed up to $10 billion to Anthropic.", "committed up to",
      "A commitment is money agreed to be invested, which may be paid over time."),
-    (tesla_spacex, "Tesla reported its SpaceX stake at a fair value of $3 billion.", "fair value",
+    # news-v17: a carrying or fair value is the source's figure — the headline names no filer
+    (tesla_spacex, "Tesla's SpaceX stake had a fair value of $3 billion.", "fair value",
      "Shares of SpaceX are listed on a U.S. exchange."),
-    (berkadia, "Berkshire Hathaway carried its Berkadia Commercial Mortgage stake at $461 million.", "carrying value",
-     "As of that date, Berkadia Commercial Mortgage was not listed on a public exchange."),
-    (itochu, "Berkshire Hathaway reported its Itochu Corporation stake at a fair value of $8.9 billion.", "fair value",
+    (berkadia, "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461 million.",
+     "carrying value", "As of that date, Berkadia Commercial Mortgage was not listed on a public exchange."),
+    (itochu, "Berkshire Hathaway's Itochu Corporation stake had a fair value of $8.9 billion.", "fair value",
      "As of that date, shares of Itochu Corporation traded on an exchange outside the U.S."),
     (intel_stake, "Nvidia invested $5 billion in Intel.", "invested", "Shares of Intel are listed on a U.S. exchange."),
 ], ids=["invested_private", "committed", "fair_value_us", "carrying_value", "fair_value_non_us", "invested_us"])
@@ -3878,7 +4050,7 @@ def test_the_stake_of_twin_and_the_short_fair_value_for_a_possessive_investor():
     rec = stake(investor=co("MCO", "Moody's"), investee_name="Fabrikam Analytics", value_usd=3_200_000_000.0,
                 value_basis="fair_value", kind="private")
     parts = _parts(rec, STAKES_RUN)
-    assert parts.opening["headline"] == "The stake of Moody's in Fabrikam Analytics"
+    assert parts.opening["headline"] == "The stake of Moody's in Fabrikam Analytics as of that date"
     assert "The Fabrikam Analytics stake of Moody's had a fair value of $3.2 billion, as of Mar 27." in (
         parts.image_headlines)
     out = compose(rec, STAKES_RUN)
@@ -3936,6 +4108,14 @@ BACKGROUNDS = [
     ("Details at nvidia.com for investors.", False),                                            # a bare domain
     ("alongside a cloud partnership.", False),                                                  # not a sentence
     ("Alongside a cloud partnership", False),
+    # news-v16 (review round 16): a company's worth by a verb, or its rank — dropped; their honest twins kept
+    ("Contoso led the round, which values Nscale at $90 billion.", False),                     # STAKE_CLAIM_ROWS[0]
+    ("NVIDIA values the partnership with Nscale, it said in 2025.", True),
+    ("Nscale is the largest AI startup in Europe.", False),                                     # STAKE_CLAIM_ROWS[1]
+    ("Nscale is the fastest-growing cloud company.", False),
+    ("The largest tranche closed on Oct 8, 2025.", True),
+    ("Nscale is the largest in Europe.", False),                                                # STAKE_CLAIM_ROWS[2]
+    ("The largest of the two tranches closed on Oct 8, 2025.", True),
 ]
 
 
@@ -4204,7 +4384,8 @@ def test_theme_lists_every_member_in_the_long_captions_and_draws_twelve():
     for f in T.THEME_LIST_FIELDS:
         assert all(n in out["captions"][f] for n in names), f
     assert len(out["image_spec"]["tiles"]) == 12 and out["image_spec"]["more"] == "+12 more"
-    assert out["image_spec"]["subtitle"] == "24 companies, by largest revenue segment"
+    # news-v16: the subtitle says the fiscal year of the facts the tiles draw
+    assert out["image_spec"]["subtitle"] == "24 companies, by largest revenue line in fiscal 2026"
     assert out["hook"] == "Where do 24 companies in AI chips get their revenue?"
     assert out["opening_card"]["figure"] == "24" and out["opening_card"]["logos"] == [rows[0][0]]
     narrated = [n for n in names if n in " ".join(out["video_script"])]
@@ -4247,8 +4428,8 @@ def test_theme_says_n_of_its_m_wherever_it_counts_when_the_adapter_gated_members
     out = compose(ai_chips_of_more(), THEME_RUN)
     assert out["hook"] == "Where do 14 of the 16 companies in AI chips get their revenue?"
     assert (out["opening_card"]["figure"], out["opening_card"]["headline"]) == (
-        "14", "of the 16 companies in AI chips, by largest revenue segment")
-    assert out["image_spec"]["subtitle"] == "14 of its 16 companies, by largest revenue segment"
+        "14", "of the 16 companies in AI chips, by largest revenue line")
+    assert out["image_spec"]["subtitle"] == "14 of its 16 companies, by largest revenue line in fiscal 2025 or 2026"
     assert out["image_spec"]["more"] == "+2 more"          # the LISTED members not drawn, never the gated ones
     assert out["image_post"]["paragraphs"][0].startswith("The image shows 12 of the 16 companies in AI chips.")
     for f, body in out["captions"].items():
@@ -4290,7 +4471,7 @@ def test_theme_claims_the_whole_theme_only_when_the_record_says_so(size, members
     eight = compose(theme(_members(8), theme_size=8 if whole else None), THEME_RUN)
     assert eight["image_post"]["paragraphs"][0] == (
         ("The image shows the 8 companies in AI chips." if whole else "The image shows 8 companies in AI chips.")
-        + " It gives each one's largest revenue segment.")
+        + " It gives each one's largest revenue line in fiscal 2026.")
 
 
 def test_theme_says_each_ones_segment_only_when_every_member_has_one():
@@ -4301,12 +4482,13 @@ def test_theme_says_each_ones_segment_only_when_every_member_has_one():
     for rec in (ai_chips(), ai_chips_of_more(), theme()):       # Intel stale, Synopsys too long, KLA none
         out = compose(rec, THEME_RUN)
         assert not any("each one's" in s for s in [*_strings(out), *_offered(rec)]), rec.theme_size
-        assert out["image_post"]["paragraphs"][0].endswith(" It gives the largest revenue segment for 10 of them.")
+        assert out["image_post"]["paragraphs"][0].endswith(
+            " It gives the largest revenue line in fiscal 2025 or 2026 for 10 of them.")
     out = compose(theme(_members(8), theme_size=8), THEME_RUN)
-    assert out["captions"]["x"] == "AI chips: where 8 companies get their revenue, by each one's largest reported segment."
+    assert out["captions"]["x"] == "AI chips: where 8 companies get their revenue, by each one's largest product or business line."
     out = compose(theme(_members(8), theme_size=10), THEME_RUN)
     assert out["captions"]["x"] == ("AI chips: where 8 of its 10 companies get their revenue, by each one's largest "
-                                    "reported segment.")
+                                    "product or business line.")
     # no drawn tile with a fact (the three facts sit past the twelfth tile): no segment sentence at all
     rows = _members(15, seg=lambda i: "Cloud" if i >= 12 else None, share=lambda i: 0.5 if i >= 12 else None)
     out = compose(theme(rows, theme_size=15), THEME_RUN)
@@ -4360,7 +4542,7 @@ def test_theme_member_facts_and_tiles_never_guess():
     rows = _members(8, seg=lambda i: "Wwwwwwwwwwwwwwww Wwwwwwwwwwwwwwww", share=lambda i: 0.995)
     out = compose(theme(rows), THEME_RUN)
     assert out["image_spec"]["tiles"][0]["line"] == "Wwwwwwwwwwwwwwww Wwwwwwwwwwwwwwww"
-    assert "more than 99% of revenue" in out["captions"]["linkedin"]
+    assert "more than 99% of fiscal 2026 revenue" in out["captions"]["linkedin"]
 
 
 @pytest.mark.parametrize("rec, run_date, code", [
@@ -4431,23 +4613,27 @@ def test_the_share_cell_is_the_only_bare_percent_and_only_on_a_tile_line():
 
 def test_theme_narration_pairs_facts_then_falls_back_to_single_lines_and_the_explainer():
     out = compose(ai_chips(), THEME_RUN)
-    assert out["video_script"][0] == ("Nvidia's largest revenue segment was Data Center, and Broadcom's was "
-                                      "Semiconductor Solutions.")
-    assert out["cards"][0] == {"title": "NVIDIA and Broadcom", "body": "Data Center · Semiconductor Solutions"}
+    # news-v16: only facts of ONE fiscal year share a line, and the line says it — NVIDIA (fiscal 2026) is
+    # narrated alone, Broadcom and AMD (both fiscal 2025) as a pair; the cards keep the line's year
+    assert out["video_script"][:2] == ["Nvidia's largest revenue line in fiscal 2026 was Data Center.",
+                                       "Broadcom's largest revenue line in fiscal 2025 was Semiconductor Solutions, "
+                                       "and AMD's was Data Center."]
+    assert out["cards"][:2] == [{"title": "NVIDIA", "body": "Largest revenue line in fiscal 2026: Data Center"},
+                                {"title": "Broadcom and AMD", "body": "Fiscal 2025: Semiconductor Solutions · Data Center"}]
     # four-word names: a pair no longer fits 20 words, so each fact gets its own line
     long = _members(6, name=lambda i: f"Northwind Data Systems {i:02d}", seg=lambda i: "Cloud and Data Infrastructure")
     out = compose(theme(long), THEME_RUN)
-    assert out["video_script"][0] == ("Northwind Data Systems 00's largest revenue segment in its latest reported year "
+    assert out["video_script"][0] == ("Northwind Data Systems 00's largest revenue line in fiscal 2026 "
                                       "was Cloud and Data Infrastructure.")
     assert out["cards"][0] == {"title": "Northwind Data Systems 00",
-                               "body": "Largest segment: Cloud and Data Infrastructure"}
+                               "body": "Largest revenue line in fiscal 2026: Cloud and Data Infrastructure"}
     # a member name word too long for a card TITLE (CARD_TITLE_WORD_MAX_CHARS): the generic title,
     # the names in the body
     wide = _members(6, name=lambda i: f"Northwindcorporation {i:02d}", seg=lambda i: "Cloud") + [
         (f"S{a}", f"Fabrikam {a}", "Cloud", 0.5, "2026") for a in "ABC"]          # the grid draws these
     out = compose(theme(wide), THEME_RUN)
-    assert out["cards"][0] == {"title": "Largest segments",
-                               "body": "Northwindcorporation 00: Cloud · Northwindcorporation 01: Cloud"}
+    assert out["cards"][0] == {"title": "Largest revenue lines",
+                               "body": "Fiscal 2026 · Northwindcorporation 00: Cloud · Northwindcorporation 01: Cloud"}
     one = T._theme_parts(theme(wide), THEME_RUN)
     assert all(len(w) <= T.CARD_TITLE_WORD_MAX_CHARS for t, _b in one.cards for w in t.split())
     # three facts: [pair, single] + the segment explainer + the grouping line
@@ -4885,3 +5071,983 @@ def test_no_caption_restates_its_headline_at_any_budget(name, factory, run_date,
         for f, body in bodies.items():
             head, *paras = body.split("\n\n")
             assert [r for p in paras for r in _restatements(head, p)] == [], (budget, f)
+
+
+# ── news-v12: the post-commit copy check (2026-10-10) ─────────────────────────
+
+_WORKER_FONT = str(_BACKEND / "marketing" / "assets" / "fonts" / "Inter-Bold.ttf")
+
+
+def _logo_entries(out):
+    """`output.logos` as script_service attaches it, every logo a wordmark (the widest case)."""
+    return [{"key": r["key"], "name": r["name"], "url": None, "sha256": None, "bytes": None, "width": None,
+             "height": None} for r in out["logo_refs"]]
+
+
+#: (factory, the cover's chip, its headline) — every stake sample.
+_STAKE_COVERS = [
+    (nscale, "Invested · as of Mar 27, 2026", "NVIDIA invested in Nscale"),
+    (anthropic_commitment, "Committed up to · as of Nov 18, 2025", "NVIDIA committed up to this amount to Anthropic"),
+    (tesla_spacex, "Fair value · as of Jun 30, 2026", "Tesla's stake in SpaceX as of that date"),
+    (berkadia, "Carrying value · as of Jun 30, 2026",
+     "Berkshire Hathaway's stake in Berkadia Commercial Mortgage as of that date"),
+    (itochu, "Fair value · as of Dec 31, 2025", "Berkshire Hathaway's stake in ITOCHU Corporation as of that date"),
+    (intel_stake, "Invested · as of Dec 26, 2025", "NVIDIA invested in Intel"),
+]
+_STAKE_IDS = ["invested", "committed_up_to", "fair_value", "carrying_value", "fair_value_non_us", "invested_us"]
+
+
+@pytest.mark.parametrize("factory, chip, headline", _STAKE_COVERS, ids=_STAKE_IDS)
+def test_a_stake_cover_states_its_basis_and_date_and_never_a_value_today(factory, chip, headline):
+    """Post-commit finding 1 (medium): the opening card is the video's first frame — the cover TikTok and
+    Instagram pin (VIDEO_COVER_MS) — and it drew only "$10B / NVIDIA committed funds to Anthropic" (the
+    source says UP TO $10B) or "$3B / Tesla's stake in SpaceX" (no basis, no date: a worth today). Its
+    chip now states the basis and the as-of date over the figure, and its headline says "up to" / "as of
+    that date". Mutation-checked by hand (2026-10-10, in memory): without the chip, or with the news-v11
+    headlines, this turns red.
+
+    Review round 13: the chip says "as of" before its date — the date is the source's or a period end's,
+    never the deal's ("Invested · Jul 31, 2026" read as the day of the investment, "Committed up to · Jun
+    30, 2026" as a deadline the deal does not have)."""
+    rec = factory()
+    out = compose(rec, STAKES_RUN)
+    card = out["opening_card"]
+    assert card["chip"] == chip and card["headline"] == headline
+    # the basis is the image's own label, the date the image's own "As of" line — said "as of" on the chip too
+    assert chip.casefold().startswith(out["image_spec"]["label"].casefold() + " · as of ")
+    assert chip.split(" · ", 1)[1] == f"as of {T.date_image(rec.as_of)}"
+    assert out["image_spec"]["lines"][0] == f"As of {T.date_image(rec.as_of)}"
+    if rec.value_basis == "committed_up_to":
+        assert "up to" in headline
+    elif rec.value_basis in ("carrying_value", "fair_value"):
+        assert headline.endswith(" as of that date")
+    assert onscreen.validate_opening_card(card, {r["key"] for r in out["logo_refs"]}) is None
+    assert chip in onscreen.opening_strings(card, _logo_entries(out))      # the server allows the worker to draw it
+    assert T.validate_package(out, record=rec) == []
+
+
+@pytest.mark.parametrize("factory", [c[0] for c in _STAKE_COVERS], ids=_STAKE_IDS)
+def test_the_worker_draws_a_stake_covers_chip_exactly_as_the_server_allows(factory):
+    """The chip rides the opening card's existing optional `chip` (template_onscreen.OPENING_KEYS): the
+    worker's `opening_spec` draws it as the label under the logo, and what it draws is exactly
+    `opening_strings` — no template_onscreen or worker change."""
+    pytest.importorskip("PIL")
+    from marketing import cards
+    out = compose(factory(), STAKES_RUN)
+    logos = _logo_entries(out)
+    spec = cards.opening_spec(out["opening_card"], cards.logo_table({"logos": logos}, {}))
+    assert spec.label == out["opening_card"]["chip"]
+    assert cards.onscreen_strings(spec) == onscreen.opening_strings(out["opening_card"], logos)
+    for engine in ["basic"] + (["raqm"] if cards.raqm_available() else []):
+        layout = cards.layout_card(spec, font_path=_WORKER_FONT, layout_engine=engine)
+        assert " ".join(layout.field_lines("label")) == out["opening_card"]["chip"]
+        assert layout.step < cards.RAMP_STEPS                          # the cover keeps room to spare
+
+
+def _worst_cover_headline(template, font, width, cap):
+    """The cover headline `template` with the investor (32 characters) and investee (40) names of "W"
+    words of at most `cap` characters, single-spaced, whose greedy wrap (the worker's `_wrap`) at `font`
+    / `width` takes the MOST lines — exact, a DP over every word-length sequence. Returns (lines, text)."""
+    from functools import lru_cache
+
+    segs = []
+    for tok in template.split():
+        m = re.fullmatch(r"\{(inv|inv_s|ee)\}", tok)
+        segs.append(("name", R.COMPANY_NAME_CHARS[1] if m.group(1) != "ee" else T.STAKE_NAME_MAX_CHARS,
+                     m.group(1) == "inv_s") if m else ("word", tok))
+    space = font.getlength("W W") - 2 * font.getlength("W")
+
+    def put(lines, cw, w):
+        return (lines, cw + space + w) if lines and cw + space + w <= width else (lines + 1, w)
+
+    @lru_cache(maxsize=None)
+    def best(i, rem, lines, cw):
+        if i == len(segs):
+            return lines, ()
+        seg = segs[i]
+        if seg[0] == "word":
+            r = best(i + 1, 0, *put(lines, cw, font.getlength(seg[1])))
+            return r[0], (seg[1],) + r[1]
+        rem = rem or seg[1]
+        out = (-1, ())
+        for k in range(1, cap + 1):
+            if k == rem:
+                word = "W" * k + ("'s" if seg[2] else "")
+                r = best(i + 1, 0, *put(lines, cw, font.getlength(word)))
+            elif k + 1 < rem:
+                word = "W" * k
+                r = best(i, rem - k - 1, *put(lines, cw, font.getlength(word)))
+            else:
+                continue
+            if r[0] > out[0]:
+                out = (r[0], (word,) + r[1])
+        return out
+
+    lines, words = best(0, 0, 0, 0.0)
+    return lines, " ".join(words)
+
+
+@pytest.mark.parametrize("entry_id", ["st.open.invested", "st.open.committed_up_to", "st.open.dated.poss",
+                                      "st.open.dated.of"])
+def test_every_stake_cover_fits_with_its_chip_and_room_to_spare(entry_id):
+    """The news-v12 cover is taller (a chip line) and its headline longer: its tallest form — the widest
+    chip, a 12-character date, the widest figure, the investor and investee names whose words pack the
+    headline into the most lines at the step before the floor (a superset: such names fail the hook's
+    word bound) — still lays out before the floor. Every other headline wraps to no more lines at that
+    size, so every stake cover keeps the room to spare the other covers keep."""
+    pytest.importorskip("PIL")
+    from marketing import cards
+    out = compose(tesla_spacex(), STAKES_RUN)
+    width = cards.SAFE_X[1] - cards.SAFE_X[0]
+    chip = max((T.LEXICON["st.open.chip"].format(basis_title=T.LEXICON[f"st.c2.{b}.title"], as_of_img="Sep 30, 2026")
+                for b in T.STAKE_BASES), key=len)
+    assert chip == "Committed up to · as of Sep 30, 2026"
+    for engine in ["basic"] + (["raqm"] if cards.raqm_available() else []):
+        step = cards.RAMP_STEPS - 1
+        font = cards._font(_WORKER_FONT, cards.OPENING_HEADLINE_STYLE.size(step), engine)
+        lines, headline = _worst_cover_headline(T.LEXICON[entry_id], font, width, T.PAIR_NAME_WORD_MAX_CHARS)
+        assert len(cards._wrap(headline.split(), font, width, 99, "probe")) == lines
+        card = dict(out["opening_card"], chip=chip, figure="$999.9B", headline=headline)
+        logos = [dict(e, name="W" * T.PAIR_NAME_WORD_MAX_CHARS) for e in _logo_entries(out)]
+        layout = cards.layout_card(cards.opening_spec(card, cards.logo_table({"logos": logos}, {})),
+                                   font_path=_WORKER_FONT, layout_engine=engine)
+        assert layout.step <= step < cards.RAMP_STEPS, (entry_id, engine, lines)
+
+
+def apple(**kw):
+    """An Apple-shaped fiscal 2025 as FMP's product breakdown (`revenue-product-segmentation`) gives it:
+    product and service LINES — Apple's reportable segments are geographic."""
+    base = dict(series="money_map", company=co("AAPL", "Apple"), fiscal_year="2025", period_end=date(2025, 9, 27),
+                segments=(R.Segment("iPhone", 209_586_000_000.0), R.Segment("Services", 109_158_000_000.0),
+                          R.Segment("Wearables, Home and Accessories", 35_686_000_000.0),
+                          R.Segment("Mac", 33_708_000_000.0), R.Segment("iPad", 28_023_000_000.0)),
+                other_usd=None, eliminations_usd=None, revenue_usd=416_161_000_000.0,
+                gross_profit_usd=195_201_000_000.0, operating_profit_usd=133_050_000_000.0,
+                net_income_usd=112_010_000_000.0)
+    base.update(kw)
+    return R.MoneyMap(**base)
+
+
+@pytest.mark.parametrize("factory", [apple, costco, rivian, comcast])
+def test_money_map_never_calls_a_line_of_its_breakdown_a_segment(factory):
+    """Post-commit finding 2: the breakdown is FMP's PRODUCT segmentation — Apple's iPhone, Microsoft's
+    LinkedIn — and the copy called each part a "segment" ("Its iPhone segment made up 50% of revenue")
+    beside "Figures are as reported": false for the named company. No public string says "segment" now
+    but the eliminations bar's own line-item name. Mutation-checked by hand (2026-10-10, in memory): the
+    news-v11 `mm.*` wording turns this red."""
+    rec = factory()
+    out = compose(rec, THU)
+    for f, text, _body in T._public_strings(out):
+        assert not re.search(r"(?i)segment", text.replace(T.LEXICON["mm.bar.elim"], "")), (f, text)
+    assert out["cards"][1]["title"] == "Revenue mix"
+    assert T.validate_package(out, record=rec) == []
+    if factory is apple:
+        assert out["video_script"][1] == ("Its iPhone business made up 50% of revenue, and Services made up 26% of "
+                                          "revenue.")
+        assert out["captions"]["linkedin"].split("\n\n")[1] == (
+            "Revenue by product or business line in fiscal 2025: iPhone, $209.6 billion; Services, $109.2 billion; "
+            "Wearables, Home and Accessories, $35.7 billion; Mac, $33.7 billion; iPad, $28 billion.")
+
+
+def test_a_late_form4_row_states_its_trade_date_never_the_two_business_day_rule():
+    """Post-commit finding 3: the record admits a trade up to INSIDER_MAX_FILING_LAG_DAYS (30) before its
+    filing, and no line stated the trade date — "filed Nov 12" beside "must file a Form 4 within two
+    business days of a trade" dated a trade of Oct 17 to about Nov 10. A late row (its last filing more
+    than INSIDER_LATE_BUSINESS_DAYS business days after its earliest trade) states its trade date in the narration, on its
+    card and in every caption that carried the rule. Mutation-checked by hand (2026-10-10, in memory):
+    with `_late_trades` always False this turns red."""
+    rec = week(late(traded=(date(2026, 10, 17),), k=1), series="insider_buys")
+    out = compose(rec, MON)
+    assert "two business days" not in json.dumps(out)
+    assert out["video_script"][0] == "The filing is by a director of the company and was filed on November 12th."
+    assert out["video_script"][2] == "The filing gives October 17th as the trade date."
+    assert out["cards"][2] == {"title": "Trade date", "body": "Oct 17, 2026 · filed Nov 12, 2026"}
+    for f in ("facebook", "linkedin", "tiktok", "instagram", "youtube_description"):
+        assert "The filing gives Oct 17 as the trade date. A Form 4 is the report" in out["captions"][f], f
+    assert T.validate_package(out, record=rec) == []
+
+
+#: (earliest trade, last filing, the record's window start, run date, late?) — review round 14: the bound
+#: counts FEDERAL BUSINESS DAYS after the trade up to the last filing (late when > 2), never calendar days.
+#: The weeks of Nov 16 (no holiday) and Nov 9 (Veterans Day, Wed Nov 11) and the week of Columbus Day
+#: (Mon Oct 12). The comment on each case is its business-day count, then its calendar-day gap.
+_LATE_BUSINESS_DAY_CASES = [
+    (date(2026, 11, 16), date(2026, 11, 16), date(2026, 11, 16), date(2026, 11, 23), False),   # 0
+    (date(2026, 11, 16), date(2026, 11, 18), date(2026, 11, 16), date(2026, 11, 23), False),   # Mon→Wed: 2, 2
+    (date(2026, 11, 16), date(2026, 11, 19), date(2026, 11, 16), date(2026, 11, 23), True),    # Mon→Thu: 3, 3
+    (date(2026, 11, 16), date(2026, 11, 20), date(2026, 11, 16), date(2026, 11, 23), True),    # Mon→Fri: 4, 4
+    (date(2026, 11, 12), date(2026, 11, 16), date(2026, 11, 16), date(2026, 11, 23), False),   # Thu→Mon: 2, 4
+    (date(2026, 11, 13), date(2026, 11, 17), date(2026, 11, 16), date(2026, 11, 23), False),   # Fri→Tue: 2, 4
+    (date(2026, 11, 12), date(2026, 11, 17), date(2026, 11, 16), date(2026, 11, 23), True),    # Thu→Tue: 3, 5
+    (date(2026, 11, 9), date(2026, 11, 13), date(2026, 11, 9), MON, True),                     # Mon→Fri, holiday: 3, 4
+    (date(2026, 11, 9), date(2026, 11, 12), date(2026, 11, 9), MON, False),                    # Mon→Thu, holiday: 2, 3
+    (date(2026, 10, 9), date(2026, 10, 14), date(2026, 10, 12), date(2026, 10, 19), False),    # Fri→Wed, holiday Mon: 2, 5
+    (date(2026, 11, 12) - timedelta(days=R.INSIDER_MAX_FILING_LAG_DAYS), date(2026, 11, 12), date(2026, 11, 9), MON,
+     True),                                                                                     # the record's outer bound
+]
+
+
+@pytest.mark.parametrize("traded, filed, start, run_date, is_late", _LATE_BUSINESS_DAY_CASES,
+                         ids=["same_day", "mon_wed", "mon_thu", "mon_fri", "thu_mon", "fri_tue", "thu_tue",
+                              "mon_fri_veterans_day", "mon_thu_veterans_day", "fri_wed_columbus_day", "max_lag"])
+def test_the_late_bound_is_two_federal_business_days_after_the_trade(traded, filed, start, run_date, is_late):
+    """Review round 14 (low): the bound was 4 CALENDAR days ("two business days plus a weekend"), which
+    holds only for a Thursday or Friday trade — a Monday trade filed on Friday is four business days on
+    (two past the deadline), yet the copy said "within two business days of a trade" beside "filed Nov 13",
+    dating a Nov 9 trade to Nov 11. Now: the weekdays after the earliest trade up to the last filing,
+    federal holidays excluded (the SEC's calendar), late when more than 2. Mutation-checked by hand
+    (2026-10-10, in memory): the calendar-day `_late_trades` turns every case whose two counts disagree
+    red (mon_thu, mon_fri, mon_fri_veterans_day, fri_wed_columbus_day)."""
+    row = late(traded=(traded,), filings=(filed,), k=1)
+    rec = week(row, series="insider_buys", start=start, end=start + timedelta(days=6))
+    assert T.INSIDER_LATE_BUSINESS_DAYS == 2
+    assert T._late_trades(row) is is_late
+    out = compose(rec, run_date)
+    assert (out["video_script"][2] == T.LEXICON["ins.l3.explainer"]) == (not is_late)
+    assert ("two business days" in json.dumps(out)) == (not is_late)
+    if is_late:
+        assert out["video_script"][2] == f"The filing gives {T.date_spoken(traded, run_date)} as the trade date."
+        assert out["cards"][2]["title"] == "Trade date"
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_the_reviewers_monday_trade_filed_friday_states_its_trade_date():
+    """Review round 14's probe, end to end: traded Mon Nov 9, filed Fri Nov 13 (four calendar days, three
+    business days with Veterans Day out) — the old bound called it timely and drew "Filed within two
+    business days of an insider's trade" beside "filed Nov 13"."""
+    rec = week(late(traded=(date(2026, 11, 9),), filings=(date(2026, 11, 13),), k=1), series="insider_buys")
+    out = compose(rec, MON)
+    assert out["video_script"][0] == "The filing is by a director of the company and was filed on November 13th."
+    assert out["video_script"][2] == "The filing gives November 9th as the trade date."
+    assert out["cards"][2] == {"title": "Trade date", "body": "Nov 9, 2026 · filed Nov 13, 2026"}
+    assert "two business days" not in json.dumps(out)
+    for f in ("facebook", "linkedin", "tiktok", "instagram", "youtube_description"):
+        assert "The filing gives Nov 9 as the trade date. A Form 4 is the report" in out["captions"][f], f
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_the_business_day_count_is_bounded_and_never_negative():
+    """The count stops once it passes the bound (a malformed gap of years costs a few iterations), and a
+    trade after the filing counts 0 (timely: the record gate, not the copy, refuses such a row)."""
+    assert T._business_days_after(date(2026, 11, 13), date(2026, 11, 9), stop_above=2) == 0
+    assert T._business_days_after(date(2020, 1, 1), date(2026, 11, 9), stop_above=2) == 3
+    assert T._business_days_after(date(2026, 12, 24), date(2026, 12, 28), stop_above=2) == 1   # Christmas, weekend
+    assert T._business_days_after(date(2026, 12, 30), date(2027, 1, 4), stop_above=9) == 2    # New Year's Day
+
+
+def test_the_late_twin_replaces_the_explainer_wherever_it_lands():
+    """L4 after a flag line; two filings ("The filings give …"); a window of dates. And the bound reads the
+    LAST filing: a row timely against its first filing but whose trades start more than the bound before
+    its last one states its dates (each trade then sits within the bound of whichever filing reported it)."""
+    row = late(traded=(date(2026, 10, 20), date(2026, 11, 3)), filings=(date(2026, 11, 10), date(2026, 11, 12)),
+               holding="indirect")
+    out = compose(week(row, series="insider_buys"), MON)
+    assert out["video_script"][2] == T.LEXICON["ins.l3.indirect.all"].format(role_sp="director")
+    assert out["video_script"][3] == "The filings give trade dates from October 20th to November 3rd."
+    assert out["cards"][3] == {"title": "Trade dates", "body": "Oct 20–Nov 3, 2026 · filed Nov 10–12, 2026"}
+    assert "The filings give trade dates from Oct 20 to Nov 3. A Form 4" in out["captions"]["linkedin"]
+    edge = late(traded=(date(2026, 11, 9), date(2026, 11, 13)), filings=(date(2026, 11, 10), date(2026, 11, 14)))
+    out = compose(week(edge, series="insider_buys"), MON)
+    assert out["video_script"][2] == "The filings give trade dates from November 9th to November 13th."
+    assert "two business days" not in json.dumps(out)
+
+
+def test_a_roundup_with_a_late_row_says_no_two_business_day_rule_in_any_caption():
+    """A roundup's paragraphs speak for every row: with one late row the image paragraphs give the week's
+    trade window and the video's (about the lead row and "At least {m} more …") drop the rule.
+
+    Review round 13: so do the narration and the cards. The lead row (GME) is timely, but the line right
+    after the explainer — "At least 2 more chief executives … in the same week" — covers the late row,
+    and the rule beside it dated HSY's Oct 20 trade to its filing week, on every burned frame, while the
+    same video's caption had dropped it. L3 and card 3 now say what a Form 4 is without the rule, the
+    choice the video paragraph makes."""
+    hsy = late("HSY", "Hershey", "ceo", traded=(date(2026, 10, 20),), filings=(date(2026, 11, 13),), k=1)
+    rec = week(GME, LOW, hsy)
+    out = compose(rec, MON)
+    assert out["video_script"][2] == T.LEXICON["ins.l3.form4"] == (
+        "A Form 4 is the report officers and directors file on their own trades.")
+    assert out["cards"][2] == {"title": "What a Form 4 is",
+                               "body": "The report officers and directors file on their own trades"}
+    assert out["video_script"][3].startswith("At least 2 more chief executives")
+    assert "two business days" not in json.dumps(out)                       # narration, cards and captions
+    for f, body in out["captions"].items():
+        assert "two business days" not in body, f
+    for f in ("facebook", "linkedin"):
+        assert ("The filings give trade dates from Oct 20 to Nov 12. A Form 4 is the report a company's officers "
+                "and directors file on their own trades.") in out["captions"][f], f
+    assert T.LEXICON["ins.p.form4.late"] in out["captions"]["youtube_description"]
+    assert "The filings give" not in out["captions"]["youtube_description"]
+    assert T.validate_package(out, record=rec) == []
+
+
+@pytest.mark.parametrize("holdings, para", [
+    (("indirect", "indirect", "indirect"),
+     "The shares are reported as held indirectly rather than in the buyers' own names."),
+    (("direct", "indirect", "direct"), "Some of the shares are reported as held indirectly."),
+])
+def test_a_roundups_indirect_paragraph_speaks_of_several_buyers(holdings, para):
+    """Post-commit finding 4: a 3-CEO roundup's paragraph said "rather than in the buyer's own name" for
+    three buyers, and its image note said the PURCHASES are held. Mutation-checked by hand (2026-10-10,
+    in memory): with the singular paragraphs on a roundup this turns red."""
+    rows = [replace(r, holding=h) for r, h in zip((GME, LOW, SBUX), holdings)]
+    out = compose(week(*rows), MON)
+    for f in ("facebook", "linkedin"):
+        assert para in out["captions"][f] and "buyer's own name" not in out["captions"][f], f
+    assert all("shares" in n for n in out["image_spec"]["notes"] if "indirectly" in n)
+    # one buyer keeps the singular
+    single = compose(week(LOW), MON)
+    assert T.LEXICON["ins.p.flag.indirect.all"] in single["captions"]["linkedin"]
+
+
+def test_a_theme_fact_narrated_alone_says_its_own_fiscal_year():
+    """Post-commit finding 5: a member's fact may be THEME_FACT_MAX_YEARS old (the breakdown's newest year
+    paired with an income statement often lags), and a fact narrated alone said "in its latest reported
+    year". It says the record's fiscal year now. Mutation-checked by hand (2026-10-10, in memory): the
+    news-v11 `th.one.*` turns this red."""
+    rows = _members(6, name=lambda i: f"Northwind Data Systems {i:02d}", seg=lambda i: "Cloud and Data Infrastructure")
+    # news-v16: a year older than the newest fact (a December year end's latest beside a later one's)
+    rows = [(s, n, g, sh, str(THEME_RUN.year - 1) if i == 0 else fy) for i, (s, n, g, sh, fy) in enumerate(rows)]
+    out = compose(theme(rows), THEME_RUN)
+    assert out["video_script"][0] == ("Northwind Data Systems 00's largest revenue line in fiscal 2025 was Cloud "
+                                      "and Data Infrastructure.")
+    assert out["video_script"][1] == ("Northwind Data Systems 01's largest revenue line in fiscal 2026 was Cloud "
+                                      "and Data Infrastructure.")
+    assert "latest" not in json.dumps(out)
+    for entry_id in ("th.one.poss", "th.one.of"):
+        assert "in fiscal {fy}" in T.LEXICON[entry_id] and "latest" not in T.LEXICON[entry_id]
+
+
+def test_congress_cards_keep_the_narrations_hedges():
+    """Post-commit finding 6: a card stays on screen for its whole line, and cards 3 and 4 dropped the
+    narration's hedges — "Spouse and dependent-child trades" (the reports CAN include them, beside the
+    members' own) and "Up to 45 days after the trade" (the deadline, not a bound: late reports exist).
+    Mutation-checked by hand (2026-10-10, in memory): the news-v11 bodies turn this red."""
+    out = compose(congress(), CONGRESS_RUN)
+    assert out["cards"][2] == {"title": "What the reports cover",
+                               "body": "Can include spouse and dependent-child trades; amounts as ranges"}
+    assert out["cards"][3] == {"title": "Reporting delay", "body": "Due within 45 days of the trade; some are filed later"}
+    assert "can include" in out["video_script"][2]
+    assert "Up to 45 days" not in json.dumps(out)
+    assert T.validate_package(out, record=congress()) == []
+
+
+# ── news-v13: review round 13 (2026-10-10) ────────────────────────────────────
+
+
+def _theme_shapes():
+    """Every theme shape the builder writes: the two AI chips samples (pairs, a stale fact, a long segment
+    name, a member without a fact), the default record (no size), three facts (the explainer line and
+    card), four-word names (one fact a line), a name word too wide for a card title (the generic titles),
+    and every member with its fact under a whole and an "of its" size (the ".each" headlines)."""
+    wide = _members(6, name=lambda i: f"Northwindcorporation {i:02d}", seg=lambda i: "Cloud") + [
+        (f"S{a}", f"Fabrikam {a}", "Cloud", 0.5, "2026") for a in "ABC"]
+    long = _members(6, name=lambda i: f"Northwind Data Systems {i:02d}", seg=lambda i: "Cloud and Data Infrastructure")
+    three = _members(6, seg=lambda i: "Cloud" if i < 3 else None, share=lambda i: 0.5 if i < 3 else None)
+    return [ai_chips(), ai_chips_of_more(), theme(), theme(wide), theme(long), theme(three),
+            theme(_members(8), theme_size=8), theme(_members(8), theme_size=10)]
+
+
+def test_a_theme_never_calls_a_revenue_line_a_segment():
+    """Review round 13 (medium): a theme's facts come from the same product breakdown as Money Map
+    (FMP's revenue-product-segmentation via `_segments`), which news-v12 stopped calling "segments" —
+    Apple's iPhone is not one (its reportable segments are geographic). The theme still narrated
+    "Apple's largest revenue segment was iPhone" and captioned "Largest revenue segments, as each company
+    reports them", a claim false for that company. No public theme string says "segment" now: not the
+    narration, a card, the cover, the image, the alt text, a caption or a variant offered but not picked.
+    Mutation-checked by hand (2026-10-10, in memory): the news-v12 `th.*` entries turn this red.
+
+    Review round 14 (medium): nor the record's "Source:" label (`company_news_rules.SOURCE_LABELS`),
+    burned into the image footer and closing the alt text — "company segment reporting" made the same
+    false claim on every theme post, and this test exempted it. No exemption now: the footer, the alt
+    text's source line and the whole package are scanned as composed. Mutation-checked by hand
+    (2026-10-10, in memory): the old label turns this red."""
+    for rec in _theme_shapes():
+        out = compose(rec, THEME_RUN)
+        blob = json.dumps(out, ensure_ascii=False)
+        assert not re.search(r"(?i)segment", blob), (rec.theme_size, re.findall(r".{60}segment.{20}", blob))
+        for text in _offered(rec) + [R.source_label(rec), out["image_spec"]["footer"], out["image_footer"],
+                                     *out["image_post"]["paragraphs"]]:
+            assert not re.search(r"(?i)segment", text), text
+        assert "reports them" not in blob
+        assert "Source: company revenue breakdowns; grouping by Caydex" in out["image_spec"]["footer"]
+        assert out["image_post"]["paragraphs"][-1].startswith(
+            "Source: company revenue breakdowns; grouping by Caydex. "), out["image_post"]["paragraphs"]
+        assert T.validate_package(out, record=rec) == []
+    for entry_id, text in T.LEXICON.items():
+        if entry_id.startswith("th."):
+            assert "segment" not in text.casefold() and "reports them" not in text, entry_id
+    out = compose(ai_chips(), THEME_RUN)
+    assert out["video_script"][0] == "Nvidia's largest revenue line in fiscal 2026 was Data Center."
+    assert out["captions"]["linkedin"].split("\n\n")[2].startswith(
+        "Largest revenue lines, from each company's revenue breakdown: NVIDIA, Data Center, 88% of fiscal 2026 "
+        "revenue; ")
+    assert out["opening_card"]["headline"] == "companies in AI chips, by largest revenue line"
+    three = compose(_theme_shapes()[5], THEME_RUN)
+    assert three["video_script"][2] == "A revenue line is one product or business in a company's breakdown of its revenue."
+    assert three["cards"][2] == {"title": "What a revenue line is",
+                                 "body": "One product or business in a revenue breakdown"}
+    assert compose(_theme_shapes()[3], THEME_RUN)["cards"][0]["title"] == "Largest revenue lines"
+
+
+#: (lead row, the rest, L3, card 3) — the roundup's explainer, by which of its rows are late.
+_LATE_HSY = late("HSY", "Hershey", "ceo", traded=(date(2026, 10, 20),), filings=(date(2026, 11, 13),), k=1)
+#: (lead row, the rest, L3, card 3, the YouTube description's Form 4 paragraph) — a roundup's explainer by
+#: which of its rows are late (rows are ordered by amount, so a late LEAD is the largest purchase).
+_ROUNDUP_EXPLAINERS = [
+    (GME, (LOW, SBUX), "Officers and directors must file a Form 4 within two business days of a trade.",
+     {"title": "What a Form 4 is", "body": "Filed within two business days of an insider's trade"},
+     T.LEXICON["ins.p.form4"]),
+    (GME, (SBUX, _LATE_HSY), "A Form 4 is the report officers and directors file on their own trades.",
+     {"title": "What a Form 4 is", "body": "The report officers and directors file on their own trades"},
+     T.LEXICON["ins.p.form4.late"]),
+    (replace(_LATE_HSY, amount_usd=80_000_000.0), (GME, SBUX), "The filing gives October 20th as the trade date.",
+     {"title": "Trade date", "body": "Oct 20, 2026 · filed Nov 13, 2026"},
+     "The filing gives Oct 20 as the trade date. " + T.LEXICON["ins.p.form4.late"]),
+]
+
+
+@pytest.mark.parametrize("lead, rest, l3, c3, yt_form4", _ROUNDUP_EXPLAINERS,
+                         ids=["all_timely", "another_late", "lead_late"])
+def test_a_roundups_explainer_matches_its_video_paragraph(lead, rest, l3, c3, yt_form4):
+    """Review round 13 (low): the roundup video narrated and drew "within two business days of a trade"
+    right before "At least {m} more … in the same week" when the lead row was timely but another row was
+    late, though that video's caption had already dropped the rule. Narration L3 and card 3 now make the
+    caption's choice (`form4_video`): the rule only when no row is late; the lead's trade dates when the
+    lead is late; else the Form 4 without the rule and without dates. Mutation-checked by hand
+    (2026-10-10, in memory): without the `late_other` branch the "another_late" case turns red."""
+    rec = week(lead, *rest)
+    out = compose(rec, MON)
+    assert out["video_script"][2] == l3 and out["cards"][2] == c3
+    assert out["video_script"][3].startswith("At least 2 more chief executives")
+    yt = out["captions"]["youtube_description"]
+    assert yt_form4 in yt
+    assert ("two business days" in l3) == ("two business days" in yt) == ("two business days" in json.dumps(out))
+    if lead is GME and _LATE_HSY in rest:
+        assert "The filing gives" not in yt                                   # the lead's filing gives no date
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_an_insider_roundup_with_only_a_later_row_late_draws_no_rule():
+    """The same choice on an Insider Buys roundup (a CFO lead, a late director after it)."""
+    nke = buy("NKE", "Nike", "cfo", None, 1_250_000.0, 18_500.0, 1, [date(2026, 11, 10)])
+    rec = week(nke, late(traded=(date(2026, 10, 20),), filings=(date(2026, 11, 13),), k=1), series="insider_buys")
+    out = compose(rec, MON)
+    assert out["video_script"][2] == T.LEXICON["ins.l3.form4"]
+    assert out["video_script"][3] == "At least 1 more director disclosed buying their own company's stock in the same week."
+    assert out["cards"][2]["body"] == T.LEXICON["ins.c3.form4.body"]
+    assert "two business days" not in json.dumps(out)
+    assert T.validate_package(out, record=rec) == []
+
+
+# ── news-v14: review round 14 (2026-10-10) ────────────────────────────────────
+
+
+def _all_offered_text(rec, run_date) -> str:
+    """Every string the builder OFFERS (each narration variant, card, headline, title, paragraph, the image
+    and opening specs), picked or not, as one JSON blob."""
+    from dataclasses import asdict
+    return json.dumps(asdict(_parts(rec, run_date)), ensure_ascii=False, default=sorted)
+
+
+@pytest.mark.parametrize("rec, run_date", [
+    (berkshire(filed_on=sec_13f_due_date(2026, 3)), TUE),     # on the due date, 47 days on
+    (berkshire(filed_on=date(2026, 11, 20)), date(2026, 11, 23)),       # a late filer inside the season, 51
+    (berkshire(amended_on=date(2026, 12, 18)), date(2026, 12, 21)),     # an amendment, 79 days on
+    (pershing(), TUE),                                                  # a listed holding takes L4 and card 4
+], ids=["on_due_date", "late_filer", "amended", "listed_l4"])
+def test_a_13f_states_its_deadline_as_a_deadline_never_a_bound(rec, run_date):
+    """Review round 14 (medium): the 13F explainer said a 13F "is filed up to 45 days later", but the due
+    date rolls past weekends and federal holidays (`sec_13f_due_date`: 2026-Q3's is Nov 16, 47 days after
+    Sep 30), the season admits late filers and an amendment can come months on — so the same video showed
+    "filed Nov 16, 2026" beside a 45-day maximum. It says "is due about 45 days later" now, in the narration
+    (both variants), on card 4 and in the caption paragraph. Mutation-checked by hand (2026-10-10, in
+    memory): any one of the four news-v13 entries turns this red."""
+    assert sec_13f_due_date(2026, 3) == date(2026, 11, 16)
+    out = compose(rec, run_date)
+    blob = json.dumps(out, ensure_ascii=False)
+    for text in (blob, _all_offered_text(rec, run_date)):
+        assert "up to 45 days" not in text and "filed up to" not in text
+    assert "due about 45 days" in blob
+    for f in ("facebook", "linkedin", "instagram", "youtube_description"):
+        assert T.LEXICON["f13.p.explainer"] in out["captions"][f], f
+    assert T.LEXICON["f13.p.explainer"].startswith(
+        "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later; ")
+    if rec.filer_symbol == "BRK-B":
+        assert out["video_script"][3] == "A 13F lists U.S. stock holdings at a quarter's end and is due about 45 days later."
+        assert out["cards"][3] == {"title": "About 13F filings", "body": "U.S. stock holdings, due about 45 days after the quarter"}
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_no_13f_entry_states_the_deadline_as_a_bound():
+    """The lexicon itself, every 13F entry (the short narration variant included)."""
+    assert T.LEXICON["f13.l4.explainer.short"] == "A 13F is due about 45 days after a quarter's end."
+    for entry_id, text in T.LEXICON.items():
+        if entry_id.startswith("f13."):
+            assert "up to" not in text and "at most" not in text and "within 45" not in text, entry_id
+
+
+# ── news-v15: review round 15 (2026-10-10) ────────────────────────────────────
+
+CG_DEADLINE_LINE = "Reports are due within 45 days of a trade; some come later, so the trades may be older."
+
+
+def test_the_congress_narration_states_45_days_as_a_deadline_never_a_bound():
+    """Review round 15 (medium): `cg.l4` said "A trade can be disclosed up to 45 days after it happens", but the
+    adapter counts every in-month 'purchase' row by its DISCLOSURE date and never reads the trade date, so a
+    report filed months late (the STOCK Act's late fee exists for them) is counted — beside a narrated 45-day
+    bound. It states the deadline now, as card 4 already did ("Due within 45 days of the trade; some are filed
+    later"), in the narration and in every caption that carries the paragraph. Mutation-checked by hand
+    (2026-10-10, in memory): the news-v14 `cg.l4` turns this red."""
+    rec = congress()
+    out = compose(rec, CONGRESS_RUN)
+    assert T.LEXICON["cg.l4"] == CG_DEADLINE_LINE
+    assert out["video_script"][3] == CG_DEADLINE_LINE
+    assert out["cards"][3] == {"title": "Reporting delay", "body": "Due within 45 days of the trade; some are filed later"}
+    for f in ("linkedin", "instagram", "facebook", "youtube_description"):
+        assert CG_DEADLINE_LINE in out["captions"][f], f
+    for text in (json.dumps(out, ensure_ascii=False), _all_offered_text(rec, CONGRESS_RUN)):
+        assert "up to 45 days" not in text and "disclosed up to" not in text
+    for entry_id, text in T.LEXICON.items():
+        if entry_id.startswith("cg."):
+            assert "up to" not in text and "at most" not in text, entry_id
+    assert T.validate_package(out, record=rec) == []
+
+
+def thirteen_f_partial():
+    """A 13F record carrying FEWER moves than its counts — the usual shape (THIRTEEN_F_MAX_MOVES and the
+    adapter's materiality floors): one move per kind, counts new 2, more 3, fewer 4, gone 1."""
+    return berkshire(
+        moves=(move("ZQCT", "Contoso", "increased", shares=3_000_000.0, prev_shares=1_000_000.0,
+                    value_usd=300_000_000.0),
+               move("ZQFB", "Fabrikam", "decreased", shares=1_000_000.0, prev_shares=2_000_000.0,
+                    value_usd=100_000_000.0),
+               move("ZQNW", "Northwind", "newly_reported", shares=500_000.0, prev_shares=0.0, value_usd=50_000_000.0),
+               move("ZQTT", "Tailspin Toys", "no_longer_reported", shares=0.0, prev_shares=800_000.0,
+                    prev_value_usd=40_000_000.0)),
+        counts=(("newly_reported", 2), ("increased", 3), ("decreased", 4), ("no_longer_reported", 1)))
+
+
+def test_a_13f_paragraph_and_alt_section_say_how_many_of_their_kind_they_leave_out():
+    """Review round 15 (low): the caption paragraphs listed only the moves the record carries and the alt
+    sections only the drawn rows — "4 holdings with fewer shares" then "Reported fewer shares of: Fabrikam.",
+    and an alt text "Reported more shares: Contoso." for an image that draws "Contoso +2 more" (a false
+    description for a screen-reader user). Each now ends with the rest of its kind, the same k the image's
+    "+k more" draws. Mutation-checked by hand (2026-10-10, in memory): the news-v14 `items` (no rest) and the
+    news-v14 alt (", ".join of the drawn names) each turn this red."""
+    rec = thirteen_f_partial()
+    out = compose(rec, TUE)
+    sections = out["image_spec"]["sections"]
+    alt = out["image_post"]["paragraphs"][:-1]
+    assert [s["heading"] for s in sections] == ["Newly reported", "Reported more shares", "Reported fewer shares"]
+    assert [s["more"] for s in sections] == ["+1 more", "+2 more", "+3 more"]
+    # every drawn section is described, with the same "+k more" the image draws beside its rows
+    assert len(alt) == len(sections)
+    for sec, para in zip(sections, alt):
+        k = int(re.fullmatch(r"\+(\d+) more", sec["more"]).group(1))
+        assert para.startswith(f"{sec['heading']}: ") and para.endswith(f" and {k} more."), para
+    assert alt == ["Newly reported: Northwind and 1 more.", "Reported more shares: Contoso and 2 more.",
+                   "Reported fewer shares: Fabrikam and 3 more."]
+    paras = _parts(rec, TUE).image_paragraphs
+    assert paras[:3] == ["Reported more shares of: Contoso and 2 more.",
+                         "Reported fewer shares of: Fabrikam and 3 more.",
+                         "Newly reported, with the value the filing gives at the quarter's end: Northwind, "
+                         "$50 million; and 1 more."]
+    assert "Reported more shares of: Contoso and 2 more." in out["captions"]["tiktok"]
+    assert "Reported fewer shares of: Fabrikam and 3 more." in out["captions"]["linkedin"]
+    assert T.validate_package(out, record=rec) == []
+    # a kind the record carries whole says no rest: Berkshire's sample lists all 3 new and both exits
+    whole = compose(berkshire(), TUE)
+    assert not re.search(r"\band \d+ more\b", json.dumps([whole["image_post"], whole["captions"]["linkedin"]]))
+
+
+def test_the_roundup_alt_text_lists_each_buyers_total_never_each_purchase():
+    """Review round 15 (low): `ins.alt.rows` said "The image lists each purchase by company, role and amount",
+    but a row is one person's TOTAL over every purchase line in the window (GameStop's row is 2 purchases, the
+    narration says so), so a screen-reader user was told $74.4M was one purchase. Mutation-checked by hand
+    (2026-10-10, in memory): the news-v14 entry turns this red."""
+    rec = ceo_roundup()
+    assert rec.rows[0].purchases == 2
+    out = compose(rec, MON)
+    assert out["image_post"]["paragraphs"][0].startswith(
+        "The image lists each buyer's total by company, role and amount: GameStop, CEO, $74.4M; ")
+    for text in (json.dumps(out, ensure_ascii=False), _all_offered_text(rec, MON)):
+        assert "each purchase" not in text
+
+
+#: Wording that COUNTS a row's Form 4 documents as one — never on a row with one filing date and several
+#: purchase lines (the record keeps distinct filing days, not documents).
+_ONE_FILING_PHRASES = ("a Form 4 filed", "Form 4s", "The filing is", "The filing names", "The filing gives",
+                       "It reports", "was filed on", "the filing's")
+
+
+@pytest.mark.parametrize("person, traded", [
+    ("Ryan Cohen", None), (None, None),
+    (None, (date(2026, 10, 14), date(2026, 10, 17))),          # a late row: its trade dates, count-neutral too
+], ids=["named", "role_only", "late"])
+def test_one_filing_date_with_several_purchases_never_counts_its_filings(person, traded):
+    """Review round 15 (low, PLAUSIBLE): the adapter builds `filing_dates` from distinct DAYS and InsiderBuy
+    carries no accession number, so two Form 4s filed the same day (one per trade date, both filed Wednesday)
+    are one date — and the post said "in a Form 4 filed Oct 8", "The filing is by …", "It reports 3
+    purchases", "The filing names …". Such a row is worded count-neutrally now (`_filing_count` "neutral");
+    a single purchase line is provably one filing and two dates provably several, so those keep their words.
+    Mutation-checked by hand (2026-10-10, in memory): `_filing_count` answering "one" for one date turns
+    this red."""
+    filed = date(2026, 11, 10)
+    row = buy("GME", "GameStop", "ceo", person, 74_400_000.0, 3_000_000.0, 3, [filed])
+    if traded:
+        row = replace(row, earliest_trade_date=traded[0], latest_trade_date=traded[-1])
+    assert T._filing_count(row) == "neutral"
+    rec = week(row)
+    out = compose(rec, MON)
+    for text in (json.dumps(out, ensure_ascii=False), _all_offered_text(rec, MON)):
+        for phrase in _ONE_FILING_PHRASES:
+            assert phrase not in text, phrase
+    assert out["video_script"][0] == "The filer is the company's chief executive, and the filing date is November 10th."
+    assert out["video_script"][1] == "3 purchases are reported, 3 million shares in total, for $74.4 million."
+    assert out["captions"]["x"] == ("GameStop's CEO disclosed buying $74.4 million of GameStop stock on Form 4, "
+                                    "filed Nov 10.")
+    if person:
+        assert "The filer is Ryan Cohen, the CEO of GameStop." in out["captions"]["linkedin"]
+    if traded:
+        assert out["video_script"][2] == ("The purchases are reported with trade dates from October 14th to "
+                                          "October 17th.")
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_the_filing_count_is_neutral_only_where_the_record_cannot_tell():
+    one = buy("LOW", "Lowe's", "ceo", None, 2_300_000.0, 9_812.0, 1, [date(2026, 11, 12)])
+    assert T._filing_count(one) == "one"                     # one line → one document
+    assert T._filing_count(GME) == "many"                    # two filing dates → two documents at least
+    assert T._filing_count(replace(GME, filing_dates=(date(2026, 11, 10),))) == "neutral"
+    # the provable cases keep their words
+    assert compose(week(one), MON)["captions"]["x"].endswith("in a Form 4 filed Nov 12.")
+    assert "in Form 4s filed Nov 10-11" in compose(week(GME), MON)["captions"]["x"]
+    # every neutral narration variant fits LINE_WORDS for every role, so a long script can still step down
+    lo, hi = T.LINE_WORDS
+    for role in ("ceo", "cfo", "director"):
+        for entry_id in ("ins.l1.role.neutral", "ins.l1.role.short.neutral"):
+            assert lo <= len(neutral(entry_id).replace(NEUTRAL["role_np_sp"], T.LEXICON[f"role.{role}.np.sp"])
+                             .split()) <= hi, (entry_id, role)
+
+
+# ── news-v16: review round 16 (2026-10-10) ────────────────────────────────────
+
+
+def _theme_at(rows, run_date, **kw):
+    """`rows` as a theme whose member list is ten days old on `run_date` (inside THEME_MAX_AGE_DAYS)."""
+    return theme(rows, tickers_as_of=run_date - timedelta(days=10), **kw)
+
+
+#: The finding's probe, run on THEME_RUN (Nov 16, 2026): Contoso's fact is from fiscal 2024, the others
+#: from fiscal 2025 and 2026.
+_PROBE_ROWS = [("CTSO", "Contoso", "Gaming", 0.62, "2024"), ("FBKM", "Fabrikam", "Data Center", 0.71, "2026"),
+               ("ADVW", "Adventure Works", "Outdoor gear", 0.55, "2025"), ("NWND", "Northwind", "Cloud", 0.48, "2026"),
+               ("TLSP", "Tailspin", "Drones", 0.39, "2026"), ("WGBK", "Woodgrove", "Payments", 0.66, "2026")]
+
+
+def test_a_theme_never_shows_a_fact_two_fiscal_years_old_beside_newer_ones():
+    """Review round 16 (low, CONFIRMED by probe): the adapter and the template both accepted a member's fact up
+    to THEME_FACT_MAX_YEARS old, so a Nov 2026 run narrated "Contoso's largest revenue line was Gaming, and
+    Fabrikam's was Data Center", drew the tile "Gaming · 62%" and captioned "Contoso, Gaming, 62% of revenue" —
+    a fiscal 2024 share beside fiscal 2026 ones, with no year anywhere but the one-fact line. From June
+    (THEME_FACT_LATE_MONTH) every company has reported fiscal run_year - 1, so a fiscal run_year - 2 fact is a year
+    stale: it is not used — the member stays, listed, without it. Mutation-checked by hand (2026-10-10, in
+    memory): with THEME_FACT_LATE_MONTH = 13 and THEME_FACT_SPREAD_YEARS = 9 (the news-v15 rule) this turns red."""
+    rec = _theme_at(_PROBE_ROWS, THEME_RUN, theme_size=6)
+    out = compose(rec, THEME_RUN)
+    blob = json.dumps(out, ensure_ascii=False)
+    assert "Gaming" not in blob and "2024" not in blob
+    assert "Gaming" not in json.dumps(_offered(rec))
+    tiles = {t["name"]: t.get("line") for t in out["image_spec"]["tiles"]}
+    assert tiles["Contoso"] is None and tiles["Fabrikam"] == "Data Center · 71%"
+    assert "Contoso" in out["captions"]["linkedin"].split("\n\n")[1]            # still listed
+    assert out["image_spec"]["subtitle"] == "6 companies, by largest revenue line in fiscal 2025 or 2026"
+    assert T.validate_package(out, record=rec) == []
+
+
+@pytest.mark.parametrize("run_date, years, kept", [
+    # before June a December year end may not have filed fiscal run_year - 1: its run_year - 2 fact is its latest
+    (date(2027, 3, 15), ("2025", "2026"), {"2025", "2026"}),
+    (date(2027, 5, 31), ("2025", "2026"), {"2025", "2026"}),
+    # ... unless a fact two fiscal years newer sits beside it (THEME_FACT_SPREAD_YEARS)
+    (date(2027, 3, 15), ("2025", "2027"), {"2027"}),
+    (date(2027, 3, 15), ("2025", "2026", "2027"), {"2026", "2027"}),
+    # from June every company has reported fiscal run_year - 1
+    (date(2027, 6, 1), ("2025", "2026"), {"2026"}),
+    (THEME_RUN, ("2024", "2025", "2026"), {"2025", "2026"}),
+    (THEME_RUN, ("2025", "2026"), {"2025", "2026"}),
+], ids=["mar_two_back", "may31_two_back", "mar_spread_two", "mar_three_years", "jun1_two_back", "nov_three_years",
+        "nov_adjacent"])
+def test_a_theme_fact_is_used_only_while_it_can_be_the_latest_and_beside_facts_at_most_a_year_newer(
+        run_date, years, kept):
+    rows = [(f"Z{a}", f"Company {a}", f"Line {a}", 0.5, years[i % len(years)]) for i, a in enumerate("ABCDEFGHJ")]
+    p = T._theme_parts(_theme_at(rows, run_date), run_date)
+    blob = json.dumps([p.lines, p.cards, p.image_spec, p.image_paragraphs], ensure_ascii=False)
+    shown = {fy for _s, _n, g, _sh, fy in rows if g in blob}
+    assert shown == kept, (shown, kept)
+
+
+def test_a_theme_with_no_fact_that_can_still_be_the_latest_is_refused():
+    rows = [(s, n, g, sh, "2025") for s, n, g, sh, _fy in _members(8)]
+    assert compose(_theme_at(rows, date(2027, 5, 31)), date(2027, 5, 31))["image_spec"]["subtitle"] == (
+        "8 companies, by largest revenue line in fiscal 2025")
+    with pytest.raises(T.NewsTemplateRefused) as e:
+        compose(_theme_at(rows, date(2027, 6, 1)), date(2027, 6, 1))
+    assert e.value.code == "too_few_rows"
+
+
+def test_every_theme_fact_surface_states_its_fiscal_year():
+    """Review round 16 (low): the pair lines, the cards, the tiles and the caption list never carried a year
+    (only the one-fact line did, news-v12). Now a narration pair joins two facts of ONE fiscal year and says it,
+    its card keeps the year (a card stays on screen for the whole line), every caption item says its fact's year,
+    and the image subtitle says the fiscal year(s) of the facts its tiles draw (a tile line's width is proven at
+    GRID_MAX_LINES, so the year is stated once, above them). Mutation-checked by hand (2026-10-10, in memory): the
+    news-v15 `th.pair.*`, `th.item*` and `th.img.sub*` each turn this red, and so does pairing across two years."""
+    for rec in (ai_chips(), _theme_at(_PROBE_ROWS, THEME_RUN), theme(_members(8), theme_size=8),
+                theme([(s, n, g, sh, "2025" if i % 2 else "2026") for i, (s, n, g, sh, _fy) in enumerate(_members(8))])):
+        out = compose(rec, THEME_RUN)
+        fy_of = {m.company.name: m.fiscal_year for m in rec.members}
+        fact_lines = out["video_script"][:-1]
+        if out["video_script"][-2] == T.LEXICON["th.explainer"]:
+            fact_lines = fact_lines[:-1]
+        for line, card in zip(fact_lines, out["cards"]):
+            years = re.findall(r"\bfiscal (\d{4})\b", line)
+            assert len(years) == 1, line                                  # one year a line: a pair shares it
+            assert re.search(rf"(?i)\bfiscal {years[0]}\b", card["body"]), (line, card)
+        items = out["captions"]["linkedin"].split("\n\n")[2]
+        assert items.startswith("Largest revenue lines, from each company's revenue breakdown: ")
+        for item in items.split(": ", 1)[1].rstrip(".").split("; "):
+            name = item.split(", ", 1)[0]
+            assert re.search(rf"\bfiscal {fy_of[name]}\b", item), item
+        drawn = sorted({fy_of[t["name"]] for t in out["image_spec"]["tiles"] if "line" in t})
+        assert out["image_spec"]["subtitle"].endswith("in fiscal " + " or ".join(drawn)), out["image_spec"]["subtitle"]
+        assert ("in fiscal " + " or ".join(drawn)) in out["image_post"]["paragraphs"][0]
+        assert T.validate_package(out, record=rec) == []
+    # alternate years: no two neighbours share one, so no line pairs them
+    mixed = compose(theme([(s, n, g, sh, "2025" if i % 2 else "2026") for i, (s, n, g, sh, _fy) in
+                           enumerate(_members(8))]), THEME_RUN)
+    assert all(", and " not in line for line in mixed["video_script"])
+    assert mixed["cards"][0] == {"title": "Company 00", "body": "Largest revenue line in fiscal 2026: Cloud"}
+    # one year: pairs, each saying it
+    same = compose(theme(_members(8), theme_size=8), THEME_RUN)
+    assert same["video_script"][0] == "Company 00's largest revenue line in fiscal 2026 was Cloud, and Company 01's was Cloud."
+    assert same["cards"][0] == {"title": "Company 00 and Company 01", "body": "Fiscal 2026: Cloud · Cloud"}
+    for entry_id in ("th.pair.poss.poss", "th.pair.poss.of", "th.pair.of.poss", "th.pair.of.of", "th.item.share",
+                     "th.item", "th.c.pair.body", "th.c.pair.body.min", "th.c.one.body", "th.c.one.body.min",
+                     "th.img.sub.fy", "th.img.sub.part.fy", "th.alt.segs", "th.alt.segs.each"):
+        assert "fiscal {fy}" in T.LEXICON[entry_id].lower() or "fiscal {fys}" in T.LEXICON[entry_id], entry_id
+
+
+#: One must-reject sample per STAKE_CLAIM_ROWS row — it matches its own row and no other — and an honest twin
+#: no row matches (the investee is the stake fixture's Nscale, masked like any record name).
+STAKE_CLAIM_ROW_SAMPLES = [
+    ("Contoso led the round, which values Nscale at $90 billion.",
+     "NVIDIA values the partnership with Nscale, it said in 2025."),
+    ("Nscale is the largest AI startup in Europe.", "The largest tranche closed on Oct 8, 2025."),
+    ("Nscale is the largest in Europe.", "The largest of the two tranches closed on Oct 8, 2025."),
+]
+
+
+def test_every_stake_claim_row_has_its_own_must_reject_sample_and_an_honest_twin():
+    assert len(STAKE_CLAIM_ROW_SAMPLES) == len(T.STAKE_CLAIM_ROWS)
+    rx = T._mask_re(["NVIDIA", "Nscale"])
+    for i, (bad, twin) in enumerate(STAKE_CLAIM_ROW_SAMPLES):
+        hits = [j for j, row in enumerate(T.STAKE_CLAIM_ROWS) if re.search(row, fold(T._masked(bad, rx)), re.I)]
+        assert hits == [i], (bad, hits)
+        assert not T.STAKE_CLAIM_RE.search(fold(T._masked(twin, rx))), twin
+
+
+@pytest.mark.parametrize("text, names", [
+    # the finding's three, verbatim
+    ("Contoso led the round, which values Relecloud at $90 billion.", ["Contoso", "Relecloud"]),
+    ("Relecloud is the largest AI startup in Europe.", ["Contoso", "Relecloud"]),
+    ("Relecloud is the fastest-growing cloud company.", ["Contoso", "Relecloud"]),
+    ("NVIDIA led a round valuing Nscale at about $3 billion.", ["NVIDIA", "Nscale"]),
+    ("Nscale is the world's biggest AI chipmaker.", ["NVIDIA", "Nscale"]),
+    ("Nscale is the leading AI cloud provider in Europe.", ["NVIDIA", "Nscale"]),
+    ("Nscale is the top AI lab in Europe.", ["NVIDIA", "Nscale"]),
+    ("Nscale is the largest among its peers.", ["NVIDIA", "Nscale"]),
+])
+def test_a_stake_background_never_values_or_ranks_a_company(text, names, monkeypatch):
+    """Review round 16 (low, filter gap CONFIRMED by probe): `_stake_background` kept a present-tense valuation by
+    a verb and a record / rank claim about a named company — none of BANNED_COPY, FORECAST_COPY, NEWS_BANNED_RE,
+    STAKES_BANNED_RE or scan_text caught them (scan_text's valuation rows know "valued at" / "valuation" only) —
+    and the kept text is the first caption paragraph of a company_stakes post (rules §1 "Companies": never a
+    verdict, record or worth claim). STAKE_CLAIM_RE drops them. The anti-vacuity half: with it emptied, every
+    other rule keeps each one — the gap these rows close."""
+    assert T._stake_background(text, names) is None
+    monkeypatch.setattr(T, "STAKE_CLAIM_RE", re.compile(r"(?!)"))
+    assert T._stake_background(text, names) == text
+
+
+def test_no_catalogue_background_is_dropped_by_the_stake_claim_rows(monkeypatch):
+    """Over-block check against the real catalogue (`data/trillion_club_seed.json`): the claim rows match no
+    background, and every background `_stake_background` kept before them it still keeps."""
+    seed = json.loads((_BACKEND / "data" / "trillion_club_seed.json").read_text(encoding="utf-8"))
+    names = {c["slug"]: c["display_name"] for c in seed["companies"]}
+    rows = [(s["background"], [names.get(s["company_slug"]), s["investee_name"]]) for s in seed["stakes"]
+            if isinstance(s.get("background"), str)]
+    assert len(rows) >= 100
+    claim = re.compile("|".join(f"(?:{r})" for r in T.STAKE_CLAIM_ROWS), re.IGNORECASE)
+    assert [b for b, n in rows if claim.search(fold(T._masked(b, T._mask_re(n))))] == []
+    with_rows = [T._stake_background(b, n) for b, n in rows]
+    monkeypatch.setattr(T, "STAKE_CLAIM_RE", re.compile(r"(?!)"))
+    assert [T._stake_background(b, n) for b, n in rows] == with_rows
+    assert sum(k is not None for k in with_rows) >= 50
+
+
+def test_validation_refuses_a_stake_string_that_values_or_ranks_a_company():
+    """Defense in depth: `validate_package` (compose and `revalidate`) scans every stake string with the claim
+    rows too, so a stored package edited to carry one is refused."""
+    rec = nscale()
+    out = compose(rec, STAKES_RUN)
+    assert T.validate_package(out, record=rec) == []
+    for text in ("Nscale is the largest AI startup in Europe.", "The round values Nscale at $90 billion."):
+        bad = copy.deepcopy(out)
+        bad["captions"]["linkedin"] += "\n\n" + text
+        assert ("captions.linkedin", "series_word") in {(v["field"], v["code"]) for v in T.validate_package(bad)}
+    for entry_id, text in T.LEXICON.items():
+        if entry_id.startswith("st."):
+            assert not T.STAKE_CLAIM_RE.search(fold(text)), entry_id
+
+
+@pytest.mark.parametrize("unit", ["values a ", "values at ", "valued at about ", "valuing x at $9 ", "largest ",
+                                  "the largest a ", "most valuable ", "largest in ", "$9 at ", "makers "])
+def test_the_stake_claim_rows_scan_in_linear_time(unit):
+    from test_marketing_content_r2_overblock import _SWEEP_FLOOR, _SWEEP_LADDER, _SWEEP_LIMIT, assert_linear
+
+    def make(n):
+        text = (unit * (n // len(unit) + 1))[:n]
+        return lambda: list(T.STAKE_CLAIM_RE.finditer(text))
+
+    assert_linear(make, ("STAKE_CLAIM_RE", unit), floor=_SWEEP_FLOOR, ladder=_SWEEP_LADDER, limit=_SWEEP_LIMIT)
+
+
+# ── news-v17: review round 17 (2026-10-10) ────────────────────────────────────
+
+#: A stake string that says WHO reported, carried, recorded or measured the figure: the investor's name (or a
+#: pronoun for it) before a reporting verb and "its", or the investor's own accounts. A catalogue row's source
+#: can be another filer's document, so only the source may be credited with the figure.
+_FILER_CLAIM_RE = re.compile(
+    r"(?i)\b(?:reported|reports|carried|carries|recorded|records|measured|measures|marked|valued|values)\s+its\b"
+    r"|\binvestor'?s'?\s+(?:own\s+)?(?:accounts|books|balance\s+sheet)\b")
+
+
+def _offered_stake(rec):
+    """Every string the stake builder OFFERS (hooks, headlines, titles, paragraphs, cards, alt), picked or not."""
+    p = _parts(rec, STAKES_RUN)
+    return [*p.hook, *(s for line in p.lines for s in line), *(s for card in p.cards for s in card),
+            *p.image_headlines, *p.video_headlines, *p.youtube_titles, *p.image_paragraphs, *p.video_paragraphs,
+            *p.alt_paragraphs, p.alt_title, p.opening["headline"], p.opening["chip"]]
+
+
+@pytest.mark.parametrize("factory", [
+    iroquois_bhe, berkadia, tesla_spacex, itochu,
+    # the ".of" twins (an investor whose name is already possessive)
+    lambda: stake(investor=co("MCO", "Moody's"), investee_name="Fabrikam Analytics", value_usd=3_200_000_000.0,
+                  value_basis="carrying_value", kind="private"),
+    lambda: stake(investor=co("MCO", "Moody's"), investee_name="Fabrikam Analytics", value_usd=3_200_000_000.0,
+                  value_basis="fair_value", kind="private"),
+], ids=["iroquois_bhe_source", "berkadia", "spacex_fair", "itochu_fair", "of_twin_carrying", "of_twin_fair"])
+def test_a_stake_figure_is_never_attributed_to_the_investor(factory):
+    """Review round 17 (low, CONFIRMED by probe): the carrying- and fair-value headlines said "{inv} reported its
+    {ee} stake at …" / "{inv} carried its {ee} stake at …" and L2 said "… in the investor's accounts". The
+    catalogue's Berkshire Hathaway Energy rows (`data/trillion_club_seed.json`) sit under the investor Berkshire
+    Hathaway, but their figure is a separate SEC registrant's — BHE's 10-Q — so X, Bluesky, Threads, TikTok,
+    Facebook and LinkedIn read "Berkshire Hathaway reported its Iroquois Gas Transmission System stake at a
+    carrying value of $597 million", contradicted by the background right after it ("the $597M was BHE's
+    consolidated carrying value"). news-v17: the headline names no filer, the caption cites the source and L2
+    says "the source says". Every OFFERED variant is checked, picked or not, and the composed package too.
+    Mutation-checked (2026-10-10, in memory): restoring "{inv} reported its …" in `st.h.carrying_value.poss` /
+    `st.h.fair_value.poss`, "{inv} carried its …" in `st.h.carrying_value.short.poss`, or "the investor's
+    accounts" in `st.l2.carrying_value` each turned this red."""
+    rec = factory()
+    out = compose(rec, STAKES_RUN)
+    inv = re.escape(rec.investor.name)
+    for s in [*_offered_stake(rec), *_strings(out)]:
+        assert not _FILER_CLAIM_RE.search(s), s
+        assert not re.search(rf"\b{inv}\s+(?:reported|carried|recorded|measured|disclosed|said)\b", s), s
+    if rec.value_basis == "carrying_value":
+        assert out["video_script"][1] == ("Carrying value is the amount the source says the stake was recorded at "
+                                          "on that date.")
+    else:
+        assert out["video_script"][1] == ("Fair value is the amount the source says the stake was measured at on "
+                                          "that date.")
+    # the long caption headlines credit the source by name
+    source = R.source_label(rec)
+    assert out["captions"]["linkedin"].split("\n", 1)[0].endswith(f"Source: {source}."), out["captions"]["linkedin"]
+
+
+def test_the_iroquois_probe_reads_as_the_sources_figure():
+    """The finding's own probe, verbatim: compose(run_date=2026-12-29) on the catalogue's Iroquois row (investor
+    Berkshire Hathaway, source BHE's 10-Q). The headline is source-neutral and the caption names BHE's 10-Q."""
+    out = compose(iroquois_bhe(), STAKES_RUN)
+    probe = ("Berkshire Hathaway reported its Iroquois Gas Transmission System stake at a carrying value of "
+             "$597 million")
+    assert probe not in json.dumps(out)
+    assert out["hook"] == ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of "
+                           "$597 million.")
+    for platform in ("threads", "linkedin", "facebook", "tiktok", "instagram", "youtube_description"):
+        assert out["captions"][platform].startswith(
+            "Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597 million, as "
+            "of Jun 30. Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026)."), platform
+    # the background still says whose figure it is, and no line contradicts it now
+    assert "\n\nHeld by BHE's Eastern Energy Gas; the $597M was BHE's consolidated carrying value." in (
+        out["captions"]["linkedin"])
+    assert out["captions"]["bluesky"].startswith(
+        "Berkshire Hathaway's Iroquois Gas Transmission System stake was carried at $597 million")
+
+
+def test_no_stake_entry_credits_the_investor_with_the_figure():
+    """The lexicon half: no `st.*` entry puts a reporting verb after the investor's slot or names the investor's
+    accounts — only the investor's OWN actions follow `{inv}` ("invested", "committed up to")."""
+    for entry_id, text in T.LEXICON.items():
+        if not entry_id.startswith("st."):
+            continue
+        assert not _FILER_CLAIM_RE.search(text), entry_id
+        for m in re.finditer(r"\{inv\}\s+([a-z]+)", text):
+            assert m.group(1) in ("invested", "committed", "in", "and", "had", "was"), (entry_id, m.group(1))
+        assert "investor" not in text.lower(), entry_id
+
+
+@pytest.mark.parametrize("row, alt, narrated", [
+    (GME, "It shows $74.4M in 2 purchases, 3M shares in total.",
+     "They report 2 purchases, 3 million shares in total, for $74.4 million."),
+    (buy("CTSO", "Contoso", "director", None, 1_000_000.0, 1.4, 3, [date(2026, 11, 12), date(2026, 11, 13)]),
+     "It shows $1M in 3 purchases, about 1 share in total.",
+     "They report 3 purchases, about 1 share in total, for $1 million."),
+    (buy("CTSO", "Contoso", "director", None, 640_000.0, 2_600.0, 3, [date(2026, 11, 12)]),
+     "It shows $640K in 3 purchases, 2,600 shares in total.",
+     "3 purchases are reported, 2,600 shares in total, for $640,000."),
+    (buy("NKE", "Nike", "cfo", None, 1_250_000.0, 18_500.0, 1, [date(2026, 11, 10)]),
+     "It shows $1.3M in 1 purchase of about 19K shares.",
+     "It reports one purchase of about 19,000 shares, for $1.3 million."),
+], ids=["two_purchases_3M", "three_purchases_about_1", "neutral_one_filing_day", "one_purchase_keeps_of"])
+def test_the_spotlight_alt_text_states_the_share_total(row, alt, narrated):
+    """Review round 17 (low, CONFIRMED by probe): compose(week(GME)) gave the alt text "It shows $74.4M in 2
+    purchases of 3M shares." — read as two purchases of 3M shares each (6M) — while the narration said "They
+    report 2 purchases, 3 million shares in total". The record's share figure is the row's TOTAL over all its
+    purchase lines (round 15 reworded the roundup's alt, `ins.alt.rows`, for the same reason). news-v17:
+    `ins.alt.spot.many` says "in total"; one purchase keeps "of" (`ins.alt.spot.one`), as the narration does.
+    Mutation-checked (2026-10-10, in memory): restoring "{k_txt} of {shares_s}" in `ins.alt.spot.many` turned
+    the multi-purchase cases red."""
+    out = compose(week(row, series="insider_buys" if row.role != "ceo" else "ceo_buys"), MON)
+    assert out["image_post"]["paragraphs"][0] == alt
+    assert out["video_script"][1] == narrated
+    if row.purchases > 1:
+        assert not re.search(r"\b\d+ purchases of\b", json.dumps(out["image_post"])), out["image_post"]
+
+
+def test_the_post_commit_sweep_wordings_hold():
+    """Post-commit sweep (2026-10-10): (1) a theme never says HOW Caydex groups companies — the rotation
+    weighs signals §1 forbids naming, so "based on each company's business" was false; (2) Money Map's rest
+    bar can hold revenue the breakdown never attributes, so it never reads as a plain reported "Other";
+    (3) a carrying value is dated like its sibling bases, never an undated present-tense value."""
+    lex = T.LEXICON
+    for key in ("th.grouping", "th.c.grouping.body"):
+        text = lex[key].casefold()
+        assert "based on" not in text and "business" not in text, (key, lex[key])
+    assert "not broken out" in lex["mm.bar.other"] and "not broken out" in lex["mm.item.other"]
+    assert lex["mm.bar.other"] != "Other"
+    assert "on that date" in lex["st.c2.carrying_value.body"]
+    assert "in the accounts" not in lex["st.c2.carrying_value.body"]

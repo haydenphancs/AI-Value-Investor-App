@@ -21,6 +21,19 @@ WHAT IS STORED — labels, never text
   summary or publisher: migration 104 removed our last long-term copy of news text, and this
   table must not become a second one.
 
+WHAT COUNTS — the chart gate (2026-10-10)
+  A blind re-label of 200 live headlines by three independent raters found the labeller
+  over-directional (69 bullish where the raters saw 50, 69 neutral where they saw 98). The
+  question now names the scope as its subject and lets "neutral" be a normal answer
+  (``news_cache_service.SENTIMENT_RUBRIC``), and :func:`tone_skip_reason` keeps three kinds
+  of headline OFF the chart (they stay in the feed): an article the model says is only
+  "passing" for the scope (about another company or asset — on the Market line, a story the
+  Market feed hides), a quarterly-holdings filing, and a law-firm solicitation. Wire copies
+  of one story in one batch count once. A gated article is still LOGGED, with its
+  ``skip_reason`` (migration 191), so the verdict is first-label-wins like the label;
+  news_sentiment_daily() counts only reason-less rows. Each row records the rules that wrote
+  it (``labeller``, :data:`TONE_LABELLER_VERSION`).
+
 HONESTY RULES the endpoint and the chart rely on
   * First label wins (ON CONFLICT DO NOTHING). A re-fetch after expiry can reset a row and
     the model can label it differently; an article is counted once, with its first label.
@@ -143,9 +156,70 @@ def _clamp_confidence(value: Any) -> Optional[int]:
         return None
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    # OverflowError: int(float("inf")); a NaN raises ValueError. Either must cost the
+    # confidence only — never the batch (build_log_rows runs over every row of it).
+    except (TypeError, ValueError, OverflowError):
         return None
     return max(0, min(100, n))
+
+
+#: Which labelling rules wrote a log row (`news_sentiment_log.labeller`, migration 191).
+#: 2 = the scope-specific question with a `relevance` answer and the chart gate
+#: (:func:`tone_skip_reason`), 2026-10-10. Rows from earlier rules carry NULL; migration 192
+#: deletes them for the re-labellable scopes and re-queues their backfill. Bump it whenever
+#: the question or the gate changes what a label means.
+TONE_LABELLER_VERSION = 2
+#: The ET day the version-2 rules went live. Scopes the re-label (migration 192) cannot rebuild
+#: — the Market line, an unsupported index — keep older days labelled by the old rules, so the
+#: chat is told not to compare across this date (`summarize_tone`).
+TONE_RULES_SINCE = date(2026, 10, 10)
+
+#: The model's answer to "what is this article about, relative to the scope?" (the enrichment
+#: prompt's `relevance` item). Only "passing" keeps a label off the chart.
+RELEVANCE_VALUES = ("primary", "secondary", "passing")
+
+
+def normalize_relevance(value: Any) -> Optional[str]:
+    """primary / secondary / passing, or None for anything else (a missing answer)."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip().lower()
+    return s if s in RELEVANCE_VALUES else None
+
+
+def is_trend_scope(scope: Any) -> bool:
+    """Whether ``scope`` is one the News Tone endpoint can read — the ONE rule, shared with
+    ``GET /updates/sentiment-trend``'s validator. A label logged under any other key (the
+    commodity detail screen's ``COMMODITY_GC``) can never be charted."""
+    if not isinstance(scope, str) or not scope or len(scope) > 32:
+        return False
+    if scope == "__MARKET__":
+        return True
+    # FMP symbols: letters, digits, and . - ^ = (indices, crypto pairs, futures).
+    return all(c.isalnum() or c in ".-^=" for c in scope)
+
+
+def tone_skip_reason(row: Dict[str, Any]) -> Optional[str]:
+    """Why a labelled article must stay off the News Tone chart, or None when it counts. Pure.
+
+    Measured 2026-10-10 against three blind raters: most of the labeller's over-direction came
+    from headlines that are not news about the scope — a story about another company or asset
+    (the model's own `relevance` answer "passing"), the syndicated quarterly-holdings template
+    and law-firm solicitations (`news_tone_filters`). They stay in the feed; only the chart
+    skips them. A missing `relevance` (an older answer, or a provider that dropped the field)
+    counts, as before — a schema hiccup must never silently empty the chart."""
+    from app.services.news_tone_filters import is_law_firm_solicitation, is_routine_holdings_filing
+
+    if normalize_relevance(row.get("relevance")) == "passing":
+        return "off_topic"
+    title = row.get("headline")
+    if not isinstance(title, str) or not title:
+        title = row.get("title")
+    if is_routine_holdings_filing(title):
+        return "holdings_filing"
+    if is_law_firm_solicitation(title):
+        return "solicitation"
+    return None
 
 
 def build_log_rows(
@@ -158,18 +232,26 @@ def build_log_rows(
     undated: str = "labelled_day",
     oldest_day: Optional[date] = None,
     model: Optional[str] = None,
+    skipped: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Log rows for the labelled cache rows of ONE scope. Pure.
 
-    Skips a row with no identity or no valid label. The defaults are the LIVE writer's rules:
-    a label made more than :data:`MAX_LABEL_AGE_HOURS` after publication is skipped, and a
-    row without a usable ``published_at`` (or one dated in the future) is charted on the
-    labelling day.
+    Skips a row with no identity or no valid label. A row :func:`tone_skip_reason` keeps off the
+    chart, and a second copy of a title already in this batch (wire copies of one story under
+    different URLs, on the same ET day), is logged WITH its ``skip_reason`` — kept off the chart
+    by news_sentiment_daily(), and first-label-wins like any label. The defaults are the LIVE
+    writer's rules: a label made more than
+    :data:`MAX_LABEL_AGE_HOURS` after publication is skipped, and a row without a usable
+    ``published_at`` (or one dated more than ``_FUTURE_SKEW`` ahead) is charted on the
+    labelling day. A date up to ``_FUTURE_SKEW`` ahead is clamped to the labelling day, so a
+    label written at 23:30 ET never lands on tomorrow's bar (which the chart hides until
+    tomorrow).
 
     The backfill passes ``source="backfill"``, ``max_age_hours=None`` (history is old by
     definition), ``undated="skip"`` (an undated historical article must not land on today's
     bar) and ``oldest_day`` (nothing before the backfill horizon). ``model`` records which
-    model produced the label.
+    model produced the label. ``skipped`` (optional) counts the gate's reasons (and undated
+    rows), for the caller's one log line.
     """
     if source not in SOURCES:
         raise ValueError(f"source must be one of {SOURCES}, got {source!r}")
@@ -178,13 +260,21 @@ def build_log_rows(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     scope = (scope or "").strip()
-    if not scope or len(scope) > 32:
+    if not is_trend_scope(scope):
         return []
+    from app.services.news_tone_filters import title_key
+
     oldest = now - timedelta(hours=max_age_hours) if max_age_hours is not None else None
     labelled_day = now.astimezone(ET).date()
     model = (model or "").strip()[:80] or None
     out: List[Dict[str, Any]] = []
     seen: set = set()
+    seen_titles: set = set()
+
+    def _skip(reason: str) -> None:
+        if skipped is not None:
+            skipped[reason] = skipped.get(reason, 0) + 1
+
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -202,12 +292,27 @@ def build_log_rows(
             continue
         if instant is None or instant > now + _FUTURE_SKEW:
             if undated == "skip":
+                _skip("undated")
                 continue
             day = labelled_day
         else:
-            day = instant.astimezone(ET).date()
+            day = min(instant.astimezone(ET).date(), labelled_day)
         if oldest_day is not None and day < oldest_day:
             continue
+        # The gate: a row it keeps off the chart is STILL logged, with its reason, so the
+        # verdict is first-label-wins like the label (the backfill never re-asks about it, and
+        # a later answer cannot put it back). news_sentiment_daily() counts only reason-less rows.
+        reason = tone_skip_reason(row)
+        # Keyed with the day: a recurring generic title ("Stock market today") on two days is
+        # two stories; wire copies of one story share the day.
+        tkey = title_key(row.get("headline") if isinstance(row.get("headline"), str) else row.get("title"))
+        tkey = (tkey, day) if tkey is not None else None
+        if reason is None and tkey is not None and tkey in seen_titles:
+            reason = "duplicate_title"
+        if reason is not None:
+            _skip(reason)
+        elif tkey is not None:
+            seen_titles.add(tkey)
         seen.add(key)
         entry = {
             "scope": scope,
@@ -217,6 +322,8 @@ def build_log_rows(
             "confidence": _clamp_confidence(row.get("sentiment_confidence")),
             "source": source,
             "labelled_at": now.isoformat(),
+            "labeller": TONE_LABELLER_VERSION,
+            "skip_reason": reason,
         }
         if model:
             entry["model"] = model
@@ -271,10 +378,10 @@ def shape_series(
     for row in raw or []:
         if not isinstance(row, dict):
             continue
-        day_value = row.get("day")
-        try:
-            day = day_value if isinstance(day_value, date) else date.fromisoformat(str(day_value)[:10])
-        except (TypeError, ValueError):
+        # `_series_day` refuses a datetime: it IS a `date` subclass, and comparing it with the
+        # window's dates below raised a TypeError outside every guard (a 500, not a 503).
+        day = _series_day(row.get("day"))
+        if day is None:
             continue
         if day < since or day > today:
             continue
@@ -360,7 +467,7 @@ _BUILDING_NOTE_WINDOWS = (
 
 def summarize_trend(
     series: List[Dict[str, Any]], *, days: int, today: date, tracking_since: Optional[date] = None,
-    history_status: Optional[str] = None,
+    history_status: Optional[str] = None, partial_from: Optional[date] = None,
 ) -> Optional[str]:
     """A compact, figure-exact text of the series for chat grounding, or None when empty.
 
@@ -369,6 +476,11 @@ def summarize_trend(
     (`history_status` "building"), older days are NOT final and the text says so: the chart's
     legend row says "filling in 90 days…", and the model must not call a trend from a history
     that is still arriving.
+
+    ``partial_from`` is the oldest ET day a late label can still land on
+    (:func:`open_since`); the "still filling in" sentence starts there. Without it the
+    sentence starts at the first day the series marks partial — which, when the open days
+    have no row yet, is later than the truth and called open days "final".
     """
     if not series:
         return None
@@ -380,12 +492,12 @@ def summarize_trend(
         f"News tone over the last {days} days (headlines Cay AI scored, by ET day"
         + since_phrase(tracking_since, today)
         + f"): {total} scored — {bull} bullish, {bear} bearish, {neut} neutral; "
-        f"net tone {net_score(bull, bear, total):+d} on a -100..+100 scale."
+        f"net tone {_signed(net_score(bull, bear, total))}% on a -100..+100 scale."
     ]
     recent = _window_net(series, today - timedelta(days=6), today)
     prior = _window_net(series, today - timedelta(days=13), today - timedelta(days=7))
     if days > 7 and recent is not None and prior is not None:
-        parts.append(f"Last 7 days net {recent:+d} vs the 7 days before {prior:+d}.")
+        parts.append(f"Last 7 days net {_signed(recent)}% vs the 7 days before {_signed(prior)}%.")
     most_bearish = max(series, key=lambda d: (d["bearish"] - d["bullish"], d["bearish"]))
     most_bullish = max(series, key=lambda d: (d["bullish"] - d["bearish"], d["bullish"]))
     if most_bearish["bearish"] > most_bearish["bullish"]:
@@ -401,9 +513,13 @@ def summarize_trend(
             f"{most_bullish['bearish']} bearish)."
         )
     building = history_status == HISTORY_BUILDING
-    partial = [d for d in series if d["is_partial"]]
-    if partial:
-        first = date.fromisoformat(partial[0]["date"])
+    window_start = today - timedelta(days=days - 1)
+    if partial_from is not None:
+        first: Optional[date] = max(partial_from, window_start) if partial_from <= today else None
+    else:
+        partial = [d for d in series if d["is_partial"]]
+        first = date.fromisoformat(partial[0]["date"]) if partial else None
+    if first is not None:
         parts.append(
             f"Counts from {_fmt_day(first)} on are still filling in (late articles are scored "
             "overnight and after weekends)" + ("." if building else "; earlier days are final.")
@@ -413,19 +529,36 @@ def summarize_trend(
     return " ".join(parts)
 
 
-#: The News Tone card's summary line calls a window "Mostly positive" at a net score of +20 or
-#: more, "Mostly negative" at -20 or less, else "Mixed" (iOS `NewsSentimentTrendChart.toneWord`;
-#: pinned equal by tests/test_chat_updates_scope_context.py), so the chat can name the card's
-#: verdict in the card's own words.
+#: The net score at which a window without a majority side still "leans" (owner, 2026-10-10:
+#: "Majority-based + %"). Mirrors iOS `NewsSentimentTrendChart.toneWord` (pinned equal by
+#: tests/test_chat_updates_scope_context.py), so the chat names the card's verdict in the
+#: card's own words.
 TONE_WORD_THRESHOLD = 20
 
 
-def tone_word(net: int) -> str:
-    """The word the News Tone card's summary line shows for a window's net score."""
-    if net >= TONE_WORD_THRESHOLD:
+def tone_word(bullish: int, bearish: int, neutral: int) -> str:
+    """The word the News Tone card's summary line shows for a window's counts.
+
+    "Mostly" means a real majority: the old rule said "Mostly positive" at net +20 even when
+    most headlines were neutral (2 positive, 6 neutral read "Mostly positive"). In order:
+    a side with more than half of all scored headlines is "Mostly positive/negative"; else a
+    net score of ±20 or beyond "Leans"; else more than half neutral is "Mostly neutral"; else
+    "Mixed". Integer math, so the boundary (exactly half) is never a majority."""
+    bullish, bearish, neutral = _count(bullish), _count(bearish), _count(neutral)
+    total = bullish + bearish + neutral
+    if total <= 0:
+        return "Mixed"
+    if 2 * bullish > total:
         return "Mostly positive"
-    if net <= -TONE_WORD_THRESHOLD:
+    if 2 * bearish > total:
         return "Mostly negative"
+    net = net_score(bullish, bearish, total)
+    if net >= TONE_WORD_THRESHOLD:
+        return "Leaning positive"
+    if net <= -TONE_WORD_THRESHOLD:
+        return "Leaning negative"
+    if 2 * neutral > total:
+        return "Mostly neutral"
     return "Mixed"
 
 
@@ -530,7 +663,7 @@ def summarize_tone_windows(
         net = net_score(bull, bear, total)
         clauses.append(
             f"{days}D: {total} headline{'' if total == 1 else 's'} ({bull} positive, "
-            f"{bear} negative, {neut} neutral), net {_signed(net)} ({tone_word(net)})"
+            f"{bear} negative, {neut} neutral), net {_signed(net)}% ({tone_word(bull, bear, neut)})"
         )
     # "as the News Tone card counts it", never "on screen": the app hides the card until a
     # feed has a few days of history, and the model must not point at a card that is not there.
@@ -538,12 +671,17 @@ def summarize_tone_windows(
         "News tone for this feed, as the News Tone card counts it (headlines Cay AI scored, "
         "by ET day" + since_phrase(tracking_since, today)
         + "). The card's Positive / Negative / Neutral are Cay AI's bullish / bearish / neutral "
-        "labels; net = (positive - negative) / all scored, as a whole percent from -100 to "
-        "+100. " + "; ".join(clauses) + "."
+        "labels; net = (positive - negative) / all scored, as a whole percent from -100% to "
+        "+100%. The card leaves out headlines that are not mainly about this feed's subject, "
+        "routine fund-holdings filings, law-firm solicitations and repeat wire copies of one "
+        "story, so its counts can be lower than the labels in the headline list. "
+        + "; ".join(clauses) + "."
     )
 
 
-def summarize_tone(data: Any, *, focus_days: int, today: date) -> Optional[str]:
+def summarize_tone(
+    data: Any, *, focus_days: int, today: date, partial_from: Optional[date] = None,
+) -> Optional[str]:
     """The Updates chat's whole news-tone grounding, from ONE 90-day ``get_trend`` answer.
 
     Two parts: :func:`summarize_tone_windows` (every window the card offers, and how far back
@@ -554,6 +692,7 @@ def summarize_tone(data: Any, *, focus_days: int, today: date) -> Optional[str]:
     focus window is empty the building caveat, which the detail would have carried, is added
     here instead. A focus outside the card's windows gets no detail (never a guessed one).
     None when nothing was scored in 90 days, or ``data`` is not a trend answer.
+    ``partial_from`` (:func:`open_since` of the read) starts the "still filling in" sentence.
     """
     if not isinstance(data, dict):
         return None
@@ -568,12 +707,19 @@ def summarize_tone(data: Any, *, focus_days: int, today: date) -> Optional[str]:
     detail = (
         summarize_trend(
             window_slice(series, days=focus_days, today=today),
-            days=focus_days, today=today, history_status=status,
+            days=focus_days, today=today, history_status=status, partial_from=partial_from,
         )
         if focus_days in TREND_DAYS else None
     )
     if detail is None and status == HISTORY_BUILDING:
         detail = _BUILDING_NOTE_WINDOWS
+    if any(date.fromisoformat(d["date"]) < TONE_RULES_SINCE for d in series):
+        # Re-labelled scopes hold no older-rule days after migration 192; this is for the
+        # rest (the Market line above all), until the 90-day windows pass the date.
+        caveat = (f"Cay AI's labelling rules changed on {_fmt_day(TONE_RULES_SINCE)}, "
+                  f"{TONE_RULES_SINCE.year} (more headlines read as neutral; stories not about "
+                  "this feed no longer count): compare days on the same side of that date only.")
+        detail = f"{detail} {caveat}" if detail else caveat
     return windows + ("\n" + detail if detail else "")
 
 
@@ -599,7 +745,7 @@ def read_history_status(supabase: Any, scope: str, today: date) -> Optional[str]
         return None
     result = (
         supabase.table(BACKFILL_TABLE)
-        .select("status,covered_from,covered_to")
+        .select("status,covered_from,covered_to,attempts")
         .eq("scope", scope)
         .limit(1)
         .execute()
@@ -621,7 +767,20 @@ def read_history_status(supabase: Any, scope: str, today: date) -> Optional[str]
     if (covered_from is not None and covered_to is not None
             and covered_from <= horizon and covered_to >= today - timedelta(days=_READY_RECENT_SLACK_DAYS)):
         return HISTORY_READY
-    return HISTORY_BUILDING if status in ("queued", "running") else None
+    if status in ("queued", "running"):
+        return HISTORY_BUILDING
+    # 'failed' below the attempt cap is retried within the hour, so an incomplete history is
+    # still being built (None here let the card and chat present a partial 90 days as final).
+    # AT the cap it is retried once a day and may stay incomplete for weeks (an article the
+    # model will never label holds coverage there): that is not "building" — the card would
+    # promise "filling in" and the chat "do not read a trend" for as long — so it reads None.
+    from app.services.news_sentiment_backfill_service import MAX_ATTEMPTS
+
+    try:
+        attempts = int(row.get("attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    return HISTORY_BUILDING if attempts < MAX_ATTEMPTS else None
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -636,53 +795,95 @@ def _as_date(value: Any) -> Optional[date]:
 # ── Writes ─────────────────────────────────────────────────────────────────────
 
 
-#: Set once PostgREST reports the `model` column missing (migration 181 not applied yet):
-#: later writes leave it out instead of failing. Process-local; a restart re-checks.
+#: Set once PostgREST reports an optional column missing — `model` (migration 181) or
+#: `labeller` (migration 191) — because the deploy ran ahead of its migration: later writes
+#: leave it out instead of failing. Process-local; a restart re-checks.
 _model_column_missing = False
+_labeller_column_missing = False
+_skip_reason_column_missing = False
+#: When `labeller` was found missing: the heal re-checks after this long, so a deploy that ran
+#: ahead of migration 191 starts writing the column once 191 lands — no restart needed (rows
+#: written without it read as the old rules and would survive migration 192's re-label).
+_labeller_missing_at = 0.0
+_LABELLER_RECHECK_SECONDS = 600.0
+#: column -> (flag name, the migration that adds it)
+_OPTIONAL_COLUMNS = {
+    "model": ("_model_column_missing", 181),
+    "labeller": ("_labeller_column_missing", 191),
+    "skip_reason": ("_skip_reason_column_missing", 191),
+}
 
 
-def _is_missing_model_column(exc: BaseException) -> bool:
+def _missing_optional_column(exc: BaseException, rows: List[Dict[str, Any]]) -> Optional[str]:
+    """The optional column PostgREST says is missing, when THIS call's rows carry it."""
     text = str(exc).lower()
-    return "model" in text and ("column" in text or "pgrst204" in text)
+    # Only PostgREST's "unknown column" answer (PGRST204 "Could not find the 'x' column", or
+    # Postgres' "column x … does not exist"): a constraint error that merely NAMES a column
+    # (a null or CHECK violation) must raise, never be "healed" by dropping data.
+    if not ("pgrst204" in text or "could not find" in text or "does not exist" in text):
+        return None
+    for col in _OPTIONAL_COLUMNS:
+        named = f"'{col}'" in text or f'"{col}"' in text or f"column {col} " in f"{text} "
+        if named and any(col in r for r in rows):
+            return col
+    return None
+
+
+def _strip_missing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rows as the live schema can take them. Without `skip_reason` (191 not applied) a
+    gated row is DROPPED, never written unflagged: unflagged, it would count on the chart."""
+    global _labeller_column_missing, _skip_reason_column_missing
+    if ((_labeller_column_missing or _skip_reason_column_missing)
+            and time.monotonic() - _labeller_missing_at > _LABELLER_RECHECK_SECONDS):
+        # Re-check: migration 191 may have landed since.
+        _labeller_column_missing = _skip_reason_column_missing = False
+    drop = {c for c, (flag, _) in _OPTIONAL_COLUMNS.items() if globals()[flag]}
+    if not drop:
+        return rows
+    if "skip_reason" in drop:
+        rows = [r for r in rows if not r.get("skip_reason")]
+    return [{k: v for k, v in r.items() if k not in drop} for r in rows]
 
 
 def upsert_log_rows(supabase: Any, payload: List[Dict[str, Any]]) -> int:
     """Blocking upsert of prepared log rows (first label wins). Returns rows NEWLY written.
 
-    Call through ``asyncio.to_thread``. Raises on failure, except the one it heals: before
-    migration 181 the `model` column does not exist, so the batch is retried once without it
-    — no live label is lost to a deploy that ran ahead of the migration.
+    Call through ``asyncio.to_thread``. Raises on failure, except the one it heals: a deploy
+    that ran ahead of its migration (181's `model`, 191's `labeller`) is retried without the
+    missing column — no live label is lost to the ordering. A row written without `labeller`
+    reads as the OLD rules, so migration 192 re-labels it: the heal can cost a re-label,
+    never a label.
     """
-    global _model_column_missing
     if not payload:
         return 0
-    rows = payload
-    if _model_column_missing:
-        rows = [{k: v for k, v in r.items() if k != "model"} for r in payload]
-    try:
-        result = (
-            supabase.table(TABLE)
-            .upsert(rows, on_conflict="scope,article_key", ignore_duplicates=True)
-            .execute()
-        )
-    except Exception as e:
-        # Judged on THIS call's rows, not the flag: a concurrent batch built with `model` whose
-        # error arrives after another batch set the flag must still retry, not be dropped.
-        if not any("model" in r for r in rows) or not _is_missing_model_column(e):
-            raise
-        if not _model_column_missing:
-            logger.warning(
-                "news_sentiment_log: `model` column missing (migration 181 not applied) — "
-                "writing labels without it until restart"
+    rows = _strip_missing(payload)
+    for _ in range(len(_OPTIONAL_COLUMNS) + 1):
+        try:
+            result = (
+                supabase.table(TABLE)
+                .upsert(rows, on_conflict="scope,article_key", ignore_duplicates=True)
+                .execute()
             )
-        _model_column_missing = True
-        rows = [{k: v for k, v in r.items() if k != "model"} for r in payload]
-        result = (
-            supabase.table(TABLE)
-            .upsert(rows, on_conflict="scope,article_key", ignore_duplicates=True)
-            .execute()
-        )
-    return len(getattr(result, "data", None) or [])
+            return len(getattr(result, "data", None) or [])
+        except Exception as e:
+            # Judged on THIS call's rows, not the flag: a concurrent batch built with the column
+            # whose error arrives after another batch set the flag must still retry, not drop.
+            col = _missing_optional_column(e, rows)
+            if col is None:
+                raise
+            flag, migration = _OPTIONAL_COLUMNS[col]
+            if not globals()[flag]:
+                logger.warning(
+                    "news_sentiment_log: `%s` column missing (migration %d not applied) — "
+                    "writing labels without it until restart", col, migration,
+                )
+            globals()[flag] = True
+            if col in ("labeller", "skip_reason"):
+                globals()["_labeller_missing_at"] = time.monotonic()
+            rows = _strip_missing(payload)
+            if not rows:
+                return 0
+    raise RuntimeError("news_sentiment_log upsert: optional-column heal did not converge")
 
 
 async def record_labels(
@@ -695,25 +896,45 @@ async def record_labels(
 ) -> int:
     """Log the labels of freshly enriched cache rows. Returns rows NEWLY logged. Never raises.
 
+    Rows may carry ``headline`` and ``relevance`` for the chart gate (:func:`tone_skip_reason`).
+    An undated row is skipped, like the backfill does: with no date it cannot be placed on a
+    day, and charting it on the labelling day put an old story on today's bar.
+
     Best-effort by design: enrichment already succeeded and the user already has their
-    bullets; a lost log write costs one article on the chart, never the feed. It is logged
-    at WARNING with the scope and batch size so a missing migration is visible, not silent.
+    bullets. A transient Supabase failure is retried (the write is ON CONFLICT DO NOTHING, so
+    a replay is harmless); a failure that survives the retries loses the WHOLE batch's labels
+    for good (the rows are already marked processed), so it is logged at ERROR with the scope
+    and batch size — visible in Sentry, never silent.
     """
     if supabase is None:
         return 0
+    skipped: Dict[str, int] = {}
     try:
-        payload = build_log_rows(scope, rows, now=now or datetime.now(timezone.utc), model=model)
+        payload = build_log_rows(
+            scope, rows, now=now or datetime.now(timezone.utc), model=model,
+            undated="skip", skipped=skipped,
+        )
     except Exception as e:  # noqa: BLE001 — a malformed row must not break enrichment
         logger.warning("news_sentiment_log: could not build rows for %s (%s: %s)",
                        scope, type(e).__name__, e)
         return 0
+    if skipped:
+        logger.info("news_sentiment_log: %s — kept %d label(s) off the chart (%s)",
+                    scope, sum(skipped.values()), dict(sorted(skipped.items())))
     if not payload:
         return 0
 
+    from app.utils.supabase_errors import retry_idempotent_sync
+
     try:
-        return await asyncio.to_thread(upsert_log_rows, supabase, payload)
+        return await asyncio.to_thread(
+            retry_idempotent_sync,
+            lambda: upsert_log_rows(supabase, payload),
+            what=f"news_sentiment_log upsert {scope}",
+            logger=logger,
+        )
     except Exception as e:  # noqa: BLE001
-        logger.warning(
+        logger.error(
             "news_sentiment_log: dropped %d label(s) for %s (%s: %s)",
             len(payload), scope, type(e).__name__, e,
         )
@@ -788,8 +1009,7 @@ class NewsSentimentTrendService:
         try:
             result = await self._fetch(scope, days, today, now)
             if len(self._cache) >= _CACHE_MAX_ENTRIES:
-                self._cache.clear()
-                self._status_unknown = {key} & self._status_unknown
+                self._evict(today, keep=key)
             self._cache[key] = (time.monotonic(), result)
             # Guarded: `reset()` (tests, or a future caller) may have resolved or dropped it.
             if not fut.done():
@@ -806,6 +1026,19 @@ class NewsSentimentTrendService:
             raise
         finally:
             self._inflight.pop(key, None)
+
+    def _evict(self, today: date, *, keep: Tuple[str, int, date]) -> None:
+        """Make room at the cap without dropping the hot keys: first every entry from an
+        earlier ET day or past the long TTL, then (only if still full) the oldest quarter.
+        Clearing the whole cache made every scope miss at once."""
+        cutoff = time.monotonic() - _CACHE_TTL_SECONDS
+        for k in [k for k, (ts, _) in self._cache.items() if k[2] != today or ts < cutoff]:
+            self._cache.pop(k, None)
+        if len(self._cache) >= _CACHE_MAX_ENTRIES:
+            oldest = sorted(self._cache.items(), key=lambda kv: kv[1][0])
+            for k, _ in oldest[: max(1, len(oldest) // 4)]:
+                self._cache.pop(k, None)
+        self._status_unknown &= set(self._cache) | {keep}
 
     async def _fetch(
         self, scope: str, days: int, today: date, now: Optional[datetime] = None,
@@ -916,6 +1149,10 @@ __all__ = [
     "article_key",
     "build_log_rows",
     "et_day",
+    "is_trend_scope",
+    "normalize_relevance",
+    "tone_skip_reason",
+    "TONE_LABELLER_VERSION",
     "get_news_sentiment_trend_service",
     "history_status_for",
     "read_history_status",

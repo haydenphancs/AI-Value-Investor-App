@@ -55,12 +55,13 @@ logger = logging.getLogger(__name__)
 # Cache TTL in hours
 CACHE_TTL_HOURS = 6
 
-# Gemini model for news enrichment (fast + cheap). Flash-Lite: enrichment is
-# extractive compression of a headline + snippet into bullets + a 3-way sentiment
-# — the same shape the Insights card uses on Flash-Lite — so it does not need
-# Flash. ~1/3 the cost, which matters now that the pre-warmer enriches proactively.
-# Revert to "gemini-2.5-flash" here if bullet/sentiment quality regresses.
-NEWS_AI_MODEL = "gemini-2.5-flash-lite"
+# The enrichment's model is `settings.NEWS_LLM_MODEL` (app/services/news_llm.py).
+
+#: The enrichment is a CLASSIFIER (its label feeds the News Tone chart, first label wins), so
+#: it samples at temperature 0, not the chat default (GEMINI_TEMPERATURE 0.7). At 0.7 the
+#: labeller agreed with its own earlier labels only ~82-86% of the time (calibration
+#: 2026-09-27/28). The 90-day backfill sends this same request (`label_request`).
+ENRICHMENT_TEMPERATURE = 0.0
 
 # How many of a scope's freshest in-window articles are AI-enriched per cycle by a
 # proactive enricher (the insight sweeper for the whole universe, the pre-warmer for
@@ -106,7 +107,10 @@ _BUZZ_TOP_N = 40
 _BUZZ_TIMEOUT_SECONDS = 2.0
 
 
-def build_enrichment_prompt(articles: List[Dict[str, Any]], ticker: str = "") -> str:
+def build_enrichment_prompt(
+    articles: List[Dict[str, Any]], ticker: str = "", *,
+    company_name: Optional[str] = None, is_etf: bool = False,
+) -> str:
     """The per-article enrichment prompt (summary bullets + sentiment + tickers), byte for byte
     what the live feed sends. ONE builder, shared by `_batch_enrich_articles` and the 90-day
     sentiment backfill: a backfilled day must be labelled by the same question — a
@@ -133,14 +137,19 @@ def build_enrichment_prompt(articles: List[Dict[str, Any]], ticker: str = "") ->
             f"<<<END_ARTICLE {i}>>>"
         )
 
-    sentiment_subject, scope_line = sentiment_scope(ticker)
-    # MARKET ONLY: what each article is ABOUT, so the Market feed can hide one company's
-    # story no ticker names (`market_news_relevance`; TestFlight 2026-10-03). Empty for
-    # every other scope, so the ticker prompt — and the 90-day backfill, which never
-    # labels the Market — stays byte-identical (the golden test pins all three cases).
+    sentiment_subject, scope_line = sentiment_scope(ticker, company_name=company_name, is_etf=is_etf)
+    # MARKET: what each article is ABOUT, so the Market feed can hide one company's story no
+    # ticker names (`market_news_relevance`; TestFlight 2026-10-03). Every OTHER named scope:
+    # how much the article is about the scope (`RELEVANCE_RULE`), so a story about another
+    # company stays off that scope's News Tone chart (2026-10-10). A blank scope asks neither.
+    # The golden test pins all three cases.
     is_market = ticker == MARKET_SCOPE
-    scope_item = f"\n{MARKET_SCOPE_RULE}" if is_market else ""
-    scope_field = f"\n{MARKET_SCOPE_FIELD}" if is_market else ""
+    if is_market:
+        scope_item, scope_field = f"\n{MARKET_SCOPE_RULE}", f"\n{MARKET_SCOPE_FIELD}"
+    elif ticker:
+        scope_item, scope_field = f"\n{RELEVANCE_RULE}", f"\n{RELEVANCE_FIELD}"
+    else:
+        scope_item = scope_field = ""
 
     return f"""Analyze the following {len(articles)} financial news articles.
 
@@ -153,7 +162,7 @@ For EACH article, provide:
    - The FINAL bullet is the conclusion: one sentence on what this article's points add up to for the company, asset or market it covers — built only from the bullets above it, with no new fact, figure or name. Its subject is the company, asset or market, never a group of people.
    - NO LEAD-IN. Start that final bullet with the point itself. Never open it with "Investors", "Everyday investors", "For investors,", "Investors should care because", "This matters because" or "Why it matters", and never with a transition of any kind: not "So,", "In short,", "Ultimately,", "The takeaway,", "The takeaway for everyday investors,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?" or "So what:". The app marks this bullet with its own icon, so naming it in words is redundant on screen and is stripped before display — a lead-in only costs you words from the 25-word budget.
    - No introductory phrases like "This article discusses..." or "The key points are..."
-2. Sentiment classification — the NET directional lean for {sentiment_subject}, one of these three exact values:
+2. Sentiment classification — the NET directional lean for {sentiment_subject} ("the subject" below), one of these three exact values:
 {SENTIMENT_RUBRIC}
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
 4. Related tickers: Extract ALL US-listed stock ticker symbols (e.g., AAPL, MSFT, GOOGL) explicitly mentioned or clearly referenced in the article. Only include real ticker symbols — no crypto, indices, ETFs, or made-up symbols. Maximum 8 tickers.{scope_item}
@@ -184,6 +193,18 @@ MARKET_SCOPE_RULE = """5. Scope: what the article is ABOUT, exactly one of these
 
 #: The matching line of the MARKET prompt's output contract.
 MARKET_SCOPE_FIELD = '- "scope": exactly one of "market" | "sector" | "company" | "unclear"'
+
+#: Item 5 of every OTHER named scope's prompt: how much the article is about the subject.
+#: "passing" keeps the label off the News Tone chart (`news_sentiment_trend_service.
+#: tone_skip_reason`) — a blind re-label (2026-10-10) found off-topic stories labelled for
+#: whatever company they were about (a Samsung/TSMC capex story counted bullish for AAPL).
+RELEVANCE_RULE = """5. Relevance: how much the article is about the subject, exactly one of these values:
+   - "primary": the article is mainly about the subject.
+   - "secondary": the subject is one of a few subjects, and the article says something specific about it.
+   - "passing": the subject is only named in passing, in a list, as a benchmark or as an example, or not at all."""
+
+#: The matching line of the output contract.
+RELEVANCE_FIELD = '- "relevance": exactly one of "primary" | "secondary" | "passing"'
 
 
 #: Article sets a provider's moderation refused, logged at ERROR once per process.
@@ -256,32 +277,81 @@ def article_external_id(raw: Dict[str, Any], index: int) -> str:
     """The cache's identity for one FMP article: url, else title, else a positional
     placeholder, capped at 500 chars. ONE definition, shared by the cache writer and the
     sentiment backfill — the label log keys on md5 of this value, so two spellings would
-    count the same article twice."""
-    return (raw.get("url") or raw.get("title") or f"unknown_{index}")[:500]
+    count the same article twice. A non-string url or title (a malformed upstream row) is
+    treated as missing — it used to raise TypeError and fail a whole backfill scope on every
+    retry; the placeholder is never logged (`article_key` refuses it)."""
+    url, title = raw.get("url"), raw.get("title")
+    if isinstance(url, str) and url:
+        return url[:500]
+    if isinstance(title, str) and title:
+        return title[:500]
+    return f"unknown_{index}"
+
+
+def answer_positions(parsed: List[Any], expected_count: int) -> List[int]:
+    """Which input article each answer item belongs to. Pure.
+
+    Position by default — the structured-output array is one object per article in input
+    order, and the index drift seen in practice (duplicate, missing or 1-based values) sits
+    on content that is still in order, so trusting it would misattribute. ONLY when every
+    item carries an int ``index`` and the indices are exactly 0..n-1 in a DIFFERENT order is
+    it a reorder, mapped by index (positional mapping would swap two articles' labels and
+    summaries, and first-label-wins keeps the swap forever)."""
+    identity = list(range(expected_count))
+    if len(parsed) != expected_count:
+        return identity
+    indices = []
+    for item in parsed:
+        idx = item.get("index") if isinstance(item, dict) else None
+        if isinstance(idx, bool) or not isinstance(idx, int):
+            return identity
+        indices.append(idx)
+    if indices != identity and sorted(indices) == identity:
+        return indices
+    return identity
 
 
 #: The sentiment rules of the per-article enrichment prompt (`build_enrichment_prompt`), which
 #: the sentiment backfill sends unchanged, so a backfilled label and a live one are asked the
 #: same question. Changing a word here changes both — and the golden-prompt test.
-SENTIMENT_RUBRIC = """   - "bullish": the article leans to an upward catalyst (earnings beat, product launch, analyst upgrade, lawsuit win, major contract, approval, raised guidance, easing conditions).
-   - "bearish": the article leans to a downward catalyst (missed revenue, investigation, recall, downgrade, lawsuit loss, fraud, breach, cut guidance, tightening conditions).
-   - "neutral": ONLY when the article is genuinely two-sided or purely backward-looking / educational with no directional read (a history lesson, a balanced explainer, or up- and down-catalysts that truly cancel out).
-   Commit to the lean — an article that tilts positive is "bullish" even if it notes caveats, and likewise "bearish". Do NOT use "neutral" as a safe default; the confidence score below is where genuine uncertainty belongs."""
+SENTIMENT_RUBRIC = """   - "bullish": the article reports or argues something good for the subject's value (results above expectations, raised guidance, a major contract or approval, an analyst upgrade, a lawsuit win, easing conditions).
+   - "bearish": the article reports or argues something bad for the subject's value (results below expectations, cut guidance, an investigation, recall or breach, a downgrade, a lawsuit loss, a rival winning at the subject's expense, tightening conditions).
+   - "neutral": no clear directional read for the subject. That includes an article mainly about another company, asset or the wider market that names the subject only in passing or as a benchmark; routine items (an institution's quarterly change in its holding, a routine insider sale under a trading plan or after vesting, a dividend at the usual rate, a conference appearance); a balanced piece whose up- and down-points cancel out; and a recap or statistics with no direction.
+   Judge the subject only: an article that praises another company or asset is not "bullish" for the subject unless it says what that means for the subject. Commit to the lean when the article clearly tilts — caveats alone do not make it "neutral" — and put any remaining uncertainty in the confidence score."""
 
 
-def sentiment_scope(ticker: str) -> Tuple[str, str]:
+#: What a commodity or index scope's articles are judged FOR (their feeds are made of related
+#: stocks and funds — `COMMODITY_NEWS_TICKERS`, an index's members — so "the stock" would
+#: score whichever company an article covers).
+_COMMODITY_SUBJECTS = {
+    "GC": "gold", "SI": "silver", "CL": "crude oil", "NG": "natural gas",
+    "PL": "platinum", "PA": "palladium", "HG": "copper",
+}
+_INDEX_SUBJECTS = {
+    "^GSPC": "the S&P 500 index", "^DJI": "the Dow Jones Industrial Average",
+    "^IXIC": "the Nasdaq Composite index", "^RUT": "the Russell 2000 index",
+}
+
+
+def sentiment_scope(
+    ticker: str, *, company_name: Optional[str] = None, is_etf: bool = False,
+) -> Tuple[str, str]:
     """``(sentiment_subject, scope_line)`` for a scope's labelling prompt.
 
-    The Market feed is stored under the reserved key __MARKET__, which is not a ticker.
-    Naming it as one asked the model to put "__MARKET__" in related_tickers and to judge
-    each article's lean "for the stock" — there is no stock. Its labels also feed the
-    Market line of the news-sentiment timeline, so they must be read for the market as a
-    whole.
+    The subject is NAMED per asset class (2026-10-10). The old ticker prompt asked for the
+    lean "for the stock" and named the ticker only in a related-tickers line, so a story about
+    another company was scored for THAT company and counted on this scope's News Tone chart
+    (blind re-label: 69 bullish where three raters saw 50). Commodity and index feeds are made
+    of related stocks and funds, so they are judged for the commodity's price / the index as
+    a whole, and a coin for its price — never "the stock". An ETF (``is_etf``, from its cached
+    FMP profile) is judged for the fund: the market, sector or commodity it holds IS its
+    subject. A stock carries its company name when known (``company_name``): "the stock IT"
+    alone let a model read a Gartner story as off-topic for IT.
 
-    The Market line no longer ASSERTS "not about one company": the same prompt now asks
-    what each article is about (`MARKET_SCOPE_RULE`), and telling the model the answer
-    in advance would bias it toward "market" — the one-company stories the Market feed
-    exists to drop are exactly the ones that sentence mislabelled.
+    The Market feed is stored under the reserved key __MARKET__, which is not a ticker: its
+    labels feed the Market line, so they are read for the market as a whole. The Market line
+    does not ASSERT "not about one company": the same prompt asks what each article is about
+    (`MARKET_SCOPE_RULE`), and telling the model the answer in advance would bias it.
     """
     if ticker == MARKET_SCOPE:
         return (
@@ -290,13 +360,119 @@ def sentiment_scope(ticker: str) -> Tuple[str, str]:
             "article's sentiment for the overall US stock market, and list in "
             "related_tickers only real ticker symbols the article itself names.",
         )
-    if ticker:
+    t = (ticker or "").strip().upper()
+    if not t:
+        return "the stock", ""
+    if t.startswith("COMMODITY_"):      # the commodity detail screen's cache key
+        t = f"{t[len('COMMODITY_'):]}USD"
+    from app.services.asset_class import detect_asset_class
+
+    asset_class = detect_asset_class(t)
+    if asset_class == "commodity":
+        root = t[:-3] if t.endswith("USD") else t
+        name = _COMMODITY_SUBJECTS.get(root, root)
         return (
-            "the stock",
-            f"These articles were fetched for ticker {ticker}. Always include {ticker} "
-            "in related_tickers if the article is relevant to it.",
+            f"the price of {name} ({t})",
+            f"These articles were fetched for {name} ({t}) through related stocks and funds. "
+            f"Judge each article's sentiment for the price of {name} itself: a company's own "
+            f"results, deals or ratings are \"neutral\" unless the article says what they mean "
+            f"for the price of {name}. Do not list {t} in related_tickers.",
         )
-    return "the stock", ""
+    if asset_class == "crypto":
+        base = t[:-4] if t.endswith("USDT") else t[:-3]
+        return (
+            f"the price of {base} ({t})",
+            f"These articles were fetched for the cryptocurrency {base} ({t}). Judge each "
+            f"article's sentiment for the price of {base} only — not for another coin, token, "
+            f"company or project an article is mainly about. Do not list {t} or any other "
+            "crypto symbol in related_tickers.",
+        )
+    if asset_class == "index":
+        name = _INDEX_SUBJECTS.get(t, f"the index {t}")
+        return (
+            f"{name} as a whole ({t})",
+            f"These articles were fetched for {name} ({t}) through its member companies. "
+            f"Judge each article's sentiment for {name} as a whole: one company's own news is "
+            "\"neutral\" unless the article ties it to the whole index. Do not list "
+            f"{t} in related_tickers.",
+        )
+    name = _clean_company_name(company_name)
+    if is_etf:
+        fund = f"the fund {t}" + (f" ({name})" if name else "")
+        return (
+            fund,
+            f"These articles were fetched for the exchange-traded fund {t}. Judge each article's "
+            f"sentiment for the fund's value: the market, sector, commodity or group of companies "
+            f"{t} holds is its subject, so a story about that market or sector is about the fund. "
+            "A single company's own news is \"neutral\" unless the article ties it to the fund or "
+            f"to its whole market or sector. Always include {t} in related_tickers if the article "
+            "is relevant to it.",
+        )
+    label = f"{t} ({name})" if name else t
+    return (
+        f"the stock {label}",
+        f"These articles were fetched for ticker {label}. Judge each article's sentiment for {t} "
+        "only — never for another company, the sector or the market an article is mainly "
+        f"about. Always include {t} in related_tickers if the article is relevant to it.",
+    )
+
+
+def _clean_company_name(raw: Any) -> Optional[str]:
+    """A company name safe to put in the prompt (one line, ≤ 80 chars, no fence text), or None."""
+    if not isinstance(raw, str):
+        return None
+    from app.services.chat_security import neutralize_fences
+
+    name = " ".join(neutralize_fences(raw).split())[:80].strip(" ,.;:")
+    return name or None
+
+
+#: (company name, is ETF) per scope from `company_profile_cache` — read once per process per
+#: 6 h. The labelling prompt needs both (`sentiment_scope`); a failed read is remembered for
+#: 10 min as "unknown" (the plain ticker prompt), never retried on every batch.
+_SCOPE_PROFILES: Dict[str, Tuple[float, Optional[str], bool]] = {}
+_SCOPE_PROFILE_TTL = 6 * 3600.0
+_SCOPE_PROFILE_FAIL_TTL = 600.0
+
+
+async def scope_profile(supabase: Any, scope: str) -> Tuple[Optional[str], bool]:
+    """``(company_name, is_etf)`` for a stock-class scope from the cached FMP profile, or
+    ``(None, False)``: no client, not a stock-class symbol, no cached profile, or a failed read
+    (logged at WARNING). Never raises; never calls FMP."""
+    s = (scope or "").strip().upper()
+    if not s or supabase is None or s == MARKET_SCOPE or s.startswith("COMMODITY_"):
+        return None, False
+    from app.services.asset_class import detect_asset_class
+
+    if detect_asset_class(s) != "stock":
+        return None, False
+    now = time.monotonic()
+    hit = _SCOPE_PROFILES.get(s)
+    if hit and now < hit[0]:
+        return hit[1], hit[2]
+
+    def _read() -> Any:
+        return (
+            supabase.table("company_profile_cache").select("profile_json")
+            .eq("ticker", s).limit(1).execute()
+        )
+
+    try:
+        result = await asyncio.to_thread(_read)
+        rows = getattr(result, "data", None) or []
+        profile = rows[0].get("profile_json") if rows and isinstance(rows[0], dict) else None
+        profile = profile if isinstance(profile, dict) else {}
+        name = _clean_company_name(profile.get("companyName"))
+        is_etf = profile.get("isEtf") is True
+        ttl = _SCOPE_PROFILE_TTL
+    except Exception as e:  # noqa: BLE001 — the plain ticker prompt still works
+        logger.warning("news enrichment: profile read for %s failed (%s: %s) — labelling it by "
+                       "ticker alone for 10 min", s, type(e).__name__, e)
+        name, is_etf, ttl = None, False, _SCOPE_PROFILE_FAIL_TTL
+    if len(_SCOPE_PROFILES) >= 4096:
+        _SCOPE_PROFILES.clear()
+    _SCOPE_PROFILES[s] = (now + ttl, name, is_etf)
+    return name, is_etf
 
 
 #: The enrichment's system instruction (wrapped with the identity + advice guards at the
@@ -403,9 +579,13 @@ def _clamp_confidence(value: Any) -> int:
     value — the `sentiment_confidence` column is a bare integer with no CHECK,
     and Gemini can return an out-of-range or non-integer score.
     """
+    if isinstance(value, bool):   # True is an int to Python; never a confidence
+        return 0
     try:
         return max(0, min(100, int(value)))
-    except (TypeError, ValueError):
+    # OverflowError: int(float("inf")) / 1e999 — one such item raised out of
+    # `_map_enrichments` and cost the whole batch. A NaN raises ValueError.
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -1390,9 +1570,20 @@ class NewsCacheService:
                     continue
                 out[ext] = enrichment
                 if enrichment.get("sentiment_valid", True):
+                    # Judged by the FEED's own rule (`is_market_story`, with the stamp this
+                    # answer will be written with): a story the Market feed hides — one
+                    # company's — is off the Market line too (owner, 2026-10-10: "match the
+                    # feed"). `out` still gets it: the writer needs it to stamp the verdict.
+                    kept = is_market_story({
+                        "title": raw.get("title"),
+                        "ai_model": stamp_model_scope(news_model_name(), enrichment.get("scope")),
+                    })
                     labelled.append({
                         "external_id": ext,
+                        "headline": raw.get("title"),
                         "sentiment": enrichment.get("sentiment"),
+                        "sentiment_confidence": enrichment.get("confidence"),
+                        "relevance": None if kept else "passing",
                         "published_at": _sanitize_published_at(raw.get("publishedDate")),
                     })
         if labelled:
@@ -1998,8 +2189,21 @@ class NewsCacheService:
         # then fails is simply re-enriched later, and first-label-wins ignores the repeat.
         # Only labels the model actually gave (`sentiment_valid`): a missing or off-list one
         # shows as neutral on the badge but is not a "neutral" headline on the chart.
+        #
+        # Each logged row carries the model's `relevance` answer and its headline, for the
+        # chart gate (`tone_skip_reason`: off-topic stories, holdings filings and law-firm
+        # solicitations stay in the feed but off the chart). A Market row the feed hides
+        # (`is_market_story`) is off the Market line too (owner, 2026-10-10: "match the feed").
         labelled = [
-            needs_enrichment[i] for i in update_indices
+            {
+                **needs_enrichment[i],
+                "relevance": (
+                    ("passing" if not is_market_story(needs_enrichment[i]) else None)
+                    if ticker == MARKET_SCOPE
+                    else (enrichments.get(i) or {}).get("relevance")
+                ),
+            }
+            for i in update_indices
             if (enrichments.get(i) or {}).get("sentiment_valid", True)
         ]
         if len(labelled) < len(update_indices):
@@ -2159,6 +2363,31 @@ class NewsCacheService:
         },
     }
 
+    # Every OTHER named scope's schema: the shared one plus `relevance` (`RELEVANCE_RULE`),
+    # which keeps an article about another company off the scope's News Tone chart.
+    _SCOPED_ENRICHMENT_SCHEMA = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                **copy.deepcopy(_ENRICHMENT_SCHEMA["items"]["properties"]),
+                "relevance": {"type": "STRING", "enum": ["primary", "secondary", "passing"]},
+            },
+            "required": ["index", "bullets", "sentiment", "confidence", "relevance"],
+        },
+    }
+
+    @classmethod
+    def enrichment_schema_for(cls, ticker: str) -> Dict[str, Any]:
+        """The response schema that matches `build_enrichment_prompt(…, ticker)`: Market asks
+        for `scope`, every other named scope for `relevance`, a blank scope for neither. ONE
+        rule, shared with the 90-day backfill (`label_request`)."""
+        if ticker == MARKET_SCOPE:
+            return cls._MARKET_ENRICHMENT_SCHEMA
+        if (ticker or "").strip():
+            return cls._SCOPED_ENRICHMENT_SCHEMA
+        return cls._ENRICHMENT_SCHEMA
+
     @staticmethod
     def _normalize_sentiment(raw: str) -> str:
         """Normalize any sentiment string to DB-compatible bullish/bearish/neutral."""
@@ -2184,27 +2413,31 @@ class NewsCacheService:
 
     @staticmethod
     def _map_enrichments(parsed: Any, expected_count: int) -> Dict[int, Dict[str, Any]]:
-        """Map a Gemini enrichment array to {position: enrichment} by POSITIONAL order.
+        """Map a Gemini enrichment array to {position: enrichment}, POSITIONAL by default.
 
-        Deliberately IGNORES each item's self-reported ``index`` field: Gemini can
-        emit duplicate / missing / 1-based index values, and keying on ``item["index"]``
-        (default 0) then binds one article's bullets+sentiment to a DIFFERENT article
-        (silent wrong-data). The structured-output array is one object per article in
-        INPUT order, so position is authoritative.
+        Ignores each item's self-reported ``index`` field unless it is unambiguous
+        (:func:`answer_positions`): Gemini can emit duplicate / missing / 1-based index values
+        on an array that is otherwise in input order, and keying on ``item["index"]`` then
+        binds one article's bullets+sentiment to a DIFFERENT article (silent wrong-data). Only
+        an exact 0-based permutation that differs from input order is read as a reorder.
 
         Returns ``{}`` when the array shape doesn't match the input count, so the
         caller degrades to unenriched-and-retryable instead of risking misattribution.
         """
         if not isinstance(parsed, list) or len(parsed) != expected_count:
             return {}
+        positions = answer_positions(parsed, expected_count)
         # Typed per element. Gemini's schema guarantees these shapes; an OpenAI-compatible
         # provider in json_object mode only guarantees "valid JSON", and without these
         # checks a string `bullets` became its first five CHARACTERS and a string
         # `related_tickers` one "ticker" per character — persisted to the shared cache.
         from app.services.news_sentiment_trend_service import normalize_sentiment as strict_sentiment
 
+        from app.services.news_sentiment_trend_service import normalize_relevance
+
         result: Dict[int, Dict[str, Any]] = {}
-        for pos, item in enumerate(parsed):
+        for i, item in enumerate(parsed):
+            pos = positions[i]
             if not isinstance(item, dict):
                 continue
             raw_tickers = item.get("related_tickers")
@@ -2246,6 +2479,9 @@ class NewsCacheService:
                 # Market prompt only; None when absent or off-list, which the Market
                 # feed reads as "no verdict" (its ticker rule decides), never "company".
                 "scope": normalize_model_scope(item.get("scope")),
+                # Every other named scope; None when absent or off-list — such a label
+                # still counts on the chart (a schema hiccup must not empty it).
+                "relevance": normalize_relevance(item.get("relevance")),
             }
         return result
 
@@ -2260,7 +2496,10 @@ class NewsCacheService:
         if not articles:
             return {}
 
-        batch_prompt = build_enrichment_prompt(articles, ticker)
+        company_name, is_etf = await scope_profile(self.__dict__.get("supabase"), ticker)
+        batch_prompt = build_enrichment_prompt(
+            articles, ticker, company_name=company_name, is_etf=is_etf,
+        )
 
         try:
             # Through the news features' switchable model (app/services/news_llm.py). On the
@@ -2272,12 +2511,13 @@ class NewsCacheService:
                 # "Cay AI" in the Updates UI exactly like the guarded report/chat surfaces,
                 # but built its own bare instruction and inherited neither guard.
                 system_instruction=neutral_system_instruction(ENRICHMENT_SYSTEM_BASE),
-                # The Market prompt also asks for `scope`; every other scope keeps the
-                # shared schema byte for byte.
-                response_schema=(
-                    self._MARKET_ENRICHMENT_SCHEMA if ticker == MARKET_SCOPE
-                    else self._ENRICHMENT_SCHEMA
-                ),
+                # Market asks for `scope`, every other named scope for `relevance`.
+                response_schema=self.enrichment_schema_for(ticker),
+                # A classifier: temperature 0 (ENRICHMENT_TEMPERATURE). And no response cache:
+                # a wrong-count or blank answer is "retryable", but a cached copy replayed the
+                # same failure to every retry for an hour.
+                temperature=ENRICHMENT_TEMPERATURE,
+                cache=False,
                 gemini_client=getattr(self, "gemini", None),
             )
 

@@ -374,6 +374,15 @@ final class AccountSnapshotStore<Payload: AccountSnapshotPayload> {
         #endif
     }
 
+    // DO NOT DELETE: Swift 6.3.x compiler-crash workaround (swiftlang/swift#87462, #88173; fixed in
+    // Swift 6.4, PR #87504). Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor the IMPLICIT deinit of this
+    // GENERIC class is inferred @MainActor. Below iOS 18.4 its deallocating deinit then calls the stdlib
+    // back-deploy shim with this class's generic substitutions, and the -O EarlyPerfInliner segfaults
+    // (Release / Archive only; Debug never runs the pass). A written-out deinit is nonisolated, so that
+    // call is never emitted. Never `isolated deinit` (the bug's own reproducer). Both stores are
+    // app-lifetime singletons, so this never runs; it touches no state.
+    nonisolated deinit {}
+
     /// A memory-only store, optionally pre-seeded — for previews. Never touches the disk.
     static func inMemory(
         config: AccountSnapshotConfig,

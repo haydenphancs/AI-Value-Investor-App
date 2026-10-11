@@ -649,6 +649,26 @@ def _check_tracking_rule(s):
     )
 
 
+# ── The compiler-crash workaround ────────────────────────────────────────────────────
+
+def _check_deinit_workaround(s):
+    """Swift 6.3.x segfaults in the -O EarlyPerfInliner on the IMPLICIT deinit of a generic class
+    under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor with a target below iOS 18.4
+    (swiftlang/swift#87462 / #88173, fixed in Swift 6.4). Debug never runs that pass, so only a
+    Release Archive fails ("Command SwiftCompile failed", 2026-10-11). A written-out deinit is
+    nonisolated and never emits the bad call; `isolated deinit` IS the bug's reproducer."""
+    store = _store(s)
+    assert not re.search(r"(?<!non)isolated\s+deinit", store), (
+        "`isolated deinit` on AccountSnapshotStore is the swiftlang/swift#87462 reproducer — "
+        "every Release Archive segfaults the Swift 6.3 optimizer"
+    )
+    assert len(re.findall(r"\bnonisolated\s+deinit\s*\{", store)) == 1, (
+        "AccountSnapshotStore lost its explicit `nonisolated deinit {}` — the implicit deinit of this "
+        "GENERIC class segfaults the Swift 6.3 -O optimizer (swiftlang/swift#87462): every Release "
+        "Archive fails with 'Command SwiftCompile failed with a nonzero exit code'"
+    )
+
+
 GUARDS: dict[str, Callable[[dict[str, str]], None]] = {
     "launch_bind": _check_launch_bind,
     "subject_helper": _check_subject_helper,
@@ -671,6 +691,7 @@ GUARDS: dict[str, Callable[[dict[str, str]], None]] = {
     "schema_matches_file": _check_schema_matches_file,
     "updates_rule": _check_updates_rule,
     "tracking_rule": _check_tracking_rule,
+    "deinit_workaround": _check_deinit_workaround,
 }
 
 
@@ -935,6 +956,10 @@ MUTATIONS: list[tuple] = [
     ("tracking-writes-store", "tracking_rule", "tracking_payload",
      _sub(r"(\n    var activePortfolio: Portfolio\? \{)",
           r"\n    func writeBack(_ store: PortfolioStore) {}\1"), "DISPLAY-ONLY"),
+    # ── The compiler-crash workaround ──
+    ("deinit-implicit", "deinit_workaround", "store", _rm("nonisolated deinit {}"), "lost its explicit"),
+    ("deinit-isolated", "deinit_workaround", "store",
+     _sub(r"nonisolated deinit \{\}", "isolated deinit {}"), "reproducer"),
 ]
 
 _MUTATION_ROWS = [m if len(m) == 5 else (*m, None) for m in MUTATIONS]

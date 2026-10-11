@@ -39,6 +39,7 @@ from app.services.sector_benchmark_lookup import (
     get_sector_benchmark_lookup,
     lookup_failed,
 )
+from app.utils.margins import revenue_backed_margin, revenue_scaled_ratio
 from app.utils.period_labels import annual_benchmark_key
 
 logger = logging.getLogger(__name__)
@@ -596,7 +597,8 @@ class MoatScoringService:
             ),
             _build_higher_better_driver(
                 "ps_ratio",
-                _safe_float(latest_ratios or {}, "priceToSalesRatio"),
+                # FMP answers 0 with no revenue: no reading, never a 0.0/10 driver.
+                revenue_scaled_ratio(_safe_float(latest_ratios or {}, "priceToSalesRatio")),
                 medians.get("ps_ratio"),
             ),
         ]
@@ -619,7 +621,8 @@ class MoatScoringService:
             ),
             _build_higher_better_driver(
                 "asset_turnover",
-                _safe_float(latest_ratios or {}, "assetTurnover"),
+                # Revenue / assets: FMP's 0 is "no revenue", not a reading (2026-10-11).
+                revenue_scaled_ratio(_safe_float(latest_ratios or {}, "assetTurnover")),
                 medians.get("asset_turnover"),
             ),
             _build_lower_better_driver(
@@ -707,22 +710,29 @@ class MoatScoringService:
         (Biotechnology's R&D median is 200.0 — pre-revenue biotechs genuinely spend 200%
         of revenue on R&D), and their helpers correctly multiply. Check the stored medians
         before changing any of these.
+
+        A company with no revenue reads None (`revenue_backed_margin`): FMP answers its gross
+        margin 0, and with its P/S (also 0) that was two "resolved" drivers, so every
+        pre-revenue company published a deterministic Brand Power of 0.0/10 (VKTX,
+        2026-10-11) instead of falling back to the AI dimension.
         """
-        v = _safe_float(ratios or {}, "grossProfitMargin")
-        if v is None:
-            return None
-        return v
+        return revenue_backed_margin(
+            _safe_float(ratios or {}, "grossProfitMargin"),
+            _safe_float(ratios or {}, "revenuePerShare"),
+        )
 
     def _operating_margin_ratio(self, ratios: Optional[Dict[str, Any]]) -> Optional[float]:
         """Operating margin on the stored 0-1 scale — see `_gross_margin_ratio`.
 
         `operating_margin` medians read from production are 0.0319-0.0821 for Consumer
         Cyclical, so a percentage here saturated this driver exactly as it did above.
+        No revenue reads None, as for the gross margin: with the asset turnover (also 0)
+        it published Cost Advantage 0.0/10 for QS and OKLO (2026-10-11).
         """
-        v = _safe_float(ratios or {}, "operatingProfitMargin")
-        if v is None:
-            return None
-        return v
+        return revenue_backed_margin(
+            _safe_float(ratios or {}, "operatingProfitMargin"),
+            _safe_float(ratios or {}, "revenuePerShare"),
+        )
 
     def _rd_to_revenue_pct(self, inc: Optional[Dict[str, Any]]) -> Optional[float]:
         if not inc:

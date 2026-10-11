@@ -110,10 +110,16 @@ PER_INDUSTRY_CONCURRENCY = 1
 # still on an older vintage as pending (`_current_vintage_rows`), and the next recompute
 # (the January chain, or the owner's `/admin/refresh-industry-moat-benchmarks?
 # skip_recent_hours=0`) replaces them.
-MODEL_VERSION = "moat_v1.2026-10"
+# 2026-10-11 ("moat_v1.2026-10-11"): a company with no revenue no longer scores 0.0 on Brand
+# Power (gross margin, P/S) or Cost Advantage (operating margin, asset turnover): FMP answers
+# those figures 0 for it (`app.utils.margins`), and every pre-revenue constituent entered its
+# industry's peer average at 0.0 — Biotechnology's Brand Power peer average read 4.6 where its
+# 127 revenue-backed members average 6.9. Rows of the two older vintages stay served, named
+# pending, until the same recompute.
+MODEL_VERSION = "moat_v1.2026-10-11"
 # Every vintage the lookup knows, oldest first; a row stamped with anything else (or
 # nothing) ranks below all of them.
-_MODEL_VERSION_ORDER = ("moat_v1.2026-05", MODEL_VERSION)
+_MODEL_VERSION_ORDER = ("moat_v1.2026-05", "moat_v1.2026-10", MODEL_VERSION)
 TABLE_NAME = "industry_moat_benchmarks"
 # Re-running the bootstrap with `skip_if_fresh_hours` set lets the
 # operator resume after a Ctrl-C / rate-limit-induced abort — any

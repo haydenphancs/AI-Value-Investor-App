@@ -38,6 +38,10 @@ from app.utils.period_labels import (
     previous_calendar_quarter,
 )
 from app.utils.supabase_async import sb_exec
+# A margin counts only beside revenue (FMP answers 0 for a company with none). Defined in
+# app.utils.margins so moat scoring and the report collector share it; imported by name
+# here for the TTM producer (`industry_benchmark_service._extract_ttm`) and the tests.
+from app.utils.margins import revenue_backed_margin
 
 logger = logging.getLogger(__name__)
 
@@ -599,7 +603,9 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     {"name": "earnings_yield",      "type": "computed",      "compute": "earnings_yield"},
     {"name": "dividend_yield",      "source": "ratios",    "field": "dividendYield",          "type": "direct"},
     # Efficiency
-    {"name": "asset_turnover",      "source": "ratios",    "field": "assetTurnover",          "type": "direct"},
+    # positive_only: revenue / assets is 0 for a company with no revenue (2026-10-11) — not a
+    # reading; the moat Cost Advantage driver compares a company with this median.
+    {"name": "asset_turnover",      "source": "ratios",    "field": "assetTurnover",          "type": "direct", "positive_only": True},
     # ── Moat-scoring metrics (Phase 3A) ──────────────────────────────
     # All four are RECONSTRUCTED from raw income/balance fields rather
     # than pulled from pre-computed FMP ratios because (a) FMP doesn't
@@ -641,31 +647,6 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
-
-def revenue_backed_margin(
-    margin: Optional[float], revenue_per_share: Optional[float],
-) -> Optional[float]:
-    """A margin a peer median may count, else None — the company side's rule
-    (`profitability_snapshot_service._ttm_margin`), so the two sides agree.
-
-    FMP divides by revenue, so with NO revenue it answers 0 for the gross, operating and
-    net margin (VKTX, every year and quarter: 0 / 0 / 0, revenuePerShare 0), and a
-    non-positive revenue sign-flips a margin. Counted, those zeros were a third of
-    Biotechnology on 2026-10-11 (72 of 213): its TTM net-margin median read 0.0% instead of
-    -76.9%, its gross margin 69.0% instead of 85.5%, and the Healthcare sector's operating
-    margin 0.0% instead of 4.0%.
-
-    Dropped: an exact 0 (the no-revenue answer; a true break-even to the last digit is
-    vanishingly rare, and the company side drops it too) and any margin whose revenue per
-    share is present and not positive. A MISSING revenue per share keeps a non-zero margin,
-    unlike the company side: FMP sent the field on all 1,325 sampled fiscal ratio rows, and
-    requiring it would let a vendor schema change silently empty every margin median.
-    """
-    if margin is None or margin == 0:
-        return None
-    if revenue_per_share is not None and revenue_per_share <= 0:
-        return None
-    return margin
 
 
 def _extract_year(record: Dict[str, Any]) -> str:

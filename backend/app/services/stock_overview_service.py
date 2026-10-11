@@ -2629,12 +2629,34 @@ class StockOverviewService:
         negative denominator flips its sign (McDonald's-shaped: -216% on a profitable
         company)."""
         from app.services.profitability_snapshot_service import _equity_state
+        from app.utils.margins import revenue_backed_margin
 
-        op_margin = _safe_float(fr, "operatingProfitMargin") or _safe_float(km, "operatingProfitMargin")
-        # Fall back to a real MARGIN field only. netIncomePerShare is EPS in dollars,
-        # NOT a margin — using it rendered per-share earnings (e.g. $6.13) as a
-        # "Net Margin" of 6.13% (or 50% for a $0.50 EPS via the <1 *100 heuristic).
-        net_margin = _safe_float(fr, "netProfitMargin") or _safe_float(km, "netProfitMargin")
+        def _margin_pct(key: str) -> Optional[float]:
+            """A margin as a percentage, from the first record that carries it (annual
+            ratios, then key metrics), or None ("—").
+
+            Only where that record shows revenue (`revenue_backed_margin`): FMP answers 0
+            for a company with none, and this card printed "Net Margin 0.00%" for VKTX
+            (2026-10-11) beside the primary card's "—". Scaled ×100 unconditionally — FMP
+            margins are always decimals; the old `abs(x) < 1` test printed a -250% margin
+            (-2.5) as "-2.50%" (`profitability_snapshot_service._to_pct` dropped the same
+            heuristic). Real MARGIN fields only: netIncomePerShare is EPS in dollars, and
+            reading it rendered $6.13 as a "Net Margin" of 6.13%."""
+            for record in (fr, km):
+                if not isinstance(record, dict):
+                    continue
+                raw = record.get(key)
+                val = None if isinstance(raw, bool) else _finite(raw)
+                if val is None:
+                    continue
+                rps_raw = record.get("revenuePerShare")
+                rps = None if isinstance(rps_raw, bool) else _finite(rps_raw)
+                margin = revenue_backed_margin(val, rps)
+                return round(margin * 100, 2) if margin is not None else None
+            return None
+
+        op_margin = _margin_pct("operatingProfitMargin")
+        net_margin = _margin_pct("netProfitMargin")
 
         def _first_finite(*pairs: Tuple[Dict, str]) -> Optional[float]:
             """First finite value among (record, key) — None, never a 0.0 default, so an
@@ -2656,12 +2678,6 @@ class StockOverviewService:
         )
         roe = round(roe_dec * 100, 2) if roe_dec is not None else None
         roa = round(roa_dec * 100, 2) if roa_dec is not None else None
-
-        # If margins are in decimal form (0.25 = 25%), convert
-        if op_margin and abs(op_margin) < 1:
-            op_margin *= 100
-        if net_margin and abs(net_margin) < 1:
-            net_margin *= 100
 
         roe_value = _pct(roe)
         if roe is not None:

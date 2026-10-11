@@ -285,7 +285,15 @@ TABLE_NAME = "ticker_report_cache"
 #     (100 / the period P/E; peer line 100 / the P/E median). This ONE bump supersedes every
 #     instant above. After the 18:00 ET close: only the cached reports since then rebuild. The full
 #     suite ran on the exact commit tree BEFORE this literal was written; commit and push followed.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 10, 1, 34, 0, tzinfo=timezone.utc)
+# 2026-10-11 (19:22 UTC = 15:22 ET, a Sunday, just before the push): bumped for a company with NO revenue, whose
+#     margins FMP answers 0 (`app.utils.margins`). Cached collections and reports carry
+#     "Gross / Operating / Net Margin: 0.0%" in the model's evidence, a 0.0% bar for every
+#     no-revenue period in the Profitability drill-down (and "0.0%→0.0% (flat)" in the Stage B
+#     trajectory), a Cathie Wood style-fit nudge halved by a fabricated flat margin trend, and a
+#     deterministic Brand Power / Cost Advantage of 0.0/10 on the moat radar, the Stage B moat
+#     prompt, the executive-summary digest and report chat. Markets are closed, so only the
+#     reports cached since Friday's close rebuild. This ONE bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 11, 19, 22, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

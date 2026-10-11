@@ -55,6 +55,7 @@ from app.services.sector_benchmark_lookup import (
     BenchmarkLookupFailed,
     lookup_failed,
 )
+from app.utils.margins import revenue_backed_margin
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
 from app.services.financials_metric_gate import (
     CURRENT_RATIO,
@@ -2541,9 +2542,33 @@ class TickerReportDataCollector:
                         return v
                 return None
 
-            c["gross_margin"] = _pct_or_none(_cur("grossProfitMargin"))
-            c["net_margin"] = _pct_or_none(_cur("netProfitMargin"))
-            c["operating_margin"] = _pct_or_none(_cur("operatingProfitMargin"))
+            def _cur_margin(name):
+                """`_cur` for a margin, read only where its own row shows revenue.
+
+                FMP answers a company with NO revenue with 0 for every margin (VKTX,
+                2026-10-11), which reached the model as "Net Margin: 0.0%" — a heavy
+                loss-maker reading as break-even, beside the card's "—" — and fed the
+                persona style-fit a fabricated flat margin trend. Same rule as the card
+                (`profitability_snapshot_service._ttm_margin`) and the peer medians
+                (`app.utils.margins.revenue_backed_margin`). The TTM row decides when it
+                carries the margin (no TTM revenue → None, never last fiscal year's
+                figure); the annual row only when the TTM row lacks it.
+                """
+                v = t0.get(f"{name}TTM")
+                if v is None:
+                    v = t0.get(name)
+                if v is not None:
+                    rps = t0.get("revenuePerShareTTM")
+                    if rps is None:
+                        rps = t0.get("revenuePerShare")
+                    return revenue_backed_margin(_num_or_none(v), _num_or_none(rps))
+                return revenue_backed_margin(
+                    _num_or_none(r0.get(name)), _num_or_none(r0.get("revenuePerShare")),
+                )
+
+            c["gross_margin"] = _pct_or_none(_cur_margin("grossProfitMargin"))
+            c["net_margin"] = _pct_or_none(_cur_margin("netProfitMargin"))
+            c["operating_margin"] = _pct_or_none(_cur_margin("operatingProfitMargin"))
             c["roe"] = _pct_or_none(
                 _cur("returnOnEquity") or km0.get("returnOnEquity")
             )
@@ -2679,8 +2704,13 @@ class TickerReportDataCollector:
         # style_fit_adjustment via _scoring_inputs._style_signals.
         c["net_income"] = _num_or_none(income[0].get("netIncome")) if income else None
         c["mkt_cap"] = _num_or_none(profile.get("mktCap") or profile.get("marketCap"))
+        # A prior year with no revenue has no margin (FMP's 0, `revenue_backed_margin`):
+        # against it a real margin read as a fabricated "expanding" trend.
         c["gross_margin_prev"] = (
-            _pct_or_none(ratios[1].get("grossProfitMargin"))
+            _pct_or_none(revenue_backed_margin(
+                _num_or_none(ratios[1].get("grossProfitMargin")),
+                _num_or_none(ratios[1].get("revenuePerShare")),
+            ))
             if ratios and len(ratios) >= 2 else None
         )
         _km0 = key_metrics[0] if key_metrics else {}
@@ -5388,9 +5418,18 @@ def _fundamentals_history_for_period(
         cf, km, rat = idx_cf.get(key), idx_km.get(key), idx_rat.get(key)
 
         if rat is not None:
-            add("gross_margin", label, _pct_or_none(rat.get("grossProfitMargin")))
-            add("operating_margin", label, _pct_or_none(rat.get("operatingProfitMargin")))
-            add("net_margin", label, _pct_or_none(rat.get("netProfitMargin")))
+            # A period with no revenue has no margin: FMP's 0 (`revenue_backed_margin`) drew a
+            # 0.0% bar for every year of a pre-revenue company under the card's "—" row, and
+            # told the AI its margins were "0.0%→0.0% (flat)". None = no point for that period.
+            rat_rps = _num_or_none(rat.get("revenuePerShare"))
+            for _mkey, _field in (
+                ("gross_margin", "grossProfitMargin"),
+                ("operating_margin", "operatingProfitMargin"),
+                ("net_margin", "netProfitMargin"),
+            ):
+                add(_mkey, label, _pct_or_none(
+                    revenue_backed_margin(_num_or_none(rat.get(_field)), rat_rps)
+                ))
             add("earnings_yield", label, _history_earnings_yield(rat.get("priceToEarningsRatio")))
             # Price multiples are undefined when non-positive → None (renders as
             # an "undefined" red 0-line marker, like P/FCF / EV/EBITDA — not a

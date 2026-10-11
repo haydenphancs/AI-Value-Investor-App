@@ -213,15 +213,24 @@ def test_profitability_net_margin_does_not_use_eps():
         km={"netIncomePerShare": 6.13}, fr={}, inc={}
     )
     assert _net_margin_value(snap) != "6.13%"
-    assert _net_margin_value(snap) == "0.00%"  # honest absent-margin, not the EPS
+    # An absent margin prints "—" like the card's ROE / ROA (2026-10-11): the old "0.00%"
+    # was itself a fabricated figure — FMP's 0 for a company with no revenue printed the same.
+    assert _net_margin_value(snap) == "—"
 
 
 def test_profitability_net_margin_uses_real_margin_field():
     svc = object.__new__(StockOverviewService)
+    # FMP margins are decimals (0.25 = 25%). The fixture used to pass 25.0, which only the
+    # removed `abs(x) < 1` heuristic left unscaled — and that heuristic printed a real -250%
+    # margin (-2.5) as "-2.50%" (2026-10-11).
     snap = svc._build_profitability_snapshot(
-        km={}, fr={"netProfitMargin": 25.0}, inc={}
+        km={}, fr={"netProfitMargin": 0.25}, inc={}
     )
     assert _net_margin_value(snap) == "25.00%"
+    snap = svc._build_profitability_snapshot(
+        km={}, fr={"netProfitMargin": -2.5, "revenuePerShare": 0.4}, inc={}
+    )
+    assert _net_margin_value(snap) == "-250.00%"
 
 
 # ── Market-status helpers (no hardcoded 'open' / fixed EST) ───────────────────

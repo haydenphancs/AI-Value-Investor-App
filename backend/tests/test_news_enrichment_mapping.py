@@ -121,12 +121,35 @@ async def test_batch_enrich_truncated_json_returns_empty():
 
 @pytest.mark.asyncio
 async def test_batch_enrich_count_mismatch_returns_empty():
-    # Valid JSON but 1 result for 2 articles → {} (no partial misattribution).
-    svc = _svc_with_gemini(_FakeGemini(
-        text=json.dumps([{"index": 0, "bullets": ["b"], "sentiment": "bullish", "confidence": 50}])
-    ))
-    out = await svc._batch_enrich_articles([{"title": "A"}, {"title": "B"}], ticker="X")
-    assert out == {}
+    # Valid JSON but 1 result for 2 articles → never a partial map that could misattribute.
+    # Since 2026-10-11 the batch is split ONCE (each half asked alone, as the backfill does): a
+    # wrong count at temperature 0 repeats, and every 15-minute pass re-billed the whole batch.
+    class _Counting:
+        def __init__(self, answers):
+            self.answers, self.prompts = list(answers), []
+
+        async def generate_json(self, **kwargs):
+            self.prompts.append(kwargs["prompt"])
+            return {"text": self.answers.pop(0)}
+
+    one = json.dumps([{"index": 0, "bullets": ["b"], "sentiment": "bullish", "confidence": 50}])
+    gem = _Counting([one, one, one])
+    out = await _svc_with_gemini(gem)._batch_enrich_articles([{"title": "A"}, {"title": "B"}], ticker="X")
+    assert len(gem.prompts) == 3, "the batch, then each half once"
+    assert sorted(out) == [0, 1], "each half answered for its own article"
+    # Halves that still miscount stay unenriched (retryable) — never split again.
+    gem = _Counting([one, "[]", "[]"])
+    out = await _svc_with_gemini(gem)._batch_enrich_articles([{"title": "A"}, {"title": "B"}], ticker="X")
+    assert out == {} and len(gem.prompts) == 3
+    # A 4-article batch whose halves still miscount: split ONCE, never recursively.
+    gem = _Counting(["[]", "[]", "[]", "[]", "[]", "[]", "[]"])
+    out = await _svc_with_gemini(gem)._batch_enrich_articles(
+        [{"title": t} for t in "ABCD"], ticker="X")
+    assert out == {} and len(gem.prompts) == 3, "the batch and its two halves — no deeper split"
+    # A single article cannot be split.
+    gem = _Counting(["[]"])
+    assert await _svc_with_gemini(gem)._batch_enrich_articles([{"title": "A"}], ticker="X") == {}
+    assert len(gem.prompts) == 1
 
 
 # ── Log level: expected LLM degradations are WARNING, not ERROR (no Sentry page) ─

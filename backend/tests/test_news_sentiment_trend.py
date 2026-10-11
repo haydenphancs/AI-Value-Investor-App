@@ -82,7 +82,7 @@ def test_a_row_becomes_one_log_row():
         "scope": "ORCL", "article_key": article_key("https://x/1"), "et_day": "2026-09-27",
         "sentiment": "bullish", "confidence": 80, "source": "live",
         "labelled_at": NOW.isoformat(), "labeller": trend.TONE_LABELLER_VERSION,
-        "skip_reason": None,
+        "skip_reason": None, "title_hash": None,
     }
 
 
@@ -1435,3 +1435,97 @@ def test_a_constraint_error_naming_a_column_is_never_healed(message, monkeypatch
     with pytest.raises(RuntimeError):
         trend.upsert_log_rows(_Boom(), build_log_rows("ORCL", [_row()], now=NOW, model="m"))
     assert trend._model_column_missing is False
+
+
+# ── 193: a copy that arrives in a LATER batch (2026-10-11) ───────────────────────
+
+
+class _LogWithTitles(_WriteClient):
+    """A log that answers the copy check from rows already written (and records upserts)."""
+
+    def __init__(self, existing=(), fail=None):
+        super().__init__()
+        self.existing = list(existing)
+        self.fail = fail
+        self.reads = 0
+
+    def table(self, name):
+        client = self
+
+        class _Q(_Table):
+            def select(self, *_a):
+                self._filters = {}
+                return self
+
+            def eq(self, col, val):
+                self._filters[col] = val
+                return self
+
+            def in_(self, col, vals):
+                self._filters[col + "__in"] = set(vals)
+                return self
+
+            def is_(self, col, val):
+                self._filters[col + "__is"] = val
+                return self
+
+            def execute(self):
+                if getattr(self, "_filters", None) is not None and not hasattr(self, "_payload"):
+                    client.reads += 1
+                    if client.fail:
+                        raise client.fail
+                    f = self._filters
+                    return _Result([r for r in client.existing
+                                    if r["scope"] == f["scope"] and r["title_hash"] in f["title_hash__in"]
+                                    and r.get("skip_reason") is None])
+                client.upserts.append((name, self._payload, {}))
+                client.existing.extend(self._payload)
+                return _Result(self._payload)
+        return _Q(self, name)
+
+
+def test_a_copy_in_a_later_batch_is_kept_off_the_chart(monkeypatch):
+    monkeypatch.setattr(trend, "_title_hash_column_missing", False)
+    log = _LogWithTitles()
+    first = build_log_rows("ORCL", [_gated(ext="a", headline="Oracle beats estimates")], now=NOW)
+    assert trend.upsert_log_rows(log, first) == 1
+    later = build_log_rows("ORCL", [
+        _gated(ext="b", headline="UPDATE 1-Oracle beats estimates!"),          # the same story
+        _gated(ext="c", headline="Oracle signs a cloud deal"),                 # a new story
+        _gated(ext="d", headline="Oracle beats estimates",                     # same title, other day
+               published="2026-09-25T15:00:00+00:00"),
+    ], now=NOW)
+    trend.upsert_log_rows(log, later)
+    written = {r["article_key"]: r["skip_reason"] for r in log.upserts[-1][1]}
+    assert written == {article_key("b"): "duplicate_title", article_key("c"): None,
+                       article_key("d"): None}
+    # Re-writing the SAME article is never its own copy (first-label-wins ignores the repeat).
+    again = trend._mark_logged_copies(log, first)
+    assert again[0]["skip_reason"] is None
+
+
+def test_the_title_hash_is_a_hash_never_the_text():
+    h = trend.title_hash("Fed Holds Rates Steady!")
+    assert h == trend.title_hash("UPDATE 1-Fed holds rates steady") and "fed" not in h
+    assert str(uuid.UUID(h)) == h
+    assert trend.title_hash("") is None and trend.title_hash(None) is None and trend.title_hash(7) is None
+
+
+def test_a_failed_copy_check_writes_the_batch_unchecked(monkeypatch, caplog):
+    monkeypatch.setattr(trend, "_title_hash_column_missing", False)
+    log = _LogWithTitles(fail=RuntimeError("Server disconnected"))
+    with caplog.at_level(logging.WARNING):
+        assert trend.upsert_log_rows(log, build_log_rows("ORCL", [_gated(ext="a", headline="x y")], now=NOW)) == 1
+    assert "copy check failed for ORCL" in caplog.text
+    assert trend._title_hash_column_missing is False, "a blip is not a missing column"
+
+
+def test_before_193_the_check_switches_off_and_the_column_is_dropped(monkeypatch):
+    monkeypatch.setattr(trend, "_title_hash_column_missing", False)
+    log = _LogWithTitles(fail=RuntimeError(
+        "{'code': '42703', 'message': 'column news_sentiment_log.title_hash does not exist'}"))
+    rows = build_log_rows("ORCL", [_gated(ext="a", headline="Oracle beats")], now=NOW)
+    assert trend._mark_logged_copies(log, rows) == rows
+    assert trend._title_hash_column_missing is True
+    assert "title_hash" not in trend._strip_missing(rows)[0]
+    monkeypatch.setattr(trend, "_title_hash_column_missing", False)

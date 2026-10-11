@@ -336,3 +336,17 @@ def test_192_requeues_first_then_deletes_only_old_rule_rows_of_rebuildable_scope
     for forbidden in ("DROP ", "TRUNCATE", "CREATE TABLE", "ALTER TABLE"):
         assert forbidden not in code, forbidden
     assert not trend.is_trend_scope("COMMODITY_GC"), "the code must no longer log what 192 deletes"
+
+
+def test_193_adds_the_title_hash_the_copy_check_reads():
+    sql = _SQL.parent / "193_news_sentiment_title_hash.sql"
+    code = _code(sql)
+    assert code.strip().startswith("BEGIN;") and code.strip().endswith("COMMIT;")
+    assert "ADD COLUMN IF NOT EXISTS title_hash uuid" in code
+    assert "CREATE INDEX IF NOT EXISTS idx_news_sentiment_log_scope_title" in code
+    assert "(scope, title_hash)" in code and "WHERE title_hash IS NOT NULL" in code
+    assert trend._OPTIONAL_COLUMNS["title_hash"][1] == 193
+    for forbidden in ("DROP ", "DELETE ", "TRUNCATE", "GRANT "):
+        assert forbidden not in code, forbidden
+    # Migration 104: a hash column only — never a column that could hold the headline itself.
+    assert not re.search(r"ADD COLUMN[^;]*\b(?:text|varchar|jsonb)\b", code, re.I)

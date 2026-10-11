@@ -103,6 +103,10 @@ def test_day_dates_are_built_from_the_key_at_call_time():
     assert "in timeZone: TimeZone = Calendar.current.timeZone" in head
     gregorian = _block(parser, "private static func gregorian(in timeZone: TimeZone)")
     assert "Calendar(identifier: .gregorian)" in gregorian and "c.timeZone = timeZone" in gregorian
+    # Cached per ZONE (2026-10-11, redraw cost): keyed by the zone asked for, never one shared
+    # calendar — a single cached Calendar would freeze the zone exactly like the old formatter.
+    assert "gregorianByZone[timeZone]" in gregorian
+    assert "static var gregorian:" not in parser and "static let gregorian:" not in parser
     # A rolled-over key ("2026-02-31") is refused, as the strict formatter refused it.
     assert "guard back.year == parts.year, back.month == parts.month, back.day == parts.day" in parse
     # The ET "today" still comes from the New York calendar.

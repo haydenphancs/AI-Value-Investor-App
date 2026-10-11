@@ -2525,6 +2525,15 @@ class NewsCacheService:
             parsed = json.loads(text)
 
             result = self._map_enrichments(parsed, len(articles))
+            if not result and _split and len(articles) > 1:
+                # A wrong-count answer at temperature 0 tends to repeat for the same batch, and
+                # with no response cache every 15-minute pass re-billed the whole batch for the
+                # same failure. Split once, as the backfill does: each half usually answers.
+                logger.warning(
+                    f"Gemini enrichment shape mismatch for {ticker} "
+                    f"(expected {len(articles)}) — splitting the batch once"
+                )
+                return await self._split_once(articles, ticker)
             if not result:
                 logger.warning(
                     f"Gemini enrichment shape mismatch for {ticker} "
@@ -2567,6 +2576,17 @@ class NewsCacheService:
             # request retries once Gemini recovers.
             return {}
 
+    async def _split_once(
+        self, articles: List[Dict[str, Any]], ticker: str,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Both halves of a batch, each asked once more WITHOUT a further split; keys of the
+        second half are shifted back to batch positions. A half that still fails stays
+        unenriched (retryable), exactly like the whole batch did."""
+        mid = len(articles) // 2
+        left = await self._batch_enrich_articles(articles[:mid], ticker=ticker, _split=False)
+        right = await self._batch_enrich_articles(articles[mid:], ticker=ticker, _split=False)
+        return {**left, **{k + mid: v for k, v in right.items()}}
+
     async def _enrich_after_refusal(
         self, articles: List[Dict[str, Any]], ticker: str, split: bool,
     ) -> Dict[int, Dict[str, Any]]:
@@ -2577,10 +2597,7 @@ class NewsCacheService:
         ERROR once per article set per process, so a stall is visible without paging on
         every 15-minute pass. Keys of the second half are shifted back to batch positions."""
         if split and len(articles) > 1:
-            mid = len(articles) // 2
-            left = await self._batch_enrich_articles(articles[:mid], ticker=ticker, _split=False)
-            right = await self._batch_enrich_articles(articles[mid:], ticker=ticker, _split=False)
-            return {**left, **{k + mid: v for k, v in right.items()}}
+            return await self._split_once(articles, ticker)
         marker = hashlib.sha1(
             "|".join(str(a.get("title", "")) for a in articles).encode("utf-8")
         ).hexdigest()

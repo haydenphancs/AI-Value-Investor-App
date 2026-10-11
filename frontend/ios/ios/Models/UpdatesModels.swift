@@ -1039,9 +1039,18 @@ enum SentimentTrendDayParser {
         return c
     }()
 
+    /// One Gregorian calendar per zone, built on first use: the chart maps every day key on each
+    /// redraw (about 300 per 90-day chart), and building a Calendar for each was most of that
+    /// work. Keyed by the ZONE itself, so after a device zone change the next lookup builds the
+    /// new zone's calendar — no mapping is ever served from a stale zone.
+    private static var gregorianByZone: [TimeZone: Calendar] = [:]
+
     private static func gregorian(in timeZone: TimeZone) -> Calendar {
+        if let cached = gregorianByZone[timeZone] { return cached }
         var c = Calendar(identifier: .gregorian)
         c.timeZone = timeZone
+        if gregorianByZone.count >= 8 { gregorianByZone.removeAll() }   // zones rarely change
+        gregorianByZone[timeZone] = c
         return c
     }
 

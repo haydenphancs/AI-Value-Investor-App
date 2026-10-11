@@ -53,7 +53,10 @@ async def test_the_gemini_enrichment_call_is_unchanged(monkeypatch, case, ticker
     svc = object.__new__(NewsCacheService)
     svc.gemini = cap
     await svc._batch_enrich_articles(_GOLDEN["inputs"], ticker=ticker)
-    [kw] = cap.calls
+    # The fake answers "[]" (a wrong count), so the batch is then split once (2026-10-11): the
+    # FIRST call is the batch the golden pins.
+    kw = cap.calls[0]
+    assert len(cap.calls) == 3, "the batch, then each half once"
     want = _GOLDEN["cases"][case]
     assert sorted(kw) == want["keys"], "no new argument may reach the Gemini call"
     # A classifier: temperature 0, and no response cache (a cached wrong-count answer replayed
@@ -283,7 +286,12 @@ async def test_a_bad_answer_leaves_articles_unenriched_never_neutral(monkeypatch
     out = await svc._batch_enrich_articles(
         [{"title": "A", "text": "x"}, {"title": "B", "text": "y"}], ticker="ORCL",
     )
-    assert out == {}, "wrong count / malformed → retryable, never a default label"
+    # Never a default label: either nothing (retryable), or — for the "1 of 2" answer, which each
+    # half of the once-split batch now receives whole — the model's OWN label for each half.
+    assert all(v["sentiment"] == "bullish" and v["sentiment_valid"] for v in out.values()), \
+        "wrong count / malformed → retryable, never a default label"
+    if "items" not in content:
+        assert out == {}
     assert svc.gemini.calls == [], "the Gemini client is not used on the other provider"
 
 

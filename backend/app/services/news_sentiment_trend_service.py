@@ -124,6 +124,18 @@ def article_key(external_id: Any) -> Optional[str]:
     return str(uuid.UUID(digest))
 
 
+def title_hash(title: Any) -> Optional[str]:
+    """md5 of the normalised headline (`news_tone_filters.title_key`) as a uuid, or None when
+    there is nothing to key on. A hash, never the text (migration 104); migration 193 stores it
+    so a wire copy that arrives in a LATER batch is recognised as one."""
+    from app.services.news_tone_filters import title_key
+
+    key = title_key(title)
+    if key is None:
+        return None
+    return str(uuid.UUID(hashlib.md5(key.encode("utf-8"), usedforsecurity=False).hexdigest()))
+
+
 def et_day(value: Any) -> Optional[date]:
     """The ET calendar day of a timestamp (str or datetime), or None when unparseable.
 
@@ -324,6 +336,9 @@ def build_log_rows(
             "labelled_at": now.isoformat(),
             "labeller": TONE_LABELLER_VERSION,
             "skip_reason": reason,
+            "title_hash": title_hash(
+                row.get("headline") if isinstance(row.get("headline"), str) else row.get("title")
+            ),
         }
         if model:
             entry["model"] = model
@@ -801,6 +816,7 @@ def _as_date(value: Any) -> Optional[date]:
 _model_column_missing = False
 _labeller_column_missing = False
 _skip_reason_column_missing = False
+_title_hash_column_missing = False
 #: When `labeller` was found missing: the heal re-checks after this long, so a deploy that ran
 #: ahead of migration 191 starts writing the column once 191 lands — no restart needed (rows
 #: written without it read as the old rules and would survive migration 192's re-label).
@@ -811,6 +827,7 @@ _OPTIONAL_COLUMNS = {
     "model": ("_model_column_missing", 181),
     "labeller": ("_labeller_column_missing", 191),
     "skip_reason": ("_skip_reason_column_missing", 191),
+    "title_hash": ("_title_hash_column_missing", 193),
 }
 
 
@@ -832,11 +849,11 @@ def _missing_optional_column(exc: BaseException, rows: List[Dict[str, Any]]) -> 
 def _strip_missing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The rows as the live schema can take them. Without `skip_reason` (191 not applied) a
     gated row is DROPPED, never written unflagged: unflagged, it would count on the chart."""
-    global _labeller_column_missing, _skip_reason_column_missing
-    if ((_labeller_column_missing or _skip_reason_column_missing)
+    global _labeller_column_missing, _skip_reason_column_missing, _title_hash_column_missing
+    if ((_labeller_column_missing or _skip_reason_column_missing or _title_hash_column_missing)
             and time.monotonic() - _labeller_missing_at > _LABELLER_RECHECK_SECONDS):
-        # Re-check: migration 191 may have landed since.
-        _labeller_column_missing = _skip_reason_column_missing = False
+        # Re-check: migration 191 / 193 may have landed since.
+        _labeller_column_missing = _skip_reason_column_missing = _title_hash_column_missing = False
     drop = {c for c, (flag, _) in _OPTIONAL_COLUMNS.items() if globals()[flag]}
     if not drop:
         return rows
@@ -845,17 +862,79 @@ def _strip_missing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [{k: v for k, v in r.items() if k not in drop} for r in rows]
 
 
+def _mark_logged_copies(supabase: Any, payload: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The payload with every counted row whose story is ALREADY counted in the log — same scope,
+    ET day and `title_hash`, another article — marked ``skip_reason='duplicate_title'``.
+
+    `build_log_rows` dedups copies inside one write; this catches the copy that arrives in a
+    later batch or a later backfill night. One indexed read per scope (migration 193). Best
+    effort: a failed read is logged and the batch is written as it is — never loses a label."""
+    global _title_hash_column_missing
+    if _title_hash_column_missing:
+        return payload
+    wanted: Dict[str, List[Dict[str, Any]]] = {}
+    for r in payload:
+        if r.get("skip_reason") is None and r.get("title_hash"):
+            wanted.setdefault(r["scope"], []).append(r)
+    if not wanted:
+        return payload
+    owners: Dict[Tuple[str, str, str], str] = {}
+    for scope, rows in wanted.items():
+        try:
+            result = (
+                supabase.table(TABLE)
+                .select("article_key,et_day,title_hash")
+                .eq("scope", scope)
+                .in_("title_hash", sorted({r["title_hash"] for r in rows}))
+                .is_("skip_reason", "null")
+                .execute()
+            )
+        except Exception as e:  # noqa: BLE001 — the dedup is an extra; the labels are not
+            text = str(e).lower()
+            if "title_hash" in text and ("does not exist" in text or "could not find" in text
+                                          or "pgrst204" in text or "42703" in text):
+                if not _title_hash_column_missing:
+                    logger.warning("news_sentiment_log: `title_hash` column missing (migration 193 "
+                                   "not applied) — cross-batch copy check off until it is")
+                _title_hash_column_missing = True
+                globals()["_labeller_missing_at"] = time.monotonic()
+                return payload
+            logger.warning("news_sentiment_log: copy check failed for %s (%s: %s) — writing the "
+                           "batch unchecked", scope, type(e).__name__, e)
+            continue
+        for row in getattr(result, "data", None) or []:
+            if isinstance(row, dict) and row.get("title_hash") and row.get("et_day"):
+                owners.setdefault((scope, str(row["et_day"])[:10], str(row["title_hash"])),
+                                  str(row.get("article_key")))
+    if not owners:
+        return payload
+    out: List[Dict[str, Any]] = []
+    marked = 0
+    for r in payload:
+        owner = owners.get((r.get("scope"), r.get("et_day"), r.get("title_hash")))
+        if r.get("skip_reason") is None and owner is not None and owner != r.get("article_key"):
+            r = {**r, "skip_reason": "duplicate_title"}
+            marked += 1
+        out.append(r)
+    if marked:
+        logger.info("news_sentiment_log: %d copy(ies) of stories already counted kept off the chart",
+                    marked)
+    return out
+
+
 def upsert_log_rows(supabase: Any, payload: List[Dict[str, Any]]) -> int:
     """Blocking upsert of prepared log rows (first label wins). Returns rows NEWLY written.
 
-    Call through ``asyncio.to_thread``. Raises on failure, except the one it heals: a deploy
-    that ran ahead of its migration (181's `model`, 191's `labeller`) is retried without the
-    missing column — no live label is lost to the ordering. A row written without `labeller`
+    Call through ``asyncio.to_thread``. A copy of a story already counted is marked first
+    (:func:`_mark_logged_copies`). Raises on failure, except the one it heals: a deploy that ran
+    ahead of its migration (181's `model`, 191's `labeller` / `skip_reason`, 193's `title_hash`)
+    is retried without the missing column — no live label is lost to the ordering. A row written without `labeller`
     reads as the OLD rules, so migration 192 re-labels it: the heal can cost a re-label,
     never a label.
     """
     if not payload:
         return 0
+    payload = _mark_logged_copies(supabase, payload)
     rows = _strip_missing(payload)
     for _ in range(len(_OPTIONAL_COLUMNS) + 1):
         try:
@@ -878,7 +957,7 @@ def upsert_log_rows(supabase: Any, payload: List[Dict[str, Any]]) -> int:
                     "writing labels without it until restart", col, migration,
                 )
             globals()[flag] = True
-            if col in ("labeller", "skip_reason"):
+            if col in ("labeller", "skip_reason", "title_hash"):
                 globals()["_labeller_missing_at"] = time.monotonic()
             rows = _strip_missing(payload)
             if not rows:

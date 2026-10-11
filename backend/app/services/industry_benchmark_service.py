@@ -83,6 +83,7 @@ from app.services.sector_benchmark_service import (
     classify_fetch_failure,
     current_rate_limit_run,
     rate_limit_run,
+    revenue_backed_margin,
 )
 from app.utils.period_labels import (
     BENCHMARK_REPORTING_LAG_DAYS,
@@ -557,6 +558,11 @@ _TTM_METRICS: Dict[str, Tuple[str, Optional[str], bool, Optional[float]]] = {
     "interest_coverage": ("r", "interestCoverageRatioTTM",     True,  100.0),
 }
 
+# Margins that count only beside a positive TTM revenue per share, never as an exact 0
+# (`revenue_backed_margin`: FMP answers 0 for a company with no revenue — a third of
+# Biotechnology on 2026-10-11). fcf_margin has its own revenue > 0 rule in `_extract_ttm`.
+_TTM_REVENUE_BACKED = frozenset({"gross_margin", "operating_margin", "net_margin"})
+
 
 def _num(d: Dict[str, Any], field: str) -> Optional[float]:
     v = d.get(field)
@@ -584,6 +590,8 @@ def _extract_ttm(r0: Dict[str, Any], k0: Dict[str, Any]) -> Dict[str, Optional[f
             # margin: a cash-generating firm looks deeply negative) — fcf_margin has
             # cap=None + positive_only=False, so nothing downstream catches it.
             out[name] = (fcf / rev) if (fcf is not None and rev is not None and rev > 0) else None
+        elif name in _TTM_REVENUE_BACKED:
+            out[name] = revenue_backed_margin(_num(r0, field), _num(r0, "revenuePerShareTTM"))
         else:
             out[name] = _num(r0 if src == "r" else k0, field)
     return out

@@ -541,10 +541,11 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
     # QoQ growth metrics (sequential quarter comparison, quarterly only)
     {"name": "eps_qoq",             "source": "income",    "field": "epsDiluted",             "type": "qoq"},
     {"name": "revenue_qoq",         "source": "income",    "field": "revenue",                "type": "qoq"},
-    # Profit Power (direct ratio values)
-    {"name": "gross_margin",        "source": "ratios",    "field": "grossProfitMargin",      "type": "direct"},
-    {"name": "operating_margin",    "source": "ratios",    "field": "operatingProfitMargin",  "type": "direct"},
-    {"name": "net_margin",          "source": "ratios",    "field": "netProfitMargin",        "type": "direct"},
+    # Profit Power (direct ratio values). `revenue_backed`: a row with no positive revenue
+    # per share, or an exact-0 margin, is not a margin (`revenue_backed_margin`).
+    {"name": "gross_margin",        "source": "ratios",    "field": "grossProfitMargin",      "type": "direct", "revenue_backed": True},
+    {"name": "operating_margin",    "source": "ratios",    "field": "operatingProfitMargin",  "type": "direct", "revenue_backed": True},
+    {"name": "net_margin",          "source": "ratios",    "field": "netProfitMargin",        "type": "direct", "revenue_backed": True},
     # FCF margin = freeCashFlow ÷ revenue — a JOIN across cashflow + income, so it
     # is "computed" (not a /ratios field). Stored as a DECIMAL (no ×100) so the
     # consumer's ×100 matches the direct margins; NEGATIVES are kept (cash-burning
@@ -639,6 +640,32 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
         return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
+
+
+def revenue_backed_margin(
+    margin: Optional[float], revenue_per_share: Optional[float],
+) -> Optional[float]:
+    """A margin a peer median may count, else None — the company side's rule
+    (`profitability_snapshot_service._ttm_margin`), so the two sides agree.
+
+    FMP divides by revenue, so with NO revenue it answers 0 for the gross, operating and
+    net margin (VKTX, every year and quarter: 0 / 0 / 0, revenuePerShare 0), and a
+    non-positive revenue sign-flips a margin. Counted, those zeros were a third of
+    Biotechnology on 2026-10-11 (72 of 213): its TTM net-margin median read 0.0% instead of
+    -76.9%, its gross margin 69.0% instead of 85.5%, and the Healthcare sector's operating
+    margin 0.0% instead of 4.0%.
+
+    Dropped: an exact 0 (the no-revenue answer; a true break-even to the last digit is
+    vanishingly rare, and the company side drops it too) and any margin whose revenue per
+    share is present and not positive. A MISSING revenue per share keeps a non-zero margin,
+    unlike the company side: FMP sent the field on all 1,325 sampled fiscal ratio rows, and
+    requiring it would let a vendor schema change silently empty every margin median.
+    """
+    if margin is None or margin == 0:
+        return None
+    if revenue_per_share is not None and revenue_per_share <= 0:
+        return None
+    return margin
 
 
 def _extract_year(record: Dict[str, Any]) -> str:
@@ -1597,6 +1624,7 @@ class SectorBenchmarkService:
                 # a negative multiple is "Neg."/undefined (the company side hides it)
                 # and would drag the median below the comparable profitable-peer level.
                 positive_only = metric_config.get("positive_only", False)
+                revenue_backed = metric_config.get("revenue_backed", False)
                 # One row per period per company (`_by_calendar_quarter` /
                 # `_by_annual_key`), so a duplicate row can't vote twice.
                 labelled = (
@@ -1609,6 +1637,8 @@ class SectorBenchmarkService:
                 )
                 for label, rec in labelled:
                     val = _safe_float(rec, field)
+                    if revenue_backed:
+                        val = revenue_backed_margin(val, _safe_float(rec, "revenuePerShare"))
                     if val is None:
                         continue
                     if positive_only and val <= 0:

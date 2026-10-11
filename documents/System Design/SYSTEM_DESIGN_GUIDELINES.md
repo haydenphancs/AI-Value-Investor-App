@@ -1437,7 +1437,10 @@ out to compute peer medians per request:
   bounds the FMP budget; the **median** (not mean) protects against 1–2 outlier reporters. Values are
   positive-only / capped where appropriate (e.g. P/E·P/B·P/S capped at 200, loss-makers excluded)
   and **finite-guarded** (NaN / ±inf and sign-flipping negative-denominator ratios dropped) before
-  reaching `statistics.median`.
+  reaching `statistics.median`. A gross / operating / net margin counts only beside a positive
+  revenue per share and never as an exact 0 (`sector_benchmark_service.revenue_backed_margin`, both
+  the TTM and the fiscal producer): FMP answers 0 for a company with no revenue, and a third of
+  Biotechnology counted that way pinned its net-margin median at 0.0% (revenue-backed: −76.9%).
 
 #### Recompute scheduling (two independent jobs)
 

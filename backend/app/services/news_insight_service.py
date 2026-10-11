@@ -62,6 +62,7 @@ from app.services.insight_conclusion import (
 )
 from app.services.market_news_quality import is_material_headline
 from app.services.news_cache_service import is_crypto_scope
+from app.services.news_tone_filters import is_filler_article
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.updates_materiality import PROMPT_VERSION, finite
 from app.utils.market_hours import (
@@ -2121,6 +2122,29 @@ def filter_to_subject(
     return kept
 
 
+def drop_filler_articles(
+    rows: Sequence[Dict[str, Any]], scope: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Drop the headlines that are not news: routine holdings filings ("GAMMA
+    Investing LLC Acquires 7,458 Shares of Meta Platforms, Inc. $META") and law-firm
+    solicitations ("ROSEN, A LEADING LAW FIRM, Encourages … Investors …").
+
+    Fed them, the card summarised them as a development (MSFT, 2026-10-11: "Several
+    institutional investors increased their stakes in Microsoft during the second
+    quarter."). The detectors are the News Tone chart's (`news_tone_filters`), narrow by
+    design; the rows stay in the feed. Order is kept; non-dict rows pass through to the
+    window helper, which skips them."""
+    kept = [r for r in rows if not is_filler_article(r)]
+    dropped = len(rows) - len(kept)
+    if dropped:
+        logger.info(
+            "news corpus: dropped %d/%d holdings-filing / law-firm headline(s) for %s; "
+            "%d kept",
+            dropped, len(rows), scope or "unscoped window", len(kept),
+        )
+    return kept
+
+
 def select_recent_corpus(
     rows: Sequence[Dict[str, Any]],
     now: datetime,
@@ -2141,6 +2165,16 @@ def select_recent_corpus(
     return (no news in the widest window tried) means "no card"; the hours in that
     case report the widest window tried, never a claim of freshness.
     """
+    # FILLER OUT FIRST, for EVERY scope (the Market's too): holdings filings and law-firm
+    # solicitations are not news, so they must not summarise into the card, pad the
+    # "N sources" list, count toward MIN_CORPUS_ARTICLES (two real stories plus filler
+    # would read "24h" instead of widening) or keep the card shown over a window that
+    # holds no news.
+    # Applied here because every reader of the card's corpus comes through here: the
+    # sweeper (fingerprint + generation, so a new filler row never re-keys a card), the
+    # endpoint (show/hide, fallback, badge) and the Updates-scope chat.
+    rows = drop_filler_articles(rows, scope)
+
     # SUBJECT FILTER BEFORE THE WINDOW, not after.
     #
     # Order matters: filtering first means the 24h/48h choice is made over articles that

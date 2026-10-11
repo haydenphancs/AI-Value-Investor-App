@@ -458,6 +458,11 @@ async def get_updates_feed(
         # to empty and got NO card — while the timeline directly beneath it listed the
         # very articles that had just been filtered out. Reported from TestFlight as
         # "on PLUG it doesn't have Insight at all".
+        #
+        # Both windows leave out holdings filings and law-firm solicitations (the selector
+        # drops them, 2026-10-11): a window holding only those has no news to summarise,
+        # so it shows no card, and the fallback never lists one as a headline. The
+        # timeline (`articles` above) still carries them.
         feed_recent, feed_window = select_recent_corpus(raw_articles, now)
         subject_recent, subject_window = select_recent_corpus(
             raw_articles, now,

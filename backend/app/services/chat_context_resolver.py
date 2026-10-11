@@ -1841,8 +1841,10 @@ class ChatContextResolver:
         labels.
 
         It mirrors `GET /updates/feed` so the model is told what the user actually sees: the
-        headline window is the feed's UNFILTERED one, the stored card is "on screen" only
-        when the feed has in-window news (the endpoint hides it otherwise), and a scope with
+        headline window is the feed's (no subject filter; holdings filings and law-firm
+        solicitations left out, as the endpoint's card gate leaves them out), the stored
+        card is "on screen" only when the feed has in-window news (the endpoint hides it
+        otherwise), and a scope with
         no stored card is described as showing the plain "Latest headlines" list. Returns
         None when nothing at all was read, so the "Updates feed" source pill is not claimed
         for an answer grounded on nothing.
@@ -1881,7 +1883,10 @@ class ChatContextResolver:
             # No subject filter: this is the window the feed endpoint shows and builds its
             # fallback card from. The subject-filtered corpus only feeds the AI card, and a
             # ticker whose coverage is all peer wraps would otherwise read as "no news" under
-            # a timeline full of it.
+            # a timeline full of it. Holdings filings and law-firm solicitations ARE left
+            # out (by the selector, as on the card and the endpoint's show/hide gate), so
+            # "on screen" below agrees with the endpoint and the model is never handed
+            # them to restate as news; the label says so.
             recent, _hours = select_recent_corpus(rows, now)
             return recent
 
@@ -1955,7 +1960,11 @@ class ChatContextResolver:
             )
 
         if headline_lines:
-            lines.append("Headlines in the feed (newest first; label = Cay AI's read, where scored):")
+            lines.append(
+                "Headlines in the feed (newest first; routine fund-holdings filings and "
+                "law-firm solicitations left out, as on the card; label = Cay AI's read, "
+                "where scored):"
+            )
             lines.extend(headline_lines)
 
         if trend_text:

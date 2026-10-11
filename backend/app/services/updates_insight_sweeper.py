@@ -878,6 +878,13 @@ class InsightSweeper:
         #
         # `company_name` is what lets the filter recognise "Oracle" in a headline as
         # ORCL. One extra query per sweep, shared by every scope.
+        #
+        # Holdings filings and law-firm solicitations are out of every corpus here (the
+        # bulk read skips them before its cap; the selector drops them again), so they
+        # are never summarised, cited or proactively enriched (the feed enriches a
+        # visible one on demand), and since the fingerprint is the corpus's article ids,
+        # a new filler row never re-keys a card. Its first deploy re-keys, once, every
+        # scope whose window held filler (each regenerates under the usual caps).
         names = await asyncio.to_thread(self._company_names, scopes)
         corpora = {
             scope: select_recent_corpus(

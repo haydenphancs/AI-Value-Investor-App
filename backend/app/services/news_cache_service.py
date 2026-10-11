@@ -49,6 +49,7 @@ from app.services.market_news_relevance import (
     select_market_stories,
     stamp_model_scope,
 )
+from app.services.news_tone_filters import is_filler_article
 
 logger = logging.getLogger(__name__)
 
@@ -2752,6 +2753,14 @@ class NewsCacheService:
             for row in rows:
                 key = row.get("ticker")
                 if not key:
+                    continue
+                # Holdings filings and law-firm solicitations never reach the card
+                # (`select_recent_corpus` drops them too); skipped BEFORE the cap for the
+                # Market's reason above, so a filler-heavy ticker still gets
+                # `per_scope_limit` real stories — measured 2026-10-11, 5 of MSFT's and 8
+                # of AAPL's newest 25 cached rows were filler — and before `market_rows`,
+                # so the floor cannot put one back. The feed itself still lists them.
+                if is_filler_article(row):
                     continue
                 if key == MARKET_SCOPE:
                     market_rows.append(row)

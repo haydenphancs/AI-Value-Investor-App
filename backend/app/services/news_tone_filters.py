@@ -16,6 +16,10 @@ They stay in the feed (a reader may still want them); they are only kept off the
 The model is also told they are neutral (``news_cache_service.SENTIMENT_RUBRIC``), but a
 deterministic rule does not depend on the model following it.
 
+The same two rules keep them out of the Updates Insights card's corpus (``is_filler_article``,
+2026-10-11): fed the filler, the card summarised it ("Several institutional investors
+increased their stakes in Microsoft during the second quarter.", MSFT).
+
 Both rules are deliberately NARROW, with must-not-match twins in
 ``tests/test_news_tone_filters.py``: dropping a real story from the chart is worse than
 counting one advert. ``theme_insights_service.is_solicitation`` is NOT reused — it was
@@ -154,6 +158,25 @@ def is_law_firm_solicitation(title: Any) -> bool:
     return bool(_LEADING_FIRM_RE.search(t) or _LAW_FIRM_RE.search(t) or _SOLICIT_RE.search(t))
 
 
+# ── Article rows (the Updates Insights card's corpus) ──────────────────────────
+
+
+def is_filler_article(row: Any) -> bool:
+    """True for an article row whose headline is a routine holdings filing or a law-firm
+    solicitation: kept out of the Insights card's corpus (``news_insight_service.
+    select_recent_corpus``, ``news_cache_service.get_cached_bulk``), never out of the feed.
+
+    Reads ``headline`` (cache rows), else ``title`` (raw FMP rows), as
+    ``news_sentiment_trend_service.tone_skip_reason`` does. A non-dict or untitled row is
+    not filler: it is kept, and the corpus's own guards decide what to do with it."""
+    if not isinstance(row, dict):
+        return False
+    title = row.get("headline")
+    if not isinstance(title, str) or not title.strip():
+        title = row.get("title")
+    return is_routine_holdings_filing(title) or is_law_firm_solicitation(title)
+
+
 # ── Duplicate titles ───────────────────────────────────────────────────────────
 
 _UPDATE_PREFIX_RE = re.compile(r"^\s*(?:update(?:d)?\s*\d*\s*[-:–—]|corrected\s*[-:–—])\s*",
@@ -171,4 +194,6 @@ def title_key(title: Any) -> Optional[str]:
     return key or None
 
 
-__all__ = ["is_law_firm_solicitation", "is_routine_holdings_filing", "title_key"]
+__all__ = [
+    "is_filler_article", "is_law_firm_solicitation", "is_routine_holdings_filing", "title_key",
+]

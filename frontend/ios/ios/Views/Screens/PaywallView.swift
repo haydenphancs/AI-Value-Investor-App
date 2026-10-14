@@ -88,8 +88,22 @@ struct PaywallView: View {
 
     private var selectedPlan: PlanDTO? {
         guard let catalog = viewModel.catalog else { return nil }
+        let plans = visiblePlans(catalog)
         let tier = selectedTier ?? defaultSelection(catalog)
-        return catalog.plans.first { $0.tier == tier } ?? catalog.plans.last
+        return plans.first { $0.tier == tier } ?? plans.last
+    }
+
+    /// The plans the list offers. A store-backed Max subscriber sees Max only — never a cheaper
+    /// plan to move down to (`PaywallViewModel.hidesLowerPlans`); everyone else sees them all.
+    /// The catalog arrives sorted cheapest → dearest, so "current and above" is a suffix.
+    private func visiblePlans(_ catalog: PlanCatalog) -> [PlanDTO] {
+        guard PaywallViewModel.hidesLowerPlans(
+            currentTier: currentTier,
+            currentTierIsStoreBacked: viewModel.currentTierIsStoreBacked
+        ), let currentIndex = catalog.plans.firstIndex(where: { $0.userTier == currentTier }) else {
+            return catalog.plans
+        }
+        return Array(catalog.plans[currentIndex...])
     }
 
     /// The plan to open on: the cheapest one ABOVE the user's current tier that actually
@@ -116,7 +130,12 @@ struct PaywallView: View {
                 .first { $0.key == context.featureKey }?
                 .included ?? false
         }
-        return (unlocks ?? above.first ?? paid.first)?.tier
+        // Nothing above: the account is on the top plan (Max). Open on THAT plan, never on a
+        // cheaper one (owner, 2026-10-13: "when i'm at Max … it points to Pro. i don't want
+        // that. point to Max only"). Free → Pro and Pro → Max still come from `above`.
+        let current = currentIndex >= 0 ? catalog.plans[currentIndex] : nil
+        let onTopPlan = above.isEmpty && (current?.priceCents ?? 0) > 0
+        return (unlocks ?? above.first ?? (onTopPlan ? current : nil) ?? paid.first)?.tier
     }
 
     var body: some View {
@@ -244,7 +263,7 @@ struct PaywallView: View {
 
     private func planSelector(_ catalog: PlanCatalog) -> some View {
         VStack(spacing: AppSpacing.sm) {
-            ForEach(catalog.plans) { plan in
+            ForEach(visiblePlans(catalog)) { plan in
                 PlanSelectorRow(
                     plan: plan,
                     // Apple's localized price wins when the product has loaded — the

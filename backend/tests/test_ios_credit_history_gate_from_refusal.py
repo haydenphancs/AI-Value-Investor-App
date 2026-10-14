@@ -68,7 +68,8 @@ _PERFORM = "private func performLoad() async"
 _VIEW_DECL = "struct CreditHistoryView: View"
 _CONTENT = "private var content: some View"
 _AUTH_POLICY = "nonisolated var authPolicy: AuthPolicy"
-_BUILD = "private func buildRequest(for endpoint: APIEndpoint, baseURL: URL? = nil) throws -> URLRequest"
+_BUILD = ("private func buildRequest(for endpoint: APIEndpoint, baseURL: URL? = nil, "
+          "credential: RequestCredential = .armed) throws -> URLRequest")
 _MAP = "private static func mapAPIError(_ error: APIError) -> AppError"
 
 _ARM = "if case .signInRequired = appError"
@@ -79,7 +80,11 @@ _HEALER = ".onChange(of: appState.auth.status)"
 _HEAL_GUARD = "guard status == .authenticated, isAuthBlocked else { return }"
 _FIRST_LOAD_TASK = r"\.task\s*\{"
 _POLICY_ARM = r"\bcase\s+\.listCreditHistory\s*:\s*return\s+\.signInRequired\b"
-_PRE_FLIGHT = r"if\s+endpoint\.authPolicy\s*==\s*\.signInRequired\s*,\s*authToken\s*==\s*nil\s*\{\s*throw\s+APIError\.authRequired\s*\}"
+# The gate reads `bearer`, the credential the request will carry (2026-10-13: sign-out sends its
+# last two calls with an explicit token). For every ordinary request that is the armed token —
+# `_ARMED_BEARER` — so "no bearer" still means "unarmed" for the credit-history load.
+_PRE_FLIGHT = r"if\s+endpoint\.authPolicy\s*==\s*\.signInRequired\s*,\s*bearer\s*==\s*nil\s*\{\s*throw\s+APIError\.authRequired\s*\}"
+_ARMED_BEARER = r"case\s+\.armed\s*:\s*bearer\s*=\s*authToken\s*\n"
 _TYPED = r"\bcase\s+\.authRequired\s*:\s*return\s+\.signInRequired\(feature:\s*nil\)"
 
 
@@ -265,6 +270,9 @@ def test_an_unarmed_load_is_refused_typed_before_any_io():
     assert re.search(_PRE_FLIGHT, build), (
         "buildRequest no longer refuses an unarmed .signInRequired call before any I/O — the "
         "credit-history refusal arm is dead code")
+    assert re.search(_ARMED_BEARER, build), (
+        "buildRequest's ordinary (.armed) bearer is no longer the armed token — the pre-flight "
+        "gate no longer means 'unarmed', so the credit-history refusal arm is unproven")
     mapping = _block(_code(_APP_ERROR), _MAP)
     assert re.search(_TYPED, mapping), (
         "APIError.authRequired no longer maps to AppError.signInRequired, so the pre-flight "
@@ -388,8 +396,9 @@ _V_LOAD_AND_WAIT = "    func loadAndWait() async {\n        load()\n"
 _V_LOAD_MORE = "    func loadMore() {\n        guard let cursor = nextCursor, !isLoadingMore else { return }\n"
 
 _E_POLICY = "        case .listCreditHistory:\n            return .signInRequired\n"
-_C_PRE_FLIGHT = ("        if endpoint.authPolicy == .signInRequired, authToken == nil {\n"
+_C_PRE_FLIGHT = ("        if endpoint.authPolicy == .signInRequired, bearer == nil {\n"
                  "            throw APIError.authRequired\n        }\n")
+_C_ARMED_BEARER = "        case .armed:\n            bearer = authToken\n"
 _M_TYPED = "        case .authRequired:\n            return .signInRequired(feature: nil)\n"
 
 _W_TASK = "        .task { await viewModel.loadAndWait() }\n"
@@ -483,6 +492,9 @@ _MUTATIONS = [
      _T3, "listCreditHistory is no longer .signInRequired"),
     ("C1-no-pre-flight-refusal", _CLIENT, ((_C_PRE_FLIGHT, ""),),
      _T3, "buildRequest no longer refuses an unarmed .signInRequired call before any I/O"),
+    ("C2-armed-bearer-not-the-token", _CLIENT,
+     ((_C_ARMED_BEARER, '        case .armed:\n            bearer = "guest"\n'),),
+     _T3, "buildRequest's ordinary (.armed) bearer is no longer the armed token"),
     ("M1-refusal-untyped", _APP_ERROR,
      ((_M_TYPED, "        case .authRequired:\n            return .unauthorized\n"),),
      _T3, "APIError.authRequired no longer maps to AppError.signInRequired"),

@@ -22,6 +22,7 @@ boundary, which is itself tested separately for fail-closed behaviour.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import MutableMapping
 from datetime import datetime, timedelta, timezone
@@ -1439,6 +1440,13 @@ def test_a_refund_of_an_older_renewal_keeps_the_current_period():
     )
     assert sb.remaining == held == 3700
     assert sb.model.paid_period["end"] == _ANCHOR + timedelta(days=31)
+    # 2026-10-13: and the TIER. The REFUND used to be written over the newer row, dropping a
+    # subscriber whose current period was paid for to free until Restore or the next DID_RENEW.
+    assert sb._tier() == "premium"
+    row = sb.db["subscriptions"][0]
+    assert row["status"] == "active"
+    assert svc._parse_iso(row["current_period_end"]) == _ANCHOR + timedelta(days=31)
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
 
 
 def test_refund_reversed_gives_back_exactly_what_the_refund_took():
@@ -1458,3 +1466,461 @@ def test_refund_reversed_gives_back_exactly_what_the_refund_took():
     assert sb.remaining == 3900, "the refund took 3,900; the reversal gives exactly that back"
     s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=1)))
     assert sb.remaining == 3900, "a replay of the reversed transaction reinstates nothing more"
+
+
+# ── A refund of an OLDER period never overwrites the newer row (2026-10-13) ──
+#
+# Apple refunds a past renewal with THAT renewal's transaction: same originalTransactionId, an
+# EARLIER expiresDate. "Revocation always wins" wrote it over the newer row, so
+# `reconcile_user_tier` dropped a subscriber whose current period was paid for and not refunded
+# to free until Restore or the next DID_RENEW. Migration 196 already kept the credits.
+
+def _renewed_max(sb, *, renew_signed_at):
+    """Max bought through the client (its period ends at +1 day), then renewed by DID_RENEW
+    (+31 days) once the model's clock is past the first period's end. The renewal's credit
+    period is in force: 4,000."""
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-1", expires_in_days=1))
+    sb.now = _ANCHOR + timedelta(days=1, seconds=1)
+    s.apply_notification(
+        {"notificationType": "DID_RENEW", "signedDate": _ms(renew_signed_at)},
+        _txn(product=_MAX, txn_id="txn-2", expires_in_days=31, originalTransactionId="txn-1"),
+    )
+    assert sb.model.paid_period["end"] == _ANCHOR + timedelta(days=31)
+    return s
+
+
+def _refund_of_the_first_period(now, ntype="REFUND", *, signed_at=None):
+    return (
+        {"notificationType": ntype, "signedDate": _ms(signed_at or now - timedelta(days=1))},
+        _txn(product=_MAX, txn_id="txn-1", expires_in_days=1, revocationDate=_ms(now)),
+    )
+
+
+def _row(sb) -> dict:
+    return sb.db["subscriptions"][0]
+
+
+@pytest.mark.parametrize("ntype", ["REFUND", "REVOKE"])
+def test_an_older_period_revocation_keeps_the_tier_the_row_and_the_credits(ntype):
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=2))
+    sb.credits["used"] = 300
+    before = dict(_row(sb))
+
+    outcome, _ = s.apply_notification(*_refund_of_the_first_period(now, ntype))
+
+    assert outcome == f"applied:{ntype}"          # a 200: Apple must not redeliver it
+    assert sb._tier() == "premium"
+    assert _row(sb) == before, "nothing is written — tier, status, period end, ordering key"
+    assert sb.remaining == 3700
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+    assert "tier_revoked" not in [r["reason"] for r in sb.model.ledger]
+
+
+@pytest.mark.parametrize("refunded_end_days", [31, 61], ids=["the-period-in-force", "a-later-renewal"])
+def test_a_refund_of_the_current_or_a_later_period_still_revokes(refunded_end_days):
+    """Negative control: an EQUAL expiresDate is the period in force, a LATER one a renewal the
+    row has not recorded yet. Both keep today's behaviour — revoked, free."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=2))
+    sb.credits["used"] = 300
+
+    s.apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(now - timedelta(days=1))},
+        _txn(product=_MAX, txn_id=f"txn-{refunded_end_days}", expires_in_days=refunded_end_days,
+             originalTransactionId="txn-1", revocationDate=_ms(now)),
+    )
+
+    assert _row(sb)["status"] == "revoked"
+    assert svc._parse_iso(_row(sb)["current_period_end"]) == _ANCHOR + timedelta(
+        days=refunded_end_days)
+    assert sb._tier() == "free"
+    if refunded_end_days == 31:
+        assert sb.credits == {"total": 50, "used": 50}, "the period in force is clawed back"
+        assert sb.model.paid_period is None
+
+
+@pytest.mark.parametrize("source", ["notification", "client"])
+def test_refunding_the_superseded_pro_of_an_upgrade_keeps_max(source):
+    """Pro → Max keeps the originalTransactionId and starts Max at once; the Pro transaction
+    keeps its own, EARLIER expiresDate. Its refund — here WITHOUT `isUpgraded`, which the
+    dedicated guard above handles when Apple sets it — must leave Max alone."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(product=_PRO, txn_id="txn-pro", original="txn-g",
+                                             signed_at=now - timedelta(days=10),
+                                             expires_in_days=20))
+    s.apply_verified_transaction(_USER, _jws(product=_MAX, txn_id="txn-max", original="txn-g",
+                                             signed_at=now - timedelta(hours=1),
+                                             expires_in_days=30))
+    assert sb._tier() == "premium" and sb.model.paid_period["tier"] == "premium"
+    held = sb.remaining
+
+    refunded = _jws(product=_PRO, txn_id="txn-pro", original="txn-g", signed_at=now,
+                    expires_in_days=20, revocationDate=_ms(now))
+    if source == "notification":
+        s.apply_notification({"notificationType": "REFUND", "signedDate": _ms(now)}, refunded)
+    else:
+        s.apply_verified_transaction(_USER, refunded)
+
+    assert sb._tier() == "premium"
+    assert (_row(sb)["tier"], _row(sb)["status"]) == ("premium", "active")
+    assert sb.remaining == held and sb.model.paid_period["tier"] == "premium"
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+
+
+def test_a_revoked_older_renewal_from_the_client_keeps_the_tier_and_records_no_key():
+    """No webhook (or it lost the race): the refund of last month's renewal arrives as a revoked
+    JWS through `Transaction.updates`. Same outcome — and its signedDate is NOT stored as the
+    ordering key, which exists to keep a REVOKED row revoked; this row was not revoked."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=2))
+    sb.credits["used"] = 300
+    key_before = _row(sb)["last_event_at"]
+
+    out = s.apply_verified_transaction(_USER, _jws(
+        txn_id="txn-1", signed_at=now, expires_in_days=1, revocationDate=_ms(now),
+    ))
+
+    assert out["was_stale"] is True and out["winning_tier"] == "premium"
+    assert out["status"] == "active", "the client is told the stored state, not 'revoked'"
+    assert sb._tier() == "premium"
+    assert _row(sb)["status"] == "active" and _row(sb)["last_event_at"] == key_before
+    assert svc._parse_iso(_row(sb)["current_period_end"]) == _ANCHOR + timedelta(days=31)
+    assert sb.remaining == 3700
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+
+
+def test_a_renewal_signed_before_an_older_refund_but_delivered_after_it_still_applies():
+    """Why the kept row records no ordering key. A refund is signed late; had its signedDate
+    become `last_event_at`, this genuine DID_RENEW — signed earlier, redelivered later (Apple
+    retries for hours, in no order) — would be refused as stale, and the subscriber would
+    lapse at the end of the current period with the next one already paid."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=3))
+    s.apply_notification(*_refund_of_the_first_period(now, signed_at=now - timedelta(hours=1)))
+
+    s.apply_notification(
+        {"notificationType": "DID_RENEW", "signedDate": _ms(now - timedelta(hours=2))},
+        _txn(product=_MAX, txn_id="txn-3", expires_in_days=61, originalTransactionId="txn-1"),
+    )
+
+    assert svc._parse_iso(_row(sb)["current_period_end"]) == _ANCHOR + timedelta(days=61)
+    assert _row(sb)["status"] == "active" and sb._tier() == "premium"
+
+
+def test_an_older_refund_during_a_billing_grace_period_keeps_the_hold():
+    """The renewed period has ENDED and Apple is retrying the next charge (grace): still
+    entitled, and 196 HOLDS the balance. Applied, the older period's revoked row ended both —
+    free tier, and the balance lapsed to the free allowance."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=3))
+    sb.credits["used"] = 300
+    sb.now = _ANCHOR + timedelta(days=31, seconds=1)
+    s.apply_notification(
+        {"notificationType": "DID_FAIL_TO_RENEW", "subtype": "GRACE_PERIOD",
+         "signedDate": _ms(now - timedelta(days=2))},
+        _txn(product=_MAX, txn_id="txn-2", expires_in_days=31, originalTransactionId="txn-1"),
+    )
+    assert _row(sb)["status"] == "grace_period" and sb.remaining == 3700
+
+    s.apply_notification(*_refund_of_the_first_period(now))
+
+    assert _row(sb)["status"] == "grace_period"
+    assert sb._tier() == "premium" and sb.remaining == 3700
+
+
+def test_after_ignored_older_refunds_the_current_period_can_still_be_refunded():
+    """Apple redelivers the older refund (no-op each time); a later refund of the period in
+    force must still revoke and claw back."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=3))
+    sb.credits["used"] = 300
+    for _ in range(3):
+        s.apply_notification(*_refund_of_the_first_period(now, signed_at=now - timedelta(days=2)))
+    assert sb._tier() == "premium" and sb.remaining == 3700
+
+    s.apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(now - timedelta(days=1))},
+        _txn(product=_MAX, txn_id="txn-2", expires_in_days=31, originalTransactionId="txn-1",
+             revocationDate=_ms(now)),
+    )
+
+    assert sb._tier() == "free" and _row(sb)["status"] == "revoked"
+    assert sb.credits == {"total": 50, "used": 50}
+
+
+def test_a_refund_of_the_running_period_after_an_early_renewal_keeps_the_paid_renewal():
+    """Apple charges a renewal up to 24 h before the period ends, so the DID_RENEW can land while
+    the old period still runs — and is still the credit period in force (196 waits for it to
+    end). Refunding that old period keeps the tier: the renewal is paid. Its unspent credits are
+    NOT clawed back (the row is not rewritten, so 196 never sees a refund of the period in
+    force); they last until it ends, at most ~24 h, then expire as the renewal starts. Accepted:
+    the same credits could have been spent before asking for the refund, which no clawback
+    recovers either."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-1", expires_in_days=1))
+    sb.credits["used"] = 300
+    s.apply_notification(
+        {"notificationType": "DID_RENEW", "signedDate": _ms(now - timedelta(hours=2))},
+        _txn(product=_MAX, txn_id="txn-2", expires_in_days=31, originalTransactionId="txn-1"),
+    )
+    assert sb.model.paid_period["end"] == _ANCHOR + timedelta(days=1), "the old period runs on"
+
+    s.apply_notification(*_refund_of_the_first_period(now, signed_at=now - timedelta(hours=1)))
+
+    assert sb._tier() == "premium"
+    assert sb.remaining == 3700 and sb.model.paid_period["end"] == _ANCHOR + timedelta(days=1)
+    sb.now = _ANCHOR + timedelta(days=1, seconds=1)               # the refunded period ends
+    sb.rpc("ensure_credit_period", {"p_user_id": _USER})          # the next credit read
+    assert sb.credits == {"total": 4000, "used": 0}
+    assert sb.model.paid_period["end"] == _ANCHOR + timedelta(days=31)
+    assert (sb.model.ledger[-2]["reason"], sb.model.ledger[-2]["delta"]) == ("monthly_expired", -3700)
+
+
+def test_the_ignored_older_refund_is_logged_with_both_dates(caplog):
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=2))
+
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        s.apply_notification(*_refund_of_the_first_period(now))
+
+    msgs = [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "OLDER period" in r.getMessage()]
+    assert len(msgs) == 1
+    assert "txn=txn-1" in msgs[0] and f"user={_USER}" in msgs[0]
+    assert (_ANCHOR + timedelta(days=1)).isoformat() in msgs[0]       # the refunded period
+    assert (_ANCHOR + timedelta(days=31)).isoformat() in msgs[0]      # the period kept
+
+
+def test_the_older_period_guard_edges():
+    """Pure-function edges. Everything but a strictly older period of the SAME lineage against
+    an ENTITLING row applies exactly as before (revocation wins)."""
+    end = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    row = {"original_transaction_id": "otid", "status": "active", "tier": "premium",
+           "current_period_end": end.isoformat()}
+
+    def reason(prior=row, *, status="revoked", otid="otid", period_end=end - timedelta(days=30)):
+        return svc._older_period_revocation_reason(
+            prior, status=status, original_transaction_id=otid, period_end=period_end,
+        )
+
+    assert reason() is not None, "a month older, same lineage, entitling row"
+    assert reason(period_end=end - timedelta(seconds=60)) is not None
+    # Applies as before.
+    for status in ("active", "expired", "grace_period"):
+        assert reason(status=status) is None, f"only a revocation is refused, not {status}"
+    assert reason(prior=None) is None and reason(prior={}) is None
+    assert reason(otid="another") is None, "the owner fallback's row is ANOTHER lineage"
+    assert reason(prior={**row, "original_transaction_id": None}, otid="") is None
+    assert reason(period_end=None) is None
+    assert reason(period_end=end) is None, "equal: a refund of the period in force"
+    assert reason(period_end=end + timedelta(days=30)) is None, "later: a renewal not yet recorded"
+    assert reason(period_end=end - timedelta(seconds=59)) is None, "inside the drift margin"
+    for status in ("revoked", "expired", "", None, "paused"):
+        assert reason(prior={**row, "status": status}) is None, status
+    for junk in (None, "", "not-a-date", 12345, "2026-13-45T99:99:99"):
+        assert reason(prior={**row, "current_period_end": junk}) is None, junk
+    # Entitling in any case, including Apple's retry states; compared by period end, never
+    # against the clock (an `active` row past its end is still the newer period).
+    for status in ("ACTIVE", "Grace_Period", "billing_retry"):
+        assert reason(prior={**row, "status": status}) is not None, status
+    t = datetime.now(timezone.utc)
+    lapsed = {**row, "current_period_end": (t - timedelta(days=2)).isoformat()}
+    assert reason(prior=lapsed, period_end=t - timedelta(days=32)) is not None
+    # A naive stored timestamp is read as UTC rather than raising.
+    naive = {**row, "current_period_end": end.replace(tzinfo=None).isoformat()}
+    assert reason(prior=naive) is not None
+    # Both dates are in the reason (the WARNING carries it).
+    assert end.isoformat() in reason() and (end - timedelta(days=30)).isoformat() in reason()
+
+
+# ── A late OLDER revocation never rewinds the ordering key (2026-10-13) ───────
+#
+# A revocation bypasses the stale check ("revocation always wins"), so it can be signed BEFORE
+# the event whose `signedDate` is stored. The webhook path still wrote its signedDate as
+# `last_event_at` unconditionally and LOWERED the key. The refund of an older period, signed at
+# T3 and delivered after the refund of the current period (T5) had revoked the row, left T3 —
+# and anything signed between the two then read as newer than the refund: the saved pre-refund
+# JWS of the current period (T4) brought back the tier AND migration 196's `plan_reinstated`
+# of the refunded period, the 2026-09-25 replay class. The client path was already monotonic
+# (`test_a_client_revocation_never_lowers_a_later_stored_key`); the webhook path now is too.
+
+def _refund_of_the_current_period(at):
+    """The REFUND of the renewal `_renewed_max` put in force (txn-2: original txn-1, +31 d)."""
+    return (
+        {"notificationType": "REFUND", "signedDate": _ms(at)},
+        _txn(product=_MAX, txn_id="txn-2", expires_in_days=31, originalTransactionId="txn-1",
+             revocationDate=_ms(at)),
+    )
+
+
+def _both_refunds_out_of_order(sb, now):
+    """`_renewed_max`, the refund of the current period (T5 = now - 1 d), then the refund of
+    the FIRST period: signed earlier (T3 = now - 3 d), delivered after it. The row no longer
+    entitles by then, so the older-period guard leaves that refund to apply. Returns the
+    service and the ordering key T5 wrote."""
+    s = _renewed_max(sb, renew_signed_at=now - timedelta(days=6))
+    s.apply_notification(*_refund_of_the_current_period(now - timedelta(days=1)))
+    assert sb._tier() == "free" and sb.remaining == 50
+    key = _row(sb)["last_event_at"]
+    assert svc._parse_iso(key) == svc._ms_to_dt(_ms(now - timedelta(days=1))), \
+        "a later revocation still raises the key"
+
+    s.apply_notification(*_refund_of_the_first_period(now, signed_at=now - timedelta(days=3)))
+    return s, key
+
+
+@pytest.mark.parametrize("replay", ["client", "notification"])
+def test_a_late_older_refund_cannot_reopen_the_pre_refund_replay(replay):
+    """THE bug. Before the fix the key fell to T3 and a payload signed at T4 applied: premium,
+    and 4,000 credits (196 reinstated the refunded period); `was_stale` False.
+
+    `client`: the saved pre-refund JWS re-POSTed to /billing/verify. `notification`: Apple's own
+    out-of-order delivery — a DID_CHANGE_RENEWAL_STATUS signed at T4, still carrying the
+    unrefunded transaction, retried after both refunds. No attacker needed for that one."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s, key = _both_refunds_out_of_order(sb, now)
+    assert _row(sb)["status"] == "revoked", "the older refund still applies (revocation wins)"
+    assert _row(sb)["last_event_at"] == key, "the older refund rewound the ordering key"
+
+    pre_refund = _jws(txn_id="txn-2", original="txn-1", signed_at=now - timedelta(days=2),
+                      expires_in_days=31)
+    if replay == "client":
+        out = s.apply_verified_transaction(_USER, pre_refund)
+        assert out["was_stale"] is True and out["winning_tier"] == "free"
+    else:
+        s.apply_notification(
+            {"notificationType": "DID_CHANGE_RENEWAL_STATUS", "subtype": "AUTO_RENEW_DISABLED",
+             "signedDate": _ms(now - timedelta(days=2))},
+            pre_refund,
+        )
+
+    assert sb._tier() == "free" and _row(sb)["status"] == "revoked"
+    assert sb.remaining == 50, "the replay got the refunded period's credits back"
+    assert "plan_reinstated" not in [r["reason"] for r in sb.model.ledger]
+    assert _row(sb)["last_event_at"] == key
+
+
+@pytest.mark.parametrize("source", ["client-same-original", "client-new-original", "notification"])
+def test_a_resubscribe_signed_after_both_refunds_still_applies(source):
+    """The kept key is the LATEST refund's, so it must not lock the customer out: a genuine
+    re-subscribe is a new transaction Apple signs after both refunds."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s, key = _both_refunds_out_of_order(sb, now)
+
+    # A month after ITS purchase: never a refunded period's exact end (+1 or +31 days), which
+    # with the same original transaction would be a reversal of that refund.
+    fresh = _jws(txn_id="txn-3", signed_at=now, expires_in_days=30,
+                 original="txn-3" if source == "client-new-original" else "txn-1")
+    if source == "notification":
+        s.apply_notification({"notificationType": "SUBSCRIBED", "subtype": "RESUBSCRIBE",
+                              "signedDate": _ms(now)}, fresh)
+        assert svc._parse_iso(_row(sb)["last_event_at"]) == svc._ms_to_dt(_ms(now)), \
+            "a later notification still moves the key forward"
+    else:
+        out = s.apply_verified_transaction(_USER, fresh)
+        assert out["was_stale"] is False and out["winning_tier"] == "premium"
+
+    assert sb._tier() == "premium" and _row(sb)["status"] == "active"
+    assert sb.remaining == 4000
+    assert len(sb.db["subscriptions"]) == 1
+
+
+@pytest.mark.parametrize("stored_status", ["revoked", "expired", "active"])
+def test_a_webhook_revocation_never_lowers_a_later_stored_key(stored_status):
+    """The webhook twin of `test_a_client_revocation_never_lowers_a_later_stored_key`, whatever
+    the row holds: a revocation signed before the stored key still revokes, and the key stays."""
+    now = datetime.now(timezone.utc)
+    later = now - timedelta(hours=1)
+    sb = FakeSupabase(subscriptions=[{
+        "id": "row-1", "user_id": _USER, "tier": "premium", "status": stored_status,
+        "original_transaction_id": "txn-1", "last_event_at": later.isoformat(),
+        "current_period_end": (now + timedelta(days=20)).isoformat(),
+    }])
+    signed = now - timedelta(days=1)
+
+    outcome, _ = _service(sb).apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(signed)},
+        _jws(signed_at=signed, revocationDate=_ms(signed)),
+    )
+
+    assert outcome == "applied:REFUND"
+    assert _row(sb)["status"] == "revoked" and sb._tier() == "free"
+    assert _row(sb)["last_event_at"] == later.isoformat()
+
+
+_NO_KEY = object()
+
+
+def test_the_webhook_ordering_key_edges():
+    """What a REFUND notification leaves in `last_event_at`, by what the row stored."""
+    now = datetime.now(timezone.utc)
+    signed = now - timedelta(days=1)
+    written = svc._ms_to_dt(_ms(signed))
+
+    def key_after(stored):
+        row = {"id": "row-1", "user_id": _USER, "tier": "premium", "status": "revoked",
+               "original_transaction_id": "txn-1",
+               "current_period_end": (now + timedelta(days=20)).isoformat()}
+        if stored is not _NO_KEY:
+            row["last_event_at"] = stored
+        sb = FakeSupabase(subscriptions=[row])
+        _service(sb).apply_notification(
+            {"notificationType": "REFUND", "signedDate": _ms(signed)},
+            _jws(signed_at=signed, revocationDate=_ms(signed)),
+        )
+        assert _row(sb)["status"] == "revoked"
+        return _row(sb).get("last_event_at")
+
+    later = written + timedelta(milliseconds=1)
+    assert key_after(later.isoformat()) == later.isoformat(), "kept: one ms later"
+    naive = (written + timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    assert key_after(naive) == naive, "a naive stored key reads as UTC, and is kept"
+    assert svc._parse_iso(key_after(written.isoformat())) == written, "a tie keeps the instant"
+    earlier = written - timedelta(milliseconds=1)
+    assert svc._parse_iso(key_after(earlier.isoformat())) == written, "raised"
+    assert svc._parse_iso(key_after(_NO_KEY)) == written, "no key yet: written"
+    for junk in (None, "", "not-a-date", 12345, "2026-13-45T99:99:99"):
+        assert svc._parse_iso(key_after(junk)) == written, f"junk {junk!r} is replaced"
+
+
+def test_a_client_payload_that_is_not_a_revocation_records_no_ordering_key():
+    """The client half of the same rule, pinned: only a client REVOCATION stores its signedDate.
+    A client payload's status is derived from the transaction alone, so in a billing grace
+    period it reads `expired` (the period has ended). Had its signedDate become the key, Apple's
+    DID_FAIL_TO_RENEW / GRACE_PERIOD — signed before it, delivered after it — would be refused
+    as stale, and a subscriber Apple still entitles would stay on Free."""
+    now = datetime.now(timezone.utc)
+    renewed_at = now - timedelta(days=30)
+    sb = FakeSupabase(subscriptions=[{
+        "id": "row-1", "user_id": _USER, "tier": "premium", "status": "active",
+        "original_transaction_id": "txn-1", "last_event_at": renewed_at.isoformat(),
+        "current_period_end": (_ANCHOR - timedelta(days=1)).isoformat(),
+    }])
+    s = _service(sb)
+
+    out = s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(hours=1),
+                                                   expires_in_days=-1))
+    assert out["was_stale"] is False and _row(sb)["status"] == "expired"
+    assert _row(sb)["last_event_at"] == renewed_at.isoformat()
+
+    s.apply_notification(
+        {"notificationType": "DID_FAIL_TO_RENEW", "subtype": "GRACE_PERIOD",
+         "signedDate": _ms(now - timedelta(hours=2))},
+        _txn(product=_MAX, txn_id="txn-1", expires_in_days=-1),
+    )
+    assert _row(sb)["status"] == "grace_period" and sb._tier() == "premium"

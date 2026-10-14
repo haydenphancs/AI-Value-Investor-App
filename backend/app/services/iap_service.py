@@ -352,7 +352,10 @@ def _stale_delivery_reason(
          path is ordered by `_stale_client_delivery_reason` instead, on the transaction's own
          `signedDate` — a verified JWS does carry one.)
       3. **Revocation always wins.** A refund/chargeback is authoritative, and leaving a
-         refunded user entitled is the expensive direction.
+         refunded user entitled is the expensive direction. (It wins over ORDERING: a refund
+         of an older period than the stored one is refused by
+         `_older_period_revocation_reason`.) It never REWINDS the stored key, though:
+         `apply_transaction` keeps the later one.
       4. **Equal timestamps apply.** Apple can re-sign an identical payload; re-applying it is
          idempotent, whereas dropping it on a tie could lose a real transition.
     """
@@ -398,7 +401,8 @@ def _stale_client_delivery_reason(
 
     Rules, deliberately narrower than "never trust the client":
 
-      * **Incoming revocation always applies** (same as the webhook guard).
+      * **Incoming revocation always applies** (same as the webhook guard) — unless it is for
+        an older period than the stored one (`_older_period_revocation_reason`).
       * **No stored key → apply**, exactly as before — EXCEPT a REVOKED row, which falls back
         to its `updated_at` (when we wrote the revocation): rows revoked before migration 114,
         or by the client path, may carry no `last_event_at`.
@@ -446,6 +450,70 @@ def _stale_client_delivery_reason(
     if signed_at == stored and not prior_revoked:
         return None
     return f"client signedDate={signed_at.isoformat()} does not postdate the {context}"
+
+
+# How much earlier than the stored period a revoked transaction's period must END to count as
+# an OLDER one. A refund of the period in force carries the very same `expiresDate`, so this
+# only absorbs representation drift, and drift must never turn that refund into an "older"
+# one: that is the direction that leaves a refunded user entitled. Apple's shortest period is
+# a Sandbox renewal (3-5 minutes); only Xcode's accelerated StoreKit testing goes below the
+# margin, and there an older period's refund simply revokes, as before.
+_OLDER_PERIOD_MARGIN = timedelta(seconds=60)
+
+
+def _older_period_revocation_reason(
+    prior: Optional[Dict[str, Any]],
+    *,
+    status: str,
+    original_transaction_id: str,
+    period_end: Optional[datetime],
+) -> Optional[str]:
+    """Why a REVOCATION is about an OLDER paid period than the stored row's, or None to apply.
+
+    Apple can refund any past renewal, not only the period in force. The REFUND notification
+    (or the revoked JWS `Transaction.updates` delivers) then carries THAT renewal's
+    transaction, whose `expiresDate` is earlier than the stored row's `current_period_end` for
+    the same originalTransactionId. "Revocation always wins" applied it over the newer row:
+    the ONE `subscriptions` row became the old period, revoked, and `reconcile_user_tier`
+    dropped to free a subscriber whose current period was paid for and not refunded, until the
+    current transaction was delivered again (Restore, or the next DID_RENEW). Migration 196
+    already kept their CREDITS (it claws back only the period in force); the tier had no guard.
+    (Inside the <= 24 h an early renewal opens, the refunded period can still be the credit
+    period in force; its unspent credits then last until it ends — SYSTEM_DESIGN_GUIDELINES
+    §9b.12 "Known, accepted gaps".)
+
+    Decided on WHICH period (`expiresDate`), not on when Apple said it (`signedDate`): a refund
+    is signed late by nature, so its signedDate cannot tell an old period from the current one.
+
+    Narrow on purpose. Everything else applies exactly as before, because leaving a refunded
+    user entitled is the expensive direction:
+
+      * **Same lineage only.** The owner fallback can hand over the user's row for a DIFFERENT
+        originalTransactionId, whose period end says nothing about this transaction's periods.
+      * **The stored row must entitle** (`_ENTITLING_STATUSES`). Its end is compared, never the
+        clock: an `active` row past its end is still a newer period than the refunded one, and
+        the expiry sweep or the next delivery ends it.
+      * **Earlier by at least `_OLDER_PERIOD_MARGIN`.** An EQUAL `expiresDate` is a refund of
+        the period in force, and a LATER one a renewal the row has not recorded yet; both
+        apply. So does a payload or a row with no readable date.
+    """
+    if status != "revoked" or not prior:
+        return None
+    stored_original = str(prior.get("original_transaction_id") or "")
+    if not original_transaction_id or stored_original != original_transaction_id:
+        return None
+    if str(prior.get("status") or "").lower() not in _ENTITLING_STATUSES:
+        return None
+    stored_end = _parse_iso(prior.get("current_period_end"))
+    if period_end is None or stored_end is None:
+        return None
+    if stored_end - period_end < _OLDER_PERIOD_MARGIN:
+        return None
+    return (
+        f"revoked expiresDate={period_end.isoformat()} is before the stored "
+        f"current_period_end={stored_end.isoformat()} "
+        f"(stored status={prior.get('status')!r}, tier={prior.get('tier')!r})"
+    )
 
 
 def _is_upgraded(payload: Dict[str, Any]) -> bool:
@@ -778,11 +846,9 @@ class IAPService:
             _ENVIRONMENT_COLUMN: str(payload.get("environment") or settings.IAP_ENVIRONMENT),
         }
 
-        # When Apple told us WHEN it said this (a notification's `signedDate`), persist it as
-        # the ordering key. The client-verify path is ordered on the transaction's OWN
-        # `signedDate` further down, and persists it only for a revocation.
-        if event_at is not None:
-            row[_EVENT_AT_COLUMN] = event_at.isoformat()
+        # When Apple told us WHEN it said this (a notification's `signedDate`), that is the
+        # ordering key. The client-verify path is ordered on the transaction's OWN `signedDate`.
+        # What gets STORED is decided once `prior` is known, further down: never a lower key.
         client_path = event_at is None and client_submitted
         client_signed_at = _ms_to_dt(payload.get("signedDate")) if client_path else None
 
@@ -907,14 +973,44 @@ class IAPService:
             )
             return _unapplied()
 
-        # A revocation seen on the CLIENT path records its own `signedDate` as the ordering
-        # key, so an older JWS — or an older notification redelivered late — cannot re-entitle
-        # the row even when the REFUND notification never arrives. Monotonic: never lowers a
-        # key a later event already stored.
-        if client_path and status == "revoked" and client_signed_at is not None:
+        # A REFUND OF AN OLDER PERIOD is not a refund of the one in force: applied, it wrote
+        # the old period over the newer row and dropped a paying subscriber to free (see
+        # `_older_period_revocation_reason`). Nothing is written, not even the ordering key:
+        # this event says nothing about the stored period, and recording its late signedDate
+        # would refuse a genuine renewal signed before the refund but delivered after it. No
+        # `revoke_tier_credits` either — the stored period was not refunded.
+        older = _older_period_revocation_reason(
+            prior, status=status, original_transaction_id=original_txn_id,
+            period_end=period_end,
+        )
+        if older:
+            logger.warning(
+                "IAP: IGNORING revocation of an OLDER period for txn=%s original=%s user=%s "
+                "source=%s (%s) — the stored period is newer and was not refunded; "
+                "tier/status/current_period_end left unchanged, no credit clawback",
+                payload.get("transactionId"), original_txn_id, user_id,
+                "client" if client_path else "notification", older,
+            )
+            return _unapplied()
+
+        # THE ORDERING KEY. A notification records its `signedDate`. A revocation seen on the
+        # CLIENT path records its own `signedDate`, so an older JWS — or an older notification
+        # redelivered late — cannot re-entitle the row even when the REFUND notification never
+        # arrives; no other client payload records one.
+        #
+        # Monotonic on BOTH paths: never lowers a key a later event already stored. A
+        # revocation skips the stale check, so it can be signed BEFORE the stored key. The
+        # webhook wrote it regardless: the late refund of an OLDER period (signed T3), applied
+        # over a row the refund of the current period (T5) had already revoked, rewound the key
+        # to T3 — and the saved pre-refund JWS of the current period, signed at T4, then
+        # applied: the tier and the refunded period's credits back (2026-10-13).
+        incoming_key = event_at if event_at is not None else (
+            client_signed_at if client_path and status == "revoked" else None
+        )
+        if incoming_key is not None:
             stored_key = _parse_iso((prior or {}).get(_EVENT_AT_COLUMN))
-            if stored_key is None or client_signed_at > stored_key:
-                row[_EVENT_AT_COLUMN] = client_signed_at.isoformat()
+            if stored_key is None or incoming_key > stored_key:
+                row[_EVENT_AT_COLUMN] = incoming_key.isoformat()
 
         def _write(payload_row: Dict[str, Any]) -> None:
             if prior:

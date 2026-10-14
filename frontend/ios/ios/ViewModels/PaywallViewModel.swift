@@ -178,6 +178,21 @@ final class PaywallViewModel: ObservableObject {
         return isFreePlan || currentTierIsStoreBacked
     }
 
+    /// True when the plan list shows only the current plan and above — i.e. a Max subscriber
+    /// is never offered Free or Pro (owner, 2026-10-13: "hide the lower plans for them").
+    ///
+    /// Only for a STORE-BACKED Max: a hand-set Max (App Review's demo account) still sees every
+    /// plan, because App Review must be able to buy one. `currentTierIsStoreBacked` starts
+    /// `true` and stays `true` on a failed read, so a real subscriber never sees the lower plans
+    /// flash in; only the demo account reveals them once its subscription read answers. A
+    /// subscriber can still change or cancel through Apple (Settings › Manage Subscription).
+    nonisolated static func hidesLowerPlans(
+        currentTier: UserTier,
+        currentTierIsStoreBacked: Bool
+    ) -> Bool {
+        currentTier == .premium && currentTierIsStoreBacked
+    }
+
     private func loadCatalog() async {
         do {
             catalog = try await repository.fetchPlanCatalog()

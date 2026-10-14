@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ZeTPGBfGG6aT8CzF0YySPGJVxlhht8nUkPjWwE0T6ygRuWDkw4bihhlYbQcHZmF
+\restrict dskx7c0V5e3edwphs6ORLNlIY9GSNl97WoNirDZ9QtHEY7OSuOeyL6YFI4ei8p3
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1758,11 +1758,35 @@ CREATE FUNCTION public.ensure_credit_period(p_user_id uuid) RETURNS integer
 DECLARE
     _GUEST       CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
     v_tier       public.user_tier;
+    v_user_tier  public.user_tier;
+    v_comp_tier  public.user_tier;
     v_alloc      INTEGER;
     v_now_et     TIMESTAMP;
     v_next_reset TIMESTAMPTZ;
     v_row        public.user_credits%ROWTYPE;
     v_remaining  INTEGER;
+    v_expired    INTEGER;
+    v_sub        public.subscriptions%ROWTYPE;
+    v_has_sub    BOOLEAN := FALSE;
+    v_prod_row   BOOLEAN := FALSE;
+    v_paid_row   BOOLEAN := FALSE;
+    v_cur        public.subscription_credit_periods%ROWTYPE;
+    v_has_cur    BOOLEAN := FALSE;
+    v_running    BOOLEAN := FALSE;
+    v_new_key    BOOLEAN := FALSE;
+    v_seen       BOOLEAN := FALSE;
+    v_seen_row   public.subscription_credit_periods%ROWTYPE;
+    v_reinstate  BOOLEAN := FALSE;
+    v_start_paid BOOLEAN := FALSE;
+    v_plan_alloc INTEGER;
+    v_carry      INTEGER := 0;
+    v_cap        NUMERIC;
+    v_dropped    INTEGER;
+    v_restore    INTEGER;
+    v_period_id  BIGINT;
+    v_floor      INTEGER;
+    v_writeoff   INTEGER;
+    v_delta      INTEGER;
 BEGIN
     IF p_user_id = _GUEST THEN
         SELECT (total - used) INTO v_remaining
@@ -1770,14 +1794,29 @@ BEGIN
         RETURN COALESCE(v_remaining, 0);
     END IF;
 
-    SELECT u.tier INTO v_tier FROM public.users u WHERE u.id = p_user_id;
-    IF v_tier IS NULL THEN
-        v_tier := 'free';
-    END IF;
+    -- ONE row per account (subscriptions_user_id_key UNIQUE (user_id)). NULL environment = a
+    -- row written before 196 or by older code: treated as Production.
+    SELECT * INTO v_sub FROM public.subscriptions WHERE user_id = p_user_id;
+    v_has_sub  := FOUND;
+    v_prod_row := v_has_sub AND COALESCE(v_sub.environment, 'Production') = 'Production';
+
+    -- The CALENDAR allowance. users.tier sizes it unless a PRODUCTION subscriptions row exists:
+    -- then only the complimentary floor does, and a paid allocation comes only from a paid
+    -- period below. (No row: hand-set testers. A Sandbox row: TestFlight / App Review, which
+    -- renew every few minutes and keep the pre-196 sizing.)
+    SELECT u.tier, u.comp_tier INTO v_user_tier, v_comp_tier FROM public.users u WHERE u.id = p_user_id;
+    v_tier := CASE WHEN v_prod_row THEN COALESCE(v_comp_tier, 'free')
+                   ELSE COALESCE(v_user_tier, v_comp_tier, 'free') END;
     SELECT monthly_credits INTO v_alloc FROM public.plan_credits WHERE tier = v_tier;
     IF v_alloc IS NULL THEN
         v_alloc := 0;
     END IF;
+
+    -- A row that can carry a paid period for this account: Production, and a tier above the
+    -- complimentary floor (a comp tier at or above the plan keeps the calendar allowance).
+    v_paid_row := v_prod_row
+        AND (CASE v_sub.tier WHEN 'premium' THEN 2 WHEN 'pro' THEN 1 ELSE 0 END)
+          > (CASE v_tier WHEN 'premium' THEN 2 WHEN 'pro' THEN 1 ELSE 0 END);
 
     v_now_et     := (now() AT TIME ZONE 'America/New_York');
     v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
@@ -1794,31 +1833,272 @@ BEGIN
                 (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
             VALUES (p_user_id, v_alloc, v_alloc, 0, 'grant',
                     to_char(v_now_et, 'YYYY-MM'), v_alloc);
+        END IF;
+        -- Fall through: a paying account's first touch still gets its paid period below.
+        SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
+        IF NOT FOUND THEN
+            RETURN 0;
+        END IF;
+    END IF;
+
+    -- Which paid period the pool is in, and whether the subscription row brings a new one.
+    -- Reads only; nothing is written before the branches below.
+    IF v_row.paid_period_id IS NOT NULL THEN
+        SELECT * INTO v_cur FROM public.subscription_credit_periods WHERE id = v_row.paid_period_id;
+        v_has_cur := FOUND;
+        v_running := v_has_cur AND v_cur.period_end > now();
+    END IF;
+
+    v_new_key := COALESCE(
+        v_paid_row
+        AND v_sub.status = 'active'
+        AND v_sub.current_period_end > now()
+        AND COALESCE(v_sub.original_transaction_id, '') <> ''
+        AND NOT (v_has_cur
+                 AND v_cur.original_transaction_id = v_sub.original_transaction_id
+                 AND v_cur.period_end = v_sub.current_period_end),
+        FALSE);
+    IF v_new_key THEN
+        SELECT * INTO v_seen_row
+          FROM public.subscription_credit_periods p
+         WHERE p.original_transaction_id = v_sub.original_transaction_id
+           AND p.period_end = v_sub.current_period_end;
+        v_seen := FOUND;
+        IF v_seen AND v_seen_row.user_id <> p_user_id THEN
+            RAISE WARNING 'ensure_credit_period: paid period %/% is already granted to user %; user % not granted',
+                v_sub.original_transaction_id, v_sub.current_period_end, v_seen_row.user_id, p_user_id;
+        END IF;
+    END IF;
+
+    -- Granted before and not in force (an older JWS re-submitted, or a period an upgrade
+    -- superseded): never again — UNLESS this account's period was refunded and Apple reversed
+    -- the refund (the row entitles again under the same key), which reinstates it once.
+    v_reinstate := COALESCE(
+        v_new_key AND v_seen AND v_seen_row.user_id = p_user_id
+        AND v_seen_row.revoked_at IS NOT NULL AND NOT v_running,
+        FALSE);
+
+    -- A new period starts when nothing paid is running, or at once when it is a higher tier
+    -- than the running period (an upgrade).
+    v_start_paid := COALESCE(
+        v_new_key AND NOT v_seen
+        AND (NOT v_running
+             OR (CASE v_sub.tier WHEN 'premium' THEN 2 WHEN 'pro' THEN 1 ELSE 0 END)
+              > (CASE v_cur.tier WHEN 'premium' THEN 2 WHEN 'pro' THEN 1 ELSE 0 END)),
+        FALSE);
+
+    -- CALENDAR MODE: no paid period in force and none starting.
+    IF NOT v_has_cur AND NOT v_start_paid AND NOT v_reinstate THEN
+        IF v_row.resets_at IS NULL OR now() >= v_row.resets_at THEN
+            -- 194: ledger what the old period still held BEFORE it is wiped. v_row is the
+            -- pre-UPDATE row, read FOR UPDATE above. GRANTED pool only.
+            v_expired := GREATEST(v_row.total - v_row.used, 0);
+            IF v_expired > 0 THEN
+                INSERT INTO public.credit_transactions
+                    (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+                VALUES (p_user_id, -v_expired, -v_expired, 0, 'monthly_expired', NULL, 0);
+            END IF;
+
+            UPDATE public.user_credits
+               SET total      = v_alloc,
+                   used       = 0,
+                   tier_alloc = v_alloc,
+                   resets_at  = v_next_reset,
+                   updated_at = NOW()
+             WHERE user_id = p_user_id;
+            INSERT INTO public.credit_transactions
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_alloc, v_alloc, 0, 'monthly_reset',
+                    to_char(v_now_et, 'YYYY-MM'), v_alloc);
             RETURN v_alloc;
         END IF;
-        SELECT (total - used) INTO v_remaining
-          FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN COALESCE(v_remaining, v_alloc);
+
+        -- A tier raised mid-month (scripts/set_comp_tier.py, or a Sandbox upgrade) is topped
+        -- up at once, as grant_tier_upgrade did (139); a lowered one keeps what it has until
+        -- the 1st.
+        IF v_alloc > v_row.tier_alloc THEN
+            v_delta := GREATEST(v_alloc - v_row.total, 0);
+            UPDATE public.user_credits
+               SET total      = GREATEST(v_alloc, v_row.total),
+                   tier_alloc = v_alloc,
+                   updated_at = NOW()
+             WHERE user_id = p_user_id;
+            IF v_delta > 0 THEN
+                INSERT INTO public.credit_transactions
+                    (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+                VALUES (p_user_id, v_delta, v_delta, 0, 'tier_upgrade',
+                        to_char(v_now_et, 'YYYY-MM'), GREATEST(v_alloc, v_row.total) - v_row.used);
+            END IF;
+            RETURN (GREATEST(v_alloc, v_row.total) - v_row.used);
+        END IF;
+
+        RETURN (v_row.total - v_row.used);
     END IF;
 
-    IF v_row.resets_at IS NULL OR now() >= v_row.resets_at THEN
+    v_remaining := GREATEST(v_row.total - v_row.used, 0);
+
+    -- REFUND of the period in force: the revoked transaction IS that period (same original
+    -- transaction AND same period end — a refund of an older renewal, or of a later one not yet
+    -- started, leaves it alone). Claw back exactly as revoke_tier_credits (139) does, floored at
+    -- the calendar allowance; mark the period revoked so a reversal can reinstate it.
+    IF v_has_cur AND v_has_sub AND v_sub.status = 'revoked'
+       AND v_sub.original_transaction_id = v_cur.original_transaction_id
+       AND v_sub.current_period_end = v_cur.period_end THEN
+        v_floor    := GREATEST(v_alloc, v_row.used);
+        v_writeoff := GREATEST(v_row.used - v_alloc, 0);
+        v_delta    := v_floor - v_row.total;
+        UPDATE public.subscription_credit_periods
+           SET revoked_at        = now(),
+               revoked_remaining = v_remaining
+         WHERE id = v_cur.id;
         UPDATE public.user_credits
-           SET total      = v_alloc,
-               used       = 0,
-               tier_alloc = v_alloc,
-               resets_at  = v_next_reset,
-               updated_at = NOW()
+           SET total          = v_floor - v_writeoff,
+               used           = used - v_writeoff,
+               tier_alloc     = LEAST(v_row.tier_alloc, v_alloc),
+               resets_at      = v_next_reset,
+               paid_period_id = NULL,
+               updated_at     = NOW()
          WHERE user_id = p_user_id;
+        IF v_delta <> 0 THEN
+            INSERT INTO public.credit_transactions
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_delta, v_delta, 0, 'tier_revoked',
+                    to_char(v_now_et, 'YYYY-MM'), v_floor - v_row.used);
+        END IF;
+        RETURN (v_floor - v_row.used);
+    END IF;
+
+    -- REFUND_REVERSED: reinstate the revoked period once, with exactly what the refund took.
+    -- The calendar leftovers since the refund expire, as on any start of a paid period.
+    IF v_reinstate THEN
+        v_restore := COALESCE(v_seen_row.revoked_remaining, 0);
+        IF v_remaining > 0 THEN
+            INSERT INTO public.credit_transactions
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, -v_remaining, -v_remaining, 0, 'monthly_expired', NULL, 0);
+        END IF;
+        UPDATE public.subscription_credit_periods
+           SET revoked_at        = NULL,
+               revoked_remaining = NULL,
+               reinstated_at     = now()
+         WHERE id = v_seen_row.id;
+        UPDATE public.user_credits
+           SET total          = v_restore,
+               used           = 0,
+               tier_alloc     = v_seen_row.allocation,
+               resets_at      = v_seen_row.period_end,
+               paid_period_id = v_seen_row.id,
+               updated_at     = NOW()
+         WHERE user_id = p_user_id;
+        IF v_restore > 0 THEN
+            INSERT INTO public.credit_transactions
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_restore, v_restore, 0, 'plan_reinstated',
+                    v_seen_row.original_transaction_id, v_restore);
+        END IF;
+        RETURN v_restore;
+    END IF;
+
+    -- A NEW PAID PERIOD: the tier's full allocation; on an upgrade the leftovers carry on top,
+    -- capped at the old allocation times the old period's elapsed share (Apple refunds the
+    -- rest of that period).
+    IF v_start_paid THEN
+        SELECT monthly_credits INTO v_plan_alloc FROM public.plan_credits WHERE tier = v_sub.tier;
+        IF v_plan_alloc IS NULL THEN
+            v_plan_alloc := 0;
+        END IF;
+
+        IF v_running THEN
+            -- floor(allocation x elapsed / span), MULTIPLIED BEFORE DIVIDING: elapsed / span
+            -- first is a repeating NUMERIC (11/24 = 0.4583…) that truncates, and FLOOR then
+            -- turns an exact 550 into 549. Clamped to [0, allocation].
+            v_cap := EXTRACT(EPOCH FROM (now() - v_cur.period_start)) * v_cur.allocation
+                     / NULLIF(EXTRACT(EPOCH FROM (v_cur.period_end - v_cur.period_start)), 0);
+            v_carry := LEAST(v_remaining,
+                             LEAST(GREATEST(FLOOR(COALESCE(v_cap, 0)), 0), v_cur.allocation)::INTEGER);
+        END IF;
+
+        INSERT INTO public.subscription_credit_periods
+            (user_id, original_transaction_id, period_start, period_end, tier, allocation,
+             carried, source)
+        VALUES (p_user_id, v_sub.original_transaction_id,
+                LEAST(v_sub.current_period_end - INTERVAL '1 month', now()),
+                v_sub.current_period_end, v_sub.tier, v_plan_alloc, v_carry,
+                CASE WHEN v_running THEN 'upgrade' ELSE 'new_period' END)
+        ON CONFLICT (original_transaction_id, period_end) DO NOTHING
+        RETURNING id INTO v_period_id;
+
+        IF v_period_id IS NULL THEN
+            -- Another account's call granted this key between the read above and here. Never
+            -- twice: leave this balance alone and say so.
+            RAISE WARNING 'ensure_credit_period: paid period %/% was granted concurrently elsewhere; user % not granted',
+                v_sub.original_transaction_id, v_sub.current_period_end, p_user_id;
+            RETURN v_remaining;
+        END IF;
+
+        v_dropped := v_remaining - v_carry;
+        IF v_dropped > 0 THEN
+            INSERT INTO public.credit_transactions
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, -v_dropped, -v_dropped, 0, 'monthly_expired', NULL, v_carry);
+        END IF;
+
+        UPDATE public.user_credits
+           SET total          = v_plan_alloc + v_carry,
+               used           = 0,
+               tier_alloc     = v_plan_alloc,
+               resets_at      = v_sub.current_period_end,
+               paid_period_id = v_period_id,
+               updated_at     = NOW()
+         WHERE user_id = p_user_id;
+
         INSERT INTO public.credit_transactions
             (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
-        VALUES (p_user_id, v_alloc, v_alloc, 0, 'monthly_reset',
-                to_char(v_now_et, 'YYYY-MM'), v_alloc);
-        RETURN v_alloc;
+        VALUES (p_user_id, v_plan_alloc, v_plan_alloc, 0, 'plan_period',
+                v_sub.original_transaction_id, v_plan_alloc + v_carry);
+
+        RETURN (v_plan_alloc + v_carry);
     END IF;
 
-    RETURN (v_row.total - v_row.used);
+    -- The paid period in force is still running: nothing to do.
+    IF v_running THEN
+        RETURN (v_row.total - v_row.used);
+    END IF;
+
+    -- It is over. HOLD while the row can still carry a paid period and entitles (Apple
+    -- retrying billing, or an expiry not yet recorded); otherwise LAPSE: the leftovers expire
+    -- and the calendar allowance starts now.
+    IF v_paid_row AND v_sub.status IN ('active', 'grace_period', 'billing_retry') THEN
+        RETURN (v_row.total - v_row.used);
+    END IF;
+
+    IF v_remaining > 0 THEN
+        INSERT INTO public.credit_transactions
+            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+        VALUES (p_user_id, -v_remaining, -v_remaining, 0, 'monthly_expired', NULL, 0);
+    END IF;
+    UPDATE public.user_credits
+       SET total          = v_alloc,
+           used           = 0,
+           tier_alloc     = v_alloc,
+           resets_at      = v_next_reset,
+           paid_period_id = NULL,
+           updated_at     = NOW()
+     WHERE user_id = p_user_id;
+    INSERT INTO public.credit_transactions
+        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+    VALUES (p_user_id, v_alloc, v_alloc, 0, 'monthly_reset',
+            to_char(v_now_et, 'YYYY-MM'), v_alloc);
+    RETURN v_alloc;
 END;
 $$;
+
+
+--
+-- Name: FUNCTION ensure_credit_period(p_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ensure_credit_period(p_user_id uuid) IS 'Brings the GRANTED pool up to date (196). Paid: one allocation per Apple paid period, from a PRODUCTION subscriptions row (active, period end in the future) whose tier is above the complimentary floor, each (original_transaction_id, period_end) granted at most once via subscription_credit_periods; a new period waits for the running one to end unless it is a higher tier (an upgrade carries leftovers capped by the old period''s elapsed share); a refunded period is clawed back and marked, and reinstated once if Apple reverses the refund; a lapsed one expires into the calendar allowance. Calendar (Free / complimentary / Sandbox): resets on the ET 1st with 194''s monthly_expired row. Never touches the purchased pool (App Store 3.1.1). Returns the granted remaining. service_role only.';
 
 
 --
@@ -2074,82 +2354,24 @@ CREATE FUNCTION public.grant_tier_upgrade(p_user_id uuid) RETURNS integer
     SET search_path TO 'public', 'pg_temp'
     SET row_security TO 'off'
     AS $$
-DECLARE
-    _GUEST      CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
-    v_tier      public.user_tier;
-    v_alloc     INTEGER;
-    v_row       public.user_credits%ROWTYPE;
-    v_now_et    TIMESTAMP;
-    v_next_reset TIMESTAMPTZ;
-    v_delta     INTEGER;
 BEGIN
-    IF p_user_id = _GUEST THEN
+    IF p_user_id = '00000000-0000-4000-8000-00000000dead'::UUID THEN
         RETURN 0;
     END IF;
-
-    SELECT u.tier INTO v_tier FROM public.users u WHERE u.id = p_user_id;
-    IF v_tier IS NULL THEN
-        v_tier := 'free';
-    END IF;
-    SELECT monthly_credits INTO v_alloc FROM public.plan_credits WHERE tier = v_tier;
-    IF v_alloc IS NULL THEN
-        v_alloc := 0;
-    END IF;
-
-    v_now_et     := (now() AT TIME ZONE 'America/New_York');
-    v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
-                        AT TIME ZONE 'America/New_York';
-
-    SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
-
-    IF NOT FOUND THEN
-        INSERT INTO public.user_credits (user_id, total, used, tier_alloc, resets_at, updated_at)
-        VALUES (p_user_id, v_alloc, 0, v_alloc, v_next_reset, NOW())
-        ON CONFLICT (user_id) DO NOTHING;
-        IF FOUND THEN
-            INSERT INTO public.credit_transactions
-                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
-            VALUES (p_user_id, v_alloc, v_alloc, 0, 'tier_upgrade',
-                    to_char(v_now_et, 'YYYY-MM'), v_alloc);
-            RETURN v_alloc;
-        END IF;
-        SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
-        IF NOT FOUND THEN
-            RETURN 0;
-        END IF;
-    END IF;
-
-    -- THE FIX. This compared against `v_row.total`, which `revoke_tier_credits` overwrites
-    -- with GREATEST(free_alloc, used) — so after an Apple refund of a subscription, a user
-    -- who had spent more than the next plan's allocation looked like they had "already been
-    -- granted" it, and a fresh PAID subscription granted nothing. `tier_alloc` records what
-    -- was actually granted for this period and is reset to the free allocation on a revoke,
-    -- so a genuine re-subscribe is never mistaken for a replay.
-    IF v_alloc <= v_row.tier_alloc THEN
-        RETURN (v_row.total - v_row.used);
-    END IF;
-
-    -- `total` can legitimately already be at or above the allocation (a revoke high-water
-    -- mark, or a mid-period downgrade). Never LOWER it here — this function only ever raises
-    -- the ceiling — but always record the allocation we just granted.
-    v_delta := GREATEST(v_alloc - v_row.total, 0);
-
-    UPDATE public.user_credits
-       SET total      = GREATEST(v_alloc, v_row.total),
-           tier_alloc = v_alloc,
-           updated_at = NOW()
-     WHERE user_id = p_user_id;
-
-    IF v_delta > 0 THEN
-        INSERT INTO public.credit_transactions
-            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
-        VALUES (p_user_id, v_delta, v_delta, 0, 'tier_upgrade',
-                to_char(v_now_et, 'YYYY-MM'), GREATEST(v_alloc, v_row.total) - v_row.used);
-    END IF;
-
-    RETURN (GREATEST(v_alloc, v_row.total) - v_row.used);
+    -- Before 196 this topped the balance up to users.tier's full allocation on any upgrade —
+    -- the first half of the double grant. A paid allocation now comes only from a paid period,
+    -- and a raised complimentary (or Sandbox) tier is topped up by ensure_credit_period's
+    -- calendar branch.
+    RETURN public.ensure_credit_period(p_user_id);
 END;
 $$;
+
+
+--
+-- Name: FUNCTION grant_tier_upgrade(p_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.grant_tier_upgrade(p_user_id uuid) IS 'Kept for its callers (iap_service.reconcile_user_tier, scripts/set_comp_tier.py). Since 196 it runs ensure_credit_period: a paid allocation is granted per Apple paid period there, and a raised complimentary or Sandbox tier is topped up by its calendar branch. service_role only.';
 
 
 --
@@ -2385,12 +2607,14 @@ CREATE FUNCTION public.news_sentiment_daily(p_scope text, p_since date) RETURNS 
     AS $$
     -- ⚠️ Every column is alias-qualified: the RETURNS TABLE names are OUT parameters.
     -- The floor keeps a bad p_since from walking more than the retention window.
+    -- Rows the chart gate keeps off the chart (skip_reason, migration 191) are not counted.
     SELECT l.et_day                                        AS day,
            count(*) FILTER (WHERE l.sentiment = 'bullish') AS bullish,
            count(*) FILTER (WHERE l.sentiment = 'bearish') AS bearish,
            count(*) FILTER (WHERE l.sentiment = 'neutral') AS neutral
       FROM public.news_sentiment_log l
      WHERE l.scope = p_scope
+       AND l.skip_reason IS NULL
        AND l.et_day >= GREATEST(
                COALESCE(p_since, (now() AT TIME ZONE 'America/New_York')::date - 90),
                (now() AT TIME ZONE 'America/New_York')::date - 400
@@ -2404,7 +2628,7 @@ $$;
 -- Name: FUNCTION news_sentiment_daily(p_scope text, p_since date); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) IS 'Per-ET-day counts of bullish / bearish / neutral labels for one scope since p_since (never more than 400 days back). Days with no labelled article are absent, not zero. INVOKER: its only caller is service_role.';
+COMMENT ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) IS 'Per-ET-day counts of bullish / bearish / neutral labels for one scope since p_since (never more than 400 days back), counting only rows the chart gate keeps (skip_reason IS NULL). Days with no counted article are absent, not zero. INVOKER: its only caller is service_role.';
 
 
 --
@@ -2876,13 +3100,17 @@ CREATE FUNCTION public.revoke_tier_credits(p_user_id uuid) RETURNS integer
     SET row_security TO 'off'
     AS $$
 DECLARE
-    _GUEST      CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
-    v_free      INTEGER;
-    v_row       public.user_credits%ROWTYPE;
-    v_floor     INTEGER;
-    v_writeoff  INTEGER;
-    v_delta     INTEGER;
-    v_now_et    TIMESTAMP;
+    _GUEST       CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_free       INTEGER;
+    v_row        public.user_credits%ROWTYPE;
+    v_cur        public.subscription_credit_periods%ROWTYPE;
+    v_sub        public.subscriptions%ROWTYPE;
+    v_has_sub    BOOLEAN := FALSE;
+    v_floor      INTEGER;
+    v_writeoff   INTEGER;
+    v_delta      INTEGER;
+    v_now_et     TIMESTAMP;
+    v_next_reset TIMESTAMPTZ;
 BEGIN
     IF p_user_id = _GUEST THEN
         RETURN 0;
@@ -2898,6 +3126,32 @@ BEGIN
         RETURN 0;
     END IF;
 
+    v_now_et     := (now() AT TIME ZONE 'America/New_York');
+    v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
+                        AT TIME ZONE 'America/New_York';
+
+    -- 196: in paid mode, claw back only when the refunded transaction IS the period in force.
+    -- ensure_credit_period (run first by iap_service) has normally done it already and left
+    -- paid mode; reaching here still in paid mode means the refund was for another period.
+    IF v_row.paid_period_id IS NOT NULL THEN
+        SELECT * INTO v_cur FROM public.subscription_credit_periods WHERE id = v_row.paid_period_id;
+        SELECT * INTO v_sub FROM public.subscriptions WHERE user_id = p_user_id;
+        v_has_sub := FOUND;
+        IF NOT COALESCE(v_has_sub
+                        AND v_sub.status = 'revoked'
+                        AND v_sub.original_transaction_id = v_cur.original_transaction_id
+                        AND v_sub.current_period_end = v_cur.period_end, FALSE) THEN
+            RAISE WARNING 'revoke_tier_credits: user % - the refunded transaction is not the paid period in force (%/%); nothing clawed back',
+                p_user_id, v_cur.original_transaction_id, v_cur.period_end;
+            RETURN (v_row.total - v_row.used);
+        END IF;
+        UPDATE public.subscription_credit_periods
+           SET revoked_at        = now(),
+               revoked_remaining = GREATEST(v_row.total - v_row.used, 0)
+         WHERE id = v_cur.id
+           AND revoked_at IS NULL;
+    END IF;
+
     v_floor := GREATEST(v_free, v_row.used);
 
     -- Write off the spend that the refunded subscription paid for, exactly as section 5 does
@@ -2909,23 +3163,29 @@ BEGIN
     v_writeoff := GREATEST(v_row.used - v_free, 0);
 
     -- Idempotent: a replayed REFUND finds total already at the floor. `tier_alloc` is still
-    -- written, because the first delivery may have landed before this migration.
+    -- written, because the first delivery may have landed before this migration. 196: a
+    -- refund also ends paid mode, so the pool follows the ET calendar from now on.
     IF v_row.total <= v_floor AND v_writeoff = 0 THEN
         UPDATE public.user_credits
-           SET tier_alloc = LEAST(v_row.tier_alloc, v_free),
-               updated_at = NOW()
+           SET tier_alloc     = LEAST(v_row.tier_alloc, v_free),
+               resets_at      = CASE WHEN v_row.paid_period_id IS NULL THEN resets_at
+                                     ELSE v_next_reset END,
+               paid_period_id = NULL,
+               updated_at     = NOW()
          WHERE user_id = p_user_id;
         RETURN (v_row.total - v_row.used);
     END IF;
 
-    v_delta  := v_floor - v_row.total;          -- <= 0, the change in `remaining`
-    v_now_et := (now() AT TIME ZONE 'America/New_York');
+    v_delta := v_floor - v_row.total;          -- <= 0, the change in `remaining`
 
     UPDATE public.user_credits
-       SET total      = v_floor - v_writeoff,
-           used       = used - v_writeoff,
-           tier_alloc = LEAST(v_row.tier_alloc, v_free),
-           updated_at = NOW()
+       SET total          = v_floor - v_writeoff,
+           used           = used - v_writeoff,
+           tier_alloc     = LEAST(v_row.tier_alloc, v_free),
+           resets_at      = CASE WHEN v_row.paid_period_id IS NULL THEN resets_at
+                                 ELSE v_next_reset END,
+           paid_period_id = NULL,
+           updated_at     = NOW()
      WHERE user_id = p_user_id;
 
     IF v_delta <> 0 THEN
@@ -2938,6 +3198,13 @@ BEGIN
     RETURN (v_floor - v_row.used);
 END;
 $$;
+
+
+--
+-- Name: FUNCTION revoke_tier_credits(p_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.revoke_tier_credits(p_user_id uuid) IS 'Apple REFUND/REVOKE of a subscription: claws back the unspent granted pool to GREATEST(free allocation, used) and writes off the spend (139), then leaves paid mode (196: paid_period_id NULL, resets_at the next ET 1st). In paid mode it acts only when the refunded transaction is the period in force, which it marks revoked; otherwise it logs a WARNING and changes nothing. Never touches the purchased pool. service_role only.';
 
 
 --
@@ -7657,6 +7924,13 @@ CREATE TABLE public.credit_transactions (
 
 
 --
+-- Name: COLUMN credit_transactions.balance_after; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.credit_transactions.balance_after IS 'The balance after this row, as its WRITER saw it. Two conventions, kept for history: spend_credits / refund_credits / add_purchased_credits / revoke_purchased_credits / the tester seed write spendable (both pools); the granted-pool writers (grant, monthly_reset, monthly_expired, tier_upgrade, tier_revoked) write the GRANTED remaining only. Nothing reads it — the balance is user_credits.spendable, and SUM(delta) ties out to it for history written after migration 194.';
+
+
+--
 -- Name: COLUMN credit_transactions.granted_delta; Type: COMMENT; Schema: public; Owner: -
 --
 
@@ -8785,10 +9059,15 @@ CREATE TABLE public.news_sentiment_log (
     source text DEFAULT 'live'::text NOT NULL,
     labelled_at timestamp with time zone DEFAULT now() NOT NULL,
     model text,
+    labeller smallint,
+    skip_reason text,
+    title_hash uuid,
     CONSTRAINT news_sentiment_log_confidence_check CHECK (((confidence >= 0) AND (confidence <= 100))),
+    CONSTRAINT news_sentiment_log_labeller_check CHECK (((labeller IS NULL) OR ((labeller >= 1) AND (labeller <= 100)))),
     CONSTRAINT news_sentiment_log_model_check CHECK (((model IS NULL) OR (char_length(model) <= 80))),
     CONSTRAINT news_sentiment_log_scope_check CHECK (((char_length(scope) >= 1) AND (char_length(scope) <= 32))),
     CONSTRAINT news_sentiment_log_sentiment_check CHECK ((sentiment = ANY (ARRAY['bullish'::text, 'bearish'::text, 'neutral'::text]))),
+    CONSTRAINT news_sentiment_log_skip_reason_check CHECK (((skip_reason IS NULL) OR (skip_reason = ANY (ARRAY['off_topic'::text, 'holdings_filing'::text, 'solicitation'::text, 'duplicate_title'::text])))),
     CONSTRAINT news_sentiment_log_source_check CHECK ((source = ANY (ARRAY['live'::text, 'seed'::text, 'backfill'::text])))
 );
 
@@ -8812,6 +9091,27 @@ COMMENT ON COLUMN public.news_sentiment_log.article_key IS 'md5(external_id)::uu
 --
 
 COMMENT ON COLUMN public.news_sentiment_log.model IS 'The model that produced the label (news_llm.news_model_name()); NULL for rows written before migration 181.';
+
+
+--
+-- Name: COLUMN news_sentiment_log.labeller; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_sentiment_log.labeller IS 'Which labelling rules wrote the row (news_sentiment_trend_service.TONE_LABELLER_VERSION): 2 = the scope-named question with a relevance answer and the chart gate (2026-10-10). NULL = earlier rules; migration 192 deletes those for re-labellable scopes and re-queues their backfill.';
+
+
+--
+-- Name: COLUMN news_sentiment_log.skip_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_sentiment_log.skip_reason IS 'Why the chart gate keeps this article OFF the News Tone chart (news_sentiment_trend_service.tone_skip_reason): off_topic / holdings_filing / solicitation / duplicate_title; NULL = counted. Stored so the verdict is first-label-wins like the label (the backfill never re-asks).';
+
+
+--
+-- Name: COLUMN news_sentiment_log.title_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_sentiment_log.title_hash IS 'md5 of the normalised headline (news_tone_filters.title_key) as a uuid — never the text. A counted row with the same scope, ET day and hash makes a later copy a duplicate_title skip.';
 
 
 --
@@ -9115,6 +9415,7 @@ CREATE TABLE public.research_reports (
     pdf_status text DEFAULT 'pending'::text,
     pdf_generated_at timestamp with time zone,
     processing_started_at timestamp with time zone,
+    refund_outcome text,
     CONSTRAINT research_reports_fair_value_nonneg CHECK (((fair_value_estimate IS NULL) OR (fair_value_estimate >= (0)::numeric))),
     CONSTRAINT research_reports_overall_score_check CHECK (((overall_score >= (0)::numeric) AND (overall_score <= (100)::numeric))),
     CONSTRAINT research_reports_progress_check CHECK (((progress >= 0) AND (progress <= 100))),
@@ -9183,6 +9484,13 @@ COMMENT ON COLUMN public.research_reports.fair_value_estimate IS 'Estimated fair
 --
 
 COMMENT ON COLUMN public.research_reports.ticker_report_data IS 'Full TickerReportResponse JSON from multi-agent research. Matches the exact schema expected by iOS TickerReportView.';
+
+
+--
+-- Name: COLUMN research_reports.refund_outcome; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.research_reports.refund_outcome IS 'What the refund behind is_refunded actually did. is_refunded is the one-shot claim, set BEFORE refund_credits runs; this is written AFTER, best-effort, by research_reconciliation_service.record_refund_outcome — never inside the is_refunded compare-and-set, and an unconfirmed label never overwrites a confirmed one. refunded / already_refunded / guest / invalid / legacy (charged under the bare-ticker ref before per-report refs, so it cannot be re-checked) / manual (corrected by hand) = the credits are back. rpc_failed = the round trip failed on the unique per-report ref; the reconciliation loop retries it ONCE on that ref -> a settled outcome or retry_rpc_failed. legacy_rpc_failed = failed on the legacy bare-ticker ref, never retried. Anything else (no_matching_debit, capped_to_zero, partial, no_credits_row, unknown, retry_rpc_failed) = still owed: a REFUND LEAK was paged; fix by hand, then set manual. NULL on a claimed row = the stamp never landed; served as not confirmed and re-checked on its per-report ref by the retry pass after a 30-minute grace. The Reports list serves this as refund_confirmed. See migration 195.';
 
 
 --
@@ -9384,6 +9692,58 @@ CREATE TABLE public.stock_fundamentals_cache (
 
 
 --
+-- Name: subscription_credit_periods; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.subscription_credit_periods (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    original_transaction_id text NOT NULL,
+    period_start timestamp with time zone NOT NULL,
+    period_end timestamp with time zone NOT NULL,
+    tier public.user_tier NOT NULL,
+    allocation integer NOT NULL,
+    carried integer DEFAULT 0 NOT NULL,
+    source text NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_at timestamp with time zone,
+    revoked_remaining integer,
+    reinstated_at timestamp with time zone,
+    CONSTRAINT subscription_credit_periods_allocation_nonneg CHECK ((allocation >= 0)),
+    CONSTRAINT subscription_credit_periods_carried_nonneg CHECK ((carried >= 0)),
+    CONSTRAINT subscription_credit_periods_revoked_remaining_nonneg CHECK (((revoked_remaining IS NULL) OR (revoked_remaining >= 0))),
+    CONSTRAINT subscription_credit_periods_source CHECK ((source = ANY (ARRAY['new_period'::text, 'upgrade'::text, 'backfill'::text]))),
+    CONSTRAINT subscription_credit_periods_span CHECK ((period_end > period_start))
+);
+
+
+--
+-- Name: TABLE subscription_credit_periods; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.subscription_credit_periods IS 'Every Apple paid subscription period whose credit allocation was granted, keyed (original_transaction_id, period_end) UNIQUE so a period is granted at most once per account (the rows go with the account). Written only by ensure_credit_period, revoke_tier_credits (revoked_at) and 196''s backfill; user_credits.paid_period_id points at the one in force. A key granted before and not in force is never re-applied, so an older JWS re-submitted later cannot re-grant; a revoked one is reinstated once, with revoked_remaining, when Apple reverses the refund. period_start is current_period_end - 1 month (the subscriptions row stores no start). carried = unused credits kept on an upgrade, capped by the old period''s elapsed share. SERVICE-ROLE ONLY. Migration 196.';
+
+
+--
+-- Name: subscription_credit_periods_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.subscription_credit_periods_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: subscription_credit_periods_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.subscription_credit_periods_id_seq OWNED BY public.subscription_credit_periods.id;
+
+
+--
 -- Name: subscriptions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9397,7 +9757,8 @@ CREATE TABLE public.subscriptions (
     current_period_end timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    last_event_at timestamp with time zone
+    last_event_at timestamp with time zone,
+    environment text
 );
 
 
@@ -9406,6 +9767,13 @@ CREATE TABLE public.subscriptions (
 --
 
 COMMENT ON COLUMN public.subscriptions.last_event_at IS 'Apple''s signedDate from the most recently APPLIED App Store Server Notification. The ordering key for out-of-order redeliveries — NOT expiresDate, which describes which period a transaction is about rather than when Apple asserted it. NULL for rows last written by the client verify path, which carries no signedDate. See migration 114.';
+
+
+--
+-- Name: COLUMN subscriptions.environment; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.subscriptions.environment IS 'Apple environment of the transaction last applied to the row (Production, Sandbox, Xcode, LocalTesting), written by iap_service.apply_transaction. Only a Production row - or NULL, a row written before 196 or by older code - starts a paid credit period: Sandbox / TestFlight renew every few minutes, so their rows keep the calendar allowance sized by users.tier, as every row was before 196. Migration 196.';
 
 
 --
@@ -9908,6 +10276,7 @@ CREATE TABLE public.user_credits (
     purchased_used integer DEFAULT 0 NOT NULL,
     spendable integer GENERATED ALWAYS AS (((total - used) + (purchased_total - purchased_used))) STORED,
     tier_alloc integer DEFAULT 0 NOT NULL,
+    paid_period_id bigint,
     CONSTRAINT user_credits_purchased_total_nonneg CHECK ((purchased_total >= 0)),
     CONSTRAINT user_credits_purchased_used_le_total CHECK ((purchased_used <= purchased_total)),
     CONSTRAINT user_credits_purchased_used_nonneg CHECK ((purchased_used >= 0)),
@@ -9956,7 +10325,14 @@ COMMENT ON COLUMN public.user_credits.spendable IS 'Auto-computed: (total - used
 -- Name: COLUMN user_credits.tier_alloc; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.user_credits.tier_alloc IS 'Monthly allocation actually granted for the CURRENT period. Written by ensure_credit_period (on reset), grant_tier_upgrade (on grant) and revoke_tier_credits (down to the free allocation). Read only by grant_tier_upgrade''s replay guard. Exists because `total` is a high-water mark after a revoke, not an allocation, and using it as the guard made a paid re-subscribe grant nothing. See migration 139.';
+COMMENT ON COLUMN public.user_credits.tier_alloc IS 'Allocation granted for the CURRENT period (paid: the plan allocation, excluding any carried credits; calendar: the Free, complimentary or Sandbox allocation). Written by ensure_credit_period and revoke_tier_credits. Read by ensure_credit_period''s calendar branch to top up a raised tier mid-month, and by 196''s backfill. See migrations 139 and 196.';
+
+
+--
+-- Name: COLUMN user_credits.paid_period_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_credits.paid_period_id IS 'The subscription_credit_periods row the GRANTED pool belongs to. NULL = calendar mode: Free, complimentary or Sandbox allowance, reset on the ET 1st. Set only by ensure_credit_period (a new or reinstated paid period) and 196''s backfill; cleared on a lapse or a refund. resets_at is the paid period''s end while it is set. Migration 196.';
 
 
 --
@@ -10116,7 +10492,7 @@ COMMENT ON TABLE public.users IS 'Core user profiles. id = auth.users.id (direct
 -- Name: COLUMN users.tier; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.users.tier IS 'Effective tier the app gates on. Written by iap_service.reconcile_user_tier as max(winning subscriptions tier, users.comp_tier); also set by scripts/seed_testflight_testers.py and scripts/set_comp_tier.py for complimentary accounts. ensure_credit_period / grant_tier_upgrade read it for the monthly allocation.';
+COMMENT ON COLUMN public.users.tier IS 'Effective tier the app gates FEATURES on. Written by iap_service.reconcile_user_tier as max(winning subscriptions tier, users.comp_tier); also set by scripts/seed_testflight_testers.py and scripts/set_comp_tier.py for complimentary accounts. Since migration 196 it never sizes a PRODUCTION paid credit allocation (that comes from the subscription''s paid period); ensure_credit_period reads it only for the calendar allowance of an account with no Production subscriptions row (hand-set testers, Sandbox / TestFlight subscribers).';
 
 
 --
@@ -10892,6 +11268,13 @@ ALTER TABLE ONLY public.price_catalyst_audit ALTER COLUMN id SET DEFAULT nextval
 --
 
 ALTER TABLE ONLY public.signals_cache ALTER COLUMN id SET DEFAULT nextval('public.signals_cache_id_seq'::regclass);
+
+
+--
+-- Name: subscription_credit_periods id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscription_credit_periods ALTER COLUMN id SET DEFAULT nextval('public.subscription_credit_periods_id_seq'::regclass);
 
 
 --
@@ -12167,6 +12550,22 @@ ALTER TABLE ONLY public.stock_fundamentals_cache
 
 ALTER TABLE ONLY public.stock_fundamentals_cache
     ADD CONSTRAINT stock_fundamentals_cache_ticker_key UNIQUE (ticker);
+
+
+--
+-- Name: subscription_credit_periods subscription_credit_periods_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscription_credit_periods
+    ADD CONSTRAINT subscription_credit_periods_key UNIQUE (original_transaction_id, period_end);
+
+
+--
+-- Name: subscription_credit_periods subscription_credit_periods_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscription_credit_periods
+    ADD CONSTRAINT subscription_credit_periods_pkey PRIMARY KEY (id);
 
 
 --
@@ -13748,6 +14147,13 @@ CREATE INDEX idx_news_sentiment_log_scope_day ON public.news_sentiment_log USING
 
 
 --
+-- Name: idx_news_sentiment_log_scope_title; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_news_sentiment_log_scope_title ON public.news_sentiment_log USING btree (scope, title_hash) WHERE (title_hash IS NOT NULL);
+
+
+--
 -- Name: idx_notification_events_category_sent; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13937,6 +14343,13 @@ COMMENT ON INDEX public.idx_research_reports_cache IS 'Partial index for ticker 
 
 
 --
+-- Name: idx_research_reports_refund_retry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_research_reports_refund_retry ON public.research_reports USING btree (created_at) WHERE (is_refunded AND ((refund_outcome IS NULL) OR (refund_outcome = 'rpc_failed'::text)));
+
+
+--
 -- Name: idx_revenue_breakdown_cache_ticker; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13997,6 +14410,13 @@ CREATE INDEX idx_social_mentions_ticker_date ON public.social_mentions_history U
 --
 
 CREATE INDEX idx_stock_fundamentals_cache_ticker ON public.stock_fundamentals_cache USING btree (ticker);
+
+
+--
+-- Name: idx_subscription_credit_periods_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_subscription_credit_periods_user ON public.subscription_credit_periods USING btree (user_id, period_end DESC);
 
 
 --
@@ -14123,6 +14543,13 @@ CREATE INDEX idx_updates_insight_state_due ON public.updates_insight_state USING
 --
 
 CREATE INDEX idx_updates_insight_state_watch ON public.updates_insight_state USING btree (watch_count DESC);
+
+
+--
+-- Name: idx_user_credits_paid_period; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_credits_paid_period ON public.user_credits USING btree (paid_period_id) WHERE (paid_period_id IS NOT NULL);
 
 
 --
@@ -14897,6 +15324,14 @@ ALTER TABLE ONLY public.price_alerts
 
 
 --
+-- Name: subscription_credit_periods subscription_credit_periods_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscription_credit_periods
+    ADD CONSTRAINT subscription_credit_periods_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: subscriptions subscriptions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14918,6 +15353,14 @@ ALTER TABLE ONLY public.theme_rotation_decisions
 
 ALTER TABLE ONLY public.trillion_club_stakes
     ADD CONSTRAINT trillion_club_stakes_company_slug_fkey FOREIGN KEY (company_slug) REFERENCES public.trillion_club_companies(slug) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- Name: user_credits user_credits_paid_period_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_credits
+    ADD CONSTRAINT user_credits_paid_period_id_fkey FOREIGN KEY (paid_period_id) REFERENCES public.subscription_credit_periods(id) ON DELETE SET NULL;
 
 
 --
@@ -16275,6 +16718,19 @@ ALTER TABLE public.stock_fundamentals_cache ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY stock_fundamentals_cache_service_write ON public.stock_fundamentals_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: subscription_credit_periods; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.subscription_credit_periods ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: subscription_credit_periods subscription_credit_periods_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY subscription_credit_periods_service_all ON public.subscription_credit_periods TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -18959,6 +19415,20 @@ GRANT ALL ON TABLE public.stock_fundamentals_cache TO service_role;
 
 
 --
+-- Name: TABLE subscription_credit_periods; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.subscription_credit_periods TO service_role;
+
+
+--
+-- Name: SEQUENCE subscription_credit_periods_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.subscription_credit_periods_id_seq TO service_role;
+
+
+--
 -- Name: TABLE subscriptions; Type: ACL; Schema: public; Owner: -
 --
 
@@ -19245,8 +19715,8 @@ GRANT USAGE ON SEQUENCE realtime.subscription_id_seq TO service_role;
 REVOKE ALL ON TABLE storage.buckets FROM supabase_storage_admin;
 GRANT ALL ON TABLE storage.buckets TO supabase_storage_admin WITH GRANT OPTION;
 GRANT ALL ON TABLE storage.buckets TO service_role;
-GRANT ALL ON TABLE storage.buckets TO authenticated;
-GRANT ALL ON TABLE storage.buckets TO anon;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE storage.buckets TO authenticated;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE storage.buckets TO anon;
 GRANT ALL ON TABLE storage.buckets TO postgres WITH GRANT OPTION;
 
 
@@ -19255,8 +19725,8 @@ GRANT ALL ON TABLE storage.buckets TO postgres WITH GRANT OPTION;
 --
 
 GRANT ALL ON TABLE storage.buckets_analytics TO service_role;
-GRANT ALL ON TABLE storage.buckets_analytics TO authenticated;
-GRANT ALL ON TABLE storage.buckets_analytics TO anon;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE storage.buckets_analytics TO authenticated;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE storage.buckets_analytics TO anon;
 
 
 --
@@ -19264,8 +19734,8 @@ GRANT ALL ON TABLE storage.buckets_analytics TO anon;
 --
 
 GRANT SELECT ON TABLE storage.buckets_vectors TO service_role;
-GRANT SELECT ON TABLE storage.buckets_vectors TO authenticated;
 GRANT SELECT ON TABLE storage.buckets_vectors TO anon;
+GRANT SELECT ON TABLE storage.buckets_vectors TO authenticated;
 
 
 --
@@ -19275,8 +19745,8 @@ GRANT SELECT ON TABLE storage.buckets_vectors TO anon;
 REVOKE ALL ON TABLE storage.objects FROM supabase_storage_admin;
 GRANT ALL ON TABLE storage.objects TO supabase_storage_admin WITH GRANT OPTION;
 GRANT ALL ON TABLE storage.objects TO service_role;
-GRANT ALL ON TABLE storage.objects TO authenticated;
-GRANT ALL ON TABLE storage.objects TO anon;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE storage.objects TO authenticated;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE storage.objects TO anon;
 GRANT ALL ON TABLE storage.objects TO postgres WITH GRANT OPTION;
 
 
@@ -19303,8 +19773,8 @@ GRANT SELECT ON TABLE storage.s3_multipart_uploads_parts TO anon;
 --
 
 GRANT SELECT ON TABLE storage.vector_indexes TO service_role;
-GRANT SELECT ON TABLE storage.vector_indexes TO authenticated;
 GRANT SELECT ON TABLE storage.vector_indexes TO anon;
+GRANT SELECT ON TABLE storage.vector_indexes TO authenticated;
 
 
 --
@@ -19539,5 +20009,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ZeTPGBfGG6aT8CzF0YySPGJVxlhht8nUkPjWwE0T6ygRuWDkw4bihhlYbQcHZmF
+\unrestrict dskx7c0V5e3edwphs6ORLNlIY9GSNl97WoNirDZ9QtHEY7OSuOeyL6YFI4ei8p3
 

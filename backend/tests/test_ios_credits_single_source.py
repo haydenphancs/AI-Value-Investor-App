@@ -35,9 +35,12 @@ What is pinned (iOS source; `ResearchViewModel.swift` and `AppState.swift` unles
 15. The settle re-read is delayed, coalesced, RE-ARMED by a call that lands while it is pending
     (one extra full-delay round, bounded) and session-gated.
 16. No balance lands for a session that had ended: a read SENT or ANSWERED while signed out is
-    dropped by both writers. `AuthService.signOut` keeps the ended account's token armed through
-    its unregister + logout round trips, so a reload the sign-out triggers reads THAT account's
-    balance under the new identity generation — the identity fence cannot see it.
+    dropped by both writers. Sign-out used to keep the ended account's token armed through its
+    unregister + logout round trips, so a reload the sign-out triggered read THAT account's
+    balance under the new identity generation — the identity fence cannot see it. Since
+    2026-10-13 `AuthService.beginSignOut()` disarms synchronously, before the identity moves
+    (`test_signout_and_session_hygiene.py` §5); both drops stay for a refresh in flight that
+    re-arms the ended token until sign-out's backstop clears it.
 
 House style (`.claude/rules/testing.md` §3): comments are stripped before every assertion, every
 scan is brace-bound to its declaration and asserts presence before slicing, and the in-memory

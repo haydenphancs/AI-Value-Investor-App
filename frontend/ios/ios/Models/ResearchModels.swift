@@ -29,25 +29,9 @@ private enum ResearchFormatters {
         return f
     }()
 
-    /// `"MMM d, yyyy"` for the monthly credit reset — additionally pinned to ET.
-    ///
-    /// SEPARATE FROM THE ABOVE ON PURPOSE. `resets_at` is not a plain instant: it is written
-    /// by `ensure_credit_period` as `date_trunc('month', now() AT TIME ZONE 'America/New_York')
-    /// + 1 month`, i.e. midnight EASTERN, which arrives as `…T04:00:00+00:00`. Rendering that
-    /// in the device's zone moves it to the PREVIOUS calendar day for everyone west of ET, so
-    /// the Research credits card said "Renews Aug 31" while Profile — which pins ET already —
-    /// said "Resets on Sep 1", in the same session, about the same field.
-    ///
-    /// Keep this in step with `ProfileViewModel.resetDateFormatter`; they render the same
-    /// backend value and must never disagree.
-    static let creditResetFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.calendar = Calendar(identifier: .gregorian)
-        f.timeZone = TimeZone(identifier: "America/New_York")
-        f.dateFormat = "MMM d, yyyy"
-        return f
-    }()
+    // The credit renewal day is formatted by `CreditRenewalDate` (Core/Utilities), shared with
+    // Account so the two never disagree: ET for the calendar allowance's 1st, the device's zone
+    // for a subscriber's Apple renewal day (migration 196).
 }
 
 // MARK: - Research Tab
@@ -442,9 +426,10 @@ struct CreditBalance {
     /// Credits that actually expire at `renewalDate`.
     var monthlyCredits: Int { max(credits - purchasedCredits, 0) }
 
-    /// `"Nov 1, 2026"` — the reset day, pinned to ET (see `creditResetFormatter`).
+    /// `"Nov 1, 2026"` — the renewal day (`CreditRenewalDate`: ET for the calendar 1st, the
+    /// device's zone for a subscriber's Apple renewal day).
     private var renewalDateText: String {
-        ResearchFormatters.creditResetFormatter.string(from: renewalDate)
+        CreditRenewalDate.long(renewalDate)
     }
 
     /// "Renews <date>" — or `nil` when NOTHING here renews.
@@ -459,14 +444,14 @@ struct CreditBalance {
         return "Renews \(renewalDateText)"
     }
 
-    /// "Monthly credits reset <date>" — when the monthly allowance comes back, for a balance
+    /// "Monthly credits renew <date>" — when the monthly allowance comes back, for a balance
     /// with NO monthly credits left (`formattedRenewalDate` is nil there). Without it a user
     /// at 0 was told "No credits remaining" and nothing about when that ends. It names the
     /// MONTHLY pool only, so it never implies purchased credits expire (Guideline 3.1.1). nil
     /// when the date is a placeholder rather than the server's.
     var monthlyResetSummary: String? {
         guard renewalDateIsKnown else { return nil }
-        return "Monthly credits reset \(renewalDateText)"
+        return "Monthly credits renew \(renewalDateText)"
     }
 
     /// "N never expire" — the honest counterpart, or nil when there is no purchased balance.
@@ -502,7 +487,7 @@ struct CreditBalance {
 }
 
 private extension String {
-    /// "Monthly credits reset Nov 1" → "monthly credits reset Nov 1": only the first letter, so
+    /// "Monthly credits renew Nov 1" → "monthly credits renew Nov 1": only the first letter, so
     /// a month name keeps its capital (`lowercased()` would not).
     var lowercasedFirstLetter: String {
         guard let head = first else { return self }

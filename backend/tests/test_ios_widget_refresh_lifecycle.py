@@ -7,9 +7,11 @@ XCTest target, and each failure leaves a widget that renders — just for the wr
 never again:
 
   1. **Sign-out re-publish.** `credentialReady` opens once per process and never closes, and
-     `AuthService.signOut` keeps the bearer armed through two awaited calls. A foreground in
-     that window fetched the ex-user's holdings, wrote them onto a signed-out Home Screen and
-     minted a fresh 90-day widget token (auth.md §8a). Fixed by `sessionOpen`, which
+     sign-out kept the bearer armed through two awaited calls. A foreground in that window
+     fetched the ex-user's holdings, wrote them onto a signed-out Home Screen and minted a fresh
+     90-day widget token (auth.md §8a). (`AuthService.beginSignOut()` now disarms synchronously;
+     a refresh in flight can still re-arm the ended token until sign-out's backstop clears it,
+     so the gate stays.) Fixed by `sessionOpen`, which
      `clearForEndedSession` closes and only `AppState` reopens — after the account-switch
      discard, or the new account's forced refresh is dropped.
   2. **Orphaned run.** A run cancelled by sign-out finished after the next session's run had
@@ -28,7 +30,7 @@ never again:
      sign-in the in-memory account-switch guard could not see.
   7. **Settle after a sign-out.** A sign-out landing while `onAuthenticated` awaited the StoreKit
      drain / credits closed the gate, and `settleWidgetSession` then REOPENED it and forced a run
-     under the bearer `AuthService.signOut` still had armed. Fixed by the identity captured at
+     under the bearer sign-out still had armed. Fixed by the identity captured at
      the top of `establishAuthenticatedSession` and fenced in the helper.
   8. **Fences that only MENTIONED the epoch.** The epoch guards looked for the text
      `epoch == sessionEpoch` before the FIRST write: an `await` moved between the two writes, or a
@@ -247,7 +249,7 @@ def _check_clear_closes_the_session(s: dict[str, str]) -> None:
     clear = _block(svc, "func clearForEndedSession()")
     assert re.search(r"\bsessionOpen\s*=\s*false\b", clear), (
         "clearForEndedSession leaves the session gate open — every trigger can still fetch "
-        "while AuthService.signOut has the ex-user's bearer armed"
+        "while the ex-user's bearer can be re-armed (a refresh in flight at sign-out)"
     )
     for token in ("sessionEpoch &+= 1", "contentDebounce?.cancel()", "forcedRefreshPending = false"):
         assert token in clear, f"clearForEndedSession no longer does `{token}`"
@@ -575,7 +577,7 @@ def _check_on_authenticated_opens_the_session(s: dict[str, str]) -> None:
 def _check_settle_refuses_a_moved_identity(s: dict[str, str]) -> None:
     """A sign-out tapped while `onAuthenticated` awaits the StoreKit drain / credits (or the
     guest claim before it) closes the widget gate synchronously — and settle used to REOPEN it
-    unconditionally and force a run under the bearer `AuthService.signOut` still had armed: the
+    unconditionally and force a run under the bearer sign-out still had armed: the
     ex-user's holdings back on a signed-out Home Screen, a fresh 90-day widget token, and the
     gate left open for the rest of the process."""
     app = s["app"]

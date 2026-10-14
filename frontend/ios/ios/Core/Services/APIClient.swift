@@ -15,6 +15,7 @@
 
 import Foundation
 import OSLog
+import Synchronization
 
 // MARK: - API Client
 
@@ -27,7 +28,20 @@ actor APIClient {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
-    private var authToken: String?
+
+    /// The armed access token. Kept behind a `Mutex` rather than as plain actor state for one
+    /// caller: sign-out disarms it SYNCHRONOUSLY (`disarmAuthToken()`), on the main actor, before
+    /// `AppState.signOut()` changes the identity. Through an actor hop, the reloads that change
+    /// sets off could be built first and go out with the ended account's token.
+    ///
+    /// Touched only by the `authToken` accessors and `disarmAuthToken()`; every read and write
+    /// inside the actor goes through `authToken`.
+    nonisolated private let armedToken = Mutex<String?>(nil)
+
+    private var authToken: String? {
+        get { armedToken.withLock { $0 } }
+        set { armedToken.withLock { $0 = newValue } }
+    }
 
     /// Refreshes the auth token on a 401. Wired from the app root to
     /// `AuthService.refreshToken()`. Returns a `TokenRefreshOutcome`; see there for what each
@@ -81,6 +95,22 @@ actor APIClient {
 
     func setAuthToken(_ token: String?) {
         self.authToken = token
+    }
+
+    /// Disarm the client and hand back the token it held — SYNCHRONOUSLY, callable from the main
+    /// actor without a hop, and as one swap under the lock, so no request can be built with the
+    /// token between the read and the clear.
+    ///
+    /// For sign-out only (`AuthService.beginSignOut()`): it must stop every ordinary request from
+    /// carrying the ended session's credential before `AppState.signOut()` changes the identity,
+    /// yet still needs that credential for its own last two calls (see
+    /// `requestAuthenticated(as:endpoint:)`). It only ever clears; arming stays `setAuthToken`'s.
+    nonisolated func disarmAuthToken() -> String? {
+        armedToken.withLock { token in
+            let endedToken = token
+            token = nil
+            return endedToken
+        }
     }
 
     /// Install the token-refresh hook (called once from the app root after auth is
@@ -542,6 +572,53 @@ actor APIClient {
         }
     }
 
+    // MARK: - Explicit-credential requests (sign-out)
+
+    /// Send `endpoint` authenticated by `token` — a credential the CALLER holds, never the armed
+    /// one — and decode the response. The client is not armed with it, before or after.
+    ///
+    /// Exists for sign-out's last two calls (detach the APNs token, `POST /auth/logout`). Sign-out
+    /// disarms the client first (`disarmAuthToken()`), so the reloads its identity change sets off
+    /// go out tokenless instead of as the ended account; these two still have to present that
+    /// account's credential, and re-arming the shared client to send them would reopen the window.
+    ///
+    /// One attempt, nothing else: no pre-flight refresh, no 401 → refresh → retry, no 5xx retry, no
+    /// failover. Each of those acts on the SHARED session — a refresh rewrites the Keychain and
+    /// re-arms the client, `handleUnrecoverableAuthFailure` disarms whatever is armed by then (a
+    /// newer session's token after a quick re-sign-in) — for a credential that is no longer the
+    /// session's. A failure is the caller's to log.
+    func requestAuthenticated<T: Decodable>(
+        as token: String,
+        endpoint: APIEndpoint,
+        responseType: T.Type
+    ) async throws -> T {
+        let data = try await sendAuthenticated(as: token, endpoint: endpoint)
+        return try decodeBody(responseType, from: data)
+    }
+
+    /// `requestAuthenticated(as:endpoint:responseType:)` for a call whose response body is unused.
+    func requestAuthenticated(as token: String, endpoint: APIEndpoint) async throws {
+        _ = try await sendAuthenticated(as: token, endpoint: endpoint)
+    }
+
+    private func sendAuthenticated(as token: String, endpoint: APIEndpoint) async throws -> Data {
+        let request = try buildRequest(for: endpoint, credential: .explicit(token))
+        logRequest(request, endpoint: endpoint)
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.unknown(message: "Invalid response type")
+            }
+            logResponse(httpResponse, data: data)
+            try validateResponse(httpResponse, data: data)
+            return data
+        } catch let error as APIError {
+            throw error
+        } catch {
+            throw APIError.networkError(error)
+        }
+    }
+
     // MARK: - Server-Sent Events (SSE) streaming
 
     /// Stream an SSE endpoint (e.g. chat `/messages/stream`) as an async sequence
@@ -852,7 +929,16 @@ actor APIClient {
 
     // MARK: - Request Building
 
-    private func buildRequest(for endpoint: APIEndpoint, baseURL: URL? = nil) throws -> URLRequest {
+    /// Which credential a built request carries.
+    private enum RequestCredential {
+        /// The token the client is armed with (`authToken`) — every ordinary request.
+        case armed
+        /// A token the caller holds, for this one request; it is never armed. Sign-out only —
+        /// see `requestAuthenticated(as:endpoint:)`.
+        case explicit(String)
+    }
+
+    private func buildRequest(for endpoint: APIEndpoint, baseURL: URL? = nil, credential: RequestCredential = .armed) throws -> URLRequest {
         let base = baseURL ?? currentBaseURL
         var components = URLComponents(url: base, resolvingAgainstBaseURL: true)!
         components.path = endpoint.path
@@ -906,17 +992,25 @@ actor APIClient {
         //
         // Refusing here instead means the UI can offer sign-in immediately, and it cannot be
         // bypassed: `buildRequest` is the single funnel behind `request<T>`, `request`,
-        // `downloadData` AND `openStream`.
+        // `downloadData`, `openStream` AND sign-out's `requestAuthenticated`.
         //
         // `.guestAllowed` and `.public` are deliberately untouched — the backend resolves a
         // signed-out caller to a per-install guest for those, and gating them on a token would
         // delete working features for every guest.
-        if endpoint.authPolicy == .signInRequired, authToken == nil {
+        let bearer: String?
+        switch credential {
+        case .armed:
+            bearer = authToken
+        case .explicit(let token):
+            // An empty string is no credential (auth.md §8): refused below, never sent.
+            bearer = token.isEmpty ? nil : token
+        }
+        if endpoint.authPolicy == .signInRequired, bearer == nil {
             throw APIError.authRequired
         }
 
         // Auth token — always send when available (supports optional-auth endpoints)
-        if let token = authToken {
+        if let token = bearer {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 

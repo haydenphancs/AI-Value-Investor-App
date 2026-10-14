@@ -30,7 +30,7 @@ protocol AccountRepositoryProtocol: Sendable {
     func fetchSettings() async throws -> [String: PreferenceValue]
     func updateSettings(_ preferences: [String: PreferenceValue]) async throws -> [String: PreferenceValue]
     func registerDevice(token: String, environment: String?) async throws -> Bool
-    func unregisterDevice(token: String) async throws -> Bool
+    func unregisterDevice(token: String, authenticatedAs sessionToken: String) async throws -> Bool
     func verifyPurchase(signedTransaction: String) async throws -> PurchaseApplied
     func claimGuestData() async throws -> ClaimGuestDataResult
 }
@@ -142,8 +142,12 @@ final class AccountRepository: AccountRepositoryProtocol {
     }
 
     /// Detach this device's APNs token. Returns true when it is no longer registered.
-    func unregisterDevice(token: String) async throws -> Bool {
-        let stillRegistered = try await apiClient.request(
+    ///
+    /// Authenticated by `sessionToken`, the ENDED session's credential, not the armed one: the
+    /// only caller is sign-out, which disarms the client before it sends this.
+    func unregisterDevice(token: String, authenticatedAs sessionToken: String) async throws -> Bool {
+        let stillRegistered = try await apiClient.requestAuthenticated(
+            as: sessionToken,
             endpoint: .unregisterDevice(token: token),
             responseType: DeviceRegisterResult.self
         ).registered

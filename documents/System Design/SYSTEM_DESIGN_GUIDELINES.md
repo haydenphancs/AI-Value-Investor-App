@@ -2330,6 +2330,17 @@ with `isUpgraded` are skipped on both paths (they could demote or revoke the upg
 Accepted trade-off: a purchase on a NEW lineage whose verify is delayed past a newer notification
 on the user's old subscription reads as stale.
 
+**The stored ordering key never moves backwards (2026-10-13).** A revocation skips the stale
+check ("revocation always wins"), so it can be signed before the stored `last_event_at`. A client
+revocation already kept the later key; a notification's `signedDate` was written as-is. So a late
+REFUND of an OLDER period (signed T3), applied over a row that the refund of the current period
+(T5) had already revoked, rewound the key to T3, and anything signed between the two then read as
+newer than the refund. The saved pre-refund JWS of the current period (T4) brought back the paid
+tier and migration 196 reinstated the refunded period's credits; Apple's own late redelivery of a
+notification signed at T4 did the same with no attacker. `apply_transaction` now stores a key on
+either path only when it is later than the stored one, or no readable key is stored. A client
+payload other than a revocation still stores none.
+
 ### 9b.4 Restore, and why buying requires an account
 
 Apple does **not** restore consumables — `Transaction.currentEntitlements` excludes them. The
@@ -3318,6 +3329,18 @@ undercuts a plan" held only on paper.
     - A refund of an OLDER renewal carries that renewal's earlier `expiresDate`, and so does a
       refund of the Pro half of an upgrade. A later renewal not yet started carries a later one.
       Neither touches the period in force: it was paid for and not refunded.
+    - Since 2026-10-13 an OLDER one does not touch the tier either. "Revocation always wins" used
+      to write it over the newer row, dropping a paying subscriber to Free until the current
+      transaction was delivered again (Restore, or the next renewal). `apply_transaction` now
+      writes nothing when a revocation's `expiresDate` ends at least a minute before the
+      `current_period_end` of an ENTITLING row with the same original transaction: no tier,
+      status, period end or ordering key, and no `revoke_tier_credits`. It logs a WARNING with
+      both dates (`iap_service.py::_older_period_revocation_reason`). An equal or later
+      `expiresDate` revokes as before.
+    - Against a row that no longer entitles (already revoked or expired), an older refund still
+      applies, but it never rewinds the ordering key (§9b.3, 2026-10-13). Stored as-is, its late
+      `signedDate` let a payload signed between the two refunds re-entitle the row and reinstate
+      the refunded period.
     - `revoke_tier_credits`, which iap_service still calls after a refund, applies the same
       match. It is a no-op after `ensure_credit_period`, and logs a WARNING when the refund was
       for another period.
@@ -3403,11 +3426,18 @@ calendar mode may simply not be reconciled yet.
 **Known, accepted gaps.**
 - `period_start` is derived as `current_period_end − 1 month`, because the row stores no start.
   It can be off by up to 3 days around short months, and only the upgrade cap reads it.
-- A refund of an OLDER renewal still overwrites the one `subscriptions` row with that revoked
-  transaction. This is pre-existing iap_service behaviour.
-  - The TIER drops to Free until the next delivery of the current transaction (Restore, or the
-    next renewal).
-  - The CREDITS of the period in force are kept (above).
+- A refund of an OLDER renewal no longer overwrites the one `subscriptions` row (2026-10-13,
+  under Refund above). Three edges of it remain:
+  - Apple charges a renewal up to 24 h early, so its `DID_RENEW` can land while the old period
+    still runs and is still the credit period in force. A refund of that old period keeps the
+    renewal's tier, and the old period's unspent credits are not clawed back: 196 never sees a
+    refund of the period in force. They last until the period ends, then expire as the renewal
+    starts. The same credits could have been spent before the refund was requested, and no
+    clawback recovers those either.
+  - Only the same original transaction is compared. A revoked JWS from ANOTHER lineage reaching
+    the client path still overwrites the user's row through the owner fallback.
+  - A `REFUND_REVERSED` of an older renewal derives `expired` from that renewal's past
+    `expiresDate`. It is still written over the newer row and drops the tier in the same way.
 - In a HOLD, `resets_at` is the past period end, so Profile's "Resets on" shows a past date until
   the renewal or expiry lands.
 - A paid renewal or upgrade is a new boundary, like the 1st. A report charged just before it that
@@ -5132,6 +5162,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-09 | The paid report's Earnings Yield drill-down follows the Price card (§9b.11): company point = 100 / the period's displayed P/E; peer line = 100 / the P/E median line (same period, same peer level, TTM point included); the stored earnings_yield medians are no longer read | After the card moved to 1/P/E the drill-down still drew FMP's yield where present and the stored net income ÷ market cap medians, so the card and its own drill-down disagreed for preferred-heavy groups (banks) | Recomputing the stored earnings_yield medians as median 1/P/E (an owner-run benchmark rebuild for a value the P/E line already holds: for an odd peer count median 1/P/E = 1/median P/E exactly) |
 | 2026-10-09 | No written storage confirmation from Brave is required before the automatic web tier or source-pill persistence (owner: "I don't need it"); `CHAT_WEB_SOURCES_PERSIST` stays a switch (on in production since 2026-10-03; code default flipped to on 2026-10-09 to match), and while it is on Privacy §3 must say the source list is kept (it does: saved with the answer, shown again on reopen, deleted with the conversation or the account; `tests/test_legal_pages.py` ties that sentence to the default) | The owner accepts the risk that Brave's terms (2026-09-01) allow "transient storage" only, while answers, conversation summaries and (with the switch on) source pills written from search results stay in the user's own chat history; the rules that still bind are unchanged: no cross-user cache, and never evaluating or tuning the AI on web results or chats containing them (§3(b)(xiii)) | Holding the automatic tier until Brave confirmed in writing (the 2026-10-08 rollout step 3) |
 | 2026-10-11 | A company with NO revenue has no margin, P/S or asset turnover anywhere: FMP's 0 for those reads as absent (`app.utils.margins`: an exact 0, or a margin beside revenue per share ≤ 0, is dropped; P/S and asset turnover count only when positive). Applied to the peer medians (TTM and fiscal producers; asset turnover positive-only), the report's model evidence, persona style-fit and Profitability drill-down, moat Brand Power and Cost Advantage (scorer vintage `moat_v1.2026-10-11`; older peer-average rows stay served, named pending, until the next recompute), and the degraded Overview Profitability card (which also scales FMP's decimal margins unconditionally); `CACHE_SCHEMA_FLOOR` moved | Found by the first live US-only Sunday check: 72 of Biotechnology's 213 companies have no revenue, so its TTM net-margin median read 0.0% (revenue-backed −76.9%); a read-only workflow then reproduced, live, "Net Margin: 0.0%" in a heavy loss-maker's report evidence, a −5-point Cathie Wood score from a fabricated flat margin trend, 0.0% history bars under a "—" row, and a deterministic Brand Power / Cost Advantage of 0.0/10 (VKTX, QS, OKLO) that also pulled Biotechnology's Brand Power peer average to 4.6 (6.9 among revenue-backed members). The Profitability card had dropped the 0 since 2026-09-30 | Requiring revenue per share to be present (a vendor schema drop would empty every margin median); fixing only the peer side (the report kept contradicting its own card); scoring a no-revenue company's Brand Power as 0 on purpose (it is unmeasured, not weak — the AI dimension decides) |
+| 2026-10-13 | A revocation of an OLDER paid period writes nothing (§9b.12 Refund): when its `expiresDate` ends at least a minute before the `current_period_end` of an entitling row with the same original transaction, `apply_transaction` keeps tier, status, period end and ordering key, calls no `revoke_tier_credits`, and logs a WARNING with both dates; an equal or later `expiresDate` still revokes | Apple refunds any past renewal with that renewal's transaction. "Revocation always wins" wrote it over the newer row, so a subscriber whose current period was paid for and not refunded dropped to Free until Restore or the next renewal (196 already kept the credits) | Ordering on `signedDate` (a refund is signed late whichever period it is for); storing the refund's `signedDate` as the ordering key (a renewal signed before it but delivered after would be refused as stale); applying it while the refunded period still runs after an early renewal (keeps the period's credits clawable, but drops a paying user to Free for up to a month); a key-specific clawback RPC for that window (a migration, for credits that could have been spent before the refund anyway) |
+| 2026-10-13 | `subscriptions.last_event_at` never moves backwards (§9b.3): `apply_transaction` stores a notification's `signedDate` only when it is later than the stored key or no readable key is stored, the rule a client revocation already followed; a client payload other than a revocation still stores none | A revocation skips the stale check, so a late REFUND of an OLDER period (signed T3), applied over a row the current period's refund (T5) had revoked, rewound the key to T3. A payload signed between the two then applied: the saved pre-refund JWS of the current period, or Apple's own late redelivery of a notification signed then, brought back the paid tier, and 196 reinstated the refunded period (refund + tier + 4,000 credits) | Refusing a revocation signed before the stored key (a late refund of the period in force must still revoke); refusing an older-period refund against a revoked or expired row too (a wider behaviour change; keeping the key closes the replay on its own); a SQL-side GREATEST (a migration; it would also close the read-then-write race between two concurrent deliveries for one transaction, which every field of the row shares today) |
 
 ---
 

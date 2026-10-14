@@ -52,4 +52,10 @@ ENV PYTHONUNBUFFERED=1
 # ONE worker: with no --workers flag uvicorn takes its worker count from UVICORN_WORKERS (its CLI,
 # first) or WEB_CONCURRENCY, so both must stay unset (or 1) on the web service — app/main.py logs
 # "STARTUP: UVICORN_WORKERS=…" / "STARTUP: WEB_CONCURRENCY=…" at ERROR otherwise.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30"]
+# `exec`: the shell (needed only to expand ${PORT}) must REPLACE itself with uvicorn. Without it
+# `sh` stays the parent and swallows Railway's SIGTERM, so uvicorn never ran its graceful window or
+# the lifespan teardown and was SIGKILLed mid-work — measured on the 2026-10-13 deploy (container
+# PIDs: 1 podman-init, 2 sh, 3 uvicorn; "sending signal SIGTERM" followed by ~55 s of normal work
+# and no "Shutting down"). That teardown releases the durable job claims and drains the detached
+# credit refunds of requests a deploy cut off (app/main.py lifespan).
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30"]

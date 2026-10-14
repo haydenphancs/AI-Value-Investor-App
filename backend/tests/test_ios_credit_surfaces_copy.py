@@ -122,8 +122,11 @@ def test_an_empty_monthly_pool_still_states_its_reset_date():
     guard = re.search(r"guard\s+renewalDateIsKnown\s+else\s*\{\s*return\s+nil\s*\}", reset)
     assert guard and "renewalDateText" in reset[guard.end():], (
         "monthlyResetSummary states a PLACEHOLDER reset date (no resets_at) as the account's")
-    assert "ResearchFormatters.creditResetFormatter" in _block(balance, "private var renewalDateText: String"), (
-        "the reset date is no longer formatted with the ET-pinned creditResetFormatter")
+    # 2026-10-13: the renewal day goes through the shared `CreditRenewalDate` (ET for the
+    # calendar 1st, the device's zone for a subscriber's Apple renewal day), the same helper
+    # Account uses, so the two screens can never state different days.
+    assert "CreditRenewalDate.long(renewalDate)" in _block(balance, "private var renewalDateText: String"), (
+        "the renewal date is no longer formatted with the shared CreditRenewalDate helper")
     for header in ("static func from(_ response: BackendCreditsResponse) -> CreditBalance",
                    "static func from(_ info: CreditInfo) -> CreditBalance"):
         body = _block(models, header)

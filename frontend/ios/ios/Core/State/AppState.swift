@@ -903,11 +903,13 @@ final class AppState {
     /// ⚠️ AND ONLY FOR A SESSION THAT STILL EXISTS. `identity` is what
     /// `establishAuthenticatedSession` captured before the guest-claim, StoreKit-drain and
     /// credits awaits. A sign-out tapped during them runs synchronously: it closes the widget
-    /// gate, wipes the App Group and clears the widget token — but `AuthService.signOut` keeps
-    /// the bearer ARMED through two more awaited calls. Reopening the gate here unconditionally
-    /// then forced a run under that bearer: the ex-user's holdings went back onto a signed-out
-    /// Home Screen and a fresh 90-day widget token was minted for a device with no session
-    /// (auth.md §7, §8a), and the gate stayed open for the rest of the process. Every session
+    /// gate, wipes the App Group and clears the widget token — and sign-out used to keep the
+    /// bearer ARMED through two more awaited calls. Reopening the gate here unconditionally then
+    /// forced a run under that bearer: the ex-user's holdings went back onto a signed-out Home
+    /// Screen and a fresh 90-day widget token was minted for a device with no session (auth.md
+    /// §7, §8a), and the gate stayed open for the rest of the process. `AuthService.beginSignOut()`
+    /// now disarms synchronously; this fence stays, because a refresh already in flight can
+    /// re-arm the ended token until sign-out's backstop clears it. Every session
     /// end bumps `identityGeneration` (`invalidateIdentity`, `noteCredentialDisarmed`), as does
     /// a newer sign-in as someone else (`resolveIdentity`), whose own settle then takes over.
     private func settleWidgetSession(userId: String?, identity: Int) {
@@ -1157,12 +1159,14 @@ final class AppState {
     //    across a sign-out or an account switch never writes the ended session's balance back
     //    (auth.md §7); a purchase decision would be made against it.
     //  • SESSION — a read SENT, or answered, while `auth.status` is `.unauthenticated` never
-    //    lands. The identity fence cannot see a read sent AFTER a sign-out: `signOut()` bumps
-    //    the generation at once, but `AuthService.signOut` keeps the ended account's token
-    //    armed on the client through its unregister and `/auth/logout` round trips, so a reload
-    //    the sign-out itself triggers reads THAT account's balance under the NEW generation —
-    //    and the next account to sign in on the device would be shown it. `.restoring` is not
-    //    refused: its token is disarmed, so the client refuses those reads itself.
+    //    lands. The identity fence cannot see a read sent AFTER a sign-out, under the NEW
+    //    generation. Sign-out used to keep the ended account's token armed through its
+    //    unregister and `/auth/logout` round trips, so a reload the sign-out itself triggered
+    //    read THAT account's balance — and the next account to sign in on the device would be
+    //    shown it. `AuthService.beginSignOut()` now disarms synchronously, before the generation
+    //    moves; this fence stays for a refresh in flight that re-arms the ended token until
+    //    sign-out's backstop clears it. `.restoring` is not refused: its token is disarmed, so
+    //    the client refuses those reads itself.
     //  • SEND ORDER — every read takes a number from `creditsReadSeq` before it goes out, and
     //    only an answer newer than the last one applied may land. Without it a slow read sent
     //    BEFORE a chat turn's charge could overwrite the fresher read sent after it, and the
@@ -1388,11 +1392,17 @@ final class AppState {
         }
     }
 
-    /// Sign out. Resets local state immediately for a snappy UI; the backend
-    /// `/auth/logout` call + Keychain/APIClient token clear run in the background
-    /// (they need the token to still be set, so they fire before it is cleared).
+    /// Sign out. Ends the session locally FIRST, synchronously — Keychain cleared, client disarmed
+    /// (`AuthService.beginSignOut()`) — then resets local state for a snappy UI. The device detach
+    /// and `/auth/logout` run in the background with the ended token passed explicitly
+    /// (`AuthService.finishSignOut(_:)`).
     func signOut() {
-        Task { [authService] in await authService?.signOut() }
+        // BEFORE anything below changes the identity: every screen reloads on that change, and a
+        // reload built while the client still held the token went out as the ENDED account.
+        if let authService {
+            let handoff = authService.beginSignOut()
+            Task { await authService.finishSignOut(handoff) }
+        }
         // Invalidate any restore already in flight.
         //
         // ⚠️ This counter is bumped by signIn / signUp / completeSocialSignIn but WAS NOT
@@ -1980,8 +1990,9 @@ struct CreditInfo: Codable, Equatable, Sendable {
 struct CreditsReadTicket: Sendable {
     let seq: Int
     let identity: Int
-    /// `auth.status` was `.unauthenticated` when the read was sent: whatever token it carried
-    /// (an ended session's, still armed during `AuthService.signOut`) is nobody's balance now.
+    /// `auth.status` was `.unauthenticated` when the read was sent: whatever token it carried is
+    /// nobody's balance now. (`AuthService.beginSignOut()` disarms before the status moves, but a
+    /// refresh in flight can re-arm the ended token until sign-out's backstop clears it.)
     let sentSignedOut: Bool
 }
 

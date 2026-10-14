@@ -458,3 +458,108 @@ def test_the_simulator_hook_starts_the_watchdog_only_for_a_build(tmp_path, paylo
                        env=_shims(tmp_path), timeout=30)
     assert r.returncode == 0 and r.stderr == "", r.stderr
     assert _wait_for(marker, 1.0 if expected else 0.5) == expected
+
+
+# ── hooks that run Python on backend code: one verdict from ANY cwd (2026-10-13) ───────────────
+#
+# post-tool-use-theme.sh ran pytest from wherever the session's shell was. With no pytest ini, the
+# rootdir is the common ancestor of that cwd and the test paths, and conftest.py lookup stops at the
+# rootdir (pytest 8): from backend/tests — or from a cwd sharing only `/` with the repo, like /tmp —
+# backend/conftest.py never loaded, `app` was not importable, and comment-only Swift edits were
+# blocked by 13 ModuleNotFoundErrors. These run each hook's REAL script from the project root,
+# backend/tests and `/`, against a fake interpreter that records where and how it was started.
+
+_PYTEST_HOOKS = {                                    # hook → a path its `case` filter accepts
+    "post-tool-use-theme.sh": "frontend/ios/ios/Views/Atoms/AIBadge.swift",
+    "post-tool-use-design-doc.sh": "backend/app/main.py",
+}
+_FAKE_INTERPRETER = r"""#!/bin/bash
+{ pwd -P; printf '%s\n' "$@"; } > "$FAKE_LOG"
+exit "${FAKE_STATUS:-0}"
+"""
+
+
+def _runs_pytest(script: Path) -> bool:
+    import re
+    return any(re.search(r"-m\s+pytest\b|\bbin/pytest\b", l) and not l.lstrip().startswith("echo")
+               for l in _code_lines(script))
+
+
+def test_every_hook_that_runs_pytest_is_pinned_cwd_independent():
+    found = {p.name for p in _HOOKS.glob("*.sh") if _runs_pytest(p)}
+    assert found == set(_PYTEST_HOOKS), \
+        f"hooks that run pytest: {sorted(found)} — list each in _PYTEST_HOOKS so the cwd test runs it"
+
+
+def _fake_project(tmp_path: Path, hook: str, interpreter: str) -> tuple[Path, Path, Path]:
+    """A project holding a copy of `hook`, with a fake backend/venv/bin/<interpreter> that logs its
+    cwd and argv (one per line) to the returned log and exits $FAKE_STATUS."""
+    project = tmp_path / "project"
+    for d in (".claude/hooks", "backend/tests", "backend/venv/bin"):
+        (project / d).mkdir(parents=True, exist_ok=True)
+    shutil.copy(_HOOKS / hook, project / ".claude" / "hooks" / hook)
+    fake = project / "backend" / "venv" / "bin" / interpreter
+    fake.write_text(_FAKE_INTERPRETER)
+    fake.chmod(0o755)
+    return project, project / ".claude" / "hooks" / hook, tmp_path / "interpreter.log"
+
+
+def _run_hook(script: Path, cwd: Path, edited: Path, log: Path, project: Path | None,
+              status: int = 0) -> subprocess.CompletedProcess:
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "FAKE_LOG": str(log), "FAKE_STATUS": str(status)}
+    if project is not None:                          # as Claude Code sets it; None = a hand run
+        env["CLAUDE_PROJECT_DIR"] = str(project)
+    payload = json.dumps({"tool_name": "Edit", "tool_input": {"file_path": str(edited)}})
+    return subprocess.run(["/bin/bash", str(script)], input=payload, capture_output=True, text=True,
+                          cwd=cwd, env=env, timeout=30)
+
+
+def _rootdir_and_tests(started_in: str, argv: list[str]) -> tuple[Path, list[Path]]:
+    """pytest's rootdir for this call — an explicit --rootdir, else (no ini in this repo, every test
+    path under backend/) the directory it started in — and its .py arguments, resolved."""
+    here = Path(started_in)
+    rootdir = here
+    for i, arg in enumerate(argv):
+        if arg.startswith("--rootdir"):
+            rootdir = here / (arg.split("=", 1)[1] if "=" in arg else argv[i + 1])
+    return rootdir.resolve(), [(here / a).resolve() for a in argv if a.endswith(".py")]
+
+
+@pytest.mark.parametrize("hook", sorted(_PYTEST_HOOKS))
+def test_a_pytest_hook_runs_from_backend_whatever_the_callers_cwd(tmp_path, hook):
+    project, script, log = _fake_project(tmp_path, hook, "python")
+    backend = (project / "backend").resolve()
+    argvs = set()
+    for cwd in (project, project / "backend" / "tests", Path("/")):
+        r = _run_hook(script, cwd, project / _PYTEST_HOOKS[hook], log, project)
+        assert r.returncode == 0 and log.exists(), f"{hook} from {cwd}: rc {r.returncode} {r.stderr}"
+        started_in, *argv = log.read_text().splitlines()
+        log.unlink()
+        rootdir, tests = _rootdir_and_tests(started_in, argv)
+        assert rootdir == backend, (
+            f"{hook}, run from {cwd}, started pytest in {started_in}: its rootdir must be backend/ "
+            "or backend/conftest.py never loads — `cd \"$repo/backend\" && …` or --rootdir")
+        assert tests and all(t.is_relative_to(backend / "tests") for t in tests), tests
+        argvs.add(tuple(argv))
+    assert len(argvs) == 1, f"{hook}'s pytest arguments depend on the cwd: {argvs}"
+
+
+@pytest.mark.parametrize("hook", sorted(_PYTEST_HOOKS))
+def test_a_pytest_hook_still_blocks_a_failure_and_reruns_from_backend(tmp_path, hook):
+    project, script, log = _fake_project(tmp_path, hook, "python")
+    r = _run_hook(script, project / "backend" / "tests", project / _PYTEST_HOOKS[hook], log, project,
+                  status=1)
+    assert r.returncode == 2 and "Re-run: cd backend && " in r.stderr, r.stderr
+
+
+def test_the_syntax_hook_parses_with_the_projects_venv_from_any_cwd(tmp_path):
+    """A hand run has no CLAUDE_PROJECT_DIR, and this hook's fallback was `.`: from backend/tests it
+    missed the venv and parsed with Homebrew's 3.12, which accepts f-strings that 3.11 rejects."""
+    project, script, log = _fake_project(tmp_path, "post-tool-use-python.sh", "python3")
+    edited = project / "backend" / "app" / "x.py"
+    edited.parent.mkdir()
+    edited.write_text("x = 1\n")
+    for cwd in (project, project / "backend" / "tests", Path("/")):
+        r = _run_hook(script, cwd, edited, log, project=None)
+        assert r.returncode == 0 and log.exists(), f"from {cwd} it did not parse with backend/venv: {r.stderr}"
+        log.unlink()

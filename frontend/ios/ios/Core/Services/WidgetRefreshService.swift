@@ -115,12 +115,14 @@ final class WidgetRefreshService {
     /// (`AppState.settleWidgetSession`). Closed by `clearForEndedSession()`.
     ///
     /// ⚠️ `credentialReady` is NOT a session gate: it opens once per process and never closes.
-    /// Sign-out runs `clearForEndedSession()` synchronously, but `AuthService.signOut` keeps
-    /// the bearer ARMED until its two awaited calls (device unregister, `/auth/logout`) finish.
-    /// A foreground inside that window — opening Control Center is enough — found the throttle
+    /// Sign-out runs `clearForEndedSession()` synchronously, and it used to keep the bearer
+    /// ARMED until its two awaited calls (device unregister, `/auth/logout`) finished. A
+    /// foreground inside that window — opening Control Center is enough — found the throttle
     /// reset and the gate free, fetched the ex-user's holdings with the still-armed bearer,
     /// wrote them back onto a signed-out Home Screen and minted a fresh 90-day widget token
-    /// for a device with no session (auth.md §8a).
+    /// for a device with no session (auth.md §8a). `AuthService.beginSignOut()` now disarms
+    /// synchronously; this gate stays, because a refresh in flight can re-arm the ended token
+    /// until sign-out's backstop clears it.
     private var sessionOpen = false
 
     /// Bumped whenever a session ends, so work already in flight refuses to publish.

@@ -45,11 +45,32 @@ def _procfile_cmd() -> str:
     return lines[0][len("web: "):].strip()
 
 
-def _dockerfile_cmd() -> str:
+def _dockerfile_shell_string() -> str:
     src = (_BACKEND / "Dockerfile").read_text()
     m = re.search(r'^CMD \["sh", "-c", "(.*)"\]\s*$', src, re.M)
     assert m, "Dockerfile CMD is not the sh -c form this test expects"
     return m.group(1)
+
+
+def _dockerfile_cmd() -> str:
+    """The server command the shell runs, without the leading `exec` (pinned separately)."""
+    cmd = _dockerfile_shell_string()
+    return cmd[len("exec "):] if cmd.startswith("exec ") else cmd
+
+
+def test_the_shell_execs_uvicorn_so_it_receives_sigterm():
+    """`sh -c "uvicorn …"` keeps `sh` as uvicorn's parent, and `sh` swallows Railway's SIGTERM:
+    uvicorn then never runs its graceful window or the lifespan teardown (durable job-claim
+    release, the detached credit-refund drain) and is SIGKILLed mid-work. Measured on the
+    2026-10-13 deploy — PIDs 1 podman-init, 2 sh, 3 uvicorn, and no "Shutting down" after
+    "sending signal SIGTERM". `exec` makes uvicorn replace the shell."""
+    cmd = _dockerfile_shell_string()
+    assert cmd.startswith("exec uvicorn "), (
+        f"{cmd!r}: without a leading `exec`, sh stays PID-parent and swallows SIGTERM"
+    )
+    assert cmd.count("exec ") == 1 and "&&" not in cmd and ";" not in cmd, (
+        "a compound shell command keeps sh alive as the parent — exec must start the ONLY command"
+    )
 
 
 def test_railway_builds_from_the_dockerfile():

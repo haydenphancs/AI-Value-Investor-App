@@ -198,9 +198,11 @@ final class PushNotificationManager {
     /// watchlist alerts to this device: a phone showing the signed-out guest UI buzzing with
     /// someone else's tickers, which also discloses what they follow.
     ///
-    /// Awaited by `AuthService.signOut()` BEFORE the token is cleared, because the call needs
-    /// the session that is being ended. Best-effort: a failure must never block sign-out.
-    func unregisterCurrentDevice() async {
+    /// Awaited by `AuthService.finishSignOut(_:)` with `sessionToken`, the credential of the
+    /// session being ended: the call needs that session, and sign-out has already disarmed the
+    /// client so the reloads its identity change sets off cannot go out as the ended account.
+    /// Best-effort: a failure must never block sign-out.
+    func unregisterCurrentDevice(authenticatedAs sessionToken: String) async {
         // `?? pendingToken` is what makes this work at all on the deliberate sign-out path,
         // and it is not defensive padding — it fixes a deterministic ordering bug.
         //
@@ -217,7 +219,7 @@ final class PushNotificationManager {
         // token, still valid, and re-registration on the next sign-in wants it.
         guard let token = registeredToken ?? pendingToken else { return }
         do {
-            _ = try await repository.unregisterDevice(token: token)
+            _ = try await repository.unregisterDevice(token: token, authenticatedAs: sessionToken)
             registeredToken = nil
         } catch {
             // Release-visible: a token that fails to detach stays bound to the account that
@@ -242,8 +244,8 @@ final class PushNotificationManager {
     /// Release this device's binding LOCALLY, for the session-end paths that have no usable
     /// credential to de-register with.
     ///
-    /// `unregisterCurrentDevice()` needs a live session, so it can only run from a deliberate
-    /// sign-out. The other two endings — a dead access token and a dead refresh token — cannot
+    /// `unregisterCurrentDevice(authenticatedAs:)` needs a live session, so it can only run from a
+    /// deliberate sign-out. The other two endings — a dead access token and a dead refresh token — cannot
     /// call the server at all, and they used to do nothing: `device_tokens` kept mapping this
     /// phone to the ended account, and because the only detach endpoint requires that account's
     /// session, nothing could ever undo it. The sweeper kept delivering the previous user's

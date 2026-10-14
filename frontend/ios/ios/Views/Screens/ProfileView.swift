@@ -449,12 +449,18 @@ struct ProfileView: View {
                     // paywall a Pro/Max account could reach was Buy Credits → "more credits
                     // with a plan", and App Review (demo account on Max) reported it could not
                     // find the subscriptions. Same one-row card chrome as Credit History.
+                    //
+                    // Max is the top plan, so its subtitle invites no change (owner, 2026-10-13:
+                    // "they are on the highest level. so, we don't want them to move down"). The row
+                    // itself stays — it is how App Review finds the subscriptions.
                     Button(action: { showPaywall = true }) {
                         ProfileSettingsRowContent(
                             icon: "crown.fill",
                             iconColor: AppColors.caution,
                             title: "Plans",
-                            subtitle: "You're on \(viewModel.userTier == .premium ? "Max" : "Pro") · compare or change plans"
+                            subtitle: viewModel.userTier == .premium
+                                ? "You're on Max"
+                                : "You're on Pro · compare or change plans"
                         )
                     }
                     .buttonStyle(PlainButtonStyle())

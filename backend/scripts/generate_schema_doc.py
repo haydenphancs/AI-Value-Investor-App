@@ -126,11 +126,21 @@ EXPECTED: dict[str, int] = {
     #                          (174), get_search_trending / get_most_added_tickers /
     #                          increment_search_pick (179), news_sentiment_daily (180),
     #                          claim / renew / finish / enqueue / discover_sentiment_backfill (181)
-    "tables": 150,
-    "public": 111,
-    "fk": 29,
-    "policies": 119,
-    "rls": 111,
+    # Refreshed 2026-10-13 after applying 191-196 and re-dumping. Every delta accounted for:
+    #   +1 table / +1 public / +1 rls / +1 policy -> subscription_credit_periods (196), with its
+    #                          one service_role policy
+    #   +2 fk                  -> subscription_credit_periods.user_id, user_credits.paid_period_id
+    #                          (196)
+    #   functions / secdef unchanged: 194 and 196 REPLACED ensure_credit_period (196 last, which
+    #   keeps 194's monthly_expired row), 196 replaced grant_tier_upgrade / revoke_tier_credits,
+    #   191 replaced news_sentiment_daily. 195 only adds research_reports.refund_outcome and an
+    #   index. The Supabase platform narrowed anon/authenticated on storage.* from ALL to
+    #   SELECT/INSERT/UPDATE/DELETE in the same window (grants are not counted here).
+    "tables": 151,
+    "public": 112,
+    "fk": 31,
+    "policies": 120,
+    "rls": 112,
     "functions": 52,
     "enums": 14,
     "views": 1,

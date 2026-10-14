@@ -86,7 +86,7 @@ class ProfileViewModel: BaseViewModel {
     }
 
     /// VoiceOver's reading of the "Monthly Credits used/total" row, e.g. "4 of 50 used.
-    /// Resets on Nov 1. Plus 120 purchased credits that never expire".
+    /// Renews on Nov 1. Plus 120 purchased credits that never expire".
     ///
     /// The row's visual stays "4/50" (owner, 2026-10-12: "4/50 is correct way" — USED of the
     /// monthly total), but spoken it was "4 slash 50", which reads as either used or left. This
@@ -102,42 +102,24 @@ class ProfileViewModel: BaseViewModel {
         return parts.joined(separator: ". ")
     }
 
-    /// Human label for the monthly reset. Derived from the backend `resets_at`
-    /// (written by `ensure_credit_period` = next-month boundary in ET). Falls back
-    /// to "Renews monthly" when absent (e.g. a brand-new row) or unparseable.
+    /// "Renews on <date>" — the day the monthly allowance comes back. From the backend
+    /// `resets_at`: for a Pro/Max subscriber that is Apple's renewal day (migration 196 ties the
+    /// allowance to the paid period), for Free and complimentary accounts the ET 1st.
+    /// `CreditRenewalDate` picks the right time zone for each. "Renews monthly" when the date is
+    /// absent (a brand-new row) or unparseable.
+    ///
+    /// "Renews", not "Resets" (owner, 2026-10-13): it reads as the plan's renewal date, which for
+    /// a subscriber it now is. Every account's allowance does come back that day — a lapsed plan
+    /// falls to the Free allowance — so the sentence is true even after a cancellation.
     var creditResetLabel: String {
         guard let resetsAt = appState?.user.credits?.resetsAt,
               let date = Self.parseISODate(resetsAt) else {
             return "Renews monthly"
         }
-        return "Resets on \(Self.resetDateFormatter.string(from: date))"
+        return "Renews on \(CreditRenewalDate.short(date))"
     }
 
-    /// `"MMM d"` for the monthly reset — pinned to a Gregorian, English locale AND to ET.
-    ///
-    /// Both halves were missing and both are wrong without them:
-    ///
-    /// * NO LOCALE means the pattern resolves against the DEVICE's calendar. On a phone set to
-    ///   Thai (Buddhist), Japanese (era) or an Islamic calendar, "MMM d" renders that calendar's
-    ///   month and day — a date the user cannot reconcile with anything else in the app, since
-    ///   every other date here is Gregorian.
-    /// * NO TIME ZONE means the UTC instant is rendered in the DEVICE's zone. The reset boundary
-    ///   is written by `ensure_credit_period` as a next-month boundary in ET, so anyone west of
-    ///   ET saw the day BEFORE the one their credits actually renew.
-    ///
-    /// `en_US_POSIX` is the fixed-format locale: it is the one guaranteed not to be re-interpreted
-    /// by a user's regional settings. Mirrors `HomeRepository`, which already does this for the
-    /// same pattern.
-    private static let resetDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.calendar = Calendar(identifier: .gregorian)
-        f.timeZone = TimeZone(identifier: "America/New_York")
-        f.dateFormat = "MMM d"
-        return f
-    }()
-
-    /// `"MMM yyyy"` for "Member since". Same reasoning as `resetDateFormatter`, except the
+    /// `"MMM yyyy"` for "Member since". Same locale reasoning as `CreditRenewalDate`, except the
     /// anchor is UTC: `users.created_at` is a plain timestamptz with no business timezone
     /// attached. Without the locale a Japanese-calendar device renders the ERA year — "Member
     /// since 8月 8" rather than "Member since Aug 2026".

@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import OSLog
 import Security
 
 // MARK: - Auth Response
@@ -80,13 +81,16 @@ final class AuthService {
     private let apiClient: APIClient
     private let keychain: KeychainService
 
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "auth")
+
     private static let accessTokenKey = "access_token"
     private static let refreshTokenKey = "refresh_token"
 
     /// Monotonic session counter, bumped on every session transition (sign-in,
     /// sign-up, sign-out). A token-persisting operation (refresh) that started
-    /// under an older epoch discards its result, and sign-out's token clear is
-    /// skipped if a newer session began mid-logout. This makes sign-out/sign-in
+    /// under an older epoch discards its result, and sign-out's trailing client-token
+    /// clear (`finishSignOut`'s backstop) is skipped if a newer session began
+    /// mid-logout. This makes sign-out/sign-in
     /// races safe (a stale refresh can't resurrect a signed-out session; a quick
     /// re-sign-in isn't wiped by a late logout clear). @MainActor serializes it.
     private var sessionEpoch: Int = 0
@@ -312,41 +316,76 @@ final class AuthService {
         )
     }
 
-    /// Sign out
-    func signOut() async {
-        sessionEpoch += 1
-        let epoch = sessionEpoch
+    /// What sign-out's network half needs from its synchronous half.
+    struct SignOutHandoff: Sendable {
+        /// The token the client was armed with, already disarmed. nil when it held none.
+        let endedToken: String?
+        /// `sessionEpoch` right after the bump: the backstop's guard.
+        let epoch: Int
+    }
 
-        // Clear the DURABLE credential FIRST, before the awaited network call.
+    /// Sign out, part 1 — everything LOCAL, synchronously: end the session epoch, clear the
+    /// Keychain, disarm the client. `AppState.signOut()` calls this BEFORE it changes the
+    /// identity, then hands the result to `finishSignOut(_:)` in a Task.
+    ///
+    /// Synchronous on purpose (2026-10-13). `AppState.signOut()` bumps the identity generation and
+    /// shows the signed-out UI at once, so every screen reloads. Sign-out used to begin inside a
+    /// Task and disarm the client only after the device detach and logout round trips, so those
+    /// reloads were built with the ENDED account's token — its reports list landed in the
+    /// signed-out UI — and `/auth/logout` only logs, so that token stays valid server-side. With
+    /// no suspension point in here, the client is disarmed before `AppState` has changed anything.
+    func beginSignOut() -> SignOutHandoff {
+        sessionEpoch += 1
+
+        // Clear the DURABLE credential before any network call.
         //
         // The Keychain write used to sit after `await apiClient.request(.signOut)`. On a dead
         // connection that request hangs for the full 30s timeout, and if the user force-quits
         // in that window — which is exactly what people do when an app looks stuck — the line
         // never runs. Both Keychain items are `AfterFirstUnlockThisDeviceOnly`, so they
         // survive the kill, and the next launch's `restoreAuthState()` finds a stored token
-        // and silently signs the "signed-out" user back in. The UI already showed them as
-        // signed out before this function was even called.
+        // and silently signs the "signed-out" user back in.
         //
-        // Ordering is safe: the logout request below is best-effort and its outcome changes
-        // nothing locally, and the in-memory APIClient token dies with the process anyway.
-        // The epoch guard still protects a fast re-sign-in — a newer session will have written
-        // its own tokens after this point, and we must not clear those.
-        if epoch == sessionEpoch {
-            clearToken()
+        // No epoch guard: nothing in this function suspends, so no newer session can have
+        // written its own tokens yet.
+        clearToken()
+
+        // Read and cleared as one swap under the client's lock, without an actor hop, so no
+        // request can be built with the ended token after this line.
+        let endedToken = apiClient.disarmAuthToken()
+        return SignOutHandoff(endedToken: endedToken, epoch: sessionEpoch)
+    }
+
+    /// Sign out, part 2 — the network calls, sent with the ended token passed explicitly, after
+    /// `beginSignOut()` has already ended the session locally. Best-effort throughout.
+    func finishSignOut(_ handoff: SignOutHandoff) async {
+        if let endedToken = handoff.endedToken {
+            // Detach the APNs token with the ended session's credential — the call is
+            // authenticated. Otherwise `device_tokens` keeps mapping this device to the account
+            // being signed out and the sweeper keeps pushing its alerts here.
+            await PushNotificationManager.shared.unregisterCurrentDevice(authenticatedAs: endedToken)
+
+            // Best-effort backend logout, with the same credential so the server can see who is
+            // logging out. Passed explicitly: re-arming the shared client to send these two would
+            // reopen the window `beginSignOut()` closed.
+            do {
+                try await apiClient.requestAuthenticated(as: endedToken, endpoint: .signOut)
+            } catch {
+                Self.log.warning("sign-out: POST /auth/logout failed (best-effort, the session is already ended locally): \(AppError.from(error).analyticsCode, privacy: .public)")
+            }
+        } else {
+            // No armed credential: a sign-out while `.restoring` after a transient failure (the
+            // client was disarmed and the stored token never re-validated) or a repeated
+            // sign-out. Nothing can authenticate the detach or the logout; the device binding
+            // heals on the next sign-in (`clearLocalRegistrationForEndedSession` re-stashes the
+            // APNs token).
+            Self.log.notice("sign-out: the client held no credential — device detach and backend logout skipped")
         }
 
-        // Detach the APNs token BEFORE the session ends — the call is authenticated, so it has
-        // to run while the token is still armed. Otherwise `device_tokens` keeps mapping this
-        // device to the account being signed out and the sweeper keeps pushing its alerts here.
-        await PushNotificationManager.shared.unregisterCurrentDevice()
-
-        // Best-effort backend logout. Fired with the token still armed on the APIClient so the
-        // server can see who is logging out.
-        try? await apiClient.request(endpoint: .signOut)
-
-        // Only disarm if no NEWER session started during the logout round-trip — a
-        // quick re-sign-in bumps the epoch and its fresh tokens must survive.
-        guard epoch == sessionEpoch else { return }
+        // Backstop, not the disarm: a token refresh already in flight when sign-out began can
+        // land after the disarm and re-arm the ended session. Only if no NEWER session started
+        // meanwhile — a quick re-sign-in bumps the epoch and its fresh tokens must survive.
+        guard handoff.epoch == sessionEpoch else { return }
         await apiClient.setAuthToken(nil)
     }
 

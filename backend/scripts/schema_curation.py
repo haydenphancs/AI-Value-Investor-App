@@ -198,7 +198,7 @@ CURATION: dict[str, TableDoc] = {
     # ----------------------------------------------------------------- billing
     "public.user_credits": T("billing",
         key=("user_id", "total", "used", "remaining", "purchased_total", "purchased_used",
-             "spendable", "resets_at"),
+             "spendable", "resets_at", "paid_period_id"),
         note="TWO pools. Granted credits renew per Apple paid period for a subscriber (196, "
              "`paid_period_id`) or on the ET 1st for Free and comp accounts; purchased ones never "
              "expire and the three tier RPCs must never touch them (App Store 3.1.1). "
@@ -223,8 +223,10 @@ CURATION: dict[str, TableDoc] = {
     "public.subscriptions": T("billing",
         purpose="Current auto-renewing subscription state per user, reconciled from App Store "
                 "server notifications.",
-        key=("user_id", "tier", "status", "store", "current_period_end", "last_event_at"),
-        note="UNIQUE(user_id) — one subscription per account."),
+        key=("user_id", "tier", "status", "store", "current_period_end", "last_event_at",
+             "environment"),
+        note="UNIQUE(user_id) — one subscription per account. Only a Production (or NULL "
+             "legacy) `environment` row starts a paid credit period (196)."),
     "public.subscription_credit_periods": T("billing",
         purpose="Every Apple paid subscription period whose credit allocation was granted — the "
                 "exactly-once guard for paid allowances (migration 196).",
@@ -241,10 +243,13 @@ CURATION: dict[str, TableDoc] = {
     # ---------------------------------------------------------------- research
     "public.research_reports": T("research",
         key=("id", "user_id", "ticker", "investor_persona", "status", "progress",
-             "processing_started_at", "credits_charged", "is_refunded", "ticker_report_data"),
+             "processing_started_at", "credits_charged", "is_refunded", "refund_outcome",
+             "ticker_report_data"),
         note="user_id FK dropped in migration 110 so guests partition per install — deletion is "
              "manual via _UNLINKED_USER_TABLES. `processing_started_at` is the clock the "
-             "refund reconciler uses; the completion write is conditional on it."),
+             "refund reconciler uses; the completion write is conditional on it. "
+             "`is_refunded` is the one-shot refund CLAIM; `refund_outcome` (195) records what "
+             "the refund behind it actually did, served to iOS as `refund_confirmed`."),
     "public.ticker_report_cache": T("research",
         purpose="The assembled report payload, keyed by (ticker, persona), so a second request "
                 "for the same pair skips both agent stages.",

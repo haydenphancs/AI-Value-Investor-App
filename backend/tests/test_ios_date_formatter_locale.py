@@ -146,12 +146,23 @@ def test_the_account_surface_is_clean():
 
 def test_the_credit_reset_label_is_anchored_to_eastern_time():
     """Separate from the locale problem and just as visible. `resets_at` is written by
-    `ensure_credit_period` as a next-month boundary in ET, so rendering it in the DEVICE's zone
-    showed everyone west of ET the day BEFORE their credits actually renew."""
-    src = _code_only((_IOS / "ViewModels" / "ProfileViewModel.swift").read_text(encoding="utf-8"))
-    windows = [w for _, w in _formatter_windows(src) if '"MMM d"' in w]
-    assert windows, "the credit-reset formatter is gone or no longer uses the MMM d pattern"
-    assert any("America/New_York" in w for w in windows), (
-        "the reset-date formatter does not pin ET, so 'Resets on Aug 31' is off by a day for "
-        "every user west of Eastern"
+    `ensure_credit_period` as a next-month boundary in ET for Free and complimentary accounts,
+    so rendering it in the DEVICE's zone showed everyone west of ET the day BEFORE their credits
+    actually renew.
+
+    2026-10-13: Account's label is "Renews on …" and both Account and the Research card format
+    the date through `Core/Utilities/CreditRenewalDate.swift`. Since migration 196 a subscriber's
+    `resets_at` is Apple's renewal instant instead, shown in the device's zone (how Apple states
+    it); only the ET calendar boundary is still shown in ET. The detailed pins live in
+    `test_ios_credit_renewal_and_plan_copy.py`; this keeps the original guarantee: the
+    calendar boundary is still rendered in ET."""
+    vm = _code_only((_IOS / "ViewModels" / "ProfileViewModel.swift").read_text(encoding="utf-8"))
+    assert "CreditRenewalDate.short(" in vm, (
+        "Account's credit reset label no longer goes through CreditRenewalDate — a raw "
+        "device-zone formatter would show 'Aug 31' for a Sep 1 reset west of Eastern"
+    )
+    helper = _code_only((_IOS / "Core" / "Utilities" / "CreditRenewalDate.swift").read_text(encoding="utf-8"))
+    assert 'TimeZone(identifier: "America/New_York")' in helper and "isCalendarBoundary(date) ? shortEastern" in helper, (
+        "the calendar reset (00:00 ET on the 1st) is no longer rendered in ET, so 'Renews on Aug 31' "
+        "is off by a day for every user west of Eastern"
     )

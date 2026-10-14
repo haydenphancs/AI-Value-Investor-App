@@ -15,7 +15,7 @@ Migration 118 then taught `spend_credits` / `refund_credits` about both pools.
 These tests MODEL THE SQL rather than stub it, in the same spirit as
 `test_iap_entitlement.FakeSupabase`: a fake that returns bland success for every RPC makes a
 credit test pass no matter what the balance does, which is exactly how a money bug survives a
-green suite. **If you change the SQL in 100/112/114/117/118, change `_Credits` below.**
+green suite. **If you change the SQL in 100/112/114/117/118/196, change `_Credits` below.**
 
 The weight here is on the ways this goes wrong:
   * a purchased balance surviving every granted-pool mutation (the 3.1.1 property),
@@ -26,12 +26,38 @@ The weight here is on the ways this goes wrong:
 
 from __future__ import annotations
 
+import calendar
+import itertools
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pytest
 
 
 _PLAN_CREDITS = {"free": 50, "pro": 1200, "premium": 4000}
+
+# migration 196 — explicit, like iap_service._TIER_RANK, never the enum's declaration order.
+_TIER_RANK = {"free": 0, "pro": 1, "premium": 2}
+_ENTITLING = frozenset({"active", "grace_period", "billing_retry"})
+_ET = ZoneInfo("America/New_York")
+_USER_IDS = itertools.count(1)
+
+
+def _minus_one_month(ts: datetime) -> datetime:
+    """Postgres `timestamptz - INTERVAL '1 month'` in a UTC session: the day clamps to the
+    shorter month (Mar 31 -> Feb 28)."""
+    year, month = (ts.year, ts.month - 1) if ts.month > 1 else (ts.year - 1, 12)
+    return ts.replace(year=year, month=month, day=min(ts.day, calendar.monthrange(year, month)[1]))
+
+
+def _next_et_reset(now: datetime) -> datetime:
+    """`(date_trunc('month', now AT TIME ZONE 'America/New_York') + INTERVAL '1 month')
+    AT TIME ZONE 'America/New_York'` — midnight ET on the next 1st, in UTC. ET changes clocks at
+    2am, so midnight on a 1st is never ambiguous."""
+    local = now.astimezone(_ET)
+    year, month = (local.year, local.month + 1) if local.month < 12 else (local.year + 1, 1)
+    return datetime(year, month, 1, tzinfo=_ET).astimezone(timezone.utc)
 
 
 class _Credits:
@@ -39,9 +65,17 @@ class _Credits:
 
     Column names match the SQL exactly so a reader can diff this against the migrations.
     `remaining` is the GRANTED half only (unchanged meaning); `spendable` is the real balance.
+
+    Migration 196 gave the granted pool two modes. With no `subscription` (Free, comp and
+    hand-set accounts) it is the calendar month, sized by `comp_tier` — or by `tier` when the
+    account has no subscriptions row at all — and `period_due` / a `resets_at` the `now`
+    clock has passed rolls it. With a `subscription` (the ONE `subscriptions` row iap_service
+    writes) each Apple paid period is granted once, from `periods`: pass one dict to several
+    models to share the table's UNIQUE (original_transaction_id, period_end) key.
     """
 
-    def __init__(self, total=0, used=0, purchased_total=0, purchased_used=0, tier="free"):
+    def __init__(self, total=0, used=0, purchased_total=0, purchased_used=0, tier="free",
+                 *, comp_tier=None, now=None, periods=None):
         self.total = total
         self.used = used
         self.purchased_total = purchased_total
@@ -51,6 +85,14 @@ class _Credits:
         self.tier_alloc = total
         self.tier = tier
         self.period_due = False
+        # migration 196
+        self.comp_tier = comp_tier
+        self.now = now or datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc)
+        self.resets_at: Optional[datetime] = None
+        self.subscription: Optional[dict] = None   # otid, tier, status, end
+        self.paid_period: Optional[dict] = None    # the subscription_credit_periods row in force
+        self.periods: dict = {} if periods is None else periods
+        self.user_id = next(_USER_IDS)
         self.ledger: list[dict] = []
         self.purchases: dict[tuple[str, str], dict] = {}   # (environment, txn) -> row
 
@@ -98,42 +140,165 @@ class _Credits:
             "reverses_id": reverses_id,
         })
 
-    # ── migration 100 ───────────────────────────────────────────────────────
+    # ── migration 196: the ONE subscriptions row, as iap_service writes it ─────
+    def set_subscription(self, otid, tier, status, end, environment=None):
+        """`environment` None = a row written before 196 or by older code: Production."""
+        self.subscription = {"otid": otid, "tier": tier, "status": status, "end": end,
+                             "environment": environment}
+
+    def _prod_row(self) -> bool:
+        sub = self.subscription
+        return sub is not None and (sub.get("environment") or "Production") == "Production"
+
+    def _calendar_tier(self) -> str:
+        """users.tier never sizes a PRODUCTION paid allocation. It sizes the calendar
+        allowance only without a Production subscriptions row: hand-set testers (no row) and
+        Sandbox / TestFlight subscribers (renewing every few minutes, kept on pre-196 sizing)."""
+        if self._prod_row():
+            return self.comp_tier or "free"
+        return self.tier or self.comp_tier or "free"
+
+    def _calendar_alloc(self) -> int:
+        return _PLAN_CREDITS.get(self._calendar_tier(), 0)
+
+    def _calendar_roll(self, alloc: int) -> None:
+        """194's reset. Ledger what the old period still held BEFORE the wipe, so the ledger
+        keeps tying out to the balance across periods: GRANTED only, ref_id NULL (no refund can
+        pair with it), and only when something expired. The SQL writes balance_after = 0 (the
+        granted-pool convention) where `_ledger` stamps `spendable`; nothing here asserts
+        balance_after. Column-explicit like the SQL, so the purchased pool is untouched."""
+        if self.remaining > 0:
+            self._ledger(-self.remaining, -self.remaining, 0, "monthly_expired", None)
+        self.total, self.used, self.tier_alloc = alloc, 0, alloc
+        self.period_due = False
+        self.resets_at = _next_et_reset(self.now)
+        self._ledger(alloc, alloc, 0, "monthly_reset", None)
+
+    # ── migrations 100 → 194 → 196 ──────────────────────────────────────────
     def ensure_credit_period(self) -> int:
-        """HARD reset of the granted pool at the ET month boundary. Column-explicit: it names
-        only `total`, `used`, `resets_at`, `updated_at`, so the purchased pool is untouched."""
-        alloc = _PLAN_CREDITS.get(self.tier, 0)
-        if self.period_due:
-            self.total = alloc
-            self.used = 0
-            self.tier_alloc = alloc          # migration 139
-            self.period_due = False
-            self._ledger(alloc, alloc, 0, "monthly_reset", None)
-        self._check()
-        return self.remaining
+        """Branch for branch with 196's SQL, in its order: the calendar block (194's reset or
+        the mid-month top-up), then the refund, the REFUND_REVERSED reinstatement, a new paid
+        period, a running one, hold, lapse. `resets_at` None here means a FUTURE boundary
+        (rows in these tests start mid-period); the SQL treats a NULL resets_at as due."""
+        cal_tier = self._calendar_tier()
+        cal_alloc = _PLAN_CREDITS.get(cal_tier, 0)
+        sub, cur = self.subscription, self.paid_period
+        running = cur is not None and cur["end"] > self.now
+        paid_row = self._prod_row() and _TIER_RANK[sub["tier"]] > _TIER_RANK[cal_tier]
+        new_key = (paid_row and sub["status"] == "active" and sub["end"] is not None
+                   and sub["end"] > self.now and bool(sub["otid"])
+                   and not (cur is not None and (cur["otid"], cur["end"]) == (sub["otid"], sub["end"])))
+        seen = self.periods.get((sub["otid"], sub["end"])) if new_key else None
+        reinstate = (new_key and seen is not None and seen["user"] == self.user_id
+                     and seen.get("revoked_at") is not None and not running)
+        start_paid = new_key and seen is None and (
+            not running or _TIER_RANK[sub["tier"]] > _TIER_RANK[cur["tier"]])
 
-    # ── migration 112 ───────────────────────────────────────────────────────
-    def grant_tier_upgrade(self) -> int:
-        alloc = _PLAN_CREDITS.get(self.tier, 0)
-        # migration 139: guard on tier_alloc, NOT on total. revoke_tier_credits overwrites
-        # total with GREATEST(free_alloc, used) — a high-water mark, not an allocation — so
-        # guarding on it made a PAID re-subscribe after an Apple refund grant nothing.
-        if alloc > self.tier_alloc:
-            delta = max(alloc - self.total, 0)
-            self.total = max(alloc, self.total)   # only ever raises the ceiling
-            self.tier_alloc = alloc
+        if cur is None and not start_paid and not reinstate:          # CALENDAR MODE
+            if self.period_due or (self.resets_at is not None and self.now >= self.resets_at):
+                self._calendar_roll(cal_alloc)
+            elif cal_alloc > self.tier_alloc:
+                # migration 139: guard on tier_alloc, NOT on total. A raised complimentary (or
+                # Sandbox) tier is topped up mid-month; total only ever rises here.
+                delta = max(cal_alloc - self.total, 0)
+                self.total = max(cal_alloc, self.total)
+                self.tier_alloc = cal_alloc
+                if delta:
+                    self._ledger(delta, delta, 0, "tier_upgrade", None)
+            self._check()
+            return self.remaining
+
+        remaining = self.remaining
+
+        # REFUND of the period in force: the revoked transaction IS that period.
+        if (cur is not None and sub is not None and sub["status"] == "revoked"
+                and sub["otid"] == cur["otid"] and sub["end"] == cur["end"]):
+            floor = max(cal_alloc, self.used)
+            writeoff = max(self.used - cal_alloc, 0)
+            delta = floor - self.total
+            cur["revoked_at"], cur["revoked_remaining"] = self.now, remaining
+            self.total, self.used = floor - writeoff, self.used - writeoff
+            self.tier_alloc = min(self.tier_alloc, cal_alloc)
+            self.paid_period, self.resets_at, self.period_due = None, _next_et_reset(self.now), False
             if delta:
-                self._ledger(delta, delta, 0, "tier_upgrade", None)
+                self._ledger(delta, delta, 0, "tier_revoked", None)
+            self._check()
+            return self.remaining
+
+        # REFUND_REVERSED: the revoked period back, once, with exactly what the refund took.
+        if reinstate:
+            restore = seen.get("revoked_remaining") or 0
+            if remaining > 0:
+                self._ledger(-remaining, -remaining, 0, "monthly_expired", None)
+            seen["revoked_at"], seen["revoked_remaining"], seen["reinstated_at"] = None, None, self.now
+            self.total, self.used, self.tier_alloc = restore, 0, seen["allocation"]
+            self.paid_period, self.resets_at = seen, seen["end"]
+            if restore > 0:
+                self._ledger(restore, restore, 0, "plan_reinstated", seen["otid"])
+            self._check()
+            return self.remaining
+
+        if start_paid:                                                 # A NEW PAID PERIOD
+            alloc = _PLAN_CREDITS.get(sub["tier"], 0)
+            carry = 0
+            if running:
+                # floor(allocation x elapsed / span) in exact integer microseconds, multiplied
+                # before dividing like the SQL (a float share can round either way at an exact
+                # boundary); clamped to [0, allocation].
+                us = timedelta(microseconds=1)
+                span = (cur["end"] - cur["start"]) // us
+                cap = (cur["allocation"] * ((self.now - cur["start"]) // us)) // span if span > 0 else 0
+                carry = min(remaining, min(max(cap, 0), cur["allocation"]))
+            row = {"user": self.user_id, "otid": sub["otid"], "end": sub["end"],
+                   "start": min(_minus_one_month(sub["end"]), self.now), "tier": sub["tier"],
+                   "allocation": alloc, "carried": carry,
+                   "source": "upgrade" if running else "new_period",
+                   "revoked_at": None, "revoked_remaining": None, "reinstated_at": None}
+            self.periods[(sub["otid"], sub["end"])] = row
+            if remaining - carry > 0:
+                self._ledger(-(remaining - carry), -(remaining - carry), 0, "monthly_expired", None)
+            self.total, self.used, self.tier_alloc = alloc + carry, 0, alloc
+            self.paid_period, self.resets_at = row, sub["end"]
+            self._ledger(alloc, alloc, 0, "plan_period", sub["otid"])
+            self._check()
+            return self.remaining
+
+        if running:                                                    # paid, in force
+            self._check()
+            return self.remaining
+
+        if paid_row and sub["status"] in _ENTITLING:                    # HOLD
+            self._check()
+            return self.remaining
+        self.paid_period = None                                        # LAPSE: "Expire at plan end"
+        self._calendar_roll(cal_alloc)
         self._check()
         return self.remaining
 
-    # ── migration 114 ───────────────────────────────────────────────────────
+    # ── migrations 112 → 196 ────────────────────────────────────────────────
+    def grant_tier_upgrade(self) -> int:
+        """Since 196 the same reconciliation: a paid allocation comes only from a paid
+        period, and the calendar branch keeps 139's top-up for a raised tier."""
+        return self.ensure_credit_period()
+
+    # ── migrations 114 → 139 → 196 ──────────────────────────────────────────
     def revoke_tier_credits(self) -> int:
         free = _PLAN_CREDITS["free"]
+        # migration 196: in paid mode, act only when the refunded transaction IS the period in
+        # force (ensure_credit_period has normally done it already and left paid mode); a
+        # refund of another period changes nothing. The period is marked for a reversal.
+        cur, sub = self.paid_period, self.subscription
+        if cur is not None:
+            if not (sub is not None and sub["status"] == "revoked"
+                    and sub["otid"] == cur["otid"] and sub["end"] == cur["end"]):
+                self._check()
+                return self.remaining
+            if cur.get("revoked_at") is None:
+                cur["revoked_at"], cur["revoked_remaining"] = self.now, self.remaining
         floor = max(free, self.used)
         # migration 139: tier_alloc drops to the free allocation whether or not `total` moves,
-        # or grant_tier_upgrade's guard would still see the pre-revoke allocation and refuse a
-        # genuine re-subscribe.
+        # or the replay guard would still see the pre-revoke allocation and refuse a genuine
+        # re-subscribe.
         self.tier_alloc = min(self.tier_alloc, free)
         # migration 139: write off the spend the refunded subscription paid for, exactly as
         # revoke_purchased_credits does for a charged-back pack. Leaving `used` alone left a
@@ -146,6 +311,9 @@ class _Credits:
             self.used -= writeoff
             if delta:
                 self._ledger(delta, delta, 0, "tier_revoked", None)
+        # migration 196: a refund also ends paid mode; the pool follows the ET calendar again.
+        if self.paid_period is not None:
+            self.paid_period, self.resets_at, self.period_due = None, _next_et_reset(self.now), False
         self._check()
         return self.remaining
 
@@ -1043,3 +1211,162 @@ def test_a_matched_debit_that_refunds_nothing_is_not_reported_as_success():
 
     from app.services.credit_service import refund_did_not_happen
     assert refund_did_not_happen(out), "the call sites would not log a REFUND LEAK for this"
+
+
+# ── 2026-10-12: one debit per ref is what makes a refund replay-safe ───────────────────
+#
+# The deep door now charges `{TICKER}:{report_id}` and the direct door
+# `{TICKER}:{persona}:{uuid}`; chat already charged `{session}:{uuid}`. The CreditService
+# retry, both doors' precharge compensations, the insert-failure refund and a raised claim's
+# re-read refund are all safe ONLY because of the property these two tests pin.
+
+
+def test_unique_refs_make_a_replayed_refund_converge():
+    c = _Credits(total=100, used=0)
+    c.spend_credits(20, ref_id="AAPL:r1")
+    c.spend_credits(20, ref_id="AAPL:r2")
+    first = c.refund_credits(20, ref_id="AAPL:r1")
+    replay = c.refund_credits(20, ref_id="AAPL:r1")   # a retry after a lost reply
+    assert first["outcome"] == "refunded" and first["refunded"] == 20
+    assert replay["outcome"] == "already_refunded" and replay["refunded"] == 0
+    assert c.spendable == 100 - 40 + 20, "spendable must rise by exactly ONE refund"
+    r2_debit = next(r for r in c.ledger if r["ref_id"] == "AAPL:r2" and r["delta"] < 0)
+    assert r2_debit["id"] not in {r["reverses_id"] for r in c.ledger}, (
+        "the sibling report's debit was reversed by a replay"
+    )
+
+    # Contrast — the bare shared ref this replaced: the SAME replay reverses the sibling's
+    # debit (a delivered report's), i.e. it mints 20 credits.
+    legacy = _Credits(total=100, used=0)
+    legacy.spend_credits(20, ref_id="AAPL")
+    legacy.spend_credits(20, ref_id="AAPL")
+    legacy.refund_credits(20, ref_id="AAPL")
+    second = legacy.refund_credits(20, ref_id="AAPL")
+    assert second["outcome"] == "refunded" and legacy.spendable == 100, (
+        "on a shared ref the replay pays out a second time — the bug unique refs close"
+    )
+
+
+def test_the_legacy_fallback_never_pairs_with_a_new_ref_debit():
+    """`refund_report_charge`'s CAS-winner fallback: a legacy row (charged on the bare ticker)
+    misses on its per-report ref, then refunds on the bare ticker — which can reach only
+    LEGACY debits, never a new per-report one."""
+    c = _Credits(total=100, used=0)
+    c.spend_credits(20, ref_id="AAPL")          # a legacy row's charge
+    c.spend_credits(20, ref_id="AAPL:r2")       # a new row's charge
+    miss = c.refund_credits(20, ref_id="AAPL:legacy-row-id")
+    assert miss["outcome"] == "no_matching_debit", "the per-report ref must miss a legacy row"
+    hit = c.refund_credits(20, ref_id="AAPL")
+    assert hit["outcome"] == "refunded"
+    reversed_ids = {r["reverses_id"] for r in c.ledger if r["reverses_id"]}
+    new_debit = next(r for r in c.ledger if r["ref_id"] == "AAPL:r2" and r["delta"] < 0)
+    legacy_debit = next(r for r in c.ledger if r["ref_id"] == "AAPL" and r["delta"] < 0)
+    assert legacy_debit["id"] in reversed_ids and new_debit["id"] not in reversed_ids
+    # And once every legacy debit is reversed, the bare ticker matches nothing ever again —
+    # the legacy namespace only shrinks.
+    again = c.refund_credits(20, ref_id="AAPL")
+    assert again["outcome"] == "already_refunded" and again["refunded"] == 0
+
+
+def test_a_compensation_for_a_charge_that_never_landed_moves_nothing():
+    """Both report doors now compensate a precharge whose reply was lost. When the debit never
+    committed, the per-charge ref matches no row at all: no_matching_debit, nothing moved —
+    even with an earlier DELIVERED report of the same ticker+persona in the ledger."""
+    c = _Credits(total=100, used=0)
+    c.spend_credits(20, ref_id="AAPL:warren_buffett:" + "a" * 32)   # delivered last week
+    out = c.refund_credits(20, ref_id="AAPL:warren_buffett:" + "b" * 32)
+    assert out["outcome"] == "no_matching_debit" and out["refunded"] == 0
+    assert c.used == 20, "a compensation reversed a delivered report's debit (a mint)"
+
+
+# ── Migration 194: the monthly reset ledgers what expired ──────────────────────────────
+#
+# Before 194 the reset was the one balance change with no ledger row: `total - used` simply
+# vanished, so SUM(delta) overstated the balance by every month's unspent allocation and the
+# Credit History screen stopped adding up after the first reset.
+
+
+def _ledger_sum(c: _Credits) -> int:
+    return sum(r["delta"] for r in c.ledger)
+
+
+def test_the_ledger_sums_to_the_balance_across_month_rolls():
+    """Every balance-changing step, including three month rolls (one after a tier upgrade,
+    one after a subscription refund), must keep SUM(delta) == spendable."""
+    c = _Credits(total=0, used=0, tier="free")
+    c.period_due = True
+    c.ensure_credit_period()                       # a ledgered origin: +50 monthly_reset
+    steps = []
+
+    def check(step):
+        steps.append(step)
+        assert _ledger_sum(c) == c.spendable, (
+            f"after {steps}: ledger sums to {_ledger_sum(c)} but the balance is {c.spendable}"
+        )
+
+    check("origin")
+    c.spend_credits(20, ref_id="AAPL:r1")
+    check("spend 20")
+    assert c.add_purchased_credits("txn-1", 250)["outcome"] == "granted"
+    check("buy 250")
+    c.spend_credits(40, ref_id="NVDA:r2")          # 30 granted + 10 purchased
+    check("spend 40 across both pools")
+    assert c.refund_credits(40, ref_id="NVDA:r2")["outcome"] == "refunded"
+    check("refund it")
+    c.period_due = True
+    c.ensure_credit_period()                       # 30 granted expire, +50
+    check("month roll with 30 unspent")
+    c.tier = "pro"
+    c.period_due = True
+    c.ensure_credit_period()                       # 50 expire, +1200
+    check("roll into pro")
+    c.tier = "free"
+    c.revoke_tier_credits()
+    check("subscription refunded")
+    c.period_due = True
+    c.ensure_credit_period()
+    check("roll after the revoke")
+
+    expiries = [r for r in c.ledger if r["reason"] == "monthly_expired"]
+    assert [r["delta"] for r in expiries] == [-30, -50, -50], expiries
+    resets = [r for r in c.ledger if r["reason"] == "monthly_reset"]
+    for exp in expiries:
+        # Written immediately BEFORE its reset (id order = the history's keyset order).
+        nxt = next(r for r in c.ledger if r["id"] == exp["id"] + 1)
+        assert nxt["reason"] == "monthly_reset", nxt
+    assert len(resets) == 4
+
+
+def test_a_fully_spent_month_ledgers_no_expiry():
+    c = _Credits(total=50, used=0, tier="free")
+    c.spend_credits(50, ref_id="AAPL:r1")
+    c.period_due = True
+    c.ensure_credit_period()
+    assert not [r for r in c.ledger if r["reason"] == "monthly_expired"]
+    assert all(r["delta"] != 0 for r in c.ledger), "a zero-delta row was written"
+
+
+def test_an_expiry_never_touches_purchased_credits():
+    """App Store 3.1.1: purchased credits never expire — not in the balance and not in the
+    ledger's split either."""
+    c = _Credits(total=50, used=10, purchased_total=250, purchased_used=40, tier="free")
+    before = c.purchased_remaining
+    c.period_due = True
+    c.ensure_credit_period()
+    assert c.purchased_remaining == before == 210
+    expiry = next(r for r in c.ledger if r["reason"] == "monthly_expired")
+    assert expiry["delta"] == expiry["granted_delta"] == -40
+    assert expiry["purchased_delta"] == 0
+    assert expiry["ref_id"] is None
+
+
+def test_an_expiry_row_can_never_be_paired_by_a_refund():
+    """ref_id NULL: `refund_credits` pairs on (ref_id, -amount) and NULL matches nothing, so no
+    refund can ever reverse an expiry and hand the expired credits back."""
+    c = _Credits(total=50, used=20, tier="free")
+    c.period_due = True
+    c.ensure_credit_period()                       # 30 expire
+    expiry = next(r for r in c.ledger if r["reason"] == "monthly_expired")
+    for ref in (None, "", "2026-10"):
+        c.refund_credits(30, ref_id=ref)
+    assert expiry["id"] not in {r["reverses_id"] for r in c.ledger if r["reverses_id"]}

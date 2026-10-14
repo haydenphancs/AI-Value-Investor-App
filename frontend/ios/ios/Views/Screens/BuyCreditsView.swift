@@ -172,10 +172,11 @@ struct BuyCreditsView: View {
         }
         .task {
             Analytics.shared.track(.creditPackShown)
-            // Re-read the balance on open. Nothing else does: `AppState.user.credits` is
-            // populated at sign-in and refreshed only by an entitlement change, so a user who
-            // spent credits elsewhere in the session arrived here to a stale number — on the
-            // one screen where the balance is the whole point.
+            // Re-read the balance on open — the one screen where the balance is the whole
+            // point. Every money event re-reads `AppState.user.credits` now (chat turns, the
+            // report doors, the Reports list, pushes, the foreground), but a charge or refund
+            // that settled on the server since the last of those is only seen by asking.
+            // Joins a read already in flight, so it costs nothing extra then.
             if appState.auth.isAuthenticated {
                 await appState.refreshCredits()
             }
@@ -200,7 +201,7 @@ struct BuyCreditsView: View {
                 Text("\(credits.remaining)")
                     .font(AppTypography.dataHero)
                     .foregroundColor(AppColors.textPrimary)
-                Text("credits available")
+                Text(credits.remaining == 1 ? "credit available" : "credits available")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             } else {

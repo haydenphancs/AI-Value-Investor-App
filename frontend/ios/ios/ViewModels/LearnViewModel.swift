@@ -19,8 +19,9 @@ class LearnViewModel: ObservableObject {
     @Published var discussions: [CommunityDiscussion] = []
     // NOTE: no `creditBalance` here on purpose. This used to be hardcoded to
     // `47 credits, renews Jan 1 2025` — a fabricated balance shown to every user
-    // that contradicted the real one on Research and Profile. The Learn screen now
-    // reads `appState.user.credits`, the documented single source of truth.
+    // that contradicted the real one on Research and Profile. The Learn screen renders
+    // no balance at all now; the surfaces that do (Research, Account, Buy Credits) read
+    // `AppState.user.credits`, the single source.
     @Published var isLoading: Bool = false
     @Published var error: String?
     @Published var searchText: String = ""

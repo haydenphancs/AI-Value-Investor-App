@@ -238,5 +238,6 @@ Data entry, but hard-required to reach Submit — and absent from the launch che
   credentials** the review notes promise (plan §8)
 - **Age rating** — 17+ via the age-gate question; answer the new AI-content and in-app-chat
   capability questions honestly
-- **Availability** — United States only
+- **Availability** — United States only at launch; **110 storefronts since 2026-10-11** (owner decision; the 65
+  left off and why: [`country-availability-2026-10-11.md`](country-availability-2026-10-11.md))
 - **App Review notes** — paste `app-privacy-answers.md` §7 verbatim

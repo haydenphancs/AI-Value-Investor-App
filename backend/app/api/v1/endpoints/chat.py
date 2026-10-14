@@ -8,6 +8,7 @@ Frontend: POST /chat/sessions, GET /chat/sessions,
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
@@ -40,7 +41,15 @@ from app.services.chat_security import (
 from app.core.client_app_version import capture_client_app_version
 from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
-from app.services.credit_service import CreditService, CreditServiceUnavailable, refund_did_not_happen
+from app.services.credit_service import (
+    CreditService,
+    CreditServiceUnavailable,
+    charge_off_loop,
+    chat_turn_ref,
+    refund_did_not_happen,
+    settle_detached,
+    settle_off_loop,
+)
 from app.integrations.gemini import GeminiTimeoutError, _is_clean_finish, is_length_cut
 # The grounding audit reads a tool result as the model saw it (the same structural shrink).
 from app.integrations.gemini import truncate_tool_result
@@ -232,8 +241,12 @@ class _ChatQuota:
       debit — see migration 101).
 
     `refund_once` hands the quota back on non-delivery and is safe to call from every
-    failure site + the finally backstop: a single-coroutine `_settled` flag fires the
-    (non-idempotent) refund AT MOST ONCE.
+    failure site + the finally backstop: the `_settled` flag fires the refund AT MOST ONCE.
+    The flag is checked and set under `_lock`, INSIDE the method: the doors run these SYNC
+    methods in worker threads (`settle_off_loop`, `settle_detached`) and
+    `chat_answer_coverage` calls `settle_no_cost` from one, so two settlements can now race
+    across threads. Claiming inside the thread body (never pre-claimed on the loop) means a
+    work item dropped before it started leaves the turn unsettled for the backstop.
 
     `ref_id` is PER-TURN (`"{session_id}:{uuid4}"`), not per-session. It used to be the
     bare session id, which made every turn in a conversation write an identical
@@ -263,6 +276,8 @@ class _ChatQuota:
         self._session_id = session_id
         self._free = free
         self._settled = False
+        # Guards the `_settled` check-and-set only; the RPC runs outside it.
+        self._lock = threading.Lock()
         self._refunded = False
         self._refund_reason: Optional[str] = None
         self._balance_after: Optional[int] = balance_after
@@ -296,11 +311,18 @@ class _ChatQuota:
         """The ledger PROVED the credit came back (`refund_did_not_happen` was False)."""
         return self._refunded
 
+    def _claim_settlement(self, reason: str) -> bool:
+        """Atomically take the turn's one settlement. True for exactly one caller."""
+        with self._lock:
+            if self._settled:
+                return False
+            self._settled = True
+            self._refund_reason = reason
+            return True
+
     def refund_once(self, reason: str) -> None:
-        if self._settled:
+        if not self._claim_settlement(reason):
             return
-        self._settled = True
-        self._refund_reason = reason
         if self._free:
             # ⚠️ MUST return before `refund_ledgered`. A free turn wrote NO debit, so a
             # refund against its ref_id finds no matching row. Before migrations 139/142 that
@@ -351,10 +373,8 @@ class _ChatQuota:
         `refund_once` does. Idempotent through `_settled`, and `on_delivered` is a no-op
         afterwards, so a no-cost turn never earns a follow-up either.
         """
-        if self._settled:
+        if not self._claim_settlement(reason):
             return
-        self._settled = True
-        self._refund_reason = reason
         if self._free or self._is_guest:
             return
         payload = CreditService().refund_ledgered(
@@ -444,7 +464,45 @@ class _ChatQuota:
         """
         if self._settled or self._free or self._is_guest:
             return
+        # Parked by the owner (2026-10-03: no free follow-up, every question costs a credit):
+        # with the window at 0 no allowance can ever be CLAIMED (`_claim_chat_quota` gates the
+        # claim the same way), so a grant is a wasted sync RPC — and this runs on the event
+        # loop, where its call sites are pinned by source scans. Re-enabling the window means
+        # moving this grant off the loop first.
+        if int(settings.CHAT_FREE_FOLLOWUP_SECONDS or 0) <= 0:
+            return
         get_chat_budget_service().grant_free_followup(self._session_id)
+
+
+def _refund_abandoned_claim(claimed, exc) -> None:
+    """`charge_off_loop`'s hand-back for a door cancelled while `_claim_chat_quota` ran: the
+    claim finished in its thread but no caller saw it, so a charged turn is refunded here (a
+    refused or failed claim charged nothing — its own compensation already ran)."""
+    quota = claimed[0] if (exc is None and isinstance(claimed, tuple) and claimed) else None
+    if quota is not None:
+        quota.refund_once("chat_undelivered")
+
+
+class _ChargedStreamingResponse(StreamingResponse):
+    """The stream door's response: runs `if_never_streamed` when it ends without its body
+    ever having started.
+
+    `_metered_stream`'s `finally` is the stream's refund backstop, but an async generator
+    that was never iterated never runs its `finally`: a cancel (a deploy's graceful-shutdown
+    deadline) or a disconnect landing between the handler's return and the stream task's
+    first step dropped a charged turn with no refund and no log line (review F2,
+    2026-10-12). This `finally` runs in the request's own task — possibly while it is being
+    cancelled — so `if_never_streamed` must not await."""
+
+    def __init__(self, content, *, if_never_streamed, **kwargs):
+        super().__init__(content, **kwargs)
+        self._if_never_streamed = if_never_streamed
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._if_never_streamed()
 
 
 def _claim_chat_quota(user: dict, x_guest_id, *, session_id: Optional[str], req=None):
@@ -462,10 +520,16 @@ def _claim_chat_quota(user: dict, x_guest_id, *, session_id: Optional[str], req=
     lines after claiming quota — so the credit ref never travels as a caller argument.
 
     Returns `(quota, None)` to proceed, or `(None, JSONResponse)` to short-circuit.
+
+    SYNC and blocking (the precharge RPC, its compensation, the free-follow-up claim): the
+    doors call it through `asyncio.to_thread`, inside a lambda that keeps this literal call
+    and its `req=req` (`tests/test_chat_ip_ceiling.py` follows it through the lambda).
     """
     # One ref per DEBIT. Prefixed with the session so a ledger row stays greppable back to
-    # its conversation; the uuid is what makes the refund pairing exact.
-    turn_ref = f"{session_id}:{uuid.uuid4().hex}"
+    # its conversation; the uuid is what makes the refund pairing exact. A ChargeRef, so a
+    # refund of this turn (any settlement, and the compensation below) is retried on a
+    # transient fault — a replay answers `already_refunded`.
+    turn_ref = chat_turn_ref(session_id)
     # `user.get("is_guest")`, NOT `user["id"] == GUEST_USER_ID`. Under migration 111 a guest
     # resolves to a per-INSTALL uuid5 that never equals the shared sentinel, so the old
     # comparison would have sent every guest into the credit precharge below — against a
@@ -1834,7 +1898,13 @@ async def send_chat_message(
     # Reserve this turn's quota BEFORE spending Gemini tokens: authenticated users are
     # charged CHAT_CREDIT_COST credits (pre-flight + atomic deduction → 402 if broke);
     # guests use the durable per-install daily-turn budget.
-    quota, quota_err = _claim_chat_quota(user, x_guest_id, session_id=session_id, req=req)
+    # Off the loop (a sync precharge RPC — invariant #6); the lambda keeps the literal call.
+    # `charge_off_loop` hands the turn back if a deploy cancels this wait after it charged.
+    quota, quota_err = await charge_off_loop(
+        lambda: _claim_chat_quota(user, x_guest_id, session_id=session_id, req=req),
+        on_abandoned=_refund_abandoned_claim,
+        what=f"chat_charge {session_id}",
+    )
     if quota_err is not None:
         return quota_err
 
@@ -1843,6 +1913,7 @@ async def send_chat_message(
     # stream-failure reconcile to later duplicate), and the two rows commit atomically — matching the
     # streaming endpoint's persist contract.
     delivered = False  # True once the answer is durably persisted → gates the finally refund
+    unwinding = False  # set by a BaseException (a cancel) — the finally must not await then
     try:
         from app.services.chat_service import ChatService, _chat_thinking_budget
 
@@ -2061,13 +2132,17 @@ async def send_chat_message(
         # answer, but we don't bill a turn that incurred no AI cost. `== 0` (not falsy) so a
         # real generation reporting None/unknown usage is never wrongly refunded.
         if ai_result.get("tokens_used") == 0:
-            quota.settle_no_cost("chat_cache_hit")
+            await settle_off_loop(lambda: quota.settle_no_cost("chat_cache_hit"),
+                                  what=f"chat_cache_hit {session_id}")
         elif _settles_no_cost(ai_result.get("degraded"), web_used,
                               ai_result.get("web_search_spent") is True):
             # `generate_response` fell back to a tool-less plain-text call (or every tool the
             # model called failed): the answer to a stock question with none of its live data.
             # The stream path already refunds its degraded shapes; this one only logged.
-            quota.settle_no_cost(f"chat_degraded_{ai_result['degraded']}")
+            await settle_off_loop(
+                lambda: quota.settle_no_cost(f"chat_degraded_{ai_result['degraded']}"),
+                what=f"chat_degraded {session_id}",
+            )
         elif ai_result.get("degraded"):
             logger.info("Chat send: cut answer built on web results stays charged (session %s)",
                         session_id)
@@ -2182,14 +2257,25 @@ async def send_chat_message(
             )
         logger.error(f"Chat response failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate response")
+    except BaseException:
+        # Records the fact only: a frame being cancelled must not await in `finally`.
+        unwinding = True
+        raise
     finally:
         # Any non-delivery — generation/persist error, the budget, the disconnect probe
         # above — hands the turn's quota back exactly once (credit for authed, daily turn
-        # for guest) so an outage never burns a paid turn. (No CancelledError arrives on
-        # this door: Starlette cancels only STREAMING responses on a client disconnect,
-        # which is why the explicit `is_disconnected()` probe before the persist exists.)
-        if not delivered:
-            quota.refund_once("chat_undelivered")
+        # for guest) so an outage never burns a paid turn. A client disconnect does not
+        # cancel this door (Starlette cancels only STREAMING responses, which is why the
+        # explicit `is_disconnected()` probe before the persist exists), but a deploy's
+        # graceful-shutdown deadline does — then the refund runs detached, drained by the
+        # lifespan, because a cancelled frame cannot await.
+        if not delivered and not quota.is_settled:
+            if unwinding:
+                settle_detached(lambda: quota.refund_once("chat_undelivered"),
+                                what=f"chat_undelivered {session_id}")
+            else:
+                await settle_off_loop(lambda: quota.refund_once("chat_undelivered"),
+                                      what=f"chat_undelivered {session_id}")
 
 
 @router.post("/sessions/{session_id}/messages/stream")
@@ -2247,33 +2333,64 @@ async def stream_chat_message(
     # are charged CHAT_CREDIT_COST credits (→ 402 if broke), guests use the daily-turn
     # budget. Returning a clean JSON error here (not an SSE frame) mirrors the 404s above;
     # iOS surfaces INSUFFICIENT_CREDITS via its non-stream fallback decode.
-    quota, quota_err = _claim_chat_quota(user, x_guest_id, session_id=session_id, req=req)
+    # Off the loop (a sync precharge RPC — invariant #6); the lambda keeps the literal call.
+    # `charge_off_loop` hands the turn back if a deploy cancels this wait after it charged.
+    quota, quota_err = await charge_off_loop(
+        lambda: _claim_chat_quota(user, x_guest_id, session_id=session_id, req=req),
+        on_abandoned=_refund_abandoned_claim,
+        what=f"chat_charge {session_id}",
+    )
     if quota_err is not None:
         return quota_err
 
-    sdata = session.data
-    ctx_type = request.context_type or sdata.get("context_type")
-    ref_id = request.reference_id or sdata.get("reference_id")
-    # Live turn → the iOS on-screen snapshot; history reopen (context=None) →
-    # the snapshot persisted at open time (migration 087). Sanitized + bounded
-    # since it lands in the SYSTEM instruction (injection surface).
-    req_ctx = sanitize_context(request.context)   # whitespace-only → absent, everywhere
-    effective_context = sanitize_context(_effective_context(req_ctx, sdata))
-    # True only when a stored snapshot is being replayed (reopen) — labels it as
-    # a point-in-time copy in the prompt so stale figures aren't answered as live.
-    context_is_replayed = not req_ctx and bool(effective_context)
-    session_type = sdata.get("session_type", "NORMAL")
-    stock_id = sdata.get("stock_id")
-    # "First turn of this session" — the same trigger-maintained counter the auto-title
-    # keys on (`trg_chat_message_count` adds one per persisted row, both rows of a turn
-    # land in one insert, and this row was read before this turn's write). Drives the
-    # once-per-session price card (E7): the grounded asset's card is attached to the
-    # FIRST answer only and stays on screen; later one-line follow-ups no longer arrive
-    # under a full-height repeat of it. A first turn that failed to persist leaves the
-    # counter at 0, so the next attempt shows the card again — acceptable. A later turn
-    # whose earlier answers never rendered a card (a timed-out fetch) is treated as the
-    # first for the card's purposes — see `_session_has_card`.
-    first_turn = await _should_attach_base_card(supabase, sdata, session_id)
+    # The turn is charged from here, and until the response's body starts nothing else owns
+    # its refund (`_metered_stream`'s `finally` runs only once the stream is iterated). A
+    # raise in this stretch, or a deploy's graceful-shutdown cancel landing on the card probe
+    # below (a Supabase hop), used to keep the credit with no refund and no log line (review
+    # F2, 2026-10-12). Between this block and `return` there is no await, and the response
+    # covers the gap before its body starts (`_ChargedStreamingResponse`).
+    try:
+        sdata = session.data
+        ctx_type = request.context_type or sdata.get("context_type")
+        ref_id = request.reference_id or sdata.get("reference_id")
+        # Live turn → the iOS on-screen snapshot; history reopen (context=None) →
+        # the snapshot persisted at open time (migration 087). Sanitized + bounded
+        # since it lands in the SYSTEM instruction (injection surface).
+        req_ctx = sanitize_context(request.context)   # whitespace-only → absent, everywhere
+        effective_context = sanitize_context(_effective_context(req_ctx, sdata))
+        # True only when a stored snapshot is being replayed (reopen) — labels it as
+        # a point-in-time copy in the prompt so stale figures aren't answered as live.
+        context_is_replayed = not req_ctx and bool(effective_context)
+        session_type = sdata.get("session_type", "NORMAL")
+        stock_id = sdata.get("stock_id")
+        # "First turn of this session" — the same trigger-maintained counter the auto-title
+        # keys on (`trg_chat_message_count` adds one per persisted row, both rows of a turn
+        # land in one insert, and this row was read before this turn's write). Drives the
+        # once-per-session price card (E7): the grounded asset's card is attached to the
+        # FIRST answer only and stays on screen; later one-line follow-ups no longer arrive
+        # under a full-height repeat of it. A first turn that failed to persist leaves the
+        # counter at 0, so the next attempt shows the card again — acceptable. A later turn
+        # whose earlier answers never rendered a card (a timed-out fetch) is treated as the
+        # first for the card's purposes — see `_session_has_card`.
+        first_turn = await _should_attach_base_card(supabase, sdata, session_id)
+    except Exception as e:
+        # The raise itself reaches the unhandled-error path (a 500, with its stack); this
+        # line ties the refund to it.
+        logger.warning(
+            "Chat stream setup failed after the charge (session=%s, %s: %s) — refunding the turn",
+            session_id, type(e).__name__, e,
+        )
+        if not quota.is_settled:
+            await settle_off_loop(lambda: quota.refund_once("chat_undelivered"),
+                                  what=f"chat_undelivered {session_id}")
+        raise
+    except BaseException:
+        # Cancelled: this frame cannot await (the next await is re-cancelled at once), so
+        # the refund runs detached and the lifespan drains it.
+        if not quota.is_settled:
+            settle_detached(lambda: quota.refund_once("chat_undelivered"),
+                            what=f"chat_undelivered {session_id}")
+        raise
     user_message = msg
 
     # Non-delivery backstop for the stream: `_metered_stream`'s finally refunds this turn
@@ -2281,6 +2398,9 @@ async def stream_chat_message(
     # client-disconnect CancelledError the inner except-Exception guards miss). event_gen
     # flips it True right after the persist.
     delivered = False
+    # True once `_metered_stream` takes its first step — from then on ITS `finally` owns the
+    # non-delivery refund; before it, the response's (`_ChargedStreamingResponse`).
+    stream_started = False
     # The unanswered check (2026-10-09): its decision task (cancelled by `_metered_stream`'s
     # finally when the client leaves mid-check), and whether this turn passed its gates — a judged
     # turn's free-follow-up grant is held by the decision until its settlement is final.
@@ -3039,7 +3159,9 @@ async def stream_chat_message(
                 else:
                     logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
                     code = "INTERNAL_ERROR"
-                quota.refund_once("chat_stream_fallback_failed")  # no answer → hand the turn back
+                # no answer → hand the turn back
+                await settle_off_loop(lambda: quota.refund_once("chat_stream_fallback_failed"),
+                                      what=f"chat_stream_fallback_failed {session_id}")
                 yield _sse("error", {
                     "error_code": code,
                     "user_message": "Cay AI couldn't respond right now. Please try again.",
@@ -3049,7 +3171,9 @@ async def stream_chat_message(
         if not (content or "").strip():
             # Whitespace-only is empty: the non-stream door refunds it, and persisting
             # "\n" as an answer charged the user for a blank bubble.
-            quota.refund_once("chat_stream_empty")  # no answer produced → hand the turn back
+            # no answer produced → hand the turn back
+            await settle_off_loop(lambda: quota.refund_once("chat_stream_empty"),
+                                  what=f"chat_stream_empty {session_id}")
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Cay AI couldn't respond right now. Please try again.",
@@ -3215,7 +3339,8 @@ async def stream_chat_message(
             # never refunded. The starter-warm replay deliberately stays charged (see above).
             degraded_reason = stream_signals.get("degraded") or fallback_degraded
             if tokens_used == 0:
-                quota.settle_no_cost("chat_cache_hit")
+                await settle_off_loop(lambda: quota.settle_no_cost("chat_cache_hit"),
+                                      what=f"chat_cache_hit {session_id}")
             elif degraded_reason and not _settles_no_cost(
                 degraded_reason, web_search_used,
                 (web_turn is not None and web_turn.spent_a_unit()) or fallback_web_unit_spent,
@@ -3235,7 +3360,10 @@ async def stream_chat_message(
                 # and the thinking card, not the answer, and refunding it would hand back a
                 # credit on a large share of turns every time the network is flaky. Only the
                 # fallback's OWN degraded marker (none of its live data) settles no-cost.
-                quota.settle_no_cost(f"chat_degraded_{degraded_reason}")
+                await settle_off_loop(
+                    lambda: quota.settle_no_cost(f"chat_degraded_{degraded_reason}"),
+                    what=f"chat_degraded {session_id}",
+                )
             # The unanswered check's view of this turn, read AFTER the ladder: its gates stop at
             # every turn the ladder settled or deliberately kept charged (a cut web answer, a
             # starter replay), which makes it the `elif` behind the ladder. Pure; never raises.
@@ -3269,7 +3397,9 @@ async def stream_chat_message(
             # was NOT durably recorded. Guard on `delivered` anyway so this can never hand back a
             # charge for an already-persisted turn.
             if not delivered:
-                quota.refund_once("chat_stream_persist_failed")  # not recorded → hand it back
+                # not recorded → hand it back
+                await settle_off_loop(lambda: quota.refund_once("chat_stream_persist_failed"),
+                                      what=f"chat_stream_persist_failed {session_id}")
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
@@ -3513,12 +3643,20 @@ async def stream_chat_message(
         # Wrap event_gen so a client disconnect (CancelledError/GeneratorExit) — which the
         # inner except-Exception guards miss — still refunds the turn exactly once. No-op if
         # an error site already settled, or if the turn was delivered.
+        nonlocal stream_started
+        stream_started = True
         try:
             async for frame in event_gen():
                 yield frame
         finally:
-            if not delivered:
-                quota.refund_once("chat_stream_cancelled")
+            # Detached, never awaited: this `finally` runs while the generator is being
+            # closed or CANCELLED (a client disconnect, a deploy), where an await is
+            # re-cancelled at once. The strongly-held task finishes the refund off the loop
+            # and the lifespan drains it. `refund_once` claims the settlement inside its own
+            # thread body, so a turn an error site already settled stays a no-op.
+            if not delivered and not quota.is_settled:
+                settle_detached(lambda: quota.refund_once("chat_stream_cancelled"),
+                                what=f"chat_stream_cancelled {session_id}")
             # A disconnect while the unanswered check runs: stop it — the turn stays charged
             # unless its money section had started, which completes as a unit in its worker
             # thread and logs itself. The held free-follow-up grant is released by the decision
@@ -3527,8 +3665,18 @@ async def stream_chat_message(
             if unanswered_task is not None and not unanswered_task.done():
                 unanswered_task.cancel()
 
-    return StreamingResponse(
+    def _refund_if_never_streamed() -> None:
+        # The response ended before `_metered_stream` took a step (a cancel or disconnect in
+        # the moment between this return and the stream task's start): that generator's
+        # `finally` will never run, so the turn is handed back here. Detached, never awaited
+        # — this runs in the response's `finally`, possibly while it is being cancelled.
+        if not stream_started and not delivered and not quota.is_settled:
+            settle_detached(lambda: quota.refund_once("chat_stream_cancelled"),
+                            what=f"chat_stream_cancelled {session_id}")
+
+    return _ChargedStreamingResponse(
         _metered_stream(),
+        if_never_streamed=_refund_if_never_streamed,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

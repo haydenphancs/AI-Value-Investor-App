@@ -651,8 +651,15 @@ struct BackendReportListItem: Sendable {
     let processingStartedAt: String?
     let completedAt: String?
     let userRating: Int?
+    /// The CLAIM flag: set once the refund was claimed (the one-shot compare-and-set), which is
+    /// BEFORE the refund itself runs. Retry's balance gate depends on exactly that meaning — a
+    /// claimed row's DELETE refunds nothing — so it is never served from `refundConfirmed`.
     let isRefunded: Bool?
     let creditsCharged: Int?
+    /// Whether the refund behind `isRefunded` actually LANDED (`refund_outcome`, migration
+    /// 195). false = claimed but not confirmed ("Refund pending"); nil = an older backend, or a
+    /// database without the column — keep the legacy "Refunded N credits" chip.
+    let refundConfirmed: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -673,6 +680,7 @@ struct BackendReportListItem: Sendable {
         case userRating = "user_rating"
         case isRefunded = "is_refunded"
         case creditsCharged = "credits_charged"
+        case refundConfirmed = "refund_confirmed"
     }
 }
 
@@ -699,12 +707,20 @@ extension BackendReportListItem: Decodable {
         self.userRating = try container.decodeIfPresent(Int.self, forKey: .userRating)
         self.isRefunded = try container.decodeIfPresent(Bool.self, forKey: .isRefunded)
         self.creditsCharged = try container.decodeIfPresent(Int.self, forKey: .creditsCharged)
+        // Absent on a backend that predates it: never a decode failure.
+        self.refundConfirmed = try container.decodeIfPresent(Bool.self, forKey: .refundConfirmed)
     }
 }
 
 // MARK: - Backend Credits Response
 
 /// Decodable DTO matching backend GET /users/me/credits response.
+///
+/// `ResearchViewModel.loadCredits()` decodes it, renders it on the Research card and writes it
+/// through to `AppState.user.credits` (`CreditInfo.init(_:)` below) — so it must carry EVERY
+/// `CreditInfo` field. Dropping `granted_total` / `granted_used` would make `monthlyTotal` /
+/// `monthlyUsed` fall back to the lifetime-combined figures, and the Account card's
+/// "Monthly Credits 4/50" would read 24/1250 for anyone who ever bought a pack.
 struct BackendCreditsResponse: Sendable {
     let total: Int
     let used: Int
@@ -713,18 +729,22 @@ struct BackendCreditsResponse: Sendable {
     /// The pool split. Optional because the app and backend deploy independently — a build
     /// carrying this type can hit a Railway instance that predates credit packs.
     ///
-    /// Carried here, not just on `CreditInfo`, because this is the DTO that feeds
-    /// `CreditBalance` on the Research and Learn cards. Without it those cards structurally
-    /// cannot tell which part of the balance expires, and they printed "Renews <date>" over a
-    /// total that includes never-expiring purchased credits.
+    /// Without it the Research card structurally cannot tell which part of the balance
+    /// expires, and it printed "Renews <date>" over a total that includes never-expiring
+    /// purchased credits.
     let grantedRemaining: Int?
     let purchasedRemaining: Int?
+    /// The GRANTED pool's own totals — what the Account card's used/total fraction reads.
+    let grantedTotal: Int?
+    let grantedUsed: Int?
 
     enum CodingKeys: String, CodingKey {
         case total, used, remaining
         case resetsAt = "resets_at"
         case grantedRemaining = "granted_remaining"
         case purchasedRemaining = "purchased_remaining"
+        case grantedTotal = "granted_total"
+        case grantedUsed = "granted_used"
     }
 }
 
@@ -739,5 +759,24 @@ extension BackendCreditsResponse: Decodable {
         // backend. `decode` on an absent key throws even for an Optional type.
         self.grantedRemaining = try container.decodeIfPresent(Int.self, forKey: .grantedRemaining)
         self.purchasedRemaining = try container.decodeIfPresent(Int.self, forKey: .purchasedRemaining)
+        self.grantedTotal = try container.decodeIfPresent(Int.self, forKey: .grantedTotal)
+        self.grantedUsed = try container.decodeIfPresent(Int.self, forKey: .grantedUsed)
+    }
+}
+
+extension CreditInfo {
+    /// The shared balance from the Research tab's own read — field for field, so the write-through
+    /// into `AppState.user.credits` loses nothing (see `BackendCreditsResponse`).
+    init(_ response: BackendCreditsResponse) {
+        self.init(
+            total: response.total,
+            used: response.used,
+            remaining: response.remaining,
+            resetsAt: response.resetsAt,
+            grantedRemaining: response.grantedRemaining,
+            purchasedRemaining: response.purchasedRemaining,
+            grantedTotal: response.grantedTotal,
+            grantedUsed: response.grantedUsed
+        )
     }
 }

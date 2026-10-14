@@ -330,7 +330,7 @@ extension PlanFeature {
             PlanFeature(
                 key: "credits",
                 title: "\(formatted(monthlyCredits)) credits a month",
-                detail: creditsDetail(monthlyCredits, reportCost: reportCost, chatCost: chatCost),
+                detail: creditsDetail(monthlyCredits, reportCost: reportCost, chatCost: chatCost, paid: paid),
                 symbol: validatedSymbol("creditcard.fill"),
                 accentKey: "credits"
             ),
@@ -449,17 +449,21 @@ extension PlanFeature {
 
     /// ⚠️ ONE POOL — reports and chat draw on the same balance, so these are alternatives,
     /// never a sum. Both costs are guarded against 0: they arrive from the wire.
-    private static func creditsDetail(_ credits: Int, reportCost: Int, chatCost: Int) -> String {
+    /// A paid plan's allowance follows its billing period (migration 196); only Free's resets
+    /// on the 1st. Mirrors `plan_features._credits_row` word for word.
+    private static func creditsDetail(_ credits: Int, reportCost: Int, chatCost: Int, paid: Bool) -> String {
         var clauses: [String] = []
         if reportCost > 0 { clauses.append("\(formatted(credits / reportCost)) AI research reports") }
         if chatCost > 0 { clauses.append("\(formatted(credits / chatCost)) Cay AI replies") }
+        let pool: String = paid ? "refreshes each time your plan renews" : "resets at the start of each month"
+        let sentence: String = paid ? "Refreshes each time your plan renews." : "Resets at the start of each month."
         switch clauses.count {
         case 2:
-            return "About \(clauses[0]) or \(clauses[1]) — one shared pool that resets at the start of each month."
+            return "About \(clauses[0]) or \(clauses[1]) — one shared pool that \(pool)."
         case 1:
-            return "About \(clauses[0]). Resets at the start of each month."
+            return "About \(clauses[0]). \(sentence)"
         default:
-            return "Resets at the start of each month."
+            return sentence
         }
     }
 }

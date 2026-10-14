@@ -670,7 +670,11 @@ def test_every_public_table_is_curated():
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
 # Empty is the healthy steady state.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+_PENDING_MIGRATION_TABLES: set[str] = {
+    # 196 (2026-10-12): paid allowances per Apple paid period. Remove after it is applied and
+    # `scripts/dump_schema.sh` re-run — the guard below goes red until you do.
+    "public.subscription_credit_periods",
+}
 # 2026-09-27: 173-181's fourteen tables (marketing_scripts / marketing_link_hits,
 # theme_rotation_* / theme_relevance_cache / theme_daily_insights, trillion_club_*,
 # dcf_fair_value_*, search_pick_daily, news_sentiment_log, news_sentiment_backfill) were

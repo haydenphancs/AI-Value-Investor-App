@@ -49,7 +49,7 @@ def _install(monkeypatch, *, cached=None, generate_raises=None,
     monkeypatch.setattr(tr, "_check_legacy_report_cache", _fake_legacy)
     monkeypatch.setattr(tr, "get_cached_report", _fake_cached)
 
-    calls = {"generate": 0, "precharge": 0, "refund": 0}
+    calls = {"generate": 0, "precharge": 0, "refund": 0, "refund_kwargs": [], "charge_refs": []}
 
     class _FakeService:
         async def generate_fresh_report(self, ticker, persona):
@@ -66,12 +66,14 @@ def _install(monkeypatch, *, cached=None, generate_raises=None,
 
         def precharge(self, *a, **kw):
             calls["precharge"] += 1
+            calls["charge_refs"].append(kw.get("ref_id"))
             if charge_raises:
                 raise CreditServiceUnavailable("transient")
             return charge_return
 
         def refund_ledgered(self, *a, **kw):
             calls["refund"] += 1
+            calls["refund_kwargs"].append(kw)
             return 80
 
     monkeypatch.setattr(tr, "CreditService", FakeCreditService)
@@ -84,8 +86,10 @@ def _reset_counter():
     """The counter is module-global; a test that left it dirty would silently
     poison every later test in the file."""
     tr._INFLIGHT_REPORTS = 0
+    tr._USER_GENERATIONS.clear()
     yield
     tr._INFLIGHT_REPORTS = 0
+    tr._USER_GENERATIONS.clear()
 
 
 def _err_code(resp):
@@ -188,13 +192,18 @@ async def test_slot_released_on_generation_failure(monkeypatch):
 async def test_slot_released_on_client_disconnect(monkeypatch):
     """CancelledError is a BaseException — `except Exception` misses it, only
     `finally` runs. This is the disconnect path that would leak in production."""
-    _install(monkeypatch, generate_raises=asyncio.CancelledError())
+    _fake, _calls = _install(monkeypatch, generate_raises=asyncio.CancelledError())
     monkeypatch.setattr(tr.settings, "REPORT_GET_MAX_INFLIGHT", 2)
 
     with pytest.raises(asyncio.CancelledError):
         await tr.get_ticker_report("AAPL", "warren_buffett", USER)
 
     assert tr._INFLIGHT_REPORTS == 0
+    # The cancelled frame hands its refund to a detached task (it cannot await); drained
+    # here so it runs inside the test's loop, as the lifespan drain does in production.
+    from app.services.credit_service import drain_detached_settlements
+    assert await drain_detached_settlements(2.0) == 0
+    assert _calls["refund"] == 1, "a cancelled generation kept the user's 20 credits"
 
 
 @pytest.mark.asyncio
@@ -229,13 +238,27 @@ async def test_slot_released_on_transient_charge_failure(monkeypatch):
 async def test_failed_precharge_is_never_refunded(monkeypatch):
     """A refund without a matching debit CREDITS a user who never paid. The
     finally now runs on this path (it didn't before the gate was added), so the
-    condition has to be 'was charged', not 'is not a guest'."""
+    condition has to be 'was charged', not 'is not a guest'.
+
+    Rewritten 2026-10-12, same intent ("never mint"): a precharge whose transport failed may
+    still have committed, so it is now compensated by exactly ONE refund — quiet, so a debit
+    that never landed answers `no_matching_debit` and moves nothing, and on the charge's OWN
+    unique ref, so it can only ever reverse THIS debit. On the old shared `TICKER:persona` ref
+    that compensation would have reversed an earlier delivered report's debit: a 20-credit
+    mint. The non-delivery refund in `finally` must NOT fire as well."""
+    import re
+    from app.services.credit_service import ChargeRef
+
     _fake, calls = _install(monkeypatch, charge_raises=True)
     monkeypatch.setattr(tr.settings, "REPORT_GET_MAX_INFLIGHT", 2)
 
     await tr.get_ticker_report("AAPL", "warren_buffett", USER)
 
-    assert calls["refund"] == 0
+    assert calls["refund"] == 1, "exactly the compensation — never the finally refund too"
+    (kw,) = calls["refund_kwargs"]
+    assert kw["reason"] == "report_precharge_unconfirmed" and kw["quiet_no_match"] is True
+    assert kw["ref_id"] == calls["charge_refs"][0] and isinstance(kw["ref_id"], ChargeRef)
+    assert re.match(r"^AAPL:warren_buffett:[0-9a-f]{32}$", kw["ref_id"]), kw["ref_id"]
 
 
 @pytest.mark.asyncio

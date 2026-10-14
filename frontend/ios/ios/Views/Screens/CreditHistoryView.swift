@@ -246,6 +246,10 @@ private func previewPage() -> CreditHistoryDTO {
             id: "4", createdAt: stamp(-1_900_000), delta: 100_000, kind: "grant",
             title: "Monthly credits", reason: "monthly_reset"
         ),
+        CreditTransactionDTO(
+            id: "3", createdAt: stamp(-1_900_010), delta: -30, kind: "expire",
+            title: "Unused monthly credits expired", reason: "monthly_expired"
+        ),
     ], nextCursor: nil)
 }
 

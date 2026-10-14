@@ -39,16 +39,23 @@ struct ReportCard: View {
                     VStack(alignment: .trailing, spacing: AppSpacing.xs) {
                         ReportStatusBadge(status: report.status)
 
-                        if report.status == .failed && report.isRefunded {
+                        if let refundLine = report.refundChipText {
                             // Mirror the "ORCL • Software - Infrastructure"
                             // subtitle styling so the refund note reads as
-                            // metadata, not a second status pill. Show the amount
-                            // ACTUALLY charged for this row (credits_charged) — a
-                            // pre-migration row charged 5 must not read "20". Fall
-                            // back to the current cost only if the field is absent.
-                            Text("Refunded \(report.creditsCharged ?? AnalysisCost.standard.credits) credits")
+                            // metadata, not a second status pill. The amount is
+                            // what THIS row was charged (credits_charged) — a
+                            // pre-migration row charged 5 must not read "20".
+                            //
+                            // `isRefunded` is only the CLAIM, taken before the
+                            // refund runs; the server says separately whether the
+                            // credits came back (`refundConfirmed`). Until they do
+                            // the card reads "Refund pending" instead of claiming a
+                            // refund the user has not received. `caution` is a
+                            // TEXT-role token, and the words differ too, so the
+                            // state never rests on colour alone.
+                            Text(refundLine)
                                 .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textSecondary)
+                                .foregroundColor(report.refundIsPending ? AppColors.caution : AppColors.textSecondary)
                         }
                     }
                 }

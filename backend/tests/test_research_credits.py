@@ -410,3 +410,155 @@ def test_the_worker_task_handle_is_retained():
     assert "_RESEARCH_TASKS.add(task)" in src
     assert "add_done_callback(_RESEARCH_TASKS.discard)" in src
     assert isinstance(research._RESEARCH_TASKS, set)
+
+
+# ── 2026-10-12: ChargeRef — one debit per ref, and only then a retried refund ────────────
+
+
+def _flaky_rpc(service, side_effect):
+    rpc_call = MagicMock()
+    rpc_call.execute.side_effect = side_effect
+    service.supabase.rpc.return_value = rpc_call
+    return rpc_call
+
+
+@pytest.fixture
+def _no_backoff(monkeypatch):
+    from app.utils import supabase_errors as se
+    monkeypatch.setattr(se.time, "sleep", lambda *_a, **_k: None)
+
+
+def test_a_charge_ref_refund_is_retried_on_a_transient_error_and_converges(service, caplog, _no_backoff):
+    """The first call committed but its reply was lost (an edge 520); the replay answers
+    `already_refunded` — the refund landed, nothing pages."""
+    from app.services.credit_service import ChargeRef, refund_did_not_happen
+    from tests.test_supabase_transient_classifier import gateway_error
+
+    rpc = _flaky_rpc(service, [
+        gateway_error(520),
+        MagicMock(data={"outcome": "already_refunded", "refunded": 0, "spendable": 60}),
+    ])
+    with caplog.at_level(logging.DEBUG):
+        out = service.refund_ledgered("u", 20, reason="report_refund", ref_id=ChargeRef("AAPL:r1"))
+    assert rpc.execute.call_count == 2, "a ChargeRef refund was not retried"
+    assert out["outcome"] == "already_refunded" and not refund_did_not_happen(out)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], "a converged retry paged"
+
+
+def test_a_shared_ref_refund_is_never_retried(service, caplog, _no_backoff):
+    """A plain str (a legacy bare ticker) may name SEVERAL debits; replayed, it would reverse
+    a sibling's. Single-shot, and the leak is loud."""
+    from tests.test_supabase_transient_classifier import gateway_error
+
+    rpc = _flaky_rpc(service, [
+        gateway_error(520),
+        MagicMock(data={"outcome": "refunded", "refunded": 20, "spendable": 60}),
+    ])
+    with caplog.at_level(logging.ERROR):
+        out = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert rpc.execute.call_count == 1
+    assert out is None
+    assert any("REFUND LEAK" in r.getMessage() and "AAPL" in r.getMessage() for r in caplog.records)
+
+
+def test_a_rebuilt_ref_string_is_never_retried(service, _no_backoff):
+    """Fail-safe by construction: any str operation drops the ChargeRef type."""
+    from app.services.credit_service import ChargeRef
+    from tests.test_supabase_transient_classifier import gateway_error
+
+    rebuilt = ChargeRef("aapl:r1").upper()
+    assert type(rebuilt) is str
+    rpc = _flaky_rpc(service, [gateway_error(520), MagicMock(data={"outcome": "refunded"})])
+    assert service.refund_ledgered("u", 20, reason="report_refund", ref_id=rebuilt) is None
+    assert rpc.execute.call_count == 1
+
+
+def test_a_non_transient_error_is_not_retried_even_for_a_charge_ref(service, _no_backoff):
+    from app.services.credit_service import ChargeRef
+
+    rpc = _flaky_rpc(service, [RuntimeError("boom"), MagicMock(data={"outcome": "refunded"})])
+    assert service.refund_ledgered("u", 20, reason="report_refund", ref_id=ChargeRef("AAPL:r1")) is None
+    assert rpc.execute.call_count == 1
+
+
+def test_a_persistent_transient_error_is_bounded_and_pages(service, caplog, _no_backoff):
+    from app.services.credit_service import ChargeRef
+    from tests.test_supabase_transient_classifier import gateway_error
+
+    rpc = _flaky_rpc(service, [gateway_error(520)] * 10)
+    with caplog.at_level(logging.ERROR):
+        out = service.refund_ledgered("u", 20, reason="report_refund", ref_id=ChargeRef("AAPL:r1"))
+    assert out is None and rpc.execute.call_count == 3, "the retry must stay bounded"
+    msg = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR][0]
+    assert "REFUND LEAK" in msg and "AAPL:r1" in msg and "after transient retries" in msg
+
+
+def test_the_precharge_is_never_retried_even_for_a_charge_ref(service, _no_backoff):
+    """`spend_credits` is NOT idempotent: a replay of a committed charge debits twice."""
+    from app.services.credit_service import ChargeRef
+    from tests.test_supabase_transient_classifier import gateway_error
+
+    rpc = _flaky_rpc(service, [gateway_error(520), MagicMock(data=40)])
+    with pytest.raises(CreditServiceUnavailable):
+        service.precharge("u", 20, reason="report_charge", ref_id=ChargeRef("AAPL:r1"))
+    assert rpc.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refund_on_the_event_loop_trips_the_warning(service, caplog):
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 20, "spendable": 60})
+    with caplog.at_level(logging.WARNING):
+        service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+        _stub_rpc(service, 40)
+        service.precharge("u", 20, reason="report_charge", ref_id="AAPL")
+    hits = [r for r in caplog.records if "EVENT LOOP" in r.getMessage()]
+    assert len(hits) == 2 and hits[0].levelno == logging.WARNING
+
+
+def test_off_the_loop_the_tripwire_is_silent(service, caplog):
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 20, "spendable": 60})
+    with caplog.at_level(logging.WARNING):
+        service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert not [r for r in caplog.records if "EVENT LOOP" in r.getMessage()]
+
+
+def test_charge_refs_are_unique_and_parse_back_to_the_ticker():
+    from app.services.credit_history_service import _ticker_from_report_ref
+    from app.services.credit_service import (
+        ChargeRef, chat_turn_ref, direct_report_charge_ref, report_charge_ref,
+    )
+
+    deep = report_charge_ref(" nvda ", "ABC-uuid")
+    assert deep == "NVDA:abc-uuid" and isinstance(deep, ChargeRef)
+    one, two = (direct_report_charge_ref("aapl", "warren_buffett") for _ in range(2))
+    assert one != two
+    import re
+    for ref in (one, two):
+        assert isinstance(ref, ChargeRef)
+        assert re.match(r"^AAPL:warren_buffett:[0-9a-f]{32}$", ref), ref
+    chat = chat_turn_ref("s")
+    assert chat.startswith("s:") and isinstance(chat, ChargeRef)
+    assert chat_turn_ref("s") != chat
+    for ref, ticker in ((deep, "NVDA"), (one, "AAPL"), (report_charge_ref("BRK.B", "x"), "BRK.B")):
+        assert _ticker_from_report_ref(ref) == ticker
+    # Fail-safe: string operations and formatting yield plain str (never retried).
+    assert type(deep.upper()) is str and type(f"{deep}") is str and type(str(deep)) is str
+    assert type(deep[:4]) is str and type(deep + "x") is str
+
+
+@pytest.mark.parametrize("ticker,report_id", [("", "r1"), ("  ", "r1"), (None, "r1"),
+                                              ("AAPL", ""), ("AAPL", None), ("AAPL", "  ")])
+def test_a_report_charge_ref_refuses_a_missing_half(ticker, report_id):
+    """`":r1"` or `"AAPL:"` would be a ref nothing else rebuilds — fail loudly instead."""
+    from app.services.credit_service import report_charge_ref
+
+    with pytest.raises(ValueError):
+        report_charge_ref(ticker, report_id)
+
+
+@pytest.mark.parametrize("ticker", ["", "   ", None])
+def test_a_direct_charge_ref_refuses_an_empty_ticker(ticker):
+    from app.services.credit_service import direct_report_charge_ref
+
+    with pytest.raises(ValueError):
+        direct_report_charge_ref(ticker, "warren_buffett")

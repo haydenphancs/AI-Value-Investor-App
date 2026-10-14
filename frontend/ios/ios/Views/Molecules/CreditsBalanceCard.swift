@@ -67,7 +67,7 @@ struct CreditsBalanceCard: View {
                         .font(AppTypography.dataHero)
                         .foregroundColor(AppColors.textOnAccent)
 
-                    Text("credits")
+                    Text(balance.credits == 1 ? "credit" : "credits")
                         .font(AppTypography.body)
                         .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                 }

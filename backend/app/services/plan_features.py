@@ -112,7 +112,7 @@ def _row(
     }
 
 
-def _credits_row(credits: int, report_cost: int, chat_cost: int) -> Dict[str, Any]:
+def _credits_row(credits: int, report_cost: int, chat_cost: int, *, paid: bool) -> Dict[str, Any]:
     """The monthly allowance, expressed in the two things it actually buys.
 
     ⚠️ ONE POOL. Reports and chat draw from the same balance, so the two figures are
@@ -123,6 +123,10 @@ def _credits_row(credits: int, report_cost: int, chat_cost: int) -> Dict[str, An
 
     Both costs are guarded against 0: they are ints from `settings`, and a zero would be a
     ZeroDivisionError on the paywall — the one screen that must render for everyone.
+
+    `paid` picks WHEN the pool refills. Since migration 196 a paid plan's allowance follows
+    its Apple billing period (it refills on each renewal); only Free still resets on the 1st
+    (ET). The iOS fallback `PlanFeature.creditsDetail` mirrors this wording word for word.
     """
     clauses: List[str] = []
     if report_cost > 0:
@@ -130,15 +134,14 @@ def _credits_row(credits: int, report_cost: int, chat_cost: int) -> Dict[str, An
     if chat_cost > 0:
         clauses.append(f"{credits // chat_cost:,} Cay AI replies")
 
+    pool = "refreshes each time your plan renews" if paid else "resets at the start of each month"
+    sentence = "Refreshes each time your plan renews." if paid else "Resets at the start of each month."
     if len(clauses) == 2:
-        detail = (
-            f"About {clauses[0]} or {clauses[1]} — one shared pool "
-            "that resets at the start of each month."
-        )
+        detail = f"About {clauses[0]} or {clauses[1]} — one shared pool that {pool}."
     elif clauses:
-        detail = f"About {clauses[0]}. Resets at the start of each month."
+        detail = f"About {clauses[0]}. {sentence}"
     else:
-        detail = "Resets at the start of each month."
+        detail = sentence
 
     return _row(
         KEY_CREDITS,
@@ -399,7 +402,7 @@ def features_for_tier(
     chat_cost = max(0, int(chat_cost or 0))
 
     return [
-        _credits_row(credits, report_cost, chat_cost),
+        _credits_row(credits, report_cost, chat_cost, paid=key != entitlements.TIER_FREE),
         _updates_row(key),
         _signals_row(key),
         _theme_companies_row(key),

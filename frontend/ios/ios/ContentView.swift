@@ -468,6 +468,13 @@ struct ResearchViewWithBinding: View {
         // nothing research-related — so without this the tab behind the sheet keeps rendering
         // "Sign in to see your analyses" to a user who just signed in.
         .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
+        // AppState is the single credits source; the ViewModel keeps a MIRROR because its
+        // Generate / Retry gates read it. `adoptSharedCredits` only assigns — it never calls
+        // back into AppState — so there is no loop, and `initial: true` syncs the mirror at
+        // mount without a request.
+        .onChange(of: appState.user.credits, initial: true) { _, info in
+            viewModel.adoptSharedCredits(info)
+        }
         // This tab is the DESTINATION of the research handoff, so it must be clear when the user
         // arrives — landing on Research behind a report cover is the same bug, one screen along.
         .onPresentationReset {
@@ -536,24 +543,20 @@ struct ResearchViewWithBinding: View {
     }
 
     // MARK: - Research Tab Content
-    /// The balance to display, preferring the ViewModel's own copy and falling back to
-    /// `AppState`.
+    /// The balance to display: `AppState.user.credits`, the single source — the same number
+    /// the Account card and Buy Credits render.
     ///
-    /// The ViewModel deliberately keeps its OWN `creditBalance` (it has no AppState
-    /// reference) so it can adopt a purchase the instant `.caydexEntitlementChanged`
-    /// fires. That copy is authoritative when present — but it is nil until
-    /// `loadCredits()` returns, and it STAYS nil if that one request fails. The card and
-    /// the Generate badge then vanish entirely, while the Wiser tab — which reads
-    /// `appState.user.credits`, the documented single source of truth — shows the real
-    /// number on the same screen-swipe. Two surfaces disagreeing about the user's
-    /// balance reads as a bug in the credits system, not as a failed fetch.
-    ///
-    /// Falling back rather than replacing keeps the purchase-adoption path intact.
+    /// It used to PREFER the ViewModel's own copy, which only its own reads updated: a chat
+    /// turn, the report screen's paid door and the research precharge all moved the real
+    /// balance while this card and the Generate badge kept the old one for up to five
+    /// minutes. The ViewModel's reads still land here — written through to AppState, which
+    /// refuses one that is older than the balance shown or that belongs to another identity,
+    /// so a refused value never reaches the screen.
     private var effectiveCreditBalance: CreditBalance? {
         // `.map { … }`, not `.map(CreditBalance.from)`: an unapplied method reference
         // becomes a *nonisolated* function type, and `from` reads the @MainActor
         // `purchasedCredits`. A closure literal here inherits this view's isolation.
-        viewModel.creditBalance ?? appState.user.credits.map { CreditBalance.from($0) }
+        appState.user.credits.map { CreditBalance.from($0) }
     }
 
     private var researchTabContent: some View {

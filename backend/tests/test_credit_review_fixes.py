@@ -193,3 +193,251 @@ def test_refund_does_not_touch_total_or_resets_at():
     update = update[: update.index("RETURNING")]
     assert "total" not in update, "refund_credits must never change the allocation"
     assert "resets_at" not in update, "refund_credits must never roll the period"
+
+
+# ── 2026-10-12: the deep door's charge is named by the report it pays for ─────────────
+
+def _generate_supabase(*, insert_raises=False, claim_raises=False, insert_rows=None,
+                       threads=None):
+    """A recording Supabase mock for /research/generate. Counts and inserts are separate
+    chains so the insert payload and the claim can be inspected."""
+    import threading
+
+    record = {"insert": None, "claim": None, "stamps": [],
+              "threads": threads if threads is not None else []}
+
+    def _exec(result=None, raises=None):
+        def _run():
+            record["threads"].append(threading.get_ident())
+            if raises is not None:
+                raise raises
+            return result
+        return _run
+
+    count_q = MagicMock()
+    for m in ("select", "eq", "in_", "gte"):
+        getattr(count_q, m).return_value = count_q
+    count_q.execute.side_effect = _exec(MagicMock(count=0, data=[]))
+
+    class _Insert:
+        def __init__(self, payload):
+            record["insert"] = payload
+            self.payload = payload
+
+        def execute(self):
+            rows = insert_rows if insert_rows is not None else [dict(self.payload)]
+            return _exec(MagicMock(data=rows), RuntimeError("insert boom") if insert_raises else None)()
+
+    class _Claim:
+        def __init__(self, payload):
+            record["claim"] = {"payload": payload, "filters": []}
+
+        def eq(self, *a):
+            record["claim"]["filters"].append(("eq",) + a)
+            return self
+
+        def in_(self, *a):
+            record["claim"]["filters"].append(("in",) + a)
+            return self
+
+        def execute(self):
+            return _exec(MagicMock(data=[]), RuntimeError("claim boom") if claim_raises else None)()
+
+    class _Stamp:
+        """Migration 195's refund_outcome stamp — recorded APART from the orphan claim, so
+        `record["claim"]` stays the claim the assertions above are about."""
+
+        def __init__(self, payload):
+            self.entry = {"payload": payload, "filters": [], "thread": None}
+            record["stamps"].append(self.entry)
+
+        def _f(self, *a):
+            self.entry["filters"].append(a)
+            return self
+
+        eq = is_ = or_ = in_ = _f
+
+        def execute(self):
+            self.entry["thread"] = threading.get_ident()
+            return _exec(MagicMock(data=[{"id": "x"}]))()
+
+    class _Table:
+        def select(self, *a, **k):
+            return count_q.select(*a, **k)
+
+        def insert(self, payload):
+            return _Insert(payload)
+
+        def update(self, payload):
+            if "refund_outcome" in payload:
+                return _Stamp(payload)
+            return _Claim(payload)
+
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: _Table()
+    return sb, record
+
+
+@pytest.fixture
+def _no_worker(monkeypatch):
+    """The deep door launches `_run_research_task`; replace it so no pipeline runs."""
+    started = []
+
+    async def _fake_task(report_id, ticker, persona, user_id):
+        started.append(report_id)
+
+    monkeypatch.setattr(research, "_run_research_task", _fake_task)
+    return started
+
+
+@pytest.mark.asyncio
+async def test_the_deep_door_charges_with_the_minted_report_id(monkeypatch, _no_worker):
+    from app.services.credit_service import ChargeRef
+
+    credit = _credit_mock(monkeypatch, research)
+    _stub_fmp(monkeypatch)
+    sb, record = _generate_supabase()
+    resp = await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    ref = credit.precharge.call_args.kwargs["ref_id"]
+    assert isinstance(ref, ChargeRef)
+    assert ref == f"AAPL:{record['insert']['id']}", "the charge is not named by the row it pays for"
+    assert resp.report_id == record["insert"]["id"]
+    credit.refund_ledgered.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_insert_failure_refunds_on_the_charge_ref(monkeypatch):
+    credit = _credit_mock(monkeypatch, research)
+    _stub_fmp(monkeypatch)
+    sb, record = _generate_supabase(insert_raises=True)
+    resp = await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    assert json.loads(resp.body)["error_code"] == ErrorCode.REPORT_GENERATION_FAILED.value
+    charge = credit.precharge.call_args.kwargs["ref_id"]
+    credit.refund_ledgered.assert_called_once()
+    kw = credit.refund_ledgered.call_args.kwargs
+    assert kw["ref_id"] == charge and kw["reason"] == "report_refund"
+    assert "quiet_no_match" not in kw, "charged in this request: a no-match must page"
+    # The id-scoped claim armed before the refund, on THIS row.
+    assert ("eq", "id", record["insert"]["id"]) in record["claim"]["filters"]
+
+
+@pytest.mark.asyncio
+async def test_a_transient_deep_precharge_is_compensated_with_the_same_ref(monkeypatch):
+    from app.services.credit_service import CreditServiceUnavailable
+
+    credit = _credit_mock(monkeypatch, research)
+    credit.precharge.side_effect = CreditServiceUnavailable("edge 520")
+    _stub_fmp(monkeypatch)
+    sb, record = _generate_supabase()
+    resp = await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    body = json.loads(resp.body)
+    assert resp.status_code == 409 and body["error_code"] == ErrorCode.SYSTEM_BUSY.value
+    credit.refund_ledgered.assert_called_once()
+    kw = credit.refund_ledgered.call_args.kwargs
+    charge = credit.precharge.call_args.kwargs["ref_id"]
+    assert kw["reason"] == "report_precharge_unconfirmed" and kw["quiet_no_match"] is True
+    assert kw["ref_id"] == charge
+    import re
+    assert re.match(r"^AAPL:[0-9a-f-]{36}$", charge), charge
+    assert body["details"]["charge_ref"] == charge
+    assert record["insert"] is None, "a report row was inserted for an unconfirmed charge"
+
+
+@pytest.mark.asyncio
+async def test_an_insufficient_balance_is_never_compensated(monkeypatch):
+    credit = _credit_mock(monkeypatch, research, precharge_return=None)
+    _stub_fmp(monkeypatch)
+    sb, record = _generate_supabase()
+    resp = await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    assert resp.status_code == 402
+    credit.refund_ledgered.assert_not_called()
+    assert record["insert"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_raised_orphan_claim_still_refunds_now(monkeypatch):
+    """The claim raising proves nothing: no row (the likeliest), a row it DID claim before its
+    reply was lost, or a committed row it did not. Deferring to the sweep leaks in the first two;
+    refunding now is safe because a later sweep refund of the same charge converges."""
+    credit = _credit_mock(monkeypatch, research)
+    _stub_fmp(monkeypatch)
+    sb, _record = _generate_supabase(insert_raises=True, claim_raises=True)
+    resp = await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    assert json.loads(resp.body)["error_code"] == ErrorCode.REPORT_GENERATION_FAILED.value
+    credit.refund_ledgered.assert_called_once()
+    assert credit.refund_ledgered.call_args.kwargs["ref_id"] == credit.precharge.call_args.kwargs["ref_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_after_the_charge_hands_it_back_detached(monkeypatch):
+    import asyncio
+    from app.services.credit_service import drain_detached_settlements
+
+    credit = _credit_mock(monkeypatch, research)
+    fmp = MagicMock()
+    fmp.get_company_profile = AsyncMock(side_effect=asyncio.CancelledError())
+    monkeypatch.setattr("app.integrations.fmp.get_fmp_client", lambda: fmp)
+    sb, record = _generate_supabase()
+    with pytest.raises(asyncio.CancelledError):
+        await research.generate_research_report(
+            request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+        )
+    assert await drain_detached_settlements(2.0) == 0
+    credit.refund_ledgered.assert_called_once()
+    kw = credit.refund_ledgered.call_args.kwargs
+    assert kw["reason"] == "report_refund"
+    assert kw["ref_id"] == credit.precharge.call_args.kwargs["ref_id"]
+    assert record["insert"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_error_after_the_charge_refunds_it(monkeypatch):
+    """Anything escaping between the charge and the hand-off to the worker must hand the
+    charge back (inline, the frame is not being cancelled)."""
+    credit = _credit_mock(monkeypatch, research)
+    _stub_fmp(monkeypatch)
+    sb, _record = _generate_supabase(insert_rows=[{"no_id_here": True}])
+    with pytest.raises(KeyError):
+        await research.generate_research_report(
+            request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+        )
+    credit.refund_ledgered.assert_called_once()
+    assert credit.refund_ledgered.call_args.kwargs["reason"] == "report_refund"
+
+
+@pytest.mark.asyncio
+async def test_a_handed_off_report_is_never_refunded_by_the_door(monkeypatch, _no_worker):
+    credit = _credit_mock(monkeypatch, research)
+    _stub_fmp(monkeypatch)
+    sb, _record = _generate_supabase()
+    await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    credit.refund_ledgered.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deep_door_money_calls_leave_the_loop_thread(monkeypatch, _no_worker):
+    import threading
+
+    loop_thread = threading.get_ident()
+    credit = _credit_mock(monkeypatch, research)
+    seen = []
+    credit.precharge.side_effect = lambda *a, **k: seen.append(threading.get_ident()) or 80
+    _stub_fmp(monkeypatch)
+    sb, record = _generate_supabase(threads=seen)
+    await research.generate_research_report(
+        request=_req(), user={"id": "u1"}, supabase=sb, _rate_limit=None,
+    )
+    # two counts + the precharge + the insert
+    assert len(seen) == 4 and loop_thread not in seen, "a deep-door round trip ran on the loop"

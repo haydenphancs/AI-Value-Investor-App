@@ -434,9 +434,18 @@ struct CreditBalance {
     /// Credits that will survive the reset (bought as consumable IAP). 0 when the backend
     /// predates the split, which is correct there: no packs existed, so none were permanent.
     let purchasedCredits: Int
+    /// Whether `renewalDate` came from the server's `resets_at`. When it did not (absent or
+    /// unparseable), `renewalDate` is a one-month-out PLACEHOLDER, and copy that would state it
+    /// as a fact about this account (`monthlyResetSummary`) says nothing instead.
+    var renewalDateIsKnown: Bool = true
 
     /// Credits that actually expire at `renewalDate`.
     var monthlyCredits: Int { max(credits - purchasedCredits, 0) }
+
+    /// `"Nov 1, 2026"` — the reset day, pinned to ET (see `creditResetFormatter`).
+    private var renewalDateText: String {
+        ResearchFormatters.creditResetFormatter.string(from: renewalDate)
+    }
 
     /// "Renews <date>" — or `nil` when NOTHING here renews.
     ///
@@ -447,7 +456,17 @@ struct CreditBalance {
     /// purchased component should render `purchasedSummary` alongside.
     var formattedRenewalDate: String? {
         guard monthlyCredits > 0 else { return nil }
-        return "Renews \(ResearchFormatters.creditResetFormatter.string(from: renewalDate))"
+        return "Renews \(renewalDateText)"
+    }
+
+    /// "Monthly credits reset <date>" — when the monthly allowance comes back, for a balance
+    /// with NO monthly credits left (`formattedRenewalDate` is nil there). Without it a user
+    /// at 0 was told "No credits remaining" and nothing about when that ends. It names the
+    /// MONTHLY pool only, so it never implies purchased credits expire (Guideline 3.1.1). nil
+    /// when the date is a placeholder rather than the server's.
+    var monthlyResetSummary: String? {
+        guard renewalDateIsKnown else { return nil }
+        return "Monthly credits reset \(renewalDateText)"
     }
 
     /// "N never expire" — the honest counterpart, or nil when there is no purchased balance.
@@ -458,22 +477,37 @@ struct CreditBalance {
     /// One line describing the whole balance truthfully, whatever the mix.
     var compositionSummary: String {
         switch (formattedRenewalDate, purchasedSummary) {
-        case let (.some(renews), .some(kept)): return "\(monthlyCredits) \(renews.lowercased()) · \(kept)"
-        case let (.some(renews), .none):       return renews
-        case let (.none, .some(kept)):         return kept
-        case (.none, .none):                   return "No credits remaining"
+        // Built from the date text, not `renews.lowercased()`: that lowercased the MONTH too
+        // ("30 renews nov 1, 2026").
+        case (.some, .some(let kept)):  return "\(monthlyCredits) renews \(renewalDateText) · \(kept)"
+        case (.some(let renews), .none): return renews
+        case (.none, .some(let kept)):
+            guard let reset = monthlyResetSummary else { return kept }
+            return "\(kept) · \(reset.lowercasedFirstLetter)"
+        case (.none, .none):
+            guard let reset = monthlyResetSummary else { return "No credits remaining" }
+            return "No credits remaining · \(reset.lowercasedFirstLetter)"
         }
     }
 
     /// PREVIEW ONLY. No shipping code path may fall back to this — a fabricated
     /// balance shown as if real is worse than showing none (it contradicted the user's
-    /// actual balance on two other tabs). Both `LearnView` and `ResearchViewModel` now
-    /// render nothing until a real balance arrives.
+    /// actual balance on two other tabs). The Research tab renders nothing until a real
+    /// balance arrives; `LearnView` renders no balance at all.
     static let mock = CreditBalance(
         credits: 47,
         renewalDate: Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date(),
         purchasedCredits: 0
     )
+}
+
+private extension String {
+    /// "Monthly credits reset Nov 1" → "monthly credits reset Nov 1": only the first letter, so
+    /// a month name keeps its capital (`lowercased()` would not).
+    var lowercasedFirstLetter: String {
+        guard let head = first else { return self }
+        return head.lowercased() + String(dropFirst())
+    }
 }
 
 // MARK: - Trending Analysis
@@ -674,6 +708,26 @@ struct AnalysisReport: Identifiable, Hashable {
     /// The server's 600 s pipeline ceiling runs from here, so this — not `date` — is what
     /// the local timeout pass measures against.
     var processingStartedAt: Date? = nil
+    /// Whether the refund behind `isRefunded` actually LANDED — `refund_confirmed` on the list.
+    /// `isRefunded` is only the CLAIM (taken before the refund runs, and what Retry's balance
+    /// gate keys on); this says whether the credits came back. nil = unknown (an older backend,
+    /// a refund from before the column): the legacy chip stands.
+    var refundConfirmed: Bool? = nil
+
+    /// The failed card's credits line: "Refunded N credits" once the refund is claimed, unless
+    /// the server says it has NOT landed yet — then "Refund pending", so a card never claims
+    /// credits came back while they are still owed. nil = no line (not failed, or nothing
+    /// claimed). The amount is what THIS row was charged (`credits_charged`: 5 on a
+    /// pre-migration row, 20 now), falling back to the current cost only when absent.
+    var refundChipText: String? {
+        guard status == .failed, isRefunded else { return nil }
+        if refundConfirmed == false { return "Refund pending" }
+        let amount = creditsCharged ?? AnalysisCost.standard.credits
+        return "Refunded \(amount) \(amount == 1 ? "credit" : "credits")"
+    }
+
+    /// Claimed but not confirmed: the refund is owed and has not landed.
+    var refundIsPending: Bool { status == .failed && isRefunded && refundConfirmed == false }
 
     var formattedDate: String {
         ResearchFormatters.mediumDateFormatter.string(from: date)
@@ -705,7 +759,8 @@ struct AnalysisReport: Identifiable, Hashable {
             date: date,
             isRefunded: isRefunded,
             creditsCharged: creditsCharged,
-            processingStartedAt: processingStartedAt
+            processingStartedAt: processingStartedAt,
+            refundConfirmed: refundConfirmed
         )
     }
 
@@ -944,7 +999,8 @@ extension AnalysisReport {
             date: date,
             isRefunded: item.isRefunded ?? false,
             creditsCharged: item.creditsCharged,
-            processingStartedAt: processingStartedAt
+            processingStartedAt: processingStartedAt,
+            refundConfirmed: item.refundConfirmed
         )
     }
 }
@@ -956,7 +1012,8 @@ extension CreditBalance {
             credits: response.remaining,
             renewalDate: Self.parseResetDate(response.resetsAt),
             // 0 when the backend predates the split — correct, since no packs existed then.
-            purchasedCredits: response.purchasedRemaining ?? 0
+            purchasedCredits: response.purchasedRemaining ?? 0,
+            renewalDateIsKnown: Self.parseResetDateIfPresent(response.resetsAt) != nil
         )
     }
 
@@ -968,7 +1025,8 @@ extension CreditBalance {
         CreditBalance(
             credits: info.remaining,
             renewalDate: Self.parseResetDate(info.resetsAt),
-            purchasedCredits: info.purchasedCredits
+            purchasedCredits: info.purchasedCredits,
+            renewalDateIsKnown: Self.parseResetDateIfPresent(info.resetsAt) != nil
         )
     }
 
@@ -977,15 +1035,19 @@ extension CreditBalance {
     /// unparseable or absent value falls back to one month out rather than to `Date()`
     /// (which would render as "Renews today" forever).
     static func parseResetDate(_ resetsAt: String?) -> Date {
-        guard let resetsAt else {
-            return Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
-        }
+        parseResetDateIfPresent(resetsAt)
+            ?? Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
+    }
+
+    /// The server's reset instant, or nil when it is absent or unparseable — the signal
+    /// `renewalDateIsKnown` carries, so a placeholder date is never stated as this account's.
+    static func parseResetDateIfPresent(_ resetsAt: String?) -> Date? {
+        guard let resetsAt else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let d = formatter.date(from: resetsAt) { return d }
         formatter.formatOptions = [.withInternetDateTime]
-        if let d = formatter.date(from: resetsAt) { return d }
-        return Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
+        return formatter.date(from: resetsAt)
     }
 }
 

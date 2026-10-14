@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "October 9, 2026",
+            lastUpdated: "October 12, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -56,8 +56,8 @@ struct TermsOfUseView: View {
         LegalSection(
             heading: "Credits, Subscriptions & Billing",
             paragraphs: [
-                "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Paid subscription tiers provide a monthly allocation of credits. Unused monthly credits do not roll over: your monthly allowance resets at the start of each calendar month, US Eastern Time. If you upgrade mid-month your allowance is raised to the new tier immediately, and credits already spent that month remain spent.",
-                "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are not reset by the monthly renewal. Your monthly allowance is spent first, so a pack is only drawn on once that month's allowance is used up.",
+                "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Free accounts receive a monthly allowance of credits that resets at the start of each calendar month, US Eastern Time. Paid subscription tiers provide an allowance for each billing period: when your subscription starts, and each time it renews, your allowance is set to the tier's full amount. Unused allowance credits do not roll over into the next billing period, and they end when your subscription ends, after which the free allowance applies. If you upgrade from one paid tier to a higher one, your allowance is set to the new tier's full amount immediately, and your unused credits carry over on top of it, up to the share of the current billing period that has already passed (the App Store refunds the rest of that period). Credits already spent remain spent.",
+                "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are never reset when an allowance renews. Your allowance is spent first, so a pack is only drawn on once your current allowance is used up.",
                 "Subscriptions are billed through your Apple App Store account. Payment is charged at confirmation of purchase, and subscriptions renew automatically for the same period and price unless canceled at least 24 hours before the end of the current period. You can manage or cancel subscriptions in your App Store account settings; deleting the App does not cancel a subscription.",
                 "Except where required by applicable law or the App Store\u{2019}s policies, purchases and credits are non-refundable. Prices and allocations may change prospectively; changes will not affect a billing period already paid for."
             ]

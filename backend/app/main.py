@@ -587,6 +587,25 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Drain the credit settlements first. uvicorn cancels in-flight requests at the
+    # `--timeout-graceful-shutdown` deadline (30 s, Dockerfile CMD) and starts this block
+    # WITHOUT waiting for them to unwind; their `finally`s then hand the refunds they owe to
+    # detached worker-thread tasks (`credit_service.settle_detached` — a cancelled frame
+    # cannot await) a few loop iterations later. The drain therefore keeps re-scanning until
+    # nothing has run for a quiet window (it does not stop at an empty first look). Without
+    # this wait the process exits with the refunds queued and they are lost. Bounded so a
+    # hung Supabase cannot hold the shutdown past Railway's stop grace; anything still
+    # running is logged by its ref for manual correction.
+    try:
+        from app.services.credit_service import drain_detached_settlements
+
+        await drain_detached_settlements(timeout=10.0)
+    except Exception as e:  # best effort: an undrained settlement is logged by ref
+        logger.warning(
+            "credit settlement drain failed at shutdown: %s: %s", type(e).__name__, e,
+            exc_info=True,
+        )
+
     # Stop the insight sweeper first — it releases claim rows on the way out.
     if insight_sweeper_task is not None:
         insight_sweeper_task.cancel()
@@ -644,6 +663,21 @@ async def lifespan(app: FastAPI):
         await get_marketing_script_service().shutdown(timeout=5.0)
     except Exception as e:  # best effort: the lease expiry is the backstop
         logger.warning("marketing script shutdown failed: %s: %s", type(e).__name__, e)
+
+    # A SECOND credit drain, last before the clients close (review F1, 2026-10-12): the steps
+    # above cancelled the background loops, the Home warm builds and the marketing generations,
+    # and any of them — or a request frame still unwinding uvicorn's cancel — may have handed
+    # a refund to a detached task after the first drain returned. Nothing else would wait for
+    # it before `asyncio.run` cancels it. Shorter bound: the first drain took the long wait.
+    try:
+        from app.services.credit_service import drain_detached_settlements
+
+        await drain_detached_settlements(timeout=5.0)
+    except Exception as e:  # best effort: an undrained settlement is logged by ref
+        logger.warning(
+            "second credit settlement drain failed at shutdown: %s: %s",
+            type(e).__name__, e, exc_info=True,
+        )
 
     # Close persistent HTTP clients.
     #
@@ -1407,8 +1441,14 @@ async def _run_research_reconciliation_job():
     stranded in pending/processing and never refunded. This sweep reconciles
     such rows on a fixed interval. Idempotent (claim-then-refund on
     `is_refunded`), so it's safe even if multiple workers run it.
+
+    Each tick then retries, ONCE and only on the unique per-report charge ref, a claimed
+    refund that did not provably land (`refund_outcome` = rpc_failed, or a claim whose stamp
+    never landed) — `retry_unconfirmed_refunds_once`. Needs migration 195; until then it is
+    a latched no-op. A separate try: a failing retry must never cost the sweep its tick.
     """
     from app.services.research_reconciliation_service import (
+        retry_unconfirmed_refunds_once,
         sweep_once,
         RECON_SWEEP_INTERVAL_SECONDS,
     )
@@ -1420,6 +1460,13 @@ async def _run_research_reconciliation_job():
             await sweep_once()
         except Exception as e:
             logger.error(f"Research reconciliation sweep failed: {e}", exc_info=True)
+
+        try:
+            await retry_unconfirmed_refunds_once()
+        except Exception as e:
+            logger.error(
+                "Research refund retry failed: %s: %s", type(e).__name__, e, exc_info=True,
+            )
 
         await asyncio.sleep(RECON_SWEEP_INTERVAL_SECONDS)
 

@@ -265,10 +265,14 @@ def test_the_deleted_code_has_one_definition_on_both_sides():
     vm = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
     assert '"RESEARCH_DELETED"' not in vm, "the VM must reference TaskPollingManager.deletedCode, not the literal"
     assert "TaskPollingManager.deletedCode" in vm
-    # The backend really answers `deleted` for a soft-deleted row.
+    # The backend really answers `deleted` for a soft-deleted row. Since 2026-10-12 the
+    # handler's body runs in a worker thread as `_delete_report_sync` (its round trips were on
+    # the event loop), so that is where the write lives — and the handler must still hand off
+    # to it.
     import inspect
     from app.api.v1.endpoints import research as ep
-    assert '"deleted"' in inspect.getsource(ep.delete_report)
+    assert "_delete_report_sync" in inspect.getsource(ep.delete_report)
+    assert '"deleted"' in inspect.getsource(ep._delete_report_sync)
 
 
 def test_the_retry_delete_carries_the_intent_on_the_wire():
@@ -283,7 +287,10 @@ def test_the_retry_delete_carries_the_intent_on_the_wire():
 def test_the_backend_delete_reads_the_same_intent():
     from app.api.v1.endpoints import research as ep
     import inspect
-    src = inspect.getsource(ep.delete_report)
+    # The body moved into `_delete_report_sync` (2026-10-12, off the event loop); the handler
+    # forwards `intent` to it unchanged.
+    assert "_delete_report_sync, report_id, intent," in inspect.getsource(ep.delete_report)
+    src = inspect.getsource(ep._delete_report_sync)
     assert 'lower() == "retry"' in src and 'status_before == "completed"' in src
     assert "ErrorCode.REPORT_ALREADY_COMPLETED" in src
 
@@ -467,12 +474,30 @@ def test_the_list_endpoint_applies_the_schema_on_the_wire():
 
 def test_every_selected_column_is_declared_on_the_model_and_required_fields_are_not_null():
     """`response_model` must never 500 the list: every selected column exists on the model
-    (nothing is stripped) and every non-Optional field has a DB NOT NULL guarantee."""
+    (nothing is stripped) and every non-Optional field has a DB NOT NULL guarantee.
+
+    Since 2026-10-12 the select string lives in `_REPORT_LIST_COLUMNS` (it used to be inline
+    in `.select(...)`): the handler appends migration 195's `refund_outcome` to it while that
+    column exists and serves it as `refund_confirmed`. So this reads the constant, pins that
+    the handler selects THAT constant, and that the appended raw column never reaches the
+    model — it is popped and replaced by the declared `refund_confirmed`."""
+    import inspect
+
+    from app.api.v1.endpoints import research as ep
+
     src = _ENDPOINT.read_text(encoding="utf-8")
-    m = re.search(r'select\(\s*((?:"[^"]*"\s*)+)\)\.eq\("user_id"', src)
-    assert m, "list select not found"
-    cols = {c.strip() for c in "".join(re.findall(r'"([^"]*)"', m.group(1))).split(",") if c.strip()}
+    m = re.search(r'_REPORT_LIST_COLUMNS = \(\s*((?:"[^"]*"\s*)+)\)', src)
+    assert m, "list select columns not found"
+    joined = "".join(re.findall(r'"([^"]*)"', m.group(1)))
+    assert joined == ep._REPORT_LIST_COLUMNS, "the scan read a different string than the module"
+    cols = {c.strip() for c in joined.split(",") if c.strip()}
     fields = ResearchReportListItem.model_fields
     assert cols <= set(fields), cols - set(fields)
     required = {n for n, f in fields.items() if f.is_required()}
     assert required <= {"id", "ticker", "investor_persona", "status", "created_at"}, required
+
+    handler = inspect.getsource(ep.get_my_reports)
+    assert "_query(_REPORT_LIST_COLUMNS" in handler, "the list no longer selects _REPORT_LIST_COLUMNS"
+    assert "row.pop(REFUND_OUTCOME_COLUMN" in handler, "the raw refund_outcome label reaches the wire"
+    assert "refund_outcome" not in fields and "refund_confirmed" in fields
+    assert not fields["refund_confirmed"].is_required(), "old databases serve no value for it"

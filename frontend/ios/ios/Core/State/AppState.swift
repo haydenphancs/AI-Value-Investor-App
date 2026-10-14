@@ -1142,26 +1142,134 @@ final class AppState {
         }
     }
 
-    /// Refresh the credit balance into `user.credits` (single source of truth).
-    /// Best-effort: failures are logged, not surfaced (the Profile screen shows
-    /// the last-known balance rather than an error toast).
-    /// The credits fetch currently in flight, if any. Concurrent callers JOIN it.
-    ///
-    /// Three independent paths call this on a signed-in launch — the `onAuthenticated`
-    /// fan-out, `ResearchViewModel.loadCredits()`, and `refreshEntitlement()` via the
-    /// `.caydexEntitlementChanged` observer that `drainUnfinishedTransactions()` can post —
-    /// and they collided on `GET /users/me/credits`. Worse than wasteful: the two responses
-    /// raced to assign `user.credits`, so the balance shown could be the OLDER of the two.
-    private var creditsTask: Task<Void, Never>?
+    // MARK: - Credit balance (one copy, ordered reads)
+    //
+    // `user.credits` is the ONLY balance the app displays: the Account card, Buy Credits and
+    // the Research tab's card and badge all render it (Learn renders no balance at all).
+    // `ResearchViewModel` keeps a MIRROR (`creditBalance`, fed back through
+    // `ResearchViewWithBinding`'s `.onChange(of: appState.user.credits)`), because its
+    // Generate gates read it and its own credits GET is pinned by tests — but that GET lands
+    // here first, through `adoptCredits(_:from:)`.
+    //
+    // Exactly two methods write a balance into `user.credits`: `performCreditsRefresh()` and
+    // `adoptCredits(_:from:)`. Both are fenced three ways:
+    //  • IDENTITY — `identityGeneration` captured when the request is SENT. A read in flight
+    //    across a sign-out or an account switch never writes the ended session's balance back
+    //    (auth.md §7); a purchase decision would be made against it.
+    //  • SESSION — a read SENT, or answered, while `auth.status` is `.unauthenticated` never
+    //    lands. The identity fence cannot see a read sent AFTER a sign-out: `signOut()` bumps
+    //    the generation at once, but `AuthService.signOut` keeps the ended account's token
+    //    armed on the client through its unregister and `/auth/logout` round trips, so a reload
+    //    the sign-out itself triggers reads THAT account's balance under the NEW generation —
+    //    and the next account to sign in on the device would be shown it. `.restoring` is not
+    //    refused: its token is disarmed, so the client refuses those reads itself.
+    //  • SEND ORDER — every read takes a number from `creditsReadSeq` before it goes out, and
+    //    only an answer newer than the last one applied may land. Without it a slow read sent
+    //    BEFORE a chat turn's charge could overwrite the fresher read sent after it, and the
+    //    badge would show the pre-charge balance until the next refresh.
+    //
+    // Callers of `refreshCredits()`: the `onAuthenticated` fan-out, `refreshEntitlement`,
+    // Buy Credits on open, Profile, chat after a turn that moved credits, the report screen's
+    // paid door (Path B), the Reports list noticing a row whose credits moved, the research
+    // pushes, and the delayed settle re-read. `ResearchViewModel.loadCredits()` does NOT go
+    // through here: it sends its own GET and hands the answer to `adoptCredits`.
 
-    func refreshCredits() async {
-        if let running = creditsTask, !running.isCancelled {
-            await running.value
-            return
+    /// The read that `refreshCredits()` is running, if any. Concurrent callers JOIN it.
+    ///
+    /// Three independent paths call it on a signed-in launch — the `onAuthenticated`
+    /// fan-out, `refreshEntitlement()` via the `.caydexEntitlementChanged` observer that
+    /// `drainUnfinishedTransactions()` can post, and Buy Credits — and they used to collide on
+    /// `GET /users/me/credits`.
+    private var creditsTask: Task<AppError?, Never>?
+    /// Bumped by EVERY `refreshCredits()` call, joiners included. The running task compares
+    /// it before and after each GET: a call that arrived while a GET was in flight may have
+    /// been made right AFTER a charge that GET predates, so the task runs once more for it
+    /// rather than handing it an answer older than its own call.
+    private var creditsDemand = 0
+    /// The number handed to the most recently SENT read (`performCreditsRefresh` and every
+    /// `beginCreditsRead()` ticket share it), and the number of the newest one applied.
+    private var creditsReadSeq = 0
+    private var creditsAppliedSeq = 0
+    /// When a balance was last applied, and for whom — `refreshCreditsIfStale`'s clock.
+    private var creditsFreshness: CreditsFreshness?
+    /// The one pending delayed re-read (`refreshCreditsAfterSettle`); calls coalesce on it.
+    private var settleCreditsTask: Task<Void, Never>?
+    /// Set by a call that arrived while that re-read was pending: its own money event is owed a
+    /// full delay too, so the task runs one more round after its first read.
+    private var settleCreditsRearmed = false
+    /// The first settle read plus at most one re-armed round. A call that lands during that
+    /// round is served by its read (less than a full delay after it), and a warning says so.
+    private static let maxSettleRounds = 2
+    /// A run of re-reads ends here even if callers keep arriving; the last joiners then get an
+    /// answer up to one GET older than their call, and a warning says so.
+    private static let maxCreditsRefreshRounds = 3
+
+    /// Take a send-order number for a credits read issued OUTSIDE this class
+    /// (`ResearchViewModel.loadCredits()`, via `AppActions`). Call it BEFORE the request goes
+    /// out, then hand the answer and this ticket to `adoptCredits(_:from:)`.
+    func beginCreditsRead() -> CreditsReadTicket {
+        creditsReadSeq &+= 1
+        return CreditsReadTicket(
+            seq: creditsReadSeq,
+            identity: identityGeneration,
+            sentSignedOut: auth.status == .unauthenticated
+        )
+    }
+
+    /// Land a balance read elsewhere — only if it is still this identity's, its session had not
+    /// ended, and it is newer than what is shown. A dropped answer reports `.superseded` with
+    /// the balance that won, so the caller can mirror THAT instead of keeping the value it was
+    /// refused for.
+    func adoptCredits(_ credits: CreditInfo, from ticket: CreditsReadTicket) -> CreditsAdoption {
+        guard ticket.identity == identityGeneration else {
+            #if DEBUG
+            print("ℹ️ [AppState] credits answer from a previous identity dropped")
+            #endif
+            return .superseded(current: user.credits)
         }
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.performCreditsRefresh()
+        // See the SESSION fence above: sent with an ended session's still-armed token.
+        guard !ticket.sentSignedOut, auth.status != .unauthenticated else {
+            #if DEBUG
+            print("ℹ️ [AppState] credits answer for an ended session dropped")
+            #endif
+            return .superseded(current: user.credits)
+        }
+        guard ticket.seq > creditsAppliedSeq else {
+            #if DEBUG
+            print("ℹ️ [AppState] credits answer #\(ticket.seq) dropped — #\(creditsAppliedSeq) is newer")
+            #endif
+            return .superseded(current: user.credits)
+        }
+        user.credits = credits
+        creditsAppliedSeq = ticket.seq
+        creditsFreshness = CreditsFreshness(identity: ticket.identity, at: Date())
+        return .applied
+    }
+
+    /// Re-read the balance into `user.credits`, joining a read already in flight and running
+    /// once more when a call arrived during it (see `creditsDemand`).
+    ///
+    /// Returns nil on success and on every outcome that is nobody's failure — a superseded
+    /// answer, one for a different identity or an ended session, a refusal for want of an
+    /// armed token, a cancellation — and the error otherwise, so a screen that asked (Profile) can surface
+    /// it. Everyone else ignores the result: a background balance read must never raise UI.
+    @discardableResult
+    func refreshCredits() async -> AppError? {
+        creditsDemand &+= 1
+        if let running = creditsTask, !running.isCancelled {
+            return await running.value
+        }
+        let task = Task { [weak self] () -> AppError? in
+            guard let self else { return nil }
+            var failure: AppError?
+            for round in 1...Self.maxCreditsRefreshRounds {
+                let covered = self.creditsDemand
+                failure = await self.performCreditsRefresh()
+                if covered == self.creditsDemand { break }
+                if round == Self.maxCreditsRefreshRounds {
+                    print("⚠️ [AppState] credits refresh still in demand after \(round) reads — stopping; the next trigger re-reads")
+                }
+            }
             // Cleared HERE, as the task's own last act, rather than after `await
             // task.value` below. Between a task finishing and its awaiting caller
             // being resumed, a THIRD caller can run and observe a completed-but-still
@@ -1170,33 +1278,113 @@ final class AppState {
             // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
             self.creditsTask = nil
+            return failure
         }
         creditsTask = task
-        await task.value
+        return await task.value
     }
 
-    private func performCreditsRefresh() async {
-        // Captured BEFORE the request. `invalidateIdentity` bumps this on sign-out and on
-        // an account switch, so a refresh already in flight cannot write the ENDED
-        // session's balance back into `user.credits` after `signOut()` has reset `user`.
-        // Credits are money-adjacent — the next account (or the guest UI) would be shown
-        // the previous user's balance, and a purchase decision made against it.
+    private func performCreditsRefresh() async -> AppError? {
+        // Captured BEFORE the request — see the IDENTITY and SESSION fences above.
         let identity = identityGeneration
+        let sentSignedOut = auth.status == .unauthenticated
+        creditsReadSeq &+= 1
+        let seq = creditsReadSeq
         do {
             let credits = try await apiClient.request(
                 endpoint: .getUserCredits,
                 responseType: CreditInfo.self
             )
-            guard identity == identityGeneration else { return }
+            guard identity == identityGeneration else { return nil }
+            guard !sentSignedOut, auth.status != .unauthenticated else { return nil }
+            guard seq > creditsAppliedSeq else { return nil }
             user.credits = credits
+            creditsAppliedSeq = seq
+            creditsFreshness = CreditsFreshness(identity: identity, at: Date())
+            return nil
         } catch {
+            let appError = AppError.from(error)
+            // Nobody is waiting for a cancelled read, and a read refused because no token is
+            // armed (signed out, or the `.restoring` window) is the session's state, not a
+            // sync failure: no analytics, no error — the last-known balance stays.
+            if appError.isCancellation { return nil }
+            if case .signInRequired = appError {
+                #if DEBUG
+                print("ℹ️ [AppState] credits refresh refused — no token armed")
+                #endif
+                return nil
+            }
             Analytics.shared.track(.backgroundSyncFailed, [
                 "op": .string("credits_refresh"),
-                "code": .string(AppError.from(error).analyticsCode),
+                "code": .string(appError.analyticsCode),
             ])
             #if DEBUG
-            print("⚠️ [AppState] refreshCredits failed: \(AppError.from(error).message)")
+            print("⚠️ [AppState] refreshCredits failed: \(appError.message)")
             #endif
+            // A failure that belongs to an identity that has since ended is not this
+            // session's to show.
+            return identity == identityGeneration ? appError : nil
+        }
+    }
+
+    /// Foreground re-read: the month may have rolled over, or credits moved on another device,
+    /// while the app was in the background.
+    ///
+    /// Deliberately weaker than `refreshCredits()`, so a cold launch still sends exactly one
+    /// `GET /users/me/credits`: it does nothing before the process's first read was sent (the
+    /// `onAuthenticated` fan-out owns that one), skips a balance applied for this identity less
+    /// than `maxAge` ago, and JOINS a read in flight without adding demand to it.
+    func refreshCreditsIfStale(maxAge: TimeInterval = 60) async {
+        guard auth.isAuthenticated else { return }
+        guard creditsReadSeq > 0 else { return }
+        if let fresh = creditsFreshness, fresh.identity == identityGeneration,
+           Date().timeIntervalSince(fresh.at) < maxAge {
+            return
+        }
+        if let running = creditsTask, !running.isCancelled {
+            _ = await running.value
+            return
+        }
+        await refreshCredits()
+    }
+
+    /// One re-read a few seconds from now, for a money event whose refund (or charge) lands a
+    /// round trip AFTER the change the app just saw: a report row reading `failed` before its
+    /// refund RPC committed, or a chat turn the app stopped listening to that the server may
+    /// still persist and charge — or refund.
+    ///
+    /// Calls made while one is pending coalesce into it AND re-arm it: the first read still goes
+    /// out on the first call's timer, then the task waits one more full `delay` and reads again.
+    /// Without the re-arm a later event inherited whatever was left of the earlier one's wait —
+    /// a report flipping to `failed` 3.9 s into a chat turn's timer was re-read 0.1 s later,
+    /// before its refund RPC had committed, and the badge kept the charge until something else
+    /// re-read it.
+    func refreshCreditsAfterSettle(delay: Duration = .seconds(4)) {
+        guard settleCreditsTask == nil else {
+            settleCreditsRearmed = true
+            return
+        }
+        settleCreditsTask = Task { [weak self] in
+            for round in 1...AppState.maxSettleRounds {
+                try? await Task.sleep(for: delay)
+                guard let self else { return }
+                let rearmed = self.settleCreditsRearmed
+                self.settleCreditsRearmed = false
+                let again = rearmed && round < AppState.maxSettleRounds
+                if rearmed && !again {
+                    print("⚠️ [AppState] settle re-read re-armed after \(round) rounds — reading now; the next trigger re-reads")
+                }
+                // The slot stays held only while another round is owed, so a call during that
+                // round re-arms this task instead of starting a second timer.
+                if !again { self.settleCreditsTask = nil }
+                // Signed out (or reconnecting) since: the next session reads its own balance.
+                guard self.auth.isAuthenticated else {
+                    self.settleCreditsTask = nil
+                    return
+                }
+                await self.refreshCredits()
+                if !again { return }
+            }
         }
     }
 
@@ -1736,7 +1924,9 @@ struct UserProfile: Codable, Identifiable, Sendable {
 /// credits expiring, so anything that renders a reset date next to `remaining` must qualify it
 /// with `purchasedRemaining` — otherwise the app is telling the user their paid credits
 /// expire.
-struct CreditInfo: Codable, Sendable {
+///
+/// `Equatable` so `ResearchViewWithBinding` can mirror it with `.onChange(of:)`.
+struct CreditInfo: Codable, Equatable, Sendable {
     let total: Int
     let used: Int
     let remaining: Int
@@ -1783,6 +1973,30 @@ struct CreditInfo: Codable, Sendable {
         case grantedTotal = "granted_total"
         case grantedUsed = "granted_used"
     }
+}
+
+/// The send-order number and identity a credits read was issued under — see
+/// `AppState.beginCreditsRead()` / `adoptCredits(_:from:)`.
+struct CreditsReadTicket: Sendable {
+    let seq: Int
+    let identity: Int
+    /// `auth.status` was `.unauthenticated` when the read was sent: whatever token it carried
+    /// (an ended session's, still armed during `AuthService.signOut`) is nobody's balance now.
+    let sentSignedOut: Bool
+}
+
+/// When `user.credits` was last applied, and for which `identityGeneration`.
+struct CreditsFreshness {
+    let identity: Int
+    let at: Date
+}
+
+/// What `AppState.adoptCredits(_:from:)` did with an answer.
+enum CreditsAdoption {
+    case applied
+    /// Dropped: an older read, one asked for by a previous identity, or one sent or answered
+    /// after the session ended. `current` is the balance that stands, for the caller to mirror.
+    case superseded(current: CreditInfo?)
 }
 
 enum UserTier: String, Codable, Sendable {

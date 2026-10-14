@@ -932,13 +932,17 @@ def test_the_disconnect_notice_is_not_rebuilt_on_a_false_premise():
       * `BaseHTTPMiddleware` only converts a disconnect into a `receive()` MESSAGE. This
         GET handler never calls `receive()`.
       * uvicorn 0.34 cancels the request task only when `timeout_graceful_shutdown` is
-        exceeded, and that setting appears in neither the Procfile nor the Dockerfile.
+        exceeded. Both the Procfile and the Dockerfile CMD set it
+        (`--timeout-graceful-shutdown 30`), so the one thing that cancels this handler is a
+        deploy whose 30 s drain deadline cuts a long request off — never a client
+        disconnect. That cancel's refund is the `finally`'s job (detached, drained by the
+        lifespan), not a disconnect notice's.
 
     Measured against this venv with an identical middleware shape: an aborted curl, a hard
-    TCP RST with SO_LINGER 0, and a SIGTERM mid-request ALL let the handler run to
-    completion. So a backgrounded app is not a non-delivery — the report finishes, is
-    cached, and the user gets it free on their next open. The push would have been a
-    factual lie.
+    TCP RST with SO_LINGER 0, and a SIGTERM mid-request that finished inside the graceful
+    window ALL let the handler run to completion. So a backgrounded app is not a
+    non-delivery — the report finishes, is cached, and the user gets it free on their next
+    open. The push would have been a factual lie.
 
     If someone genuinely wants disconnect handling later it has to be built on
     `await request.is_disconnected()` polling, not on `CancelledError`.

@@ -47,6 +47,10 @@ _REASON_CALLS = {
     "refund_once": 0,               # _ChatQuota.refund_once(reason)  — positional
     "settle_no_cost": 0,            # _ChatQuota.settle_no_cost(reason) — positional; the
                                     # DELIVERED-but-free settlement (cache hit, degraded)
+    "refund_report_charge": "reason",  # research_reconciliation_service.refund_report_charge(
+                                       # refund, ..., reason=...) — the deep-door report refunds
+                                       # pass `refund_ledgered` as a VALUE, so this is the call
+                                       # that carries their reason literal (2026-10-12)
 }
 
 #: A ledger row written as a dict literal (the seeding script does this) is identified by

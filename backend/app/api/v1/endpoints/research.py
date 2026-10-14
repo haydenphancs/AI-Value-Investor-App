@@ -49,12 +49,32 @@ from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
 )
-from app.services.credit_service import refund_did_not_happen, CreditService, CreditServiceUnavailable
-from app.services.research_reconciliation_service import claim_and_mark_failed
+from app.services.credit_service import (
+    refund_did_not_happen,
+    ChargeRef,
+    CreditService,
+    CreditServiceUnavailable,
+    charge_off_loop,
+    report_charge_ref,
+    settle_detached,
+    settle_off_loop,
+)
+from app.services.research_reconciliation_service import (
+    REFUND_OUTCOME_COLUMN,
+    claim_and_mark_failed,
+    note_refund_outcome_column_missing,
+    note_refund_outcome_column_present,
+    record_refund_outcome,
+    refund_confirmed_from_label,
+    refund_outcome_column_available,
+    refund_report_charge,
+)
 from app.services.ticker_report_cache import (
     current_close_cycle_start,
     patch_legacy_price_action,
 )
+from app.utils.supabase_async import sb_exec
+from app.utils.supabase_errors import is_unknown_column_error
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +148,12 @@ async def generate_research_report(
     #    429 — iOS swallows 429 bodies) so the cap user_message is surfaced.
     cap = settings.MAX_CONCURRENT_REPORTS_PER_USER
     cycle_start = current_close_cycle_start().isoformat()
-    inflight = (
+    inflight = await sb_exec(
         supabase.table("research_reports")
         .select("id", count="exact")
         .eq("user_id", user["id"])
         .in_("status", ["pending", "processing"])
         .gte("created_at", cycle_start)
-        .execute()
     )
     inflight_count = inflight.count or 0
     if inflight_count >= cap:
@@ -159,12 +178,11 @@ async def generate_research_report(
     #    just sheds load past a safe backlog instead of accepting it.
     global_cap = settings.MAX_GLOBAL_INFLIGHT_REPORTS
     if global_cap > 0:
-        global_inflight = (
+        global_inflight = await sb_exec(
             supabase.table("research_reports")
             .select("id", count="exact")
             .in_("status", ["pending", "processing"])
             .gte("created_at", cycle_start)
-            .execute()
         )
         global_count = global_inflight.count or 0
         if global_count >= global_cap:
@@ -182,6 +200,21 @@ async def generate_research_report(
     # one round-trip (migration 101). NULL → INSUFFICIENT_CREDITS (no row mutated, no
     # race window) → 402.
     credit_service = CreditService()
+    ticker = request.stock_id.upper()
+
+    # The report id is minted BEFORE the charge, because the charge is named by it.
+    #
+    # `report_charge_ref(ticker, new_report_id)` (`TICKER:{report_id}`) names exactly ONE
+    # debit, and every refund site rebuilds it from the row (`refund_report_charge`). That
+    # is what makes a replayed refund converge (`already_refunded`) instead of pairing with
+    # an EARLIER report's debit on the same ticker — the bare ticker this used to charge
+    # with did exactly that, so the compensation below, the insert-failure refund and the
+    # sweep could each pay out a second time from a sibling. It is also the only thing
+    # that lets the insert-failure claim below name the row THIS call tried to create; see
+    # the comment on that claim. `research_reports.id` is `uuid DEFAULT gen_random_uuid()`,
+    # so supplying it is a no-op for every other path.
+    new_report_id = str(uuid.uuid4())
+    charge_ref = report_charge_ref(ticker, new_report_id)
 
     # Every caller here holds an account now, so the credit charge is unconditional.
     #
@@ -194,19 +227,58 @@ async def generate_research_report(
     #
     # A free account is seeded 50 credits against a 20-credit report, so a signed-up user gets
     # 2/month where a guest previously got 1.
-    try:
-        new_remaining = credit_service.precharge(
+    #
+    # Off the loop: `precharge` is a sync Supabase RPC (CLAUDE.md invariant #6). The lambda
+    # keeps the literal call — the reason-coverage scanner reads it. `charge_off_loop` also
+    # refunds a charge that lands after a deploy cancelled this wait (no row exists yet, so
+    # nothing else ever could).
+    def _hand_back_abandoned_charge(balance, exc):
+        if exc is None and balance is None:
+            return None                                   # insufficient: nothing debited
+        if exc is None:
+            return credit_service.refund_ledgered(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_refund", ref_id=charge_ref,
+            )
+        return credit_service.refund_ledgered(
             user["id"], CreditService.DEEP_RESEARCH_COST,
-            reason="report_charge", ref_id=request.stock_id.upper(),
+            reason="report_precharge_unconfirmed", ref_id=charge_ref, quiet_no_match=True,
+        )
+
+    try:
+        new_remaining = await charge_off_loop(
+            lambda: credit_service.precharge(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_charge", ref_id=charge_ref,
+            ),
+            on_abandoned=_hand_back_abandoned_charge,
+            what=f"report_charge {charge_ref}",
         )
     except CreditServiceUnavailable:
         # Transient Supabase/RPC failure — retryable SYSTEM_BUSY (409), never
         # INSUFFICIENT_CREDITS: a DB blip must not tell a paying user they're broke.
+        #
+        # ⚠️ A transport failure is NOT proof the debit did not commit (a 520 is "the edge
+        # could not parse what the origin said"), and there is no row yet for the sweep to
+        # find — so a committed-but-lost charge used to cost the user 20 credits for good.
+        # Compensate NOW on the same unique ref, as chat does: `refunded` if the debit
+        # landed, a quiet `no_matching_debit` if it never did. Safe ONLY because the ref
+        # names this one debit: on the old shared ticker ref this refund would have reversed
+        # an earlier DELIVERED report's debit and minted 20 credits.
+        await settle_off_loop(
+            lambda: credit_service.refund_ledgered(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_precharge_unconfirmed", ref_id=charge_ref,
+                quiet_no_match=True,
+            ),
+            what=f"report_precharge_unconfirmed {charge_ref}",
+        )
         return make_error_response(
             ErrorCode.SYSTEM_BUSY,
             status_code=409,
             message="spend_credits RPC unavailable (transient)",
-            details={"user_id": user["id"], "step": "credit_charge"},
+            details={"user_id": user["id"], "step": "credit_charge",
+                     "charge_ref": str(charge_ref)},
         )
     if new_remaining is None:
         return make_error_response(
@@ -221,167 +293,223 @@ async def generate_research_report(
             },
         )
 
-    ticker = request.stock_id.upper()
-
-    # Resolve company name + industry from FMP (non-blocking best-effort).
-    # Industry is surfaced on the Reports list card ("TSLA • Automotive").
-    company_name = ticker
-    industry: Optional[str] = None
+    # From here until the worker owns the report, THIS frame owns the 20-credit charge: any
+    # exit that does not hand it to the worker (or refund it in the insert-failure branch)
+    # must give it back. `charge_owned` flips False at exactly those two hand-offs.
+    charge_owned = True
     try:
-        from app.integrations.fmp import get_fmp_client
-        fmp = get_fmp_client()
-        profile = await fmp.get_company_profile(ticker)
-        if profile:
-            company_name = profile.get("companyName", ticker)
-            industry = profile.get("industry") or profile.get("sector")
-    except Exception:
-        pass
-
-    # Insert pending report row. credits_charged stamps how much we
-    # debited so a future tier change can't lose track of historical
-    # billing; is_refunded starts False and is flipped by
-    # _run_research_task on failure.
-    #
-    # The id is minted HERE rather than left to the column default. It is the only
-    # thing that makes the insert-failure claim below able to name the row THIS call
-    # tried to create; see the comment on that claim for what the alternative cost.
-    # `research_reports.id` is `uuid DEFAULT gen_random_uuid()`, so supplying it is
-    # a no-op for every other path.
-    new_report_id = str(uuid.uuid4())
-    report_data = {
-        "id": new_report_id,
-        "user_id": user["id"],
-        "ticker": ticker,
-        "company_name": company_name,
-        "industry": industry,
-        "investor_persona": request.investor_persona,
-        "status": "pending",
-        "progress": 0,
-        "current_step": "Initializing research...",
-        "credits_charged": CreditService.DEEP_RESEARCH_COST,
-        "is_refunded": False,
-    }
-
-    try:
-        result = supabase.table("research_reports").insert(report_data).execute()
-        insert_ok = bool(result.data)
-    except Exception as e:
-        # supabase-py raises APIError on a non-2xx insert (RLS / constraint / PostgREST blip)
-        # instead of returning empty .data — treat "insert raised" IDENTICALLY to "no rows" so
-        # the refund backstop below fires (otherwise the precharge leaks with no research_reports
-        # row for the reconciliation sweep to recover, and the raw exception breaks the contract).
-        logger.error(
-            "research_reports insert raised for %s: %s: %s",
-            ticker, type(e).__name__, e, exc_info=True,
-        )
-        result = None
-        insert_ok = False
-    if not insert_ok:
-        # DB insert failed AFTER we charged credits — refund so the user isn't out the
-        # charged credits for a row that never existed.
-        #
-        # ⚠️ "the row never existed" IS NOT SAFE TO ASSUME, and assuming it double-refunded.
-        # `insert` raising says nothing about whether Postgres committed: a Cloudflare edge 520
-        # or a read timeout after the commit lands here with the row PRESENT (status='pending',
-        # is_refunded=False, credits_charged=20) — which matches every filter the reconciliation
-        # sweep uses. The sweep then wins its own per-row claim, knows nothing about this
-        # refund, and issues a SECOND one. `refund_credits` finds no un-reversed debit by then,
-        # falls through to its granted-first fallback bounded only by the user's CURRENT `used`,
-        # and pays out again from unrelated spend — minting up to `credits_charged` credits.
-        #
-        # So arm the SAME at-most-once guard the sweep uses before refunding. If a row did
-        # commit, this claim wins it (is_refunded=True) and the sweep can never touch it; if no
-        # row exists the claim matches nothing and we refund directly, as before. Either branch
-        # refunds exactly once.
-        #
-        # ⚠️ THE CLAIM MUST NAME THIS ROW BY ID. It used to select on
-        # (user_id, ticker, investor_persona, is_refunded=False, status∈pending/processing,
-        # created_at >= cycle_start) — which has no way to distinguish the row this call tried
-        # to create from any OTHER live report the same user already has for the same
-        # (ticker, persona). Nothing forbids that: the client caps only the NUMBER of
-        # concurrent generations (4) and there is no uniqueness constraint, so tapping Generate
-        # twice for ORCL/Quality — or the Retry path, which regenerates the same pair — leaves
-        # two in-flight rows. A failed second insert then claimed the FIRST, HEALTHY row:
-        # marked it failed + is_refunded, so its worker's conditional completion write became a
-        # no-op and the report was silently dropped. And because the refund below pays exactly
-        # one DEEP_RESEARCH_COST regardless of how many rows the UPDATE matched, a two-row match
-        # returned 20 of the 40 charged. Net: 40 spent, 20 back, zero reports.
+        # Resolve company name + industry from FMP (non-blocking best-effort).
+        # Industry is surfaced on the Reports list card ("TSLA • Automotive").
+        company_name = ticker
+        industry: Optional[str] = None
         try:
-            orphan = (
-                supabase.table("research_reports")
-                .update({"status": "failed", "is_refunded": True})
-                .eq("id", new_report_id)
-                .eq("user_id", user["id"])
-                .eq("is_refunded", False)
-                .in_("status", ["pending", "processing"])
-                .execute()
-            )
-            claimed_orphan = bool(getattr(orphan, "data", None))
+            from app.integrations.fmp import get_fmp_client
+            fmp = get_fmp_client()
+            profile = await fmp.get_company_profile(ticker)
+            if profile:
+                company_name = profile.get("companyName", ticker)
+                industry = profile.get("industry") or profile.get("sector")
         except Exception as e:
-            # Best-effort. If this fails the sweep may still refund later; that is the
-            # pre-existing behaviour and strictly better than not refunding at all here.
+            # Cosmetic only (the card's name + industry); the report itself re-fetches.
             logger.warning(
-                "research_reports orphan claim failed for %s (user=%s): %s: %s",
-                ticker, user["id"], type(e).__name__, e,
-            )
-            claimed_orphan = False
-        if claimed_orphan:
-            logger.warning(
-                "research_reports insert reported failure for %s (user=%s) but a row HAD "
-                "committed — claimed it for refund so the reconciliation sweep cannot refund "
-                "it a second time",
-                ticker, user["id"],
+                "research generate: profile lookup failed for %s (%s: %s) — inserting with "
+                "the ticker as the name", ticker, type(e).__name__, e,
             )
 
-        # If the best-effort refund ALSO fails we log a greppable REFUND LEAK marker with
-        # everything a human needs to correct it manually (mirrors claim_and_mark_failed's).
-        refunded = credit_service.refund_ledgered(
-            user["id"], CreditService.DEEP_RESEARCH_COST,
-            reason="report_refund", ref_id=ticker,
-        )
-        # `None` is a transport fault; a business no-op arrives as an outcome. Both leave the
-        # user charged, so both belong on this line — checking only `is None` missed the
-        # no-op entirely, which is the case migration 142 exists to surface.
-        if refund_did_not_happen(refunded):
+        # Insert pending report row. credits_charged stamps how much we
+        # debited so a future tier change can't lose track of historical
+        # billing; is_refunded starts False and is flipped by
+        # _run_research_task on failure. The id is the one the charge is named by.
+        report_data = {
+            "id": new_report_id,
+            "user_id": user["id"],
+            "ticker": ticker,
+            "company_name": company_name,
+            "industry": industry,
+            "investor_persona": request.investor_persona,
+            "status": "pending",
+            "progress": 0,
+            "current_step": "Initializing research...",
+            "credits_charged": CreditService.DEEP_RESEARCH_COST,
+            "is_refunded": False,
+        }
+
+        try:
+            result = await sb_exec(supabase.table("research_reports").insert(report_data))
+            insert_ok = bool(result.data)
+        except Exception as e:
+            # supabase-py raises APIError on a non-2xx insert (RLS / constraint / PostgREST blip)
+            # instead of returning empty .data — treat "insert raised" IDENTICALLY to "no rows" so
+            # the refund backstop below fires (otherwise the precharge leaks with no research_reports
+            # row for the reconciliation sweep to recover, and the raw exception breaks the contract).
             logger.error(
-                "REFUND LEAK: charged %s credits to user=%s for %s but the "
-                "research_reports insert AND the refund both failed (outcome=%s) — no row "
-                "for the reconciliation sweep to catch; manual credit correction needed",
-                CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
-                _outcome_name(refunded),
+                "research_reports insert raised for %s: %s: %s",
+                ticker, type(e).__name__, e, exc_info=True,
             )
-        return make_error_response(
-            ErrorCode.REPORT_GENERATION_FAILED,
-            message="Failed to insert research_reports row",
-            details={"ticker": ticker, "step": "db_insert"},
+            result = None
+            insert_ok = False
+        if not insert_ok:
+            # DB insert failed AFTER we charged credits — refund so the user isn't out the
+            # charged credits for a row that never existed.
+            #
+            # ⚠️ "the row never existed" IS NOT SAFE TO ASSUME, and assuming it double-refunded.
+            # `insert` raising says nothing about whether Postgres committed: a Cloudflare edge 520
+            # or a read timeout after the commit lands here with the row PRESENT (status='pending',
+            # is_refunded=False, credits_charged=20) — which matches every filter the reconciliation
+            # sweep uses. The sweep then wins its own per-row claim, knows nothing about this
+            # refund, and issues a SECOND one.
+            #
+            # So arm the SAME at-most-once guard the sweep uses before refunding. If a row did
+            # commit, this claim wins it (is_refunded=True) and the sweep can never touch it; if no
+            # row exists the claim matches nothing and we refund directly, as before. Either branch
+            # refunds exactly once.
+            #
+            # ⚠️ THE CLAIM MUST NAME THIS ROW BY ID. It used to select on
+            # (user_id, ticker, investor_persona, is_refunded=False, status∈pending/processing,
+            # created_at >= cycle_start) — which has no way to distinguish the row this call tried
+            # to create from any OTHER live report the same user already has for the same
+            # (ticker, persona). Nothing forbids that: the client caps only the NUMBER of
+            # concurrent generations (4) and there is no uniqueness constraint, so tapping Generate
+            # twice for ORCL/Quality — or the Retry path, which regenerates the same pair — leaves
+            # two in-flight rows. A failed second insert then claimed the FIRST, HEALTHY row:
+            # marked it failed + is_refunded, so its worker's conditional completion write became a
+            # no-op and the report was silently dropped. And because the refund below pays exactly
+            # one DEEP_RESEARCH_COST regardless of how many rows the UPDATE matched, a two-row match
+            # returned 20 of the 40 charged. Net: 40 spent, 20 back, zero reports.
+            def _claim_orphan():
+                return (
+                    supabase.table("research_reports")
+                    .update({"status": "failed", "is_refunded": True})
+                    .eq("id", new_report_id)
+                    .eq("user_id", user["id"])
+                    .eq("is_refunded", False)
+                    .in_("status", ["pending", "processing"])
+                    .execute()
+                )
+
+            try:
+                orphan = await asyncio.to_thread(_claim_orphan)
+                claimed_orphan = bool(getattr(orphan, "data", None))
+            except Exception as e:
+                # The claim RAISED, so the row's state is unknown: no row (the insert never
+                # committed — the likeliest case), a row this claim DID claim before its reply
+                # was lost, or a committed row it did not. Refund NOW in all three: deferring
+                # to the sweep leaks in the first two (no row to sweep; a claimed row the sweep
+                # skips forever). Safe because the ref is per-report: if the sweep later claims
+                # a committed row and refunds it too, that refund answers already_refunded.
+                logger.warning(
+                    "research_reports orphan claim failed for %s (user=%s, report=%s): %s: %s "
+                    "— refunding now; a later sweep refund of the same charge converges",
+                    ticker, user["id"], new_report_id, type(e).__name__, e,
+                )
+                claimed_orphan = False
+            if claimed_orphan:
+                logger.warning(
+                    "research_reports insert reported failure for %s (user=%s) but a row HAD "
+                    "committed — claimed it for refund so the reconciliation sweep cannot refund "
+                    "it a second time",
+                    ticker, user["id"],
+                )
+
+            # If the best-effort refund ALSO fails we log a greppable REFUND LEAK marker with
+            # everything a human needs to correct it manually (mirrors claim_and_mark_failed's).
+            # Plain per-report ref, never the legacy fallback: charged in THIS request.
+            # `settle_off_loop` finishes it even if this wait is cancelled, so the frame stops
+            # owning the charge before awaiting.
+            def _refund_and_stamp():
+                outcome = credit_service.refund_ledgered(
+                    user["id"], CreditService.DEEP_RESEARCH_COST,
+                    reason="report_refund", ref_id=charge_ref,
+                )
+                # What the refund DID (migration 195), in the refund's own worker thread and
+                # after EVERY refund here, not only a claimed orphan: with no committed row the
+                # UPDATE matches nothing, but a claim that committed with its reply lost reads
+                # `claimed_orphan=False` too — skipping it would leave that card "Refund
+                # pending" for good. Best-effort; never raises.
+                record_refund_outcome(supabase, new_report_id, outcome, user_id=user["id"])
+                return outcome
+
+            charge_owned = False
+            refunded = await settle_off_loop(
+                _refund_and_stamp, what=f"report_refund {charge_ref}",
+            )
+            # `None` is a transport fault; a business no-op arrives as an outcome. Both leave the
+            # user charged, so both belong on this line — checking only `is None` missed the
+            # no-op entirely, which is the case migration 142 exists to surface.
+            if refund_did_not_happen(refunded):
+                logger.error(
+                    "REFUND LEAK: charged %s credits to user=%s for %s (ref_id=%s) but the "
+                    "research_reports insert AND the refund both failed (outcome=%s) — no row "
+                    "for the reconciliation sweep to catch; manual credit correction needed",
+                    CreditService.DEEP_RESEARCH_COST, user["id"], ticker, charge_ref,
+                    _outcome_name(refunded),
+                )
+            return make_error_response(
+                ErrorCode.REPORT_GENERATION_FAILED,
+                message="Failed to insert research_reports row",
+                details={"ticker": ticker, "step": "db_insert"},
+            )
+
+        report = result.data[0]
+
+        # Launch the worker. The handle is RETAINED in a module-level set until the task
+        # finishes: `asyncio.create_task` keeps only a WEAK reference, so an untracked
+        # task can be garbage-collected mid-execution — the documented CPython caveat that
+        # `main.py` calls out for the lifespan loops and that `stocks.py` already solves
+        # this exact way for the pre-warm. It matters more here than anywhere else in the
+        # app: this task owns a report the user has ALREADY been charged 20 credits for,
+        # and if it vanishes before `_on_started` stamps `processing_started_at` the row
+        # sits `pending` with a NULL start time, which the reconciliation sweep will not
+        # touch until `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS` (~3.2h) has passed.
+        task = asyncio.create_task(
+            _run_research_task(
+                report["id"], ticker, request.investor_persona, user["id"]
+            ),
+            name=f"research:{report['id']}",
         )
+        _RESEARCH_TASKS.add(task)
+        charge_owned = False  # the worker (and the sweep behind it) owns the charge now
+        task.add_done_callback(_RESEARCH_TASKS.discard)
 
-    report = result.data[0]
+        return ResearchGenerationResponse(
+            report_id=report["id"],
+            status="pending",
+            estimated_seconds=90,
+            poll_url=f"/api/v1/research/reports/{report['id']}/status",
+        )
+    except BaseException as e:
+        # An exit between the charge and a hand-off. Safe even if the insert committed: the
+        # sweep's later refund of that row answers already_refunded on the per-report ref.
+        if charge_owned:
+            def _hand_back():
+                return credit_service.refund_ledgered(
+                    user["id"], CreditService.DEEP_RESEARCH_COST,
+                    reason="report_refund", ref_id=charge_ref,
+                )
 
-    # Launch the worker. The handle is RETAINED in a module-level set until the task
-    # finishes: `asyncio.create_task` keeps only a WEAK reference, so an untracked
-    # task can be garbage-collected mid-execution — the documented CPython caveat that
-    # `main.py` calls out for the lifespan loops and that `stocks.py` already solves
-    # this exact way for the pre-warm. It matters more here than anywhere else in the
-    # app: this task owns a report the user has ALREADY been charged 20 credits for,
-    # and if it vanishes before `_on_started` stamps `processing_started_at` the row
-    # sits `pending` with a NULL start time, which the reconciliation sweep will not
-    # touch until `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS` (~3.2h) has passed.
-    task = asyncio.create_task(
-        _run_research_task(
-            report["id"], ticker, request.investor_persona, user["id"]
-        ),
-        name=f"research:{report['id']}",
-    )
-    _RESEARCH_TASKS.add(task)
-    task.add_done_callback(_RESEARCH_TASKS.discard)
-
-    return ResearchGenerationResponse(
-        report_id=report["id"],
-        status="pending",
-        estimated_seconds=90,
-        poll_url=f"/api/v1/research/reports/{report['id']}/status",
-    )
+            if isinstance(e, Exception):
+                logger.error(
+                    "research generate: %s after charging user=%s for %s (%s) — handing the "
+                    "charge back", type(e).__name__, user["id"], ticker, charge_ref,
+                )
+                refunded = await settle_off_loop(_hand_back, what=f"report_refund {charge_ref}")
+                if refund_did_not_happen(refunded):
+                    logger.error(
+                        "REFUND LEAK: user=%s charged %s credits for %s (ref_id=%s); the "
+                        "request failed before its report row was handed to a worker and the "
+                        "refund did not happen (outcome=%s) — manual credit correction needed",
+                        user["id"], CreditService.DEEP_RESEARCH_COST, ticker, charge_ref,
+                        _outcome_name(refunded),
+                    )
+            else:
+                # Cancelled (a deploy's graceful-shutdown deadline) — this frame cannot
+                # await, so the refund runs detached and the lifespan drains it.
+                logger.warning(
+                    "research generate: cancelled after charging user=%s for %s (%s) — "
+                    "refunding detached", user["id"], ticker, charge_ref,
+                )
+                settle_detached(_hand_back, what=f"report_refund {charge_ref}")
+        raise
 
 
 # ── Status Polling ───────────────────────────────────────────────────────────
@@ -681,6 +809,15 @@ async def regenerate_research_report_pdf(
 
 # ── List User Reports ────────────────────────────────────────────────────────
 
+# The list's columns. Hoisted so the refund_outcome-aware select below can append to it; the
+# string itself is unchanged (`test_research_list_timeout_contract` pins part of it).
+_REPORT_LIST_COLUMNS = (
+    "id, ticker, company_name, industry, investor_persona, status, title, "
+    "executive_summary, overall_score, fair_value_estimate, progress, "
+    "current_step, created_at, processing_started_at, completed_at, user_rating, "
+    "is_refunded, credits_charged, pdf_status"
+)
+
 
 # `response_model`: the wire shape IS the schema. Without it the schema's pins (the
 # `processing_started_at` clock, the `[Refunded]` chip fields) guarded a model the
@@ -702,22 +839,48 @@ async def get_my_reports(
     `industry` and `current_step` are surfaced so the iOS Reports tab
     card can render the industry subtitle and the live progress text
     while a report is in-flight.
+
+    `refund_confirmed` (migration 195) says whether the refund behind `is_refunded` LANDED;
+    `is_refunded` stays the claim flag (iOS's Retry gate depends on that meaning). The column
+    is selected only while it is known to exist: an old database answers the base select and
+    `refund_confirmed` is null on every row, so the list never 500s across the
+    code-before-migration window. Off the event loop — iOS polls this every few seconds.
     """
-    result = supabase.table("research_reports").select(
-        "id, ticker, company_name, industry, investor_persona, status, title, "
-        "executive_summary, overall_score, fair_value_estimate, progress, "
-        "current_step, created_at, processing_started_at, completed_at, user_rating, "
-        "is_refunded, credits_charged, pdf_status"
-    ).eq("user_id", user["id"]).neq(
-        "status", "deleted"
-    ).order(
-        "created_at", desc=True
-    ).limit(limit).execute()
+    def _query(columns: str):
+        return supabase.table("research_reports").select(columns).eq(
+            "user_id", user["id"]
+        ).neq(
+            "status", "deleted"
+        ).order(
+            "created_at", desc=True
+        ).limit(limit)
+
+    with_outcome = refund_outcome_column_available()
+    try:
+        result = await sb_exec(_query(
+            _REPORT_LIST_COLUMNS + (f", {REFUND_OUTCOME_COLUMN}" if with_outcome else "")
+        ))
+    except Exception as e:
+        if not (with_outcome and is_unknown_column_error(e)):
+            raise
+        # 195 not applied yet (or PostgREST's schema cache has not caught up): latch it and
+        # answer from the base columns — one extra query, once per re-check window.
+        note_refund_outcome_column_missing("reports list")
+        with_outcome = False
+        result = await sb_exec(_query(_REPORT_LIST_COLUMNS))
+    else:
+        if with_outcome:
+            note_refund_outcome_column_present()
 
     # Inject stock_id on each row for iOS compatibility
     items = []
     for row in result.data or []:
         row["stock_id"] = row["ticker"]
+        # The raw label never goes on the wire: it is a server vocabulary, not a contract.
+        label = row.pop(REFUND_OUTCOME_COLUMN, None)
+        row["refund_confirmed"] = refund_confirmed_from_label(
+            label, is_refunded=bool(row.get("is_refunded")), column_known=with_outcome,
+        )
         items.append(row)
 
     return items
@@ -794,7 +957,16 @@ async def delete_report(
     The claim below is the SAME compare-and-set the sweep uses (`is_refunded=False` + a
     claimable status), so this and `claim_and_mark_failed` can race safely: exactly one of them
     wins the row and exactly one refund is issued.
+
+    The whole body runs in ONE worker thread (`_delete_report_sync`): the CAS, the peek, the
+    refund (which may retry a transient fault) and the soft-delete are sync Supabase round
+    trips, and on the single uvicorn worker each one used to stall every in-flight request.
     """
+    return await asyncio.to_thread(_delete_report_sync, report_id, intent, user, supabase)
+
+
+def _delete_report_sync(report_id: str, intent: Optional[str], user: dict, supabase: Client):
+    """`delete_report`'s body. SYNC — runs in a worker thread (see the handler)."""
     # Atomically: mark deleted AND claim the refund, but only for a row that is still in
     # flight, was actually charged, and has not already been refunded.
     try:
@@ -827,20 +999,24 @@ async def delete_report(
     row = (getattr(claimed, "data", None) or [None])[0]
     if row:
         amount = int(row.get("credits_charged") or 0)
-        # ref_id MUST match the one the CHARGE used (`request.stock_id.upper()`), or
-        # `refund_credits` cannot find the debit's recorded granted/purchased split and falls
-        # back to granted-first — which converts permanent purchased credits into expiring
-        # ones. Same rule `claim_and_mark_failed` follows.
+        # The ref MUST match the one the CHARGE used, or `refund_credits` cannot find the
+        # debit's recorded granted/purchased split and falls back to granted-first — which
+        # converts permanent purchased credits into expiring ones. Since 2026-10-12 that is
+        # the per-report `report_charge_ref`, rebuilt from the row; this site WON the CAS, so
+        # it alone may fall back to the bare ticker a pre-2026-10-12 row was charged under
+        # (`refund_report_charge`). Same rule `claim_and_mark_failed` follows.
         ticker = (row.get("ticker") or "").upper() or None
-        refunded = CreditService().refund_ledgered(
-            user["id"], amount, reason="report_refund_deleted", ref_id=ticker,
+        refunded, ref_used = refund_report_charge(
+            CreditService().refund_ledgered, user["id"], amount,
+            ticker=ticker, report_id=row.get("id") or report_id,
+            reason="report_refund_deleted", allow_legacy_ref=True,
         )
         if refund_did_not_happen(refunded):
             logger.error(
-                "REFUND LEAK: user=%s deleted in-flight report=%s (%s) charged %s credits; "
-                "the row is now 'deleted' and unreachable by the sweep, and the refund did "
-                "not happen (outcome=%s) — manual credit correction needed",
-                user["id"], report_id, ticker, amount,
+                "REFUND LEAK: user=%s deleted in-flight report=%s (%s, ref_id=%s) charged %s "
+                "credits; the row is now 'deleted' and unreachable by the sweep, and the "
+                "refund did not happen (outcome=%s) — manual credit correction needed",
+                user["id"], report_id, ticker, ref_used, amount,
                 _outcome_name(refunded),
             )
         else:
@@ -849,6 +1025,12 @@ async def delete_report(
                 refunded.get("refunded", amount) if isinstance(refunded, dict) else amount,
                 report_id, user["id"],
             )
+        # What the refund DID (migration 195) — same worker thread, after the CAS, never in
+        # it. Retryable only when the fault was on the per-report ChargeRef.
+        record_refund_outcome(
+            supabase, report_id, refunded, user_id=user["id"],
+            replayable=isinstance(ref_used, ChargeRef),
+        )
         # The CAS returns the row AFTER the update, so the prior status is not known
         # here — only that it was one of `_REFUNDABLE_ON_DELETE`. The outcome is the
         # REAL one: this used to say "refunded" after the leak branch too.
@@ -936,11 +1118,17 @@ def _settle_raised_delete_claim(supabase: Client, user: dict, report_id: str):
     line if that fails, so it is never silent). Any other state — still in flight, the
     read itself failing — is answered 409 SYSTEM_BUSY with the row untouched: the CAS is
     convergent, so the client's retry either wins it or finds the row already terminal.
+
+    That same state is ALSO what an earlier, successful DELETE leaves behind (a re-tap after a
+    lost reply), so this re-read cannot prove it owns the CAS. It refunds on the per-report
+    ref ONLY (`allow_legacy_ref=False`): when the earlier DELETE already paid, the replay
+    answers `already_refunded`. The bare-ticker fallback here would pair with a sibling report's
+    debit and mint 20 credits. SYNC — runs inside `_delete_report_sync`'s worker thread.
     """
     try:
         again = (
             supabase.table("research_reports")
-            .select("status, is_refunded, credits_charged, ticker")
+            .select("id, status, is_refunded, credits_charged, ticker")
             .eq("id", report_id)
             .eq("user_id", user["id"])
             .limit(1)
@@ -957,21 +1145,30 @@ def _settle_raised_delete_claim(supabase: Client, user: dict, report_id: str):
     if row.get("status") == "deleted" and bool(row.get("is_refunded")):
         amount = int(row.get("credits_charged") or 0)
         ticker = (row.get("ticker") or "").upper() or None
-        refunded = CreditService().refund_ledgered(
-            user["id"], amount, reason="report_refund_deleted", ref_id=ticker,
+        refunded, ref_used = refund_report_charge(
+            CreditService().refund_ledgered, user["id"], amount,
+            ticker=ticker, report_id=row.get("id") or report_id,
+            reason="report_refund_deleted", allow_legacy_ref=False,
         )
         if refund_did_not_happen(refunded):
             logger.error(
-                "REFUND LEAK: user=%s deleted in-flight report=%s (%s) charged %s credits; "
-                "the claim committed but its reply was lost and the refund did not happen "
-                "(outcome=%s) — manual credit correction needed",
-                user["id"], report_id, ticker, amount, _outcome_name(refunded),
+                "REFUND LEAK: user=%s deleted in-flight report=%s (%s, ref_id=%s) charged %s "
+                "credits; the claim committed but its reply was lost and the refund did not "
+                "happen (outcome=%s) — manual credit correction needed",
+                user["id"], report_id, ticker, ref_used, amount, _outcome_name(refunded),
             )
         else:
             logger.warning(
                 "delete_report: claim for report=%s committed despite a raised reply — "
                 "refunded %s credits on re-read (user %s)", report_id, amount, user["id"],
             )
+        # Same stamp as the CAS winner's. This re-read may be replaying an EARLIER delete's
+        # settled refund: `record_refund_outcome` never lets an unconfirmed label overwrite a
+        # confirmed one, so a replay that cannot prove the refund leaves "refunded" standing.
+        record_refund_outcome(
+            supabase, report_id, refunded, user_id=user["id"],
+            replayable=isinstance(ref_used, ChargeRef),
+        )
         return {"message": "Report deleted successfully",
                 "outcome": "refund_failed" if refund_did_not_happen(refunded) else "refunded"}
     return make_error_response(
@@ -1243,8 +1440,9 @@ async def _run_research_task(
 
     On failure: marks the report 'failed', persists a structured error
     blob, refunds the credits charged in /generate, and flips
-    `is_refunded` so iOS renders the "[Refunded]" chip. This is the
-    single refund site — every failure path lands here.
+    `is_refunded` so iOS renders the "[Refunded]" chip — all through ONE
+    claim (`claim_and_mark_failed`); an uncharged row whose claim matched
+    nothing is marked failed by `_fail_unclaimed_row`.
     """
     try:
         from app.services.research_service import ReportAbandonedError, ResearchService
@@ -1289,10 +1487,74 @@ async def _run_research_task(
             extra_details={"report_id": report_id},
         )
         # Mark failed + refund through the shared claim-then-refund primitive.
-        # ONE atomic compare-and-set on `is_refunded` flips the row and
-        # decides the refund, so this worker path and the reconciliation
-        # sweep can never double-refund the same report. (Note:
-        # ResearchService.generate_report may have already stamped
-        # status='failed' before re-raising — 'failed' is a claimable status,
-        # so the refund still fires exactly once.)
-        await claim_and_mark_failed(report_id, body)
+        # ONE atomic compare-and-set on `is_refunded` flips the row to 'failed' AND
+        # decides the refund, so this worker path and the reconciliation sweep can
+        # never double-refund the same report — and 'failed' is never visible before
+        # the refund was claimed (`generate_report` no longer pre-stamps it).
+        claimed = await claim_and_mark_failed(report_id, body)
+        if not claimed:
+            # The claim matched nothing (or raised and its re-read found nothing claimed).
+            # Since generate_report stopped pre-stamping 'failed', an UNCHARGED row (the CAS
+            # filters credits_charged > 0) would otherwise sit 'processing' forever — so one
+            # off-loop re-read decides whether this worker must still mark it failed.
+            await asyncio.to_thread(_fail_unclaimed_row, report_id, body)
+
+
+def _fail_unclaimed_row(report_id: str, body: Dict[str, Any]) -> None:
+    """After a refund claim that did not land: mark an UNCHARGED stranded row failed.
+
+    SYNC (runs in a worker thread). Never raises. Three cases, decided by one read:
+      * terminal (completed / failed / deleted) — someone else settled it; nothing to do;
+      * still in flight and CHARGED — the claim did not land (it raised, or lost a race);
+        writing 'failed' here would show 'failed' with no refund behind it, so it is left
+        for the reconciliation sweep, which marks it failed AND refunds in one claim;
+      * still in flight and UNCHARGED — nothing is owed, so a guarded 'failed' stamp is all
+        that is missing.
+    """
+    from app.database import get_supabase
+
+    supabase = get_supabase()
+    try:
+        res = (
+            supabase.table("research_reports")
+            .select("status, is_refunded, credits_charged")
+            .eq("id", report_id)
+            .limit(1)
+            .execute()
+        )
+        rows = list(getattr(res, "data", None) or [])
+    except Exception as e:
+        logger.warning(
+            "report %s: re-read after an unclaimed failure failed (%s: %s) — the "
+            "reconciliation sweep decides a charged row; an uncharged one may stay in flight",
+            report_id, type(e).__name__, e,
+        )
+        return
+    row = dict(rows[0] or {}) if rows else {}
+    if row.get("status") not in ("pending", "processing"):
+        return
+    if int(row.get("credits_charged") or 0) > 0:
+        logger.warning(
+            "report %s: worker failed but its refund claim did not land — left for the "
+            "reconciliation sweep, which marks it failed and refunds in one claim", report_id,
+        )
+        return
+    try:
+        (
+            supabase.table("research_reports")
+            .update({
+                "status": "failed",
+                "progress": 0,
+                "error_message": redact_secrets(json.dumps(body)),
+            })
+            .eq("id", report_id)
+            .in_("status", ["pending", "processing"])
+            .lte("credits_charged", 0)
+            .execute()
+        )
+        logger.info("report %s: uncharged and unclaimed — marked failed", report_id)
+    except Exception as e:
+        logger.error(
+            "report %s: could not mark an uncharged failed report failed (%s: %s) — it stays "
+            "in flight", report_id, type(e).__name__, e, exc_info=True,
+        )

@@ -8,15 +8,375 @@ shared low balance.
 
 `remaining` on `user_credits` is a GENERATED column (total - used),
 so all mutations target `used` and read `remaining` afterward.
+
+Charge refs (2026-10-12). Every metered debit is named by a `ChargeRef` minted by one of
+the three builders below, and a ChargeRef names EXACTLY ONE debit. That one property is
+what makes a refund replay-safe: `refund_credits` pairs a refund with the NEWEST
+UN-REVERSED debit of (user, ref_id, amount) and answers `already_refunded` when that debit
+is already reversed, so a replayed refund — a retry after a lost reply, a compensation that
+races the sweep — converges instead of paying twice. Report charges used to be named by
+the bare ticker (deep door) or `TICKER:persona` (direct door); a replay on such a shared
+ref pairs with a SIBLING report's debit and mints credits.
 """
 
+import asyncio
 import logging
-from typing import Any, Dict, Optional
+import threading
+import uuid
+import weakref
+from typing import Any, Callable, Dict, Optional
 
 from app.config import settings
 from app.database import get_supabase
+from app.utils.supabase_errors import is_transient_supabase_error, retry_idempotent_sync
 
 logger = logging.getLogger(__name__)
+
+
+class ChargeRef(str):
+    """A `credit_transactions.ref_id` that names EXACTLY ONE debit.
+
+    Minted only by `chat_turn_ref`, `report_charge_ref` and `direct_report_charge_ref`, so a
+    charge site and its refund sites cannot drift apart. `refund_ledgered` retries a
+    transient transport fault ONLY for a ChargeRef: with one debit per ref a replay of a
+    refund that already committed answers `already_refunded` and moves nothing.
+
+    Fails SAFE by construction: any string operation (`.upper()`, slicing, an f-string,
+    `str(ref)`) returns a PLAIN `str`, which is never retried — so a legacy bare-ticker ref,
+    or one rebuilt by hand, can never be replayed against a sibling's debit.
+    """
+
+    __slots__ = ()
+
+
+def chat_turn_ref(session_id: Optional[str]) -> ChargeRef:
+    """One chat turn's debit: `{session_id}:{uuid4hex}`. The session prefix keeps a ledger
+    row greppable back to its conversation; the uuid is what makes it one debit."""
+    return ChargeRef(f"{session_id}:{uuid.uuid4().hex}")
+
+
+def report_charge_ref(ticker: str, report_id: Any) -> ChargeRef:
+    """A deep-door (`POST /research/generate`) report's debit: `{TICKER}:{report_id}`.
+
+    A pure function of two columns every `research_reports` row already carries, so every
+    refund site (the worker's claim, the sweep, both delete paths, the insert-failure path)
+    rebuilds the SAME ref from the row without a new column. `credit_history_service` reads
+    the ticker as the head before the first ':', so the statement keeps its subtitle.
+    """
+    symbol = (ticker or "").strip().upper()
+    rid = str(report_id or "").strip().lower()
+    if not symbol or not rid:
+        raise ValueError(
+            f"report_charge_ref needs a ticker and a report id (got {ticker!r}, {report_id!r})"
+        )
+    return ChargeRef(f"{symbol}:{rid}")
+
+
+def direct_report_charge_ref(ticker: str, persona: str) -> ChargeRef:
+    """A direct-door (`GET /stocks/{ticker}/report`) report's debit:
+    `{TICKER}:{persona}:{uuid4hex}`. That door has no row id, and its charge and refund
+    happen in the same request, so the uuid is held in ONE local the refund reuses."""
+    symbol = (ticker or "").strip().upper()
+    if not symbol:
+        raise ValueError(f"direct_report_charge_ref needs a ticker (got {ticker!r})")
+    return ChargeRef(f"{symbol}:{persona}:{uuid.uuid4().hex}")
+
+
+def _warn_if_on_event_loop(op: str, user_id: Any, ref_id: Any) -> None:
+    """Tripwire for CLAUDE.md invariant #6. `precharge` and `refund_ledgered` are SYNC
+    Supabase round trips (a ChargeRef refund can also sleep through up to two retry
+    backoffs), so on the single uvicorn worker an on-loop call stalls every in-flight
+    request. A worker thread has no running loop, so this is silent there."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    logger.warning(
+        "%s RPC ON THE EVENT LOOP for user=%s ref_id=%s — call it via asyncio.to_thread",
+        op, user_id, ref_id,
+    )
+
+
+# ── Detached settlements ─────────────────────────────────────────────────────────────
+# A frame that is being CANCELLED cannot await: the next await raises CancelledError again
+# at once (uvicorn cancels in-flight requests at `--timeout-graceful-shutdown`, and anyio's
+# cancel scopes re-deliver it). A refund owed by such a frame is handed to a strongly-held
+# task here, which runs the SYNC settlement in a worker thread; the lifespan shutdown waits
+# for these (`drain_detached_settlements`) so a deploy does not discard a queued refund.
+# Same shape as `chat_web_search_service._release_detached`, for a sync callable.
+_DETACHED_SETTLEMENTS: "set[asyncio.Task]" = set()
+
+
+class _SettlementRun:
+    """What a settlement's worker thread did, shared with the loop under `lock`.
+
+    A task cancelled AFTER its thread started is not a lost refund — an executor job cannot
+    be stopped once running, so the thread finishes the settlement anyway (and
+    `asyncio.run` joins it at exit) — but its outcome then has no reader. So the done-callback
+    marks such a run `orphaned`, and the thread logs how it ended itself; a run that had
+    already finished is reported by the callback. Without this a cancelled-after-start task
+    paged "REFUND LEAK?" for a refund that landed, and a raise in it was never logged."""
+
+    __slots__ = ("lock", "started", "finished", "exc", "orphaned")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.started = False
+        self.finished = False
+        self.exc: Optional[BaseException] = None
+        self.orphaned = False
+
+
+_SETTLEMENT_RUNS: "weakref.WeakKeyDictionary[asyncio.Task, _SettlementRun]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _spawn_settlement(fn: Callable[[], Any], what: str, *, report: bool) -> "asyncio.Task":
+    """Start `fn` in a worker thread as a strongly-held task the shutdown drain waits for.
+    `report=True` logs how it ended (nobody awaits it); otherwise the awaiting caller sees
+    the result and only the bookkeeping callback is attached."""
+    run = _SettlementRun()
+
+    def _body() -> Any:
+        with run.lock:
+            run.started = True
+        try:
+            result = fn()
+        except BaseException as e:
+            with run.lock:
+                run.finished, run.exc, orphaned = True, e, run.orphaned
+            if orphaned:
+                logger.error(
+                    "detached settlement %s raised after its task was cancelled: %s: %s — "
+                    "verify the ledger by ref", what, type(e).__name__, e, exc_info=True,
+                )
+            raise
+        with run.lock:
+            run.finished, orphaned = True, run.orphaned
+        if orphaned:
+            logger.info("detached settlement %s finished after its task was cancelled", what)
+        return result
+
+    loop = asyncio.get_running_loop()
+    task = loop.create_task(asyncio.to_thread(_body), name=f"settle:{what}")
+    _SETTLEMENT_RUNS[task] = run
+    _DETACHED_SETTLEMENTS.add(task)
+    task.add_done_callback(_DETACHED_SETTLEMENTS.discard)
+    if report:
+        task.add_done_callback(lambda t: _on_detached_done(what, t))
+    return task
+
+
+async def settle_off_loop(fn: Callable[[], Any], *, what: str) -> Any:
+    """Run the SYNC settlement `fn` in a worker thread and return its result — and finish it
+    even if THIS frame is cancelled while waiting.
+
+    Shielded and strongly held: a cancel (a deploy's graceful-shutdown deadline) stops only
+    the wait, the settlement runs on and the lifespan drain waits for it, and how it ended is
+    then logged by name. A plain `await asyncio.to_thread(fn)` would instead cancel an
+    executor job that had not started yet, silently dropping the refund. `fn` must CONTAIN
+    its literal call (a lambda or local def) so the reason scanners keep reading it.
+    Exceptions from `fn` propagate to the caller, exactly as an inline call's would.
+    """
+    task = _spawn_settlement(fn, what, report=False)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if not task.done():
+            task.add_done_callback(lambda t: _on_detached_done(what, t))
+        raise
+
+
+async def charge_off_loop(
+    charge: Callable[[], Any],
+    *,
+    on_abandoned: Callable[[Any, Optional[BaseException]], Any],
+    what: str,
+) -> Any:
+    """Run a SYNC precharge (or a claim that wraps one) in a worker thread, and never lose a
+    debit to THIS frame being cancelled while it waits.
+
+    Off the loop for invariant #6 — but a plain `await asyncio.to_thread(charge)` opened a
+    window the inline call never had: a cancel (a deploy's graceful-shutdown deadline) landing
+    during the round trip raised at the await, the caller never learned the charge had
+    landed, and nothing refunded it. Here the charge runs on (shielded, strongly held,
+    drained at shutdown), and once it ends `on_abandoned(result, exc)` runs DETACHED in a
+    worker thread to hand back whatever landed — the caller decides what that means (a
+    `None` balance is "insufficient": nothing was debited). Not called when the wait was not
+    cancelled: the result or the exception then reaches the caller as an inline call's would.
+    """
+    task = _spawn_settlement(charge, what, report=False)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        def _after(t: "asyncio.Task") -> None:
+            if t.cancelled():
+                # Only at interpreter exit, after the drain: the thread may still have run.
+                logger.error(
+                    "POSSIBLE LOST CHARGE: %s was cancelled with its waiter and may have "
+                    "committed — verify the ledger by ref", what,
+                )
+                return
+            exc = t.exception()
+            result = None if exc is not None else t.result()
+            settle_detached(lambda: on_abandoned(result, exc), what=f"abandoned {what}")
+
+        if task.done():
+            _after(task)
+        else:
+            task.add_done_callback(_after)
+        raise
+
+
+def _on_detached_done(what: str, task: "asyncio.Task") -> None:
+    _DETACHED_SETTLEMENTS.discard(task)
+    if task.cancelled():
+        run = _SETTLEMENT_RUNS.get(task)
+        started = finished = False
+        exc: Optional[BaseException] = None
+        if run is not None:
+            with run.lock:
+                started, finished, exc = run.started, run.finished, run.exc
+                # Not finished (started or not): the thread, if it ever runs, logs its end.
+                run.orphaned = not finished
+        if started and finished:
+            if exc is not None:
+                logger.error(
+                    "detached settlement %s raised: %s: %s", what, type(exc).__name__, exc,
+                    exc_info=exc,
+                )
+            return
+        if started:
+            logger.warning(
+                "detached settlement %s: its task was cancelled after the worker thread "
+                "started — the thread runs to completion and logs how it ended", what,
+            )
+            return
+        logger.error(
+            "REFUND LEAK? detached settlement %s was cancelled before it finished — its "
+            "worker thread may never have run; verify the ledger by ref and correct manually",
+            what,
+        )
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "detached settlement %s raised: %s: %s", what, type(exc).__name__, exc,
+            exc_info=exc,
+        )
+
+
+def settle_detached(fn: Callable[[], Any], *, what: str) -> None:
+    """Run the SYNC settlement `fn` off the loop without awaiting it. Never raises.
+
+    For a frame being cancelled only — anywhere else, `await settle_off_loop(fn, ...)` keeps
+    the outcome observable. `fn` must CONTAIN its literal call (a lambda or local def), so the
+    reason scanners keep reading it. With no running loop it simply runs inline.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            fn()
+        except Exception as e:
+            logger.error(
+                "settlement %s raised (inline, no running loop): %s: %s",
+                what, type(e).__name__, e, exc_info=True,
+            )
+        return
+    try:
+        _spawn_settlement(fn, what, report=True)
+    except Exception as e:  # a closed loop — nothing to schedule onto
+        logger.error(
+            "REFUND LEAK? could not schedule detached settlement %s (%s: %s) — verify the "
+            "ledger by ref and correct manually", what, type(e).__name__, e,
+        )
+
+
+#: How long the drain must see NO settlement running (and no task still unwinding a cancel)
+#: before it concludes, and how often it re-scans meanwhile. See `drain_detached_settlements`.
+_DRAIN_QUIET_SECONDS = 0.5
+_DRAIN_POLL_SECONDS = 0.05
+#: The most the drain waits for cancelled tasks to unwind (inside its own `timeout`), so a
+#: task that swallowed its cancel cannot hold every shutdown for the whole bound.
+_DRAIN_UNWIND_SECONDS = 3.0
+
+
+def _unwinding_tasks() -> "list[asyncio.Task]":
+    """Tasks a cancel was delivered to that have not finished yet — at shutdown, the request
+    frames uvicorn cancelled, still on their way to the `finally` that spawns their refund."""
+    me = asyncio.current_task()
+    out = []
+    for t in asyncio.all_tasks():
+        if t is me or t.done():
+            continue
+        try:
+            if t.cancelling():
+                out.append(t)
+        except AttributeError:  # Task.cancelling() is 3.11+; the quiet window still applies
+            return []
+    return out
+
+
+async def drain_detached_settlements(timeout: float = 10.0) -> int:
+    """Wait (bounded) for every detached settlement still running — including any a finishing
+    one spawns (an abandoned charge's compensation) and any spawned AFTER the drain began.
+    Returns how many did NOT finish within `timeout`; each is logged at ERROR by name (it
+    carries the ref).
+
+    An empty first scan is not the end (review F1, 2026-10-12). At the graceful-shutdown
+    deadline uvicorn cancels the request tasks and IMMEDIATELY sends `lifespan.shutdown`
+    without waiting for them; a handler sits three BaseHTTPMiddleware task-group hops down,
+    so its cancel reaches the `finally` that hands its refund to `settle_detached` several
+    loop iterations AFTER this drain first looks. Returning on that empty scan left the
+    refund to `asyncio.run`'s teardown, which cancels it — lost, or a false "REFUND LEAK?"
+    page on every deploy that cut off a charged request. So the drain also waits (within
+    `_DRAIN_UNWIND_SECONDS`) for tasks still unwinding a cancel, and returns only after it
+    has seen nothing running for `_DRAIN_QUIET_SECONDS`, re-scanning every
+    `_DRAIN_POLL_SECONDS` — all inside `timeout`.
+    """
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    deadline = start + max(0.0, float(timeout))
+    unwind_deadline = min(deadline, start + _DRAIN_UNWIND_SECONDS)
+    announced = False
+    quiet_since: Optional[float] = None
+    while True:
+        pending = {t for t in _DETACHED_SETTLEMENTS if not t.done()}
+        now = loop.time()
+        if pending:
+            quiet_since = None
+            if not announced:
+                logger.info("draining %d detached credit settlement(s)", len(pending))
+                announced = True
+            left = deadline - now
+            if left > 0:
+                # Poll-sized waits, so a settlement spawned meanwhile is seen promptly.
+                await asyncio.wait(pending, timeout=min(left, _DRAIN_POLL_SECONDS))
+                # Let done-callbacks run: a finished charge may have just spawned its refund.
+                await asyncio.sleep(0)
+                continue
+            for t in pending:
+                logger.error(
+                    "REFUND LEAK? detached settlement %s still running after %.1fs at "
+                    "shutdown — verify the ledger by ref", t.get_name(), timeout,
+                )
+            return len(pending)
+        if now >= deadline:
+            return 0
+        unwinding = _unwinding_tasks() if now < unwind_deadline else []
+        if unwinding:
+            quiet_since = None
+            await asyncio.wait(unwinding, timeout=min(unwind_deadline - now, _DRAIN_POLL_SECONDS))
+            await asyncio.sleep(0)
+            continue
+        if quiet_since is None:
+            quiet_since = now
+        quiet_left = _DRAIN_QUIET_SECONDS - (now - quiet_since)
+        if quiet_left <= 0:
+            return 0
+        await asyncio.sleep(min(quiet_left, deadline - now, _DRAIN_POLL_SECONDS))
 
 
 class PackGrantConflict(Exception):
@@ -233,7 +593,11 @@ class CreditService:
         (the shared GUEST_USER_ID pool would deplete for everyone) — endpoints
         branch on the guest sentinel before reaching here; `spend_credits` also
         guest-guards as defense-in-depth.
+
+        SINGLE-SHOT, never retried: `spend_credits` is not idempotent. SYNC — call it via
+        `asyncio.to_thread` from async code.
         """
+        _warn_if_on_event_loop("spend_credits", user_id, ref_id)
         try:
             result = self.supabase.rpc(
                 "spend_credits",
@@ -246,15 +610,19 @@ class CreditService:
             ).execute()
         except Exception as e:
             # We cannot distinguish "never committed" from "committed then the HTTP response was
-            # lost" — spend_credits is not idempotent and there is no client idempotency key, so a
-            # committed-but-lost charge cannot be auto-reversed here. Log it DISTINCTLY (POSSIBLE
-            # LOST CHARGE) so the rare case is greppable + manually correctable via the
-            # credit_transactions ledger; the caller surfaces a retryable 409 (never 402). A true
-            # exactly-once fix requires a client-supplied idempotency key (tracked follow-up).
+            # lost" — spend_credits is not idempotent, so it is never retried here. All three
+            # doors (chat, both report doors) answer this with a COMPENSATING
+            # `refund_ledgered(..., ref_id=<the same ChargeRef>, quiet_no_match=True)`: it
+            # reverses the debit if it landed and answers a quiet `no_matching_debit` if it
+            # never did. A debit still queued at the edge that commits AFTER its compensation
+            # is the residual case this line exists for — greppable by the ref, manually
+            # correctable via the credit_transactions ledger. The caller answers a retryable
+            # 409 (never 402).
             logger.error(
                 "POSSIBLE LOST CHARGE: spend_credits RPC failed for user=%s amount=%s "
-                "reason=%s ref_id=%s (%s: %s) — if it committed pre-failure the debit shows in "
-                "credit_transactions with no delivered action; reconcile manually",
+                "reason=%s ref_id=%s (%s: %s) — the caller compensates with the same ref; if "
+                "the debit shows in credit_transactions unreversed with no delivered action, "
+                "reconcile manually",
                 user_id, amount, reason, ref_id, type(e).__name__, e,
             )
             raise CreditServiceUnavailable(
@@ -430,13 +798,22 @@ class CreditService:
         reason: str,
         ref_id: Optional[str] = None,
         quiet_no_match: bool = False,
+        quiet_transport: bool = False,
     ) -> Optional[dict]:
         """Best-effort refund + ledger for a non-delivered metered action.
 
         Calls `refund_credits`. Never raises — a refund failure must not affect the
         (already-failed) action's response — but logs a greppable "REFUND LEAK" marker so a
-        stranded charge is diagnosable. NOT idempotent: callers guarantee at-most-once (chat:
-        a once-only settlement flag; reports: the research_reports.is_refunded CAS).
+        stranded charge is diagnosable. Callers still guarantee at-most-once (chat: a
+        once-only settlement flag; reports: the research_reports.is_refunded CAS).
+
+        Transient transport faults are RETRIED (bounded, `retry_idempotent_sync`) only when
+        `ref_id` is a `ChargeRef`: it names exactly one debit, so a replay of a refund that
+        committed but lost its reply finds that debit already reversed and answers
+        `already_refunded`, and two concurrent refunds serialize on the `user_credits` row
+        lock the RPC takes, so the second answers the same. A plain-`str` ref (a legacy bare
+        ticker, `None`) is single-shot: replayed, it would pair with a SIBLING debit. SYNC,
+        and it may sleep through the retry backoff — call it via `asyncio.to_thread`.
 
         Returns the RPC's outcome payload, or **None strictly for a transport fault** — the
         same contract as `revoke_purchased`, so `None` can never be confused with a business
@@ -457,8 +834,11 @@ class CreditService:
         PRECONDITION: authenticated users only (guest is a no-op both here via
         the RPC guard and at the endpoint branch).
         """
-        try:
-            result = self.supabase.rpc(
+        _warn_if_on_event_loop("refund_credits", user_id, ref_id)
+        replay_safe = isinstance(ref_id, ChargeRef)
+
+        def _call():
+            return self.supabase.rpc(
                 "refund_credits",
                 {
                     "p_user_id": user_id,
@@ -467,11 +847,33 @@ class CreditService:
                     "p_ref_id": ref_id,
                 },
             ).execute()
+
+        try:
+            if replay_safe:
+                result = retry_idempotent_sync(
+                    _call, what=f"refund_credits ref_id={ref_id}", logger=logger,
+                )
+            else:
+                result = _call()
         except Exception as e:
+            transient = is_transient_supabase_error(e)
+            retried = " after transient retries" if (replay_safe and transient) else ""
+            if quiet_transport and transient:
+                # The caller is RE-CHECKING a refund (the reconciliation retry over an
+                # unstamped row) and will re-check on its next pass, so a TRANSIENT fault here
+                # is not a page: it proves nothing either way. A non-transient failure still
+                # pages below — repeated every pass, it would otherwise hide a refund that is
+                # really owed (e.g. a claimer killed between its claim and its refund).
+                logger.warning(
+                    "refund_credits RPC failed transiently on a re-check for user=%s amount=%s "
+                    "reason=%s ref_id=%s (%s: %s)%s — the caller re-checks later",
+                    user_id, amount, reason, ref_id, type(e).__name__, e, retried,
+                )
+                return None
             logger.error(
                 "REFUND LEAK: refund_credits RPC failed for user=%s amount=%s "
-                "reason=%s (%s: %s) — manual credit correction may be needed",
-                user_id, amount, reason, type(e).__name__, e,
+                "reason=%s ref_id=%s (%s: %s)%s — manual credit correction may be needed",
+                user_id, amount, reason, ref_id, type(e).__name__, e, retried,
             )
             return None
         data = result.data
@@ -507,11 +909,13 @@ class CreditService:
             )
         elif outcome == "no_matching_debit" and quiet_no_match:
             # EXPECTED by the caller: a COMPENSATING refund fired after a precharge whose
-            # transport failed — "no debit" is the good outcome (the charge never committed).
+            # transport failed — "no debit" is the good outcome (the charge never committed) —
+            # or the reconciliation retry re-checking an unstamped report, where "no debit
+            # under the per-report ref" means it was charged under the legacy bare ticker.
             logger.info(
-                "refund_credits: no debit to compensate for user=%s ref_id=%s (reason=%s) — "
-                "the precharge never committed",
-                user_id, ref_id, reason,
+                "refund_credits: no debit under ref_id=%s for user=%s (reason=%s) — expected "
+                "by the caller (a precharge that never committed, or a legacy-ref report)",
+                ref_id, user_id, reason,
             )
         elif outcome == "no_matching_debit":
             # THE one that must page. `logger.error` is the alert: Sentry's LoggingIntegration

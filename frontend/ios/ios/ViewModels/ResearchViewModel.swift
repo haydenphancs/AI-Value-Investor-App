@@ -32,6 +32,11 @@ class ResearchViewModel: ObservableObject {
     /// Optional on purpose: nil = "not loaded yet / couldn't load". It used to
     /// default to a hardcoded 47-credit mock and STAY there when the fetch failed,
     /// so every user saw a fabricated balance that contradicted their real one.
+    ///
+    /// A MIRROR of `AppState.user.credits`, which is what the tab DISPLAYS. Kept because the
+    /// Generate / Retry gates read it, and `loadCredits()` (pinned by tests) still writes it —
+    /// then hands the same answer to AppState, which may refuse an out-of-order one; the
+    /// view's `.onChange` feeds every AppState change back here through `adoptSharedCredits`.
     @Published var creditBalance: CreditBalance?
     @Published var trendingAnalyses: [TrendingAnalysis] = TrendingAnalysis.mockTrending
     @Published var analysisCost: AnalysisCost = .standard
@@ -253,6 +258,19 @@ class ResearchViewModel: ObservableObject {
     /// Task's first await, so a second tap on the still-visible card during the credits
     /// pre-read cannot spawn a second DELETE + a second 20-credit generation (W2 E-1).
     private var retryInFlightIds: Set<String> = []
+    /// What the previous applied list said about each row's credits, by backend id — what
+    /// `noteCreditMovingChanges(in:)` diffs the next list against. nil = no baseline yet for
+    /// this identity: the first list after a launch or an identity change only records.
+    private var reportCreditMarks: [String: ReportCreditMark]?
+    private struct ReportCreditMark: Equatable {
+        let inFlight: Bool
+        let failed: Bool
+        let refunded: Bool
+        /// `refund_confirmed`: nil = unknown (older backend), false = refund pending.
+        let confirmed: Bool?
+        /// `credits_charged > 0` — an absent amount counts as charged (unknown → re-read).
+        let charged: Bool
+    }
 
     // MARK: - Reports list preferences (device-only)
 
@@ -309,12 +327,13 @@ class ResearchViewModel: ObservableObject {
 
         // Adopt a purchase the moment the backend records it.
         //
-        // This ViewModel keeps its OWN `creditBalance` (it has no `AppState` reference), and it
-        // was written only by `loadCredits()` from init / `refresh()` / a completed report. So
-        // buying credits from this very tab left the balance at its pre-purchase value: the
-        // Generate button stayed disabled and the "insufficient credits" copy stayed on screen
-        // until a manual pull-to-refresh or a relaunch. The most likely reaction to paying and
-        // seeing nothing change is a refund request, or a second purchase.
+        // `creditBalance` is a mirror of `AppState.user.credits` (see its declaration). Buying
+        // credits from this very tab used to leave it at its pre-purchase value: the Generate
+        // button stayed disabled and the "insufficient credits" copy stayed on screen until a
+        // manual pull-to-refresh or a relaunch. The most likely reaction to paying and seeing
+        // nothing change is a refund request, or a second purchase. AppState's own
+        // `refreshEntitlement` reads the balance too; the two reads are ordered by send time,
+        // so whichever answer is newer is the one that stands.
         //
         // `.caydexEntitlementChanged` is the single funnel `StoreKitService` posts from for BOTH
         // interactive purchases and `Transaction.updates` replays, so this also covers a pack
@@ -486,6 +505,8 @@ class ResearchViewModel: ObservableObject {
         stopReportsPolling()
         locallyTimedOutReportIds = []
         dismissedReportIds = []
+        // The next account's first list is a baseline, never a diff against this one's rows.
+        reportCreditMarks = nil
         // The slots and live progress belong to `inFlightOwnerId`: kept for a reconnect of that
         // same account (its runs are still running, and still counted by the server), dropped
         // for anyone else.
@@ -683,6 +704,7 @@ class ResearchViewModel: ObservableObject {
             applyClientSideTimeoutPass(serverTruth: true)
             sortReports()
             applyLiveProgress()   // keep the in-flight row at the live stream %
+            noteCreditMovingChanges(in: backendReports)
         } catch {
             // NEVER fabricate. This used to fall back to `AnalysisReport.mockReports` when the
             // list was empty, which showed invented analyses — with tickers, scores and fair
@@ -731,13 +753,18 @@ class ResearchViewModel: ObservableObject {
         }
     }
 
-    /// Fetch user's credit balance from GET /users/me/credits
+    /// Fetch user's credit balance from GET /users/me/credits — and hand it to
+    /// `AppState.user.credits`, the one balance the app displays.
     func loadCredits() async {
         // No up-front `isSignedIn` check — it refused the ARMED request during `.restoring` and
         // left the balance hidden after the restore succeeded (see `loadReports`).
         // `.getUserCredits` is `.signInRequired`, so a caller with no token armed is refused by
         // `APIClient` before any I/O and can never reach the shared guest sentinel's 100,000
         // seeded credits (which once showed guests "99,999,530 credits remaining").
+        //
+        // The send-order ticket is taken BEFORE the request, like the epoch below: AppState
+        // applies this answer only if no read sent after it has landed already.
+        let ticket = AppActions.shared.beginCreditsRead()
         let epoch = identityEpoch
         print("💳 ResearchVM: Loading credits from backend...")
         do {
@@ -753,6 +780,11 @@ class ResearchViewModel: ObservableObject {
             }
             print("✅ ResearchVM: Credits loaded — \(backendCredits.remaining) remaining of \(backendCredits.total)")
             self.creditBalance = CreditBalance.from(backendCredits)
+            // Write through to the shared balance. Refused (an older read than the one shown,
+            // or another identity's), mirror the balance that won instead of keeping this one.
+            if case .superseded(let current) = AppActions.shared.adoptCredits(CreditInfo(backendCredits), from: ticket) {
+                self.creditBalance = current.map { CreditBalance.from($0) }
+            }
         } catch {
             if case .signInRequired = AppError.from(error) {
                 // Refused for want of an armed token: hide the badge rather than keep a balance
@@ -770,6 +802,15 @@ class ResearchViewModel: ObservableObject {
             // the badge/card instead of showing a balance the user doesn't have.
             print("⚠️ ResearchVM: Failed to load credits — \(error). Leaving balance unknown.")
         }
+    }
+
+    /// Mirror `AppState.user.credits` into `creditBalance`, which the Generate gates read.
+    ///
+    /// Called by `ResearchViewWithBinding`'s `.onChange(of: appState.user.credits, initial:
+    /// true)`. An assignment and nothing else — no request, no call back into AppState — so a
+    /// write there can never loop back into another write.
+    func adoptSharedCredits(_ info: CreditInfo?) {
+        creditBalance = info.map { CreditBalance.from($0) }
     }
 
     /// Pull-to-refresh. Deliberately raises no loading flag: the system refresh control IS the
@@ -799,6 +840,61 @@ class ResearchViewModel: ObservableObject {
         if !finished.isEmpty {
             print("🔓 ResearchVM: released \(finished.count) concurrency slot(s) the server finished with")
         }
+    }
+
+    /// Re-read the shared balance when the list shows that credits moved somewhere this
+    /// device's own triggers (the generation monitor, a delete, a retry) cannot see.
+    ///
+    /// SYNCHRONOUS on purpose — no `await`, no `Task`: it runs inside `loadReports`' do-block
+    /// after the assignment, where nothing may suspend (the stale-answer guard holds only at
+    /// the instant it ran). The re-reads it starts are fire-and-forget through AppState,
+    /// which joins and orders them.
+    ///
+    /// Credit-moving, against the previous applied list (raw rows, before the dismissed filter):
+    ///  • a row newly REFUNDED, or whose refund newly CONFIRMED — the credits came back;
+    ///  • a row newly FAILED. If it was charged, also ONE settle re-read a few seconds later,
+    ///    whatever `is_refunded` says: the failure (and the refund claim) can be visible a
+    ///    round trip before the refund RPC commits, and the list poll stops once nothing is in
+    ///    flight, so no later list would notice the refund landing;
+    ///  • a row this device did not start (not in `inFlightReportIds`) — charged on another
+    ///    device, whatever state it reached before this list saw it;
+    ///  • an in-flight row that vanished without being dismissed here — deleted elsewhere,
+    ///    which refunds it.
+    private func noteCreditMovingChanges(in rows: [BackendReportListItem]) {
+        var marks: [String: ReportCreditMark] = [:]
+        for row in rows {
+            marks[row.id] = ReportCreditMark(
+                inFlight: row.status == "pending" || row.status == "processing",
+                failed: row.status == "failed",
+                refunded: row.isRefunded == true,
+                confirmed: row.refundConfirmed,
+                charged: (row.creditsCharged ?? 1) > 0
+            )
+        }
+        defer { reportCreditMarks = marks }
+        guard let before = reportCreditMarks else { return }
+        var moved = false
+        var settle = false
+        for (id, mark) in marks {
+            guard let old = before[id] else {
+                if !inFlightReportIds.contains(id) { moved = true }
+                continue
+            }
+            if mark.refunded && !old.refunded { moved = true }
+            if mark.confirmed == true && old.confirmed != true { moved = true }
+            if mark.failed && !old.failed {
+                moved = true
+                if mark.charged { settle = true }
+            }
+        }
+        for (id, old) in before where marks[id] == nil && old.inFlight && !dismissedReportIds.contains(id) {
+            moved = true
+        }
+        if moved {
+            print("💳 ResearchVM: the reports list shows credits moved — re-reading the balance")
+            AppActions.shared.refreshCredits()
+        }
+        if settle { AppActions.shared.refreshCreditsAfterSettle() }
     }
 
     /// Poll the reports list every 5s while any report is in-flight.
@@ -1036,7 +1132,12 @@ class ResearchViewModel: ObservableObject {
         // balance we failed to fetch would lock a paying user out of the feature.
         if let balance = creditBalance, balance.credits < analysisCost.credits {
             print("⚠️ ResearchVM: bailed — insufficient credits (\(balance.credits) < \(analysisCost.credits)).")
-            error = "Insufficient credits"
+            // The global host, not this tab's "Error / OK" alert: `.insufficientCredits`
+            // carries `.upgrade`, whose button opens Buy Credits, and the copy names the
+            // cost and the balance instead of a bare "Insufficient credits".
+            AppActions.shared.handleError(
+                AppError.insufficientCredits(required: analysisCost.credits, available: balance.credits)
+            )
             return
         }
 
@@ -1108,6 +1209,9 @@ class ResearchViewModel: ObservableObject {
                         // immediately so the processing card appears the
                         // moment the user switches tabs.
                         await self.loadReports()
+                        // The POST that answered `.started` just precharged the report's
+                        // credits: show the debit now, not after the run ends.
+                        await self.loadCredits()
 
                     case .progress(let percent, let step):
                         print("🔬 ResearchVM: Progress \(percent)% — \(step)")
@@ -1201,6 +1305,10 @@ class ResearchViewModel: ObservableObject {
                             // The identity can end during that await; its poll was reset then.
                             guard self.monitorMayAct(owner) else { return }
                             self.startReportsPolling()
+                            // The run may have been refunded server-side already (swept, or failed between
+                            // this monitor's last poll and the deadline). Its own epoch guard drops an answer
+                            // for another identity.
+                            await self.loadCredits()
                         } else if case .timeout = appError {
                             // The POST to /research/generate timed out BEFORE a report id
                             // came back. The server may have committed the row and charged
@@ -1246,10 +1354,17 @@ class ResearchViewModel: ObservableObject {
                                 "reason": .string(appError.analyticsCode),
                             ])
                             print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
-                            self.error = appError.message
+                            // A failure a purchase fixes (402 INSUFFICIENT_CREDITS, a plan
+                            // limit) goes to the GLOBAL error host, whose Upgrade button opens
+                            // Buy Credits; this tab's own alert only offers "OK".
+                            if appError.suggestedAction == .upgrade {
+                                AppActions.shared.handleError(appError)
+                            } else {
+                                self.error = appError.message
+                            }
                             // Refresh so the failed card appears in the list — and adopt
-                            // the server's refund, which `creditBalance` had no other way
-                            // to learn about (it refreshes on init / completion only).
+                            // the server's refund, which no other trigger reports to this
+                            // monitor.
                             await self.loadReports()
                             await self.loadCredits()
                         }
@@ -1267,7 +1382,13 @@ class ResearchViewModel: ObservableObject {
                 // (ios.APIError error 4.)" on the app's most expensive action — and since report
                 // generation became `.signInRequired`, the pre-flight `APIError.authRequired`
                 // throw is now a ROUTINE outcome on this exact path, not a rare one.
-                self.error = AppError.from(error).message
+                let failure = AppError.from(error)
+                // Same routing as the `.failed` arm: a purchase remedy goes to Buy Credits.
+                if failure.suggestedAction == .upgrade {
+                    AppActions.shared.handleError(failure)
+                } else {
+                    self.error = failure.message
+                }
             }
         }
         // Registered before the Task's first run: both are main-actor, and this method is
@@ -1562,7 +1683,18 @@ class ResearchViewModel: ObservableObject {
                 guard stillOwner("the credits read") else { return }
                 if let balance = self.creditBalance, balance.credits < self.analysisCost.credits {
                     print("⚠️ ResearchVM: retry refused before the delete — insufficient credits (\(balance.credits) < \(self.analysisCost.credits))")
-                    self.error = "Insufficient credits"
+                    if report.refundIsPending {
+                        // This row's refund is claimed but has NOT landed, so the user is owed
+                        // the credits they lack: never an upsell to Buy Credits. The card stays
+                        // (with its "Refund pending" line) and nothing is deleted — deleting it
+                        // would refund nothing either, and the backend's 402 would refuse the
+                        // charge on this balance anyway.
+                        self.error = "This analysis's refund hasn't landed yet, so there aren't enough credits to retry. Try again once it has."
+                    } else {
+                        AppActions.shared.handleError(
+                            AppError.insufficientCredits(required: self.analysisCost.credits, available: balance.credits)
+                        )
+                    }
                     return
                 }
             }

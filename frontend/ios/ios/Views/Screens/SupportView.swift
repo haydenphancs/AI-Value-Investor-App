@@ -58,7 +58,7 @@ struct SupportView: View {
     var body: some View {
         LegalDocumentView(
             title: "Help & Support",
-            lastUpdated: "August 7, 2026",
+            lastUpdated: "October 12, 2026",
             intro: "Investment research and education — not investment advice. Caydex turns public market data into structured research: ratings, scores, fair-value estimates and AI-written summaries you can read before you form your own view.",
             sections: Self.sections
         ) {
@@ -166,8 +166,8 @@ struct SupportView: View {
             heading: "Subscriptions, credits and billing",
             paragraphs: [
                 "Caydex is free to use for research. AI features (report generation and Cay AI chat) consume credits. Free accounts receive a monthly credit allowance; Caydex Pro ($14.99/month) and Caydex Max ($39.99/month) are optional auto-renewable subscriptions with larger monthly allowances.",
-                "Unused monthly credits do not roll over. Your monthly allowance resets at the start of each calendar month (US Eastern Time). If you upgrade mid-month, your allowance is raised to the new tier immediately, and credits already spent that month remain spent.",
-                "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are not reset by the monthly renewal. Your monthly allowance is spent first, so a pack is only drawn on once that month's allowance is used up."
+                "The free allowance resets at the start of each calendar month (US Eastern Time). A Pro or Max allowance follows your billing period instead: it is set to the plan's full amount when you subscribe and again each time the subscription renews. Unused allowance credits do not roll over into the next period, and they end when a subscription ends, after which the free allowance applies. If you upgrade from Pro to Max, the full Max allowance starts immediately and your unused Pro credits carry over on top of it, up to the share of your Pro billing period that had already passed (Apple refunds the rest of that period).",
+                "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are never reset when an allowance renews. Your allowance is spent first, so a pack is only drawn on once your current allowance is used up."
             ]
         ),
         LegalSection(

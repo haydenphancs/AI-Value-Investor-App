@@ -253,6 +253,13 @@ struct iosApp: App {
                     // to the app after a few hours is precisely when "you have something to
                     // check" needs to be true.
                     Task { await NotificationInboxViewModel.shared.refreshUnreadCount() }
+                    // Re-read the credit balance if it is stale: the month may have rolled over
+                    // (the monthly reset) or credits moved on another device while the app was
+                    // in the background. Signed-in only, joins a read already in flight, skips a
+                    // balance read under 60 s ago — and does nothing until the process's FIRST
+                    // read was sent, which belongs to `onAuthenticated`, so a cold launch still
+                    // sends exactly one `/users/me/credits` (all inside `refreshCreditsIfStale`).
+                    Task { await appState.refreshCreditsIfStale() }
 
                     #if DEBUG
                     AppearanceProbe.dump("foreground")

@@ -239,6 +239,13 @@ class ResearchReportListItem(BaseModel):
     # so the refund chip shows the real number instead of a hardcoded constant.
     is_refunded: bool = False
     credits_charged: int = 20
+    # Migration 195: did the refund behind `is_refunded` actually LAND? `is_refunded` is the
+    # one-shot claim, set BEFORE the refund RPC runs, so on its own it cannot say. True = the
+    # ledger confirmed it (or it was charged under the legacy bare ticker — migration 195's
+    # backfill and the retry pass label those 'legacy' — or corrected by hand); False = the
+    # refund was claimed but is not proven (iOS: "Refund pending"); None = nothing to confirm
+    # (no refund claimed), or a database without the column — iOS keeps its legacy chip.
+    refund_confirmed: Optional[bool] = None
     # Detailed-analysis PDF readiness (migration 064): pending|ready|failed.
     pdf_status: Optional[str] = None
 

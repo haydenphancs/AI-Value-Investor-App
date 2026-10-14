@@ -17,6 +17,9 @@ struct CreditsBadge: View {
         case large
     }
 
+    /// "1 credit", never "1 credits".
+    private var unit: String { credits == 1 ? "credit" : "credits" }
+
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             if showIcon {
@@ -24,13 +27,13 @@ struct CreditsBadge: View {
                     .font(style == .large ? .system(size: 16) : .system(size: 12))
             }
 
-            Text(style == .large ? "\(credits)" : "You have \(credits) credits remaining")
+            Text(style == .large ? "\(credits)" : "You have \(credits) \(unit) remaining")
                 .font(style == .large ? AppTypography.titleLarge : AppTypography.caption)
                 .fontWeight(style == .large ? .bold : .regular)
                 .foregroundColor(style == .large ? AppColors.textPrimary : AppColors.textSecondary)
 
             if style == .large {
-                Text("credits")
+                Text(unit)
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
             }
@@ -42,6 +45,7 @@ struct CreditsBadge: View {
     VStack(spacing: AppSpacing.lg) {
         CreditsBadge(credits: 47, style: .compact)
         CreditsBadge(credits: 47, style: .large)
+        CreditsBadge(credits: 1, style: .compact)
     }
     .padding()
     .background(AppColors.background)

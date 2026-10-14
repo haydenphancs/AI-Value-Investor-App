@@ -201,11 +201,14 @@ async def test_the_failure_stamp_leaves_the_loop_thread_too(monkeypatch):
     svc.supabase = MagicMock()
 
     def _status(report_id, status, progress, current_step=None, error_message=None):
-        seen.append((status, threading.get_ident()))
+        seen.append((status, error_message, threading.get_ident()))
     monkeypatch.setattr(svc, "_update_status", _status)
     monkeypatch.setattr(svc, "_lookup_shared_cache", AsyncMock(side_effect=RuntimeError("db down")))
 
     with pytest.raises(RuntimeError):
         await svc.generate_report("rid", "AAPL", "warren_buffett", "u1")
-    failed = [t for st, t in seen if st == "failed"]
-    assert failed and loop_thread not in failed
+    # The failure stamp is error-only since 2026-10-12 (status=None): 'failed' is written by
+    # the worker's refund claim, in the same UPDATE. It must still leave the loop thread.
+    stamps = [t for st, err, t in seen if err]
+    assert stamps and loop_thread not in stamps
+    assert not any(st == "failed" for st, _err, _t in seen), "generate_report stamped 'failed'"

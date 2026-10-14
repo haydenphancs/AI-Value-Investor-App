@@ -30,7 +30,8 @@ struct CreditTransactionDTO: Decodable, Identifiable, Hashable, Sendable {
     let createdAt: String?
     /// Signed, exactly as stored. Negative = credits left the account.
     let delta: Int
-    /// `spend` | `refund` | `grant` | `purchase` | `revoke` | `other`.
+    /// `spend` | `refund` | `grant` | `purchase` | `revoke` | `expire` | `other`.
+    /// (`expire`: the unused MONTHLY credits a reset retired — migration 194.)
     let kind: String
     /// What it was for, in the user's language. Backend-authored.
     let title: String
@@ -132,6 +133,9 @@ struct CreditTransactionDTO: Decodable, Identifiable, Hashable, Sendable {
         case "grant":    return "gift.fill"
         case "purchase": return "creditcard.fill"
         case "revoke":   return "xmark.circle.fill"
+        // Routine, not a warning: the monthly allowance resets every month and purchased
+        // credits never expire. An older build draws this kind with the neutral default.
+        case "expire":   return "hourglass"
         default:         return "circle.dashed"
         }
     }
@@ -148,6 +152,8 @@ struct CreditTransactionDTO: Decodable, Identifiable, Hashable, Sendable {
         case "refund", "grant", "purchase": return AppColors.gain
         case "revoke":                      return AppColors.caution
         case "spend":                       return AppColors.primaryBlue
+        // Neutral TEXT-role ink: an expiry is routine, so it must not read as a revoke.
+        case "expire":                      return AppColors.textSecondary
         default:                            return AppColors.textSecondary
         }
     }

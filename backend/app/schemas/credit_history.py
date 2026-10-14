@@ -33,7 +33,7 @@ class CreditTransactionResponse(BaseModel):
 
     kind: str = Field(
         default="other",
-        description="spend | refund | grant | purchase | revoke | other",
+        description="spend | refund | grant | purchase | revoke | expire | other",
     )
 
     #: What it was for, in the user's language, e.g. "Deep research report".

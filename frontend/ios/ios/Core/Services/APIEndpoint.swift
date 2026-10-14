@@ -770,6 +770,22 @@ enum APIEndpoint: Sendable {
         }
     }
 
+    // MARK: - Billable reads
+
+    /// A GET that SPENDS credits: `GET /stocks/{ticker}/report` precharges a report's credits
+    /// on a cache miss (refunded only if the report is not delivered). `APIClient` must never
+    /// re-send it on its own — not after a bare 5xx, not through the DEBUG failover — for the
+    /// same reason it never re-sends a POST (see `HTTPMethod.isSafeToRetryAfterServerError`):
+    /// a 5xx or a dropped connection says nothing about whether the server already charged,
+    /// so a silent second send double-bills one tap. The user's own Retry is a decision; an
+    /// automatic one is not.
+    ///
+    /// `nonisolated` for the same reason as `method`: `APIClient` is a plain `actor`.
+    nonisolated var isBillableRead: Bool {
+        if case .getTickerReport = self { return true }
+        return false
+    }
+
     // MARK: - Method
 
     nonisolated var method: HTTPMethod {
@@ -1366,11 +1382,11 @@ enum APIEndpoint: Sendable {
              .listPriceAlerts, .createPriceAlert, .updatePriceAlert, .deletePriceAlert:
             return .signInRequired
 
-        // NOT `.guestAllowed`, even though its sibling `.getUserCredits` above is. A
-        // signed-out caller resolves to the SHARED guest sentinel, so serving that
-        // account's ledger would hand every install one global pool's history. Guests are
-        // never metered, so their statement is empty by construction — the backend uses
-        // `get_current_user` here for the same reason.
+        // `.signInRequired`, like its sibling `.getUserCredits` above. A signed-out caller
+        // would resolve to the SHARED guest sentinel, so serving that account's ledger would
+        // hand every install one global pool's history. Guests are never metered, so their
+        // statement is empty by construction — the backend uses `get_current_user` here for
+        // the same reason.
         case .listCreditHistory:
             return .signInRequired
 

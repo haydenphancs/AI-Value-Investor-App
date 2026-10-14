@@ -23,9 +23,12 @@ boundary, which is itself tested separately for fail-closed behaviour.
 from __future__ import annotations
 
 import time
+from collections.abc import MutableMapping
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from test_credit_pool_isolation import _Credits
 
 from app.config import settings
 from app.integrations import app_store
@@ -41,6 +44,14 @@ def _ms(dt: datetime) -> float:
     return dt.timestamp() * 1000
 
 
+# One anchor for every fixture's `expiresDate`, so the same transaction always carries the same
+# date — as Apple's does. Migration 196 claws back a refunded period only when the refunded
+# transaction IS the period in force (same original transaction AND same period end); a
+# fixture that minted a fresh `now + 30 days` per call would look like a refund of a
+# different period.
+_ANCHOR = datetime.now(timezone.utc).replace(microsecond=0)
+
+
 def _txn(product=_PRO, txn_id="1000000000000001", expires_in_days=30, **extra):
     payload = {
         "transactionId": txn_id,
@@ -49,9 +60,7 @@ def _txn(product=_PRO, txn_id="1000000000000001", expires_in_days=30, **extra):
         "bundleId": settings.IAP_BUNDLE_ID,
     }
     if expires_in_days is not None:
-        payload["expiresDate"] = _ms(
-            datetime.now(timezone.utc) + timedelta(days=expires_in_days)
-        )
+        payload["expiresDate"] = _ms(_ANCHOR + timedelta(days=expires_in_days))
     payload.update(extra)
     return payload
 
@@ -110,77 +119,110 @@ class _Q:
         return type("R", (), {"data": []})()
 
 
-_PLAN_CREDITS = {"free": 50, "pro": 1200, "premium": 4000}
+class _CreditsView(MutableMapping):
+    """`sb.credits` as the tests read and write it ({"total", "used"}), backed by the model."""
+
+    def __init__(self, model: _Credits):
+        self._m = model
+
+    def __getitem__(self, key):
+        if key not in ("total", "used"):
+            raise KeyError(key)
+        return getattr(self._m, key)
+
+    def __setitem__(self, key, value):
+        if key not in ("total", "used"):
+            raise KeyError(key)
+        setattr(self._m, key, value)
+
+    def __delitem__(self, key):
+        raise TypeError("the balance row has fixed columns")
+
+    def __iter__(self):
+        return iter(("total", "used"))
+
+    def __len__(self):
+        return 2
 
 
 class FakeSupabase:
     """Fake Supabase client.
 
-    The `rpc` handler MODELS the SQL of `ensure_credit_period` (migration 100),
-    `grant_tier_upgrade` (migration 112) and `revoke_tier_credits` (migration 114) rather than
-    merely recording that they were called. That matters: a fake that returns a bland success
-    for every rpc makes a credit test pass no matter what the balance does, which is exactly
-    how a money bug survives a green suite. Keep this model in step with those three
-    migrations — if you change the SQL, change this.
+    The `rpc` handler runs `ensure_credit_period`, `grant_tier_upgrade` and
+    `revoke_tier_credits` through `_Credits` — the ONE executable model of that SQL
+    (tests/test_credit_pool_isolation.py, kept branch for branch with migration 196) — fed with
+    this fake's own `users` and `subscriptions` rows before every call. That matters: a fake
+    that returns a bland success for every rpc makes a credit test pass no matter what the
+    balance does, which is exactly how a money bug survives a green suite, and a SECOND
+    hand-written model drifts (this one still encoded migration 114 after 139 and 196 had
+    changed the SQL). Change the SQL, change `_Credits`.
     """
 
-    def __init__(self, fail=(), subscriptions=None, credits=None, period_due=False):
+    def __init__(self, fail=(), subscriptions=None, credits=None, period_due=False, now=None):
         self.db = {"subscriptions": list(subscriptions or []), "users": [{"id": _USER}]}
         self.log: list = []
         self._fail = set(fail)
         self.rpcs: list = []
-        # None = no balance row yet (first touch). Otherwise {"total", "used"}.
-        self.credits = dict(credits) if credits is not None else None
-        # Whether the stored period boundary has passed. False = mid-period, which is the
-        # case the upgrade bug lived in.
-        self.period_due = period_due
+        # None = no balance row yet (first touch). Otherwise the model of the user_credits row.
+        self.model = None
+        if credits is not None:
+            self.model = _Credits(total=credits["total"], used=credits["used"])
+            self.model.period_due = period_due
+        # The model's clock. None = real time, which is what the service compares against.
+        self.now = now
+
+    @property
+    def credits(self):
+        return None if self.model is None else _CreditsView(self.model)
 
     def table(self, name):
         return _Q(self.db, self.log, name, self._fail)
 
-    def _tier(self) -> str:
-        for r in self.db["users"]:
-            if r.get("id") == _USER:
-                return (r.get("tier") or "free").lower()
-        return "free"
+    def _user(self) -> dict:
+        return next((r for r in self.db["users"] if r.get("id") == _USER), {})
 
-    def _alloc(self) -> int:
-        return _PLAN_CREDITS.get(self._tier(), 0)
+    def _tier(self) -> str:
+        return (self._user().get("tier") or "free").lower()
+
+    def _sync(self, model: _Credits) -> None:
+        """What the SQL reads: users.tier / comp_tier and the account's FIRST subscriptions
+        row (plpgsql `SELECT ... INTO` takes the first; the schema allows only one)."""
+        model.now = self.now or datetime.now(timezone.utc)
+        model.tier = self._tier()
+        model.comp_tier = (self._user().get("comp_tier") or None)
+        row = next((r for r in self.db["subscriptions"] if r.get("user_id") == _USER), None)
+        if row is None:
+            model.subscription = None
+            return
+        end = svc._parse_iso(row.get("current_period_end"))
+        model.set_subscription(row.get("original_transaction_id"), (row.get("tier") or "free"),
+                               (row.get("status") or ""), end, row.get("environment"))
 
     def rpc(self, name, params):
         if "rpc" in self._fail or name in self._fail:
             raise RuntimeError(f"rpc {name} unavailable")
         self.rpcs.append((name, params))
 
-        alloc = self._alloc()
-        if name == "ensure_credit_period":
-            if self.credits is None:
-                self.credits = {"total": alloc, "used": 0}
-            elif self.period_due:
-                self.credits = {"total": alloc, "used": 0}
-                self.period_due = False
-            # else: mid-period -> returns the live remaining UNCHANGED (migration 100:236).
-        elif name == "grant_tier_upgrade":
-            if self.credits is None:
-                self.credits = {"total": alloc, "used": 0}
-            elif alloc > self.credits["total"]:
-                # Raises the ceiling; `used` is preserved (migration 112).
-                self.credits["total"] = alloc
-            # else: replay or downgrade -> no-op, no clawback.
+        if name in ("ensure_credit_period", "grant_tier_upgrade"):
+            if self.model is None:
+                # The SQL's first touch: a calendar-mode row at the calendar allowance, then
+                # the same call falls through to any paid period.
+                self.model = _Credits(total=0)
+                self._sync(self.model)
+                alloc = self.model._calendar_alloc()
+                self.model.total = self.model.tier_alloc = alloc
+            self._sync(self.model)
+            getattr(self.model, name)()
         elif name == "revoke_tier_credits":
-            # Migration 114. Floors at GREATEST(free_allocation, used) so `remaining` — a
-            # GENERATED column, total - used — can never go negative. Idempotent: a replayed
-            # REFUND finds total already at the floor.
-            if self.credits is not None:
-                floor = max(_PLAN_CREDITS["free"], self.credits["used"])
-                if self.credits["total"] > floor:
-                    self.credits["total"] = floor
+            if self.model is not None:
+                self._sync(self.model)
+                self.model.revoke_tier_credits()
 
         return type("R", (), {"execute": lambda *_a, **_k: None})()
 
     @property
     def remaining(self) -> int:
-        return 0 if self.credits is None else self.credits["total"] - self.credits["used"]
+        return 0 if self.model is None else self.model.total - self.model.used
 
 
 def _service(sb) -> svc.IAPService:
@@ -625,7 +667,9 @@ def test_a_refund_claws_back_the_unspent_allocation():
 def test_the_clawback_never_drives_remaining_negative():
     """`remaining` is a GENERATED column (total - used). Flooring at `used` is what keeps it
     from going negative — every later charge would otherwise fail a CHECK rather than a
-    balance test. Credits already SPENT are a business loss, not a modelling problem."""
+    balance test. Credits already SPENT are a business loss, not a modelling problem. Since
+    139 the spend above the free allocation is written off too (both columns drop together),
+    so the row lands on total == used == the free allocation."""
     sb = FakeSupabase()
     s = _service(sb)
     s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-refund"))
@@ -633,7 +677,7 @@ def test_the_clawback_never_drives_remaining_negative():
 
     s.apply_transaction(_USER, _revoked_txn())
 
-    assert sb.credits["total"] == 900
+    assert sb.credits == {"total": 50, "used": 50}
     assert sb.remaining == 0, "remaining must floor at zero, never go negative"
 
 
@@ -647,7 +691,7 @@ def test_the_clawback_is_idempotent_across_apple_retries():
     for _ in range(4):
         s.apply_transaction(_USER, _revoked_txn())
 
-    assert sb.credits["total"] == 120
+    assert sb.credits == {"total": 50, "used": 50}   # 139's write-off, applied once
     assert sb.remaining == 0
 
 
@@ -898,7 +942,9 @@ def test_a_genuine_resubscribe_after_a_refund_still_applies(new_lineage):
     s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=3)))
     _refund(s, at=now - timedelta(days=1))
 
-    fresh = _jws(txn_id="txn-2", signed_at=now,
+    # A new purchase expires a month after ITS purchase — never on the refunded period's
+    # exact end, which (with the same original transaction) is a reversal of that refund.
+    fresh = _jws(txn_id="txn-2", signed_at=now, expires_in_days=31,
                  original="txn-2" if new_lineage else "txn-1")
     out = s.apply_verified_transaction(_USER, fresh)
 
@@ -919,7 +965,7 @@ def test_a_cheap_resubscribe_does_not_reopen_the_replay(new_lineage):
     s.apply_verified_transaction(_USER, jws_max)
     _refund(s, at=now - timedelta(days=2))
     s.apply_verified_transaction(_USER, _jws(
-        product=_PRO, txn_id="txn-pro", signed_at=now - timedelta(days=1),
+        product=_PRO, txn_id="txn-pro", signed_at=now - timedelta(days=1), expires_in_days=31,
         original="txn-pro" if new_lineage else "txn-1",
     ))
     assert sb._tier() == "pro" and sb.credits["total"] == 1200
@@ -1298,3 +1344,117 @@ def test_the_ios_client_finishes_the_transaction_on_this_code_only():
     assert terminal_at < finish_at, "the finish must sit inside the terminal branch"
     # The unconditional 'leave unfinished' path must still exist for everything else.
     assert "leaving unfinished" in catch
+
+
+# ── Migration 196: Production-only paid periods, refunds of the right period, reversals ──
+#
+# The balance math runs through `_Credits` (see FakeSupabase). These pin the SERVICE half:
+# what `apply_transaction` writes for the SQL to read, and the Apple event sequences the
+# 2026-10-12 review found.
+
+def test_the_subscriptions_row_records_the_apple_environment():
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_PRO))
+    assert sb.db["subscriptions"][0]["environment"] == settings.IAP_ENVIRONMENT
+    s.apply_transaction(_USER, _txn(product=_PRO, environment="Sandbox"))
+    assert sb.db["subscriptions"][0]["environment"] == "Sandbox"
+
+
+def test_a_sandbox_purchase_keeps_the_calendar_sizing():
+    """TestFlight / App Review buy in Sandbox, which renews every few minutes. Only a
+    Production row starts a paid period; a Sandbox one tops the calendar pool up once."""
+    sb = FakeSupabase(credits={"total": 50, "used": 0})
+    s = _service(sb)
+    for _ in range(5):
+        s.apply_transaction(_USER, _txn(product=_MAX, environment="Sandbox"))
+    assert sb.credits == {"total": 4000, "used": 0}
+    assert sb.model.paid_period is None and not sb.model.periods
+
+
+class _NoNewColumns(FakeSupabase):
+    """A database where migrations 114 and 196 have not been applied: a write naming either
+    optional column fails, as PostgREST does for an unknown column."""
+
+    def table(self, name):
+        q = super().table(name)
+        if name != "subscriptions":
+            return q
+        original = q.execute
+
+        def execute():
+            if q._op in ("insert", "update") and (
+                    "environment" in q._values or "last_event_at" in q._values):
+                raise RuntimeError("PGRST204: column not found")
+            return original()
+
+        q.execute = execute
+        return q
+
+
+def test_a_database_without_the_new_columns_still_records_the_purchase():
+    sb = _NoNewColumns()
+    _service(sb).apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-old-db"))
+    row = sb.db["subscriptions"][0]
+    assert row["status"] == "active" and "environment" not in row
+    assert sb.credits == {"total": 4000, "used": 0}, "a NULL environment counts as Production"
+
+
+def test_an_expiry_at_plan_end_lapses_to_the_free_allowance_without_a_clawback():
+    """Owner rule 2026-10-12, "Expire at plan end": when the paid period is over and Apple says
+    EXPIRED, the leftovers end with it and the free allowance starts. It is not a refund — no
+    `revoke_tier_credits`, no `tier_revoked` row."""
+    end = _ANCHOR + timedelta(days=30)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-x"))
+    sb.credits["used"] = 1000
+    sb.now = end + timedelta(seconds=1)
+    s.apply_notification({"notificationType": "EXPIRED", "signedDate": _ms(end)},
+                         _txn(product=_MAX, txn_id="txn-x"))
+    assert sb.credits == {"total": 50, "used": 0}
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+    reasons = [r["reason"] for r in sb.model.ledger]
+    assert "tier_revoked" not in reasons and reasons[-2:] == ["monthly_expired", "monthly_reset"]
+
+
+def test_a_refund_of_an_older_renewal_keeps_the_current_period():
+    """Apple refunds LAST month's charge while this month's is in force: the REFUND carries the
+    old transaction (old expiresDate). The period in force was paid and not refunded."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    # The first purchase arrives through the client (a notification for a transaction the
+    # server has never seen is ignored — it can beat the verify call).
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-1", expires_in_days=1))
+    sb.now = _ANCHOR + timedelta(days=1, seconds=1)             # the first period is over
+    s.apply_notification({"notificationType": "DID_RENEW", "signedDate": _ms(now - timedelta(days=2))},
+                         _txn(product=_MAX, txn_id="txn-2", expires_in_days=31,
+                              originalTransactionId="txn-1"))
+    sb.credits["used"] = 300
+    held = sb.remaining
+    s.apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(now - timedelta(days=1))},
+        _txn(product=_MAX, txn_id="txn-1", expires_in_days=1, revocationDate=_ms(now)),
+    )
+    assert sb.remaining == held == 3700
+    assert sb.model.paid_period["end"] == _ANCHOR + timedelta(days=31)
+
+
+def test_refund_reversed_gives_back_exactly_what_the_refund_took():
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=3)))
+    sb.credits["used"] = 100
+    _refund(s, at=now - timedelta(days=2))
+    assert sb.remaining == 0 and sb._tier() == "free"
+
+    s.apply_notification(
+        {"notificationType": "REFUND_REVERSED", "signedDate": _ms(now - timedelta(days=1))},
+        _jws(signed_at=now - timedelta(days=1)),
+    )
+    assert sb._tier() == "premium"
+    assert sb.remaining == 3900, "the refund took 3,900; the reversal gives exactly that back"
+    s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=1)))
+    assert sb.remaining == 3900, "a replay of the reversed transaction reinstates nothing more"

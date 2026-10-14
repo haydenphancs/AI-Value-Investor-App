@@ -578,6 +578,32 @@ the notification's DETAIL screen (the same one Tracking → Alerts opens), never
 
 There is no `StockState` and no `NewsState`; the error property is `currentError`, not `globalError`.
 
+### 4.3 The credit balance — one copy, ordered reads
+
+`AppState.user.credits` is the only balance any screen displays. Until 2026-10-12 the Research tab
+showed `ResearchViewModel`'s private copy in preference to it, and nothing a chat turn, the direct
+report door or the research pre-charge did ever reached that copy, so the badge and the Generate gate
+ran up to five minutes stale (the owner's report read the Account card's "4/50" as a stale balance;
+that figure is USED of the monthly allowance and correct, and stays as it is).
+
+- **Every write is ordered and fenced.** A read takes a ticket (a send-order number plus the
+  identity generation) before it goes out; its answer lands only if no newer read has already landed,
+  the identity has not changed, and the session has not ended. `refreshCredits` joins a read already in
+  flight and re-runs it once when it was called mid-read, so a caller arriving right after a charge never
+  adopts an answer whose request predates its call.
+- **Research mirrors, it does not own.** Its pinned credits GET is written THROUGH to `AppState`, and the
+  view pushes every `AppState` change back into the ViewModel (whose Generate gates read it) without a
+  request, so there is no loop.
+- **Triggers:** a chat turn that charged or refunded (streaming 402 and abandoned turns included), the
+  research monitor's start and poll-timeout, a report-list row turning refunded, failed or
+  refund-confirmed, the direct door's paid read on any outcome, a research push on arrival or tap, and the
+  app returning to the foreground (only when the balance is over 60 s old; it joins a read already in
+  flight and does nothing before the launch's first read, so a cold launch still sends one read).
+- The direct door's paid GET is never re-sent automatically after an ambiguous 5xx, unlike every other
+  GET: a cache miss charges 20 credits, so a resend double-bills exactly like a POST.
+- A 402 on Research goes to the global error host, whose Upgrade action opens Buy Credits (§9b.7),
+  never a dead-end alert.
+
 ---
 
 ## 4b. Presentation Layer & Theming (iOS)
@@ -749,9 +775,20 @@ Corrections to what this section used to claim, each of which was wrong in a way
 | one refund path | **five** — insert failed after charging; pipeline raised (which includes the 600 s `wait_for` kill); user deleted an in-flight report; the reconciliation sweeper catching a worker that died without writing either outcome; and the direct door's own refund when `GET /stocks/{ticker}/report` fails after its pre-charge |
 | one billable door | **two** — `POST /research/generate` and `GET /stocks/{ticker}/report` (`app/api/v1/endpoints/ticker_report.py`) pre-charge the same cost on a cache miss. Both must stay account-gated or the gate is cosmetic (`.claude/rules/auth.md` §1a) |
 
-**Every refund must pass the `ref_id` its charge used** — `ticker` for `POST /research/generate`,
-`ticker:persona` for `GET /stocks/{ticker}/report` — never the report id. A mismatch
-is a silent non-refund the user is still owed (§9b.2).
+**Every refund must pass the `ref_id` its charge used**, and since the per-report-ref deploy
+(the 2026-10-12 credits work) that ref names
+exactly ONE debit: `TICKER:{report_id}` for `POST /research/generate` (the report id is minted
+before the pre-charge, so every refund site rebuilds the ref from the row) and
+`TICKER:persona:{random hex}` for `GET /stocks/{ticker}/report`, held in one local by the charge and
+its refund. Both come from the `ChargeRef` builders in `app/services/credit_service.py`. The old
+shared refs (the bare ticker, `ticker:persona`) let a refund pair with a SIBLING report's debit,
+because `refund_credits` takes the newest un-reversed debit of that ref; reports charged before the
+change are refunded through a bare-ticker fallback that fires only on `no_matching_debit` and only for
+the caller holding the row's `is_refunded` claim. A mismatch is a silent non-refund the user is still
+owed (§9b.2).
+
+The direct door also has per-user single-flight on (user, ticker, persona): a re-sent request for a
+generation still in flight joins it and is never charged a second time.
 
 No Celery, RQ, or Dramatiq. The accepted cost is that in-flight work does not survive a restart; the
 compensating control is `research_reconciliation_service`, a lifespan loop that finds rows stuck in
@@ -2090,6 +2127,17 @@ expression is written out, and must stay that way.)*
 >   `purchased_used <= purchased_total`. It must be `<=`: `revoke_tier_credits` deliberately
 >   lands on `total == used == free_alloc`.
 
+> **Migration 196 rewrote all three again** (§9b.12). A paid allocation now comes once per
+> Apple paid period, no longer from `users.tier` on the calendar month. `grant_tier_upgrade` now
+> just runs `ensure_credit_period`. All three stay column-explicit on the granted pool.
+
+> **Migration 194 ledgers the monthly expiry** (2026-10-12). The reset used to overwrite the
+> granted pool (`total := allocation, used := 0`) and write only the `monthly_reset` grant, so the
+> unspent remainder vanished without a row and Credit History stopped adding up after every reset.
+> `ensure_credit_period` now writes a `monthly_expired` row (`-(total - used)`, granted only,
+> `ref_id` NULL so no refund can ever pair with it) before the reset row; the history shows it as
+> "Unused monthly credits expired". Migration 196 builds on 194's body and keeps that row.
+
 ### 9b.2 Spend order and refund order are not inverses
 
 Migration **118** teaches `spend_credits` / `refund_credits` about both pools.
@@ -2137,14 +2185,27 @@ Both simple orderings are wrong, and both are tempting:
 > | `partial` (minted by `refund_ledgered`, not the RPC, when `0 < refunded < amount`) | the pools absorbed SOME of it — a charge and a refund straddling a monthly reset with a small new-period `used` — **the user is OWED the rest** | **ERROR → Sentry → Discord** (was a WARNING that every report site read as settled, 2026-09-17) |
 > | `no_credits_row` / `invalid` / `guest` | degenerate no-ops | ERROR / INFO |
 >
-> One caller passes `quiet_no_match=True` on purpose: the chat pre-charge's compensation.
+> `quiet_no_match=True` is passed on purpose where a no-match is the expected answer: the
+> pre-charge compensations and the abandoned-charge hand-backs (a cancel that lands after the charge),
+> `refund_report_charge`'s per-report probe before its legacy fallback, and the reconciliation
+> retry's re-check of an unstamped row.
 > When `spend_credits` fails on TRANSPORT (a Cloudflare 520 is "the edge could not parse the
-> origin's answer", not proof the debit did not commit), chat has no reconciliation row for a
-> sweep to find later, so `_claim_chat_quota` refunds AT ONCE with the per-turn `ref_id` under
-> reason `chat_precharge_unconfirmed` and answers `409 SYSTEM_BUSY`. `refunded` means the debit
-> had landed and is now reversed; `no_matching_debit` there means it never did, and is INFO, not
-> a page. A debit still queued at the edge that commits after the compensation is the one gap —
-> the `POSSIBLE LOST CHARGE` log line carries the same `turn_ref` the 409 body does.
+> origin's answer", not proof the debit did not commit), there is no row for a sweep to find
+> later, so the door refunds AT ONCE with the charge's own unique `ref_id` and answers
+> `409 SYSTEM_BUSY`: `_claim_chat_quota` under reason `chat_precharge_unconfirmed`, and since
+> 2026-10-12 both report doors under `report_precharge_unconfirmed` (it was safe for chat first
+> because only chat had a per-charge ref; a compensation on a SHARED ref would have reversed an
+> earlier delivered report's debit). `refunded` means the debit had landed and is now reversed;
+> `no_matching_debit` there means it never did, and is INFO, not a page. A debit still queued at
+> the edge that commits after the compensation is the one gap — the `POSSIBLE LOST CHARGE` log
+> line carries the same ref the 409 body does.
+>
+> **Retries (2026-10-12).** `refund_ledgered` retries a TRANSIENT transport fault, but only for a
+> `ChargeRef` — a ref that names one debit, so a replay of a refund that committed but lost its
+> reply answers `already_refunded` and moves nothing. A plain string (a legacy bare ticker) is never
+> retried: replayed on a shared ref it could pair a second debit and mint credits. Every money RPC
+> runs off the event loop; a frame being cancelled settles through a strongly held detached task
+> that the lifespan shutdown drains, never through an await (anyio re-cancels it).
 >
 > `capped_to_zero` is the month-boundary case and is easy to miss: `ensure_credit_period` resets
 > `used` to 0, so a report charged in month M and refunded in M+1 — which the reconciliation
@@ -2154,8 +2215,26 @@ Both simple orderings are wrong, and both are tempting:
 > Escalating *benign* zero cases would trade a silent-money bug for alert fatigue, which is how the
 > genuine one ends up ignored — hence the split. `credit_service.refund_did_not_happen()` is the
 > single predicate all three report call sites use, because each burns the one-shot
-> `research_reports.is_refunded` CAS **before** refunding: there is no retry, so "did it actually
-> happen" is the only question that decides whether a human must intervene.
+> `research_reports.is_refunded` CAS **before** refunding, so "did it actually happen" is the
+> only question that decides whether a human must intervene.
+>
+> **Migration 195 records the answer** in `research_reports.refund_outcome`, written in the
+> refund's own worker thread and never inside the `is_refunded` CAS. The report list serves it to
+> iOS as `refund_confirmed`, so a card says "Refunded N credits" only when the refund provably
+> landed and "Refund pending" otherwise. 195's backfill labels `legacy` (confirmed) only the rows
+> created before the first per-report charge in the ledger — the instant comes from the data, not a
+> constant. The 5-minute reconciliation loop then retries a transport-failed (`rpc_failed`) refund
+> ONCE, and re-checks an unlabelled refunded row on every pass, always by the per-report ref and
+> never through the legacy fallback: a replay of a refund that landed answers `already_refunded`,
+> and an unlabelled row whose per-report ref finds no debit was charged under the bare ticker, so it
+> is labelled `legacy` with a WARNING. That re-check passes `quiet_no_match` and `quiet_transport`
+> to `refund_ledgered`, so neither a no-match nor a TRANSIENT transport fault pages for it; a
+> non-transient failure and a business no-op (`capped_to_zero`, `partial`, `no_credits_row`) still
+> do, and a known `rpc_failed` row pages on all of them. Everything a retry
+> cannot fix waits for the owner's runbook (`documents/OWNER_TASKS.md` §2.4). A CAS whose UPDATE committed
+> but whose reply was lost is re-read in the same shielded thread and refunded there, instead of
+> being stranded as refunded-in-name. `is_refunded` stays the CAS flag: Retry decides from it
+> whether a DELETE can still refund.
 >
 > ⚠️ `None` from `refund_ledgered` still means **strictly** a transport fault, never a business
 > outcome — the same contract as `revoke_purchased`.
@@ -2169,7 +2248,10 @@ Both simple orderings are wrong, and both are tempting:
 The existing `/billing/verify` idempotency does **not** transfer to consumables. It works for
 subscriptions because "credits come from the monthly allocation rather than per-delivery, so a
 replay cannot mint credits" — both halves are false for a pack, which *must* mint credits per
-delivery while `Transaction.updates` redelivers on every app launch.
+delivery while `Transaction.updates` redelivers on every app launch. (Since migration 196 a
+subscription's credits come once per Apple paid period, keyed
+`(original_transaction_id, period_end)` and never re-applied, §9b.12. A replay is harmless
+because that key was already granted.)
 
 - Dedup key is `credit_purchases (environment, transaction_id)` UNIQUE. **`transactionId`, not
   `originalTransactionId`** — each consumable purchase mints a fresh one, so reusing the
@@ -3169,6 +3251,177 @@ carry; and the "filings context" wording appears only while chat RAG is on.
 **Measured, not yet enforced.** `CHAT_GROUNDING` (§9.3 LLM09) logs, per answer, how many of its
 numbers this data grounds. Its two-week baseline starts with the deploy; an enforced note waits on
 that baseline and an 80% precision check on hand-labelled turns.
+
+### 9b.12 Paid allowances follow the Apple paid period (migration 196)
+
+*(Added 2026-10-12. Owner decisions, same day: "(b) Per paid period"; on a lapse "Expire at plan
+end"; on an upgrade the unused credits "add up with the Max plan … 400 + 4000 credits = 4400",
+"Cap by Pro time used".)*
+
+**The defect.** Until 196 the granted pool of a PAID plan reset on the ET calendar month, sized by
+`users.tier`, and `grant_tier_upgrade` topped a new subscriber up to the full allocation on the
+day of purchase. One Apple period spans two calendar months, so every subscription that did not
+start on the 1st got one allocation more than it paid for. Max bought on Oct 25 and cancelled at
+once was +3,950 that day, then +4,000 on Nov 1 (the tier stays paid until Nov 25). Nothing was
+clawed back before Dec 1, so the total was 7,950 credits for $39.99 (Pro: 2,350 for $14.99). At
+that rate a Max credit cost ~$0.0050, against $0.0192 for the best pack, so §9b.7's "no pack
+undercuts a plan" held only on paper.
+
+**The rule.** `ensure_credit_period` keeps the granted pool in one of two modes.
+
+- **Paid: one allocation per Apple paid period.** A period is the account's ONE `subscriptions`
+  row while it is `active` with `current_period_end` in the future, keyed by
+  `(original_transaction_id, current_period_end)`. A renewal or an upgrade is a new key. The table
+  subscription_credit_periods holds every key ever granted, with UNIQUE
+  `(original_transaction_id, period_end)`, and `user_credits.paid_period_id` points at the one in
+  force.
+  - **Only a Production row above the complimentary floor.**
+    - `subscriptions.environment` (196, written by `apply_transaction`) must be Production. NULL
+      counts as Production: those rows were written before 196.
+    - A Sandbox / TestFlight row renews every few minutes. It therefore keeps the pre-196
+      calendar sizing: one top-up to its tier, then the 1st. Otherwise every renewal would grant
+      a full allocation.
+    - The row's tier must also be above `users.comp_tier`. The App Review demo account is comp
+      Max, and a reviewer's sandbox Pro must not shrink it.
+  - **Exactly once per account.** A key granted before and not in force is ignored. So an older
+    JWS re-submitted later (the 2026-09-25 replay class), or the superseded half of an upgrade,
+    cannot grant anything. That holds even where the stale-delivery guard has no stored ordering
+    key to refuse it with. The keys go with the account on deletion (`ON DELETE CASCADE`, as
+    `credit_purchases`). A re-claim by another account is refused upstream by the
+    `appAccountToken` check.
+  - **When it starts.**
+    - When no paid period is running: a first purchase, a re-subscribe, or a renewal once the old
+      period has ended. A `DID_RENEW` that lands before the end waits for it.
+    - At once, when the new key is a HIGHER tier than the running period (an upgrade).
+    - A same-or-lower tier never cuts a running period short. Apple applies a downgrade at the
+      renewal anyway.
+  - **How much.** A new period sets the pool to the tier's full allocation (`used = 0`), and the
+    leftovers expire (`monthly_expired`).
+    - The one exception is an upgrade: the unused credits carry on top, capped at the old
+      allocation × the share of the old period already elapsed. Apple refunds the unused part of
+      that period.
+    - An instant upgrade carries ~0. 400 left after 20 of 31 days carries all 400.
+    - The cap is `floor(allocation × elapsed ÷ span)`, multiplied before dividing. A share
+      computed first is a repeating NUMERIC that truncates, and the local Postgres run caught it
+      turning an exact 550 into 549.
+    - A first subscription from Free starts fresh: Free credits were not paid for, so they do not
+      carry.
+  - **Lapse.** When the period has ended and the row no longer entitles, the leftovers expire and
+    the calendar allowance starts at once.
+  - **Hold.** When the period has ended but the row still entitles, the balance is kept and nothing
+    new is granted until Apple's renewal or expiry is recorded. That covers `grace_period`,
+    `billing_retry`, and an `active` row past its end until the expiry sweep runs.
+  - **Refund.** Only when the revoked transaction IS the period in force: the same original
+    transaction AND the same period end.
+    - Then it claws back exactly as `revoke_tier_credits` does (floor = the calendar allowance),
+      marks the period `revoked_at` / `revoked_remaining`, and returns to calendar mode.
+    - A refund of an OLDER renewal carries that renewal's earlier `expiresDate`, and so does a
+      refund of the Pro half of an upgrade. A later renewal not yet started carries a later one.
+      Neither touches the period in force: it was paid for and not refunded.
+    - `revoke_tier_credits`, which iap_service still calls after a refund, applies the same
+      match. It is a no-op after `ensure_credit_period`, and logs a WARNING when the refund was
+      for another period.
+  - **Refund reversed (`REFUND_REVERSED`).** The row entitles again under the revoked key. The
+    period is reinstated ONCE, with exactly what the refund took (`plan_reinstated`), and the
+    calendar leftovers since then expire. A replay finds the key in force and does nothing.
+    Before 196, `grant_tier_upgrade`'s top-up did this by accident; 196 has to do it on purpose.
+- **Calendar: Free, complimentary and Sandbox accounts.**
+  - Unchanged from 194: the pool resets at midnight ET on the 1st and ledgers a
+    `monthly_expired` row. That block of the function is kept verbatim and pinned by
+    `tests/test_monthly_expired_ledger_row.py`.
+  - `users.tier` sizes the calendar allowance UNLESS the account has a Production subscriptions
+    row; then only `users.comp_tier` does. Accounts with no row (hand-set testers) and Sandbox
+    subscribers keep their pre-196 sizing.
+  - A raised complimentary or Sandbox tier is still topped up mid-month.
+  - **`users.tier` never sizes a Production paid allocation**; it gates features.
+
+`grant_tier_upgrade(uuid)` keeps its signature for its callers (`reconcile_user_tier`,
+`scripts/set_comp_tier.py`, migration 177's instructions) and now just runs
+`ensure_credit_period`. None of the three functions names the purchased pool, which keeps
+App Store 3.1.1 safe. `tests/test_credit_paid_periods.py` pins that structurally, along with the
+exactly-once key and `users.tier` staying out of the paid branch. The same file's outlier math
+covers:
+- last-minute and early-month starts, downgrade, lapse, re-subscribe, refund, hold and DST;
+- comp floor, Sandbox, an older-renewal refund and a reversal;
+- a seeded property walk over all of them.
+
+The `_Credits` model in `tests/test_credit_pool_isolation.py` mirrors the SQL branch for branch.
+`tests/test_iap_entitlement.py`'s fake now runs the three RPCs through that model too, where it
+used to be a second, stale model of migration 114.
+
+The SQL itself was run against a local Postgres 17, applied after the real 194:
+- 77 scenario checks, a two-connection race and a re-run of the migration;
+- 12,000 random steps against the model, with zero mismatches.
+
+Two independent reviews (migration conventions, and an adversarial money audit) found:
+- the comp, Sandbox, older-refund, reversal and backfill issues fixed above;
+- the missing `user_credits.paid_period_id` index;
+- the 194-after-196 hazard. 194 now refuses to run once this table exists.
+
+**Why the period is DERIVED from the `subscriptions` row** rather than recorded per transaction
+from Python:
+- The row is already the reconciled truth. iap_service writes it only from Apple-signed data,
+  orders it on Apple's `signedDate`, refuses stale and cross-account deliveries, and keeps it
+  current through the expiry sweep.
+- Deriving from it needs no new write path.
+- It is deploy-order safe: the backend calls the same three RPC names before and after 196.
+- The exactly-once table supplies the one thing the single row cannot: a memory of every period
+  already paid out.
+
+**Rejected.**
+- **Resetting by renewal state at the 1st (option a).**
+  - It needs auto-renew status, which is tracked nowhere: there is no column, and the webhook
+    never decodes `signedRenewalInfo`.
+  - It is gamed by turning auto-renew off on the 2nd.
+  - Without it, every honest renewer whose period ends before the month does would drop to the
+    free allowance on each 1st.
+- **Prorating the upgrade (option c).** It fixes only LATE starts: an Oct 2 start still got
+  ~3,870 + 4,000.
+
+**Transition.** On its FIRST apply, the migration backfills a subscriber's current period as
+already granted (source `backfill`) when three things hold:
+- the row entitles;
+- the old code demonstrably paid the period out (`tier_alloc` at the plan's allocation);
+- the plan is above the subscriber's comp floor.
+
+The balance is untouched and `resets_at` moves to the period end. So applying 196 neither
+re-grants a period the calendar reset already paid for nor drops anyone to Free on the next 1st.
+A backfilled subscriber's current balance lasts until their renewal date instead of the 1st.
+Terms §5 promises "changes will not affect a billing period already paid for".
+
+A period whose grant had failed is left for the first `ensure_credit_period` to grant. A re-run
+skips the backfill once any period has been granted the new way, because by then a subscriber in
+calendar mode may simply not be reconciled yet.
+
+**Copy.** The paid/free split is stated in:
+- Terms §5 and the Support page, plus their in-app mirrors;
+- the paywall cost note;
+- the plan rows (`plan_features._credits_row`, mirrored by the iOS fallback).
+
+`tests/test_legal_pages.py` pins the website and the app together.
+
+**Known, accepted gaps.**
+- `period_start` is derived as `current_period_end − 1 month`, because the row stores no start.
+  It can be off by up to 3 days around short months, and only the upgrade cap reads it.
+- A refund of an OLDER renewal still overwrites the one `subscriptions` row with that revoked
+  transaction. This is pre-existing iap_service behaviour.
+  - The TIER drops to Free until the next delivery of the current transaction (Restore, or the
+    next renewal).
+  - The CREDITS of the period in force are kept (above).
+- In a HOLD, `resets_at` is the past period end, so Profile's "Resets on" shows a past date until
+  the renewal or expiry lands.
+- A paid renewal or upgrade is a new boundary, like the 1st. A report charged just before it that
+  fails just after it is refunded `capped_to_zero` (logged as REFUND LEAK), as at the calendar
+  boundary.
+- Rows written before the backend deploy carry a NULL environment and count as Production. A
+  tester's Sandbox renewal in the window between applying 196 and the deploy still grants (once
+  per renewal, for minutes).
+- iOS renders `resets_at` pinned to ET, which is right for the calendar mode. A renewal instant
+  near midnight ET can show as the neighbouring day for a user far from ET.
+- A refund that lands after the boundary still pays back up to the NEW period's `used`. That is
+  `refund_credits`' existing cap, unchanged from the calendar boundary.
+- A $0 offer period (an offer code or a future free trial) is a period like any other and grants a
+  full allocation. That was already true of `grant_tier_upgrade`.
 
 ---
 

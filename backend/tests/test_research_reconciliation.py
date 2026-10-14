@@ -12,8 +12,11 @@ Covered:
   - a stuck processing row is claimed once and refunded once
   - a second claim is a no-op (is_refunded guard) — never double-refunds
   - a 'completed' row is never claimed/refunded
-  - a 'failed' + is_refunded=False row IS claimed (worker pre-set status='failed'
-    before re-raising, and the killed-between-mark-and-refund leak)
+  - a 'failed' + is_refunded=False row IS claimed (a legacy row whose pre-2026-10-12 worker
+    pre-set status='failed' before re-raising, and the killed-between-mark-and-refund leak)
+  - the refund is keyed by the per-report charge ref; only a CAS winner may fall back to the
+    legacy bare ticker, and only on `no_matching_debit` (2026-10-12)
+  - a claim that RAISED is settled from a re-read in the same shielded body (2026-10-12)
   - the sweep only touches OLD claimable+unrefunded rows
   - worker-except path and a sweep on the SAME row refund exactly once
   - a refund RPC failure leaves the row claimed (under-refund, never double)
@@ -72,6 +75,27 @@ class _Query:
         self._filters.append(("lt", col, val))
         return self
 
+    # Migration 195's refund_outcome stamp and retry pass (2026-10-12) also use these.
+    def gte(self, col, val):
+        self._filters.append(("gte", col, val))
+        return self
+
+    def lte(self, col, val):
+        self._filters.append(("lte", col, val))
+        return self
+
+    def neq(self, col, val):
+        self._filters.append(("neq", col, val))
+        return self
+
+    def is_(self, col, val):
+        self._filters.append(("is", col, None if val in (None, "null") else val))
+        return self
+
+    def or_(self, expr):
+        self._filters.append(("or", None, _or_terms(expr)))
+        return self
+
     def order(self, _col, desc=False):
         return self
 
@@ -89,6 +113,16 @@ class _Query:
             if kind == "gt" and not (rv is not None and rv > val):
                 return False
             if kind == "lt" and not (rv is not None and rv < val):
+                return False
+            if kind == "gte" and not (rv is not None and rv >= val):
+                return False
+            if kind == "lte" and not (rv is not None and rv <= val):
+                return False
+            if kind == "neq" and rv == val:
+                return False
+            if kind == "is" and rv != val:
+                return False
+            if kind == "or" and not any(term(row) for term in val):
                 return False
         return True
 
@@ -114,6 +148,35 @@ class _Query:
         return _Result([dict(r) for r in matched])
 
 
+def _or_terms(expr):
+    """PostgREST `or=(...)` terms → row predicates, for the shapes the code under test sends
+    (`col.is.null`, `col.eq.v`, `col.not.in.(a,b)`). SQL semantics: NULL is never IN or
+    NOT IN anything. An unknown shape raises, so a new filter cannot pass by accident."""
+    parts, depth, cur = [], 0, ""
+    for ch in expr:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    terms = []
+    for part in parts:
+        col, rest = part.split(".", 1)
+        if rest == "is.null":
+            terms.append(lambda r, c=col: r.get(c) is None)
+        elif rest.startswith("eq."):
+            terms.append(lambda r, c=col, v=rest[3:]: r.get(c) == v)
+        elif rest.startswith("not.in.(") and rest.endswith(")"):
+            vals = set(rest[len("not.in.("):-1].split(","))
+            terms.append(lambda r, c=col, v=vals: r.get(c) is not None and r.get(c) not in v)
+        else:
+            raise AssertionError(f"the fake cannot evaluate or_ term {part!r}")
+    return terms
+
+
 class FakeSupabase:
     def __init__(self, rows, raise_on=None, commit_before_raise=False):
         self._store = rows
@@ -131,16 +194,30 @@ class FakeCreditService:
     DEEP_RESEARCH_COST = 20
     calls = []  # class-level so every instance records to the same log
     ref_ids = []  # recorded separately so the (user, amount) assertions above stay readable
+    quiet = []    # the `quiet_no_match` flag of each call, in order (2026-10-12)
+    quiet_transport = []   # the `quiet_transport` flag of each call (the retry's re-check)
     raise_on_refund = False
     # migration 142: the real method returns {outcome, refunded, spendable}, or None strictly
     # for a transport fault. Override per-test to exercise the no-op outcomes.
     outcome = {"outcome": "refunded", "refunded": 20, "spendable": 999}
+    # Per-ref answers win over `outcome` (the legacy-fallback tests answer differently for
+    # the per-report ref and the bare ticker). The SENTINEL `None` value means "transport
+    # fault", so presence is tested with `in`, not `.get`.
+    outcome_by_ref: dict = {}
 
-    def refund_ledgered(self, user_id, amount, *, reason=None, ref_id=None):
+    # `quiet_no_match` is REQUIRED in this signature: `refund_report_charge` passes it at every
+    # CAS winner, and a fake without it TypeErrors inside `_settle`'s try/except — which reads
+    # as a false REFUND LEAK, not as a test bug.
+    def refund_ledgered(self, user_id, amount, *, reason=None, ref_id=None, quiet_no_match=False,
+                        quiet_transport=False):
         if FakeCreditService.raise_on_refund:
             raise RuntimeError("refund RPC down")
         FakeCreditService.calls.append((user_id, amount))
         FakeCreditService.ref_ids.append(ref_id)
+        FakeCreditService.quiet.append(quiet_no_match)
+        FakeCreditService.quiet_transport.append(quiet_transport)
+        if ref_id in FakeCreditService.outcome_by_ref:
+            return FakeCreditService.outcome_by_ref[ref_id]
         return FakeCreditService.outcome
 
 
@@ -148,9 +225,12 @@ class FakeCreditService:
 def _patch_credit_service(monkeypatch):
     FakeCreditService.calls = []
     FakeCreditService.ref_ids = []
+    FakeCreditService.quiet = []
+    FakeCreditService.quiet_transport = []
     FakeCreditService.raise_on_refund = False
     FakeCreditService.outcome = {
         "outcome": "refunded", "refunded": 20, "spendable": 999}
+    FakeCreditService.outcome_by_ref = {}
     monkeypatch.setattr(recon, "CreditService", FakeCreditService)
     yield
 
@@ -220,27 +300,38 @@ async def test_claim_refunds_processing_row_once():
 
 @pytest.mark.asyncio
 async def test_refund_is_keyed_by_ticker_to_match_the_charge():
-    """The reconciled refund MUST use the same `ref_id` the charge used —
-    `research.py` charges with `ref_id=request.stock_id.upper()`.
+    """The reconciled refund MUST use the same `ref_id` the charge used — since 2026-10-12
+    `research.py` charges with `report_charge_ref(ticker, new_report_id)`, i.e. the
+    ticker-keyed `{TICKER}:{report_id}` (before that, the bare ticker). The name is kept:
+    SYSTEM_DESIGN_GUIDELINES points at it.
 
-    This stopped being cosmetic at migration 118. `refund_credits` now looks the original
-    spend up BY (user, ref_id, amount) to learn which credit pool it drained. This call site
-    passed `report_id`, which is never equal to a ticker, so every reconciled failure missed
-    the lookup and took the granted-first fallback — refunding a report that was paid for out
-    of PURCHASED credits into the GRANTED pool, where `ensure_credit_period` destroys it at
-    the month boundary. That is the App Store Guideline 3.1.1 violation the two-pool design
-    exists to prevent, on the primary failure path of the 20-credit action.
+    This stopped being cosmetic at migration 118. `refund_credits` looks the original spend up
+    BY (user, ref_id, amount) to learn which credit pool it drained. This call site once passed
+    `report_id` ALONE, which matches no charge, so every reconciled failure took the
+    granted-first fallback — refunding a report paid for out of PURCHASED credits into the
+    GRANTED pool, where `ensure_credit_period` destroys it at the month boundary (App Store
+    Guideline 3.1.1). And a per-report ref (not the bare ticker) is what makes a replayed
+    refund answer `already_refunded` instead of reversing a SIBLING report's debit.
     """
     rows = [_row(ticker="nvda")]
     sb = FakeSupabase(rows)
 
     await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
 
-    assert FakeCreditService.ref_ids == ["NVDA"], (
-        "the refund must be keyed by the UPPER-CASED ticker, exactly as research.py charges — "
-        f"got {FakeCreditService.ref_ids}"
+    assert FakeCreditService.ref_ids == ["NVDA:r1"], (
+        "the refund must be keyed by the per-report charge ref (UPPER-CASED ticker + the row "
+        f"id), exactly as research.py charges — got {FakeCreditService.ref_ids}"
     )
-    assert "r1" not in FakeCreditService.ref_ids, "report_id is not a valid refund key"
+    assert "r1" not in FakeCreditService.ref_ids, "report_id alone is not a valid refund key"
+    assert "NVDA" not in FakeCreditService.ref_ids, "a refunded new-ref row never falls back"
+    # The CAS winner sends it quietly: a no_matching_debit there means a LEGACY row, which
+    # the bare-ticker fallback then settles (and logs) itself.
+    assert FakeCreditService.quiet == [True]
+    from app.services.credit_service import ChargeRef
+    assert isinstance(FakeCreditService.ref_ids[0], ChargeRef), (
+        "the per-report ref must be a ChargeRef — only a ChargeRef refund is retried on a "
+        "transient fault"
+    )
 
 
 @pytest.mark.asyncio
@@ -280,9 +371,9 @@ async def test_completed_row_never_refunded():
 
 @pytest.mark.asyncio
 async def test_failed_unrefunded_row_is_claimed():
-    # generate_report stamps status='failed' before re-raising; the worker
-    # except path must still refund. Also covers a row stranded in 'failed'
-    # + is_refunded=False by a worker killed between mark and refund.
+    # A legacy row: before 2026-10-12 generate_report stamped status='failed' before
+    # re-raising, and the worker's except path must still refund it. Also covers a row
+    # stranded in 'failed' + is_refunded=False by a worker killed between mark and refund.
     rows = [_row(status="failed")]
     sb = FakeSupabase(rows)
 
@@ -550,8 +641,14 @@ def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None, intent=None
     calls = refunds if refunds is not None else []
 
     class _Credits:
-        def refund_ledgered(self, uid, amount, *, reason, ref_id):
-            calls.append({"user_id": uid, "amount": amount, "reason": reason, "ref_id": ref_id})
+        # `quiet_no_match` is REQUIRED here: the delete CAS winner passes it through
+        # `refund_report_charge`. `refund_outcome` may be a dict keyed by ref_id ("by_ref")
+        # for the legacy-fallback tests.
+        def refund_ledgered(self, uid, amount, *, reason, ref_id, quiet_no_match=False):
+            calls.append({"user_id": uid, "amount": amount, "reason": reason, "ref_id": ref_id,
+                          "quiet": quiet_no_match})
+            if isinstance(refund_outcome, dict) and "by_ref" in refund_outcome:
+                return refund_outcome["by_ref"].get(ref_id)
             return refund_outcome
 
     original = research_ep.CreditService
@@ -589,19 +686,28 @@ def test_a_delete_whose_refund_leaked_says_so_in_its_response(outcome, caplog):
              "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
     with caplog.at_level(logging.ERROR):
         resp, calls = _delete(rows, refund_outcome=outcome)
-    assert len(calls) == 1
+    # The delete CAS winner may fall back to the legacy bare ticker — on `no_matching_debit`
+    # ONLY (2026-10-12): the per-report ref first (quiet), then "AAPL" (loud). Every other
+    # outcome is one call on the per-report ref.
+    if isinstance(outcome, dict) and outcome.get("outcome") == "no_matching_debit":
+        assert [(c["ref_id"], c["quiet"]) for c in calls] == [("AAPL:rep-1", True), ("AAPL", False)]
+    else:
+        assert [c["ref_id"] for c in calls] == ["AAPL:rep-1"]
     assert resp["outcome"] == "refund_failed", resp
     assert any("REFUND LEAK" in r.getMessage() for r in caplog.records)
 
 
-def test_the_delete_refund_uses_the_ticker_the_charge_used():
+def test_the_delete_refund_uses_the_per_report_ref_the_charge_used():
     """`refund_credits` matches the debit on (user_id, ref_id, delta). research.py charges with
-    `request.stock_id.upper()`, so a lowercase or None ref_id finds no split and falls back to
-    granted-first — converting PERMANENT purchased credits into expiring ones (3.1.1)."""
+    `report_charge_ref(ticker, new_report_id)` (was the bare `request.stock_id.upper()` before
+    2026-10-12 — renamed from `..._uses_the_ticker_the_charge_used`), so a lowercase or None
+    ref_id finds no split and falls back to granted-first — converting PERMANENT purchased
+    credits into expiring ones (3.1.1). The lowercase-ticker normalisation is still exercised."""
     rows = [{"id": "rep-1", "user_id": "user-1", "status": "pending",
              "is_refunded": False, "credits_charged": 20, "ticker": "aapl"}]
     _, calls = _delete(rows)
-    assert calls[0]["ref_id"] == "AAPL"
+    assert calls[0]["ref_id"] == "AAPL:rep-1"
+    assert len(calls) == 1, "a refunded new-ref row never falls back to the bare ticker"
 
 
 def test_deleting_a_finished_report_refunds_nothing():
@@ -727,7 +833,10 @@ def test_a_cas_that_committed_but_lost_its_reply_still_refunds():
     resp, calls = _delete(rows, raise_on=_cas_raiser(RuntimeError("reply lost")),
                           commit_before_raise=True)
     assert rows[0]["status"] == "deleted" and rows[0]["is_refunded"] is True
-    assert len(calls) == 1 and calls[0]["amount"] == 20 and calls[0]["ref_id"] == "AAPL"
+    # The per-report ref (2026-10-12), exactly once, and never the legacy bare ticker: this
+    # re-read does not own the CAS, so a replay must converge to already_refunded.
+    assert len(calls) == 1 and calls[0]["amount"] == 20 and calls[0]["ref_id"] == "AAPL:rep-1"
+    assert calls[0]["quiet"] is False
     assert resp == {"message": "Report deleted successfully", "outcome": "refunded"}
 
 
@@ -1113,3 +1222,318 @@ async def test_an_update_that_raises_after_the_cancel_is_logged_not_lost(caplog)
             "failed after the cancel" in r.getMessage() and "r1" in r.getMessage()
             and "RuntimeError" in r.getMessage() for r in caplog.records))
     assert FakeCreditService.calls == []
+
+
+# ── 2026-10-12: per-report refs, the CAS-winner legacy fallback, the raised claim ──────
+#
+# Deep-door charges are named `{TICKER}:{report_id}` since 2026-10-12; rows charged before
+# carry the bare ticker. Only a CAS winner may fall back to it, and only on
+# `no_matching_debit` — every other outcome proves (or may prove) the per-report debit exists,
+# and falling back there IS the double refund.
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_row_falls_back_to_the_bare_ticker_only_on_no_matching_debit(pushes, caplog):
+    import logging
+
+    FakeCreditService.outcome_by_ref = {
+        "NVDA:r1": {"outcome": "no_matching_debit", "refunded": 0},
+        "NVDA": {"outcome": "refunded", "refunded": 5, "spendable": 60},
+    }
+    with caplog.at_level(logging.WARNING):
+        won = await recon.claim_and_mark_failed("r1", _BLOB, supabase=FakeSupabase([_row()]))
+    assert won is True
+    assert FakeCreditService.ref_ids == ["NVDA:r1", "NVDA"]
+    assert FakeCreditService.quiet == [True, False], "the legacy refund must page on a no-match"
+    assert pushes and "credits have been returned" in pushes[0]["body"], pushes
+    assert any("legacy ref NVDA" in r.getMessage() and "r1" in r.getMessage()
+               for r in caplog.records), "the fallback must be visible so it can be retired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    {"outcome": "already_refunded", "refunded": 0},
+    None,                                           # transport fault — the debit may exist
+    {"outcome": "partial", "refunded": 1, "requested": 5},
+    {"outcome": "capped_to_zero", "refunded": 0},
+    {"outcome": "refunded", "refunded": 5},
+])
+async def test_an_outcome_other_than_no_matching_debit_never_falls_back(outcome, pushes):
+    FakeCreditService.outcome_by_ref = {"NVDA:r1": outcome}
+    await recon.claim_and_mark_failed("r1", _BLOB, supabase=FakeSupabase([_row()]))
+    assert FakeCreditService.ref_ids == ["NVDA:r1"], (
+        f"{outcome!r} fell back to the bare ticker — a possible double refund"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_fallback_that_also_misses_is_a_loud_leak(caplog, pushes):
+    import logging
+
+    FakeCreditService.outcome = {"outcome": "no_matching_debit", "refunded": 0}
+    with caplog.at_level(logging.ERROR):
+        await recon.claim_and_mark_failed("r1", _BLOB, supabase=FakeSupabase([_row()]))
+    assert FakeCreditService.ref_ids == ["NVDA:r1", "NVDA"]
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno >= logging.ERROR and "REFUND LEAK" in r.getMessage()]
+    assert errors and "r1" in errors[-1] and "ref_id=NVDA" in errors[-1], errors
+    assert pushes and "credits" not in pushes[0]["body"].lower()
+
+
+# ── refund_report_charge, the helper itself ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("ticker", [None, "", "   "])
+def test_a_ticker_less_row_refunds_without_a_ref_and_never_falls_back(ticker):
+    calls = []
+
+    def _refund(uid, amount, *, reason, ref_id=None, quiet_no_match=False):
+        calls.append((ref_id, quiet_no_match))
+        return {"outcome": "no_matching_debit"}
+
+    out, ref = recon.refund_report_charge(
+        _refund, "u1", 20, ticker=ticker, report_id="r1",
+        reason="report_refund_reconciled", allow_legacy_ref=True,
+    )
+    assert calls == [(None, False)] and ref is None
+    assert out == {"outcome": "no_matching_debit"}
+
+
+def test_a_row_without_an_id_refunds_without_a_ref():
+    calls = []
+    out, ref = recon.refund_report_charge(
+        lambda uid, amount, *, reason, ref_id=None, quiet_no_match=False:
+            calls.append(ref_id) or {"outcome": "refunded"},
+        "u1", 20, ticker="AAPL", report_id=None, reason="report_refund_deleted",
+        allow_legacy_ref=True,
+    )
+    assert calls == [None] and ref is None and out["outcome"] == "refunded"
+
+
+def test_without_the_cas_the_helper_never_falls_back_and_is_never_quiet():
+    calls = []
+
+    def _refund(uid, amount, *, reason, ref_id=None, **kw):
+        calls.append((ref_id, kw))
+        return {"outcome": "no_matching_debit"}
+
+    out, ref = recon.refund_report_charge(
+        _refund, "u1", 20, ticker="aapl", report_id="REP-1",
+        reason="report_refund_deleted", allow_legacy_ref=False,
+    )
+    assert calls == [("AAPL:rep-1", {})] and ref == "AAPL:rep-1"
+    assert out["outcome"] == "no_matching_debit"
+
+
+def test_the_helper_reports_the_ref_its_final_call_used():
+    answers = {"AAPL:r1": {"outcome": "no_matching_debit"}, "AAPL": None}
+    out, ref = recon.refund_report_charge(
+        lambda uid, amount, *, reason, ref_id=None, quiet_no_match=False: answers[ref_id],
+        "u1", 20, ticker="AAPL", report_id="r1", reason="report_refund_reconciled",
+        allow_legacy_ref=True,
+    )
+    assert out is None and ref == "AAPL", "a fallback whose transport failed must name the legacy ref"
+
+
+# ── the raised claim (tri-state) ──────────────────────────────────────────────────
+
+
+def _claim_raiser(exc):
+    return lambda op, values: exc if (op == "update" and values and "is_refunded" in values) else None
+
+
+@pytest.mark.asyncio
+async def test_a_claim_whose_reply_was_lost_still_refunds_on_the_per_report_ref(pushes):
+    """The UPDATE committed (failed + is_refunded=True) and only its reply was lost. The sweep
+    selects is_refunded=False, so it would never see this row again: before 2026-10-12 this was
+    a permanent, silent 20-credit leak. The re-read settles it — per-report ref ONLY."""
+    from tests.test_supabase_transient_classifier import gateway_error
+
+    rows = [_row(credits_charged=20)]
+    sb = FakeSupabase(rows, raise_on=_claim_raiser(gateway_error(520)), commit_before_raise=True)
+    won = await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+    assert won is True
+    assert rows[0]["status"] == "failed" and rows[0]["is_refunded"] is True
+    assert FakeCreditService.ref_ids == ["NVDA:r1"] and FakeCreditService.quiet == [False]
+    assert pushes and "credits have been returned" in pushes[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_raised_claim_that_never_committed_refunds_nothing(caplog):
+    import logging
+
+    rows = [_row(credits_charged=20)]
+    sb = FakeSupabase(rows, raise_on=_claim_raiser(RuntimeError("connection reset")))
+    with caplog.at_level(logging.WARNING):
+        won = await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+    assert won is False
+    assert FakeCreditService.calls == [], "refunded a row the claim never claimed"
+    assert rows[0]["is_refunded"] is False, "the sweep must still see this row"
+    assert any("left for the reconciliation sweep" in r.getMessage() for r in caplog.records)
+    # ...and the sweep's next pass then claims and refunds it exactly once.
+    assert await recon.claim_and_mark_failed("r1", _BLOB, supabase=FakeSupabase(rows)) is True
+    assert FakeCreditService.calls == [("u1", 20)]
+
+
+@pytest.mark.asyncio
+async def test_a_raised_claim_on_a_legacy_row_never_uses_the_legacy_ref(caplog, pushes):
+    """This call cannot prove it owns the CAS (a concurrent claimer may have refunded via the
+    legacy fallback), so the bare ticker could pair with a sibling's debit: loud leak instead."""
+    import logging
+
+    FakeCreditService.outcome = {"outcome": "no_matching_debit", "refunded": 0}
+    rows = [_row(credits_charged=20)]
+    sb = FakeSupabase(rows, raise_on=_claim_raiser(RuntimeError("reply lost")),
+                      commit_before_raise=True)
+    with caplog.at_level(logging.ERROR):
+        await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+    assert FakeCreditService.ref_ids == ["NVDA:r1"], "the legacy fallback ran without the CAS"
+    assert any("REFUND LEAK" in r.getMessage() and "r1" in r.getMessage() for r in caplog.records)
+    assert pushes and "credits" not in pushes[0]["body"].lower()
+
+
+@pytest.mark.asyncio
+async def test_a_raised_claim_on_a_row_someone_else_settled_converges():
+    """Another claimer (the sweep, the insert-failure orphan claim) already refunded: the
+    re-read sees failed + is_refunded and replays on the per-report ref, which the RPC answers
+    `already_refunded` — nothing moves twice."""
+    FakeCreditService.outcome = {"outcome": "already_refunded", "refunded": 0, "spendable": 1}
+    rows = [_row(status="failed", is_refunded=True, credits_charged=20)]
+    sb = FakeSupabase(rows, raise_on=_claim_raiser(RuntimeError("reply lost")))
+    assert await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb) is True
+    assert FakeCreditService.ref_ids == ["NVDA:r1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_over", [
+    {"status": "completed", "is_refunded": False},
+    {"status": "deleted", "is_refunded": True},     # the DELETE settled it — its refund
+    {"status": "failed", "is_refunded": True, "credits_charged": 0},
+])
+async def test_a_raised_claim_never_refunds_a_row_it_could_not_have_claimed(row_over):
+    rows = [_row(**{"credits_charged": 20, **row_over})]
+    sb = FakeSupabase(rows, raise_on=_claim_raiser(RuntimeError("reply lost")))
+    assert await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb) is False
+    assert FakeCreditService.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_raised_claim_whose_reread_also_fails_pages_and_refunds_nothing(caplog):
+    import logging
+
+    rows = [_row(credits_charged=20)]
+    sb = FakeSupabase(rows, raise_on=lambda op, values: RuntimeError(f"{op} down"),
+                      commit_before_raise=True)
+    with caplog.at_level(logging.ERROR):
+        assert await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb) is False
+    assert FakeCreditService.calls == []
+    assert any("POSSIBLE REFUND LEAK" in r.getMessage() and "r1" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_raised_claim_settles_inside_the_shield_even_when_cancelled(caplog):
+    """The re-read and its refund run in the SAME shielded thread body as the claim, so a
+    cancel landing mid-UPDATE (a deploy) still settles a claim whose reply was lost."""
+    import logging
+    import threading
+
+    gate, started = threading.Event(), threading.Event()
+    rows = [_row(credits_charged=20)]
+    sb = _BlockingSupabase(rows, gate, started)
+    sb._raise_on = _claim_raiser(RuntimeError("reply lost"))
+    sb._commit_before_raise = True
+    task = asyncio.create_task(recon.claim_and_mark_failed("r1", _BLOB, supabase=sb))
+    assert await _wait_until(started.is_set)
+    with caplog.at_level(logging.INFO):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        assert await _wait_until(lambda: bool(FakeCreditService.calls)), (
+            "a claim that committed under a cancel was never refunded"
+        )
+        assert await _wait_until(lambda: any(
+            "failed after the cancel" in r.getMessage() and "settled it" in r.getMessage()
+            for r in caplog.records))
+    assert FakeCreditService.ref_ids == ["NVDA:r1"]
+
+
+# ── the delete door ─────────────────────────────────────────────────────────────
+
+
+def test_a_cas_winning_delete_of_a_legacy_row_refunds_via_the_bare_ticker():
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows, refund_outcome={"by_ref": {
+        "AAPL:rep-1": {"outcome": "no_matching_debit", "refunded": 0},
+        "AAPL": {"outcome": "refunded", "refunded": 20, "spendable": 40},
+    }})
+    assert [(c["ref_id"], c["quiet"]) for c in calls] == [("AAPL:rep-1", True), ("AAPL", False)]
+    assert resp == {"message": "Report deleted successfully", "outcome": "refunded"}
+
+
+def test_the_raised_delete_claim_reread_never_uses_the_legacy_ref(caplog):
+    """`deleted + is_refunded` is ALSO what an earlier successful DELETE leaves (a re-tap after
+    a lost reply): this path cannot prove it owns the CAS, so the bare ticker — which could pair
+    with a sibling report's debit — is never tried. A miss is a loud leak instead."""
+    import logging
+
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    with caplog.at_level(logging.ERROR):
+        resp, calls = _delete(rows, raise_on=_cas_raiser(RuntimeError("reply lost")),
+                              commit_before_raise=True,
+                              refund_outcome={"outcome": "no_matching_debit", "refunded": 0})
+    assert [c["ref_id"] for c in calls] == ["AAPL:rep-1"]
+    assert resp["outcome"] == "refund_failed"
+    assert any("REFUND LEAK" in r.getMessage() and "rep-1" in r.getMessage() for r in caplog.records)
+
+
+def test_the_delete_handler_runs_its_round_trips_off_the_loop():
+    import threading
+    from app.api.v1.endpoints import research as research_ep
+
+    seen = []
+
+    class _Tracking(FakeSupabase):
+        def table(self, name):
+            seen.append(threading.get_ident())
+            return super().table(name)
+
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+
+    class _Credits:
+        def refund_ledgered(self, uid, amount, *, reason, ref_id, quiet_no_match=False):
+            seen.append(threading.get_ident())
+            return {"outcome": "refunded", "refunded": 20}
+
+    original = research_ep.CreditService
+    research_ep.CreditService = _Credits
+    try:
+        async def _run():
+            return threading.get_ident(), await research_ep.delete_report(
+                "rep-1", intent=None, user={"id": "user-1"}, supabase=_Tracking(rows))
+        loop_thread, resp = asyncio.run(_run())
+    finally:
+        research_ep.CreditService = original
+    assert resp["outcome"] == "refunded"
+    assert seen and loop_thread not in seen, "a delete round trip ran on the event loop"
+
+
+@pytest.mark.parametrize("ticker,report_id", [(None, "r1"), ("", "r1"), ("AAPL", None)])
+def test_without_the_claim_a_ref_less_row_is_never_refunded_unpaired(ticker, report_id, caplog):
+    """The RPC's no-ref_id path refunds granted-first with NO pairing, so it is not replay-safe:
+    only a CAS holder may take it. A non-holder (a re-read after a raised claim) pages instead."""
+    import logging
+
+    calls = []
+    with caplog.at_level(logging.ERROR):
+        out, ref = recon.refund_report_charge(
+            lambda *a, **k: calls.append(k) or {"outcome": "refunded"},
+            "u1", 20, ticker=ticker, report_id=report_id,
+            reason="report_refund_deleted", allow_legacy_ref=False,
+        )
+    assert calls == [] and out is None and ref is None
+    assert any("POSSIBLE REFUND LEAK" in r.getMessage() for r in caplog.records)

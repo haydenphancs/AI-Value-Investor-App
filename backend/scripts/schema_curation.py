@@ -157,6 +157,7 @@ NOT_A_REF: frozenset[tuple[str, str]] = frozenset({
     ("public.credit_purchases", "transaction_id"),
     ("public.credit_purchases", "original_transaction_id"),
     ("public.subscriptions", "original_transaction_id"),
+    ("public.subscription_credit_periods", "original_transaction_id"),
     ("public.ticker_news_cache", "external_id"),
     ("public.competitor_intel_audit", "run_id"),
     ("public.moat_intel_audit", "run_id"),
@@ -198,8 +199,10 @@ CURATION: dict[str, TableDoc] = {
     "public.user_credits": T("billing",
         key=("user_id", "total", "used", "remaining", "purchased_total", "purchased_used",
              "spendable", "resets_at"),
-        note="TWO pools. Granted credits reset monthly; purchased ones never expire and the "
-             "three tier RPCs must never touch them (App Store 3.1.1). `spendable` is the sum."),
+        note="TWO pools. Granted credits renew per Apple paid period for a subscriber (196, "
+             "`paid_period_id`) or on the ET 1st for Free and comp accounts; purchased ones never "
+             "expire and the three tier RPCs must never touch them (App Store 3.1.1). "
+             "`spendable` is the sum."),
     "public.credit_transactions": T("billing",
         purpose="Append-only credit ledger — one row per debit, grant or refund, with the "
                 "balance after it.",
@@ -222,6 +225,14 @@ CURATION: dict[str, TableDoc] = {
                 "server notifications.",
         key=("user_id", "tier", "status", "store", "current_period_end", "last_event_at"),
         note="UNIQUE(user_id) — one subscription per account."),
+    "public.subscription_credit_periods": T("billing",
+        purpose="Every Apple paid subscription period whose credit allocation was granted — the "
+                "exactly-once guard for paid allowances (migration 196).",
+        key=("user_id", "original_transaction_id", "period_end", "tier", "allocation", "carried",
+             "source"),
+        note="UNIQUE(original_transaction_id, period_end): a period is granted at most once, "
+             "ever, and an older one is never re-applied. Written only by ensure_credit_period; "
+             "user_credits.paid_period_id points at the one in force."),
     "public.guest_report_budget": T("billing",
         key=("bucket_key", "period_month", "report_count"),
         note="LEGACY. AI generation went account-only; a client-chosen header meant rotating it "

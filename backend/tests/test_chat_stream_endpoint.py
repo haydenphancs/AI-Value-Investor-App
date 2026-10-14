@@ -1689,11 +1689,238 @@ def test_refund_site_client_disconnect_backstop(harness, monkeypatch):
     async def send(message):
         sent.append(message)
 
-    _aio.run(app(scope, receive, send))
+    import threading as _threading
+    refund_threads: List[int] = []
+    _orig_refund_once = quota.refund_once
+
+    def _recording_refund_once(reason):
+        refund_threads.append(_threading.get_ident())
+        return _orig_refund_once(reason)
+    quota.refund_once = _recording_refund_once
+
+    async def _drive():
+        # The `finally` hands the refund to a DETACHED task (2026-10-12: a frame being closed or
+        # cancelled cannot await). Drain it here, exactly as the lifespan does at shutdown —
+        # otherwise `asyncio.run`'s teardown could cancel it before its thread starts.
+        from app.services.credit_service import drain_detached_settlements
+        loop_thread = _threading.get_ident()
+        await app(scope, receive, send)
+        assert await drain_detached_settlements(2.0) == 0
+        return loop_thread
+
+    loop_thread = _aio.run(_drive())
     text = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body").decode()
     names = [f[0] for f in _parse_sse(text)]
     assert "done" not in names
     assert quota.delivered == 0 and db.inserted_messages == []
+    assert quota.refunds == ["chat_stream_cancelled"], quota.every_call
+    assert refund_threads and loop_thread not in refund_threads, (
+        "the disconnect refund ran on the event loop thread"
+    )
+
+
+# ── review F2 (2026-10-12): a turn charged before its stream starts is still refunded ──
+#
+# `_metered_stream`'s `finally` is the stream's only backstop, and it runs only once the
+# generator has taken a step. The handler's stretch after the charge (the card probe, a
+# Supabase hop) and the moment between the handler's return and the stream task's first step
+# were both outside it: the 1-credit debit stayed, with no refund and no log line.
+
+
+def _stream_scope(body: bytes) -> Dict[str, Any]:
+    path = f"/api/v1/chat/sessions/{_SESSION}/messages/stream"
+    return {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"",
+        "root_path": "", "server": ("testserver", 80), "client": ("127.0.0.1", 1),
+        "headers": [
+            (b"host", b"testserver"), (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()), (b"accept", b"text/event-stream"),
+        ],
+    }
+
+
+def test_a_deploy_cancel_on_the_card_probe_refunds_the_charged_turn(harness, monkeypatch):
+    """A deploy's graceful-shutdown cancel lands on the card probe, after the charge and
+    before any stream exists: the handler hands the credit back itself — detached (a frame
+    being cancelled cannot await), off the loop, and drained like the lifespan does."""
+    import asyncio as _aio
+    import threading as _threading
+
+    from app.services.credit_service import drain_detached_settlements
+
+    client, db, quota, _ = harness
+    refund_threads: List[int] = []
+    _orig_refund_once = quota.refund_once
+
+    def _recording_refund_once(reason):
+        refund_threads.append(_threading.get_ident())
+        return _orig_refund_once(reason)
+    quota.refund_once = _recording_refund_once
+
+    body = json.dumps({"message": "How is Apple doing?"}).encode()
+
+    async def _drive():
+        probing = _aio.Event()
+
+        async def _stalled_probe(*a, **k):
+            probing.set()
+            await _aio.Event().wait()            # a Supabase round trip that never returns
+        monkeypatch.setattr(chat_mod, "_should_attach_base_card", _stalled_probe)
+        state = {"body": False}
+
+        async def receive():
+            if not state["body"]:
+                state["body"] = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            await _aio.Event().wait()
+
+        async def send(message):
+            pass
+
+        task = _aio.create_task(app(_stream_scope(body), receive, send))
+        await _aio.wait_for(probing.wait(), 2.0)
+        assert quota.every_call == [], "anti-vacuity: the turn is charged and not yet settled"
+        task.cancel()                           # uvicorn's graceful-shutdown deadline
+        with pytest.raises(_aio.CancelledError):
+            await task
+        assert await drain_detached_settlements(2.0) == 0
+        return _threading.get_ident()
+
+    loop_thread = _aio.run(_drive())
+    assert quota.refunds == ["chat_undelivered"], quota.every_call
+    assert refund_threads and loop_thread not in refund_threads, "the refund ran on the loop"
+    assert quota.delivered == 0 and db.inserted_messages == []
+
+
+def test_a_raise_after_the_charge_but_before_the_stream_refunds_the_turn(harness, monkeypatch):
+    seen, quota = _loop_thread_probe(monkeypatch)
+    client, db, _q, _ = harness
+
+    async def _broken_probe(*a, **k):
+        raise RuntimeError("card probe bug")
+    monkeypatch.setattr(chat_mod, "_should_attach_base_card", _broken_probe)
+    with pytest.raises(RuntimeError, match="card probe bug"):
+        _post(client)
+    assert quota.refunds == ["chat_undelivered"], quota.every_call
+    assert quota.delivered == 0 and db.inserted_messages == []
+    _assert_off_loop(seen, quota)
+
+
+def test_a_stream_that_never_starts_still_refunds_the_turn(harness):
+    """The handler returned, but the request is cancelled before the body iterator's first
+    step: Starlette's `stream_response` awaits `send(http.response.start)` BEFORE it iterates
+    the body, and through BaseHTTPMiddleware that send can suspend (a zero-buffer hand-off).
+    A deploy's cancel landing there means `_metered_stream` never runs — nor its `finally`.
+    The response's own `finally` hands the turn back."""
+    import asyncio as _aio
+
+    from starlette.requests import Request as _StarletteRequest
+
+    from app.schemas.chat import SendChatMessageRequest
+    from app.services.credit_service import drain_detached_settlements
+
+    client, db, quota, _ = harness
+    scope = _stream_scope(json.dumps({"message": "How is Apple doing?"}).encode())
+    sent: List[Dict[str, Any]] = []
+
+    async def _drive():
+        resp = await chat_mod.stream_chat_message(
+            session_id=_SESSION, request=SendChatMessageRequest(message="How is Apple doing?"),
+            req=_StarletteRequest(scope), user=_USER, supabase=db, x_guest_id=None, _rate=None,
+        )
+        assert quota.every_call == [], "anti-vacuity: the turn is charged and not yet settled"
+        at_start = _aio.Event()
+
+        async def receive():
+            await _aio.Event().wait()            # the client stays connected
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.start":
+                at_start.set()
+                await _aio.Event().wait()        # the hand-off has not been taken yet
+
+        task = _aio.create_task(resp(scope, receive, send))
+        await _aio.wait_for(at_start.wait(), 2.0)
+        task.cancel()                           # the deploy's deadline lands right here
+        with pytest.raises(_aio.CancelledError):
+            await task
+        assert await drain_detached_settlements(2.0) == 0
+
+    _aio.run(_drive())
+    assert [m["type"] for m in sent] == ["http.response.start"], (
+        "anti-vacuity: the body iterator must not have started in this replay"
+    )
+    assert quota.refunds == ["chat_stream_cancelled"], quota.every_call
+    assert quota.delivered == 0 and db.inserted_messages == []
+
+
+def test_a_started_stream_leaves_its_refund_to_the_generator_alone(harness, monkeypatch):
+    """Once `_metered_stream` has taken a step it owns the turn: a delivered turn is never
+    refunded, and a stream cancelled mid-flight is handed back by the generator's `finally`
+    ONLY — the response's backstop schedules nothing even while that refund's ledger call is
+    still running (so `is_settled` still reads False on the loop)."""
+    import asyncio as _aio
+    import threading as _threading
+
+    from starlette.requests import Request as _StarletteRequest
+
+    from app.schemas.chat import SendChatMessageRequest
+    from app.services.credit_service import drain_detached_settlements
+
+    client, db, quota, _ = harness
+    r = _post(client)
+    assert r.status_code == 200 and quota.every_call == [] and quota.delivered == 1
+
+    quota = _Quota()
+    monkeypatch.setattr(chat_mod, "_claim_chat_quota", lambda *a, **k: (quota, None))
+    release = _threading.Event()
+    _orig_refund_once = quota.refund_once
+
+    def _slow_refund_once(reason):
+        release.wait(timeout=5)       # the ledger RPC is still running while the response unwinds
+        return _orig_refund_once(reason)
+    quota.refund_once = _slow_refund_once
+    spawned: List[str] = []
+    _real_settle_detached = chat_mod.settle_detached
+
+    def _recording_settle_detached(fn, *, what):
+        spawned.append(what.split(" ")[0])
+        return _real_settle_detached(fn, what=what)
+    monkeypatch.setattr(chat_mod, "settle_detached", _recording_settle_detached)
+
+    async def _slow_gen(*a, **k):
+        yield ("thought", "Let me check.")
+        await _aio.sleep(5)
+        yield ("answer", "never reached")
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", lambda self, prompt, **kw: _slow_gen())
+    scope = _stream_scope(json.dumps({"message": "How is Apple doing?"}).encode())
+
+    async def _drive():
+        resp = await chat_mod.stream_chat_message(
+            session_id=_SESSION, request=SendChatMessageRequest(message="How is Apple doing?"),
+            req=_StarletteRequest(scope), user=_USER, supabase=db, x_guest_id=None, _rate=None,
+        )
+        first_body = _aio.Event()
+
+        async def receive():
+            await _aio.Event().wait()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first_body.set()
+
+        task = _aio.create_task(resp(scope, receive, send))
+        await _aio.wait_for(first_body.wait(), 2.0)
+        task.cancel()
+        with pytest.raises(_aio.CancelledError):
+            await task
+        release.set()
+        assert await drain_detached_settlements(2.0) == 0
+
+    _aio.run(_drive())
+    assert spawned == ["chat_stream_cancelled"], spawned
     assert quota.refunds == ["chat_stream_cancelled"], quota.every_call
 
 
@@ -4162,6 +4389,11 @@ class _GrantLog:
 @pytest.fixture
 def real_quota(harness, monkeypatch):
     client, db, _fake, warm = harness
+    # A non-zero free-follow-up window (2026-10-12): `on_delivered` now issues no grant RPC at
+    # all while the window is 0 (the shipped default — the feature is parked), so without this
+    # the "grants once" test below would be red and every "a refunded turn grants nothing"
+    # assertion in this section would pass vacuously.
+    monkeypatch.setattr(chat_mod.settings, "CHAT_FREE_FOLLOWUP_SECONDS", 300)
     _LedgerCredits.calls = []
     _LedgerCredits.answer = "migration-142"
     monkeypatch.setattr(chat_mod, "CreditService", _LedgerCredits)
@@ -4343,3 +4575,123 @@ def test_only_the_unanswered_refund_is_unlabelled(reason, label):
         cm.CreditService = orig
     assert q.cost_payload()["label"] == label
     assert q.cost_payload()["outcome"] == "refunded"
+
+
+# ── 2026-10-12: every door settlement runs OFF the event loop (invariant #6) ──────────
+#
+# `refund_once` / `settle_no_cost` are sync Supabase RPCs (and a ChargeRef refund may retry
+# with backoff). On the single uvicorn worker each inline call stalled every in-flight request
+# — every SSE frame of every other user's answer. The doors now hand them to worker threads.
+
+
+class _ThreadRecordingQuota(_Quota):
+    def __init__(self):
+        super().__init__()
+        import threading
+        self._threading = threading
+        self.threads: List[int] = []
+
+    def refund_once(self, reason: str) -> None:
+        self.threads.append(self._threading.get_ident())
+        super().refund_once(reason)
+
+    def settle_no_cost(self, reason: str) -> None:
+        self.threads.append(self._threading.get_ident())
+        super().settle_no_cost(reason)
+
+
+def _loop_thread_probe(monkeypatch):
+    """The request loop's thread id, captured by an ASYNC dependency (which runs on the loop —
+    a sync one would run in the threadpool), plus a thread-recording quota and claim."""
+    import threading
+    seen: Dict[str, Any] = {"loop": None, "claim": None}
+
+    async def _ident():
+        seen["loop"] = threading.get_ident()
+        return _USER
+    app.dependency_overrides[get_chat_identity] = _ident
+    quota = _ThreadRecordingQuota()
+
+    def _claim(*a, **k):
+        seen["claim"] = threading.get_ident()
+        return quota, None
+    monkeypatch.setattr(chat_mod, "_claim_chat_quota", _claim)
+    return seen, quota
+
+
+def _assert_off_loop(seen, quota):
+    assert seen["loop"] is not None and quota.threads, (seen, quota.every_call)
+    assert seen["claim"] != seen["loop"], "the precharge ran on the event loop"
+    assert seen["loop"] not in quota.threads, "a settlement RPC ran on the event loop"
+
+
+def test_the_stream_empty_refund_runs_off_the_loop(harness, monkeypatch):
+    client, db, _q, _ = harness
+    seen, quota = _loop_thread_probe(monkeypatch)
+    _FakeChatService.events = [("thought", "Let me check.")]
+    _FakeChatService.fallback_result = {"content": "", "tokens_used": 0}
+    _post(client)
+    assert quota.refunds == ["chat_stream_empty"], quota.every_call
+    _assert_off_loop(seen, quota)
+
+
+def test_the_stream_fallback_failed_refund_runs_off_the_loop(harness, monkeypatch):
+    client, db, _q, _ = harness
+    seen, quota = _loop_thread_probe(monkeypatch)
+    _FakeChatService.events = [("thought", "Let me check.")]
+    _FakeChatService.fallback_result = None
+    _post(client)
+    assert quota.refunds == ["chat_stream_fallback_failed"], quota.every_call
+    _assert_off_loop(seen, quota)
+
+
+def test_the_stream_persist_failed_refund_runs_off_the_loop(harness, monkeypatch):
+    client, db, _q, _ = harness
+    seen, quota = _loop_thread_probe(monkeypatch)
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_messages", RuntimeError("insert died"))
+    _post(client)
+    assert quota.refunds == ["chat_stream_persist_failed"], quota.every_call
+    _assert_off_loop(seen, quota)
+
+
+def test_the_stream_cache_hit_settlement_runs_off_the_loop(harness, monkeypatch):
+    client, db, _q, _ = harness
+    seen, quota = _loop_thread_probe(monkeypatch)
+    db.session_row.update({"stock_id": "SPY", "context_type": "ETF", "reference_id": "SPY"})
+    _FakeChatService.prep_overrides = {
+        "asset_type": "ETF", "is_deep_dive": True, "deep_dive_cached": "CACHED BRIEF " * 30,
+    }
+    r = _post(client, "Give me a deep dive on SPY", context="SPY $500 +1%")
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_cache_hit"], quota.every_call
+    _assert_off_loop(seen, quota)
+
+
+def test_the_send_door_undelivered_refund_runs_off_the_loop(harness, monkeypatch):
+    from app.integrations.gemini import GeminiTimeoutError
+
+    client, db, _q, _ = harness
+    seen, quota = _loop_thread_probe(monkeypatch)
+
+    async def _boom(self, *a, **k):
+        raise GeminiTimeoutError("generate_content timed out after 60s")
+    monkeypatch.setattr(_FakeChatService, "generate_response", _boom)
+    client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert quota.refunds == ["chat_undelivered"], quota.every_call
+    _assert_off_loop(seen, quota)
+
+
+def test_a_settled_send_turn_is_not_settled_again_by_the_backstop(harness, monkeypatch):
+    """The send door's `finally` skips a turn an earlier site already settled — it used to rely
+    on the one-shot flag alone; now it does not even schedule the call."""
+    from app.integrations.gemini import GeminiTimeoutError
+
+    client, db, _q, _ = harness
+    seen, quota = _loop_thread_probe(monkeypatch)
+    quota._settled = True                     # e.g. settled by the unanswered check
+
+    async def _boom(self, *a, **k):
+        raise GeminiTimeoutError("timed out")
+    monkeypatch.setattr(_FakeChatService, "generate_response", _boom)
+    client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert quota.every_call == [], quota.every_call

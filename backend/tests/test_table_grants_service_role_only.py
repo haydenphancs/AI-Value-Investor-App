@@ -53,6 +53,7 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     "163": ("users",),
     "115": ("user_credits",),
     "117": ("credit_purchases",),
+    "196": ("subscription_credit_periods",),
     "107": ("analytics_events",),
     "109": ("push_send_log",),
     "119": ("notification_events",),

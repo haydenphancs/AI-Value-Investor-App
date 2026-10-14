@@ -9,7 +9,9 @@ Upgraded from single-pass Gemini prompt to a true agentic pipeline:
   5. Service also extracts legacy fields (title, executive_summary, etc.) for
      backward compatibility with the research reports list view
 
-On ANY failure → status = "failed", error_message saved to DB.
+On ANY failure → the redacted structured error is saved to the row and the
+exception re-raised; `_run_research_task`'s claim then writes status='failed'
+AND claims the refund in ONE UPDATE (`claim_and_mark_failed`).
 """
 
 import asyncio
@@ -437,10 +439,10 @@ class ResearchService:
             # buyer via _lookup_shared_cache.
             #
             # Raising is what makes the refund fire: _run_research_task only refunds inside
-            # `except Exception`. The `except` below stamps status='failed' and re-raises;
-            # 'failed' is a claimable status, so claim_and_mark_failed still refunds
-            # exactly once. This mirrors the direct path (ticker_report.py's `_degraded`
-            # check leaving `delivered=False`).
+            # `except Exception`. The `except` below stamps the structured error and
+            # re-raises; the worker's claim (claim_and_mark_failed) then marks the row
+            # 'failed' AND refunds it in one claim, exactly once. This mirrors the direct
+            # path (ticker_report.py's `_degraded` check leaving `delivered=False`).
             degraded = report_degraded_reason(ticker_report_data)
             if degraded:
                 logger.warning(
@@ -610,9 +612,17 @@ class ResearchService:
             # (2) a Gemini failure named the vendor ("stage_a_GeminiQuotaError") on the
             # user's screen in the same window. `error_body_from_exception` redacts
             # BEFORE truncating and yields a `user_message` the splitter serves instead.
+            #
+            # The error ONLY — status and progress are left alone (2026-10-12). This used to
+            # stamp status='failed' here, a full claim + refund round trip before
+            # `_run_research_task`'s claim refunded: the 3 s `/status` poll read 'failed',
+            # iOS re-read the balance at once and showed it 20 credits short. Now the claim
+            # writes 'failed' and is_refunded=True in ONE UPDATE, so 'failed' is never
+            # visible before the refund was claimed (an uncharged row the claim cannot match
+            # is marked failed by `_fail_unclaimed_row`).
             from app.api.error_response import error_body_from_exception
             await self._update_status_async(
-                report_id, "failed", 0,
+                report_id, None, None,
                 error_message=json.dumps(error_body_from_exception(
                     e, ticker=ticker, persona=persona_key, step="generate_report",
                 )),
@@ -706,9 +716,9 @@ class ResearchService:
         reports that are about to be refunded.
 
         Never raises: a push failure must not turn a delivered report into a failed one.
-        The `except` in `generate_report` stamps status='failed' and re-raises, which
-        triggers the refund — so an escaping push error would refund a report the user
-        actually received.
+        The `except` in `generate_report` stamps the error and re-raises, which triggers
+        the worker's mark-failed + refund claim — so an escaping push error would refund a
+        report the user actually received.
         """
         try:
             from app.services.notification_kinds import KIND_RESEARCH_COMPLETE
@@ -760,8 +770,8 @@ class ResearchService:
     async def _update_status_async(
         self,
         report_id: str,
-        status: str,
-        progress: int,
+        status: Optional[str],
+        progress: Optional[int],
         current_step: Optional[str] = None,
         error_message: Optional[str] = None,
     ) -> None:
@@ -778,8 +788,8 @@ class ResearchService:
     def _update_status(
         self,
         report_id: str,
-        status: str,
-        progress: int,
+        status: Optional[str],
+        progress: Optional[int],
         current_step: Optional[str] = None,
         error_message: Optional[str] = None,
     ):
@@ -801,8 +811,16 @@ class ResearchService:
              land — a permanently "processing" row that no longer owed anything.
 
         Both are silent: no exception, no log, just a row in a state nothing owns.
+
+        `status` / `progress` of None leave that column alone — the failure stamp writes
+        only the error, so the terminal 'failed' stays the claim's to write. An update with
+        nothing to set is not sent.
         """
-        update: Dict[str, Any] = {"status": status, "progress": progress}
+        update: Dict[str, Any] = {}
+        if status is not None:
+            update["status"] = status
+        if progress is not None:
+            update["progress"] = progress
         if current_step:
             update["current_step"] = current_step
         if error_message:
@@ -811,6 +829,8 @@ class ResearchService:
             # cover the database, so it is applied to the persisted text itself.
             from app.log_redaction import redact_secrets
             update["error_message"] = redact_secrets(error_message)
+        if not update:
+            return
         try:
             self.supabase.table("research_reports").update(update).eq(
                 "id", report_id

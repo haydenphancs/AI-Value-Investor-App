@@ -52,6 +52,10 @@ KIND_REFUND = "refund"
 KIND_GRANT = "grant"
 KIND_PURCHASE = "purchase"
 KIND_REVOKE = "revoke"
+# The unspent MONTHLY credits a reset retired (migration 194). Its own kind, not `revoke`:
+# iOS draws `revoke` as a caution mark, and an expiry is routine — it happens every month.
+# Older builds draw an unknown kind with their neutral default glyph and this title.
+KIND_EXPIRE = "expire"
 KIND_OTHER = "other"
 
 # ── how to read `ref_id` for a given reason ──────────────────────────────────
@@ -59,7 +63,10 @@ KIND_OTHER = "other"
 # with the wrong parser is how a month stamp or an Apple transaction id ends up rendered
 # at a user as if it were a ticker.
 _REF_NONE = "none"      # an ET month stamp ("2026-08") or nothing meaningful
-_REF_REPORT = "report"  # "ORCL"  or  "ORCL:warren_buffett"
+_REF_REPORT = "report"  # "ORCL" (legacy deep) · "ORCL:{report_uuid}" (deep, 2026-10-12) ·
+                        # "ORCL:warren_buffett" (legacy direct) ·
+                        # "ORCL:warren_buffett:{uuid4hex}" (direct, 2026-10-12)
+                        # — the ticker is always the head before the first ':'
 _REF_CHAT = "chat"      # "report_chat:ORCL:{uuid}"  or  "{session_uuid}:{uuid}"
 _REF_PACK = "pack"      # an Apple StoreKit transaction id
 
@@ -72,9 +79,14 @@ _REPORT_CHAT_PREFIX = "report_chat:"
 #:   chat_charge              endpoints/chat.py (ticker_report.py's report-chat route was deleted 2026-09-11)
 #:   report_refund*           endpoints/research.py, endpoints/ticker_report.py,
 #:                            services/research_reconciliation_service.py
+#:                            (`_reconciled` / `_deleted` through `refund_report_charge`)
+#:   report_precharge_unconfirmed  endpoints/research.py, endpoints/ticker_report.py
 #:   chat_*                   endpoints/chat.py (ticker_report.py's report-chat route was deleted 2026-09-11)
 #:   grant / monthly_reset    SQL: create_user_credits(), ensure_credit_period()
-#:   tier_upgrade/_revoked    SQL: grant_tier_upgrade(), revoke_tier_credits()
+#:   monthly_expired          SQL: ensure_credit_period() (migrations 194, 196)
+#:   plan_period/_reinstated  SQL: ensure_credit_period() (migration 196)
+#:   tier_upgrade/_revoked    SQL: ensure_credit_period() (196; grant_tier_upgrade() before it),
+#:                            revoke_tier_credits()
 #:   pack_purchase/_revoked   SQL: add_purchased_credits(), revoke_purchased_credits()
 #:   tester_grant             scripts/seed_testflight_testers.py  ← outside app/, easy to miss
 _REASONS: Dict[str, Tuple[str, str, str]] = {
@@ -85,6 +97,11 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     "report_refund": (KIND_REFUND, "Refund · research report", _REF_REPORT),
     "report_refund_deleted": (KIND_REFUND, "Refund · report deleted", _REF_REPORT),
     "report_refund_reconciled": (KIND_REFUND, "Refund · report didn't finish", _REF_REPORT),
+    # The report precharge's outcome was lost to a transport blip; the request is refused
+    # with 409 and this compensating refund is attempted on the charge's own ref (both report
+    # doors, 2026-10-12). It matches a debit only when the charge actually landed, so most of
+    # these never write a row — and when one does, the matching debit renders as reversed.
+    "report_precharge_unconfirmed": (KIND_REFUND, "Refund · research report", _REF_REPORT),
     # chat refunds — each names the actual reason, because "why did I get a credit back"
     # is the question this screen exists to answer
     "chat_refund": (KIND_REFUND, "Refund · Ask Cay AI", _REF_CHAT),
@@ -106,9 +123,20 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     "grant": (KIND_GRANT, "Welcome credits", _REF_NONE),
     "monthly_reset": (KIND_GRANT, "Monthly credits", _REF_NONE),
     "tier_upgrade": (KIND_GRANT, "Plan credits", _REF_NONE),
+    # One allocation per Apple paid period (migration 196): written when a subscription starts,
+    # renews or is upgraded. `ref_id` is the subscription's original transaction id.
+    "plan_period": (KIND_GRANT, "Plan credits", _REF_NONE),
+    # Apple reversed a refund (REFUND_REVERSED): the refunded period comes back with exactly
+    # what the refund removed (migration 196). `ref_id` is the original transaction id.
+    "plan_reinstated": (KIND_GRANT, "Plan credits restored", _REF_NONE),
     "tester_grant": (KIND_GRANT, "TestFlight credits", _REF_NONE),
     # removals
     "tier_revoked": (KIND_REVOKE, "Plan credits removed", _REF_NONE),
+    # expiries — GRANTED credits only (purchased credits never expire, App Store 3.1.1). Each
+    # boundary ledgers what the old period still held right before its new allocation's row
+    # (`monthly_reset` on the 1st or at a lapse, `plan_period` when a paid period starts — 196),
+    # so the statement adds up across periods (migration 194). `ref_id` is NULL.
+    "monthly_expired": (KIND_EXPIRE, "Unused monthly credits expired", _REF_NONE),
     # purchases
     "pack_purchase": (KIND_PURCHASE, "Credit pack", _REF_PACK),
     "pack_revoked": (KIND_REVOKE, "Credit pack refunded", _REF_PACK),
@@ -178,7 +206,8 @@ def _looks_like_ticker(value: Any) -> bool:
 
 
 def _ticker_from_report_ref(ref_id: Any) -> Optional[str]:
-    """`"ORCL"` → ORCL · `"ORCL:warren_buffett"` → ORCL · anything odd → None.
+    """`"ORCL"` → ORCL · `"ORCL:{report_uuid}"` → ORCL · `"ORCL:warren_buffett"` → ORCL ·
+    `"ORCL:warren_buffett:{uuid4hex}"` → ORCL · anything odd → None.
 
     The persona half is deliberately dropped: rendering it needs a key→display-name map,
     which is one more table to drift out of sync for something the reader did not ask.

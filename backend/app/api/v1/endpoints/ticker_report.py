@@ -22,11 +22,12 @@ Endpoints:
 """
 
 import asyncio
+import copy
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 from fastapi import APIRouter, Depends, Header, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from app.services.dcf_report_gate import report_dcf_source_matches, strip_caydex_if_disabled
@@ -43,7 +44,15 @@ from app.dependencies import (
     ReportRateLimit,
 )
 from app.schemas.ticker_report import TickerReportResponse
-from app.services.credit_service import CreditService, CreditServiceUnavailable
+from app.services.credit_service import (
+    CreditService,
+    CreditServiceUnavailable,
+    charge_off_loop,
+    direct_report_charge_ref,
+    refund_did_not_happen,
+    settle_detached,
+    settle_off_loop,
+)
 from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
@@ -78,6 +87,13 @@ LEGACY_CACHE_TTL_HOURS = 24
 # check and the increment below have no `await` between them.
 _INFLIGHT_REPORTS = 0
 
+# Per-user single-flight for the BILLABLE path: (user_id, TICKER, persona) → the leader's
+# future, resolved with whatever the leader returned. Process-local, so correct only under
+# ONE uvicorn worker (pinned by tests/test_deploy_command_parity.py). See `get_ticker_report`.
+_USER_GENERATIONS: Dict[Tuple[str, str, str], "asyncio.Future[Any]"] = {}
+# The leader's result when it never returned (an exception escaped, or it was cancelled).
+_LEADER_DIED = object()
+
 
 @router.get("/{ticker}/report")
 async def get_ticker_report(
@@ -91,7 +107,9 @@ async def get_ticker_report(
 
     Billing: a cache HIT is free; a cache MISS runs the full AI pipeline and costs
     `CreditService.DEEP_RESEARCH_COST` credits, charged upfront and refunded on ANY
-    non-delivery (generation error, schema drift, or client disconnect).
+    non-delivery (generation error, a degraded report, schema drift, or a deploy cancelling
+    the request). A same-user request for a generation that is still running joins it and is
+    never charged a second time.
 
     ACCOUNT-ONLY. This used to accept guests, metered per install against
     `GUEST_REPORT_MONTHLY_LIMIT` (migration 106) keyed off the `X-Guest-Id`-derived
@@ -110,7 +128,6 @@ async def get_ticker_report(
     the charge and the admission gate fire strictly on a genuine generation, never
     on a cache hit.
     """
-    global _INFLIGHT_REPORTS
     ticker = ticker.upper().strip()
 
     if not ticker or len(ticker) > 10:
@@ -179,6 +196,79 @@ async def get_ticker_report(
         result, err = _validate_report(cached, ticker, persona)
         return err if err is not None else result
 
+    # ── PER-USER SINGLE-FLIGHT: one billable generation per (user, ticker, persona).
+    #    A same-user request that finds its own generation still running JOINS it — no
+    #    admission slot, no second precharge — and gets the leader's answer (its report, or
+    #    its error). Without this a re-send of a slow generation (iOS's Retry after its
+    #    120 s timeout, or an auto-retry after a bare edge 5xx) precharged 20 credits again
+    #    and joined the SAME agent run (`run_agent_deduped` shares compute across callers
+    #    but cannot know about billing): 40 credits for one report.
+    #
+    #    Placement: AFTER both free cache paths (a hit costs nothing to serve twice) and
+    #    BEFORE the admission gate and the precharge. The get and the set below have no
+    #    `await` between them, so they are atomic on the one event loop — correct only
+    #    under ONE uvicorn worker, which `tests/test_deploy_command_parity.py` pins. Accepted
+    #    residual: a retry whose cache read started before the leader's cache write, and
+    #    whose map check runs after the leader popped, becomes a new leader and charges.
+    key = (str(user["id"]), ticker, persona)
+    leader = _USER_GENERATIONS.get(key)
+    if leader is not None:
+        logger.info(
+            "Report %s/%s already generating for user=%s — joining it (no second charge)",
+            ticker, persona, user["id"],
+        )
+        return await _join_user_generation(leader, ticker, persona)
+    fut: "asyncio.Future[Any]" = asyncio.get_running_loop().create_future()
+    _USER_GENERATIONS[key] = fut
+    result: Any = _LEADER_DIED
+    try:
+        result = await _billable_generation(ticker, persona, user)
+        return result
+    finally:
+        if _USER_GENERATIONS.get(key) is fut:
+            _USER_GENERATIONS.pop(key, None)
+        if not fut.done():
+            fut.set_result(result)
+
+
+async def _join_user_generation(leader: "asyncio.Future[Any]", ticker: str, persona: str):
+    """A follower's answer: a COPY of what the leader returned, never a second charge.
+
+    Shielded, so a follower that is itself cancelled cannot cancel the future the leader and
+    any other follower share. A leader that died (an exception escaped, or it was cancelled)
+    answers a retryable 409 SYSTEM_BUSY — its own `finally` already handed its charge back.
+    """
+    value = await asyncio.shield(leader)
+    if value is _LEADER_DIED:
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message=f"the joined generation for {ticker}/{persona} did not finish",
+            details={"ticker": ticker, "persona": persona, "step": "joined_generation"},
+        )
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    body = getattr(value, "body", None)
+    if body is None:
+        return value
+    # A Response is one-shot (Starlette streams its body to ONE client), so each follower
+    # gets its own copy of the leader's error.
+    return Response(
+        content=bytes(body),
+        status_code=getattr(value, "status_code", 500),
+        media_type="application/json",
+    )
+
+
+async def _billable_generation(ticker: str, persona: str, user: dict):
+    """The billable half of `get_ticker_report`: admission, charge, generate, settle.
+
+    Only ever entered by a single-flight LEADER. Every exit settles the charge exactly once:
+    delivered → kept; anything else → refunded (inline in the degraded branch, else in
+    `finally`), on the ONE unique ref the charge used.
+    """
+    global _INFLIGHT_REPORTS
+
     # ── ADMISSION GATE: shed load past a safe backlog. Placement is load-bearing
     #    on three counts:
     #      1. AFTER both free cache paths — shedding a cache hit would turn a
@@ -199,40 +289,89 @@ async def get_ticker_report(
             message=f"{_INFLIGHT_REPORTS} report generations already in flight (cap {cap})",
             details={"ticker": ticker, "persona": persona, "step": "admission"},
         )
-    _INFLIGHT_REPORTS += 1
 
-    # Everything from here on lives inside the try, so the slot is released on
-    # EVERY exit — including the two credit early-returns below, which would
-    # otherwise leak a slot per failure and permanently brick the endpoint.
     credit_service = CreditService()
+    # ONE local for the charge, its compensation and its refund. Unique per generation
+    # (`TICKER:persona:{uuid}`): the old shared `TICKER:persona` ref meant a refund could
+    # pair with an EARLIER delivered report's debit, so a compensation on it minted credits.
+    charge_ref = direct_report_charge_ref(ticker, persona)
     charged = False
     delivered = False
+    unwinding = False
+    # Set BEFORE a refund is awaited: `settle_off_loop` finishes it even if that wait is
+    # cancelled, so the `finally` must not issue a second one.
+    refund_issued = False
+
+    def _refund_sync():
+        return credit_service.refund_ledgered(
+            user["id"], CreditService.DEEP_RESEARCH_COST,
+            reason="report_refund", ref_id=charge_ref,
+        )
+
+    def _hand_back_abandoned_charge(balance, exc):
+        # This frame was cancelled WHILE the precharge ran, so it never learned the outcome
+        # (and `charged` stays False): hand back whatever landed, on the same unique ref.
+        if exc is None and balance is None:
+            return None                                   # insufficient: nothing debited
+        if exc is None:
+            return credit_service.refund_ledgered(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_refund", ref_id=charge_ref,
+            )
+        return credit_service.refund_ledgered(
+            user["id"], CreditService.DEEP_RESEARCH_COST,
+            reason="report_precharge_unconfirmed", ref_id=charge_ref, quiet_no_match=True,
+        )
+
+    # Taken immediately before the try (no await since the cap check), so the slot is
+    # released on EVERY exit — including the two credit early-returns below, which would
+    # otherwise leak a slot per failure and permanently brick the endpoint.
+    _INFLIGHT_REPORTS += 1
     try:
         # ── BILLABLE PATH: cache miss = a fresh AI generation. Authenticated users
         #    are charged upfront via the unified gate (reset-if-due + atomic debit +
         #    ledger, one round-trip). Refund on ANY non-delivery via the finally below.
-        #    Synchronous endpoint → the refund fires at most once, so the non-idempotent
-        #    refund RPC is safe without the is_refunded CAS.
+        #    One request settles its own charge, so the refund fires at most once without
+        #    the is_refunded CAS the deep door needs.
         #
         #    The guest branch that used to live here claimed against `guest_report_budget`
         #    keyed on `identity_key(user, x_guest_id)` — a UUID5 of a CLIENT-supplied header.
         #    Rotating it bought a fresh allowance per request, so this endpoint (the same
         #    ~17 Gemini + ~20 FMP cost as /research/generate on a miss) was unmetered against
         #    anyone willing to send a new header. Account-only closes that.
+        #
+        #    Off the loop (a sync RPC, invariant #6) through `charge_off_loop`, which also
+        #    refunds a charge that lands after a deploy cancelled this wait.
         try:
-            new_remaining = credit_service.precharge(
-                user["id"], CreditService.DEEP_RESEARCH_COST,
-                reason="report_charge", ref_id=f"{ticker}:{persona}",
+            new_remaining = await charge_off_loop(
+                lambda: credit_service.precharge(
+                    user["id"], CreditService.DEEP_RESEARCH_COST,
+                    reason="report_charge", ref_id=charge_ref,
+                ),
+                on_abandoned=_hand_back_abandoned_charge,
+                what=f"report_charge {charge_ref}",
             )
         except CreditServiceUnavailable:
             # Transient Supabase/RPC failure — retryable SYSTEM_BUSY (never
             # INSUFFICIENT_CREDITS: a DB blip must not tell a paying user
-            # they're broke). Nothing was debited, so `charged` stays False.
+            # they're broke). A transport failure does NOT prove nothing was debited (a 520
+            # after the commit lands here too), so compensate NOW on the same unique ref:
+            # `refunded` if the debit landed, a quiet `no_matching_debit` if it never did.
+            # `charged` stays False, so the `finally` cannot refund a second time.
+            await settle_off_loop(
+                lambda: credit_service.refund_ledgered(
+                    user["id"], CreditService.DEEP_RESEARCH_COST,
+                    reason="report_precharge_unconfirmed", ref_id=charge_ref,
+                    quiet_no_match=True,
+                ),
+                what=f"report_precharge_unconfirmed {charge_ref}",
+            )
             return make_error_response(
                 ErrorCode.SYSTEM_BUSY,
                 status_code=409,
                 message="spend_credits RPC unavailable (transient)",
-                details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge"},
+                details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge",
+                         "charge_ref": str(charge_ref)},
             )
         if new_remaining is None:
             return make_error_response(
@@ -255,21 +394,31 @@ async def get_ticker_report(
         # open, 429s exhausted, 5xx) Stage A falls back to an empty shell and every Stage B
         # narrative uses its sentinel. The result still validates, so it used to be charged
         # 20 credits and returned as a success — the user paid full price for a blank report.
-        # Returning an error here leaves `delivered` False, so the `finally` refunds.
         # `generate_fresh_report` has already declined to cache it.
+        #
+        # Settled HERE, before answering, so the copy can state what actually happened (the
+        # `finally` then skips it). The copy is hygiene for a web client: iOS maps
+        # GEMINI_UNAVAILABLE to its own text and re-reads the balance itself.
         degraded = report.get("_degraded") if isinstance(report, dict) else None
         if degraded:
             logger.warning(
                 "Degraded report for %s/%s (%s) — refunding rather than delivering a shell",
                 ticker, persona, degraded,
             )
+            refund_issued = True
+            refund_result = await settle_off_loop(
+                _refund_sync, what=f"report_refund {charge_ref}",
+            )
+            returned = not refund_did_not_happen(refund_result)
             return make_error_response(
                 ErrorCode.GEMINI_UNAVAILABLE,
                 message=f"report generation degraded for {ticker}/{persona}: {degraded}",
                 status_code=503,
                 user_message=(
-                    "Analysis is temporarily unavailable. You have not been charged — "
+                    "Analysis is temporarily unavailable. Your credits were returned — "
                     "please try again in a few minutes."
+                    if returned else
+                    "Analysis is temporarily unavailable — please try again in a few minutes."
                 ),
                 action="retry",
             )
@@ -299,42 +448,48 @@ async def get_ticker_report(
         return error_response_from_exception(
             e, ticker=ticker, persona=persona, step="report_generation",
         )
+    except BaseException:
+        # Records the fact only (CancelledError / GeneratorExit / KeyboardInterrupt): the
+        # `finally` below must not await while this frame is being cancelled.
+        unwinding = True
+        raise
     finally:
         _INFLIGHT_REPORTS -= 1
         # `charged`, not `not is_guest`: a precharge that never succeeded must not
-        # be "refunded" (that would CREDIT a user who was never debited).
+        # be "refunded" (that would CREDIT a user who was never debited). And a refund
+        # already settled (the degraded branch) is not issued twice.
         if charged and not delivered:
-            # Non-delivery: generation error, schema drift, or a client disconnect
-            # / CancelledError (a BaseException that `except` misses, but `finally`
-            # always runs). Refund the charge. This is the ONLY backstop — unlike
-            # /research/generate there is no research_reports row for the
-            # reconciliation sweep — so a failed refund gets a greppable REFUND
-            # LEAK marker (logged inside refund_ledgered) for manual correction.
-            # ⚠️ NO "your report didn't finish" PUSH HERE, and a `CancelledError` arm
-            # above would be DEAD CODE — do not add one back. It was added and removed:
+            # Non-delivery: generation error, schema drift, or a CANCELLATION. Refund the
+            # charge. This is the ONLY backstop — unlike /research/generate there is no
+            # research_reports row for the reconciliation sweep — so a failed refund gets a
+            # greppable REFUND LEAK marker (logged inside refund_ledgered, with the ref) for
+            # manual correction.
             #
-            # The premise (FastAPI cancels the handler when the client disconnects, so
-            # only this `finally` runs and the user learns nothing) is FALSE on the
-            # pinned stack. `starlette.routing.request_response` in 0.41.3 is a bare
-            # `response = await f(request)` with no task group and no `http.disconnect`
-            # listener; `BaseHTTPMiddleware` only turns a disconnect into a `receive()`
-            # MESSAGE, which this GET never reads; and uvicorn 0.34 cancels only on
-            # `timeout_graceful_shutdown`, which is unset here. Verified empirically
-            # against this venv: an aborted curl, a hard TCP RST and a SIGTERM mid-request
-            # all left the handler running to completion.
+            # ⚠️ Cancellation IS real here, on a deploy. A client disconnect does not cancel
+            # this handler on the pinned stack (starlette 0.41.3's `request_response` is a
+            # bare `await f(request)` with no task group and no `http.disconnect` listener,
+            # and this GET never reads `receive()`), but uvicorn
+            # 0.34 DOES cancel in-flight requests when `--timeout-graceful-shutdown` expires
+            # — and the Dockerfile CMD sets it to 30 s. A cancelled frame cannot await (the
+            # next await is cancelled at once), so the refund goes to a strongly-held
+            # detached task that the lifespan shutdown drains.
             #
-            # So a backgrounded app is not a non-delivery at all — the handler finishes,
-            # `delivered` is True, the report is CACHED, and the user gets it free on
-            # their next open. That is the right outcome, and a "we couldn't finish this
-            # analysis" push would have been factually wrong.
+            # ⚠️ NO "your report didn't finish" PUSH HERE. A backgrounded app is not a
+            # non-delivery: the handler finishes, `delivered` is True, the report is CACHED,
+            # and the user gets it free on their next open — a "we couldn't finish this
+            # analysis" push would be factually wrong. It was added and removed once.
             #
-            # The one real hole is a Railway SIGKILL past the grace period, which runs no
-            # Python at all and so cannot be closed from here. Unlike /research/generate
-            # there is no `research_reports` row for the reconciliation sweep to find.
-            credit_service.refund_ledgered(
-                user["id"], CreditService.DEEP_RESEARCH_COST,
-                reason="report_refund", ref_id=f"{ticker}:{persona}",
-            )
+            # The one hole left is a Railway SIGKILL past the stop grace (or the drain's own
+            # bound), which runs no Python at all.
+            #
+            # Skipped only when a refund was already issued (the degraded branch settles
+            # before answering, so its copy can state the real outcome).
+            if not refund_issued:
+                refund_issued = True
+                if unwinding:
+                    settle_detached(_refund_sync, what=f"report_refund {charge_ref}")
+                else:
+                    await settle_off_loop(_refund_sync, what=f"report_refund {charge_ref}")
 
 
 def _validate_report(report: dict, ticker: str, persona: str):

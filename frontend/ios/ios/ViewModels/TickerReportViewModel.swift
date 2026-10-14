@@ -352,6 +352,13 @@ class TickerReportViewModel: ObservableObject {
             self.errorAction = AppError.from(error).suggestedAction
             // Don't set reportData — let the error view show with retry button
         }
+        // Re-read the shared balance on EVERY outcome of the paid door: a cache miss
+        // precharges the report's credits (refunded if it is not delivered), a transport
+        // failure says nothing about whether the server charged, and `regenerateForCredits`
+        // arrives here too. Nothing else on this screen would ever tell the Research badge or
+        // the Account card. Fire-and-forget through AppState, which joins and orders reads;
+        // Path A (free) and the refresh-only early returns above do not reach this line.
+        AppActions.shared.refreshCredits()
     }
 
     // MARK: - Detailed-Analysis PDF

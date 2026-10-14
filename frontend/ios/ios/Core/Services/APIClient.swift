@@ -340,10 +340,13 @@ actor APIClient {
             // not tell us whether the origin committed, so re-sending a write repeats its
             // side effects. This used to be unconditional, which meant a dropped response
             // on `POST /research/generate` re-precharged 20 credits per retry — up to 60
-            // for one tap. See the doc comment on `HTTPMethod`.
+            // for one tap. See the doc comment on `HTTPMethod`. A BILLABLE GET
+            // (`isBillableRead`: the report door precharges on a cache miss) is excluded
+            // for the same reason.
             if retryCount > 0,
                case .serverError = error,
-               endpoint.method.isSafeToRetryAfterServerError {
+               endpoint.method.isSafeToRetryAfterServerError,
+               !endpoint.isBillableRead {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 return try await self.request(endpoint: endpoint, responseType: responseType, retryCount: retryCount - 1, allowAuthRetry: allowAuthRetry)
             }
@@ -470,10 +473,11 @@ actor APIClient {
             } else if error.isSignInRequired, allowAuthRetry {
                 _ = await handleUnrecoverableAuthFailure(error, endpoint: endpoint)
             }
-            // GET only — same rule as `request<T>` above (see `HTTPMethod`).
+            // GET only, and never a billable GET — same rule as `request<T>` above.
             if retryCount > 0,
                case .serverError = error,
-               endpoint.method.isSafeToRetryAfterServerError {
+               endpoint.method.isSafeToRetryAfterServerError,
+               !endpoint.isBillableRead {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 return try await downloadData(endpoint: endpoint, retryCount: retryCount - 1, allowAuthRetry: allowAuthRetry)
             }
@@ -726,7 +730,8 @@ actor APIClient {
         // merely lost bills the user twice for one tap. This guard was missing entirely —
         // `attemptFailover` rebuilt and re-sent whatever it was handed, which made the
         // careful GET-only rule on the retry path bypassable through the DEBUG failover.
-        guard endpoint.method.isSafeToRetryAfterServerError else { throw originalError }
+        // A BILLABLE GET (`isBillableRead`) is a re-send that can charge again, too.
+        guard endpoint.method.isSafeToRetryAfterServerError, !endpoint.isBillableRead else { throw originalError }
 
         let env = ServerEnvironmentManager.shared
 
@@ -774,7 +779,8 @@ actor APIClient {
         // merely lost bills the user twice for one tap. This guard was missing entirely —
         // `attemptFailover` rebuilt and re-sent whatever it was handed, which made the
         // careful GET-only rule on the retry path bypassable through the DEBUG failover.
-        guard endpoint.method.isSafeToRetryAfterServerError else { throw originalError }
+        // A BILLABLE GET (`isBillableRead`) is a re-send that can charge again, too.
+        guard endpoint.method.isSafeToRetryAfterServerError, !endpoint.isBillableRead else { throw originalError }
 
         let env = ServerEnvironmentManager.shared
         guard !env.isManualOverride else { throw originalError }
@@ -811,6 +817,7 @@ actor APIClient {
     ) async throws -> (value: T, body: Data) {
         // GET only — the same money rule as `attemptFailover` (a failover is a RE-SEND).
         guard endpoint.method.isSafeToRetryAfterServerError else { throw originalError }
+        guard !endpoint.isBillableRead else { throw originalError }
 
         let env = ServerEnvironmentManager.shared
         guard !env.isManualOverride else { throw originalError }

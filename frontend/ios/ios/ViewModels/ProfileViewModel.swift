@@ -85,6 +85,23 @@ class ProfileViewModel: BaseViewModel {
         appState?.user.credits?.resetsAt
     }
 
+    /// VoiceOver's reading of the "Monthly Credits used/total" row, e.g. "4 of 50 used.
+    /// Resets on Nov 1. Plus 120 purchased credits that never expire".
+    ///
+    /// The row's visual stays "4/50" (owner, 2026-10-12: "4/50 is correct way" — USED of the
+    /// monthly total), but spoken it was "4 slash 50", which reads as either used or left. This
+    /// says which, from the same monthly figures the visual draws, and folds in the bar, the
+    /// purchased row and the reset label, which are hidden from VoiceOver.
+    var creditUsageAccessibilityValue: String {
+        guard appState?.user.credits != nil else { return "Not loaded" }
+        var parts = ["\(creditsUsed) of \(creditsTotal) used", creditResetLabel]
+        if purchasedCredits > 0 {
+            let tail = purchasedCredits == 1 ? "credit that never expires" : "credits that never expire"
+            parts.append("Plus \(purchasedCredits) purchased \(tail)")
+        }
+        return parts.joined(separator: ". ")
+    }
+
     /// Human label for the monthly reset. Derived from the backend `resets_at`
     /// (written by `ensure_credit_period` = next-month boundary in ET). Falls back
     /// to "Renews monthly" when absent (e.g. a brand-new row) or unparseable.
@@ -300,18 +317,12 @@ class ProfileViewModel: BaseViewModel {
     }
 
     func loadCredits() {
-        // A signed-out caller is NOT rejected by this endpoint — `.getUserCredits` is
-        // `.guestAllowed`, and the backend resolves a tokenless request to the SHARED guest
-        // sentinel, which is seeded ~100,000 credits. Loading that wrote a balance that is not
-        // the user's into `AppState.user.credits`, and every other surface reads AppState: the
-        // Wiser/Learn card and the Research badge then displayed the sentinel's credits as
-        // theirs, and `canGenerateResearch` returned true for someone who cannot generate.
-        //
-        // Clearing rather than merely skipping matters too: without it a balance left over from
-        // a previous session survives a sign-out on this screen.
-        //
-        // `ResearchViewModel.loadCredits()` has carried this guard since the same bug was found
-        // there; Profile is the other caller and was missed.
+        // `.getUserCredits` is `.signInRequired`: APIClient refuses an unarmed call before it is
+        // sent, so it can no longer reach the shared guest sentinel's ~100,000 seeded credits
+        // (which once showed as this user's balance on every surface that reads AppState).
+        // The explicit guard stays anyway, because a signed-out viewer of this screen must
+        // also CLEAR a leftover balance — without it one from a previous session survives a
+        // sign-out here.
         //
         // ⚠️ `.restoring` is NOT the signed-out case. We hold a credential that is healing, so
         // clearing here would blank a balance the user can currently see — and `restoreSession`
@@ -321,12 +332,16 @@ class ProfileViewModel: BaseViewModel {
             appState?.user.credits = nil
             return
         }
+        // Through AppState, never a direct GET + `user.credits =`: its read joins one already
+        // in flight, lands only when it is newer than the balance shown, and is fenced to the
+        // identity that sent it — the direct write here could put an ended session's balance
+        // back after a sign-out. A real failure still reaches this screen's alert: thrown into
+        // `performTask`, whose `setError` drops cancellation.
         performTask("loadCredits", showLoading: false) { [weak self] in
-            let credits = try await self?.apiClient.request(
-                endpoint: .getUserCredits,
-                responseType: CreditInfo.self
-            )
-            self?.appState?.user.credits = credits
+            guard let appState = self?.appState else { return }
+            if let failure = await appState.refreshCredits() {
+                throw failure
+            }
         }
     }
 

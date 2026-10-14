@@ -139,6 +139,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         await MainActor.run {
             syncBadge(from: info)
             Analytics.shared.track(.pushReceived, ["kind": .string(kindDimension(info))])
+            // A report finished or was refunded while the app is open: re-read the wallet.
+            PushNotificationManager.shared.noteCreditMovingPush(info)
         }
         // `.list` is not optional chrome. Without it a notification that arrives while
         // the app is in the FOREGROUND shows its banner and is then gone — it is never
@@ -202,6 +204,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             // was a silent no-op: the banner was tappable, the tap did nothing, and nothing
             // was logged.
             PushNotificationManager.shared.handleTap(pushed)
+            // The tap may be the first this process hears of a report's charge settling.
+            PushNotificationManager.shared.noteCreditMovingPush(info)
         }
 
         // RECONCILE, never adopt — this is the phantom-badge fix.

@@ -310,6 +310,11 @@ struct ProfileView: View {
             VStack(spacing: AppSpacing.sm) {
                 // Usage Card
                 VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    // ONE VoiceOver element for the whole usage card. The visual stays
+                    // "used/total" (owner, 2026-10-12: "4/50 is correct way"), but spoken it was
+                    // "4 slash 50", which reads as used OR left. The value says which, and folds
+                    // in the bar, the purchased row and the reset date (hidden below).
+                    // Accessibility modifiers only — no layout or style change.
                     HStack {
                         Text("Monthly Credits")
                             .font(AppTypography.bodySmallEmphasis)
@@ -321,6 +326,9 @@ struct ProfileView: View {
                             .font(AppTypography.dataHeading)
                             .foregroundColor(AppColors.primaryBlue)
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Monthly credits")
+                    .accessibilityValue(viewModel.creditUsageAccessibilityValue)
 
                     // Progress Bar
                     GeometryReader { geometry in
@@ -338,6 +346,7 @@ struct ProfileView: View {
                         }
                     }
                     .frame(height: 8)
+                    .accessibilityHidden(true)
 
                     // Purchased credits, when there are any.
                     //
@@ -357,6 +366,7 @@ struct ProfileView: View {
                                 .foregroundColor(AppColors.gain)
                             Spacer()
                         }
+                        .accessibilityHidden(true)
                     }
 
                     // Reset Date + Add Credits
@@ -364,6 +374,7 @@ struct ProfileView: View {
                         Text(viewModel.creditResetLabel)
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
+                            .accessibilityHidden(true)
 
                         Spacer()
 

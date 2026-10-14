@@ -1,14 +1,15 @@
 """Backend↔iOS response-shape parity for the AUTH and MONEY paths.
 
 WHY THIS EXISTS. Eight Pydantic response models that iOS decodes on the sign-in and payment
-paths had ZERO test coverage of any kind. `.claude/rules/testing.md` calls this class of gap
-out by name: "A failure here means iOS will crash on decode in production — the test is a
+paths had ZERO test coverage of any kind (a ninth — the Reports list item, whose
+`refund_confirmed` drives the "Refund pending" chip — joined them on 2026-10-12).
+`.claude/rules/testing.md` calls this class of gap out by name: "A failure here means iOS will crash on decode in production — the test is a
 guard rail, not a nice-to-have." The decoder is a plain `JSONDecoder` with hand-written
 `CodingKeys` (`APIClient.swift:61-67`), so ADDING a backend field is safe, while renaming one,
 dropping one, or letting one go null that Swift declares non-optional is an instant crash on
 that screen — sign-in, credits, or a completed purchase.
 
-⚠️ ALL NINE PAIRS AGREE TODAY. This module is REGRESSION INSURANCE, not a bug report. If a
+⚠️ ALL TEN PAIRS AGREE TODAY. This module is REGRESSION INSURANCE, not a bug report. If a
 test here is red the first time you run it, the test is wrong — do not "fix" a correct backend
 to satisfy it.
 
@@ -70,7 +71,7 @@ class Pair:
         return f"{self.model}->{self.swift_struct}"
 
 
-# NINE pairs for eight models: `UserCreditsResponse` has TWO independent decoders for one
+# TEN pairs for nine models: `UserCreditsResponse` has TWO independent decoders for one
 # endpoint. `CreditInfo` and `BackendCreditsResponse` are byte-identical shapes maintained in
 # two files — if either drifts, one of the two call paths breaks and the other does not. That
 # duplication is a latent bug in itself, and listing both is what makes it visible.
@@ -93,6 +94,10 @@ _PAIRS = (
          "Core/Services/TaskPollingManager.swift", "ResearchGenerationResponse"),
     Pair("ResearchStatusResponse", "app.schemas.research",
          "Core/Services/TaskPollingManager.swift", "ResearchStatusResponse"),
+    # GET /research/reports (`response_model=List[ResearchReportListItem]`). Its
+    # `refund_confirmed` (migration 195) decides "Refunded N credits" vs "Refund pending".
+    Pair("ResearchReportListItem", "app.schemas.research",
+         "Core/Services/TaskPollingManager.swift", "BackendReportListItem"),
 )
 
 _IDS = [f"{p.model}->{p.swift_struct}" for p in _PAIRS]
@@ -321,8 +326,8 @@ def test_the_over_tolerant_trio_stays_over_tolerant():
     """`PasswordChangedResponse` declares three backend-REQUIRED fields as `String?` in Swift,
     on purpose: the app and backend deploy independently, so a build carrying this type can hit
     a Railway instance predating token rotation and get a bare `{"message": …}`. That is the
-    only intentional over-tolerance in the nine — pinning it converts the explanatory comment
-    at `APIEndpoint.swift:1074-1080` into an assertion."""
+    only intentional over-tolerance among the auth/payment pairs — pinning it converts the
+    explanatory comment at `APIEndpoint.swift:1074-1080` into an assertion."""
     _, props, _ = _parsed(next(p for p in _PAIRS if p.swift_struct == "PasswordChangedResponse"))
     assert {p for p, opt in props.items() if opt} == {"accessToken", "refreshToken", "userId"}
     model = _model(next(p for p in _PAIRS if p.model == "PasswordChangedResponse"))
@@ -336,7 +341,7 @@ def test_the_over_tolerant_trio_stays_over_tolerant():
 
 def test_the_ios_decoder_is_plain():
     """Every comparison here matches against the CodingKeys RAW VALUE. If the decoder ever
-    gained `.convertFromSnakeCase`, all nine DTOs would break at runtime while this module
+    gained `.convertFromSnakeCase`, all ten DTOs would break at runtime while this module
     stayed green — it would be measuring a contract the app no longer uses."""
     src = _code(_IOS / "Core/Services/APIClient.swift")
     dec = src[src.index("self.decoder = JSONDecoder()"):src.index("self.encoder = JSONEncoder()")]
@@ -372,27 +377,43 @@ def test_no_model_declares_a_field_alias():
     assert not offenders, "\n".join(offenders)
 
 
+# `(?:List\[)?`: the Reports list returns `List[ResearchReportListItem]`, which a bare
+# `(\w+)` reads as "List" — the pair would describe a route this guard cannot see.
+_RESPONSE_MODEL = re.compile(r"response_model=(?:List\[)?(\w+)")
+
+
 def test_endpoints_still_declare_these_response_models():
     """Without this, the pair table can describe a route that no longer returns that model."""
     expected = {
         "app/api/v1/endpoints/auth.py": {"TokenResponse", "SignUpResponse", "PasswordChangedResponse"},
         "app/api/v1/endpoints/users.py": {"UserResponse", "UserCreditsResponse"},
-        "app/api/v1/endpoints/research.py": {"ResearchGenerationResponse", "ResearchStatusResponse"},
+        "app/api/v1/endpoints/research.py": {"ResearchGenerationResponse", "ResearchStatusResponse",
+                                             "ResearchReportListItem"},
         "app/api/v1/endpoints/billing.py": {"VerifyPurchaseResponse"},
     }
     for rel, names in expected.items():
         src = (_REPO / "backend" / rel).read_text()
-        declared = set(re.findall(r"response_model=(\w+)", src))
+        declared = set(_RESPONSE_MODEL.findall(src))
         missing = names - declared
         assert not missing, f"{rel} no longer declares {missing}"
 
 
-def test_pair_table_covers_all_eight_models():
+def test_pair_table_covers_all_nine_models():
     assert {p.model for p in _PAIRS} == {
         "TokenResponse", "SignUpResponse", "PasswordChangedResponse", "VerifyPurchaseResponse",
         "UserCreditsResponse", "UserResponse", "ResearchGenerationResponse",
-        "ResearchStatusResponse"}
-    assert len(_PAIRS) == 9, "UserCreditsResponse has two decoders; both must stay listed"
+        "ResearchStatusResponse", "ResearchReportListItem"}
+    assert len(_PAIRS) == 10, "UserCreditsResponse has two decoders; both must stay listed"
+
+
+def test_the_response_model_scan_reads_list_wrapped_models():
+    """Non-vacuity for the scan above: `List[X]` must yield X, not "List"."""
+    src = ('@router.get("/a", response_model=List[ResearchReportListItem])\n'
+           '@router.get("/b", response_model=ResearchStatusResponse)\n')
+    assert set(_RESPONSE_MODEL.findall(src)) == {
+        "ResearchReportListItem", "ResearchStatusResponse"}
+    assert set(re.findall(r"response_model=(\w+)", src)) == {
+        "List", "ResearchStatusResponse"}, "premise: the old scan was blind to List[...]"
 
 
 # ── Anti-vacuity ─────────────────────────────────────────────────────────────
@@ -403,7 +424,7 @@ def test_swift_parser_finds_the_real_population():
         _, props, _ = _parsed(pair)
         assert len(props) >= 3, f"{pair.swift_struct}: only {len(props)} properties parsed"
         total += len(props)
-    assert total >= 38, f"only {total} properties across all nine pairs — parser went blind"
+    assert total >= 52, f"only {total} properties across all ten pairs — parser went blind"
 
 
 def test_the_struct_resolver_does_not_invent_structs():

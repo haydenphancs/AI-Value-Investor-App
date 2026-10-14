@@ -163,8 +163,13 @@ async def test_the_e2_failure_stamp_is_structured_and_redacted(monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         await svc.generate_report("rid-1", "AAPL", "warren_buffett", "uid-1")
 
-    failed = [u for u in sb.updates if u.get("status") == "failed"]
-    assert failed, f"no failed stamp was written: {sb.updates}"
+    # The stamp is ERROR-ONLY since 2026-10-12: 'failed' is the worker claim's to write, in the
+    # same UPDATE that claims the refund, so the poll never reads 'failed' before the refund.
+    assert not any(u.get("status") == "failed" for u in sb.updates), (
+        f"generate_report pre-stamped 'failed' again: {sb.updates}"
+    )
+    failed = [u for u in sb.updates if "error_message" in u and "status" not in u]
+    assert failed, f"no error stamp was written: {sb.updates}"
     raw = failed[-1]["error_message"]
     assert _KEY not in raw, f"the FMP key reached research_reports.error_message: {raw[:200]}"
     assert "apikey=***" in raw
@@ -202,7 +207,9 @@ async def test_a_gemini_failure_never_names_the_vendor_on_the_status_surface(mon
     with pytest.raises(GeminiQuotaError):
         await svc.generate_report("rid-2", "AAPL", "warren_buffett", "uid-1")
 
-    raw = [u for u in sb.updates if u.get("status") == "failed"][-1]["error_message"]
+    assert not any(u.get("status") == "failed" for u in sb.updates)
+    raw = [u for u in sb.updates
+           if "error_message" in u and "status" not in u][-1]["error_message"]
     from app.api.v1.endpoints.research import _split_structured_error
     code, msg = _split_structured_error(raw)
     assert code and msg

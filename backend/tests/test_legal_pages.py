@@ -700,6 +700,70 @@ def test_the_carve_out_scan_is_not_vacuous():
         assert "we guarantee your investment returns" not in prose
 
 
+# ── When credits refill: paid = per billing period, Free = the calendar month (196) ──
+#
+# Migration 196 moved a paid plan's allowance off the ET calendar month and onto its Apple
+# billing period, with an upgrade carrying the unused paid credits up to the share of the
+# period already used. The Terms (the App Store EULA, linked from the purchase sheet) and the
+# Support page both used to promise the calendar-month reset and the old "raised mid-month"
+# upgrade, so the website and the in-app mirrors are pinned to the new clauses TOGETHER —
+# the 2026-08-13 carve-out shipped on the website and was forgotten in the app.
+_CREDIT_PERIOD_CLAUSES = {
+    "terms": (
+        "terms.html",
+        "TermsOfUseView.swift",
+        [
+            "free accounts receive a monthly allowance of credits that resets at the start of each calendar month",
+            "paid subscription tiers provide an allowance for each billing period",
+            "unused allowance credits do not roll over into the next billing period",
+            "up to the share of the current billing period that has already passed",
+        ],
+    ),
+    "support": (
+        "support.html",
+        "SupportView.swift",
+        [
+            "the free allowance resets at the start of each calendar month",
+            "a pro or max allowance follows your billing period instead",
+            "unused allowance credits do not roll over into the next period",
+            "up to the share of your pro billing period that had already passed",
+        ],
+    ),
+}
+# The promises 196 retired. Either one back on a page states a reset the code no longer does.
+_RETIRED_CREDIT_PROMISES = (
+    "your monthly allowance resets at the start of each calendar month",
+    "if you upgrade mid-month",
+)
+
+
+@pytest.mark.parametrize("doc", sorted(_CREDIT_PERIOD_CLAUSES))
+def test_the_website_and_the_app_state_the_same_credit_period_rules(doc):
+    html_name, screen, clauses = _CREDIT_PERIOD_CLAUSES[doc]
+    html = _normalized_prose(
+        (_BACKEND / "app" / "templates" / "legal" / html_name).read_text(encoding="utf-8"),
+        strip_tags=True,
+    )
+    prose = _normalized_prose(
+        _swift_user_facing_strings(_IOS_SCREENS_DIR / screen), strip_tags=False
+    )
+    assert len(prose) > 1000, f"{screen} scan returned {len(prose)} chars — extractor drifted"
+    for clause in clauses:
+        assert clause in html, f"{html_name} no longer states {clause!r}"
+        assert clause in prose, f"{screen} does not state {clause!r}, but {html_name} does"
+    for retired in _RETIRED_CREDIT_PROMISES:
+        assert retired not in html, f"{html_name} still promises {retired!r}"
+        assert retired not in prose, f"{screen} still promises {retired!r}"
+
+
+def test_the_authored_terms_match_the_served_terms():
+    """`documents/legal/terms.html` is the authored copy; the backend serves its own. A clause
+    edited in one and not the other publishes two different EULAs."""
+    served = (_BACKEND / "app" / "templates" / "legal" / "terms.html").read_text(encoding="utf-8")
+    authored = (_BACKEND.parent / "documents" / "legal" / "terms.html").read_text(encoding="utf-8")
+    assert served == authored
+
+
 # ── The third-party-AI consent promise (App Review 5.1.2(i)) ──────────────────
 #
 # Privacy §3 makes three AFFIRMATIVE promises about Cay AI chat: that we ask explicit

@@ -147,6 +147,14 @@ class ChatViewModel: ObservableObject {
         Task { [weak appState] in await appState?.refreshCredits() }
     }
 
+    /// A turn this screen STOPPED listening to — the user switched or reset the conversation
+    /// mid-turn. The server may still persist and charge it, or refund it, AFTER we dropped it,
+    /// so one delayed, coalesced re-read (identity-fenced in AppState) instead of an immediate
+    /// one that would race the settlement.
+    private func refreshCreditsAfterAbandonedTurn() {
+        appState?.refreshCreditsAfterSettle()
+    }
+
     // MARK: - Published State
 
     /// Messages in the current conversation (UI-facing)
@@ -901,6 +909,8 @@ class ChatViewModel: ObservableObject {
             // drop the result so it doesn't append into / clear the typing state of the wrong session.
             guard sessionId == currentSessionId else {
                 print("⚠️ [ChatVM] Discarding stale response for \(sessionId); active is \(currentSessionId ?? "nil")")
+                // Dropped from the screen, but persisted and charged all the same.
+                refreshCreditsIfMoved(response.credit)
                 return
             }
             let richMessage = response.toRichChatMessage()
@@ -918,7 +928,10 @@ class ChatViewModel: ObservableObject {
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
             print("❌ [ChatVM] Send failed after \(elapsed)s: \(error)")
             // Only surface the error on the conversation that is still active.
-            guard sessionId == currentSessionId else { return }
+            guard sessionId == currentSessionId else {
+                refreshCreditsAfterAbandonedTurn()
+                return
+            }
             // A timeout or a dropped connection says nothing about the SERVER: the door
             // persists and charges the turn as soon as generation finishes, so the answer
             // may already be in history. Adopt it if it is — never re-POST from here — and
@@ -1041,7 +1054,10 @@ class ChatViewModel: ObservableObject {
                 // Drop the stream if the user navigated to another conversation. Do NOT touch shared
                 // reveal state here — it now belongs to the active session (navigation already reset
                 // it); cancelReveal() would wipe the CURRENT session's live reveal.
-                guard sessionId == currentSessionId else { return }
+                guard sessionId == currentSessionId else {
+                    refreshCreditsAfterAbandonedTurn()
+                    return
+                }
 
                 switch event.event {
                 case "thinking":
@@ -1165,7 +1181,11 @@ class ChatViewModel: ObservableObject {
                     reasonTask = nil
                     // User navigated away DURING the drain await → the active session owns the reveal
                     // state now; return without cancelReveal (which would wipe the active session's).
-                    guard sessionId == currentSessionId else { return }
+                    // The turn itself is done and settled, so its cost still re-reads the wallet.
+                    guard sessionId == currentSessionId else {
+                        refreshCreditsIfMoved(turnCost)
+                        return
+                    }
                     if let id = liveId, let idx = messages.firstIndex(where: { $0.id == id }) {
                         // Same id → the row updates in place (no ForEach tear-down/flicker).
                         messages[idx] = RichChatMessage(
@@ -1268,8 +1288,12 @@ class ChatViewModel: ObservableObject {
             // If this stream belongs to a session the user already navigated away from — or the turn
             // Task was cancelled (navigation/reset cancels respondTask, which surfaces here as a
             // CancellationError) — do NOT touch any shared reveal/typing state: it belongs to the
-            // now-active session. Just stop; the active session owns its own lifecycle.
-            guard sessionId == currentSessionId, !Task.isCancelled else { return }
+            // now-active session. Just stop; the active session owns its own lifecycle — but the
+            // abandoned turn may still settle server-side.
+            guard sessionId == currentSessionId, !Task.isCancelled else {
+                refreshCreditsAfterAbandonedTurn()
+                return
+            }
             cancelReveal()
             if let id = liveId { messages.removeAll { $0.id == id } }  // drop the partial bubble
             streamingMessageId = nil
@@ -1293,6 +1317,12 @@ class ChatViewModel: ObservableObject {
                     reportTurnFailure(ChatStreamError.sessionGone)
                 } else {
                     reportTurnFailure(error)
+                }
+                // Same as the non-streaming door: a 402 means the local balance was already
+                // stale — the server just corrected us. Only the 402 (a 401/404 read would
+                // fail the same way).
+                if case APIError.businessError(let code, _) = error, code == "INSUFFICIENT_CREDITS" {
+                    Task { [weak appState] in await appState?.refreshCredits() }
                 }
                 return
             }
@@ -1354,10 +1384,14 @@ class ChatViewModel: ObservableObject {
         let delays: [UInt64] = mayRegenerate ? [0] : [0, 2, 5, 10, 15, 15]
         for (i, delaySeconds) in delays.enumerated() {
             if delaySeconds > 0 { try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000) }
-            guard sessionId == currentSessionId, !Task.isCancelled else { isAITyping = false; return }
+            guard sessionId == currentSessionId, !Task.isCancelled else {
+                refreshCreditsAfterAbandonedTurn(); isAITyping = false; return
+            }
             switch await fetchHistoryForReconcile(sessionId: sessionId) {
             case .fetched(let history):
-                guard sessionId == currentSessionId else { isAITyping = false; return }
+                guard sessionId == currentSessionId else {
+                    refreshCreditsAfterAbandonedTurn(); isAITyping = false; return
+                }
                 if Self.historyContainsTurn(history.messages, userMessage: target,
                                             knownAssistantServerIds: known) {
                     // The stream DID persist this turn — adopt server state, don't re-send.
@@ -1374,7 +1408,9 @@ class ChatViewModel: ObservableObject {
                 if i == delays.count - 1 { break }
             case .unavailable(let error):
                 // See the non-stream arm: a cancelled read is not an unconfirmed turn.
-                guard sessionId == currentSessionId, !Task.isCancelled else { isAITyping = false; return }
+                guard sessionId == currentSessionId, !Task.isCancelled else {
+                    refreshCreditsAfterAbandonedTurn(); isAITyping = false; return
+                }
                 print("⚠️ [ChatVM] Reconcile could not read history — NOT regenerating: \(error)")
                 isAITyping = false
                 reportTurnFailure(ChatStreamError.unconfirmed)

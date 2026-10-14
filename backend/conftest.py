@@ -211,6 +211,22 @@ def _isolate_price_cache():
     _cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_refund_outcome_latch():
+    """Reset `research_reconciliation_service`'s "refund_outcome column missing" latch.
+
+    It is a module-global, process-wide flag (migration 195's code-before-migration window):
+    a test that latches it would silently switch every later test's refund stamps and the
+    Reports list's `refund_confirmed` off — the same order-dependence as the price cache
+    above. Imported inside the fixture so the SENTRY_DSN reset and the socket guard at the top
+    of this file are in place before any app module loads.
+    """
+    from app.services import research_reconciliation_service as recon
+    recon._reset_refund_outcome_latch()
+    yield
+    recon._reset_refund_outcome_latch()
+
+
 def _reset_stock_search_directory() -> None:
     from app.services import stock_search_service as svc
 

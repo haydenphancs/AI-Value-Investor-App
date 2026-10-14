@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.credit_history_service import (
+    KIND_EXPIRE,
     KIND_GRANT,
     KIND_OTHER,
     KIND_PURCHASE,
@@ -43,6 +44,7 @@ _EXPECTED_KINDS = {
     "report_refund": KIND_REFUND,
     "report_refund_deleted": KIND_REFUND,
     "report_refund_reconciled": KIND_REFUND,
+    "report_precharge_unconfirmed": KIND_REFUND,  # both report doors' compensation (2026-10-12)
     "chat_refund": KIND_REFUND,
     "chat_cache_hit": KIND_REFUND,
     "chat_undelivered": KIND_REFUND,
@@ -55,8 +57,11 @@ _EXPECTED_KINDS = {
     "grant": KIND_GRANT,
     "monthly_reset": KIND_GRANT,
     "tier_upgrade": KIND_GRANT,
+    "plan_period": KIND_GRANT,  # one allocation per Apple paid period (migration 196)
+    "plan_reinstated": KIND_GRANT,  # a refunded period back after REFUND_REVERSED (196)
     "tester_grant": KIND_GRANT,
     "tier_revoked": KIND_REVOKE,
+    "monthly_expired": KIND_EXPIRE,  # ensure_credit_period's expiry row (migration 194)
     "pack_purchase": KIND_PURCHASE,
     "pack_revoked": KIND_REVOKE,
 }
@@ -292,3 +297,59 @@ def test_the_raw_reason_is_preserved_for_support():
     described = describe_transaction(row)
     assert described.reason == "chat_degraded_brand_new_suffix"
     assert described.kind == KIND_REFUND
+
+
+# ── 2026-10-12: the per-charge report refs still render their ticker ─────────────────
+
+
+@pytest.mark.parametrize("ref_id,ticker", [
+    ("NVDA:1b4e28ba-2fa1-11d2-883f-0016d3cca427", "NVDA"),      # deep door, per report
+    ("BRK.B:1b4e28ba-2fa1-11d2-883f-0016d3cca427", "BRK.B"),
+    ("AAPL:warren_buffett:" + "0123456789abcdef" * 2, "AAPL"),   # direct door, per generation
+    ("ORCL", "ORCL"),                                            # legacy deep
+    ("ORCL:warren_buffett", "ORCL"),                             # legacy direct
+])
+def test_every_report_ref_shape_renders_its_ticker(ref_id, ticker):
+    from app.services.credit_history_service import _ticker_from_report_ref
+
+    assert _ticker_from_report_ref(ref_id) == ticker
+
+
+def test_the_report_precharge_compensation_reads_as_a_report_refund():
+    kind, title, _ref_style = describe_reason("report_precharge_unconfirmed")
+    assert kind == KIND_REFUND and title.strip()
+    assert "report" in title.lower()
+
+
+# ── 2026-10-12: the monthly reset's expiry row (migration 194) ───────────────────────
+
+
+def test_an_expiry_has_its_own_kind_and_reads_as_routine():
+    """Its own kind, never `revoke` — iOS draws revoke as a caution mark, and an expiry happens
+    to every account every month."""
+    from app.services.credit_history_service import _REF_NONE
+
+    assert describe_reason("monthly_expired") == (
+        KIND_EXPIRE, "Unused monthly credits expired", _REF_NONE,
+    )
+    assert KIND_EXPIRE not in (KIND_REVOKE, KIND_OTHER)
+
+
+@pytest.mark.parametrize("ref_id", [None, "2026-10", "AAPL"])
+def test_an_expiry_row_renders_no_subtitle_and_no_pool_note(ref_id):
+    """Migration 194 writes ref_id NULL; a month stamp (or anything else a hand-written row
+    might carry) must never be rendered at the user as if it named something."""
+    row = {"id": 41, "delta": -30, "granted_delta": -30, "purchased_delta": 0,
+           "reason": "monthly_expired", "ref_id": ref_id}
+    described = describe_transaction(row)
+    assert described.kind == KIND_EXPIRE
+    assert described.delta == -30
+    assert described.subtitle is None
+    assert described.pool_note is None, "a granted-only movement says nothing about pools"
+
+
+def test_the_expire_kind_is_listed_on_the_wire_description():
+    from app.schemas.credit_history import CreditTransactionResponse
+
+    description = CreditTransactionResponse.model_fields["kind"].description or ""
+    assert "expire" in {k.strip() for k in description.split("|")}

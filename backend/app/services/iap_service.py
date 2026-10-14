@@ -7,7 +7,8 @@ Turns an Apple-verified transaction into an entitlement:
       -> product id -> tier
       -> upsert `subscriptions` (idempotent on original_transaction_id)
       -> mirror the WINNING tier onto `users.tier`
-      -> ensure_credit_period() so the new tier's monthly credits land
+      -> ensure_credit_period(), which grants each Apple PAID PERIOD's allocation exactly
+         once, read from that `subscriptions` row (migration 196)
 
 Migration 100 built the data layer for exactly this and left the wiring to "a later
 ENFORCEMENT phase": *"A server-side receipt validator / webhook updates it and mirrors the
@@ -316,6 +317,12 @@ def status_for_transaction(payload: Dict[str, Any]) -> str:
 # Column added by migration 114. The code must work BEFORE it is applied, because migrations
 # are applied by hand and the deploy order is not guaranteed — see the write path below.
 _EVENT_AT_COLUMN = "last_event_at"
+
+# Column added by migration 196, same posture. `ensure_credit_period` starts a paid credit
+# period only for a Production row: Sandbox / TestFlight renew every few minutes, and each
+# renewal would otherwise grant a full allocation.
+_ENVIRONMENT_COLUMN = "environment"
+_OPTIONAL_SUBSCRIPTION_COLUMNS = (_EVENT_AT_COLUMN, _ENVIRONMENT_COLUMN)
 
 
 def _stale_delivery_reason(
@@ -766,6 +773,9 @@ class IAPService:
             "original_transaction_id": original_txn_id,
             "current_period_end": period_end.isoformat() if period_end else None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            # `_to_dict` drops None, so a payload may carry no environment; fall back to how
+            # this deploy is configured, exactly as the consumable path does.
+            _ENVIRONMENT_COLUMN: str(payload.get("environment") or settings.IAP_ENVIRONMENT),
         }
 
         # When Apple told us WHEN it said this (a notification's `signedDate`), persist it as
@@ -917,18 +927,22 @@ class IAPService:
         try:
             _write(row)
         except Exception as e:
-            # Migration 114 adds `last_event_at`, and migrations here are applied BY HAND —
-            # so a deploy can legitimately run this code against a database that does not yet
-            # have the column, and PostgREST answers an unknown column with an error. Failing
-            # the whole apply there would reject a purchase Apple has ALREADY charged for, to
-            # protect an ordering guard that is merely an optimisation. Retry once without it.
-            if _EVENT_AT_COLUMN in row:
+            # Migrations 114 (`last_event_at`) and 196 (`environment`) add optional columns,
+            # and migrations here are applied BY HAND — so a deploy can legitimately run this
+            # code against a database that does not yet have them, and PostgREST answers an
+            # unknown column with an error. Failing the whole apply there would reject a
+            # purchase Apple has ALREADY charged for, to protect an ordering guard and a credit
+            # rule that degrade safely without them (a NULL environment counts as Production).
+            # Retry once without them.
+            optional = [c for c in _OPTIONAL_SUBSCRIPTION_COLUMNS if c in row]
+            if optional:
                 logger.warning(
-                    "IAP: subscriptions write with %s failed (%s: %s) — retrying without it. "
-                    "Apply migration 114 to enable out-of-order notification protection.",
-                    _EVENT_AT_COLUMN, type(e).__name__, e,
+                    "IAP: subscriptions write with %s failed (%s: %s) — retrying without them. "
+                    "Apply migrations 114 (out-of-order notification protection) and 196 "
+                    "(Production-only paid credit periods).",
+                    ", ".join(optional), type(e).__name__, e,
                 )
-                degraded_row = {k: v for k, v in row.items() if k != _EVENT_AT_COLUMN}
+                degraded_row = {k: v for k, v in row.items() if k not in optional}
                 try:
                     _write(degraded_row)
                 except Exception as e2:
@@ -946,11 +960,12 @@ class IAPService:
 
         winning_tier = self.reconcile_user_tier(user_id)
 
-        # A REFUND must take the unspent credits back. `reconcile_user_tier` drops the tier,
-        # but the allocation is granted by `grant_tier_upgrade`, which never lowers `total` —
-        # correct for a voluntary downgrade (you keep what you paid for until the next reset),
-        # wrong for a revocation, where the money went back. A refunded Max subscriber
-        # otherwise keeps 4000 credits, ~200 AI reports, having paid nothing.
+        # A REFUND must take the unspent credits back, or a refunded Max subscriber keeps 4000
+        # credits, ~200 AI reports, having paid nothing. Since migration 196 the
+        # `ensure_credit_period` inside `reconcile_user_tier` claws back a refunded paid period
+        # itself (the row's transaction is the one the balance was granted from); this call is
+        # the backstop for a database without 196 or a balance already in calendar mode, and
+        # is a no-op after it.
         #
         # Gated on `winning_tier == "free"` so a user who holds a SECOND, still-active
         # subscription is not stripped because an old one was refunded.
@@ -1079,12 +1094,11 @@ class IAPService:
     def _revoke_tier_credits(self, user_id: str, original_txn_id: str = "") -> None:
         """Claw back the UNSPENT portion of a revoked tier's allocation. Best-effort.
 
-        Separate from `grant_tier_upgrade` on purpose. That function never lowers `total`
-        (migration 112 §2) because a voluntary downgrade must not delete credits the user
-        already paid for — but a refund is not a downgrade, and routing revocation through the
-        same no-op left a refunded Max subscriber holding 4000 credits for the rest of the
-        month. `revoke_tier_credits` floors at `GREATEST(free_allocation, used)` so `remaining`
-        (a GENERATED column, `total - used`) can never go negative.
+        A refund is not a downgrade: the money went back, so the unspent allocation goes too.
+        `revoke_tier_credits` floors at `GREATEST(free_allocation, used)` so `remaining`
+        (a GENERATED column, `total - used`) can never go negative, and since migration 196 it
+        also leaves paid-period mode. `ensure_credit_period` claws back a refunded paid period
+        on its own since 196, so this is the backstop and a no-op after it.
 
         Never raises: the entitlement itself is already recorded and the tier has already
         dropped, so a failure here costs credits, not correctness — and raising would make the
@@ -1099,8 +1113,9 @@ class IAPService:
         except Exception as e:
             logger.error(
                 "IAP: entitlement REVOKED for user=%s (txn=%s) but revoke_tier_credits FAILED "
-                "(%s: %s) — the user keeps their unspent credits until the next monthly reset. "
-                "If this is PGRST202/undefined function, migration 114 has not been applied.",
+                "(%s: %s) — unless migration 196's ensure_credit_period already clawed the "
+                "period back, the user keeps their unspent credits until it ends. If this is "
+                "PGRST202/undefined function, migration 114 has not been applied.",
                 user_id, original_txn_id, type(e).__name__, e,
             )
 
@@ -1111,9 +1126,10 @@ class IAPService:
         so a complimentary account (App Review's demo account, testers) is never demoted by a
         sandbox purchase or its expiry. See `effective_tier`.
 
-        `users.tier` is what `ensure_credit_period` reads to decide the monthly allocation
-        (migration 100), so the mirror has to happen before the allocation call or the user
-        gets last tier's credits.
+        Since migration 196 `ensure_credit_period` sizes a PAID allocation from the
+        `subscriptions` row itself — one allocation per Apple paid period, granted once — and
+        reads `users.tier` only for an account with no subscriptions row. The mirror still runs
+        first: before 196 that function read `users.tier` for every allocation.
         """
         tier = self.effective_tier(user_id)
 
@@ -1139,24 +1155,23 @@ class IAPService:
                 tier, user_id, type(e).__name__, e,
             )
 
-        # THEN grant the new tier's allocation. `ensure_credit_period` alone is NOT enough and
-        # this call is the whole reason migration 112 exists: it only grants when the monthly
-        # boundary has passed, so an upgrade bought on the 10th used to leave the buyer on
-        # their old (often exhausted) balance until the 1st — paid, tier flipped, zero credits,
-        # 402 on the next tap. `grant_tier_upgrade` raises `total` to the new allocation and is
-        # idempotent by construction (it no-ops once total >= allocation), so replays from
-        # `Transaction.updates` on every app launch cannot farm credits, and a downgrade never
-        # claws back. See migrations/112_grant_tier_upgrade.sql for the full reasoning.
+        # THEN `grant_tier_upgrade`. Since migration 196 it just runs `ensure_credit_period`
+        # again — the call above already granted any new paid period, so this is a cheap
+        # no-op kept for a database that predates 196, where it is what lands an upgrade's
+        # credits mid-month (112: without it the buyer sat on an exhausted balance until the
+        # 1st). Replays cannot farm credits either way: 196 grants each Apple paid period at
+        # most once (subscription_credit_periods), 112 no-ops once the allocation is granted.
         try:
             self.supabase.rpc("grant_tier_upgrade", {"p_user_id": user_id}).execute()
         except Exception as e:
-            # Degrades to exactly the old behaviour (credits at the next monthly reset), which
-            # is also what happens if 112 has not been applied yet — so this is warned, not
-            # raised, but it IS the difference between a working purchase and a silent one.
+            # Warned, not raised: the entitlement is recorded and the next credit read runs
+            # the same reconciliation. Before 196 this IS the difference between a working
+            # upgrade and one whose credits wait for the 1st.
             logger.error(
                 "IAP: tier=%s applied for user=%s but grant_tier_upgrade FAILED (%s: %s) — "
-                "the upgrade's credits will NOT land until the next monthly reset. If this is "
-                "PGRST202/undefined function, migration 112 has not been applied.",
+                "the credits land on the next credit read (or, before migration 196, at the "
+                "next monthly reset). If this is PGRST202/undefined function, migration 112 "
+                "has not been applied.",
                 tier, user_id, type(e).__name__, e,
             )
 
@@ -1169,11 +1184,13 @@ class IAPService:
         only when a client `POST /billing/verify` or an App Store Server Notification arrives.
         Nothing re-evaluated entitlement on its own. So a single lost EXPIRED or REFUND
         notification — Apple stops retrying, the webhook URL is an unticked checklist item, a
-        deploy eats the delivery window — left the account on the paid tier permanently. Worse
-        than "keeps access": `ensure_credit_period` reads `users.tier` at every monthly
-        boundary (migration 100:185), so a cancelled Max subscriber keeps getting 4000 fresh
-        credits on the 1st of every month, forever, at real Gemini and FMP cost. The client
-        only ever reports *purchases*, so nothing else can notice.
+        deploy eats the delivery window — left the account on the paid tier permanently. Before
+        migration 196 that was worse than "keeps access": `ensure_credit_period` read
+        `users.tier` at every monthly boundary, so a cancelled Max subscriber kept getting 4000
+        fresh credits on the 1st of every month. Since 196 a row left `active` past its period
+        end is a HOLD (the balance stays, nothing new is granted), and this sweep is what ends
+        it: expired here, the next `ensure_credit_period` lapses the account to the calendar
+        allowance. The client only ever reports *purchases*, so nothing else can notice.
 
         This makes entitlement self-correcting with zero notifications delivered.
 

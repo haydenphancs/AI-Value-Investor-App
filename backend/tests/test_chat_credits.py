@@ -631,3 +631,120 @@ def test_a_fresh_quota_reads_unsettled_and_unrefunded(monkeypatch):
     _patch_credit(monkeypatch)
     quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
     assert quota.is_settled is False and quota.is_refunded is False and quota.outcome == "charged"
+
+
+# ── 2026-10-12: a ChargeRef per turn, a thread-safe settlement, no grant RPC at window 0 ──
+
+
+def test_the_turn_ref_is_a_charge_ref(monkeypatch):
+    """A ChargeRef is what lets `refund_ledgered` retry a transient refund fault — and its
+    compensation — because it names exactly one debit."""
+    from app.services.credit_service import ChargeRef
+
+    credit = _patch_credit(monkeypatch)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    charge_ref = credit.precharge.call_args.kwargs["ref_id"]
+    assert isinstance(charge_ref, ChargeRef) and charge_ref.startswith("sess-1:")
+    quota.refund_once("chat_undelivered")
+    assert credit.refund_ledgered.call_args.kwargs["ref_id"] == charge_ref
+    assert isinstance(credit.refund_ledgered.call_args.kwargs["ref_id"], ChargeRef)
+
+
+def test_an_unconfirmed_chat_precharge_compensates_on_the_charge_ref(monkeypatch):
+    from app.services.credit_service import ChargeRef
+
+    credit = _patch_credit(monkeypatch, precharge_raises=True)
+    quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    assert quota is None and err.status_code == 409
+    kw = credit.refund_ledgered.call_args.kwargs
+    assert kw["ref_id"] == credit.precharge.call_args.kwargs["ref_id"]
+    assert isinstance(kw["ref_id"], ChargeRef) and kw["quiet_no_match"] is True
+
+
+def test_on_delivered_issues_no_rpc_while_the_window_is_zero(monkeypatch):
+    """Parked by the owner (2026-10-03). With the window at 0 no allowance can be claimed, so
+    the grant was a wasted SYNC RPC on the event loop after every answered turn."""
+    _patch_credit(monkeypatch)
+    budget = MagicMock()
+    budget.claim_free_followup.return_value = False
+    monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
+    for window in (0, None, -5):
+        monkeypatch.setattr(chat.settings, "CHAT_FREE_FOLLOWUP_SECONDS", window)
+        quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+        quota.on_delivered()
+    budget.grant_free_followup.assert_not_called()
+    # Anti-vacuity: the same charged turn DOES grant once the window is open.
+    monkeypatch.setattr(chat.settings, "CHAT_FREE_FOLLOWUP_SECONDS", 300)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.on_delivered()
+    budget.grant_free_followup.assert_called_once_with("sess-1")
+
+
+def test_racing_settlements_across_threads_refund_exactly_once(monkeypatch):
+    """The doors now settle in worker threads, and `chat_answer_coverage` settles from one too.
+    The `_settled` check-and-set is locked, so racing settlements issue ONE refund RPC."""
+    import threading
+
+    credit = _patch_credit(monkeypatch)
+    entered = threading.Barrier(8)
+    calls = []
+
+    def _slow_refund(*a, **k):
+        calls.append(k["reason"])
+        return {"outcome": "refunded", "refunded": 1, "spendable": 40}
+    credit.refund_ledgered.side_effect = _slow_refund
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+
+    # Deterministic half (the race below is probabilistic under the GIL): the check-and-set
+    # must happen while the turn's lock is HELD.
+    real_lock = quota._lock
+    held_during_claim = []
+
+    class _RecordingLock:
+        def __enter__(self):
+            real_lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            held_during_claim.append(quota._settled)   # set while still holding the lock
+            real_lock.release()
+            return False
+    quota._lock = _RecordingLock()
+
+    def _settle(i):
+        entered.wait(timeout=5)
+        (quota.refund_once if i % 2 else quota.settle_no_cost)(f"reason_{i}")
+
+    threads = [threading.Thread(target=_settle, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    assert len(calls) == 1, f"{len(calls)} refunds for one turn: {calls}"
+    assert quota.is_settled and quota.is_refunded
+    assert len(held_during_claim) == 8 and all(held_during_claim), (
+        "a settlement checked/set `_settled` outside the turn's lock"
+    )
+
+
+def test_an_abandoned_claim_hands_a_charged_turn_back(monkeypatch):
+    """A door cancelled (a deploy) while `_claim_chat_quota` ran in its thread never sees the
+    quota; `charge_off_loop` calls this hand-back once the claim finishes."""
+    credit = _patch_credit(monkeypatch)
+    claimed = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    chat._refund_abandoned_claim(claimed, None)
+    kw = credit.refund_ledgered.call_args.kwargs
+    assert kw["reason"] == "chat_undelivered"
+    assert kw["ref_id"] == credit.precharge.call_args.kwargs["ref_id"]
+    assert claimed[0].is_settled
+
+
+@pytest.mark.parametrize("claimed,exc", [
+    ((None, "refusal"), None),                 # 402 / 409: nothing was charged
+    (None, RuntimeError("claim blew up")),     # the claim raised: nothing to hand back
+    (None, None),
+])
+def test_an_abandoned_claim_that_charged_nothing_refunds_nothing(monkeypatch, claimed, exc):
+    credit = _patch_credit(monkeypatch)
+    chat._refund_abandoned_claim(claimed, exc)
+    credit.refund_ledgered.assert_not_called()

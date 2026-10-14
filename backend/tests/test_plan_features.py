@@ -94,6 +94,59 @@ def test_credits_are_described_as_one_shared_pool(tier):
     assert "shared pool" in detail
 
 
+# ── When the pool refills: paid = each renewal (migration 196), Free = the 1st ──────────
+#
+# Before 196 every plan reset on the ET calendar month, and a subscription bought late in a
+# month got two full allocations for one payment. A paid allowance now follows the Apple
+# billing period, so "resets at the start of each month" under Pro/Max would be false.
+
+_RENEWS = "refreshes each time your plan renews"
+_MONTHLY = "resets at the start of each month"
+
+
+@pytest.mark.parametrize("tier", entitlements.TIER_ORDER)
+@pytest.mark.parametrize("report_cost,chat_cost", [(REPORT_COST, CHAT_COST), (REPORT_COST, 0), (0, CHAT_COST), (0, 0)])
+def test_the_credits_row_says_when_the_pool_refills(tier, report_cost, chat_cost):
+    """Every branch of the detail builder, including the zero-cost fallbacks, names the
+    right refill for its tier and never the other one."""
+    detail = row(tier, pf.KEY_CREDITS, report_cost=report_cost, chat_cost=chat_cost)["detail"].lower()
+    if tier == entitlements.TIER_FREE:
+        assert _MONTHLY in detail and "renew" not in detail, detail
+    else:
+        assert _RENEWS in detail and "start of each month" not in detail, detail
+
+
+def _swift_code_only(src: str) -> str:
+    """Swift source with `//` line comments and `/* */` blocks removed, so a guard cannot be
+    satisfied by the explanatory comment beside the code it pins."""
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.DOTALL)
+    return "\n".join(
+        line for line in src.splitlines() if not line.lstrip().startswith("//")
+    )
+
+
+def test_the_ios_fallback_mirrors_the_refill_wording():
+    """The bundled table renders when /billing/plans is unreachable. It must make the same
+    paid-vs-free distinction, inside `creditsDetail` itself (brace-bounded), with the caller
+    passing the tier's paid flag."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "frontend/ios/ios/Models/SubscriptionModels.swift"
+    code = _swift_code_only(path.read_text(encoding="utf-8"))
+    start = code.index("private static func creditsDetail(")
+    depth, i = 0, code.index("{", start)
+    while True:
+        depth += {"{": 1, "}": -1}.get(code[i], 0)
+        i += 1
+        if depth == 0:
+            break
+    body = code[start:i]
+    for phrase in (_RENEWS, _MONTHLY, "Refreshes each time your plan renews.", "Resets at the start of each month."):
+        assert phrase in body, f"creditsDetail no longer says {phrase!r}"
+    assert "paid: Bool" in body
+    assert re.search(r"creditsDetail\([^)]*paid:\s*paid\)", code), "the caller no longer passes the tier"
+
+
 # ── Gate parity: `included` must equal the boolean the server actually checks ─────────
 
 

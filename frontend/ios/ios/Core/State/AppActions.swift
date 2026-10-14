@@ -16,6 +16,9 @@
 //  .claude/rules/ios-swiftui.md. Widening this surface would quietly reintroduce the singleton
 //  state coupling those rules exist to prevent.
 //
+//  The ONE documented exception is the credit balance (see `// MARK: - Credits`): ordered,
+//  identity-fenced entry points only, for the two ViewModels that move it without an AppState.
+//
 
 import Foundation
 
@@ -83,5 +86,47 @@ final class AppActions {
     ///     one; falls back to `action` when omitted.
     func reportMutationFailure(_ error: Error, action: String, signInFeature: String? = nil) {
         appState?.reportMutationFailure(error, action: action, signInFeature: signInFeature)
+    }
+
+    /// Route a failure to the GLOBAL error host — the root toast, whose action button follows
+    /// `AppError.suggestedAction`. For a failure whose remedy is a purchase: `.upgrade`
+    /// (`.insufficientCredits`, `.planUpgradeRequired`) opens Buy Credits there, where a
+    /// screen-local "Error / OK" alert is a dead end for someone who just ran out of credits.
+    func handleError(_ error: Error) {
+        appState?.handleError(error)
+    }
+
+    // MARK: - Credits
+    //
+    // A deliberate widening of this bridge, and the only one: the credit balance is the one
+    // piece of `AppState`-owned data two ViewModels without an `AppState` must move.
+    // `ResearchViewModel` sends its own credits GET (its shape is pinned by tests) and
+    // `TickerReportViewModel` loads from its `init`, before any view could inject one. Both go
+    // through the ORDERED, identity-fenced entry points below — never a raw setter — so a
+    // balance only lands when it is this identity's and newer than the one on screen (see
+    // `AppState`'s "Credit balance" section).
+
+    /// A send-order ticket, taken BEFORE a credits request goes out. nil while unconfigured.
+    func beginCreditsRead() -> CreditsReadTicket? {
+        appState?.beginCreditsRead()
+    }
+
+    /// Land a balance read under `ticket`. `.applied` when there is nothing to fence against
+    /// (unconfigured — previews), so the caller keeps its own value.
+    @discardableResult
+    func adoptCredits(_ credits: CreditInfo, from ticket: CreditsReadTicket?) -> CreditsAdoption {
+        guard let appState, let ticket else { return .applied }
+        return appState.adoptCredits(credits, from: ticket)
+    }
+
+    /// Fire-and-forget re-read of the shared balance after something that moved credits.
+    func refreshCredits() {
+        guard let appState else { return }
+        Task { await appState.refreshCredits() }
+    }
+
+    /// One coalesced re-read a few seconds from now — see `AppState.refreshCreditsAfterSettle`.
+    func refreshCreditsAfterSettle() {
+        appState?.refreshCreditsAfterSettle()
     }
 }

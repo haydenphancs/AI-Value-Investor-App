@@ -167,6 +167,23 @@ final class PushNotificationManager {
         appState?.pendingPushNotification = pushed
     }
 
+    /// The push kinds whose arrival means the user's credits just moved: a report finished
+    /// (its precharge is now final) or failed (and its credits were refunded — the backend
+    /// sends `research_failed` only after the refund). Mirrors `KIND_RESEARCH_COMPLETE` /
+    /// `KIND_RESEARCH_FAILED` in `backend/app/services/notification_kinds.py`.
+    private static let creditMovingKinds: Set<String> = ["research_complete", "research_failed"]
+
+    /// Re-read the balance when a credit-moving push ARRIVES (foreground) or is TAPPED.
+    /// On a cold launch from a tap `appState` is still nil here, and the `onAuthenticated`
+    /// fan-out reads the balance anyway.
+    func noteCreditMovingPush(_ info: [AnyHashable: Any]) {
+        guard let kind = info["kind"] as? String,
+              Self.creditMovingKinds.contains(kind),
+              let appState,
+              appState.auth.isAuthenticated else { return }
+        Task { await appState.refreshCredits() }
+    }
+
     /// Called by the AppDelegate with the raw APNs token.
     func didRegister(deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()

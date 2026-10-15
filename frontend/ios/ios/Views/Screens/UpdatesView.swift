@@ -93,6 +93,14 @@ struct UpdatesView: View {
                         )
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.bottom, AppSpacing.sm)
+                    } else if viewModel.showsRefreshFailure {
+                        // A pull-to-refresh of live rows failed: they stay, and this says so.
+                        InlineRetryNotice(
+                            message: "Couldn't refresh the news.",
+                            onRetry: { Task { await viewModel.refresh() } }
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.bottom, AppSpacing.sm)
                     }
 
                     // NOTE: the "Filter news…" keyword bar used to sit here, between the

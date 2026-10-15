@@ -32,6 +32,12 @@
 //  pull-to-refresh ends when the rows paint, not after the model answers. A load that finishes
 //  behind another tab starts no paid work until the tab is on screen (`deferredPostPaint`).
 //
+//  PULL-TO-REFRESH (2026-10-15). The refresh is owned here too (`refreshTask`), not by SwiftUI's
+//  `.refreshable` task: SwiftUI cancels that task while the content changes under the spinner,
+//  and the cancelled request ended the refresh with an empty list — "No recent stories" over a
+//  feed with ~2,000 headlines. And a refresh of the scope on screen keeps its rows until the
+//  answer replaces them (`loadFeed`'s `keepsShownRows`), so a pull never blanks the timeline.
+//
 
 import Foundation
 import Combine
@@ -127,6 +133,13 @@ final class UpdatesViewModel: ObservableObject {
         snapshotSavedAt != nil && error != nil && !requiresSignIn && !isReconnecting && !groupedNews.isEmpty
     }
 
+    /// A pull-to-refresh of LIVE rows failed (not a refusal): `loadFeed` keeps the rows of the
+    /// scope it refreshes, so they stay — and this says so beside them. Without it the spinner
+    /// just stopped over the old stories with no word of why. Same gate terms as the snapshot's.
+    var showsRefreshFailure: Bool {
+        snapshotSavedAt == nil && error != nil && !requiresSignIn && !isReconnecting && !groupedNews.isEmpty
+    }
+
     /// True for an Insights card that came from the snapshot. "Ask Cay AI" is withheld from it
     /// (on the card and in its detail sheet): the chat is grounded on the server's CURRENT card,
     /// which may not hold the bullet the user is reading, and the first send costs a credit.
@@ -218,6 +231,13 @@ final class UpdatesViewModel: ObservableObject {
     private var initialLoadTask: Task<Void, Never>?
     /// Which `initialLoadTask` is current, so a finished task never clears a newer one.
     private var initialLoadID: UUID?
+    /// The pull-to-refresh, owned HERE for the same reason as `initialLoadTask`: SwiftUI cancels
+    /// a `.refreshable` action's task while the content changes under the spinner, and that must
+    /// cancel only the view's wait, never the request. A second pull (or "Try Again") joins it.
+    /// Cancelled only by `handleIdentityChange`.
+    private var refreshTask: Task<Void, Never>?
+    /// Which `refreshTask` is current, so a finished task never clears a newer one.
+    private var refreshTaskID: UUID?
     /// The post-paint AI enrichment of the visible rows. Detached so a load (and a
     /// pull-to-refresh) ends when the rows paint, not when the model answers. Cancelled on a
     /// scope change and on an identity change; the merge keeps its own scope + token check.
@@ -370,7 +390,7 @@ final class UpdatesViewModel: ObservableObject {
     deinit {
         refreshPollTask?.cancel(); appearWorkTask?.cancel()
         trendTask?.cancel(); trendPollTask?.cancel()
-        enrichTask?.cancel(); initialLoadTask?.cancel()
+        enrichTask?.cancel(); initialLoadTask?.cancel(); refreshTask?.cancel()
     }
 
     // MARK: - Snapshot lifecycle
@@ -434,6 +454,14 @@ final class UpdatesViewModel: ObservableObject {
         snapshotSavedAt = nil
         seededEpoch = nil
         seededAt = nil
+        allNewsArticles = []
+        insightSummary = nil
+        applyFiltersAndGroup()
+    }
+
+    /// Take the LIVE rows a pull-to-refresh kept on screen (`loadFeed`'s `keepsShownRows`) off
+    /// it — the refusal's counterpart of `dropSnapshot()`: no stories under the account gate.
+    private func dropShownRows() {
         allNewsArticles = []
         insightSummary = nil
         applyFiltersAndGroup()
@@ -534,7 +562,30 @@ final class UpdatesViewModel: ObservableObject {
         }
     }
 
+    /// Pull-to-refresh, and every "Try Again". JOINS a refresh already running instead of
+    /// starting another. The work runs in `refreshTask`, owned by the ViewModel: awaited straight
+    /// from `.refreshable`, it ran in SwiftUI's task, which SwiftUI cancels — the requests then
+    /// failed as "cancelled" and the refresh ended on an empty list.
     func refresh() async {
+        if let running = refreshTask {
+            await running.value
+            return
+        }
+        let id = UUID()
+        refreshTaskID = id
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefresh()
+            if self.refreshTaskID == id {
+                self.refreshTask = nil
+                self.refreshTaskID = nil
+            }
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func performRefresh() async {
         isRefreshing = true
         error = nil
         // Drop the per-scope cache so pull-to-refresh actually re-fetches.
@@ -604,6 +655,9 @@ final class UpdatesViewModel: ObservableObject {
         initialLoadTask?.cancel()
         initialLoadTask = nil
         initialLoadID = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshTaskID = nil
         loadToken = UUID()
         inFlightScope = nil
         enrichTask?.cancel()
@@ -927,10 +981,16 @@ final class UpdatesViewModel: ObservableObject {
         }
 
         // Clear immediately so the previous tab's news never shows under the new
-        // tab's title while the request is in flight — EXCEPT the Market snapshot under a
-        // Market load: it stays on screen (no skeleton flash) and the answer replaces it in
-        // one turn below. The snapshot is always Market, so any other scope clears it.
-        if snapshotSavedAt == nil || scope != UpdatesScope.market {
+        // tab's title while the request is in flight — EXCEPT two loads whose rows stay on
+        // screen (no skeleton flash) until the answer replaces them in one turn below:
+        //   • the Market snapshot under a Market load. The snapshot is always Market, so any
+        //     other scope clears it;
+        //   • a pull-to-refresh of the scope already painted. Clearing it blanked the timeline
+        //     for the whole request, and a refresh that ended without an answer (cancelled)
+        //     left "No recent stories" over a full feed. `shownFeedScope` was cleared above
+        //     for any other scope, so a chip switch still clears.
+        let keepsShownRows = force && shownFeedScope == scope
+        if !keepsShownRows && (snapshotSavedAt == nil || scope != UpdatesScope.market) {
             snapshotSavedAt = nil
             allNewsArticles = []
             newsArticles = []
@@ -1052,14 +1112,17 @@ final class UpdatesViewModel: ObservableObject {
                 isReconnecting = reconnecting
                 requiresSignIn = !reconnecting
                 self.error = nil
-                // No stored stories under the account gate (owner decision 1).
+                // No stored stories under the account gate (owner decision 1) — nor the live
+                // rows a pull-to-refresh kept on screen.
                 dropSnapshot()
+                if keepsShownRows { dropShownRows() }
             } else {
                 self.error = appError.message
                 requiresSignIn = false
                 isReconnecting = false
                 // A snapshot on screen STAYS (the view says the refresh failed beside it),
-                // still bounded by its display window.
+                // still bounded by its display window. So do live rows a pull-to-refresh kept
+                // (`showsRefreshFailure`).
                 expireSnapshotIfStale()
             }
             isLoading = false

@@ -188,7 +188,13 @@ struct DailyScanner: Identifiable {
 
 /// A leader inside an expanded signal row (e.g. "NVDA · 4 buys").
 struct SignalLeader: Identifiable, Hashable {
-    let id = UUID()
+    /// Stable identity = the symbol. A per-instance `UUID()` was re-minted on every 60 s
+    /// refresh, so `ForEach(signal.leaders)` in `SignalDisclosureRow` tore down and rebuilt
+    /// every leader row of an open card once a minute — the churn already fixed for
+    /// `MarketPulseItem.id` and `ExclusiveSignal.id`. Unique within one card: every backend
+    /// aggregator keys its entries on the symbol (congress / whale / CEO aggregate per
+    /// symbol; earnings dedups into `best[sym]`).
+    var id: String { symbol }
     let symbol: String
     /// Cleaned company name (e.g. "Nike"); "" for congress/whale rows (backend sends
     /// no name there) — the row then shows the ticker alone.

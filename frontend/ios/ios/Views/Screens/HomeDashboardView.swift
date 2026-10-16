@@ -6,7 +6,7 @@
 //
 //  Composes the four home organisms (Market Pulse, Daily Scanners,
 //  App-Exclusive Signals, Trending Themes) over a `HomeDashboardViewModel`
-//  backed by a `MockHomeRepository` (UI only — no backend). Reuses the shared
+//  backed by the live `HomeRepository` (`MockHomeRepository` in previews). Reuses the shared
 //  `HomeHeader` (logo · search · avatar) and `CustomTabBar`, and routes taps to
 //  the existing detail screens via the same fullScreenCover pattern as the rest
 //  of the app.
@@ -102,11 +102,15 @@ struct HomeDashboardView: View {
                 return
             }
             await viewModel.loadIfStale()
+            // Leaving Home while that load runs cancels this run, and the new run has already
+            // called `stopAutoRefresh()` — but the load ignores cancellation and returns here.
+            // Without this, the hidden tab polled `/home/dashboard` every 60 s.
+            guard !Task.isCancelled else { return }
             viewModel.startAutoRefresh()
         }
         // `loadIfStale` is keyed on AGE, which cannot express "this data belongs to somebody
         // else". A load made as a guest stamps `lastLoadedAt` like any other, so signing in
-        // left the guest's watchlist on screen for the full 5-minute window — and signing out
+        // left the guest's watchlist on screen for the whole staleness window — and signing out
         // left the previous account's watchlist for the next person to open the app.
         .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
         // Heals a gate that latched during session restore.
@@ -156,7 +160,7 @@ struct HomeDashboardView: View {
             Task { await viewModel.load() }
         }
         // The active group changed on the Tracking tab. A FORCED reload, not
-        // `loadIfStale()`: the staleness window is 300s and the auto-refresh tick is 60s,
+        // `loadIfStale()`: the staleness window and the auto-refresh tick are both 60s,
         // so the ordinary path would keep rendering the previous group's tiles under the
         // previous group's NAME — a header that is affirmatively wrong, not merely stale,
         // now that it is the server-supplied group name instead of a fixed literal.

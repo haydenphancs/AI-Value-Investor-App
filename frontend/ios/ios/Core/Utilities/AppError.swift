@@ -685,6 +685,13 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "TRILLION_CLUB_UNAVAILABLE" {
                 return .apiError(code: code, message: message)
             }
+            // 503 SIGNAL_DETAIL_UNAVAILABLE: a Home signal drill-down (who bought the ticker)
+            // could not be built. Retryable, so the backend's own copy through `.apiError` —
+            // `SignalTickerDetailView` shows it with Retry. It used to arrive as an empty 200
+            // and read as "No congress members bought …" beside a card that said four did.
+            if code == "SIGNAL_DETAIL_UNAVAILABLE" {
+                return .apiError(code: code, message: message)
+            }
             // 503 SENTIMENT_TREND_UNAVAILABLE: the Updates news-tone chart could not be read (a
             // blip, or migration 180 not applied yet). Retryable. The chart's caller hides the
             // chart rather than showing this, but the code must not fall through to a generic.

@@ -76,6 +76,11 @@ def _isolated_state(monkeypatch):
     monkeypatch.setattr(sig.SignalsService, "_cache", {})
     monkeypatch.setattr(sig.SignalsService, "_inflight", {})
     monkeypatch.setattr(sig.SignalsService, "_degraded_keys", set())
+    # A HOLD left behind by one test reads as "degraded" to the next test's warm spec.
+    monkeypatch.setattr(sig.SignalsService, "_held_until", {})
+    monkeypatch.setattr(sig.SignalsService, "_background", set())
+    # The warm spec builds through the singleton: never construct a real FMP client here.
+    monkeypatch.setattr(sig, "_service", sig.SignalsService.__new__(sig.SignalsService))
     monkeypatch.setattr(tcs.TrillionClubService, "_group_cache", {})
     monkeypatch.setattr(tcs.TrillionClubService, "_detail_cache", {})
     monkeypatch.setattr(tcs.TrillionClubService, "_inflight", {})
@@ -268,6 +273,35 @@ def test_every_section_lands_its_rebuild_before_its_ttl():
     assert _svc().warm_ordering_violations() == []
 
 
+def test_signals_cadence_is_about_twice_a_day_and_its_ages_keep_their_order():
+    """Owner decision 2026-10-15: signals are rebuilt about twice a day, every age measured
+    on the CONTENT (a reload keeps its row's `computed_at`). The order is load-bearing:
+
+    * REUSE < REFRESH_AHEAD — a Tier-2 row the warm reuses is never due on arrival, or the
+      warmer would re-read Tier 2 every tick until the row aged past REUSE;
+    * REFRESH_AHEAD < MEM_TTL — the warm lands before memory expires (the per-section
+      check above adds the tick and the build budget);
+    * MEM_TTL <= CEILING — a held or timed-out copy may outlive its freshness, never the
+      other way round;
+    * CEILING <= the Tier-2 TTL — memory never stands in with content older than a row
+      Supabase has already expired.
+    """
+    assert (
+        sig._SIGNALS_TIER2_REUSE_SECONDS
+        < hds._SIGNALS_REFRESH_AHEAD_SECONDS
+        < sig._SIGNALS_MEM_TTL_SECONDS
+        <= sig._SIGNALS_STALE_SERVE_CEILING_SECONDS
+        <= sig._SIGNALS_SUPABASE_TTL_HOURS * 3600
+    )
+    assert 11 * 3600 <= sig._SIGNALS_MEM_TTL_SECONDS <= 13 * 3600, "no longer about twice a day"
+    # ...and the warm spec carries exactly these numbers (hds hard-codes its refresh-ahead,
+    # since signals_service imports it at load).
+    spec = _svc()._warm_spec("signals")
+    assert spec.ttl_seconds == sig._SIGNALS_MEM_TTL_SECONDS
+    assert spec.refresh_ahead_seconds == hds._SIGNALS_REFRESH_AHEAD_SECONDS
+    assert spec.cooldown_seconds == sig._SIGNALS_DEGRADED_TTL_SECONDS
+
+
 def test_the_ordering_check_is_not_vacuous():
     """A 30 s tick breaks the two sub-minute sections, and only those; a 60 s tick also
     breaks the universe's closed-window pair (840 + 60 + 3 >= 900)."""
@@ -321,7 +355,9 @@ async def test_refresh_due_sections_kicks_exactly_the_due_set(monkeypatch):
     HomeDashboardService._themes_cache[hds._THEMES_CACHE_KEY] = (now - 481, _themes())
     prices._cache[hds._PRICE_UNIVERSE_KEY] = (now - 44, {"AAPL": {}})
     HomeDashboardService._scanner_cache[hds._SCANNER_CACHE_KEY] = (now - 899, _good_scanners())
-    sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] = (now - 2399, _signals())
+    sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] = (
+        now - (hds._SIGNALS_REFRESH_AHEAD_SECONDS - 1), _signals(),
+    )
     tcs.TrillionClubService._group_cache[tcs._GROUP_KEY] = (now - 479, TrillionClubGroupResponse())
     try:
         kicked = await _kick_and_wait(svc, now=now)
@@ -380,7 +416,7 @@ async def test_a_warm_build_that_comes_back_degraded_sets_the_cooldown(monkeypat
         cooldown = HomeDashboardService._warm_cooldown_until
         assert set(cooldown) == {"pulse", "scanners", "signals"}
         # The section's own degraded cadence when longer than the default: signals' rebuild
-        # is ~8 FMP calls, so it is not retried every 45 s.
+        # is ~21 FMP calls, so it is not retried every 45 s.
         assert cooldown["signals"] - before == pytest.approx(sig._SIGNALS_DEGRADED_TTL_SECONDS, abs=2)
         assert cooldown["pulse"] - before == pytest.approx(hds._WARM_FAILURE_COOLDOWN_SECONDS, abs=2)
         assert "the new entry is degraded" in caplog.text
@@ -769,7 +805,9 @@ def _arm(section: str, monkeypatch, svc: HomeDashboardService):
     if section == "signals":
         ssvc = sig.SignalsService.__new__(sig.SignalsService)
         monkeypatch.setattr(sig.SignalsService, "_read_supabase_cache", lambda self_: None)
-        monkeypatch.setattr(sig.SignalsService, "_write_supabase_cache", lambda self_, r: None)
+        monkeypatch.setattr(
+            sig.SignalsService, "_write_supabase_cache", lambda self_, r, computed_at: None,
+        )
 
         async def build(self_):
             return await held((_signals(), frozenset()))
@@ -792,7 +830,12 @@ def _arm(section: str, monkeypatch, svc: HomeDashboardService):
 
 
 _FORCE_SECTIONS = ["pulse", "scanners", "themes", "signals", "trillion"]
-_STALE_AGE = {"pulse": 61, "scanners": 1201, "themes": 601, "signals": 2701, "trillion": 601}
+_STALE_AGE = {
+    "pulse": 61, "scanners": 1201, "themes": 601,
+    # Signals past the stale-serve ceiling, not just the TTL: inside it a non-forced read is
+    # answered with the stale good copy at once (stale-while-revalidate) and never joins.
+    "signals": sig._SIGNALS_STALE_SERVE_CEILING_SECONDS + 1, "trillion": 601,
+}
 
 
 @pytest.mark.asyncio
@@ -887,27 +930,65 @@ async def test_a_forced_scanner_refresh_never_downgrades_still_valid_cards(build
 
 
 @pytest.mark.asyncio
-async def test_a_forced_signals_refresh_never_downgrades_still_valid_cards(monkeypatch):
+@pytest.mark.parametrize("good_age", [
+    hds._SIGNALS_REFRESH_AHEAD_SECONDS + 1,      # the warm's refresh-ahead
+    sig._SIGNALS_MEM_TTL_SECONDS + 60,           # past the memory TTL, content still < 24 h
+], ids=["refresh-ahead", "past-the-memory-ttl"])
+async def test_a_forced_signals_refresh_holds_still_good_cards_instead_of_downgrading(
+    good_age, monkeypatch,
+):
+    """Refresh-ahead runs while the cards are still good; a degraded early build must not
+    swap them out. They are HELD: served unchanged (never mixed with the partial build),
+    nothing persisted, retried after `_SIGNALS_DEGRADED_TTL_SECONDS` (`_held_until`, which
+    the warm spec reads as degraded). That holds past the memory TTL too, up to the 24 h
+    stale-serve ceiling (the old check stopped at the TTL: with a 12 h TTL the first rebuild
+    after it swapped a degraded build over cards still fine to show). A request inside the
+    hold reads them without another build — an outage is not rebuilt back to back. Only once
+    no good copy is under the ceiling is the degraded build cached (memory only, degraded)."""
     ssvc = sig.SignalsService.__new__(sig.SignalsService)
     writes = []
+    builds = {"n": 0}
     monkeypatch.setattr(sig.SignalsService, "_read_supabase_cache", lambda self_: None)
-    monkeypatch.setattr(sig.SignalsService, "_write_supabase_cache", lambda self_, r: writes.append(r))
+    monkeypatch.setattr(
+        sig.SignalsService, "_write_supabase_cache",
+        lambda self_, r, computed_at: writes.append(r),
+    )
 
     async def build(self_):
+        builds["n"] += 1
         return SignalsGroupResponse(earnings=_signals().congress), frozenset({"ceo"})
 
     monkeypatch.setattr(sig.SignalsService, "_build", build)
+    key = sig._SIGNALS_CACHE_KEY
     good = _signals()
-    entry = (hds.time.time() - 2401, good)
-    sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] = entry
+    entry = (hds.time.time() - good_age, good)
+    sig.SignalsService._cache[key] = entry
+    before = hds.time.time()
     assert await ssvc.get_signals(force=True) is good
-    assert sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] is entry
-    assert sig._SIGNALS_CACHE_KEY not in sig.SignalsService._degraded_keys
+    assert builds["n"] == 1
+    assert sig.SignalsService._cache[key] is entry, "the good cards were swapped out"
+    assert key not in sig.SignalsService._degraded_keys
+    assert key in sig.SignalsService._held_until
+    assert sig.SignalsService._held_until[key] - before == pytest.approx(
+        sig._SIGNALS_DEGRADED_TTL_SECONDS, abs=2,
+    )
     assert writes == []
-    # Not forced (the entry expired): the degraded build is cached in memory as before.
-    sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] = (hds.time.time() - 2701, good)
+    # Inside the hold, even past the memory TTL, a request reads the held cards: no build.
+    sig.SignalsService._cache[key] = (hds.time.time() - sig._SIGNALS_MEM_TTL_SECONDS - 60, good)
+    assert await ssvc.get_signals() is good
+    assert builds["n"] == 1, "a request inside the hold rebuilt the outage again"
+    # Past the stale-serve ceiling there is no good copy left to hold: the degraded build is
+    # the best there is, cached in memory as degraded, never persisted.
+    sig.SignalsService._cache[key] = (
+        hds.time.time() - sig._SIGNALS_STALE_SERVE_CEILING_SECONDS - 1, good,
+    )
     result = await ssvc.get_signals()
-    assert result is not good and sig._SIGNALS_CACHE_KEY in sig.SignalsService._degraded_keys
+    assert builds["n"] == 2
+    assert result is not good and result.earnings is not None
+    assert sig.SignalsService._cache[key][1] is result
+    assert key in sig.SignalsService._degraded_keys
+    assert key not in sig.SignalsService._held_until
+    assert writes == []
 
 
 @pytest.mark.asyncio
@@ -927,22 +1008,166 @@ async def test_a_kept_entry_is_judged_a_failed_warm_build(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_forced_signals_still_read_the_supabase_tier_first(monkeypatch):
-    """Only the MEMORY fast path is skipped: a fresh Tier-2 row is reloaded, not rebuilt."""
+@pytest.mark.parametrize("row_age, reused", [
+    (60, True),
+    (sig._SIGNALS_TIER2_REUSE_SECONDS + 1, False),
+])
+async def test_a_forced_signals_refresh_reuses_only_a_young_tier2_row(row_age, reused, monkeypatch):
+    """Only the MEMORY fast path is skipped: Tier 2 is still read first. A row whose CONTENT
+    is younger than `_SIGNALS_TIER2_REUSE_SECONDS` (a restart, or another process just
+    built it) is reloaded instead of rebuilt — under its own `computed_at`, so it ages from
+    its build, not from the reload (a `time.time()` stamp made a day-old row look new: the
+    once-a-day bug). An older row is rebuilt, once."""
     ssvc = sig.SignalsService.__new__(sig.SignalsService)
-    tier2 = _signals()
+    tier2, built = _signals(), _signals()
     builds = {"n": 0}
+    writes = []
 
     async def build(self_):
         builds["n"] += 1
-        return SignalsGroupResponse(), frozenset()
+        return built, frozenset()
 
-    monkeypatch.setattr(sig.SignalsService, "_read_supabase_cache", lambda self_: tier2)
+    computed_at = hds.time.time() - row_age
+    monkeypatch.setattr(
+        sig.SignalsService, "_read_supabase_cache", lambda self_: (tier2, computed_at),
+    )
+    monkeypatch.setattr(
+        sig.SignalsService, "_write_supabase_cache",
+        lambda self_, r, stamp: writes.append((r, stamp)),
+    )
     monkeypatch.setattr(sig.SignalsService, "_build", build)
-    sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] = (hds.time.time(), SignalsGroupResponse())
-    assert await ssvc.get_signals(force=True) is tier2
-    assert builds["n"] == 0
-    assert sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY][1] is tier2
+    # Memory is OLDER than the row (the warm's own refresh-ahead age), so the row is adopted;
+    # a newer good entry would rightly refuse it.
+    sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY] = (
+        hds.time.time() - hds._SIGNALS_REFRESH_AHEAD_SECONDS - 1, _signals(),
+    )
+    result = await ssvc.get_signals(force=True)
+    stamp, held = sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY]
+    if reused:
+        assert result is tier2 and held is tier2
+        assert builds["n"] == 0, "a young Tier-2 row was rebuilt"
+        assert stamp == computed_at, "the reload was stamped with now, not the content age"
+        assert writes == []
+    else:
+        assert builds["n"] == 1
+        assert result is built and held is built
+        assert stamp > computed_at
+        assert writes == [(built, stamp)], "Tier 2 must carry the same stamp as memory"
+
+
+# ── 4b. signals through the warmer: content age and the hold ─────────────────────
+# The REAL `get_signals` behind the warm spec, over a stubbed Tier-2 read/write and inner
+# build: the warmer's "new, good entry" judgement meets the service's reuse/hold rules.
+
+
+def _signals_io(monkeypatch, *, row=None, failed=()):
+    """Stub the Tier-2 read (``row``: ``(payload, computed_at)`` or None), the write and the
+    inner build. ``state.failed`` names the steps the build reports as RAISED (a degraded
+    build that still has its earnings card); clear it to make the next build healthy."""
+    state = SimpleNamespace(builds=0, writes=[], failed=set(failed))
+
+    async def build(self_):
+        state.builds += 1
+        if state.failed:
+            return SignalsGroupResponse(earnings=_signals().congress), frozenset(state.failed)
+        return _signals(), frozenset()
+
+    monkeypatch.setattr(sig.SignalsService, "_read_supabase_cache", lambda self_: row)
+    monkeypatch.setattr(
+        sig.SignalsService, "_write_supabase_cache",
+        lambda self_, r, computed_at: state.writes.append((r, computed_at)),
+    )
+    monkeypatch.setattr(sig.SignalsService, "_build", build)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_a_reloaded_tier2_row_is_not_due_on_arrival(monkeypatch):
+    """The OLDEST row the warm may reuse is still younger than the warm's refresh-ahead, so a
+    reload never leaves an entry the next tick finds due: no Tier-2 re-read every 10 s (the
+    loop a REUSE >= REFRESH_AHEAD would start, now that a reload keeps its row's stamp)."""
+    svc = _svc()
+    row = _signals()
+    # 60 s inside the reuse cutoff: near it, as intended, but with room for a slow CI box
+    # between this line and the age `_refresh` measures after a thread hop (1 s was flaky).
+    computed_at = hds.time.time() - sig._SIGNALS_TIER2_REUSE_SECONDS + 60
+    state = _signals_io(monkeypatch, row=(row, computed_at))
+    spec = svc._warm_spec("signals")
+    assert spec.stamp() is None
+    assert await svc._warm_one(spec, "missing") is True
+    assert state.builds == 0 and state.writes == [], "a reusable row was rebuilt"
+    stamp, held = sig.SignalsService._cache[sig._SIGNALS_CACHE_KEY]
+    assert held is row and stamp == computed_at
+    assert not spec.degraded()
+    assert "signals" not in HomeDashboardService._warm_cooldown_until
+    assert HomeDashboardService._warm_due_reason(spec, hds.time.time()) is None, (
+        "a reused row was due on arrival"
+    )
+    # It is due again at the refresh-ahead age of its CONTENT, not of the reload.
+    due_at = computed_at + hds._SIGNALS_REFRESH_AHEAD_SECONDS
+    assert HomeDashboardService._warm_due_reason(spec, due_at - 1) is None
+    assert HomeDashboardService._warm_due_reason(spec, due_at) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_held_signals_entry_is_judged_degraded_and_retried(monkeypatch, caplog):
+    """A warm whose rebuild comes back degraded while the cards are still good HOLDS them:
+    the same entry, untouched. The warmer must call that a failure, back off for the
+    section's degraded cadence (300 s, not 45), and then RETRY — `_held_until` reads as
+    degraded, so a held entry does not sit out its age before the next attempt. The retry
+    that succeeds clears the hold and the cooldown."""
+    svc = _svc()
+    state = _signals_io(monkeypatch, failed={"ceo"})
+    key = sig._SIGNALS_CACHE_KEY
+    now = hds.time.time()
+    entry = (now - hds._SIGNALS_REFRESH_AHEAD_SECONDS - 1, _signals())
+    sig.SignalsService._cache[key] = entry
+    spec = svc._warm_spec("signals")
+    reason = HomeDashboardService._warm_due_reason(spec, now)
+    assert reason is not None and reason.endswith("s old")
+    caplog.set_level(logging.INFO, logger=_LOGGER)
+    assert await svc._warm_one(spec, reason) is False
+    assert state.builds == 1 and state.writes == []
+    assert sig.SignalsService._cache[key] is entry, "the held cards were replaced"
+    assert key in sig.SignalsService._held_until and key not in sig.SignalsService._degraded_keys
+    assert "signals rebuild failed: the cached entry was not replaced" in caplog.text
+    cooldown = HomeDashboardService._warm_cooldown_until["signals"]
+    assert cooldown - now == pytest.approx(sig._SIGNALS_DEGRADED_TTL_SECONDS, abs=2)
+    assert spec.degraded(), "a held entry must read as degraded, or the warmer stops retrying"
+    assert HomeDashboardService._warm_due_reason(spec, now + 1) is None, "kicked inside the cooldown"
+    assert HomeDashboardService._warm_due_reason(
+        spec, now + sig._SIGNALS_DEGRADED_TTL_SECONDS + 1,
+    ) == "degraded"
+    # The retry, once the source is back: a new good entry, the hold and cooldown cleared.
+    state.failed.clear()
+    assert await svc._warm_one(spec, "degraded") is True
+    assert state.builds == 2 and len(state.writes) == 1
+    assert sig.SignalsService._cache[key] is not entry
+    assert key not in sig.SignalsService._held_until and not spec.degraded()
+    assert "signals" not in HomeDashboardService._warm_cooldown_until
+    assert "signals recovered (degraded)" in caplog.text
+
+
+def test_a_request_path_hold_gates_the_warmer_until_its_retry_time(monkeypatch):
+    """A hold a dashboard REQUEST set (its rebuild failed) never touches the warmer's cooldown.
+    Gated on the cooldown alone, the warmer's next tick (10 s) saw the old, held entry as due
+    and rebuilt against the same outage at once — two ~21-call builds back to back. The
+    hold's own retry time (`_held_until`) is the section's not-before now."""
+    svc = _svc()
+    key = sig._SIGNALS_CACHE_KEY
+    now = hds.time.time()
+    sig.SignalsService._cache[key] = (now - sig._SIGNALS_MEM_TTL_SECONDS - 60, _signals())
+    sig.SignalsService._held_until[key] = now + 120          # set by a request, not the warmer
+    assert "signals" not in HomeDashboardService._warm_cooldown_until
+    spec = svc._warm_spec("signals")
+    assert spec.degraded()
+    assert HomeDashboardService._warm_due_reason(spec, now) is None, "the warmer ignored the hold"
+    assert HomeDashboardService._warm_due_reason(spec, now + 119) is None
+    assert HomeDashboardService._warm_due_reason(spec, now + 121) == "degraded"
+    # Every other section has no not-before: unchanged.
+    assert all(
+        svc._warm_spec(name).not_before is None for name in hds.WARM_SECTIONS if name != "signals"
+    )
 
 
 # ── 5. never two builds; one section never stops the others ─────────────────────
@@ -1271,12 +1496,17 @@ async def test_a_guard_timeout_serves_only_an_honest_copy(section, case, monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("age, served", [(3600, True), (24 * 3600 + 5, False)])
+@pytest.mark.parametrize("age, served", [
+    (sig._SIGNALS_MEM_TTL_SECONDS + 60, True),             # expired, but its content < 24 h
+    (sig._SIGNALS_STALE_SERVE_CEILING_SECONDS + 5, False),
+])
 async def test_the_signals_guard_serves_a_copy_only_under_a_day_old(age, served, monkeypatch):
     ssvc = sig.SignalsService.__new__(sig.SignalsService)
     monkeypatch.setattr(sig, "_SIGNALS_BUILD_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(sig.SignalsService, "_read_supabase_cache", lambda self_: None)
-    monkeypatch.setattr(sig.SignalsService, "_write_supabase_cache", lambda self_, r: None)
+    monkeypatch.setattr(
+        sig.SignalsService, "_write_supabase_cache", lambda self_, r, computed_at: None,
+    )
     gate = asyncio.Event()
 
     async def build(self_):

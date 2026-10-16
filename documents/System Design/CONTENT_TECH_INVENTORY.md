@@ -140,9 +140,11 @@ the cache-aside two-tier pattern (in-memory dict + Supabase `*_cache` table + `_
 ### 2.2 Congressional trades ("App-Exclusive Signals")
 
 - `services/signals_service.py` — `_aggregate_congress()` ranks tickers by **distinct** congress
-  members who bought (30-day disclosure window). Source: FMP `senate-latest` + `house-latest`.
-  Cached in Supabase `signals_cache` (24h). Detail rows surface who bought, when, and amount
-  ranges (`format_amount_range`).
+  members who bought (30-day disclosure window; PURCHASES only — an "Exchange" is a spinoff/fund
+  share swap and stopped counting on 2026-10-15). Source: FMP `senate-latest` + `house-latest`.
+  The card and its drill-down read the same rows (`_congress_buy_rows`), so the drill-down lists
+  exactly the members the card counts. Detail rows surface who bought, when, and amount ranges
+  (`format_amount_range`); a failed drill-down answers 503 `SIGNAL_DETAIL_UNAVAILABLE`.
 - Per-ticker congress activity also feeds the report via
   `holders_service._build_congress_activities` / `_build_congress_smart_money`.
 - **Note on naming:** the backend brands this "Congressional Buys" / "App-Exclusive Signals";
@@ -162,6 +164,15 @@ the cache-aside two-tier pattern (in-memory dict + Supabase `*_cache` table + `_
   fail-closed `get_insider_trades_since`; gated like Earnings Shockers (NASDAQ/NYSE/AMEX +
   $250M) plus a price-plausibility band; $100K per-ticker floor. Pro-locked like the others.
   A build where any card RAISED is kept in memory 5 min and never written to `signals_cache`.
+
+Refresh (2026-10-15): the four cards are rebuilt from source about **twice a day** — 12 h of
+CONTENT age in memory, refreshed by the Home warmer 20 min before that. `signals_cache` (24 h
+expiry) carries `computed_at`; a restart reuses a row only while it is under 11.5 h old, else
+it rebuilds. While a rebuild fails, the last good set of cards (under 24 h old) is held and
+retried every 5 min; a request never waits on a rebuild while such a copy exists (it is served
+at once and the refresh runs behind it). Drill-downs window on the cards' build time, so a
+card's count and its list agree. (Until then the warmer re-read the same 24 h row, so the
+cards changed about once a day.)
 
 ### 2.4 Hidden market signals (in-report)
 

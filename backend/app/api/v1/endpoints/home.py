@@ -20,7 +20,7 @@ import re
 from app.dependencies import get_current_user_id, get_watchlist_identity
 from app.services.home_service import HomeService
 from app.services.home_dashboard_service import get_home_dashboard_service
-from app.services.signals_service import get_signals_service
+from app.services.signals_service import SignalDetailUnavailable, get_signals_service
 from app.schemas.home import HomeFeedResponse
 from app.schemas.home_dashboard import HomeDashboardResponse
 from app.schemas.signals_detail import SignalTickerDetailResponse
@@ -142,9 +142,9 @@ async def get_signal_ticker_detail(
     user: dict = Depends(get_watchlist_identity),
 ):
     """Per-ticker drill-down for a Home signal card — WHO bought/added `ticker`,
-    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress, ceo}. The service degrades to an empty
-    holder list rather than failing; only an unexpected error surfaces a structured
-    response.
+    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress, ceo}. An empty holder list means nothing
+    qualified; a source that failed answers 503 ``SIGNAL_DETAIL_UNAVAILABLE`` (iOS shows
+    Retry) — it used to come back as an empty 200, read as "nobody bought it".
 
     Paid (Pro/Max). This route used to take no auth dependency at all, which made the
     signals redaction on `/dashboard` a curtain rather than a gate: the masked ticker was
@@ -178,6 +178,17 @@ async def get_signal_ticker_detail(
         )
     try:
         return await get_signals_service().get_ticker_detail(kind, ticker)
+    except SignalDetailUnavailable as e:
+        # WARNING, not ERROR with a traceback: the service already logged the cause, and a
+        # source blip is an expected, retryable state rather than a bug.
+        logger.warning(
+            "Signal detail unavailable (%s/%s): %s", kind, ticker, e.__cause__,
+        )
+        return make_error_response(
+            ErrorCode.SIGNAL_DETAIL_UNAVAILABLE,
+            message=f"signal detail build failed: {type(e.__cause__).__name__}",
+            details={"kind": kind, "ticker": ticker, "step": "signal_detail"},
+        )
     except Exception as e:
         logger.error(
             "Signal detail failed (%s/%s): %s: %s",

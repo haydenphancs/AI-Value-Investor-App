@@ -66,8 +66,9 @@ class _FakeSignalsService:
     never reaches the data layer at all — a gate that fetched and THEN refused would still
     warm a shared cache on behalf of a caller who is not entitled to the answer.
 
-    `holders=[]` models the service's own documented degradation (an honest empty state,
-    never an error); `raises=` models a transport fault escaping it.
+    `holders=[]` models an honest empty state (nothing qualified). A failed source is NOT an
+    empty list any more: the service raises `SignalDetailUnavailable`, modelled with
+    `raises=` — as is any other fault escaping it.
     """
 
     def __init__(self, *, holders=None, raises: BaseException | None = None):
@@ -294,12 +295,12 @@ def test_the_guest_flag_alone_does_not_unlock_or_lock(monkeypatch):
     assert svc.calls == []
 
 
-# ── 4. Both branches of the degrade path, for an ENTITLED caller ─────────────
+# ── 4. The empty and failure paths, for an ENTITLED caller ───────────────────
 
 def test_an_empty_holder_list_passes_through_as_an_honest_empty_state(monkeypatch):
-    """The service's documented degradation is an empty `holders`, which iOS renders as an
-    empty state. The handler must not "helpfully" turn that into an error — and must not
-    confuse it with the paywall."""
+    """An empty `holders` means nothing qualified, which iOS renders as an empty state. The
+    handler must not "helpfully" turn that into an error — and must not confuse it with the
+    paywall."""
     resp, svc = _call(monkeypatch, {"tier": TIER_PRO}, svc=_FakeSignalsService(holders=[]))
 
     assert isinstance(resp, SignalTickerDetailResponse)
@@ -323,6 +324,33 @@ def test_a_transport_fault_surfaces_as_a_structured_error_not_a_paywall(monkeypa
     assert body["error_code"] and body["user_message"]
     assert body["details"]["step"] == "signal_detail"
     assert body["details"]["ticker"] == _TICKER
+
+
+def _unavailable(kind: str) -> signals_service_module.SignalDetailUnavailable:
+    """The service's typed failure, chained the way `get_ticker_detail` raises it."""
+    exc = signals_service_module.SignalDetailUnavailable(kind, _TICKER)
+    exc.__cause__ = RuntimeError("supabase down")
+    return exc
+
+
+@pytest.mark.parametrize("kind", ["whale", "congress", "ceo"])
+def test_a_failed_drill_down_is_a_retryable_503_not_an_empty_list_or_a_paywall(monkeypatch, kind):
+    """A source that failed used to come back as an empty 200, and iOS said "No congress
+    members bought MSFT…" beside a card claiming four. It is now SIGNAL_DETAIL_UNAVAILABLE:
+    503 + "retry", so the app shows Retry. A paid user must never read it as the paywall."""
+    resp, svc = _call(
+        monkeypatch, {"tier": TIER_PRO}, kind=kind, svc=_FakeSignalsService(raises=_unavailable(kind))
+    )
+
+    body = _body(resp)
+    assert svc.calls == [(kind, _TICKER)]
+    assert resp.status_code == 503
+    assert body["error_code"] == ErrorCode.SIGNAL_DETAIL_UNAVAILABLE.value
+    assert body["action"] == "retry"
+    assert body["user_message"], "iOS renders `user_message`; an empty one is a blank alert"
+    assert "RuntimeError" in body["message"]                 # the cause, for the logs / dev builds
+    assert set(body) == {"error_code", "message", "user_message", "action", "details"}
+    assert body["details"] == {"kind": kind, "ticker": _TICKER, "step": "signal_detail"}
 
 
 # ── 5. The signals-detail route actually consults the gate ───────────────────

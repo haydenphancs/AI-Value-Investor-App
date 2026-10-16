@@ -32,6 +32,12 @@ Fix pass (adversarial review, same day) — each with its own rows below:
   * pins for the seed's Market-scope term, the forced-stale snapshot card, and loadTabs'
     cancellation return.
 
+Pull-to-refresh fix (2026-10-15) — a pull emptied the feed to "No recent stories":
+  * the refresh is owned by the ViewModel (`refreshTask`), so SwiftUI cancelling its `.refreshable`
+    task no longer cancels the requests (a cancelled load ended on the cleared list);
+  * a forced reload of the scope already painted keeps its rows until the answer replaces them
+    (`keepsShownRows`), dropping them only on a refusal; a failed refresh says so beside them.
+
 Source scans (there is no XCTest target): comments stripped and every check scoped to its
 brace-bounded declaration (.claude/rules/testing.md §3). `MUTATIONS` breaks each property once
 and asserts its guard fails, several naming the assertion they must fail WITH.
@@ -78,6 +84,8 @@ _TREND = "private var visibleTrend: SentimentTrend?"
 _ENRICH_WINDOW = "private func enrichVisibleWindow(around index: Int, scope: String, token: UUID) async"
 _MERGE = "private func mergeEnrichment("
 _REFRESH = "func refresh() async"
+_PERFORM_REFRESH = "private func performRefresh() async"
+_DROP_SHOWN = "private func dropShownRows()"
 _GROUP_RELOAD = "func reloadForActiveGroupChange() async"
 _VIEW_STRUCT = "struct UpdatesView: View"
 _HEADER_STRUCT = "struct LiveNewsHeader: View"
@@ -230,7 +238,7 @@ def _check_first_open_parallel(s):
 
 
 def _check_serial_paths_stay_serial(s):
-    for header in (_REFRESH, _GROUP_RELOAD):
+    for header in (_PERFORM_REFRESH, _GROUP_RELOAD):
         fn = _fn(s, header)
         assert "async let" not in fn, f"`{header}` started its feed beside /tabs — it must stay serial"
         _in_order(fn, "await loadTabs()", "await loadFeed(")
@@ -316,7 +324,7 @@ def _check_pending_scope_survives_heal(s):
 
 # ── 3. loadFeed with a Market snapshot on screen ─────────────────────────────────────
 
-_CONDITIONAL_CLEAR = "if snapshotSavedAt == nil || scope != UpdatesScope.market {"
+_CONDITIONAL_CLEAR = "if !keepsShownRows && (snapshotSavedAt == nil || scope != UpdatesScope.market) {"
 
 
 def _check_market_seed_kept_while_live_loads(s):
@@ -355,7 +363,7 @@ def _check_refusal_drops_failure_keeps(s):
     failure = _block_at(rest, _idx(rest, "else"))
     assert "self.error = appError.message" in failure
     assert "expireSnapshotIfStale()" in failure, "a failure no longer bounds the kept snapshot by its window"
-    for token in ("dropSnapshot()", "allNewsArticles = []"):
+    for token in ("dropSnapshot()", "allNewsArticles = []", "dropShownRows()"):
         assert token not in failure, f"a failed refresh runs `{token}` — the snapshot vanishes offline"
     drop = _fn(s, _DROP)
     _in_order(drop, "guard snapshotSavedAt != nil else { return }", "snapshotSavedAt = nil",
@@ -387,6 +395,25 @@ def _check_generic_catch_fenced(s):
     )
 
 
+_KEEP_ROWS = "let keepsShownRows = force && shownFeedScope == scope"
+
+
+def _check_refresh_keeps_shown_rows(s):
+    feed = _fn(s, _LOAD_FEED)
+    assert _KEEP_ROWS in feed, (
+        "a pull-to-refresh clears the rows of the scope it refreshes — the timeline blanks for "
+        "the whole request, and a refresh that ends without an answer leaves 'No recent stories'"
+    )
+    _in_order(feed, "if shownFeedScope != scope { shownFeedScope = nil }", _KEEP_ROWS, _CONDITIONAL_CLEAR)
+    catch = _generic_catch(feed)
+    refusal = _block_at(catch, _idx(catch, "if case .signInRequired = appError"))
+    assert "if keepsShownRows { dropShownRows() }" in refusal, (
+        "a refusal keeps the rows a refresh held on screen — stories under the account gate"
+    )
+    drop = _fn(s, _DROP_SHOWN)
+    _in_order(drop, "allNewsArticles = []", "insightSummary = nil", "applyFiltersAndGroup()")
+
+
 # ── 4. Detached enrichment ───────────────────────────────────────────────────────────
 
 def _check_enrichment_detached(s):
@@ -410,7 +437,8 @@ def _check_enrichment_detached(s):
         "the previous identity's enrichment survives an identity change"
     )
     assert "enrichTask?.cancel()" in _fn(s, "deinit")
-    assert "enrichVisibleWindow" not in _fn(s, _REFRESH)
+    for header in (_REFRESH, _PERFORM_REFRESH):
+        assert "enrichVisibleWindow" not in _fn(s, header)
 
 
 def _check_post_paint_waits_for_the_tab(s):
@@ -477,6 +505,32 @@ def _check_first_load_owned(s):
         "the first load runs in the view's structured task again — a tab-away cancels it"
     )
     assert "isLoadingInitial" not in _vm(s), "the old re-entrancy flag is back beside the owned task"
+
+
+_REFRESH_OWNED = (
+    "if let running = refreshTask {",
+    "await running.value",
+    "let task = Task {",
+    "await self.performRefresh()",
+    "if self.refreshTaskID == id {",
+    "refreshTask = task",
+    "await task.value",
+)
+
+
+def _check_refresh_owned(s):
+    fn = _fn(s, _REFRESH)
+    _in_order(fn, *_REFRESH_OWNED)
+    outside = fn[: _idx(fn, "let task = Task {")] + fn[_idx(fn, "refreshTask = task"):]
+    assert "performRefresh()" not in outside, (
+        "pull-to-refresh runs in SwiftUI's .refreshable task again — SwiftUI cancels it and the "
+        "refresh ends on an empty list"
+    )
+    handler = _fn(s, _IDENTITY)
+    assert "refreshTask?.cancel()" in handler[: _idx(handler, _GATE)], (
+        "the previous identity's refresh survives an identity change"
+    )
+    assert "refreshTask?.cancel()" in _fn(s, "deinit"), "the refresh outlives the ViewModel"
 
 
 def _check_first_frame_not_empty(s):
@@ -572,6 +626,20 @@ def _check_retry_notice_placement(s):
         "300+ pt above the stories on a small phone"
     )
 
+
+
+def _check_refresh_failure_notice(s):
+    notice = _fn(s, "var showsRefreshFailure: Bool")
+    for token in ("snapshotSavedAt == nil", "error != nil", "!requiresSignIn", "!isReconnecting",
+                  "!groupedNews.isEmpty"):
+        assert token in notice, f"showsRefreshFailure lost `{token}`"
+    body = _body(s)
+    _in_order(body, "if viewModel.showsSnapshotRefreshFailure {", "} else if viewModel.showsRefreshFailure {",
+              "ScrollView(showsIndicators: false)")
+    live = _block_at(body, _idx(body, "} else if viewModel.showsRefreshFailure {") + 1)
+    assert "InlineRetryNotice(" in live and "viewModel.refresh()" in live, (
+        "a failed refresh of live rows is silent — the spinner stops over the old stories"
+    )
 
 def _check_task_prepare_order(s):
     task = _block(_body(s), ".task(id: isActiveTab)")
@@ -810,6 +878,9 @@ GUARDS: dict[str, Callable[[dict[str, str]], None]] = {
     "post_paint_waits_for_the_tab": _check_post_paint_waits_for_the_tab,
     "no_enrichment_of_a_snapshot": _check_no_enrichment_of_a_snapshot,
     "first_load_owned": _check_first_load_owned,
+    "refresh_owned": _check_refresh_owned,
+    "refresh_keeps_shown_rows": _check_refresh_keeps_shown_rows,
+    "refresh_failure_notice": _check_refresh_failure_notice,
     "first_frame_not_empty": _check_first_frame_not_empty,
     "no_network_in_init": _check_no_network_in_init,
     "render_gate": _check_render_gate,
@@ -898,7 +969,7 @@ MUTATIONS: list[tuple] = [
              "} else {\n            async let early: Void = loadTabs()\n            await early"),
      "before /tabs confirms"),
     ("refresh-parallel", "serial_paths_stay_serial", "vm",
-     _within(_REFRESH, _E("await loadTabs()"), "async let t: Void = loadTabs()")),
+     _within(_PERFORM_REFRESH, _E("await loadTabs()"), "async let t: Void = loadTabs()")),
     ("group-reload-parallel", "serial_paths_stay_serial", "vm",
      _within(_GROUP_RELOAD, _E("await loadTabs()"), "async let t: Void = loadTabs()")),
     ("unguarded-trailing", "trailing_isloading_fenced", "vm",
@@ -971,6 +1042,16 @@ MUTATIONS: list[tuple] = [
     ("failure-no-expiry", "refusal_drops_failure_keeps", "vm",
      _within(_LOAD_FEED, r"(isReconnecting = false\s*)expireSnapshotIfStale\(\)", r"\1"), "no longer bounds"),
     ("drop-keeps-rows", "refusal_drops_failure_keeps", "vm", _within(_DROP, _E("allNewsArticles = []"), "")),
+    ("failure-drops-refreshed-rows", "refusal_drops_failure_keeps", "vm",
+     _within(_LOAD_FEED, r"(self\.error = appError\.message\n)", r"\1                dropShownRows()\n"), "vanishes offline"),
+    # ── pull-to-refresh keeps the shown rows ──
+    ("refresh-clears-rows", "refresh_keeps_shown_rows", "vm",
+     _within(_LOAD_FEED, _E(_KEEP_ROWS), "let keepsShownRows = false"), "blanks for the whole request"),
+    ("refresh-keeps-other-scope", "refresh_keeps_shown_rows", "vm",
+     _within(_LOAD_FEED, _E(" && shownFeedScope == scope"), ""), "blanks for the whole request"),
+    ("refusal-keeps-refreshed-rows", "refresh_keeps_shown_rows", "vm",
+     _within(_LOAD_FEED, r"\n\s*if keepsShownRows \{ dropShownRows\(\) \}", ""), "under the account gate"),
+    ("drop-shown-keeps-rows", "refresh_keeps_shown_rows", "vm", _within(_DROP_SHOWN, _E("allNewsArticles = []"), "")),
     ("notice-under-gate", "refusal_drops_failure_keeps", "vm",
      _within("var showsSnapshotRefreshFailure: Bool", _E("!requiresSignIn && "), ""), "lost `!requiresSignIn`"),
     ("generic-catch-unfenced", "generic_catch_fenced", "vm",
@@ -1033,6 +1114,16 @@ MUTATIONS: list[tuple] = [
      _within(_LOAD_IF_NEEDED, r"if let running = initialLoadTask \{\s*await running\.value\s*return\s*\}\n", "")),
     ("clears-newer-task", "first_load_owned", "vm", _within(_LOAD_IF_NEEDED, _E("if self.initialLoadID == id {"), "if true {")),
     ("no-activation-expiry", "first_load_owned", "vm", _within(_LOAD_IF_NEEDED, r"expireSnapshotIfStale\(\)\n", "")),
+    # ── owned pull-to-refresh ──
+    ("structured-refresh", "refresh_owned", "vm",
+     _within(_REFRESH, r"let task = Task \{.*?await task\.value", "await performRefresh()")),
+    ("refresh-no-join", "refresh_owned", "vm",
+     _within(_REFRESH, r"if let running = refreshTask \{\s*await running\.value\s*return\s*\}\n", "")),
+    ("refresh-clears-newer-task", "refresh_owned", "vm", _within(_REFRESH, _E("if self.refreshTaskID == id {"), "if true {")),
+    ("refresh-survives-identity", "refresh_owned", "vm",
+     _within(_IDENTITY, r"refreshTask\?\.cancel\(\)\n", ""), "survives an identity change"),
+    ("deinit-keeps-refresh", "refresh_owned", "vm", _within("deinit", _E("; refreshTask?.cancel()"), ""),
+     "outlives the ViewModel"),
     ("reentrancy-flag-back", "first_load_owned", "vm",
      _sub(r"(\n    private var hasLoadedOnce = false\n)", r"\1    private var isLoadingInitial = false\n"), "old re-entrancy flag"),
     ("isloading-false", "first_frame_not_empty", "vm",
@@ -1066,6 +1157,12 @@ MUTATIONS: list[tuple] = [
      _sub(_E("if viewModel.showsSnapshotRefreshFailure {"), "if viewModel.error != nil {")),
     ("notice-no-retry", "retry_notice_placement", "view",
      _within("if viewModel.showsSnapshotRefreshFailure", _E("await viewModel.refresh()"), "print(1)"), "no retry"),
+    ("live-refresh-failure-silent", "refresh_failure_notice", "view",
+     _sub(_E("} else if viewModel.showsRefreshFailure {"), "} else if false {"), "not found"),
+    ("live-notice-no-retry", "refresh_failure_notice", "view",
+     _within("} else if viewModel.showsRefreshFailure", _E("await viewModel.refresh()"), "print(1)"), "is silent"),
+    ("live-notice-over-snapshot", "refresh_failure_notice", "vm",
+     _within("var showsRefreshFailure: Bool", _E("snapshotSavedAt == nil && "), ""), "lost `snapshotSavedAt == nil`"),
     ("notice-long-at-ax", "retry_notice_placement", "view",
      _within(_NOTICE_TEXT, r'\? "Couldn\'t refresh the news\."',
              '? "Couldn\'t refresh the news. These stories are from your last visit."'), "300+ pt"),

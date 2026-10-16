@@ -604,10 +604,14 @@ def fresh_cache():
     ssvc.SignalsService._cache.clear()
     ssvc.SignalsService._inflight.clear()
     ssvc.SignalsService._degraded_keys.clear()
+    ssvc.SignalsService._held_until.clear()
+    ssvc.SignalsService._background.clear()
     yield
     ssvc.SignalsService._cache.clear()
     ssvc.SignalsService._inflight.clear()
     ssvc.SignalsService._degraded_keys.clear()
+    ssvc.SignalsService._held_until.clear()
+    ssvc.SignalsService._background.clear()
 
 
 @pytest.mark.asyncio
@@ -634,7 +638,7 @@ async def test_a_degraded_build_is_served_from_memory_briefly_and_never_persiste
     s = ssvc.SignalsService()
     writes = []
     monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
-    monkeypatch.setattr(s, "_write_supabase_cache", lambda r: writes.append(r))
+    monkeypatch.setattr(s, "_write_supabase_cache", lambda r, computed_at: writes.append(r))
     builds = {"n": 0}
 
     async def degraded():
@@ -651,7 +655,7 @@ async def test_a_degraded_build_is_served_from_memory_briefly_and_never_persiste
 
     ts, cached = ssvc.SignalsService._cache[ssvc._SIGNALS_CACHE_KEY]
     ssvc.SignalsService._cache[ssvc._SIGNALS_CACHE_KEY] = (ts - ssvc._SIGNALS_DEGRADED_TTL_SECONDS - 1, cached)
-    await s.get_signals()                        # past the SHORT ttl (well inside 45 min) → rebuild
+    await s.get_signals()                        # past the SHORT ttl (well inside 12 h) → rebuild
     assert builds["n"] == 2
 
 
@@ -661,7 +665,7 @@ async def test_a_healthy_build_persists_and_clears_the_degraded_mark(monkeypatch
     writes = []
     ssvc.SignalsService._degraded_keys.add(ssvc._SIGNALS_CACHE_KEY)
     monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
-    monkeypatch.setattr(s, "_write_supabase_cache", lambda r: writes.append(r))
+    monkeypatch.setattr(s, "_write_supabase_cache", lambda r, computed_at: writes.append((r, computed_at)))
 
     async def healthy():
         return SignalsGroupResponse(ceo=_group("ceo", "GME")), frozenset()
@@ -671,6 +675,9 @@ async def test_a_healthy_build_persists_and_clears_the_degraded_mark(monkeypatch
     assert r.ceo.entries[0].symbol == "GME"
     assert len(writes) == 1
     assert ssvc._SIGNALS_CACHE_KEY not in ssvc.SignalsService._degraded_keys
+    # Tier 2 gets the SAME content stamp memory holds, so a restart reads back the real age.
+    stamp, cached = ssvc.SignalsService._cache[ssvc._SIGNALS_CACHE_KEY]
+    assert writes[0][0] is cached and writes[0][1] == stamp
 
 
 @pytest.mark.asyncio
@@ -678,7 +685,7 @@ async def test_a_ceo_only_build_counts_as_a_build_with_groups(monkeypatch, fresh
     """The old `congress or whale or earnings` check would have dropped a CEO-only build."""
     s = ssvc.SignalsService()
     monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
-    monkeypatch.setattr(s, "_write_supabase_cache", lambda r: None)
+    monkeypatch.setattr(s, "_write_supabase_cache", lambda r, computed_at: None)
 
     async def ceo_only():
         return SignalsGroupResponse(ceo=_group("ceo", "GME")), frozenset()
@@ -714,7 +721,9 @@ async def test_congress_and_whale_failures_now_raise_so_the_build_knows(monkeypa
 def test_the_cache_key_was_bumped_for_the_new_card():
     # v6 (2026-10-09): Earnings Shockers changed semantics (one ET day per calendar call,
     # digit-shift skip, non-common lines dropped), so a v5 row must not be served.
-    assert ssvc._SIGNALS_CACHE_KEY == "signals_v6"
+    # v7 (2026-10-15): Congressional Buys counts purchases only (an "Exchange" is a share swap,
+    # not a buy) and rows carry `computed_at` as the content's age, so a v6 row must not be served.
+    assert ssvc._SIGNALS_CACHE_KEY == "signals_v7"
     assert ssvc._SIGNAL_STEPS == ("congress", "whale", "earnings", "ceo")
     assert set(ssvc._SIGNAL_STEPS) == set(SignalsGroupResponse.model_fields)
 
@@ -784,9 +793,13 @@ async def test_detail_falls_back_to_the_quote_when_the_profile_fails(fresh_detai
 
 @pytest.mark.asyncio
 async def test_detail_without_any_reference_price_is_not_cached(fresh_detail):
+    """No profile price and no quote: the band has no reference, so the drill-down is
+    UNAVAILABLE (the endpoint's 503 + Retry), never an empty list read as "no CEO bought"."""
     d = _today_rows()
-    detail = await _svc(_NoProfileFMP([_r(filingDate=d, transactionDate=d)], {})).get_ticker_detail("ceo", "GME")
-    assert detail.holders == []
+    with pytest.raises(ssvc.SignalDetailUnavailable) as err:
+        await _svc(_NoProfileFMP([_r(filingDate=d, transactionDate=d)], {})).get_ticker_detail("ceo", "GME")
+    assert (err.value.kind, err.value.symbol) == ("ceo", "GME")
+    assert isinstance(err.value.__cause__, FMPUnavailableException)
     assert "ceo:GME" not in ssvc.SignalsService._detail_cache
 
 
@@ -805,9 +818,13 @@ def test_the_detail_page_is_large_enough_for_a_busy_ticker():
 
 @pytest.mark.asyncio
 async def test_a_detail_failure_is_not_cached(fresh_detail):
+    """A fetch failure used to come back as a 200 with no holders — iOS then said nobody
+    bought it beside a card that counted them. It is now a typed, uncached failure."""
     fake = _FakeFMP(raise_on_fetch=FMPUnavailableException("down"), quotes={"GME": _q("GME")})
-    detail = await _svc(fake).get_ticker_detail("ceo", "GME")
-    assert detail.holders == []
+    with pytest.raises(ssvc.SignalDetailUnavailable) as err:
+        await _svc(fake).get_ticker_detail("ceo", "GME")
+    assert (err.value.kind, err.value.symbol) == ("ceo", "GME")
+    assert isinstance(err.value.__cause__, FMPUnavailableException)
     assert "ceo:GME" not in ssvc.SignalsService._detail_cache, "a failure must not pin an empty screen"
 
 

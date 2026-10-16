@@ -5,10 +5,10 @@
 //  Repository layer for the redesigned Home dashboard.
 //
 //  Follows the same MVVM + Repository pattern as `StockRepository`: a protocol
-//  the ViewModel depends on, with a swappable implementation. `MockHomeRepository`
-//  is a UI-only data source (no backend / Supabase) populated with realistic
-//  dummy data so the new screen renders fully. A real `HomeRepository` that talks
-//  to the backend can be added later behind the same protocol.
+//  the ViewModel depends on, with a swappable implementation. `HomeRepository`
+//  is the live one (`GET /home/dashboard`) and the ViewModel's default;
+//  `MockHomeRepository` is a UI-only data source (no backend / Supabase) populated
+//  with realistic dummy data for previews and tests.
 //
 
 import SwiftUI

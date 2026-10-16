@@ -62,6 +62,9 @@ from app.services.home_dashboard_service import HomeDashboardService
 from app.services.market_movers_service import MarketMoversService
 
 _MAIN = "app.main"
+_HDS = "app.services.home_dashboard_service"
+# Captured at import, before any fixture swaps it for a fake.
+_REAL_GET_SIGNALS = sig.SignalsService.get_signals
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────────
@@ -80,6 +83,9 @@ async def _isolated_state(monkeypatch):
     monkeypatch.setattr(sig.SignalsService, "_cache", {})
     monkeypatch.setattr(sig.SignalsService, "_inflight", {})
     monkeypatch.setattr(sig.SignalsService, "_degraded_keys", set())
+    monkeypatch.setattr(sig.SignalsService, "_held_until", {})
+    monkeypatch.setattr(sig.SignalsService, "_background", set())
+    monkeypatch.setattr(sig, "_service", sig.SignalsService.__new__(sig.SignalsService))
     monkeypatch.setattr(tcs.TrillionClubService, "_group_cache", {})
     monkeypatch.setattr(tcs.TrillionClubService, "_inflight", {})
     monkeypatch.setattr(tcs.TrillionClubService, "_invalidated_at", 0.0)
@@ -371,6 +377,60 @@ async def test_every_piece_raising_still_opens_the_gate_and_never_escapes(monkey
     ready = [m for m in warnings if m.startswith("Home boot warm: ready in")]
     assert ready and "close_map=NOT warm" in ready[0] and "scanners=NOT warm" in ready[0], ready
     assert not mm._inflight and not HomeDashboardService._scanner_inflight
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_a_stale_tier2_row_and_a_failing_card_paints_the_row(monkeypatch, caplog):
+    """The first boot after a quiet night: memory is empty, the Tier-2 row is past the reuse
+    age (11.5 h of content), and the rebuild comes back degraded (one card's source raised).
+
+    The row is loaded FIRST, under its own `computed_at`, so the failing rebuild HOLDS it
+    instead of shipping a one-card section (or none) — and the first dashboard is served
+    it. The warm still reports signals NOT warm ("the new entry is degraded": a held entry),
+    so the warmer retries after the degraded cooldown; nothing is persisted.
+    """
+    _Sections(monkeypatch)
+    # The REAL signals getter (the fakes replaced it), over a stubbed Tier 2 and build.
+    monkeypatch.setattr(sig.SignalsService, "get_signals", _REAL_GET_SIGNALS)
+    stale = SignalsGroupResponse(congress=SignalGroupResponse(
+        kind="congress", entries=[SignalRowResponse(rank=1, symbol="MSFT", value=4.0)],
+    ))
+    computed_at = time.time() - sig._SIGNALS_TIER2_REUSE_SECONDS - 1
+    builds, writes = [], []
+
+    async def degraded_build(self_):
+        builds.append(1)
+        partial = SignalsGroupResponse(earnings=SignalGroupResponse(kind="earnings"))
+        return partial, frozenset({"congress"})
+
+    monkeypatch.setattr(sig.SignalsService, "_read_supabase_cache", lambda self_: (stale, computed_at))
+    monkeypatch.setattr(
+        sig.SignalsService, "_write_supabase_cache",
+        lambda self_, r, stamp: writes.append(r),
+    )
+    monkeypatch.setattr(sig.SignalsService, "_build", degraded_build)
+    gate = _gate(seconds=5)
+    monkeypatch.setattr(main_mod, "_HOME_WARM_GATE", gate)
+    with caplog.at_level(logging.INFO):
+        await asyncio.wait_for(main_mod._run_home_boot_warm(), 2.0)
+    assert gate.ready.is_set()
+    assert builds == [1], "a stale row must still be rebuilt, once"
+    assert writes == [], "a degraded build reached Tier 2"
+    key = sig._SIGNALS_CACHE_KEY
+    stamp, held = sig.SignalsService._cache[key]
+    assert held is stale and stamp == computed_at, "memory lost the row (or re-stamped it now)"
+    assert key in sig.SignalsService._held_until and key not in sig.SignalsService._degraded_keys
+    hds_warnings = [
+        r.getMessage() for r in caplog.records if r.name == _HDS and r.levelno >= logging.WARNING
+    ]
+    assert any(
+        "signals rebuild failed: the new entry is degraded" in m for m in hds_warnings
+    ), hds_warnings
+    ready = [m for m in _messages(caplog, logging.INFO) if m.startswith("Home boot warm: ready in")]
+    assert ready and "signals=NOT warm" in ready[0] and "pulse=ok" in ready[0], ready
+    # The first dashboard request is served the row, not an empty section — and not rebuilt.
+    assert await sig.get_signals_service().get_signals_guarded() is stale
+    assert builds == [1]
 
 
 @pytest.mark.asyncio

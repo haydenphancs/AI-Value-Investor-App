@@ -563,6 +563,6 @@ async def test_the_drill_down_of_a_bank_ignores_the_list(monkeypatch):
     "not_applicable". Mutation: the list consulted outside the mixed industry."""
     hist = await nv._history_for(monkeypatch, ticker="V", industry="Banks - Diversified",
                                  income_q=nv._quarters(*nv._NETWORKS["V"]))
-    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, r4._CUR: 1.5}
+    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, r4._cur_year(): 1.5}
     for metric in _GATED:
         assert metric not in hist["annual"]

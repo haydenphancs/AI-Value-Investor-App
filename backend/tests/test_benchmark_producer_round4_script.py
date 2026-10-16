@@ -22,7 +22,6 @@ import asyncio
 import contextlib
 import io
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -156,6 +155,12 @@ def _args(**overrides: Any) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+#: A `run_day` the fake ledger reads back as the day of the claim being refused. A date
+#: taken from the wall clock at IMPORT named yesterday once a full-suite run crossed
+#: 00:00 UTC between collection and the test, while the script reads its own clock.
+_CLAIM_DAY = object()
+
+
 class _Ledger:
     """`notification_jobs` claim / finish / state, in memory, logging the order of events."""
 
@@ -177,6 +182,10 @@ class _Ledger:
                               "now": now})
 
     def read_state(self, job):
+        if isinstance(self.state, dict) and self.state.get("run_day") is _CLAIM_DAY:
+            # The UTC day of the claim the script just made — the SAME instant it hands
+            # `claim_refusal_reason`, so a run crossing 00:00 UTC cannot split them.
+            return {**self.state, "run_day": self.claims[-1]["now"].date().isoformat()}
         return self.state
 
 
@@ -263,13 +272,10 @@ async def test_validation_runs_take_no_claim(wired, overrides):
     assert events == ["run"] and ledger.claims == [] and ledger.finishes == []
 
 
-_TODAY = datetime.now(timezone.utc).date().isoformat()
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state, reason", [
     ({"claim_at": "2026-10-08T04:00:00+00:00", "run_day": "2026-07-05", "enabled": True}, "held"),
-    ({"claim_at": None, "run_day": _TODAY, "enabled": True}, "already_ran_today"),
+    ({"claim_at": None, "run_day": _CLAIM_DAY, "enabled": True}, "already_ran_today"),
     ({"claim_at": None, "run_day": None, "enabled": False}, "disabled"),
     (None, "ledger_unreadable"),
     ({"claim_at": None, "run_day": "2026-07-05", "enabled": True}, "claim_failed"),
@@ -367,15 +373,18 @@ def test_the_scripts_job_keys_and_stale_window_are_mains():
     assert script.CLAIM_STALE_SECONDS == m._CHAIN_PHASE_STALE_SECONDS
 
 
+_A_DAY = "2026-10-08"   # pure comparison below: a fixed day, never the wall clock
+
+
 @pytest.mark.parametrize("state", [
     None,
-    {"enabled": False, "run_day": _TODAY, "claim_at": "x"},
-    {"enabled": True, "run_day": _TODAY, "claim_at": "x"},
+    {"enabled": False, "run_day": _A_DAY, "claim_at": "x"},
+    {"enabled": True, "run_day": _A_DAY, "claim_at": "x"},
     {"enabled": True, "run_day": "2026-01-04", "claim_at": "2026-10-08T04:00:00+00:00"},
     {"enabled": True, "run_day": None, "claim_at": None},
-    {"run_day": f"{_TODAY}T00:00:00+00:00"},
+    {"run_day": f"{_A_DAY}T00:00:00+00:00"},
     {},
 ])
 def test_the_refusal_reasons_are_the_admin_routes(state):
-    assert script.claim_refusal_reason(state, _TODAY) == admin._dossier_claim_refusal(state, _TODAY)
-    assert script.claim_refusal_reason(state, _TODAY) in script._REFUSAL_COPY
+    assert script.claim_refusal_reason(state, _A_DAY) == admin._dossier_claim_refusal(state, _A_DAY)
+    assert script.claim_refusal_reason(state, _A_DAY) in script._REFUSAL_COPY

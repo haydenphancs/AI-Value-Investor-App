@@ -65,7 +65,7 @@ BEGIN;
 DO $$
 BEGIN
     IF to_regclass('public.subscription_credit_periods') IS NOT NULL THEN
-        RAISE EXCEPTION '194 must not be applied after 196: it would replace 196''s ensure_credit_period. Re-apply 196 instead.';
+        RAISE EXCEPTION '194 must not be applied after 196: it would replace the newer ensure_credit_period. Re-apply the newest migration that defines it (198 when 198 is applied, else 196) instead.';
     END IF;
 END $$;
 

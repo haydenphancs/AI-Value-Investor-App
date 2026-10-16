@@ -21,6 +21,12 @@ _NOW = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
 _FRESH = (_NOW - timedelta(days=1)).isoformat()
 _FUZZY_ERA = "2026-06-01T00:00:00+00:00"          # before the exact-symbol rule
 _PAST_TTL = (_NOW - timedelta(days=31)).isoformat()
+# `resolve_coin_id` judges a DB pin against the REAL clock (it passes no `now`), so a pin
+# meant to be trusted on that path must be fresh against the real clock. `_FRESH` is fresh
+# only against `_NOW`: it aged past the 30-day TTL at 2026-10-16 12:00 UTC, failing the
+# trusted-pin test and leaving the malformed-id rows rejected as stale instead. One day
+# old leaves a 29-day margin, so reading the clock at import is safe (an age, not a date).
+_RECENT = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 def _client(db_row, search_payload=None):
@@ -115,7 +121,7 @@ async def test_a_fuzzy_era_pin_is_replaced_by_the_exact_match(supabase):
 
 @pytest.mark.asyncio
 async def test_a_trusted_db_pin_is_served_without_a_search_call(supabase):
-    c, sb = _client({"coingecko_id": "abc", "cached_at": _FRESH})
+    c, sb = _client({"coingecko_id": "abc", "cached_at": _RECENT})
     supabase["sb"] = sb
     assert await c.resolve_coin_id("ABC") == "abc"
     c._make_request.assert_not_awaited()
@@ -127,8 +133,8 @@ async def test_a_trusted_db_pin_is_served_without_a_search_call(supabase):
     {"coingecko_id": "abc", "cached_at": _PAST_TTL},
     {"coingecko_id": "abc", "cached_at": None},
     {"coingecko_id": "abc"},
-    {"coingecko_id": "", "cached_at": _FRESH},
-    {"coingecko_id": None, "cached_at": _FRESH},
+    {"coingecko_id": "", "cached_at": _RECENT},
+    {"coingecko_id": None, "cached_at": _RECENT},
     None,
 ])
 async def test_untrusted_or_shapeless_rows_fall_through_to_search(supabase, row):
@@ -140,7 +146,7 @@ async def test_untrusted_or_shapeless_rows_fall_through_to_search(supabase, row)
 
 @pytest.mark.asyncio
 async def test_a_db_read_failure_degrades_to_search_not_an_error(supabase):
-    c, sb = _client({"coingecko_id": "abc", "cached_at": _FRESH})
+    c, sb = _client({"coingecko_id": "abc", "cached_at": _RECENT})
     sb.table.side_effect = RuntimeError("520 edge")
     supabase["sb"] = sb
     assert await c.resolve_coin_id("ABC") is None

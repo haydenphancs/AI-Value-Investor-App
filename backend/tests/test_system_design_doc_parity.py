@@ -401,8 +401,9 @@ _CURATED_TABLES = {
     "stock_fundamentals_cache",
     # §9b.9 (chat starters, migrations 161/162) names this table; the snapshot now holds it.
     "chat_starter_answers",
-    # 2026-10-12: §9b.12 derives a paid credit period from the ONE `subscriptions` row per
-    # account (migration 196). Curated so the prose and the table stay coupled.
+    # 2026-10-12: §9b.12 derives a paid credit period from the `subscriptions` row (migration
+    # 196) — since 198 one row per Apple LINEAGE, the winning one. Curated so the prose and the
+    # table stay coupled.
     "subscriptions",
     # 2026-09-18: the benchmark-scheduling invariants name the durable claim ledger the
     # quarterly chain and weekly TTM job hold their per-phase claims in (migration 147).

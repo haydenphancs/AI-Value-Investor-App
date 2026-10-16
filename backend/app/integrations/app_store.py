@@ -404,7 +404,7 @@ def _to_dict(decoded: Any) -> Dict[str, Any]:
     answered 400 for EVERY real purchase: the user is charged by Apple and receives nothing.
 
     This survived 35 IAP tests because they all feed plain dicts, never a real library model —
-    which is exactly why `test_iap_payload_flattening.py` now asserts against the real class.
+    which is exactly why `test_iap_payload_and_binding.py` now asserts against the real class.
     """
     if decoded is None:
         return {}
@@ -496,3 +496,54 @@ def extract_transaction_from_notification(
     if not signed:
         return None
     return verify_signed_transaction(signed)
+
+
+# Apple's auto-renewable subscription status (`data.status`): 1 active, 2 expired, 3 billing
+# retry, 4 billing grace period, 5 revoked.
+_SUBSCRIPTION_STATUSES = frozenset({1, 2, 3, 4, 5})
+
+
+def notification_subscription_status(notification: Dict[str, Any]) -> Optional[int]:
+    """Apple's subscription status as of the notification's `signedDate`, or None.
+
+    It sits in the notification's `data` object, inside the outer JWS that `verify_notification`
+    already verified, so it needs no further decoding. Apple resends a failed notification with
+    the SAME payload, so a retry that lands days later still says what was true when Apple
+    first signed it.
+
+    `data` arrives in two shapes. From the real verifier it is the library's attrs `Data` object,
+    because `_to_dict` flattens only the top level; its `status` is a `Status` IntEnum, and
+    `rawStatus` keeps an int the enum does not know. In tests it is a plain dict.
+
+    Only an int from 1 to 5 counts; anything else is None (logged), so a caller never acts on a
+    guess. On the verified path the library's cattrs converter has ALREADY structured `rawStatus`
+    as an int — it applies `int()`, so a numeric string, a float or a bool from the JSON arrives
+    as an int, and a non-numeric value fails verification — so this type check guards dict
+    inputs and directly built objects. Apple signs the value, so that is enough. Never raises.
+    """
+    note = notification or {}
+    data = note.get("data")
+    if data is None:
+        return None
+    read = data.get if isinstance(data, dict) else (lambda name: getattr(data, name, None))
+    value = read("rawStatus")
+    if value is None:
+        value = read("status")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.warning(
+            "App Store notification %s uuid=%s carries a non-integer data.status %r (%s) — "
+            "ignoring it",
+            note.get("notificationType"), note.get("notificationUUID"), value,
+            type(value).__name__,
+        )
+        return None
+    status = int(value)
+    if status not in _SUBSCRIPTION_STATUSES:
+        logger.warning(
+            "App Store notification %s uuid=%s carries an unknown data.status %d — ignoring it",
+            note.get("notificationType"), note.get("notificationUUID"), status,
+        )
+        return None
+    return status

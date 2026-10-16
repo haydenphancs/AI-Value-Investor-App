@@ -566,7 +566,7 @@ def test_every_non_gated_line_of_a_member_is_withheld(metric):
 def _full_history() -> Dict[str, Any]:
     names = ("roe", "pe_ratio", "gross_margin", "ev_ebitda", "debt_to_equity", "net_margin")
     return {
-        "annual": {m: {"2024": 1.0, "2025": 1.1, r4._CUR: 1.2} for m in names},
+        "annual": {m: {"2024": 1.0, "2025": 1.1, r4._cur_year(): 1.2} for m in names},
         "quarterly": {m: {"Q1'26": 1.0} for m in names},
         "levels": {"annual": {m: "industry" for m in names},
                    "quarterly": {m: "industry" for m in names}},

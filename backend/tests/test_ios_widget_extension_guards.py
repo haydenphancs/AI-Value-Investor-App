@@ -26,6 +26,11 @@ The second review (2026-09-30, the fixes themselves) added:
     "3…", the Holdings states said "today" under "Fri close", a 24/7 headline aged by the
     equity session, and the 45-minute "As of" label waited for a reload.
 
+2026-10-14 adds the cause's context `note` (CRWV −15.46% showed "No clear catalyst" while the
+Insights card named the fall): established causes only, drawn whole or dropped, and when room
+is short the TAG gives way first, then the note (owner decisions "Headline + context" and
+"Drop the tag").
+
 There is no XCTest target, so these are pinned from Python by reading the Swift. Per
 `.claude/rules/testing.md` §3 every scan strips comments first and is brace-bound to the
 declaration it means. Rule 3 (mutation-test by hand) is EXECUTABLE here: each guard is a pure
@@ -665,6 +670,228 @@ def _problems_rolling_ages_by_build_day(src: dict[str, str]) -> list[str]:
     return problems
 
 
+# ── 17. The cause's context note: established only, whole or dropped, tag first ─────
+
+def _modifier_chain(body: str, view: str) -> str | None:
+    """The `.modifier(…)` lines chained directly onto the FIRST `view` in `body` — e.g. the
+    styling of `Text(note)` — or None when `body` does not draw `view` at all."""
+    m = re.search(re.escape(view) + r"((?:\s*\.\w+\([^\n]*\))*)", body)
+    return m.group(1) if m else None
+
+
+def _if_let_else(body: str, name: str) -> tuple[str, str] | None:
+    """The `if let <name> { … } else { … }` branches in `body` ("" when there is no else)."""
+    m = re.search(rf"\bif\s+let\s+{name}\s*\{{", body)
+    if not m:
+        return None
+    then = _balanced(body, m.end() - 1)
+    rest = body[m.end() - 1 + len(then):]
+    els = re.match(r"\s*else\s*\{", rest)
+    return then, (_balanced(rest, els.end() - 1) if els else "")
+
+
+_RUNG = re.compile(r"stack\(withTag:\s*(true|false),\s*note:\s*(\w+)\)")
+_DETAIL_STYLE = ".foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)"
+
+
+def _problems_cause_note(src: dict[str, str]) -> list[str]:
+    """The backend's `note` beside an established cause (CauseView, 2026-10-14).
+
+    (a) gated on `cause.kind.isEstablished` and on a trimmed, non-empty string; (b) a
+    vertical ViewThatFits ladder whose first rung is tag + headline + note, some rung drops
+    the TAG but keeps the note, and the LAST rung carries no note (the old layout); the
+    headline in a note rung is uncut, or ViewThatFits would accept a rung that cut it;
+    (c) the note is secondary caption2 with no line limit and no scale factor — whole or
+    dropped, never "fell 4.…"; (d) nothing outside CauseView reads a cause's `.note`, which
+    would bypass all of that; (e) the no-note path is the old layout, with no ViewThatFits;
+    (f) the gallery sample shows the note on a FICTIONAL company, and the `.none` sample
+    stays previewable, with no note.
+    """
+    problems = []
+    widget = src["widget"]
+    cause = _struct(widget, "CauseView")
+
+    # (a) The gate.
+    prop = re.search(r"private\s+var\s+note\s*:\s*String\?\s*\{", cause)
+    if not prop:
+        problems.append("CauseView has no `note` property — nothing gates the backend's note")
+    else:
+        getter = _balanced(cause, prop.end() - 1)
+        if not re.search(r"\bguard\s+cause\.kind\.isEstablished\s*,", getter):
+            problems.append(
+                "the note is not gated on `cause.kind.isEstablished` — under `.none` it would "
+                "read as support for a reason that was not found"
+            )
+        bound = re.search(r"\blet\s+(\w+)\s*=\s*cause\.note\b([^\n]*)", getter)
+        if not bound:
+            problems.append("the note property no longer reads `cause.note`")
+        else:
+            name, tail = bound.group(1), bound.group(2)
+            if not re.match(r"\?\.trimmingCharacters\(in:\s*\.whitespacesAndNewlines\)", tail):
+                problems.append("the note is not trimmed — a blank note would draw an empty grey line")
+            if not re.search(rf"!\s*{name}\.isEmpty\b", getter):
+                problems.append("an empty note is not refused — it would draw an empty grey line")
+            if not re.search(rf"\breturn\s+{name}\b", getter) or not re.search(r"\breturn\s+nil\b", getter):
+                problems.append("the note property no longer returns the trimmed note, or nil")
+
+    # (b) + (e) The body: a ladder with a note, the old layout without one.
+    body = _block(cause, "var body: some View")
+    split = _if_let_else(body, "note")
+    if split is None:
+        problems.append(
+            "CauseView's body no longer branches on the note — without one the old layout "
+            "must stay exactly as it was, with no ViewThatFits"
+        )
+    else:
+        with_note, without = split
+        vtf = re.search(r"ViewThatFits\(in:\s*\.vertical\)\s*\{", with_note)
+        if not vtf:
+            problems.append(
+                "the note path has no vertical ViewThatFits — a note that does not fit would "
+                "be cut, not dropped"
+            )
+        else:
+            ladder = _balanced(with_note, vtf.end() - 1)
+            rungs: list[tuple[bool, bool]] = []
+            for line in (ln.strip() for ln in ladder[1:-1].splitlines()):
+                if not line:
+                    continue
+                m = _RUNG.fullmatch(line)
+                if not m:
+                    problems.append(f"a ladder rung this scan cannot read: {line!r}")
+                    continue
+                rungs.append((m.group(1) == "true", m.group(2) != "nil"))
+            if len(rungs) < 2:
+                problems.append("the ladder has fewer than two rungs — nothing can give way")
+            else:
+                if rungs[0] != (True, True):
+                    problems.append(
+                        "the first rung is not tag + headline + note — the tag is dropped even "
+                        "when the tile has room for it"
+                    )
+                if not any(not tag and note for tag, note in rungs[:-1]):
+                    problems.append(
+                        "no rung drops the tag and keeps the note — the owner's order (the tag "
+                        "gives way first, then the note) is gone"
+                    )
+                if rungs[-1] != (True, False):
+                    problems.append(
+                        "the ladder's LAST rung is not tag + headline with no note — when nothing "
+                        "fits, ViewThatFits draws the last rung, and a note there is cut mid-number"
+                    )
+        if not without:
+            problems.append("CauseView's no-note path is gone")
+        else:
+            if "ViewThatFits" in without:
+                problems.append("the no-note path is wrapped in ViewThatFits — the old layout changed")
+            if not re.fullmatch(r"\{\s*stack\(withTag:\s*true,\s*note:\s*nil\)\s*\}", without):
+                problems.append(
+                    "the no-note path is not the old layout (`stack(withTag: true, note: nil)`)"
+                )
+    if body.count("ViewThatFits") > 1:
+        problems.append("CauseView's body has more than one ViewThatFits")
+
+    # (b) + (c) + (e) The rung helper.
+    helper = re.search(
+        r"private\s+func\s+stack\(withTag:\s*Bool,\s*note:\s*String\?\)\s*->\s*some\s+View\s*\{", cause
+    )
+    if not helper:
+        problems.append("CauseView lost its rung helper `stack(withTag:note:)`")
+    else:
+        rung = _balanced(cause, helper.end() - 1)
+        if not re.search(
+            r"\bif\s+withTag\s*,\s*showTag\s*,\s*cause\.kind\.isEstablished\s*,\s*"
+            r"let\s+tag\s*=\s*cause\.tag\s*,\s*!tag\.isEmpty\s*\{",
+            rung,
+        ):
+            problems.append(
+                "the tag is no longer drawn only when the rung asks for it, for an established "
+                "cause with a non-empty tag"
+            )
+        tag_chain = _modifier_chain(rung, "Text(tag)") or ""
+        for style in (".font(.caption2.weight(.bold))", ".foregroundStyle(.secondary)", ".textCase(.uppercase)"):
+            if style not in tag_chain:
+                problems.append(f"the tag lost its style {style}")
+        branches = _if_let_else(rung, "note")
+        if branches is None:
+            problems.append("the rung helper no longer draws the note")
+        else:
+            note_rung, old_rung = branches
+            note_chain = _modifier_chain(note_rung, "Text(note)")
+            if note_chain is None:
+                problems.append("a note rung does not draw `Text(note)`")
+            else:
+                if ".foregroundStyle(.secondary)" not in note_chain or ".font(.caption2)" not in note_chain:
+                    problems.append("the note is not secondary caption2 — owner: the context in grey")
+                if ".lineLimit(" in note_chain or ".minimumScaleFactor(" in note_chain:
+                    problems.append(
+                        "the note has a line limit or a scale factor — it is shown whole or "
+                        "dropped, never cut or shrunk"
+                    )
+            head = _modifier_chain(note_rung, "Text(detail)")
+            if head is None:
+                problems.append("a note rung does not draw the headline")
+            else:
+                if ".lineLimit(" in head or ".minimumScaleFactor(" in head:
+                    problems.append(
+                        "the headline in a note rung has a line limit — ViewThatFits would "
+                        "accept a rung whose headline was cut to fit"
+                    )
+                if ".fixedSize(horizontal: false, vertical: true)" not in head:
+                    problems.append("the headline in a note rung does not report its full height (fixedSize)")
+                if _DETAIL_STYLE not in head:
+                    problems.append("the headline in a note rung lost its established/none colour")
+            old = _modifier_chain(old_rung, "Text(detail)")
+            if not old_rung or old is None:
+                problems.append("the no-note rung (the old layout) is gone")
+            else:
+                if ".lineLimit(lineLimit)" not in old or ".minimumScaleFactor(0.8)" not in old:
+                    problems.append(
+                        "the no-note rung lost `.lineLimit(lineLimit).minimumScaleFactor(0.8)` — "
+                        "the old layout changed"
+                    )
+                if _DETAIL_STYLE not in old:
+                    problems.append("the no-note headline lost its established/none colour")
+                if re.search(r"\bnote\b", old_rung):
+                    problems.append("the no-note rung draws a note")
+
+    # (d) Nobody else reads it.
+    structs = _all_structs(widget)
+    outside = _strip_comments(widget).replace(structs["CauseView"], "", 1) + _strip_comments(src["intent"])
+    if re.search(r"\.note\b", outside):
+        problems.append(
+            "something outside CauseView reads a cause's `.note` — it would bypass the "
+            "established-only, whole-or-dropped gate (a Lock Screen line would cut it)"
+        )
+
+    # (f) The samples. Last: a missing sample raises, and that must not mask the rest.
+    gallery = _block(widget, "func snapshot(for configuration: MoversConfigurationIntent, in context: Context)")
+    if not re.search(r"\(previewMode\s*==\s*\.portfolio\)\s*\?\s*\.previewHoldings\s*:\s*\.preview\b", gallery):
+        problems.append("the Holdings gallery card is no longer `.previewHoldings`")
+    holdings = _block(widget, "static var previewHoldings: WidgetMoverSnapshot")
+    if not re.search(r"kind:\s*\.companyNews\b", holdings) or not re.search(r'\bnote:\s*"', holdings):
+        problems.append("the gallery sample no longer shows an insight-backed cause with its note")
+    if 'ticker: "ACME"' not in holdings:
+        problems.append(
+            "the gallery sample's headline is not on the fictional ACME — an invented headline "
+            "must never be attributed to a real company"
+        )
+    none_sample = _block(widget, "static var previewHoldingsNoCause: WidgetMoverSnapshot")
+    if not re.search(r"kind:\s*\.none\b", none_sample) or re.search(r"\bnote:", none_sample):
+        problems.append("previewHoldingsNoCause is no longer a `.none` cause without a note")
+    code = _strip_comments(widget)
+    for family in ("Medium", "Large"):
+        at = code.find(f'#Preview("{family}"')
+        if at == -1:
+            problems.append(f"the {family} #Preview is gone")
+            continue
+        timeline = _block(code[at:], "timeline:")
+        for sample in (".previewHoldings,", ".previewHoldingsNoCause,"):
+            if sample not in timeline:
+                problems.append(f"the {family} preview no longer renders {sample.rstrip(',')}")
+    return problems
+
+
 _GUARDS: dict[str, Callable[[dict[str, str]], list[str]]] = {
     "token_recheck": _problems_token_recheck,
     "holdings_isolation": _problems_holdings_isolation,
@@ -682,6 +909,7 @@ _GUARDS: dict[str, Callable[[dict[str, str]], list[str]]] = {
     "breadth_drops_out": _problems_breadth_drops_out,
     "no_today_in_states": _problems_no_today_in_states,
     "rolling_ages_by_build_day": _problems_rolling_ages_by_build_day,
+    "cause_note": _problems_cause_note,
 }
 
 
@@ -827,6 +1055,81 @@ _MUTATIONS: list[tuple[str, str, str, str]] = [
     ("rolling_ages_by_build_day", "widget",
      "WidgetSessionLabel.isPriorETDay(asOf: snap.asOf, now: entry.date)",
      "WidgetSessionLabel.isPriorSession(sessionDate: snap.sessionDate, now: entry.date)"),
+    # 2026-10-14 — the cause note. (a) the gate.
+    ("cause_note", "widget",
+     "        guard cause.kind.isEstablished,\n              let text = cause.note",
+     "        guard true,\n              let text = cause.note"),
+    ("cause_note", "widget",
+     ",\n              !text.isEmpty\n        else { return nil }",
+     "\n        else { return nil }"),
+    ("cause_note", "widget",
+     "let text = cause.note?.trimmingCharacters(in: .whitespacesAndNewlines),",
+     "let text = cause.note,"),
+    # (b) the ladder: no tag-dropping rung; the tag dropped first; a note on the last rung.
+    ("cause_note", "widget", "                stack(withTag: false, note: note)\n", ""),
+    ("cause_note", "widget",
+     "                stack(withTag: true, note: note)\n                stack(withTag: false, note: note)\n",
+     "                stack(withTag: false, note: note)\n                stack(withTag: true, note: note)\n"),
+    ("cause_note", "widget",
+     "                stack(withTag: true, note: nil)\n            }\n        } else {",
+     "                stack(withTag: true, note: note)\n            }\n        } else {"),
+    # (b) a note rung that may cut its headline, or no longer reports its full height.
+    ("cause_note", "widget",
+     "                    .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)\n"
+     "                    .fixedSize(horizontal: false, vertical: true)\n",
+     "                    .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)\n"
+     "                    .lineLimit(lineLimit)\n"),
+    ("cause_note", "widget",
+     "                    .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)\n"
+     "                    .fixedSize(horizontal: false, vertical: true)\n",
+     "                    .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)\n"),
+    # (c) the note cut, shrunk, or drawn as primary.
+    ("cause_note", "widget",
+     "                Text(note)\n                    .font(.caption2)\n",
+     "                Text(note)\n                    .font(.caption2)\n                    .lineLimit(2)\n"),
+    ("cause_note", "widget",
+     "                Text(note)\n                    .font(.caption2)\n",
+     "                Text(note)\n                    .font(.caption2)\n                    .minimumScaleFactor(0.8)\n"),
+    ("cause_note", "widget",
+     "                Text(note)\n                    .font(.caption2)\n                    .foregroundStyle(.secondary)\n",
+     "                Text(note)\n                    .font(.caption2)\n                    .foregroundStyle(.primary)\n"),
+    # (d) a Lock Screen line reading the note directly.
+    ("cause_note", "widget",
+     "                        if let c = m.formattedChange { Text(c).font(.caption) }\n",
+     "                        if let c = m.formattedChange { Text(c).font(.caption) }\n"
+     "                        if let n = m.cause.note { Text(n).font(.caption2) }\n"),
+    # (e) the no-note path: wrapped in a ladder, its line limit gone, its tag gone, the
+    # branch on the note gone (`if true` compiles: `note` is the Optional property).
+    ("cause_note", "widget",
+     "        } else {\n            stack(withTag: true, note: nil)\n        }",
+     "        } else {\n            ViewThatFits(in: .vertical) {\n                stack(withTag: true, note: nil)\n"
+     "            }\n        }"),
+    ("cause_note", "widget",
+     "                    .lineLimit(lineLimit)\n                    .minimumScaleFactor(0.8)\n", ""),
+    ("cause_note", "widget",
+     "        } else {\n            stack(withTag: true, note: nil)",
+     "        } else {\n            stack(withTag: false, note: nil)"),
+    ("cause_note", "widget",
+     "        if let note {\n            ViewThatFits", "        if true {\n            ViewThatFits"),
+    # (f) the samples.
+    ("cause_note", "widget",
+     '                kind: .companyNews, tag: "Bearish News",',
+     '                kind: .none, tag: "Bearish News",'),
+    ("cause_note", "widget",
+     'ticker: "ACME", companyName: "Acme Robotics"', 'ticker: "CRWV", companyName: "CoreWeave"'),
+    ("cause_note", "widget",
+     '                detail: headline, detailAged: headline,\n'
+     '                note: "Software - Infrastructure fell 4.0%; ACME moved far more."\n',
+     "                detail: headline, detailAged: headline\n"),
+    ("cause_note", "widget",
+     "No clear catalyst in that day's news.\"\n",
+     "No clear catalyst in that day's news.\",\n                note: \"Aerospace & Defense fell 1.2%.\"\n"),
+    ("cause_note", "widget",
+     "(previewMode == .portfolio) ? .previewHoldings : .preview",
+     "(previewMode == .portfolio) ? .previewHoldingsNoCause : .preview"),
+    ("cause_note", "widget",
+     "    MoversEntry(date: .now, snapshot: .previewHoldingsNoCause, mode: .portfolio, configuredMode: .portfolio)\n",
+     ""),
 ]
 
 
@@ -850,6 +1153,13 @@ _HELPER_MUTATIONS: list[tuple[str, str, str, str, str]] = [
      "            AssetChange(asset: asset, font: .caption2.weight(.semibold))\n",
      "\nprivate struct AssetPriceTag: View {\n    let asset: WidgetIndex\n"
      "    var body: some View {\n        if let p = asset.price { Text(String(p)) }\n    }\n}\n"),
+    # 2026-10-14 — a new helper drawing the note beside CauseView, outside its gate.
+    ("cause_note", "widget",
+     "                CauseView(cause: headline.cause, lineLimit: 4, aged: aged)\n",
+     "                CauseView(cause: headline.cause, lineLimit: 4, aged: aged)\n"
+     "                CauseNoteLine(cause: headline.cause)\n",
+     "\nprivate struct CauseNoteLine: View {\n    let cause: WidgetCause\n"
+     "    var body: some View {\n        Text(cause.note ?? \"\").lineLimit(1)\n    }\n}\n"),
 ]
 
 

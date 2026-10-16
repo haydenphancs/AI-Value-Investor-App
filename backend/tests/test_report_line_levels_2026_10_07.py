@@ -18,7 +18,12 @@ from app.schemas.ticker_report import DeepDiveMetricResponse
 from app.services.agents import ticker_report_data_collector as C
 from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE as CQ
 
-_CUR = str(datetime.now(timezone.utc).year)
+def _cur_year() -> str:
+    """The year the collector labels its TTM point with, read when the TEST runs — as the
+    collector reads it (a function-scoped `datetime.now(timezone.utc).year`, so there is no
+    module clock to freeze). An import-time constant broke whenever a full-suite run
+    crossed New Year between collection and execution."""
+    return str(datetime.now(timezone.utc).year)
 
 
 def _cell(value, level, n=40):
@@ -66,7 +71,7 @@ async def test_each_line_carries_its_own_group(monkeypatch):
 async def test_a_ttm_point_that_is_the_whole_line_names_its_group(monkeypatch):
     hist = await _history(monkeypatch, {"annual": {}, CQ: {}},
                           ttm={"pe_ratio": _cell(20.56, "sector", n=140)})
-    assert hist["annual"]["pe_ratio"] == {_CUR: 20.56}
+    assert hist["annual"]["pe_ratio"] == {_cur_year(): 20.56}
     assert hist["levels"]["annual"]["pe_ratio"] == "sector"
 
 
@@ -74,7 +79,7 @@ async def test_a_ttm_point_that_is_the_whole_line_names_its_group(monkeypatch):
 async def test_a_ttm_point_of_another_group_never_relabels_the_line(monkeypatch):
     series = {"annual": {"pe_ratio": {"2025": _cell(24.0, "industry")}}, CQ: {}}
     hist = await _history(monkeypatch, series, ttm={"pe_ratio": _cell(20.56, "sector", n=140)})
-    assert _CUR not in hist["annual"]["pe_ratio"]
+    assert _cur_year() not in hist["annual"]["pe_ratio"]
     assert hist["levels"]["annual"]["pe_ratio"] == "industry"
 
 

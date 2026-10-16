@@ -113,6 +113,10 @@ class _Q:
     def execute(self):
         if self._table in self._fail:
             raise RuntimeError(f"{self._table} unavailable")
+        if self._table == "subscription_transactions":
+            # A database before migration 198 (this file is about packs): PostgREST's
+            # schema-cache miss, which keeps iap_service on its pre-198 path.
+            raise _PgError("PGRST205", "Could not find the table 'public.subscription_transactions'")
         rows = self._db.setdefault(self._table, [])
         if self._op == "select":
             out = [r for r in rows if all(r.get(k) == v for k, v in self._filters.items())]

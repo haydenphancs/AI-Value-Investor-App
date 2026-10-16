@@ -670,7 +670,10 @@ def test_every_public_table_is_curated():
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
 # Empty is the healthy steady state.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+_PENDING_MIGRATION_TABLES: set[str] = {
+    # 198 (2026-10-14): written, not yet applied — remove once the re-dump carries it.
+    "public.subscription_transactions",
+}
 # 2026-10-13: 196's subscription_credit_periods was applied and re-dumped, so it left the list.
 # 2026-09-27: 173-181's fourteen tables (marketing_scripts / marketing_link_hits,
 # theme_rotation_* / theme_relevance_cache / theme_daily_insights, trillion_club_*,

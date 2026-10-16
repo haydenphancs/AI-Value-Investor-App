@@ -20,9 +20,11 @@ different question.
 
 So the payload now carries two separate things instead of one ambiguous string:
 `cause` (established from dated, structured data — earnings today, an analyst action
-today, a classified headline, an industry move) and `context` (pure arithmetic — the σ
-multiple, the overnight gap split, the industry delta). `cause.kind == "none"` is a
-real, common, useful answer, not a failure.
+today, a classified headline, an industry move — or, behind a strict gate, the session's
+Insights card when its sentiment leans the way an Unusual move went: "Bearish News",
+2026-10-14) and `context` (pure arithmetic — the σ multiple, the overnight gap split, the
+industry delta). `cause.note` repeats that arithmetic as one sentence under an established
+cause. `cause.kind == "none"` is a real, common, useful answer, not a failure.
 
 CONTRACT NOTES
 --------------
@@ -159,12 +161,17 @@ class WidgetCauseResponse(BaseModel):
 
     Produced by `daily_move_attribution`, which checks a small enumerable answer set
     (earnings today · an analyst action today · classifiable company news · the
-    industry moved · the market moved) and returns `kind="none"` when none of them
-    holds. Every branch is dated by construction, so a multi-day rally narrative can
-    never appear here — the bug that motivated the rebuild.
+    industry moved · the market moved · the session's news lean) and returns
+    `kind="none"` when none of them holds. Every branch is dated by construction, so a
+    multi-day rally narrative can never appear here — the bug that motivated the rebuild.
+    The news lean is the Insights card written during the session described, admitted only
+    when its sentiment agrees with an Unusual move and its headline passes
+    `usable_lean_headline` (no window, price, schedule or relative-day wording).
     """
 
-    # 'earnings' | 'analyst' | 'company_news' | 'sector' | 'market' | 'none'.
+    # 'earnings' | 'analyst' | 'company_news' | 'sector' | 'market' | 'none'. The news lean
+    # is 'company_news' with tag "Bearish News" / "Bullish News" — a kind every installed
+    # build already renders, so the fix needs no app update.
     kind: str
     # 2-4 word badge label ("Earnings Beat"). None when kind == 'none'.
     tag: Optional[str] = None
@@ -179,6 +186,12 @@ class WidgetCauseResponse(BaseModel):
     # (crypto) headline is worded with the build's ET CALENDAR day ("…on Sat"), since its
     # rolling 24 h move has no equity session to name; the client ages it by as-of day.
     detail_aged: Optional[str] = None
+    # The always-true arithmetic beside an ESTABLISHED cause ("Software - Infrastructure
+    # fell 4.0%; CRWV moved far more."). Set for earnings / analyst / company_news only —
+    # a sector, market or none `detail` already says it. Carries NO session word, so it
+    # needs no aged twin. Clients from before 2026-10-14 ignore it; the new client shows
+    # it whole under the detail or drops it, never truncated.
+    note: Optional[str] = None
 
 
 class WidgetMoveContextResponse(BaseModel):

@@ -159,11 +159,33 @@ class _Table:
         return type("R", (), {"data": [dict(r) for r in matched]})()
 
 
+class _MissingTable(Exception):
+    """PostgREST's schema-cache miss, as the real client raises it (`.code`)."""
+    code = "PGRST205"
+
+
+class _NoRegister:
+    """`subscription_transactions` before migration 198: this file models the ONE-ROW-PER-ACCOUNT
+    schema (the per-lineage rules are tests/test_iap_lineage_rows.py and the [lineage] runs of
+    tests/test_iap_entitlement.py)."""
+
+    def select(self, *_a):
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def execute(self):
+        raise _MissingTable("Could not find the table 'public.subscription_transactions'")
+
+
 class _SB:
     def __init__(self, store):
         self.store, self.log = store, []
 
-    def table(self, _name):
+    def table(self, name):
+        if name == "subscription_transactions":
+            return _NoRegister()
         return _Table(self.store, self.log)
 
 

@@ -71,9 +71,13 @@ def test_reseeding_the_whole_catalog_moves_no_date():
         assert seed._resolve_published_at({"slug": slug, "publishedDaysAgo": 5}, slug) == stored
 
     for slug in ("nvidias-ai-dominance", "the-fall-of-sears", "amd-vs-intel-the-cpu-wars"):
+        before = datetime.now(timezone.utc) - timedelta(days=1)
         got = seed._resolve_published_at({"slug": slug, "publishedDaysAgo": 1}, slug)
+        after = datetime.now(timezone.utc) - timedelta(days=1)
         assert got not in existing.values()
-        assert got.startswith(str(datetime.now(timezone.utc).year))
+        # A fresh date one day back, bracketed by the clock. The old check — "starts with
+        # this year" — failed all of every Jan 1 UTC, when one day back is last year.
+        assert before <= datetime.fromisoformat(got) <= after, got
 
 
 # --- branch 1: an explicit pinned date ----------------------------------------------------

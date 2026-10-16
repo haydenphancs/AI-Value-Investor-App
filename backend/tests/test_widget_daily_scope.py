@@ -22,11 +22,17 @@ from app.services.daily_move_attribution import CauseKind, attribute
 from app.services.widget_movers_service import _classified_today_news, _et_date
 from app.utils.market_hours import ET
 
-TODAY_ISO = datetime.now(ET).date().isoformat()
+# ONE frozen clock for the whole module. `_classified_today_news` and `_market_brief` are
+# pure — the session date and the card's timestamp are both arguments — so the test owns
+# both ends and needs no wall clock at all. "Today" used to be read at IMPORT while `_ts`
+# read the clock at RUN time: a full-suite run that crossed midnight ET between collection
+# and execution failed six tests here (2026-10-14 00:06 ET).
+NOW = datetime(2026, 8, 14, 15, 30, tzinfo=ET)
+TODAY_ISO = NOW.date().isoformat()
 
 
-def _ts(days_ago: int = 0) -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
+def _ts(days_ago: int = 0, *, now: datetime = NOW) -> str:
+    return (now - timedelta(days=days_ago)).astimezone(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
@@ -249,3 +255,37 @@ def test_the_gate_is_the_same_one_the_news_detectors_use():
             f"{fn.__name__} no longer gates on the session date the rest of the payload "
             "describes"
         )
+
+
+# ── the gate at the clock boundaries this module's own flake lived on ─────
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(2026, 8, 14, 0, 0, 1, tzinfo=ET),     # just after ET midnight (04:00:01Z)
+        datetime(2026, 8, 14, 19, 59, 59, tzinfo=ET),  # last second of the UTC date (EDT)
+        datetime(2026, 8, 14, 20, 0, 1, tzinfo=ET),    # UTC is already tomorrow; ET is not
+        datetime(2026, 8, 14, 23, 59, 59, tzinfo=ET),  # last second of the ET session day
+        datetime(2026, 1, 15, 19, 30, tzinfo=ET),      # EST: 00:30Z on the next UTC date
+    ],
+    ids=["et_midnight", "edt_utc_eve", "edt_utc_flip", "et_last_second", "est_utc_flip"],
+)
+def test_the_session_gate_buckets_by_the_ET_date_at_every_clock_boundary(now):
+    """The session is the ET calendar day, whatever the UTC date reads. One second either
+    side of it is another session: before it a real negative, after it unchecked."""
+    from app.services.widget_movers_service import _market_brief
+
+    today = now.date().isoformat()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    just_before = _ts(now=day_start - timedelta(seconds=1))
+    just_after = _ts(now=day_start + timedelta(days=1))
+
+    assert _classified_today_news(_card(generated_at=_ts(now=now)), today)[1:] == (True, True)
+    assert _market_brief(_brief_card(generated_at=_ts(now=now)), today) is not None
+
+    assert _classified_today_news(_card(generated_at=just_before), today) == ([], False, True)
+    assert _market_brief(_brief_card(generated_at=just_before), today) is None
+
+    assert _classified_today_news(_card(generated_at=just_after), today) == ([], False, False)
+    assert _market_brief(_brief_card(generated_at=just_after), today) is None

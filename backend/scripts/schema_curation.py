@@ -158,6 +158,9 @@ NOT_A_REF: frozenset[tuple[str, str]] = frozenset({
     ("public.credit_purchases", "original_transaction_id"),
     ("public.subscriptions", "original_transaction_id"),
     ("public.subscription_credit_periods", "original_transaction_id"),
+    ("public.subscription_transactions", "transaction_id"),
+    ("public.subscription_transactions", "original_transaction_id"),
+    ("public.subscriptions", "transaction_id"),
     ("public.ticker_news_cache", "external_id"),
     ("public.competitor_intel_audit", "run_id"),
     ("public.moat_intel_audit", "run_id"),
@@ -221,20 +224,40 @@ CURATION: dict[str, TableDoc] = {
         purpose="Monthly credit allowance per subscription tier. Read by the tier-grant RPCs.",
         key=("tier", "monthly_credits", "price_cents")),
     "public.subscriptions": T("billing",
-        purpose="Current auto-renewing subscription state per user, reconciled from App Store "
-                "server notifications.",
-        key=("user_id", "tier", "status", "store", "current_period_end", "last_event_at",
-             "environment"),
-        note="UNIQUE(user_id) — one subscription per account. Only a Production (or NULL "
-             "legacy) `environment` row starts a paid credit period (196)."),
+        purpose="Current auto-renewing subscription state per Apple subscription lineage, "
+                "reconciled from App Store server notifications and verified purchases.",
+        key=("user_id", "original_transaction_id", "tier", "status", "current_period_end",
+             "last_event_at", "environment"),
+        note="UNIQUE(original_transaction_id) since 198 — one row per Apple LINEAGE, so an "
+             "account with a second Apple ID holds two rows (it was UNIQUE(user_id) before). "
+             "users.tier is the best entitling row; ensure_credit_period derives the paid period "
+             "from the winning row. Only a Production (or NULL legacy) `environment` row starts a "
+             "paid credit period (196). max_period_end is kept by a trigger ('infinity' = unknown "
+             "for rows that did not entitle when 198 was applied)."),
     "public.subscription_credit_periods": T("billing",
         purpose="Every Apple paid subscription period whose credit allocation was granted — the "
                 "exactly-once guard for paid allowances (migration 196).",
         key=("user_id", "original_transaction_id", "period_end", "tier", "allocation", "carried",
              "source"),
         note="UNIQUE(original_transaction_id, period_end): a period is granted at most once, "
-             "ever, and an older one is never re-applied. Written only by ensure_credit_period; "
-             "user_credits.paid_period_id points at the one in force."),
+             "ever, and an older one is never re-applied. Written by ensure_credit_period, "
+             "revoke_tier_credits, and since 198 revoke_paid_period (claws a refunded period back "
+             "by this key: revoke_requested_at, the carry stamps) and reinstate_paid_carry; "
+             "user_credits.paid_period_id points at the one in force. An upgrade records "
+             "carried_from_period_id; a period the register still holds a refund of is never "
+             "reinstated."),
+    "public.subscription_transactions": T("billing",
+        purpose="One row per Apple subscription transaction iap_service has seen: when it was "
+                "applied to a lineage row, and the latest signedDate of a refund of it and of "
+                "that refund's reversal (migration 198).",
+        key=("environment", "transaction_id", "original_transaction_id", "user_id",
+             "applied_at", "revoked_signed_at", "reversed_signed_at"),
+        note="UNIQUE(environment, transaction_id). Refunded while revoked_signed_at > "
+             "reversed_signed_at; both only move forward, so arrival order never matters. "
+             "Refuses replays of refunded transactions (even of lineages never bound to an "
+             "account: user_id NULL), lets a reversal through in either order, and keeps a "
+             "refunded period from being reinstated. Written only by "
+             "record_subscription_transaction."),
     "public.guest_report_budget": T("billing",
         key=("bucket_key", "period_month", "report_count"),
         note="LEGACY. AI generation went account-only; a client-chosen header meant rotating it "

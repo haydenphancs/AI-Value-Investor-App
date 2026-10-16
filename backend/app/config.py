@@ -355,6 +355,16 @@ class Settings(BaseSettings):
     # Shared secret Apple echoes in App Store Server Notifications, if configured. When set,
     # the webhook additionally requires it — defence in depth on top of JWS verification.
     IAP_WEBHOOK_SHARED_SECRET: Optional[str] = None
+    # MUST EQUAL App Store Connect → Subscriptions → Billing Grace Period (3, 16 or 28 days for
+    # the monthly plans; with it Off, no row is ever in grace and this is inert). It bounds two
+    # things in `iap_service`: the hold that keeps a grace_period row's tier while a same-period
+    # delivery derives "expired" from the past end, and the expiry sweep's grace_period window
+    # (this + 24 h). DEFAULTS TO 28, Apple's maximum, because the two errors are not symmetric:
+    # set BELOW the real value, the sweep expires subscribers Apple is still serving; set above
+    # it, an unpaid user keeps the tier longer only when GRACE_PERIOD_EXPIRED is lost, with no
+    # credits granted (196 holds the balance), still well inside billing_retry's 60 days.
+    # Bounded, so a bad value fails the deploy instead of silently moving either window.
+    IAP_BILLING_GRACE_DAYS: int = Field(28, ge=3, le=28)
 
     # ── APNs push notifications (token-based auth via a .p8 key) ───────────────
     # All optional: with any unset, push is simply disabled (PushService.enabled

@@ -246,17 +246,22 @@ class SubscriptionService:
 
     def get_user_subscription(self, user_id: str) -> Optional[dict]:
         """The user's subscription row, or None (caller falls back to Free).
-        Uses limit(1) rather than single() so 'no row' is a clean None, not an error."""
+
+        Since migration 198 an account holds one row per Apple subscription lineage (a second
+        Apple ID adds a row), so this returns the one `winning_tier` would pick —
+        `iap_service.pick_display_subscription` — never whichever row came back first. One row:
+        that row, as before."""
+        from app.services.iap_service import pick_display_subscription
+
         try:
             result = (
                 self.supabase.table("subscriptions")
-                .select("tier, status, store, current_period_end")
+                .select("tier, status, store, current_period_end, updated_at")
                 .eq("user_id", user_id)
-                .limit(1)
                 .execute()
             )
             rows = list(result.data or [])
-            return rows[0] if rows else None
+            return pick_display_subscription(rows)
         except Exception as e:
             logger.error(
                 "subscriptions read failed for user=%s (%s: %s)",

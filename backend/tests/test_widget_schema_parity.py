@@ -78,7 +78,9 @@ _MOVER_KEYS = {
 }
 # `detail_aged` — the headline's cause worded for a LATER day ("…on Tue"), shown when the
 # client ages the footer. None on every non-headline mover and on a 24/7 row.
-_CAUSE_KEYS = {"kind", "tag", "detail", "detail_aged"}
+# `note` (2026-10-14) — the industry arithmetic beside an established cause; None for
+# sector / market / none, whose detail already says it.
+_CAUSE_KEYS = {"kind", "tag", "detail", "detail_aged", "note"}
 _CONTEXT_KEYS = {
     "change_percent", "z", "gap_percent", "intraday_percent", "gap_dominant",
     "industry_name", "industry_change_percent", "market_change_percent",
@@ -199,6 +201,7 @@ def test_every_new_field_is_optional_or_defaulted():
     assert p.top_gainers == [] and p.top_losers == [] and p.market_assets == []
     assert p.headline_mover.rolling_24h is False
     assert p.headline_mover.cause.detail_aged is None
+    assert p.headline_mover.cause.note is None
     assert p.market_context.indices[0].short_label is None
     assert p.market_context.indices[0].rolling_24h is False
 

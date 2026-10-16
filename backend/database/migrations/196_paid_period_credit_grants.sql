@@ -97,9 +97,22 @@
 --
 -- Idempotent: CREATE TABLE / INDEX / ADD COLUMN IF NOT EXISTS, CREATE OR REPLACE, DROP POLICY IF
 -- EXISTS, and a backfill guarded to the first apply.
+--
+-- ⚠️ Never after 198 (198_subscriptions_per_lineage_transaction_register.sql). 198 replaces
+-- ensure_credit_period and revoke_tier_credits for one subscriptions row per lineage; this file
+-- applied again would silently put back the one-row bodies, and 198's keyed clawback would then
+-- report success while clawing nothing back. The guard below refuses that (added 2026-10-14, the
+-- same way 196 added 194's): once 198's table exists, this file raises and changes nothing.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+
+DO $$
+BEGIN
+    IF to_regclass('public.subscription_transactions') IS NOT NULL THEN
+        RAISE EXCEPTION '196 must not be applied after 198: it would replace 198''s ensure_credit_period and revoke_tier_credits. Re-apply 198 instead.';
+    END IF;
+END $$;
 
 -- ── 1. subscription_credit_periods — every paid period ever granted ───────────────────────
 

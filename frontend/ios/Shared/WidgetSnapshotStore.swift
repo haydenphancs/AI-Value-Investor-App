@@ -610,17 +610,28 @@ public struct WidgetCause: Codable, Equatable, Sendable {
     /// date, or for a round-the-clock headline by the ET day it was built (`isPriorETDay`) —
     /// so the cause cannot contradict the "Tue close" footer beside it.
     public let detailAged: String?
+    /// Always-true context beside an ESTABLISHED cause, from the backend ("Software -
+    /// Infrastructure fell 4.0%; CRWV moved far more."). It carries no session word, so it has
+    /// no aged twin. Nil on an older backend and for sector / market / none, whose `detail`
+    /// already says it. Decoding stays synthesized, so an old App Group snapshot or payload
+    /// without the key decodes it as nil.
+    public let note: String?
 
     enum CodingKeys: String, CodingKey {
         case kind, tag, detail
         case detailAged = "detail_aged"
+        case note
     }
 
-    public init(kind: WidgetCauseKind, tag: String? = nil, detail: String, detailAged: String? = nil) {
+    public init(
+        kind: WidgetCauseKind, tag: String? = nil, detail: String, detailAged: String? = nil,
+        note: String? = nil
+    ) {
         self.kind = kind
         self.tag = tag
         self.detail = detail
         self.detailAged = detailAged
+        self.note = note
     }
 }
 

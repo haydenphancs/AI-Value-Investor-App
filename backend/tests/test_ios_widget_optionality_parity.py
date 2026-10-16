@@ -13,14 +13,16 @@ So, for every Swift ⇄ Pydantic pair:
   2. Every non-Optional Swift stored property must map to a backend field that the CURRENT
      backend never sends as None: one whose annotation excludes None and that is required or
      has a non-None default (`gap_dominant: bool = False`, `tickers = []`).
-  3. Every key ADDED on 2026-09-30 (`_ADDITIVE_2026_09_30`) must be `T?` in Swift, or be read
-     with `decodeIfPresent` in that struct's own `init(from:)`. Rule 2 cannot see this: a
+  3. Every key ADDED after the first release (`_ADDITIVE_2026_09_30`, `_ADDITIVE_2026_10_14`,
+     all registered in `_ADDITIVE_SETS`) must be `T?` in Swift, or be read with
+     `decodeIfPresent` in that struct's own `init(from:)`. Rule 2 cannot see this: a
      default makes a field "always on the wire" only for JSON the current backend writes. The
      v1 envelope the INSTALLED app persisted, and any response from a not-yet-deployed or
      rolled-back backend, has no such key — and a synthesized `decode(Bool.self)` throws
      `keyNotFound` on it, blanking the Market tile through the migration and silently dropping
-     old-backend rows through `LossyElement`. Kept as an explicit list, not a git baseline, so
-     the suite stays hermetic; a key added later belongs in a new dated set.
+     old-backend rows through `LossyElement`. Kept as explicit lists, not a git baseline, so
+     the suite stays hermetic; a key added later belongs in a NEW dated set, registered in
+     `_ADDITIVE_SETS` (a test fails on an unregistered one).
 
 Keyed on "the annotation admits None", NOT on `is_required()`: `runners_up` is not required but
 can never be null, and Swift rightly declares it `[WidgetMover]` with `?? []`.
@@ -153,6 +155,24 @@ _ADDITIVE_2026_09_30: frozenset[tuple[str, str]] = frozenset({
     ("WidgetMoverSnapshot", "market_assets"),
 })
 
+# (Swift struct, wire key) — the 2026-10-14 cause note: the always-true context line under an
+# established cause's headline. An App Group snapshot written before it, and an older
+# backend, carry no such key.
+_ADDITIVE_2026_10_14: frozenset[tuple[str, str]] = frozenset({
+    ("WidgetCause", "note"),
+})
+
+# Every dated set, by the day its keys first went on the wire. The messages print the date,
+# so a key belongs in the set of the day IT was added — never appended to an older one.
+_ADDITIVE_SETS: dict[str, frozenset[tuple[str, str]]] = {
+    "2026-09-30": _ADDITIVE_2026_09_30,
+    "2026-10-14": _ADDITIVE_2026_10_14,
+}
+
+
+def _set_name(date: str) -> str:
+    return "_ADDITIVE_" + date.replace("-", "_")
+
 
 def _custom_init(block: str) -> str:
     """The struct's own `init(from decoder:)` body, or "" when decoding is synthesized."""
@@ -176,26 +196,29 @@ def _additive_problems(block: str, swift_name: str) -> list[str]:
     mapping = _wire_to_property(block, props)
     init = _custom_init(block)
     problems = []
-    for struct, wire in sorted(_ADDITIVE_2026_09_30):
-        if struct != swift_name:
-            continue
-        prop = mapping.get(wire)
-        if prop is None or prop not in props:
-            problems.append(
-                f"additive key `{wire}` no longer maps to a {swift_name} property — renamed? "
-                "update `_ADDITIVE_2026_09_30` with the new name, never drop the entry"
-            )
-            continue
-        if _is_optional(props[prop]):
-            continue
-        tolerant = re.search(rf"\bdecodeIfPresent\([^\n]*forKey:\s*\.{prop}\)", init)
-        strict = re.search(rf"\bdecode\([^\n]*forKey:\s*\.{prop}\)", init)
-        if not init or not tolerant or strict:
-            problems.append(
-                f"`{wire}` is new on 2026-09-30, but `{prop}: {props[prop]}` is non-Optional "
-                f"and not read with decodeIfPresent in {swift_name}'s own init(from:) — a "
-                "persisted v1 snapshot or an older backend omits it, and keyNotFound blanks the tile"
-            )
+    for date, keys in _ADDITIVE_SETS.items():
+        for struct, wire in sorted(keys):
+            if struct != swift_name:
+                continue
+            prop = mapping.get(wire)
+            if prop is None or prop not in props:
+                problems.append(
+                    f"additive key `{wire}` (new on {date}) no longer maps to a {swift_name} "
+                    f"property — renamed? update `{_set_name(date)}` with the new name, never "
+                    "drop the entry"
+                )
+                continue
+            if _is_optional(props[prop]):
+                continue
+            tolerant = re.search(rf"\bdecodeIfPresent\([^\n]*forKey:\s*\.{prop}\)", init)
+            strict = re.search(rf"\bdecode\([^\n]*forKey:\s*\.{prop}\)", init)
+            if not init or not tolerant or strict:
+                problems.append(
+                    f"`{wire}` is new on {date}, but `{prop}: {props[prop]}` is non-Optional "
+                    f"and not read with decodeIfPresent in {swift_name}'s own init(from:) — a "
+                    "snapshot persisted before that day, or an older backend, omits it, and "
+                    "keyNotFound blanks the tile"
+                )
     return problems
 
 
@@ -254,6 +277,8 @@ _MUTATIONS = [
      "public let shortLabel: String?", "public let shortLabel: String"),
     ("WidgetCause", "WidgetCauseResponse", _STORE,
      "public let detailAged: String?", "public let detailAged: String"),
+    ("WidgetCause", "WidgetCauseResponse", _STORE,
+     "public let note: String?", "public let note: String"),
     ("WidgetMarketBrief", "WidgetMarketBriefResponse", _STORE,
      "public let generatedAt: Date?", "public let generatedAt: Date"),
     ("WidgetMoveContext", "WidgetMoveContextResponse", _STORE,
@@ -287,15 +312,53 @@ def test_the_scan_bites(swift, pydantic, path, old, new):
 
 
 def test_the_additive_list_is_live():
-    """Each listed key still exists on BOTH sides — a stale entry would check nothing."""
+    """Each listed key, in every dated set, still exists on BOTH sides — a stale entry would
+    check nothing."""
     store = _STORE.read_text(encoding="utf-8")
     pydantic_of = {swift: pydantic for swift, pydantic, _path in _PAIRS}
-    for swift, wire in sorted(_ADDITIVE_2026_09_30):
-        assert wire in _model(pydantic_of[swift]).model_fields, f"backend dropped `{wire}`"
-        block = _struct_block(store, swift)
-        assert wire in _wire_to_property(block, _stored_properties(block)), (
-            f"{swift} no longer decodes `{wire}`"
-        )
+    for date, keys in _ADDITIVE_SETS.items():
+        assert keys, f"`{_set_name(date)}` is empty — it would check nothing"
+        for swift, wire in sorted(keys):
+            assert wire in _model(pydantic_of[swift]).model_fields, (
+                f"backend dropped `{wire}` (new on {date}, `{_set_name(date)}`)"
+            )
+            block = _struct_block(store, swift)
+            assert wire in _wire_to_property(block, _stored_properties(block)), (
+                f"{swift} no longer decodes `{wire}` (new on {date}, `{_set_name(date)}`)"
+            )
+
+
+def test_the_dated_sets_are_registered_and_disjoint():
+    """A key is new on ONE day. In two sets it would print two dates; a set defined but not
+    in `_ADDITIVE_SETS` would be checked by nothing — rule 3 and the test above walk the
+    registry, not the module."""
+    defined = {
+        name: value for name, value in globals().items()
+        if re.fullmatch(r"_ADDITIVE_\d{4}_\d{2}_\d{2}", name)
+    }
+    registered = {_set_name(date): keys for date, keys in _ADDITIVE_SETS.items()}
+    assert set(defined) == set(registered), (
+        f"dated sets not in _ADDITIVE_SETS: {sorted(set(defined) - set(registered))}; "
+        f"registered under a name that does not exist: {sorted(set(registered) - set(defined))}"
+    )
+    for name, keys in registered.items():
+        assert defined[name] is keys, f"`{name}` is registered under the wrong date"
+    dates = sorted(_ADDITIVE_SETS)
+    for i, a in enumerate(dates):
+        for b in dates[i + 1 :]:
+            both = _ADDITIVE_SETS[a] & _ADDITIVE_SETS[b]
+            assert not both, f"{sorted(both)} listed as new on both {a} and {b}"
+
+
+def test_rule_three_walks_every_dated_set():
+    """Rule 3 ALONE (not rule 1, which a nullable annotation also trips) must flag a key
+    from the newest set, naming its day — proof it reads the registry, not one set."""
+    block = _struct_block(_STORE.read_text(encoding="utf-8"), "WidgetCause")
+    old = "public let note: String?"
+    assert block.count(old) == 1, "mutation anchor gone from WidgetCause — update this test"
+    problems = _additive_problems(block.replace(old, "public let note: String", 1), "WidgetCause")
+    assert any("`note`" in p and "2026-10-14" in p for p in problems), problems
+    assert _additive_problems(block, "WidgetCause") == []
 
 
 def test_rule_three_accepts_a_tolerant_custom_init():

@@ -284,7 +284,8 @@ def test_every_optional_payload_key_is_decoded_leniently():
 # The 2026-09-30 contract: what the Holdings tile (name, counts, gainers / losers) and the
 # Market tile (the Home pulse assets) are drawn from. Pinned in BOTH directions — the subset
 # test above lets Swift silently ignore a field, which for these would leave the tile
-# rendering "My Holdings" with no counts while the backend sends everything.
+# rendering "My Holdings" with no counts while the backend sends everything. 2026-10-14 adds
+# the cause's `note` (the context line under an established cause's headline).
 _CONTRACT_KEYS = {
     ("WidgetMoverSnapshot", "WidgetMoverPayload"): {
         "group_name", "holdings_count", "up_count", "down_count", "flat_count",
@@ -292,7 +293,7 @@ _CONTRACT_KEYS = {
     },
     ("WidgetIndex", "WidgetIndexResponse"): {"short_label", "rolling_24h"},
     ("WidgetMover", "WidgetMoverResponse"): {"rolling_24h"},
-    ("WidgetCause", "WidgetCauseResponse"): {"detail_aged"},
+    ("WidgetCause", "WidgetCauseResponse"): {"detail_aged", "note"},
 }
 
 

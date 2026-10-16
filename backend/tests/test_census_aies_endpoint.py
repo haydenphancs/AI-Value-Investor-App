@@ -23,8 +23,18 @@ import pytest
 import app.integrations.census as census
 import app.services.industry_tam_service as its
 
-YEAR = datetime.now(timezone.utc).year
+# The client derives the vintages it probes from its own clock (`datetime.now(...).year`).
+# Read here at IMPORT, YEAR named last year once a full-suite run crossed New Year between
+# collection and execution, so every test freezes the client's clock to the same instant.
+_NOW = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+YEAR = _NOW.year
 LOGGER = "app.integrations.census"
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return _NOW.astimezone(tz) if tz else _NOW.replace(tzinfo=None)
 
 
 class _Resp:
@@ -75,6 +85,11 @@ def _clear_census_cache():
     census._cache.clear()
     yield
     census._cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _frozen_census_clock(monkeypatch):
+    monkeypatch.setattr(census, "datetime", _FrozenDatetime)
 
 
 def _aies(value: Optional[str], naics: str = "335") -> _Resp:

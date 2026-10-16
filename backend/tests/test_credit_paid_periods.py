@@ -519,7 +519,9 @@ def _latest_body(name: str) -> tuple[str, str]:
     return found[-1]
 
 
-@pytest.mark.parametrize("name", ["ensure_credit_period", "grant_tier_upgrade", "revoke_tier_credits"])
+@pytest.mark.parametrize("name", ["ensure_credit_period", "grant_tier_upgrade", "revoke_tier_credits",
+                                  "revoke_paid_period", "reinstate_paid_carry",
+                                  "record_subscription_transaction"])
 def test_the_tier_rpcs_never_name_the_purchased_pool(name):
     """App Store 3.1.1 made structural (117): the granted-pool writers name only granted
     columns, so no branch of theirs can expire a credit someone bought."""
@@ -540,11 +542,18 @@ def test_a_paid_period_is_keyed_once_and_the_paid_allocation_never_reads_users_t
     assert re.search(r"CASE\s+WHEN\s+v_prod_row\s+THEN\s+COALESCE\(v_comp_tier,\s*'free'\)", body), (
         "users.tier may size only the calendar allowance of an account with no PRODUCTION row"
     )
+    # 198: one row per lineage. Calendar sizing asks whether ANY Production row exists; a paid
+    # period needs the WINNING row itself to be Production (a Sandbox winner beside a Production
+    # row must not count as paid).
     assert re.search(
-        r"v_prod_row\s*:=\s*v_has_sub\s+AND\s+COALESCE\(v_sub\.environment,\s*'Production'\)\s*=\s*'Production'",
+        r"v_prod_row\s*:=\s*EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+public\.subscriptions\s+\w+\s+"
+        r"WHERE\s+\w+\.user_id\s*=\s*p_user_id\s+AND\s+COALESCE\(\w+\.environment,\s*'Production'\)\s*=\s*'Production'",
+        body), "users.tier may size the calendar only while the account has NO Production row"
+    assert re.search(
+        r"v_sub_prod\s*:=\s*v_has_sub\s+AND\s+COALESCE\(v_sub\.environment,\s*'Production'\)\s*=\s*'Production'",
         body), "a Sandbox row must never start a paid period (it renews every few minutes)"
     paid_row = re.search(r"v_paid_row\s*:=(.*?);", body, re.S)
-    assert paid_row and "v_prod_row" in paid_row.group(1) and "v_tier" in paid_row.group(1), (
+    assert paid_row and "v_sub_prod" in paid_row.group(1) and "v_tier" in paid_row.group(1), (
         "a paid period needs a Production row ABOVE the complimentary floor"
     )
 
@@ -554,17 +563,259 @@ def test_a_refund_claws_back_only_the_period_it_was_for():
     so the match must include the period end — in ensure_credit_period AND in the backstop."""
     for name in ("ensure_credit_period", "revoke_tier_credits"):
         source, body = _latest_body(name)
+        # 198: the in-force period's OWN lineage row (v_cur_sub), never "the" row.
         assert re.search(
-            r"v_sub\.original_transaction_id\s*=\s*v_cur\.original_transaction_id\s*"
-            r"AND\s+v_sub\.current_period_end\s*=\s*v_cur\.period_end", body), (
+            r"v_cur_sub\.original_transaction_id\s*=\s*v_cur\.original_transaction_id\s*"
+            r"AND\s+v_cur_sub\.current_period_end\s*=\s*v_cur\.period_end", body), (
             f"{name}() in {source} claws back without checking the refunded period IS the one in force"
         )
+
+
+def _migration_text(name: str) -> str:
+    return re.sub(r"--[^\n]*", "", (_MIGRATIONS / name).read_text(encoding="utf-8"))
+
+
+def _norm(sql: str) -> str:
+    """Whitespace-normalised SQL (one space; none just inside parentheses), so a guard can pin an
+    expression EXACTLY. A substring guard ("v_cur_holds" in cond) passes `NOT v_cur_holds`, an
+    `OR` for an `AND` and an extra conjunct — review of the fix pass, 2026-10-15."""
+    sql = re.sub(r"\s+", " ", sql).strip()
+    return re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", sql))
+
+
+_M198 = "198_subscriptions_per_lineage_transaction_register.sql"
+
+# The register's "still refunded" predicate (alias t): a refund newer than any reversal of it.
+# One spelling, shared by ensure_credit_period's reinstate guard and reinstate_paid_carry.
+_UNREVERSED_REFUND = ("t.revoked_signed_at IS NOT NULL AND (t.reversed_signed_at IS NULL "
+                      "OR t.reversed_signed_at < t.revoked_signed_at)")
+
+
+def test_the_keyed_clawback_matches_both_the_lineage_and_the_period_end():
+    """198's revoke_paid_period claws back ONE credit period: the refund of an older renewal
+    shares the original transaction with the period in force, so the key must include the end."""
+    source, body = _latest_body("revoke_paid_period")
+    assert re.search(r"WHERE\s+original_transaction_id\s*=\s*p_original_transaction_id\s+"
+                     r"AND\s+period_end\s*=\s*p_period_end", body), source
+
+
+def test_the_keyed_clawback_rechecks_the_refund_under_the_balance_lock():
+    """A REFUND_REVERSED recorded after the caller decided must keep the credits: the register is
+    read AFTER `user_credits ... FOR UPDATE`, and a reversed refund returns before any write."""
+    source, body = _latest_body("revoke_paid_period")
+    lock = re.search(r"FROM\s+public\.user_credits\s+WHERE\s+user_id\s*=\s*p_user_id\s+FOR\s+UPDATE", body)
+    register = body.find("FROM public.subscription_transactions")
+    assert lock and 0 <= lock.start() < register, source
+    reversed_return = body.find("'reversed'")
+    first_write = min(i for i in (body.find("UPDATE public."), body.find("INSERT INTO public.")) if i >= 0)
+    assert 0 <= reversed_return < first_write, "a reversed refund must return before anything is written"
+
+
+def test_a_refunded_period_is_never_reinstated_while_the_register_holds_its_refund():
+    """Pinned EXACTLY: an inverted comparison (`reversed_signed_at > revoked_signed_at`) reads a
+    reversed refund as still refunded and a re-refunded period as reversed — it still names the
+    register, so the old "subscription_transactions in the expression" guard passed it."""
+    source, body = _latest_body("ensure_credit_period")
+    assert len(re.findall(r"v_reinstate\s*:=", body)) == 1, source
+    reinstate = re.search(r"v_reinstate\s*:=(.*?);", body, re.S)
+    assert reinstate, source
+    expected = (
+        "COALESCE(v_new_key AND v_seen AND v_seen_row.user_id = p_user_id "
+        "AND v_seen_row.revoked_at IS NOT NULL AND NOT v_running "
+        "AND NOT EXISTS (SELECT 1 FROM public.subscription_transactions t "
+        "WHERE t.original_transaction_id = v_seen_row.original_transaction_id "
+        f"AND t.period_end = v_seen_row.period_end AND {_UNREVERSED_REFUND}), FALSE)")
+    assert _norm(reinstate.group(1)) == expected, (
+        f"{source}: the reinstate guard changed:\n  {_norm(reinstate.group(1))}\n  expected {expected}")
+    # The reinstate BRANCH (brace-bound, not the whole body) clears the keyed request, or the next
+    # call reads the stale revoke_requested_at and claws the period back again.
+    branch = re.search(r"IF\s+v_reinstate\s+THEN(.*?)RETURN\s+v_restore\s*;", body, re.S)
+    assert branch, f"{source}: the REFUND_REVERSED branch is gone"
+    clear = re.search(r"UPDATE\s+public\.subscription_credit_periods\s+SET(.*?)WHERE\s+id\s*=\s*v_seen_row\.id\s*;",
+                      branch.group(1), re.S)
+    assert clear and _norm(clear.group(1)) == (
+        "revoked_at = NULL, revoked_remaining = NULL, revoke_requested_at = NULL, reinstated_at = now()"), (
+        "the reinstate branch must clear revoke_requested_at, or the next call claws it back again")
+
+
+_CARRY_UPGRADE_LOOKUP = ("SELECT * INTO v_u FROM public.subscription_credit_periods "
+                         "WHERE carried_from_period_id = v_p.id AND user_id = p_user_id "
+                         "ORDER BY id DESC LIMIT 1 FOR UPDATE;")
+_PERIOD_UPDATE = re.compile(r"UPDATE public\.subscription_credit_periods SET (.*?) WHERE (.*?);")
+
+
+def _sets(assignments: str, column_value: str) -> bool:
+    """`column = value` is one of the comma-separated SET items (never a substring of another)."""
+    return re.search(rf"(?:^|, ){re.escape(column_value)}(?:,|$)", assignments) is not None
+
+
+def test_the_upgrade_carry_is_clawed_back_once_per_refund_and_given_back_once_per_reversal():
+    """The carry state machine (fix-pass review, 2026-10-15): carry_revoked_at is set while the
+    carry is clawed back. revoke_paid_period claws only while it is NULL (a duplicate refund takes
+    nothing); every reinstatement outcome clears it (so Apple refunding the period AGAIN after a
+    reversal claws again); and reinstate_paid_carry re-checks the register under the balance lock,
+    so a reversal that a later refund superseded gives nothing back ('still_refunded')."""
+    source, body = _latest_body("reinstate_paid_carry")
+    n = _norm(body)
+    lock = "SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;"
+    nothing = ("IF NOT FOUND OR v_u.carry_revoked_at IS NULL THEN "
+               "RETURN jsonb_build_object('outcome', 'nothing_to_reinstate'); END IF;")
+    still = ("IF EXISTS (SELECT 1 FROM public.subscription_transactions t "
+             "WHERE t.original_transaction_id = p_original_transaction_id AND t.period_end = p_period_end "
+             f"AND {_UNREVERSED_REFUND}) THEN RETURN jsonb_build_object('outcome', 'still_refunded'); END IF;")
+    for piece in (lock, _CARRY_UPGRADE_LOOKUP, nothing, still):
+        assert n.count(piece) == 1, f"{source}: reinstate_paid_carry lost (or doubled) {piece!r}"
+    first_write = min(i for i in (n.find("UPDATE public."), n.find("INSERT INTO public.")) if i >= 0)
+    assert n.index(lock) < n.index(still) < first_write, (
+        f"{source}: the register must be re-read UNDER the balance lock and before any write")
+    gives = _PERIOD_UPDATE.findall(n)
+    assert len(gives) == 3, f"{source}: three reinstatement outcomes, three period writes: {gives}"
+    for assignments, where in gives:
+        assert _sets(assignments, "carry_revoked_at = NULL"), (
+            f"{source}: a reinstatement must clear carry_revoked_at, or a later refund never claws "
+            f"again and a duplicate reversal gives the carry back twice: {assignments}")
+        assert _sets(assignments, "carry_reinstated_at = now()"), assignments
+        assert where == "id = v_u.id AND carry_revoked_at IS NOT NULL", where
+
+    source, body = _latest_body("revoke_paid_period")
+    n = _norm(body)
+    gate = "IF FOUND AND v_u.carry_revoked_at IS NULL THEN"
+    assert n.count(_CARRY_UPGRADE_LOOKUP) == 1 and n.count(gate) == 1, (
+        f"{source}: the carry branch must claw only while the carry is not clawed back already")
+    assert n.index(_CARRY_UPGRADE_LOOKUP) < n.index(gate)
+    claws = _PERIOD_UPDATE.findall(n[n.index(gate):])
+    assert len(claws) == 2, f"{source}: two clawback paths (in force / clawed-back upgrade): {claws}"
+    for assignments, where in claws:
+        assert _sets(assignments, "carry_revoked_at = now()") and _sets(assignments, "carry_revoked = v_x"), assignments
+        assert where == "id = v_u.id AND carry_revoked_at IS NULL", where
+
+
+def test_the_in_force_lineages_own_next_key_is_evaluated_when_the_winner_cannot_start():
+    """Review #5/#14/#26 (2026-10-15): only the ORDER BY winner's key used to be evaluated, so a
+    winner held back by the same-or-lower rule left nothing but a HOLD — a paid renewal of the
+    in-force lineage was never granted (permanently after a downgrade beside another Max)."""
+    source, body = _latest_body("ensure_credit_period")
+    loop = re.search(r"<<pick>>\s*LOOP(.*?)END\s+LOOP\s+pick;", body, re.S)
+    assert loop, f"{source}: the candidate key must be evaluated in the <<pick>> loop"
+    assert len(re.findall(r"v_retarget\s*:=", body)) == 1, source
+    retarget = re.search(r"v_retarget\s*:=(.*?);", loop.group(1), re.S)
+    assert retarget, source
+    # EXACT, not "each clause is a substring": `NOT v_reinstate OR v_cur_holds`, `AND NOT
+    # v_cur_holds` and `AND NOT v_cur_sub.status = 'active'` all contain every old substring.
+    # Seven conjuncts under one AND: the winner neither starts nor reinstates, the in-force
+    # lineage holds, its own row can carry a period now, and it is not the winner already.
+    expected = (
+        "COALESCE(NOT v_start_paid AND NOT v_reinstate AND v_cur_holds "
+        "AND v_cur_sub.status = 'active' AND v_cur_sub.current_period_end > now() "
+        "AND COALESCE(v_cur_sub.original_transaction_id, '') <> '' "
+        "AND v_sub.original_transaction_id IS DISTINCT FROM v_cur_sub.original_transaction_id, FALSE)")
+    assert _norm(retarget.group(1)) == expected, (
+        f"{source}: the retarget condition changed:\n  {_norm(retarget.group(1))}\n  expected {expected}")
+    # Then, in this order: leave unless retargeting; else re-evaluate the in-force lineage's own
+    # row with ITS environment and tier (a stale v_paid_row would start or skip the wrong key).
+    tail = loop.group(1)[retarget.end():]
+    assert _norm(tail) == (
+        "EXIT pick WHEN NOT v_retarget; v_sub := v_cur_sub; "
+        "v_sub_prod := COALESCE(v_sub.environment, 'Production') = 'Production'; "
+        "v_paid_row := v_sub_prod AND (CASE v_sub.tier WHEN 'premium' THEN 2 WHEN 'pro' THEN 1 ELSE 0 END) "
+        "> (CASE v_tier WHEN 'premium' THEN 2 WHEN 'pro' THEN 1 ELSE 0 END); v_seen := FALSE;"), (
+        f"{source}: the retarget step changed: {_norm(tail)}")
+    # Every key decision is inside the loop, so the retargeted row gets all of them.
+    for name in ("v_new_key", "v_reinstate", "v_start_paid"):
+        assert re.search(rf"{name}\s*:=", loop.group(1)), name
+        assert not re.search(rf"{name}\s*:=", body[:loop.start()] + body[loop.end():]), name
+
+
+def test_the_max_period_end_high_water_mark_is_a_trigger_never_a_check():
+    """Design v1 had a CHECK (max_period_end >= current_period_end) and no trigger: that failed
+    every write of code that does not set the column (a 23514 → 503 on every renewal). The
+    trigger keeps it right for every writer (a CHECK would only bite with it disabled) and must
+    never touch updated_at, which the iap_service write fence compares."""
+    ddl = _migration_text(_M198)
+    assert not re.search(r"CHECK\s*\([^;]*max_period_end", ddl), "no CHECK on max_period_end"
+    source, fn = _latest_body("subscriptions_keep_max_period_end")
+    fn = _norm(fn)
+    assert "updated_at" not in fn, f"{source}: the trigger must never touch the write fence"
+    # Review #0: a re-point to another lineage restarts the mark from the new lineage's own end
+    # (NEW.max_period_end holds OLD's when the writer did not set it, so it is never read there).
+    repoint = ("IF TG_OP = 'UPDATE' AND NEW.original_transaction_id IS DISTINCT FROM "
+               "OLD.original_transaction_id THEN NEW.max_period_end := NEW.current_period_end;")
+    # The same lineage: the mark only rises — over what it was, what the row held and what it
+    # now holds. `:= NEW.current_period_end` here would let an overlap upgrade (or the late
+    # refund of an older period) rewind it, and Rule D would read a refunded renewal as newer.
+    same_lineage = ("ELSIF TG_OP = 'UPDATE' THEN NEW.max_period_end := GREATEST(NEW.max_period_end, "
+                    "OLD.max_period_end, OLD.current_period_end, NEW.current_period_end);")
+    insert = "ELSE NEW.max_period_end := GREATEST(NEW.max_period_end, NEW.current_period_end); END IF;"
+    assert repoint in fn, "a re-pointed row must not inherit the previous lineage's mark"
+    assert same_lineage in fn, f"{source}: the same-lineage branch must only ever raise the mark: {fn}"
+    assert insert in fn, f"{source}: an INSERT must start the mark at the row's own end: {fn}"
+    assert fn == f"BEGIN {repoint} {same_lineage} {insert} RETURN NEW; END;", f"{source}: {fn}"
+    # A ROW trigger, BEFORE both writes: a STATEMENT trigger's NEW is NULL (nothing is kept), and
+    # an AFTER trigger cannot change the row. Dropped first, so a re-run recreates it.
+    triggers = re.findall(r"CREATE\s+TRIGGER\s+subscriptions_max_period_end\s+(.*?);", ddl, re.S)
+    assert [_norm(t) for t in triggers] == [
+        "BEFORE INSERT OR UPDATE ON public.subscriptions FOR EACH ROW "
+        "EXECUTE FUNCTION public.subscriptions_keep_max_period_end()"], triggers
+    drop = re.search(r"DROP\s+TRIGGER\s+IF\s+EXISTS\s+subscriptions_max_period_end\s+ON\s+public\.subscriptions\s*;",
+                     ddl)
+    assert drop and drop.start() < ddl.index("CREATE TRIGGER subscriptions_max_period_end")
+
+
+def test_the_backfill_knows_the_mark_only_for_a_row_that_entitles_when_198_is_applied():
+    """Review #17: a row revoked or expired before 198 may have been REWOUND (a late refund of an
+    older period wrote that period's end over it), so copying its current_period_end let Rule D
+    read a refunded renewal's saved JWS as a newer period. Its mark is 'infinity' (unknown)."""
+    ddl = _migration_text(_M198)
+    backfills = re.findall(r"UPDATE\s+public\.subscriptions\s+SET\s+max_period_end\s*=.*?;", ddl, re.S)
+    assert len(backfills) == 1, f"exactly one backfill statement, found {len(backfills)}"
+    # The WHOLE statement, WHERE clause included: a re-run touches only rows still unmarked, and
+    # every row that has an end or does not entitle is marked — an extra conjunct (`AND status IS
+    # NULL`) would leave revoked/expired rows unmarked, and the trigger's GREATEST would then
+    # adopt their possibly-rewound end as a KNOWN mark on their next write.
+    assert _norm(backfills[0]) == (
+        "UPDATE public.subscriptions "
+        "SET max_period_end = CASE WHEN status IN ('active', 'grace_period', 'billing_retry') "
+        "THEN current_period_end ELSE 'infinity'::timestamptz END "
+        "WHERE max_period_end IS NULL "
+        "AND (current_period_end IS NOT NULL OR status NOT IN ('active', 'grace_period', 'billing_retry'));"
+    ), _norm(backfills[0])
+
+
+def test_198_drops_the_index_its_unique_index_duplicates():
+    ddl = _migration_text(_M198)
+    unique = ddl.index("CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_original_transaction_id_key")
+    dropped = re.search(r"DROP\s+INDEX\s+IF\s+EXISTS\s+public\.idx_subscriptions_txn\s*;", ddl)
+    assert dropped and dropped.start() > unique, "drop the duplicate only after its replacement exists"
+
+
+def test_196_and_194_refuse_to_run_after_198():
+    """Re-applying 196 would put back the one-row bodies while iap_service runs per lineage."""
+    for name, table in (("196_paid_period_credit_grants.sql", "subscription_transactions"),
+                        ("194_monthly_expired_ledger_row.sql", "subscription_credit_periods")):
+        ddl = _migration_text(name)
+        guard = re.search(r"IF\s+to_regclass\('public\.(\w+)'\)\s+IS\s+NOT\s+NULL\s+THEN\s+RAISE\s+EXCEPTION",
+                          ddl)
+        assert guard and guard.group(1) == table, name
+        assert ddl.index("RAISE EXCEPTION") < ddl.index("CREATE OR REPLACE FUNCTION"), name
+
+
+def test_198_drops_one_row_per_account_and_keys_rows_by_lineage():
+    ddl = _migration_text(_M198)
+    assert re.search(r"DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+subscriptions_user_id_key", ddl)
+    assert re.search(r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+subscriptions_original_transaction_id_key\s+"
+                     r"ON\s+public\.subscriptions\s*\(\s*original_transaction_id\s*\)", ddl)
+    assert re.search(r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+idx_subscriptions_user\s+ON\s+public\.subscriptions"
+                     r"\s*\(\s*user_id\s*\)", ddl), "every per-user read lost its index with the constraint"
+    # The preflight refuses to run over two rows sharing a lineage.
+    assert ddl.index("HAVING count(*) > 1") < ddl.index("DROP CONSTRAINT IF EXISTS subscriptions_user_id_key")
 
 
 def test_the_backfill_runs_once_and_only_for_periods_the_old_code_paid():
     ddl = (_MIGRATIONS / "196_paid_period_credit_grants.sql").read_text(encoding="utf-8")
     ddl = re.sub(r"--[^\n]*", "", ddl)
-    backfill = ddl[ddl.index("DO $$"):ddl.index("END $$;")]
+    # The DO block that INSERTs the backfill rows (196 also opens with its after-198 guard).
+    blocks = re.findall(r"DO \$\$(.*?)END \$\$;", ddl, re.S)
+    backfill = next(b for b in blocks if "INSERT INTO public.subscription_credit_periods" in b)
     assert re.search(r"IF\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+public\.subscription_credit_periods\s+"
                      r"WHERE\s+source\s*<>\s*'backfill'\s*\)", backfill), "a re-run must not backfill"
     assert re.search(r"uc\.tier_alloc\s*>=\s*COALESCE\(pc\.monthly_credits,\s*0\)", backfill), (

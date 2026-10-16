@@ -42,6 +42,7 @@ _TIER_RANK = {"free": 0, "pro": 1, "premium": 2}
 _ENTITLING = frozenset({"active", "grace_period", "billing_retry"})
 _ET = ZoneInfo("America/New_York")
 _USER_IDS = itertools.count(1)
+_PERIOD_IDS = itertools.count(1)   # subscription_credit_periods.id
 
 
 def _minus_one_month(ts: datetime) -> datetime:
@@ -72,10 +73,16 @@ class _Credits:
     clock has passed rolls it. With a `subscription` (the ONE `subscriptions` row iap_service
     writes) each Apple paid period is granted once, from `periods`: pass one dict to several
     models to share the table's UNIQUE (original_transaction_id, period_end) key.
+
+    Migration 198 made `subscriptions` one row per Apple LINEAGE: `subscriptions` is the list,
+    `subscription` reads and writes a one-row account exactly as before, and `put_subscription`
+    upserts one lineage's row. `register` models `subscription_transactions` (share one dict
+    like `periods`), and the three keyed RPCs are `record_subscription_transaction`,
+    `revoke_paid_period` and `reinstate_paid_carry`.
     """
 
     def __init__(self, total=0, used=0, purchased_total=0, purchased_used=0, tier="free",
-                 *, comp_tier=None, now=None, periods=None):
+                 *, comp_tier=None, now=None, periods=None, register=None):
         self.total = total
         self.used = used
         self.purchased_total = purchased_total
@@ -89,9 +96,12 @@ class _Credits:
         self.comp_tier = comp_tier
         self.now = now or datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc)
         self.resets_at: Optional[datetime] = None
-        self.subscription: Optional[dict] = None   # otid, tier, status, end
+        # migration 198: one row per lineage — otid, tier, status, end, environment, updated, id
+        self.subscriptions: list[dict] = []
         self.paid_period: Optional[dict] = None    # the subscription_credit_periods row in force
         self.periods: dict = {} if periods is None else periods
+        # migration 198: subscription_transactions, (environment, transaction_id) -> row
+        self.register: dict = {} if register is None else register
         self.user_id = next(_USER_IDS)
         self.ledger: list[dict] = []
         self.purchases: dict[tuple[str, str], dict] = {}   # (environment, txn) -> row
@@ -141,14 +151,70 @@ class _Credits:
         })
 
     # ── migration 196: the ONE subscriptions row, as iap_service writes it ─────
+    @property
+    def subscription(self) -> Optional[dict]:
+        """A one-row account's row (the live dict: a test may mutate it), as before 198."""
+        return self.subscriptions[0] if self.subscriptions else None
+
+    @subscription.setter
+    def subscription(self, value: Optional[dict]) -> None:
+        self.subscriptions = [] if value is None else [value]
+
     def set_subscription(self, otid, tier, status, end, environment=None):
-        """`environment` None = a row written before 196 or by older code: Production."""
-        self.subscription = {"otid": otid, "tier": tier, "status": status, "end": end,
-                             "environment": environment}
+        """The account's ONE row, replacing any others (the pre-198 shape). `environment` None =
+        a row written before 196 or by older code: Production."""
+        self.subscriptions = [self._sub_row(otid, tier, status, end, environment)]
+
+    def put_subscription(self, otid, tier, status, end, environment=None):
+        """migration 198: upsert THIS lineage's row; other lineages' rows stay."""
+        row = self._sub_row(otid, tier, status, end, environment)
+        for i, existing in enumerate(self.subscriptions):
+            if existing["otid"] == otid:
+                self.subscriptions[i] = {**row, "id": existing["id"]}
+                return
+        self.subscriptions.append(row)
+
+    _row_seq = itertools.count(1)
+
+    def _sub_row(self, otid, tier, status, end, environment, updated=None, row_id=None):
+        seq = next(self._row_seq)
+        return {"otid": otid, "tier": tier, "status": status, "end": end,
+                "environment": environment, "updated": seq if updated is None else updated,
+                "id": f"{seq:012d}" if row_id is None else row_id}
+
+    def _winner(self) -> Optional[dict]:
+        """198's ORDER BY, key for key: a non-empty lineage, one that can carry a period now,
+        one that entitles, Production, the higher tier, the later end (NULLS LAST), the later
+        write, then id ascending. Stable sorts, last key first."""
+        rows = sorted(self.subscriptions, key=lambda r: str(r.get("id") or ""))
+        for key in (
+            lambda r: r.get("updated") or 0,
+            lambda r: (r["end"] is not None, r["end"] or datetime.min.replace(tzinfo=timezone.utc)),
+            lambda r: _TIER_RANK.get(r["tier"], 0),
+            lambda r: (r.get("environment") or "Production") == "Production",
+            lambda r: r["status"] in _ENTITLING,
+            lambda r: (r["status"] == "active" and r["end"] is not None and r["end"] > self.now),
+            lambda r: bool(r["otid"]),
+        ):
+            rows.sort(key=key, reverse=True)
+        return rows[0] if rows else None
+
+    def _lineage_row(self, otid) -> Optional[dict]:
+        return next((r for r in self.subscriptions if r["otid"] == otid), None)
 
     def _prod_row(self) -> bool:
-        sub = self.subscription
-        return sub is not None and (sub.get("environment") or "Production") == "Production"
+        """198: ANY Production row (any status) — calendar sizing, 196's rule kept."""
+        return any((r.get("environment") or "Production") == "Production"
+                   for r in self.subscriptions)
+
+    # ── migration 198: subscription_transactions ───────────────────────────
+    @staticmethod
+    def _refunded(rec: dict) -> bool:
+        return rec.get("rev") is not None and (rec.get("rr") is None or rec["rr"] < rec["rev"])
+
+    def _register_refunded(self, otid, end) -> bool:
+        return any(rec["otid"] == otid and rec.get("period_end") == end and self._refunded(rec)
+                   for rec in self.register.values())
 
     def _calendar_tier(self) -> str:
         """users.tier never sizes a PRODUCTION paid allocation. It sizes the calendar
@@ -174,25 +240,50 @@ class _Credits:
         self.resets_at = _next_et_reset(self.now)
         self._ledger(alloc, alloc, 0, "monthly_reset", None)
 
-    # ── migrations 100 → 194 → 196 ──────────────────────────────────────────
+    # ── migrations 100 → 194 → 196 → 198 ────────────────────────────────────
     def ensure_credit_period(self) -> int:
-        """Branch for branch with 196's SQL, in its order: the calendar block (194's reset or
+        """Branch for branch with 198's SQL, in its order: the calendar block (194's reset or
         the mid-month top-up), then the refund, the REFUND_REVERSED reinstatement, a new paid
         period, a running one, hold, lapse. `resets_at` None here means a FUTURE boundary
-        (rows in these tests start mid-period); the SQL treats a NULL resets_at as due."""
+        (rows in these tests start mid-period); the SQL treats a NULL resets_at as due.
+
+        198 over 196: `sub` is the WINNING row (`_winner`); `cur_sub` is the in-force period's
+        own lineage row, which decides the refund backstop and HOLD; while it holds, another
+        lineage's same-or-lower tier does not start; a period the register still holds a refund
+        of is never reinstated; `revoke_requested_at` (revoke_paid_period) fires the refund."""
         cal_tier = self._calendar_tier()
         cal_alloc = _PLAN_CREDITS.get(cal_tier, 0)
-        sub, cur = self.subscription, self.paid_period
+        sub, cur = self._winner(), self.paid_period
         running = cur is not None and cur["end"] > self.now
-        paid_row = self._prod_row() and _TIER_RANK[sub["tier"]] > _TIER_RANK[cal_tier]
-        new_key = (paid_row and sub["status"] == "active" and sub["end"] is not None
-                   and sub["end"] > self.now and bool(sub["otid"])
-                   and not (cur is not None and (cur["otid"], cur["end"]) == (sub["otid"], sub["end"])))
-        seen = self.periods.get((sub["otid"], sub["end"])) if new_key else None
-        reinstate = (new_key and seen is not None and seen["user"] == self.user_id
-                     and seen.get("revoked_at") is not None and not running)
-        start_paid = new_key and seen is None and (
-            not running or _TIER_RANK[sub["tier"]] > _TIER_RANK[cur["tier"]])
+        sub_prod = sub is not None and (sub.get("environment") or "Production") == "Production"
+        paid_row = sub_prod and _TIER_RANK[sub["tier"]] > _TIER_RANK[cal_tier]
+        cur_sub = self._lineage_row(cur["otid"]) if cur is not None else None
+        cur_holds = (cur is not None and not running and cur_sub is not None
+                     and (cur_sub.get("environment") or "Production") == "Production"
+                     and cur_sub["status"] in _ENTITLING
+                     and _TIER_RANK[cur_sub["tier"]] > _TIER_RANK[cal_tier])
+        while True:                                     # the SQL's <<pick>> loop: at most twice
+            new_key = (paid_row and sub["status"] == "active" and sub["end"] is not None
+                       and sub["end"] > self.now and bool(sub["otid"])
+                       and not (cur is not None
+                                and (cur["otid"], cur["end"]) == (sub["otid"], sub["end"])))
+            seen = self.periods.get((sub["otid"], sub["end"])) if new_key else None
+            reinstate = (new_key and seen is not None and seen["user"] == self.user_id
+                         and seen.get("revoked_at") is not None and not running
+                         and not self._register_refunded(seen["otid"], seen["end"]))
+            start_paid = new_key and seen is None and (
+                (not running and not (cur_holds and sub["otid"] != cur["otid"]
+                                      and _TIER_RANK[sub["tier"]] <= _TIER_RANK[cur["tier"]]))
+                or _TIER_RANK[sub["tier"]] > _TIER_RANK[(cur or {}).get("tier") or "free"])
+            # 198: the winner neither starts nor reinstates while the in-force lineage holds →
+            # that lineage's own row is evaluated once instead (its renewal is never skipped).
+            if (start_paid or reinstate or not cur_holds or cur_sub["status"] != "active"
+                    or cur_sub["end"] is None or not cur_sub["end"] > self.now
+                    or not cur_sub["otid"] or sub["otid"] == cur_sub["otid"]):
+                break
+            sub = cur_sub
+            sub_prod = (sub.get("environment") or "Production") == "Production"
+            paid_row = sub_prod and _TIER_RANK[sub["tier"]] > _TIER_RANK[cal_tier]
 
         if cur is None and not start_paid and not reinstate:          # CALENDAR MODE
             if self.period_due or (self.resets_at is not None and self.now >= self.resets_at):
@@ -210,9 +301,12 @@ class _Credits:
 
         remaining = self.remaining
 
-        # REFUND of the period in force: the revoked transaction IS that period.
-        if (cur is not None and sub is not None and sub["status"] == "revoked"
-                and sub["otid"] == cur["otid"] and sub["end"] == cur["end"]):
+        # REFUND of the period in force: its lineage row is revoked under its key, or 198's
+        # revoke_paid_period asked for exactly this period.
+        if cur is not None and (
+                cur.get("revoke_requested_at") is not None
+                or (cur_sub is not None and cur_sub["status"] == "revoked"
+                    and cur_sub["otid"] == cur["otid"] and cur_sub["end"] == cur["end"])):
             floor = max(cal_alloc, self.used)
             writeoff = max(self.used - cal_alloc, 0)
             delta = floor - self.total
@@ -231,6 +325,7 @@ class _Credits:
             if remaining > 0:
                 self._ledger(-remaining, -remaining, 0, "monthly_expired", None)
             seen["revoked_at"], seen["revoked_remaining"], seen["reinstated_at"] = None, None, self.now
+            seen["revoke_requested_at"] = None
             self.total, self.used, self.tier_alloc = restore, 0, seen["allocation"]
             self.paid_period, self.resets_at = seen, seen["end"]
             if restore > 0:
@@ -249,11 +344,16 @@ class _Credits:
                 span = (cur["end"] - cur["start"]) // us
                 cap = (cur["allocation"] * ((self.now - cur["start"]) // us)) // span if span > 0 else 0
                 carry = min(remaining, min(max(cap, 0), cur["allocation"]))
-            row = {"user": self.user_id, "otid": sub["otid"], "end": sub["end"],
+            row = {"id": next(_PERIOD_IDS), "user": self.user_id, "otid": sub["otid"],
+                   "end": sub["end"],
                    "start": min(_minus_one_month(sub["end"]), self.now), "tier": sub["tier"],
                    "allocation": alloc, "carried": carry,
                    "source": "upgrade" if running else "new_period",
-                   "revoked_at": None, "revoked_remaining": None, "reinstated_at": None}
+                   "revoked_at": None, "revoked_remaining": None, "reinstated_at": None,
+                   # migration 198
+                   "revoke_requested_at": None,
+                   "carried_from": cur.get("id") if running else None,
+                   "carry_revoked": None, "carry_revoked_at": None, "carry_reinstated_at": None}
             self.periods[(sub["otid"], sub["end"])] = row
             if remaining - carry > 0:
                 self._ledger(-(remaining - carry), -(remaining - carry), 0, "monthly_expired", None)
@@ -267,7 +367,10 @@ class _Credits:
             self._check()
             return self.remaining
 
-        if paid_row and sub["status"] in _ENTITLING:                    # HOLD
+        # HOLD — 198: on the in-force period's own lineage row when it exists, else (196) on the
+        # winning row.
+        if (cur_holds if cur_sub is not None
+                else (paid_row and sub["status"] in _ENTITLING)):
             self._check()
             return self.remaining
         self.paid_period = None                                        # LAPSE: "Expire at plan end"
@@ -287,7 +390,9 @@ class _Credits:
         # migration 196: in paid mode, act only when the refunded transaction IS the period in
         # force (ensure_credit_period has normally done it already and left paid mode); a
         # refund of another period changes nothing. The period is marked for a reversal.
-        cur, sub = self.paid_period, self.subscription
+        # migration 198: the in-force period's own lineage row decides.
+        cur = self.paid_period
+        sub = self._lineage_row(cur["otid"]) if cur is not None else None
         if cur is not None:
             if not (sub is not None and sub["status"] == "revoked"
                     and sub["otid"] == cur["otid"] and sub["end"] == cur["end"]):
@@ -316,6 +421,113 @@ class _Credits:
             self.paid_period, self.resets_at, self.period_due = None, _next_et_reset(self.now), False
         self._check()
         return self.remaining
+
+    # ── migration 198: the transaction register and the keyed clawback ───────
+    def record_subscription_transaction(self, environment, transaction_id, original_transaction_id,
+                                        user_id, tier, period_end, revocation_date, kind,
+                                        signed_at) -> dict:
+        """Every column only moves forward (GREATEST / COALESCE); a reversal needs Apple's date;
+        a refund with none is stamped `now`."""
+        if kind not in ("applied", "revoked", "reversed"):
+            raise ValueError(f"unknown kind {kind!r}")
+        if not environment or not transaction_id or not original_transaction_id:
+            raise ValueError("environment, transaction_id and original_transaction_id are required")
+        if kind == "reversed" and signed_at is None:
+            raise ValueError("a reversal needs Apple's signedDate")
+        at = signed_at if signed_at is not None else self.now
+        rec = self.register.setdefault((environment, transaction_id), {
+            "otid": original_transaction_id, "user": user_id, "tier": tier,
+            "period_end": period_end, "revocation_date": None,
+            "applied_at": None, "rev": None, "rr": None, "created": self.now})
+        rec["user"] = rec["user"] if rec["user"] is not None else user_id
+        rec["tier"] = rec["tier"] if rec["tier"] is not None else tier
+        rec["period_end"] = rec["period_end"] if rec["period_end"] is not None else period_end
+        rec["revocation_date"] = revocation_date if revocation_date is not None else rec["revocation_date"]
+        if kind == "applied" and rec["applied_at"] is None:
+            rec["applied_at"] = self.now
+        if kind == "revoked":
+            rec["rev"] = at if rec["rev"] is None else max(rec["rev"], at)
+        if kind == "reversed":
+            rec["rr"] = at if rec["rr"] is None else max(rec["rr"], at)
+        return {"applied_at": rec["applied_at"], "revoked_signed_at": rec["rev"],
+                "reversed_signed_at": rec["rr"], "user_id": rec["user"],
+                "refunded": self._refunded(rec)}
+
+    def _period_by_id(self, period_id) -> Optional[dict]:
+        return next((p for p in self.periods.values() if p.get("id") == period_id), None)
+
+    def _carried_from(self, period: dict) -> Optional[dict]:
+        """The newest upgrade period of this account that carried leftovers from `period`."""
+        hits = [p for p in self.periods.values()
+                if p.get("carried_from") is not None and p.get("carried_from") == period.get("id")
+                and p["user"] == self.user_id]
+        return max(hits, key=lambda p: p["id"]) if hits else None
+
+    def revoke_paid_period(self, environment, transaction_id, original_transaction_id,
+                           period_end) -> dict:
+        rec = self.register.get((environment, transaction_id))
+        if rec is None:
+            return {"outcome": "not_recorded"}
+        if not self._refunded(rec):
+            return {"outcome": "reversed"}
+        period = self.periods.get((original_transaction_id, period_end))
+        if period is None:
+            return {"outcome": "no_period"}
+        if period["user"] != self.user_id:
+            return {"outcome": "other_owner"}
+        if self.paid_period is period:
+            if period.get("revoke_requested_at") is None:
+                period["revoke_requested_at"] = self.now
+            self.ensure_credit_period()
+            self.ensure_credit_period()
+            if self.paid_period is period:
+                return {"outcome": "still_in_force"}
+            return {"outcome": "clawed_back"}
+        if period.get("revoked_at") is not None:
+            return {"outcome": "already_revoked"}
+        upgrade = self._carried_from(period)
+        if upgrade is not None and upgrade.get("carry_revoked_at") is None:
+            if self.paid_period is upgrade:
+                x = min(upgrade["carried"], max(self.total - self.used, 0))
+                if x > 0:
+                    self.total -= x
+                    self._ledger(-x, -x, 0, "tier_revoked", None)
+                upgrade["carry_revoked"], upgrade["carry_revoked_at"] = x, self.now
+                self._check()
+                return {"outcome": "carry_clawed_back", "carry": x}
+            if upgrade.get("revoked_at") is not None:
+                x = min(upgrade["carried"], upgrade.get("revoked_remaining") or 0)
+                upgrade["revoked_remaining"] = (upgrade.get("revoked_remaining") or 0) - x
+                upgrade["carry_revoked"], upgrade["carry_revoked_at"] = x, self.now
+                return {"outcome": "carry_clawed_back_from_revoked", "carry": x}
+        return {"outcome": "not_in_force"}
+
+    def reinstate_paid_carry(self, original_transaction_id, period_end) -> dict:
+        period = self.periods.get((original_transaction_id, period_end))
+        if period is None or period["user"] != self.user_id:
+            return {"outcome": "no_period"}
+        upgrade = self._carried_from(period)
+        # carry_revoked_at is the "clawed back NOW" stamp: a reinstatement clears it, so a later
+        # refund of the same period takes the carry again (198, fix-pass review 2026-10-15).
+        if upgrade is None or upgrade.get("carry_revoked_at") is None:
+            return {"outcome": "nothing_to_reinstate"}
+        # Under the lock: a refund signed after the reversal keeps the carry clawed back.
+        if self._register_refunded(original_transaction_id, period_end):
+            return {"outcome": "still_refunded"}
+        x = upgrade.get("carry_revoked") or 0
+        if self.paid_period is upgrade:
+            if x > 0:
+                self.total += x
+                self._ledger(x, x, 0, "plan_reinstated", original_transaction_id)
+            upgrade["carry_reinstated_at"], upgrade["carry_revoked_at"] = self.now, None
+            self._check()
+            return {"outcome": "carry_reinstated", "carry": x}
+        if upgrade.get("revoked_at") is not None:
+            upgrade["revoked_remaining"] = (upgrade.get("revoked_remaining") or 0) + x
+            upgrade["carry_reinstated_at"], upgrade["carry_revoked_at"] = self.now, None
+            return {"outcome": "carry_reinstated_to_revoked", "carry": x}
+        upgrade["carry_reinstated_at"], upgrade["carry_revoked_at"] = self.now, None
+        return {"outcome": "carry_expired"}
 
     # ── migration 118 ───────────────────────────────────────────────────────
     def spend_credits(self, amount: int, reason="report_charge", ref_id=None) -> Optional[int]:

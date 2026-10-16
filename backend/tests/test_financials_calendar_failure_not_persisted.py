@@ -74,6 +74,34 @@ def _day(offset: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=offset)).strftime("%Y-%m-%d")
 
 
+class _Days:
+    """A date `offset` days from today, resolved only when the TEST runs (`_at_run_time`).
+
+    Parametrize lists and module constants are built at COLLECTION, while the services read
+    today at run time. A `_day(0)` computed there named yesterday once a full-suite run
+    crossed 00:00 UTC before the test executed — failing five cases here."""
+
+    __slots__ = ("offset",)
+
+    def __init__(self, offset: int) -> None:
+        self.offset = offset
+
+    def __repr__(self) -> str:
+        return f"_Days({self.offset})"
+
+
+def _at_run_time(value: Any) -> Any:
+    """`value` with every `_Days` replaced by its date — copying lists and dicts, and
+    returning anything else AS IS (identity-checked sentinels like `CALENDAR_UNKNOWN`)."""
+    if isinstance(value, _Days):
+        return _day(value.offset)
+    if isinstance(value, list):
+        return [_at_run_time(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _at_run_time(v) for k, v in value.items()}
+    return value
+
+
 # ── shared harness ────────────────────────────────────────────────────────────
 
 
@@ -301,11 +329,11 @@ def _http_500() -> httpx.HTTPStatusError:
 
 #: Calendars that exercise the stale-reschedule rule (``_earnings_common.next_pending_earnings``)
 #: — shared by the getter persistence controls and the stamp table below.
-_STALE_RESCHEDULE_LEFTOVER = [{"date": _day(-3), "epsActual": 1.2},
-                              {"date": _day(4)}, {"date": _day(90)}]
-_LONE_SUSPECT_ROW = [{"date": _day(-3), "epsActual": 1.2}, {"date": _day(4)}]
-_LATE_Q4_THEN_REAL_NEXT = [{"date": _day(-10), "epsActual": 0.2},
-                           {"date": _day(34)}, {"date": _day(125)}]
+_STALE_RESCHEDULE_LEFTOVER = [{"date": _Days(-3), "epsActual": 1.2},
+                              {"date": _Days(4)}, {"date": _Days(90)}]
+_LONE_SUSPECT_ROW = [{"date": _Days(-3), "epsActual": 1.2}, {"date": _Days(4)}]
+_LATE_Q4_THEN_REAL_NEXT = [{"date": _Days(-10), "epsActual": 0.2},
+                           {"date": _Days(34)}, {"date": _Days(125)}]
 
 
 _CALENDAR_FAILURES = [
@@ -354,10 +382,10 @@ async def test_a_failed_calendar_is_served_but_never_persisted(
                    "epsEstimated": 2.35}], None, id="history_only"),
     # A future pending report is the bound.
     pytest.param([{"date": "2025-01-30", "epsActual": 2.4},
-                  {"date": _day(40), "epsEstimated": 2.5}], _day(40), id="future_pending"),
+                  {"date": _Days(40), "epsEstimated": 2.5}], _Days(40), id="future_pending"),
     # Report DAY: today's pending report (the reader then rebuilds all day).
-    pytest.param([{"date": _day(0), "epsEstimated": 2.5},
-                  {"date": _day(90), "epsEstimated": 2.6}], _day(0), id="pending_today"),
+    pytest.param([{"date": _Days(0), "epsEstimated": 2.5},
+                  {"date": _Days(90), "epsEstimated": 2.6}], _Days(0), id="pending_today"),
     # Malformed rows: non-dicts dropped by the client, undated / bad dates skipped.
     pytest.param(["junk", None, 5, {"epsEstimated": 1.0}, {"date": "not-a-date"},
                   {"date": None, "epsEstimated": 1.0}], None, id="malformed_rows"),
@@ -365,14 +393,15 @@ async def test_a_failed_calendar_is_served_but_never_persisted(
     # (`next_earnings_stamp`; their old `_find_next_earnings_date*` wrappers were
     # deleted 2026-10-01). Reported EARLY 3 days ago; the original date is still listed
     # pending 4 days out: a leftover. The row is invalidated on the REAL next report.
-    pytest.param(_STALE_RESCHEDULE_LEFTOVER, _day(90), id="stale_reschedule_leftover"),
+    pytest.param(_STALE_RESCHEDULE_LEFTOVER, _Days(90), id="stale_reschedule_leftover"),
     # ...but a lone pending row is never dropped (no later row to prefer).
-    pytest.param(_LONE_SUSPECT_ROW, _day(4), id="lone_suspect_row_kept"),
+    pytest.param(_LONE_SUSPECT_ROW, _Days(4), id="lone_suspect_row_kept"),
     # A late Q4 then the real next report 44 days later — outside the 21-day window, so it
     # is the bound, not the quarter after it.
-    pytest.param(_LATE_Q4_THEN_REAL_NEXT, _day(34), id="late_q4_real_next_report"),
+    pytest.param(_LATE_Q4_THEN_REAL_NEXT, _Days(34), id="late_q4_real_next_report"),
 ])
 async def test_a_real_calendar_answer_is_still_persisted(monkeypatch, service, answer, expected):
+    answer, expected = _at_run_time(answer), _at_run_time(expected)
     case = _wire(monkeypatch, service, answer)
     resp = await case.get(case.ticker)
 
@@ -445,11 +474,11 @@ async def test_a_joiner_gets_the_leaders_calendar_failed_build(monkeypatch, capl
 @pytest.mark.parametrize("slot, expected", [
     ([], None),
     ([{"date": "2999-01-01"}], "2999-01-01"),
-    ([{"date": _day(0)}], _day(0)),
+    ([{"date": _Days(0)}], _Days(0)),
     ([{"date": "2020-01-01", "epsActual": 1.0}], None),
-    pytest.param(_STALE_RESCHEDULE_LEFTOVER, _day(90), id="stale_reschedule_leftover"),
-    pytest.param(_LONE_SUSPECT_ROW, _day(4), id="lone_suspect_row_kept"),
-    pytest.param(_LATE_Q4_THEN_REAL_NEXT, _day(34), id="late_q4_real_next_report"),
+    pytest.param(_STALE_RESCHEDULE_LEFTOVER, _Days(90), id="stale_reschedule_leftover"),
+    pytest.param(_LONE_SUSPECT_ROW, _Days(4), id="lone_suspect_row_kept"),
+    pytest.param(_LATE_Q4_THEN_REAL_NEXT, _Days(34), id="late_q4_real_next_report"),
     (FMPNotEntitledException("402"), None),
     (FMPRateLimitException("429"), CALENDAR_UNKNOWN),
     (FMPUnavailableException("503"), CALENDAR_UNKNOWN),
@@ -462,6 +491,7 @@ async def test_a_joiner_gets_the_leaders_calendar_failed_build(monkeypatch, capl
     ("2026-10-01", CALENDAR_UNKNOWN),
 ])
 def test_next_earnings_stamp_table(caplog, slot, expected):
+    slot, expected = _at_run_time(slot), _at_run_time(expected)
     with caplog.at_level(logging.WARNING):
         got = next_earnings_stamp(slot, ticker="ZZZ", service="unit")
     if expected is None or expected is CALENDAR_UNKNOWN:
@@ -638,11 +668,12 @@ async def test_growth_with_a_failed_next_earnings_lookup_is_served_not_persisted
     pytest.param([], None, id="absent_row"),
     pytest.param([{"next_earnings_date": None}], None, id="null_column"),
     # A PP row dated before today is old, not a bound: ignored, never copied born-stale.
-    pytest.param([{"next_earnings_date": _day(-3)}], None, id="past_date_ignored"),
-    pytest.param([{"next_earnings_date": _day(0)}], _day(0), id="report_day"),
-    pytest.param([{"next_earnings_date": _day(30)}], _day(30), id="future"),
+    pytest.param([{"next_earnings_date": _Days(-3)}], None, id="past_date_ignored"),
+    pytest.param([{"next_earnings_date": _Days(0)}], _Days(0), id="report_day"),
+    pytest.param([{"next_earnings_date": _Days(30)}], _Days(30), id="future"),
 ])
 async def test_growth_still_persists_a_real_lookup_answer(monkeypatch, pp_rows, expected):
+    pp_rows, expected = _at_run_time(pp_rows), _at_run_time(expected)
     supabase = _FakeSupabase({"profit_power_cache": pp_rows})
     _svc, resp = await _drive_growth(monkeypatch, supabase)
     assert resp.degraded == []

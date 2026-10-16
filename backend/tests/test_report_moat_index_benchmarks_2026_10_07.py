@@ -62,13 +62,28 @@ from test_ticker_report_schema_parity import (  # noqa: F401
 )
 
 
+# Read at IMPORT, so only for what tolerates a run crossing midnight or New Year before the
+# test executes: row AGES (a few minutes older only makes a row staler) and a year that is
+# complete whatever today's date is — it ended more than a year ago, and its rows were
+# computed well past its end + 75 days (still true a year later).
 _NOW = datetime.now(timezone.utc)
-_CUR_YEAR = _NOW.year
-# A year that is complete whatever today's date is: it ended more than a year ago, and its
-# rows were computed well past its end + 75 days.
-_DONE_YEAR = _CUR_YEAR - 2
-_DONE_COMPUTED = f"{_CUR_YEAR - 1}-06-01T04:00:00+00:00"
+_DONE_YEAR = _NOW.year - 2
+_DONE_COMPUTED = f"{_NOW.year - 1}-06-01T04:00:00+00:00"
 _FRESH = (_NOW - timedelta(days=2)).isoformat()
+
+
+def _cur_year() -> str:
+    """The year the collector labels its TTM point with, read when the TEST runs — as the
+    collector reads it (a function-scoped `datetime.now(timezone.utc).year`, so there is no
+    module clock to freeze). The old import-time constant failed two tests here, and two in
+    the round-2 suite, whenever a full-suite run crossed New Year between collection and
+    execution — and turned the "not in" asserts below vacuous."""
+    return str(datetime.now(timezone.utc).year)
+
+
+def _during_this_year() -> str:
+    """`computed_at` of a partial current-year cohort: computed now, inside `_cur_year()`."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -170,10 +185,10 @@ async def test_a_mature_industry_ttm_is_the_current_year_point_and_equals_the_ca
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
     assert not lookup_failed(hist)
     annual = hist["annual"]["pe_ratio"]
-    assert annual[str(_CUR_YEAR)] == 31.0
+    assert annual[_cur_year()] == 31.0
     assert annual[str(_DONE_YEAR)] == 28.0, "history keeps its own complete year"
     card = lookup.get_current_benchmarks(industry, sector, ["pe_ratio"])["pe_ratio"]
-    assert card["value"] == annual[str(_CUR_YEAR)], (
+    assert card["value"] == annual[_cur_year()], (
         "the drill-down's newest peer point must be the Overview card's value"
     )
 
@@ -189,10 +204,10 @@ async def test_ko_shape_thin_industry_ttm_injects_the_sector_ttm_and_hides_the_p
     lookup, _ = _real_lookup(monkeypatch, [
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 35.0, 13, _FRESH),
         _row(sector, "", "pe_ratio", "ttm", "TTM", 20.6, 140, _FRESH),
-        _row(sector, "", "pe_ratio", "annual", str(_CUR_YEAR), 99.0, 39, _NOW.isoformat()),
+        _row(sector, "", "pe_ratio", "annual", _cur_year(), 99.0, 39, _during_this_year()),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
-    assert hist["annual"]["pe_ratio"][str(_CUR_YEAR)] == 20.6
+    assert hist["annual"]["pe_ratio"][_cur_year()] == 20.6
     card = lookup.get_current_benchmarks(industry, sector, ["pe_ratio"])["pe_ratio"]
     assert (card["value"], card["level"]) == (20.6, "sector")
 
@@ -207,11 +222,11 @@ async def test_a_thin_ttm_on_both_levels_leaves_the_current_year_blank(monkeypat
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 35.0, 13, _FRESH),
         _row(sector, "", "pe_ratio", "ttm", "TTM", 21.0, 12, _FRESH),
         _row(sector, "", "pe_ratio", "annual", str(_DONE_YEAR), 18.0, 140, _DONE_COMPUTED),
-        _row(sector, "", "pe_ratio", "annual", str(_CUR_YEAR), 99.0, 39, _NOW.isoformat()),
+        _row(sector, "", "pe_ratio", "annual", _cur_year(), 99.0, 39, _during_this_year()),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
     annual = hist["annual"]["pe_ratio"]
-    assert str(_CUR_YEAR) not in annual, annual
+    assert _cur_year() not in annual, annual
     assert annual == {str(_DONE_YEAR): 18.0}
     card = lookup.get_current_benchmarks(industry, sector, ["pe_ratio"])["pe_ratio"]
     assert card["value"] == annual[str(_DONE_YEAR)]
@@ -226,7 +241,7 @@ async def test_a_stale_ttm_row_is_never_injected(monkeypatch, tag):
              (_NOW - timedelta(days=22)).isoformat()),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
-    assert str(_CUR_YEAR) not in hist["annual"].get("pe_ratio", {})
+    assert _cur_year() not in hist["annual"].get("pe_ratio", {})
 
 
 @pytest.mark.asyncio
@@ -339,8 +354,8 @@ def test_competitor_medians_never_take_the_partial_current_year(monkeypatch, tag
     lookup, _ = _real_lookup(monkeypatch, [
         _row(sector, "", "operating_margin", "ttm", "TTM", 0.15, 300, _FRESH),
         _row(sector, "", "roe", "ttm", "TTM", 0.18, 300, _FRESH),
-        _row(sector, "", "operating_margin", "annual", str(_CUR_YEAR), 0.90, 39, _NOW.isoformat()),
-        _row(sector, "", "revenue_yoy", "annual", str(_CUR_YEAR), 85.0, 21, _NOW.isoformat()),
+        _row(sector, "", "operating_margin", "annual", _cur_year(), 0.90, 39, _during_this_year()),
+        _row(sector, "", "revenue_yoy", "annual", _cur_year(), 85.0, 21, _during_this_year()),
         _row(sector, "", "revenue_yoy", "annual", str(_DONE_YEAR), 6.5, 300, _DONE_COMPUTED),
     ])
     cells = lookup.get_current_benchmarks("", sector, list(C._COMPETITOR_BENCHMARK_METRICS))

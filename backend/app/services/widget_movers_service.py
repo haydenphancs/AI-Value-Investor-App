@@ -21,6 +21,22 @@ Reaching for the grounded catalyst instead was worse. Its only cached ACHR row
 described a **+42.7% fifteen-day rally**. Not a wrong-signed answer — a correct answer
 to a *different question*. The filter that matters is the WINDOW, not the sign.
 
+THE NEWS LEAN (owner, 2026-10-14) — the card headline, GATED
+------------------------------------------------------------
+TestFlight CRWV −15.46% (z 2.57, its industry −4.0%): the tile said "No clear catalyst in
+today's news" while the app's Insights card for that session — Bearish, "CoreWeave Faces
+Investor Scrutiny Amid Rising Bond Yields" — plainly explained the fall. The keyword
+classifier below matched none of its words. So the card headline is back, but ONLY when
+`daily_move_attribution.detect_news_lean` admits it: the card is from the session described
+(the `had_news` gate, never a second date check — `_session_news_lean`); its net sentiment
+is Bearish under a fall or Bullish under a rise, never Neutral; the move is Unusual (z ≥ 2);
+an after-close card on a report day is about the print; and the headline names its subject
+with no price, window, schedule or relative-day talk. It ranks below the group move, and is
+tagged "Bearish News" — what the news was, not a catalyst. ACHR stays the regression: its
+card was Bullish under −5.02%, so the gate refuses it and the tile still reads "…moved far
+more. No clear catalyst in today's news." An agreeing card that fails the rest of the gate
+reads "Today's news leaned bearish." instead.
+
 THE REBUILD: ATTRIBUTION, NOT GENERATION
 ----------------------------------------
 "Why did it move today" has a small enumerable answer set, and almost none of it needs
@@ -38,7 +54,8 @@ The cost argument, which is the reason this is viable at all:
 
 So attributing 200 movers costs the same two shared calls as attributing one, against
 a per-ticker paid web search in the old design. And because every branch is arithmetic
-or a dated record, the output cannot hallucinate.
+or a dated record, the output cannot hallucinate — the one model-written input is a STORED
+Insights card, reprinted behind the news-lean gate above and never generated on this path.
 
 `cause.kind == "none"` is a real answer and the common one. For ACHR it renders
 *"Aerospace & Defense fell 1.2%; ACHR moved far more. No clear catalyst in today's
@@ -94,6 +111,7 @@ from app.schemas.widget import (
 )
 from app.services.daily_move_attribution import (
     Attribution,
+    NewsLean,
     attribute,
     # Shared so the market band and the cause sentence can never disagree about how a
     # percentage reads. Duplicating the formatting is how two surfaces on the same tile
@@ -101,7 +119,11 @@ from app.services.daily_move_attribution import (
     _dir_word,
     _pct,
 )
-from app.services.news_insight_service import get_news_insight_service
+from app.services.news_insight_service import (
+    get_news_insight_service,
+    normalize_card_sentiment,
+    price_terms,
+)
 from app.services.updates_materiality import classify_move, finite, move_z
 from app.services.volatility_cache_service import get_volatility_cache_service
 from app.utils.market_hours import (
@@ -829,7 +851,8 @@ def _classified_today_news(
       The sweeper HAS covered this ticker and has nothing current, which is a real
       finding and may be stated.
     * `checked=True, had_news=True` — news exists; whether it explains the move is the
-      classifier's business.
+      classifier's business, then the news lean's (`_session_news_lean`, which reads the
+      same card behind this verdict and adds no gate of its own).
 
     A card generated AFTER the session is the fourth case, and it is `checked=False`.
     Pre-market the payload describes yesterday's session, while the sweeper's news pass
@@ -887,6 +910,87 @@ def _classified_rolling_news(
     if _et_date(card.get("generated_at")) != calendar_iso:
         return [], False, False
     return _classified_today_news(card, calendar_iso)
+
+
+# Brand names a headline uses where the legal name differs, for the news lean's SUBJECT check
+# only (never `price_terms`, which the Insights price guard also reads). Measured 2026-10-14
+# over every live card: the one honest headline refused for not naming its subject was
+# GOOGL's "Google expands AI, secures energy for growth" — the name list knows "Alphabet".
+# 2026-10-16: the press names the review and a 156-ticker probe of widely held names found
+# refused ("Disney Cuts Streaming Outlook" — the list knows "walt disney"). An alias is a
+# name, so a one-word one counts only as the headline's subject (`_subject_ends`), and an
+# all-caps one ("TSMC", "J&J") matches case-sensitively, exactly as written.
+_LEAN_BRAND_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "GOOGL": ("Google",),
+    "GOOG": ("Google",),
+    "DIS": ("Disney",),
+    "LLY": ("Lilly",),
+    "PG": ("P&G",),
+    "TSM": ("TSMC",),
+    "SMCI": ("Supermicro",),
+    "BAC": ("BofA",),
+    "JNJ": ("J&J",),
+    "BMY": ("Bristol Myers",),
+    "AXP": ("AmEx",),
+    "C": ("Citi",),
+    "SCHW": ("Schwab",),
+    "EL": ("Estee Lauder",),
+    "MSTR": ("MicroStrategy",),
+    "RY": ("RBC",),
+    "YUM": ("Yum Brands",),
+    "ON": ("Onsemi",),
+    "DE": ("John Deere",),
+    "BUD": ("AB InBev",),
+}
+
+
+def _session_news_lean(
+    card: Optional[Dict[str, Any]],
+    had_news: bool,
+    ticker: str,
+    company_name: Optional[str],
+    *,
+    rolling: bool,
+    day: date,
+) -> Optional[NewsLean]:
+    """The session's Insights card as `daily_move_attribution.NewsLean`, or None.
+
+    ⚠️ NO DATE CHECK HERE, on purpose. `had_news` is the verdict of the session gate the
+    caller already ran (`_classified_today_news` / `_classified_rolling_news`): True only
+    for a card from the very session described, with a headline, not blanked by
+    `scopes_failed_after_their_card`. A second date comparison would be a second gate that
+    can drift from the first (`test_widget_daily_scope.py` pins that it stays absent).
+
+    Only an AI card (`ai_generated is True`): the Updates screen's non-AI fallback card
+    ("Latest … headlines") never reaches `get_cards`, but a row shaped like one must not
+    pose as a summary. Neutral and unknown sentiments are passed through as-is and refused
+    by `detect_news_lean`, which owns the whole gate.
+    """
+    if not had_news or not isinstance(card, dict):
+        return None
+    if card.get("ai_generated") is not True:
+        return None
+    headline = str(card.get("headline") or "").strip()
+    if not headline:
+        return None
+    sentiment = normalize_card_sentiment(card.get("sentiment")) or ""
+    try:
+        terms = tuple(price_terms(ticker, company_name))
+    except Exception as e:
+        logger.warning(
+            "widget: price_terms failed for %s (%s: %s) — subject match falls back to "
+            "the symbol alone", ticker, type(e).__name__, e,
+        )
+        terms = (ticker,)
+    terms = terms + _LEAN_BRAND_ALIASES.get((ticker or "").upper(), ())
+    return NewsLean(
+        headline=headline,
+        sentiment=sentiment,
+        subject_terms=terms,
+        generated_at=card.get("generated_at"),
+        rolling=rolling,
+        day=day,
+    )
 
 
 def build_market_context(
@@ -1346,6 +1450,12 @@ class WidgetMoversService:
             classified, had_news, card_checked = _classified_today_news(
                 cards.get(sym), today_iso
             )
+        # The same Insights-card lean `_build_mover` passes, so Ask Cay AI and the widget
+        # give one answer: only behind the gate above (`had_news`), never a second one.
+        lean = _session_news_lean(
+            cards.get(sym), had_news, sym, m.company_name,
+            rolling=rolling, day=(cal_day if rolling else today),
+        )
         industry = ctx.industry_for(sym)
         a = attribute(
             ticker=sym,
@@ -1372,6 +1482,7 @@ class WidgetMoversService:
             classified_news=classified,
             had_news=had_news,
             news_checked=ctx.news_available and news_available and card_checked,
+            news_lean=lean,
         )
         if a is None:
             return None
@@ -2024,6 +2135,13 @@ class WidgetMoversService:
             classified, had_news, card_checked = _classified_today_news(
                 cards.get(m.ticker), today_iso
             )
+        # The session's Insights card, behind the gate just run — see `_session_news_lean`.
+        # In `inputs`, so the aged second pass gets the same lean and `detail_aged` equals
+        # `detail` for it (the headline is verbatim and names no relative day).
+        lean = _session_news_lean(
+            cards.get(m.ticker), had_news, m.ticker, m.company_name,
+            rolling=rolling, day=(calendar_day if rolling else today),
+        )
         industry = ctx.industry_for(m.ticker)
 
         inputs: Dict[str, Any] = dict(
@@ -2043,6 +2161,7 @@ class WidgetMoversService:
             # Both must hold: the batched read has to have succeeded AND this particular
             # ticker has to have an insight row behind it.
             news_checked=ctx.news_available and card_checked,
+            news_lean=lean,
         )
         a = attribute(**inputs, session_word=session_word)
         # `attribute` returns None only for an unreadable move, which `rank_movers`
@@ -2079,6 +2198,7 @@ class WidgetMoversService:
                     else deterministic_reason(m.change_percent, m.z, session_word)
                 ),
                 detail_aged=detail_aged,
+                note=(a.note if a else None),
             ),
             context=WidgetMoveContextResponse(
                 change_percent=m.change_percent or 0.0,

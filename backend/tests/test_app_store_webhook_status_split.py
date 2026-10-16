@@ -419,13 +419,28 @@ def test_on_the_wire_a_body_the_real_parser_rejects_is_400(client, monkeypatch, 
 # sections above stub the service; these run the real `IAPService` over a fake client, so the
 # service's None-vs-raise decision is what reaches the status code.
 
+class _MissingTable(Exception):
+    code = "PGRST205"   # PostgREST's schema-cache miss: migration 198 not applied
+
+
 class _LookupOnlyDB:
     """Serves only the SELECTs `user_id_for_transaction` makes. Every table answers `[]`
-    (found nothing) unless listed in `fail`, which raises like a PostgREST 520."""
+    (found nothing) unless listed in `fail`, which raises like a PostgREST 520.
 
-    def __init__(self, fail=()):
+    `schema="legacy"` is the database before migration 198 (no `subscription_transactions`);
+    `"lineage"` is after it, where a refund of a lineage nobody owns is RECORDED through
+    `record_subscription_transaction` (`rpcs`) instead of forgotten."""
+
+    def __init__(self, fail=(), schema="legacy"):
         self.fail = set(fail)
+        self.schema = schema
         self.queried: list[str] = []
+        self.rpcs: list[tuple] = []
+
+    def rpc(self, name, params):
+        self.rpcs.append((name, params))
+        result = type("R", (), {"data": {"refunded": True}})()
+        return type("Call", (), {"execute": lambda *_a, **_k: result})()
 
     def table(self, name):
         db = self
@@ -444,6 +459,8 @@ class _LookupOnlyDB:
                 db.queried.append(name)
                 if name in db.fail:
                     raise RuntimeError(f"APIError 520: {name} JSON could not be generated")
+                if name == "subscription_transactions" and db.schema == "legacy":
+                    raise _MissingTable("Could not find the table 'public.subscription_transactions'")
                 return type("R", (), {"data": []})()
 
         return _Query()
@@ -481,6 +498,20 @@ def test_a_clean_miss_is_still_the_expected_race_and_stays_200(monkeypatch):
     )
     _wire(monkeypatch, service=_real_service(_LookupOnlyDB()))
     assert _post() == {"received": True, "outcome": "ignored_unknown_transaction"}
+
+
+def test_after_198_a_refund_nobody_owns_is_recorded_and_still_200(monkeypatch):
+    """Migration 198: the same clean miss for a REFUND is RECORDED in the transaction register
+    with no owner (so a later replay of its pre-refund JWS is refused), and still answered 200."""
+    db = _LookupOnlyDB(schema="lineage")
+    assert _real_service(db).apply_notification(_NOTIFICATION, _TRANSACTION) == (
+        "recorded_refund_unknown_lineage", None,
+    )
+    (name, params), = db.rpcs
+    assert name == "record_subscription_transaction" and params["p_kind"] == "revoked"
+    assert params["p_user_id"] is None and params["p_transaction_id"] == "2000000123456789"
+    _wire(monkeypatch, service=_real_service(_LookupOnlyDB(schema="lineage")))
+    assert _post() == {"received": True, "outcome": "recorded_refund_unknown_lineage"}
 
 
 @pytest.mark.parametrize("fail", [{"subscriptions"}, {"credit_purchases"}],

@@ -266,8 +266,9 @@ _WEBHOOK_MAX_PER_MINUTE = 120
 #:
 #: ⚠️ It must never be able to reject Apple. A keyless ceiling shares one bucket between
 #: Apple and everyone else, so five noisy sources at the per-IP limit would saturate it and
-#: every genuine notification would then 429. Apple retries a non-2xx about five times over
-#: ~3 days and nothing here monitors that budget; `expire_stale_subscriptions` self-heals a
+#: every genuine notification would then 429. Apple retries a non-2xx five times over about
+#: 6.5 days in production (+1, +12, +24, +48, +72 h after each attempt; Sandbox makes one
+#: attempt) and nothing here monitors that budget; `expire_stale_subscriptions` self-heals a
 #: lost EXPIRED, but NOTHING recovers a lost REFUND, and a lost REFUND means purchased
 #: credits are never clawed back. So the global ceiling applies only to callers who are
 #: themselves noisy (`_WEBHOOK_QUIET_CALLER_PER_MINUTE`); a caller sending a handful a

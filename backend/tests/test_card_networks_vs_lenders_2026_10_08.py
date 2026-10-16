@@ -977,7 +977,7 @@ async def test_the_drill_down_keeps_a_gated_members_de_line(monkeypatch, ticker,
     hist = await _history_for(monkeypatch, ticker=ticker, income_q=income_q)
     for metric in _GATED:
         assert metric not in hist["annual"], metric
-    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, r4._CUR: 1.5}
+    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, r4._cur_year(): 1.5}
     assert hist["levels"]["annual"]["debt_to_equity"] == "industry"
 
 

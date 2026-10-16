@@ -41,11 +41,11 @@ from app.utils.period_labels import annual_benchmark_key
 # The PostgREST fake + REAL lookup harness of the D5 suite, and (through it) the schema
 # parity builder with its autouse stub of every live benchmark / moat lookup.
 from test_report_moat_index_benchmarks_2026_10_07 import (  # noqa: F401
-    _CUR_YEAR,
     _DONE_COMPUTED,
     _DONE_YEAR,
     _FRESH,
     _collector,
+    _cur_year,
     _install,
     _real_lookup,
     _RecordingLookup,
@@ -232,7 +232,7 @@ async def test_a_same_group_ttm_point_is_drawn(monkeypatch, tag):
         _row(sector, "", "pe_ratio", "ttm", "TTM", 21.0, 300, _FRESH),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
-    assert hist["annual"]["pe_ratio"] == {str(_DONE_YEAR): 18.0, str(_CUR_YEAR): 21.0}
+    assert hist["annual"]["pe_ratio"] == {str(_DONE_YEAR): 18.0, _cur_year(): 21.0}
 
 
 @pytest.mark.parametrize(
@@ -345,7 +345,7 @@ async def test_a_failed_series_read_flags_the_history(monkeypatch, tag):
     hist = await _collector()._fetch_sector_benchmark_history(f"Ind-{tag}", f"Sec-{tag}")
     assert lookup_failed(hist)
     # The annual line loaded nothing, so the TTM point is the whole (one-group) line.
-    assert hist["annual"]["pe_ratio"] == {str(_CUR_YEAR): 20.0}
+    assert hist["annual"]["pe_ratio"] == {_cur_year(): 20.0}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -20,8 +20,12 @@
 //  THE ONE RULE FOR CAUSES
 //  A tag badge appears ONLY when `cause.kind.isEstablished` — i.e. the backend found a
 //  dated, structured reason (earnings today, an analyst action today, a classified
-//  headline, an industry move). `.none` renders its sentence with no badge, because a
-//  badge implies a known cause. `.none` is the COMMON case, not an error.
+//  headline, an industry move), OR a gated news lean: "Bearish News" / "Bullish News"
+//  means the day's Insights card leans the way the stock moved, not that a catalyst was
+//  confirmed. `.none` renders its sentence with no badge, because a badge implies a known
+//  cause. `.none` is the COMMON case, not an error. An established cause may also carry a
+//  context `note`, drawn in grey under the headline, whole or not at all (`CauseView`);
+//  the note never shows under `.none`.
 //
 //  Everything here is DAILY. There is no path by which a multi-day window can reach
 //  this file; see `daily_move_attribution` for why that is structural.
@@ -769,11 +773,18 @@ private struct HoldingsHeader: View {
     }
 }
 
-/// Medium: the biggest mover and why on the left (~180pt), the rest of the day on the right.
+/// Medium: the biggest mover and why on the left (~190pt), the rest of the day on the right.
 ///
-/// Budget ~306×126pt (~289×116 on SE): header ~12, left ~22 + three caption lines ~48,
-/// bottom row ~13. The right column drops its RISING / FALLING captions when it is short of
-/// height (SE) and disappears at accessibility sizes, where the cause sentence needs the room.
+/// Budget, iPhone 17 Pro (the cause slot measured from a device screenshot): under the
+/// header and the headline row the cause has ≈77pt. A caption line is ≈14.3pt, a caption2
+/// line ≈13.1pt, and the ~190pt left column holds ~30 caption characters per line. So:
+///   • no note — tag ≈13 + four headline lines ≈57 ≈ 72pt fits, hence `lineLimit: 4`;
+///   • with a note — CRWV's tag + 3-line headline + 2-line note needs ≈86pt and does not
+///     fit; without the tag it is ≈73pt and does, so `CauseView`'s ladder picks B (the tag
+///     gives way first, then the note — owner, 2026-10-14).
+/// A shorter tile (SE, ~289×116) falls further down the ladder, to C when B does not fit.
+/// The right column drops its RISING / FALLING captions when it is short of height (SE) and
+/// disappears at accessibility sizes, where the cause sentence needs the room.
 private struct HoldingsMedium: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let snapshot: WidgetMoverSnapshot
@@ -784,7 +795,7 @@ private struct HoldingsMedium: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HeadlineRow(mover: headline, font: .headline)
-                CauseView(cause: headline.cause, lineLimit: 3, aged: aged)
+                CauseView(cause: headline.cause, lineLimit: 4, aged: aged)
                     .layoutPriority(1)
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -877,6 +888,10 @@ private struct HoldingsSmall: View {
 
 /// Large: the mover and why, the counts, then up to five risers and five fallers side by
 /// side, and the basket sentence when several moved together.
+///
+/// "Why" is the same `CauseView` as Medium, so an established cause's context note shows
+/// under its headline here too, through the same ladder; at Large's height the first rung
+/// (tag + headline + note) is the one that normally fits.
 private struct HoldingsLarge: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let snapshot: WidgetMoverSnapshot
@@ -1084,6 +1099,20 @@ private struct RollingTag: View {
 
 /// The cause line. The tag badge appears ONLY for an established cause — a `none`
 /// result gets the sentence with no badge, so nothing implies a known reason.
+///
+/// THE NOTE (2026-10-14). Beside an established cause the backend may send `note`, an
+/// always-true context sentence ("Software - Infrastructure fell 4.0%; CRWV moved far
+/// more."). Owner layout "Headline + context": the headline, then the note in grey. It is
+/// shown WHOLE or not at all — never cut mid-number — so with a note the cause is a
+/// ladder, and when room is short the TAG gives way first, then the note (owner: "Drop the
+/// tag"):
+///   A. tag + headline + note
+///   B. headline + note, no tag
+///   C. tag + headline — the layout every cause had before the note
+/// In A and B the headline has no line limit and reports its full height: with a limit,
+/// `ViewThatFits` would accept a rung whose headline was cut to fit. Only C keeps the line
+/// limit and the scale factor, so a headline too long for any rung is cut exactly as before.
+/// With no note the layout is C alone — no `ViewThatFits` at all.
 private struct CauseView: View {
     let cause: WidgetCause
     var lineLimit: Int
@@ -1095,19 +1124,54 @@ private struct CauseView: View {
         aged ? (cause.detailAged ?? cause.detail) : cause.detail
     }
 
+    /// The context note, for an ESTABLISHED cause only — under `.none` nothing may read as
+    /// support for a reason that was not found. It has no aged twin: it carries no session
+    /// word, so it is true under any footer. Blank counts as absent.
+    private var note: String? {
+        guard cause.kind.isEstablished,
+              let text = cause.note?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
+        else { return nil }
+        return text
+    }
+
     var body: some View {
+        if let note {
+            ViewThatFits(in: .vertical) {
+                stack(withTag: true, note: note)
+                stack(withTag: false, note: note)
+                stack(withTag: true, note: nil)
+            }
+        } else {
+            stack(withTag: true, note: nil)
+        }
+    }
+
+    /// One rung of the ladder. `note: nil` is the original layout, byte for byte.
+    private func stack(withTag: Bool, note: String?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            if showTag, cause.kind.isEstablished, let tag = cause.tag, !tag.isEmpty {
+            if withTag, showTag, cause.kind.isEstablished, let tag = cause.tag, !tag.isEmpty {
                 Text(tag)
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
             }
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)
-                .lineLimit(lineLimit)
-                .minimumScaleFactor(0.8)
+            if let note {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(cause.kind.isEstablished ? .primary : .secondary)
+                    .lineLimit(lineLimit)
+                    .minimumScaleFactor(0.8)
+            }
         }
     }
 }
@@ -1512,9 +1576,32 @@ extension WidgetMoverSnapshot {
         )
     }
 
-    /// The Holdings sample: a named group, a `.none` cause with a real industry comparison
-    /// (the common case against the live backend), and both sides of the day.
+    /// The Holdings sample — ALSO the widget-gallery card every user sees before adding the
+    /// tile (`snapshot(for:in:)`). An insight-backed cause: a "Bearish News" headline with
+    /// its context note under it. The company is FICTIONAL on purpose: the headline is
+    /// invented, and an invented headline must never be attributed to a real company.
     static var previewHoldings: WidgetMoverSnapshot {
+        let ctx = WidgetMoveContext(
+            changePercent: -12.14, z: 2.6, gapPercent: nil, intradayPercent: nil,
+            gapDominant: false, industryName: "Software - Infrastructure",
+            industryChangePercent: -4.0, marketChangePercent: -0.15
+        )
+        let headline = "Acme Robotics Faces Investor Scrutiny Over Rising Debt Costs."
+        let head = WidgetMover(
+            ticker: "ACME", companyName: "Acme Robotics", changePercent: -12.14,
+            cause: WidgetCause(
+                kind: .companyNews, tag: "Bearish News",
+                detail: headline, detailAged: headline,
+                note: "Software - Infrastructure fell 4.0%; ACME moved far more."
+            ),
+            context: ctx
+        )
+        return previewHoldingsDay(headline: head, context: ctx)
+    }
+
+    /// A `.none` cause with a real industry comparison (the common case against the live
+    /// backend): no badge, and no note.
+    static var previewHoldingsNoCause: WidgetMoverSnapshot {
         let ctx = WidgetMoveContext(
             changePercent: -5.02, z: 1.1, gapPercent: nil, intradayPercent: nil,
             gapDominant: false, industryName: "Aerospace & Defense",
@@ -1529,6 +1616,14 @@ extension WidgetMoverSnapshot {
             ),
             context: ctx
         )
+        return previewHoldingsDay(headline: head, context: ctx)
+    }
+
+    /// The rest of a Holdings sample day — a named group and both sides of the day — shared
+    /// so the samples above differ only in their headline mover.
+    private static func previewHoldingsDay(
+        headline head: WidgetMover, context ctx: WidgetMoveContext
+    ) -> WidgetMoverSnapshot {
         var gainers: [WidgetMover] = []
         gainers.append(previewMover("SOFI", 3.42, .earnings, "Earnings Beat", "SOFI beat EPS estimates by 12.0%.", ctx))
         gainers.append(previewMover("PLTR", 3.11, .none, nil, "No clear catalyst in today's news.", ctx))
@@ -1603,6 +1698,7 @@ extension WidgetMoverSnapshot {
     MoversWidget()
 } timeline: {
     MoversEntry(date: .now, snapshot: .previewHoldings, mode: .portfolio, configuredMode: .portfolio)
+    MoversEntry(date: .now, snapshot: .previewHoldingsNoCause, mode: .portfolio, configuredMode: .portfolio)
     MoversEntry(date: .now, snapshot: .preview, mode: .market, configuredMode: .market)
     MoversEntry(date: .now, snapshot: .previewEmptyGroup, mode: .portfolio, configuredMode: .portfolio)
     MoversEntry(date: .now, snapshot: nil, mode: .market, configuredMode: .market, isSignedOut: true)
@@ -1620,5 +1716,6 @@ extension WidgetMoverSnapshot {
     MoversWidget()
 } timeline: {
     MoversEntry(date: .now, snapshot: .previewHoldings, mode: .portfolio, configuredMode: .portfolio)
+    MoversEntry(date: .now, snapshot: .previewHoldingsNoCause, mode: .portfolio, configuredMode: .portfolio)
     MoversEntry(date: .now, snapshot: .preview, mode: .market, configuredMode: .market)
 }

@@ -37,7 +37,12 @@ from app.services.agents import ticker_report_data_collector as C
 from app.services.agents.persona_scoring import _vital_score, compute_quality_score
 from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE as CQ
 
-_CUR = str(datetime.now(timezone.utc).year)
+def _cur_year() -> str:
+    """The year the collector labels its TTM point with, read when the TEST runs — as the
+    collector reads it (a function-scoped `datetime.now(timezone.utc).year`, so there is no
+    module clock to freeze). An import-time constant broke whenever a full-suite run
+    crossed New Year between collection and execution."""
+    return str(datetime.now(timezone.utc).year)
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -147,7 +152,7 @@ async def test_a_kept_fs_company_gets_no_sector_liquidity_or_coverage_line(monke
             assert metric not in hist[granularity], (metric, granularity)
             assert metric not in hist["levels"][granularity], (metric, granularity)
     # D/E is the company's honest comparison: its sector line stays, with the TTM point.
-    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, _CUR: 1.5}
+    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, _cur_year(): 1.5}
     assert hist["levels"]["annual"]["debt_to_equity"] == "sector"
     assert hist["quarterly"]["debt_to_equity"] == {"Q2'26": 1.2}
     gate_logs = [r.getMessage() for r in caplog.records if "peer_line_gate" in r.getMessage()]
@@ -163,7 +168,7 @@ async def test_an_empty_line_never_takes_the_fs_sector_ttm_point(monkeypatch):
                           industry=_EXCHANGES, sector="Financial Services")
     for metric in _GATED:
         assert metric not in hist["annual"] and metric not in hist["levels"]["annual"]
-    assert hist["annual"]["debt_to_equity"] == {_CUR: 1.5}
+    assert hist["annual"]["debt_to_equity"] == {_cur_year(): 1.5}
 
 
 @pytest.mark.asyncio
@@ -182,7 +187,7 @@ async def test_the_industrys_own_line_is_kept_for_a_kept_fs_industry(monkeypatch
     ttm = {"interest_coverage": _cell(20.0, "industry", 22)}
     hist = await _history(monkeypatch, series, ttm, industry=_EXCHANGES,
                           sector="Financial Services")
-    assert hist["annual"]["interest_coverage"] == {"2024": 18.0, "2025": 19.0, _CUR: 20.0}
+    assert hist["annual"]["interest_coverage"] == {"2024": 18.0, "2025": 19.0, _cur_year(): 20.0}
     assert hist["levels"]["annual"]["interest_coverage"] == "industry"
 
 
@@ -193,7 +198,7 @@ async def test_a_dropped_sector_line_may_take_the_industrys_own_ttm_point(monkey
     ttm = {"current_ratio": _cell(1.1, "industry", 21)}
     hist = await _history(monkeypatch, _sector_lines(), ttm, industry=_EXCHANGES,
                           sector="Financial Services")
-    assert hist["annual"]["current_ratio"] == {_CUR: 1.1}
+    assert hist["annual"]["current_ratio"] == {_cur_year(): 1.1}
     assert hist["levels"]["annual"]["current_ratio"] == "industry"
 
 
@@ -221,7 +226,7 @@ async def test_every_other_sector_keeps_its_sector_lines(monkeypatch, sector, in
     hist = await _history(monkeypatch, _sector_lines(), _mature_sector_ttm(),
                           industry=industry, sector=sector)
     for metric in _GATED:
-        assert hist["annual"][metric] == {"2024": 1.3, "2025": 1.4, _CUR: 1.5}
+        assert hist["annual"][metric] == {"2024": 1.3, "2025": 1.4, _cur_year(): 1.5}
         assert hist["levels"]["annual"][metric] == "sector"
 
 

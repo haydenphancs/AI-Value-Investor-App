@@ -25,7 +25,10 @@ THE ANSWER LADDER — free, licensed data only
 
   1. `widget_movers_service.attribute_ticker_move` — the deterministic detector set
      (earnings / analyst / company news / group move / gap), arithmetic and string matching
-     over data already paid for. Free, and it cannot hallucinate.
+     over data already paid for, plus the session's Updates Insights card when its net
+     sentiment leans the way an Unusual move went (`daily_move_attribution.detect_news_lean`,
+     2026-10-14). Free; the one model-written input is a stored card reprinted behind that
+     gate, never generated on this path.
   2. The ticker's 6h-cached news corpus. Free — FMP's "Market News" package IS on the Order
      Form, unlike the quote and market-performance families.
 
@@ -801,6 +804,20 @@ async def explain_price_move(
     conflict = _direction_conflict(a.tag, exp.change_percent)
     if conflict:
         out["important"] = conflict
+    if a.tag in _LEAN_TAGS:
+        # The cause is the day's Insights card, not a dated event: its NET sentiment leaned
+        # the way an Unusual move went. Say so, or the model presents a news summary as a
+        # confirmed single catalyst.
+        out["explanation_basis"] = (
+            "news_lean: the day's Updates AI Insights summary leans the same way the stock "
+            "moved. Present it as what the day's news was about, not as a confirmed single "
+            "catalyst."
+        )
+    # The always-true industry arithmetic beside an established cause. Not named `note`:
+    # that key is this tool's instruction to the model on its unreadable paths above.
+    move_context = getattr(a, "note", None)
+    if move_context:
+        out["move_context"] = move_context
     if exp.industry_name is not None:
         out["industry"] = exp.industry_name
         ind = _num(exp.industry_change_percent)
@@ -853,6 +870,13 @@ def _bottom_line(exp: Any, news: Dict[str, Any]) -> str:
         # A failed read is NOT "no news". Asserting a negative nobody checked is the lie the
         # `*_available` flags exist to prevent.
         return f"{move} {poss_cap} news could not be checked, so do not say there was none."
+    # The day's Insights card leaned the way the stock moved, but its headline was withheld
+    # (the move was not Unusual, or the headline failed `usable_lean_headline`). "No single
+    # catalyst stands out" alone would read as contradicting the Bearish card the app shows;
+    # the lean is true and claims no cause. Same sentence shape the widget prints.
+    leaned = getattr(getattr(exp, "attribution", None), "lean", None)
+    if leaned in ("bearish", "bullish"):
+        return f"{move} {poss_cap} news leaned {leaned}; no single item stands out as the cause."
     if not (news.get("articles") or []):
         return f"{move} No company news was published {when}."
     return f"{move} No single catalyst stands out in {poss} news."
@@ -863,6 +887,9 @@ def _bottom_line(exp: Any, news: Dict[str, Any]) -> str:
 # rather than silently disabling the note below.
 _BEAT_TAG = "Earnings Beat"
 _MISS_TAG = "Earnings Miss"
+# The news-lean badges (`daily_move_attribution.NEWS_LEAN_TAGS`), pinned against that module
+# by `test_widget_news_lean_2026_10_14.py` for the same reason as the two above.
+_LEAN_TAGS = frozenset({"Bearish News", "Bullish News"})
 
 
 def _direction_conflict(tag: Optional[str], change: Optional[float]) -> Optional[str]:

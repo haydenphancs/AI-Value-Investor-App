@@ -382,7 +382,11 @@ _UNIVERSE_REFRESH_AHEAD_SECONDS = 45       # price_service._UNIVERSE_TTL 60; swe
 # cache).
 _UNIVERSE_CLOSED_REFRESH_AHEAD_MARGIN_SECONDS = 60
 _THEMES_REFRESH_AHEAD_SECONDS = 480        # TTL 600 (the old 900 s warm left it cold 1/3)
-_SIGNALS_REFRESH_AHEAD_SECONDS = 2400      # memory TTL 2700; usually just a Tier-2 re-read
+# Signals are rebuilt about twice a day (owner decision 2026-10-15): memory TTL 12 h of CONTENT
+# age, refreshed 20 min before it. Hard-coded (signals_service imports THIS module at load);
+# the order `_SIGNALS_TIER2_REUSE_SECONDS` (11.5 h) < this < `_SIGNALS_MEM_TTL_SECONDS` is
+# pinned by test_home_dashboard_warmer — a Tier-2 row the warm reuses is never due on arrival.
+_SIGNALS_REFRESH_AHEAD_SECONDS = 12 * 3600 - 20 * 60
 _TRILLION_REFRESH_AHEAD_SECONDS = 480      # TTL 600; Supabase reads only
 # Scanners refresh at `SCANNER_PREWARM_INTERVAL_SECONDS` (900), clamped so a misconfigured
 # value can neither outlive the TTL nor rebuild on every tick.
@@ -392,7 +396,7 @@ _SCANNER_REFRESH_AHEAD_FLOOR_SECONDS = 60
 _UNIVERSE_BUILD_BUDGET_SECONDS = 3
 # After a warm build fails, comes back degraded or writes nothing, that section is not
 # kicked again for this long (or for the section's own degraded TTL when longer — signals
-# hold 300 s, a rebuild being ~8 FMP calls). Without it a 10 s tick would retry an outage
+# hold 300 s, a rebuild being ~21 FMP calls). Without it a 10 s tick would retry an outage
 # six times a minute.
 _WARM_FAILURE_COOLDOWN_SECONDS = 45
 #: Every section the warmer keeps hot, in kick order.
@@ -1110,6 +1114,10 @@ class _WarmSpec:
     closed_window: Optional[Callable[[float, float], bool]] = None
     closed_ttl_seconds: Optional[float] = None
     closed_refresh_ahead_seconds: Optional[float] = None
+    # The section's own "not before" epoch: never due earlier, whatever its age. Signals use
+    # it for a HELD entry's retry time, which a request-path hold sets without touching the
+    # warmer's cooldown — without it the warmer rebuilt a failing source again on its next tick.
+    not_before: Optional[Callable[[], float]] = None
 
 
 def _entry_stamp(cache: Dict[str, Tuple[float, Any]], key: str) -> Optional[float]:
@@ -1167,8 +1175,8 @@ class HomeDashboardService:
         Market status is computed FRESH each call (cheap datetime math, never
         stale on an open↔closed transition). The six sections are gathered
         concurrently, each from its OWN cache behind its own timeout guard: the
-        Market Pulse (60 s), scanners (20 min), signals (45 min in memory, 24 h in
-        Supabase), themes (10 min), Trillion Club (10 min) and the uncached,
+        Market Pulse (60 s), scanners (20 min), signals (rebuilt about twice a day: 12 h
+        of content age in memory, 24 h in Supabase), themes (10 min), Trillion Club (10 min) and the uncached,
         per-user watchlist strip. The Home warmer (`refresh_due_sections`) rebuilds
         the shared ones before they expire, so a request normally reads memory only.
 
@@ -1202,7 +1210,7 @@ class HomeDashboardService:
             self._get_trillion_club_guarded(),
         )
         # App-Exclusive Signals are a Pro/Max surface. Redact AFTER the gather, per
-        # request: `signals` is the SHARED 45-min cache object, so the gate has to be a
+        # request: `signals` is the SHARED cache object (one per process), so the gate has to be a
         # copy-on-read here rather than anything the service bakes into the cache —
         # a per-tier cache entry, or an in-place edit, would serve one caller's
         # entitlement to the next. `redact_signals` is pure and does not mutate.
@@ -1317,16 +1325,21 @@ class HomeDashboardService:
                 ttl_seconds=sig._SIGNALS_MEM_TTL_SECONDS,
                 refresh_ahead_seconds=_SIGNALS_REFRESH_AHEAD_SECONDS,
                 build_budget_seconds=sig._SIGNALS_BUILD_TIMEOUT_SECONDS,
-                # A signals rebuild is ~15 FMP calls (8 of them the one-day-per-call earnings
-                # calendar); retry a failed card on the section's own degraded cadence, not
-                # every 45 s.
+                # A signals rebuild is ~21 FMP calls (8 of them the one-day-per-call earnings
+                # calendar, 8 the two congress feeds); retry a failed card on the section's
+                # own degraded cadence, not every 45 s.
                 cooldown_seconds=max(_WARM_FAILURE_COOLDOWN_SECONDS, sig._SIGNALS_DEGRADED_TTL_SECONDS),
                 session_bound=False,
                 enabled=lambda: True,
                 stamp=lambda: _entry_stamp(cls._cache, key),
-                degraded=lambda: key in cls._degraded_keys,
+                # A HELD entry (the good cards kept while their rebuild fails) is due again
+                # after the cooldown exactly like a degraded one, so the warmer keeps retrying.
+                degraded=lambda: key in cls._degraded_keys or key in cls._held_until,
                 busy=lambda: key in cls._inflight,
                 build=lambda: sig.get_signals_service().get_signals(force=True),
+                # A hold's retry epoch gates the warmer too — a request-path hold sets it
+                # without the warmer's cooldown, and the next tick would rebuild at once.
+                not_before=lambda: cls._held_until.get(key, 0.0),
             )
         if name == "trillion":
             from app.services import trillion_club_service as tcs
@@ -1388,6 +1401,8 @@ class HomeDashboardService:
     def _warm_due_reason(cls, spec: _WarmSpec, now: float) -> Optional[str]:
         """Why ``spec`` should be rebuilt now, or None. Never awaits; pure dict reads."""
         if now < cls._warm_cooldown_until.get(spec.name, 0.0):
+            return None
+        if spec.not_before is not None and now < spec.not_before():
             return None
         stamp = spec.stamp()
         if stamp is None:
@@ -1547,7 +1562,8 @@ class HomeDashboardService:
     async def warm_all(self) -> Dict[str, bool]:
         """Force-rebuild every shared Home section, and the screener universe, concurrently.
 
-        The boot warm: pulse, scanners, themes, signals (its Supabase tier first), the
+        The boot warm: pulse, scanners, themes, signals (its Supabase row reused while its
+        content is under 11.5 h old, else rebuilt), the
         Trillion group and `PriceService.refresh_universe()`. Each forced build leads or
         joins its section's `_inflight` future, so a request or warmer tick racing this
         never doubles a build. Returns ``{section: ok}`` — ok means the section now holds

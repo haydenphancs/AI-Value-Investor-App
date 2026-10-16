@@ -185,6 +185,11 @@ class ErrorCode(str, Enum):
     # from TRILLION_CLUB_COMPANY_NOT_FOUND. Without it the generic mapping would have told
     # the user "The report failed to generate" on a screen that generates nothing.
     TRILLION_CLUB_UNAVAILABLE = "TRILLION_CLUB_UNAVAILABLE"
+    # A Home signal drill-down (who bought the ticker on a Congressional Buys / Whale
+    # Accumulation / CEO Buys card) could not be built — a source failed or came back
+    # incomplete. Retryable, and deliberately NOT an empty 200: an empty list reads as
+    # "nobody bought it" right beside a card that says four members did.
+    SIGNAL_DETAIL_UNAVAILABLE = "SIGNAL_DETAIL_UNAVAILABLE"
     # The Updates news-sentiment timeline could not be READ (Supabase blip, or migration 180
     # not yet applied). Retryable, and deliberately NOT an empty 200: "no scored headlines
     # yet" and "we couldn't reach the log" must stay distinguishable in the logs, and the
@@ -463,6 +468,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.TRILLION_CLUB_UNAVAILABLE: (
         "We couldn't load this company's holdings right now. Please try again shortly."
     ),
+    ErrorCode.SIGNAL_DETAIL_UNAVAILABLE: (
+        "We couldn't load who bought this right now. Please try again shortly."
+    ),
     ErrorCode.SENTIMENT_TREND_UNAVAILABLE: (
         "We couldn't load the news sentiment trend right now. Please try again shortly."
     ),
@@ -547,6 +555,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: "retry",
     ErrorCode.TRILLION_CLUB_UNAVAILABLE: "retry",
+    ErrorCode.SIGNAL_DETAIL_UNAVAILABLE: "retry",
     ErrorCode.SENTIMENT_TREND_UNAVAILABLE: "retry_later",
     ErrorCode.WHALE_FOLLOW_LOCKED: "upgrade",
     # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
@@ -637,6 +646,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # top-up route, and no amount of credits unlocks a follow slot.
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: 503,
     ErrorCode.TRILLION_CLUB_UNAVAILABLE: 503,
+    ErrorCode.SIGNAL_DETAIL_UNAVAILABLE: 503,
     ErrorCode.SENTIMENT_TREND_UNAVAILABLE: 503,
     ErrorCode.WHALE_NOT_FOUND: 404,
     ErrorCode.WHALE_FOLLOW_LOCKED: 403,

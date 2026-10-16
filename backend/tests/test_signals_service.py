@@ -417,6 +417,9 @@ async def test_build_degrades_per_branch():
 async def test_all_none_build_is_not_cached(monkeypatch):
     ssvc.SignalsService._cache.clear()
     ssvc.SignalsService._inflight.clear()
+    ssvc.SignalsService._degraded_keys.clear()
+    ssvc.SignalsService._held_until.clear()
+    ssvc.SignalsService._background.clear()
     s = ssvc.SignalsService()
     monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
 
@@ -435,9 +438,13 @@ async def test_all_none_build_is_not_cached(monkeypatch):
 async def test_get_signals_dedups_concurrent_cold_builds(monkeypatch):
     ssvc.SignalsService._cache.clear()
     ssvc.SignalsService._inflight.clear()
+    ssvc.SignalsService._degraded_keys.clear()
+    ssvc.SignalsService._held_until.clear()
+    ssvc.SignalsService._background.clear()
     s = ssvc.SignalsService()
     monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
-    monkeypatch.setattr(s, "_write_supabase_cache", lambda result: None)
+    writes = []
+    monkeypatch.setattr(s, "_write_supabase_cache", lambda result, computed_at: writes.append(computed_at))
 
     calls = {"n": 0}
 
@@ -455,6 +462,7 @@ async def test_get_signals_dedups_concurrent_cold_builds(monkeypatch):
 
     a, b = await asyncio.gather(s.get_signals(), s.get_signals())
     assert calls["n"] == 1  # in-flight dedup → ONE build for two concurrent opens
+    assert len(writes) == 1  # … and ONE Tier-2 write (a wrong-arity stub would fail silently)
     assert a.congress.entries[0].symbol == "NVDA"
     assert b.congress.entries[0].symbol == "NVDA"
 
@@ -715,11 +723,13 @@ async def test_earnings_quote_outage_degrades_the_build_and_is_never_persisted(m
     ssvc.SignalsService._cache.clear()
     ssvc.SignalsService._inflight.clear()
     ssvc.SignalsService._degraded_keys.clear()
+    ssvc.SignalsService._held_until.clear()
+    ssvc.SignalsService._background.clear()
     try:
         s = _earnings_svc(_CountingEarningsFMP(_SHOCKER_CAL, quotes={}))
         writes = []
         monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
-        monkeypatch.setattr(s, "_write_supabase_cache", lambda r: writes.append(r))
+        monkeypatch.setattr(s, "_write_supabase_cache", lambda r, computed_at: writes.append(r))
 
         async def congress_ok():
             return SignalGroupResponse(
@@ -748,6 +758,8 @@ async def test_earnings_quote_outage_degrades_the_build_and_is_never_persisted(m
         ssvc.SignalsService._cache.clear()
         ssvc.SignalsService._inflight.clear()
         ssvc.SignalsService._degraded_keys.clear()
+        ssvc.SignalsService._held_until.clear()
+        ssvc.SignalsService._background.clear()
 
 
 # ── Earnings: one ET day per calendar call (2026-10-09) ────────────────

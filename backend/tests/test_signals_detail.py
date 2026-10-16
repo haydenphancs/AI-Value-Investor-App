@@ -1,22 +1,32 @@
 """
-Per-ticker signal drill-down — aggregation + registry-match + degradation tests.
+Per-ticker signal drill-down — aggregation + registry-match + failure-contract tests.
 
 No network / Supabase: a fake FMP client + a tiny chainable Supabase shim feed
 the pure logic. Run via `python -m pytest` (needs cwd on path — no conftest).
 """
 
 import asyncio
+import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.integrations.fmp import FMPPartialPageException
+from app.integrations.fmp import FMPPartialPageException, FMPUnavailableException
 from app.schemas.signals_detail import (
     SignalHolderResponse,
     SignalTickerDetailResponse,
 )
 from app.services import signals_service as ssvc
-from app.services.signals_service import SignalsService, _norm_name, _congress_role
+from app.services.signals_service import (
+    SignalsService,
+    _aggregate_congress,
+    _congress_coverage_gaps,
+    _congress_display_name,
+    _congress_member_key,
+    _congress_role,
+    _norm_name,
+)
 from _price_fakes import PriceFromFMPFake
 
 
@@ -82,6 +92,11 @@ class _FakeFMP:
 def _svc():
     SignalsService._detail_cache.clear()
     SignalsService._detail_inflight.clear()
+    # The drill-downs window on the cards in memory (`_card_content_time`): a card another
+    # test left behind would move this test's window, so start with none (→ now).
+    SignalsService._cache.clear()
+    SignalsService._degraded_keys.clear()
+    SignalsService._held_until.clear()
     return SignalsService()
 
 
@@ -284,7 +299,7 @@ def test_no_current_fund_omits_the_card_honestly(monkeypatch):
 
 def test_whale_rows_reraise_on_supabase_error(monkeypatch):
     # A Supabase failure must PROPAGATE (not swallow to []) so get_ticker_detail
-    # returns an uncached empty response and the next tap retries.
+    # raises SignalDetailUnavailable, caches nothing, and the next tap retries.
     def boom():
         raise RuntimeError("supabase down")
     monkeypatch.setattr(ssvc, "get_supabase", boom)
@@ -300,8 +315,10 @@ async def test_get_ticker_detail_does_not_cache_whale_transient_failure(monkeypa
     s = _svc()
     s.fmp = _FakeFMP(profile={})   # profile empty too → totally empty result
     s.price = PriceFromFMPFake(s.fmp)
-    resp = await s.get_ticker_detail("whale", "TSM")
-    assert resp.holders == []                                    # degraded, not a 500
+    # Typed, not an empty 200: the endpoint answers 503 and iOS shows Retry rather than
+    # "no funds bought TSM" beside a card that counted some.
+    with pytest.raises(ssvc.SignalDetailUnavailable):
+        await s.get_ticker_detail("whale", "TSM")
     assert "whale:TSM" not in SignalsService._detail_cache       # NOT pinned for 10 min
 
 
@@ -367,6 +384,268 @@ async def test_congress_rows_empty_when_no_buyers(monkeypatch):
     assert rows == [] and as_of is None
 
 
+# ── Congress card ↔ drill-down: ONE filter (`_congress_buy_rows`) ───────
+#
+# Since 2026-10-15 the card's count and the drill-down's list are the same rows. They
+# disagreed three ways before: "Exchange" counted as a buy, the drill-down kept undated
+# rows the card dropped, and it skipped members the card counted by representative /
+# senator / district. Rows are dated relative to the real now, because
+# `_detail_congress_rows` reads the clock itself; the card is handed the same now.
+
+
+def _days_ago(n):
+    return (datetime.now(timezone.utc) - timedelta(days=n)).strftime("%Y-%m-%d")
+
+
+def _buy(symbol, *, days=1, type_="Purchase", **who):
+    """One congress feed row; `days=None` leaves it undated."""
+    row = {"symbol": symbol, "type": type_, **who}
+    if days is not None:
+        row["disclosureDate"] = _days_ago(days)
+    return row
+
+
+def _congress_svc(monkeypatch, senate, house):
+    s = _svc()
+    s.fmp = _FakeFMP(senate=senate, house=house)
+    s.price = PriceFromFMPFake(s.fmp)
+    monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
+    return s
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def test_an_exchange_is_not_a_congressional_buy_on_the_card():
+    # Three "Exchange" rows from the Honeywell Aerospace spinoff made HONA read as
+    # congressional buying. An exchange is a share swap — no money moved, no view taken.
+    senate = [
+        _buy("HONA", type_="Exchange", firstName="Swap", lastName="One"),
+        _buy("HONA", type_="Exchange", firstName="Swap", lastName="Two"),
+        _buy("HONA", firstName="Real", lastName="Buyer"),
+    ]
+    assert _aggregate_congress(senate, [], now=_now()) is None   # 1 buyer: below the floor
+
+    # Extra exchanges never inflate a ticker that qualifies on purchases alone.
+    senate = [
+        _buy("NVDA", firstName="A", lastName="One"),
+        _buy("NVDA", firstName="B", lastName="Two"),
+        _buy("NVDA", type_="Exchange", firstName="C", lastName="Three"),
+        _buy("NVDA", type_="Exchange", firstName="A", lastName="One"),
+    ]
+    house = [_buy("NVDA", type_="Exchange", firstName="D", lastName="Four")]
+    g = _aggregate_congress(senate, house, now=_now())
+    assert g is not None and [(e.symbol, e.value) for e in g.entries] == [("NVDA", 2.0)]
+
+
+@pytest.mark.asyncio
+async def test_an_exchange_only_member_is_not_listed_in_the_drill_down(monkeypatch):
+    senate = [_buy("HONA", firstName="Real", lastName="Buyer"),
+              _buy("HONA", type_="Exchange", firstName="Swap", lastName="Only")]
+    house = [_buy("HONA", type_="Exchange", firstName="Spin", lastName="Off")]
+    rows, _ = await _congress_svc(monkeypatch, senate, house)._detail_congress_rows("HONA")
+    assert [r.name for r in rows] == ["Real Buyer"]
+
+
+def _parity_congress_feed():
+    """Every way a row can be counted, merged or dropped, on three tickers."""
+    senate = [
+        _buy("NVDA", days=5, firstName="Nancy", lastName="Pelosi", district="CA",
+             amount="$1,001 - $15,000"),
+        _buy("NVDA", days=1, firstName="Nancy", lastName="Pelosi", district="CA",
+             amount="$15,001 - $50,000"),                                    # same member again → once
+        _buy("NVDA", days=2, senator="Sam Senator"),                         # `senator` only
+        _buy("NVDA", type_="Exchange", firstName="Swap", lastName="Only"),   # exchange → dropped
+        _buy("NVDA", days=45, firstName="Too", lastName="Old"),              # outside 30 d → dropped
+        _buy("MSFT", days=3, firstName="Al", lastName="Gore"),
+        _buy("N/A", firstName="Bad", lastName="Symbol"),                     # bad symbol → dropped
+        _buy("--", firstName="Worse", lastName="Symbol"),
+    ]
+    house = [
+        _buy("NVDA", days=3, representative="Rita Representative"),          # `representative` only
+        _buy("NVDA", days=4, office="Olive Office"),                         # `office` only
+        _buy("NVDA", days=6, district="TX11"),                               # `district` only
+        _buy("NVDA", type_="Sale", firstName="Sell", lastName="Er"),         # sale → dropped
+        _buy("MSFT", days=2, representative="Rita Representative"),
+        _buy("MSFT", type_="Exchange", firstName="Spin", lastName="Off"),
+        _buy("AAPL", days=2, firstName="Solo", lastName="Buyer"),
+        # Undated in a feed that HAS dates → dropped by both. It used to be kept by the
+        # drill-down only, which would list two AAPL buyers under a card saying one.
+        _buy("AAPL", days=None, firstName="Un", lastName="Dated"),
+    ]
+    return senate, house
+
+
+@pytest.mark.asyncio
+async def test_every_congress_card_count_equals_its_drill_down_list(monkeypatch):
+    senate, house = _parity_congress_feed()
+    g = _aggregate_congress(senate, house, now=_now())
+    assert [(e.symbol, e.value) for e in g.entries] == [("NVDA", 5.0), ("MSFT", 2.0), ("AAPL", 1.0)]
+    assert g.as_of_date == _days_ago(1)
+
+    s = _congress_svc(monkeypatch, senate, house)
+    for e in g.entries:
+        rows, _ = await s._detail_congress_rows(e.symbol)
+        assert len(rows) == e.value, e.symbol
+
+    nvda, as_of = await s._detail_congress_rows("NVDA")
+    assert sorted(r.name for r in nvda) == [
+        "Nancy Pelosi", "Olive Office", "Representative (TX-11)", "Rita Representative", "Sam Senator",
+    ]
+    pelosi = next(r for r in nvda if r.name == "Nancy Pelosi")
+    assert pelosi.disclosure_date == _days_ago(1)          # her most recent filing, not the first
+    assert pelosi.amount_range == "$15K – $50K"
+    assert as_of == _days_ago(1)
+
+
+_WHO = {"office": "Olive Office", "representative": "Rita Rep", "senator": "Sam Sen", "district": "TX11"}
+
+
+@pytest.mark.parametrize("row, chamber, name", [
+    ({"firstName": "Nancy", "lastName": "Pelosi", **_WHO}, "house", "Nancy Pelosi"),
+    ({"first_name": "Nancy", "last_name": "Pelosi"}, "house", "Nancy Pelosi"),   # snake_case feed
+    ({"lastName": "Pelosi", **_WHO}, "house", "Pelosi"),                       # one name part still wins
+    (dict(_WHO), "house", "Olive Office"),
+    ({k: v for k, v in _WHO.items() if k != "office"}, "house", "Rita Rep"),
+    ({"senator": "Sam Sen", "district": "KY"}, "senate", "Sam Sen"),
+    ({"district": "TX11"}, "house", "Representative (TX-11)"),
+    ({"district": "KY"}, "senate", "Senator (KY)"),
+    ({"office": 123}, "house", "123"),                                         # non-str: str()-wrapped
+    ({"lastName": 42}, "senate", "42"),
+    ({}, "house", ""),
+    ({"firstName": "", "lastName": None, "office": "", "district": ""}, "senate", ""),
+    # A whitespace-only earlier field must not hide a real later one: the key used to join
+    # the fields with `or` before stripping, so this member had a name but no key (uncounted).
+    ({"office": "   ", "representative": "Jane Rep"}, "house", "Jane Rep"),
+    ({"firstName": " ", "lastName": "  ", "senator": "Sam Sen"}, "senate", "Sam Sen"),
+])
+def test_congress_display_name_follows_the_member_key_chain(row, chamber, name):
+    # first+last → office → representative → senator → district role, read from the SAME
+    # fields as the member key: every member the card counts has a name to list, and a
+    # row with no name is not counted. (A non-str field used to crash the key's .strip().)
+    assert _congress_display_name(row, chamber) == name
+    assert bool(_congress_member_key(row, chamber)) == bool(name)
+
+
+def test_the_member_key_and_display_name_read_the_same_winning_field():
+    # Rows that agree on the winning field are ONE member with ONE name, whatever the
+    # losing fields say; rows that differ on it are two.
+    a = {"office": "Olive Office", "representative": "Rita Rep"}
+    b = {"office": "Olive Office", "representative": "Someone Else"}
+    c = {"office": "Other Office", "representative": "Rita Rep"}
+    assert _congress_member_key(a, "house") == _congress_member_key(b, "house")
+    assert _congress_display_name(a, "house") == _congress_display_name(b, "house")
+    assert _congress_member_key(a, "house") != _congress_member_key(c, "house")
+    # Chamber-scoped: the same office in the other chamber is another member.
+    assert _congress_member_key(a, "house") != _congress_member_key(a, "senate")
+
+
+@pytest.mark.asyncio
+async def test_a_feed_with_no_parseable_dates_keeps_every_purchase_on_card_and_drill_down(monkeypatch):
+    # The degenerate rule: when NO buy in the whole feed is dated, every buy is kept so the
+    # card stays alive. Decided over the BUYS — a dated sale, exchange, bad-symbol row or
+    # anonymous row is not a buy and must not flip it.
+    senate = [
+        _buy("NVDA", days=None, firstName="A", lastName="One"),
+        {**_buy("NVDA", days=None, firstName="B", lastName="Two"), "disclosureDate": "not-a-date"},
+        _buy("NVDA", type_="Sale", firstName="C", lastName="Three"),
+        _buy("NVDA", type_="Exchange", firstName="D", lastName="Four"),
+        _buy("N/A", firstName="E", lastName="Five"),
+        _buy("NVDA"),                                                    # no identity at all
+    ]
+    house = [_buy("NVDA", days=None, representative="Rita Rep")]
+
+    g = _aggregate_congress(senate, house, now=_now())
+    assert g is not None and [(e.symbol, e.value) for e in g.entries] == [("NVDA", 3.0)]
+    assert g.as_of_date is None
+
+    rows, as_of = await _congress_svc(monkeypatch, senate, house)._detail_congress_rows("NVDA")
+    assert sorted(r.name for r in rows) == ["A One", "B Two", "Rita Rep"]
+    assert all(r.disclosure_date is None for r in rows) and as_of is None
+
+
+# ── Congress feed coverage: a feed that stops inside the window ────
+
+_CNOW = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)   # 30-day window starts 2026-05-31 12:00
+
+
+def _feed(*dates):
+    # Sales on purpose: every row type shares the feed, so every row counts toward coverage.
+    return [{"symbol": "NVDA", "type": "Sale", "disclosureDate": d} for d in dates]
+
+
+def test_a_feed_that_stops_inside_the_window_is_a_coverage_gap():
+    feed = _feed("2026-06-29", "2026-06-20", "2026-06-10")
+    assert _congress_coverage_gaps([], feed, now=_CNOW) == [("house", "2026-06-10")]
+    assert _congress_coverage_gaps(feed, [], now=_CNOW) == [("senate", "2026-06-10")]
+    # An unparseable date is not "the oldest row".
+    with_garbage = _feed("2026-06-29", "garbage", "2026-06-12")
+    assert _congress_coverage_gaps([], with_garbage, now=_CNOW) == [("house", "2026-06-12")]
+    # Whatever the row count: a "latest N" feed over years of filings that comes back SHORT and
+    # still stops inside 30 days was cut by the provider (a quietly lowered page size). The
+    # first version only checked FULL feeds, so exactly that case never warned.
+    assert _congress_coverage_gaps([], _feed("2026-06-29", "2026-06-10"), now=_CNOW) == [
+        ("house", "2026-06-10")
+    ]
+
+
+def test_a_feed_that_reaches_the_window_start_is_covered():
+    reaches = _feed("2026-06-29", "2026-06-10", "2026-05-20")
+    assert _congress_coverage_gaps(reaches, reaches, now=_CNOW) == []
+    assert _congress_coverage_gaps("garbage", None, now=_CNOW) == []
+    assert _congress_coverage_gaps([], [], now=_CNOW) == []
+    # Only unparseable dates: nothing to measure, so no claim either way.
+    assert _congress_coverage_gaps([], _feed("garbage"), now=_CNOW) == []
+
+
+class _RecordingFMP(_FakeFMP):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.limits = []
+
+    async def get_senate_latest(self, limit=1000):
+        self.limits.append(("senate", limit))
+        return await super().get_senate_latest(limit)
+
+    async def get_house_latest(self, limit=1000):
+        self.limits.append(("house", limit))
+        return await super().get_house_latest(limit)
+
+
+@pytest.mark.asyncio
+async def test_build_congress_logs_a_coverage_gap_and_still_returns_the_card(caplog):
+    # Loud, not fatal: the counts a short-reaching feed has are real, so the card ships,
+    # but a WARNING says the window was not covered (raise _CONGRESS_FEED_ROWS if it fires).
+    n = ssvc._CONGRESS_FEED_ROWS
+    house = [_buy("NVDA", days=2, firstName="A", lastName="One"),
+             _buy("NVDA", days=3, firstName="B", lastName="Two")]
+    house += [_buy("XOM", days=1 + i % 9, type_="Sale", firstName=f"S{i}", lastName="Seller")
+              for i in range(n - len(house))]
+    s = _svc()
+    s.fmp = _RecordingFMP(senate=[], house=house)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.signals_service"):
+        g = await s._build_congress()
+
+    assert g is not None and [(e.symbol, e.value) for e in g.entries] == [("NVDA", 2.0)]
+    # The gap check assumes the feed was asked for exactly _CONGRESS_FEED_ROWS rows.
+    assert sorted(s.fmp.limits) == [("house", n), ("senate", n)]
+    gaps = [r for r in caplog.records if "reaches back only to" in r.getMessage()]
+    assert len(gaps) == 1 and gaps[0].levelno == logging.WARNING
+    assert "house" in gaps[0].getMessage() and _days_ago(9) in gaps[0].getMessage()
+
+    # Anti-vacuity: the same feed with one row older than the window start covers it — no
+    # warning.
+    caplog.clear()
+    s.fmp = _RecordingFMP(senate=[], house=house[:-1] + [
+        _buy("XOM", days=ssvc._CONGRESS_WINDOW_DAYS + 5, type_="Sale", firstName="Old", lastName="Row")
+    ])
+    with caplog.at_level(logging.WARNING, logger="app.services.signals_service"):
+        assert await s._build_congress() is not None
+    assert not any("reaches back only to" in r.getMessage() for r in caplog.records)
+
+
 # ── get_ticker_detail (end to end w/ fakes) + degradation ──────────────
 
 
@@ -389,7 +668,10 @@ async def test_get_ticker_detail_congress_wraps_header_and_holders(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_ticker_detail_degrades_on_fmp_error(monkeypatch):
+async def test_get_ticker_detail_raises_on_fmp_error(monkeypatch):
+    # Was "degrades to an empty holder list" — which iOS rendered as "No congress members
+    # bought NVDA" beside a card claiming several. A failed source is now a typed error
+    # the endpoint turns into a retryable 503.
     class _BoomFMP:
         async def get_company_profile(self, t): return {}
         async def get_senate_latest(self, limit=1000): raise RuntimeError("fmp down")
@@ -397,8 +679,11 @@ async def test_get_ticker_detail_degrades_on_fmp_error(monkeypatch):
     s = _svc()
     s.fmp = _BoomFMP()
     s.price = PriceFromFMPFake(s.fmp)
-    resp = await s.get_ticker_detail("congress", "NVDA")
-    assert resp.symbol == "NVDA" and resp.holders == []   # degraded, not a 500
+    with pytest.raises(ssvc.SignalDetailUnavailable) as info:
+        await s.get_ticker_detail("congress", "nvda")
+    assert info.value.kind == "congress" and info.value.symbol == "NVDA"
+    assert isinstance(info.value.__cause__, RuntimeError)
+    assert "congress:NVDA" not in SignalsService._detail_cache
 
 
 class _FlakyCongressFMP(_FakeFMP):
@@ -458,8 +743,8 @@ async def test_a_congress_detail_failure_is_not_cached_and_the_next_tap_retries(
     s.price = PriceFromFMPFake(s.fmp)
     monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
 
-    resp = await s.get_ticker_detail("congress", "NVDA")
-    assert resp.holders == []                                          # degraded, not a 500
+    with pytest.raises(ssvc.SignalDetailUnavailable):                  # a 503 + Retry, not an empty list
+        await s.get_ticker_detail("congress", "NVDA")
     assert "congress:NVDA" not in SignalsService._detail_cache, "a failure must not pin an empty screen"
 
     fmp.house_exc = None                                               # FMP recovers
@@ -477,6 +762,84 @@ async def test_an_honest_empty_congress_detail_is_cached(monkeypatch):
     resp = await s.get_ticker_detail("congress", "NVDA")
     assert resp.holders == []
     assert "congress:NVDA" in SignalsService._detail_cache
+
+
+# ── A failed drill-down build is a typed error, for every kind ──────────
+#
+# `SignalDetailUnavailable` (→ 503 SIGNAL_DETAIL_UNAVAILABLE, iOS Retry) replaced the empty
+# holder list, which the app read as "nobody bought it" beside a card that counted buyers.
+
+
+class _FailingSourceFMP(_FakeFMP):
+    """The congress and CEO sources raise `exc`, counting each call."""
+
+    def __init__(self, exc, calls):
+        super().__init__()
+        self._exc = exc
+        self._calls = calls
+
+    async def _fail(self):
+        self._calls.append(1)
+        # Yield first: a source that raised without suspending would finish the leader's
+        # build before a concurrent tap ever saw it in flight.
+        await asyncio.sleep(0)
+        raise self._exc
+
+    async def get_senate_latest(self, limit=1000):
+        return await self._fail()
+
+    async def get_insider_trades_since(self, since_date, **kwargs):
+        return await self._fail()
+
+
+def _failing_detail_source(monkeypatch, kind):
+    """A service whose `kind` drill-down source raises → (service, the exception, calls)."""
+    calls = []
+    if kind == "whale":
+        exc = RuntimeError("supabase down")
+
+        def boom():
+            calls.append(1)
+            raise exc
+        monkeypatch.setattr(ssvc, "get_supabase", boom)
+        fmp = _FakeFMP()
+    else:
+        exc = _partial("senate-latest") if kind == "congress" else FMPUnavailableException("insider 502")
+        fmp = _FailingSourceFMP(exc, calls)
+    s = _svc()
+    s.fmp = fmp
+    s.price = PriceFromFMPFake(fmp)
+    monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
+    return s, exc, calls
+
+
+@pytest.mark.parametrize("kind", ["whale", "congress", "ceo"])
+@pytest.mark.asyncio
+async def test_a_drill_down_build_failure_raises_typed_and_caches_nothing(monkeypatch, kind):
+    s, exc, calls = _failing_detail_source(monkeypatch, kind)
+    with pytest.raises(ssvc.SignalDetailUnavailable) as info:
+        await s.get_ticker_detail(kind, "nvda")
+    err = info.value
+    assert err.kind == kind and err.symbol == "NVDA"     # canonical, for the endpoint's details
+    assert err.__cause__ is exc                          # chained: the logs keep the real cause
+    assert calls == [1]
+    assert SignalsService._detail_cache == {} and SignalsService._detail_inflight == {}
+
+
+@pytest.mark.parametrize("kind", ["whale", "congress", "ceo"])
+@pytest.mark.asyncio
+async def test_concurrent_taps_share_one_failing_build_and_both_raise(monkeypatch, kind):
+    # The joiner must FAIL with the leader (not hang on the shared future, and not get an
+    # empty list), and the failure is built once, not once per tap.
+    s, exc, calls = _failing_detail_source(monkeypatch, kind)
+    a, b = await asyncio.gather(
+        s.get_ticker_detail(kind, "NVDA"), s.get_ticker_detail(kind, "NVDA"),
+        return_exceptions=True,
+    )
+    assert isinstance(a, ssvc.SignalDetailUnavailable) and b is a
+    assert a.__cause__ is exc
+    assert calls == [1], "the second tap started its own build instead of joining"
+    assert SignalsService._detail_cache == {} and SignalsService._detail_inflight == {}
 
 
 @pytest.mark.asyncio
@@ -628,3 +991,71 @@ async def test_congress_handles_missing_owner_and_district(monkeypatch):
     assert len(rows) == 1
     assert rows[0].subtitle == "Senator"   # no district suffix
     assert rows[0].owner is None
+
+
+def test_the_drill_down_cap_fits_every_fund_a_whale_card_can_count():
+    """The drill-down list is capped at ``_DETAIL_ROWS`` while Whale Accumulation counts every
+    distinct 13F fund adding a stock. At the old 25 a card could read "30 funds adding" over a
+    25-row list, so the cap must stay at or above the registry's 13F fund count."""
+    import json
+    from pathlib import Path
+
+    registry = json.loads(
+        (Path(__file__).resolve().parents[1] / "data" / "whale_registry.json").read_text()
+    )
+    funds = [w for w in registry if isinstance(w, dict) and w.get("data_source") == "13f"]
+    assert funds, "registry shape changed — this guard can no longer count the 13F funds"
+    assert ssvc._DETAIL_ROWS >= len(funds)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["whale", "congress", "ceo"])
+async def test_every_drill_down_windows_on_the_cards_build_time(monkeypatch, kind):
+    """A card is up to ~12 h old (24 h while held). Re-windowing its drill-down at the tap let
+    "2 members buying" open onto members aged out of the 30 days in between (the review
+    reproduced it: a card built at 23:50 UTC, a tap at 00:10 → 0 rows). Every list is now
+    windowed on the moment the cards in memory were built."""
+    s = _svc()
+    s.fmp = _FakeFMP(profile={"companyName": "X Corp", "price": 10.0, "marketCap": 1e10})
+    built_at = time.time() - 10 * 3600
+    SignalsService._cache[ssvc._SIGNALS_CACHE_KEY] = (built_at, ssvc.SignalsGroupResponse())
+    seen = {}
+
+    def whale(sym, *, now=None):
+        seen["whale"] = now
+        return [], None
+
+    async def congress(sym, *, now=None):
+        seen["congress"] = now
+        return [], None
+
+    async def ceo(sym, *, ref_price=None, market_cap=None, now=None):
+        seen["ceo"] = now
+        return [], None
+
+    monkeypatch.setattr(s, "_detail_whale_rows", whale)
+    monkeypatch.setattr(s, "_detail_congress_rows", congress)
+    monkeypatch.setattr(s, "_detail_ceo_rows", ceo)
+    await s._build_ticker_detail(kind, "NVDA")
+    assert seen[kind] == datetime.fromtimestamp(built_at, timezone.utc)
+
+
+@pytest.mark.parametrize("stamp_offset, uses_card", [
+    (-60, True),                                              # a fresh card
+    (-(ssvc._SIGNALS_STALE_SERVE_CEILING_SECONDS - 60), True),  # held, still under the ceiling
+    (-(ssvc._SIGNALS_STALE_SERVE_CEILING_SECONDS + 60), False),  # past the ceiling: never shown
+    (3600, False),                                            # stamped in the future: skew
+    (None, False),                                            # no card in memory
+])
+def test_the_drill_down_anchor_is_the_card_only_while_it_can_be_shown(stamp_offset, uses_card):
+    s = _svc()
+    if stamp_offset is not None:
+        SignalsService._cache[ssvc._SIGNALS_CACHE_KEY] = (
+            time.time() + stamp_offset, ssvc.SignalsGroupResponse()
+        )
+    before = time.time()
+    anchor = s._card_content_time().timestamp()
+    if uses_card:
+        assert anchor == pytest.approx(before + stamp_offset, abs=1)
+    else:
+        assert before - 1 <= anchor <= time.time() + 1

@@ -29,12 +29,20 @@ Contract (mirrors the Daily Scanners): the backend emits only ranked DATA rows +
 raw numbers; the iOS repository supplies the fixed per-card chrome and formats
 the display strings. See ``schemas/home_dashboard.py`` (SignalRowResponse etc.).
 
-Caching (CLAUDE.md invariant 4): a 45-min in-memory tier + an ``_inflight`` dedup
-future (collapses concurrent cold builds into ONE fetch) + a 24-hour Supabase
-``signals_cache`` Tier-2 (survives restarts; the sources move daily/quarterly).
+Caching (CLAUDE.md invariant 4): the cards are rebuilt from source about TWICE A DAY
+(owner decision 2026-10-15: a long-term-investor surface). Every stamp is the CONTENT's
+age — when the build that produced it finished — never when a copy was last reloaded:
+  • memory, fresh for ``_SIGNALS_MEM_TTL_SECONDS`` (12 h) of content age, + an
+    ``_inflight`` dedup future (collapses concurrent cold builds into ONE fetch);
+  • Supabase ``signals_cache`` Tier 2 (24 h expiry): carries ``computed_at``, so a restart
+    or a second process reuses a row only while its content is younger than
+    ``_SIGNALS_TIER2_REUSE_SECONDS`` (11.5 h). An older row is loaded as the fallback and
+    the cards are REBUILT.
 This service rides inside ``get_dashboard()``, and the Home warmer
 (``HomeDashboardService.refresh_due_sections`` / ``warm_all``) refreshes it with
-``get_signals(force=True)`` before the memory tier expires.
+``get_signals(force=True)`` before the memory tier expires. Until 2026-10-15 a forced
+refresh reloaded any unexpired Tier-2 row and stamped it "now", so the 40-min warm only
+ever re-read the same row and the content really changed once a day (≈24 h 40 min).
 
 Degradation (CLAUDE.md loud-failure rule): every branch degrades independently —
 one source failing → that card is ``None`` (iOS omits it), the others still
@@ -47,6 +55,12 @@ which any branch raised is kept in memory for only ``_SIGNALS_DEGRADED_TTL_SECON
 and is NEVER written to the 24 h Supabase tier. Tier 2 is read before any rebuild,
 so a persisted partial build used to hide a transiently-failed card for up to a
 day. So a branch reports failure by RAISING; ``None`` means "nothing qualified".
+
+When a rebuild comes back degraded (or empty, or raises) while a GOOD payload is in memory
+whose content is under ``_SIGNALS_STALE_SERVE_CEILING_SECONDS`` (24 h), that whole payload
+is HELD instead (``_held_until``): served as-is, never mixed with the partial build, retried
+every ``_SIGNALS_DEGRADED_TTL_SECONDS``. Only with no good copy that young does a degraded
+build reach the screen (memory only, as above).
 """
 
 import asyncio
@@ -109,9 +123,16 @@ logger = logging.getLogger(__name__)
 
 
 # ── Config ─────────────────────────────────────────────────────────────
-_SIGNALS_MEM_TTL_SECONDS = 2700          # 45 min in-memory freshness ceiling
-_SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 survives restart; sources daily/quarterly
-_SIGNALS_CACHE_KEY = "signals_v6"        # bump to invalidate stale rows on a semantics change —
+# Content cadence: about twice a day (owner decision 2026-10-15 — long-term investors). Every
+# age below is CONTENT age (the build that produced the payload), never a reload time. The Home
+# warmer refreshes at `home_dashboard_service._SIGNALS_REFRESH_AHEAD_SECONDS` (12 h − 20 min),
+# and the order REUSE < REFRESH_AHEAD < MEM_TTL ≤ CEILING ≤ Tier-2 TTL is pinned by tests: a
+# reused row is never due on arrival (no reload loop), and the warm lands before memory expires.
+_SIGNALS_MEM_TTL_SECONDS = 12 * 3600     # memory freshness ceiling (content age)
+_SIGNALS_TIER2_REUSE_SECONDS = 11 * 3600 + 1800  # a Tier-2 row younger than this is reused, not
+                                         # rebuilt (a restart, or another process just built it)
+_SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 expiry = the oldest content ever served
+_SIGNALS_CACHE_KEY = "signals_v7"        # bump to invalidate stale rows on a semantics change —
                                          # v4 (2026-09-23) added the `ceo` card: a v3 row validates
                                          # (the field is optional) but would hide CEO Buys for up to
                                          # its 24h TTL after a deploy. The old row is simply ignored.
@@ -124,18 +145,23 @@ _SIGNALS_CACHE_KEY = "signals_v6"        # bump to invalidate stale rows on a se
                                          # warrants/units/rights/preferreds (RZLVW sat at #7 of
                                          # the v5 row); Whale Accumulation counts SHARE increases
                                          # in each fund's latest 13F, not a weight change.
+                                         # v7 (2026-10-15): Congressional Buys counts purchases
+                                         # only — an "Exchange" is a spinoff/fund share swap
+                                         # (holders_service dropped it for HONA) — and the card
+                                         # and its drill-down share ONE row filter. Rows now
+                                         # carry `computed_at` as the content's age.
 _SIGNALS_DEGRADED_TTL_SECONDS = 300     # a build where a branch RAISED: memory only, 5 min, never
                                          # persisted — so the failed card comes back on the next
-                                         # rebuild instead of being pinned for 24h by Tier 2.
+                                         # rebuild instead of being pinned for 24h by Tier 2. Also
+                                         # how long a HELD good payload waits before the retry.
 _SIGNALS_TABLE = "signals_cache"
 _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dashboard
-# How old the in-memory copy may be and still stand in for a build that missed the guard.
-# It used to be ANY age, so a day of failing rebuilds kept serving the same cards. 24 h
-# matches the Tier-2 TTL: memory is refilled from a Tier-2 row of at most 24 h, so the
-# content a guard timeout can show is bounded at ~48 h, inside these cards' own cadence
-# (30-day congress window, quarterly 13F, a week of earnings) and each card's as-of date.
-# Past it the section is hidden. The Home warmer re-reads the tier every 40 min, so this
-# only bites when every refresh has failed for a day.
+# The oldest CONTENT that may still stand in — for a build that missed the guard, and as the
+# held payload while rebuilds fail. It used to be ANY age, so a day of failing rebuilds kept
+# serving the same cards; then 24 h on a RELOAD stamp (≈48 h of content). It is now measured on
+# the content itself, so 24 h means 24 h, inside these cards' own cadence (30-day congress
+# window, quarterly 13F, a week of earnings). Past it the section is hidden (or a degraded
+# build shows). With two builds a day this only bites when every rebuild has failed for 12 h.
 _SIGNALS_STALE_SERVE_CEILING_SECONDS = 24 * 3600
 _SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS = 5   # a stamp further ahead is skew, never "fresh"
 
@@ -150,6 +176,9 @@ _SIGNAL_ROWS = 10                        # drill-down leaders per card (iOS scro
 # staying "this month" fresh. Keep the iOS subtitle in sync with this span.
 _CONGRESS_WINDOW_DAYS = 30
 _CONGRESS_MIN_MEMBERS = 2                # a "most-bought" headline needs > 1 member
+_CONGRESS_FEED_ROWS = 1000               # rows fetched per chamber (card AND drill-down). Nothing
+                                         # guarantees they reach back the whole window, so a full
+                                         # feed that does not is logged (`_congress_coverage_gaps`)
 
 # Whale
 _WHALE_MIN_FUNDS = 2                     # a "funds loading up" headline needs > 1 fund
@@ -247,7 +276,10 @@ _SIGNAL_STEPS: Tuple[str, ...] = ("congress", "whale", "earnings", "ceo")
 # Per-ticker drill-down (tap a signal ticker → who bought it). On-demand, so a
 # short in-memory tier + inflight dedup is enough (no Supabase tier).
 _DETAIL_TTL_SECONDS = 600                 # 10 min
-_DETAIL_ROWS = 25                         # cap the holder list (screen scrolls)
+_DETAIL_ROWS = 50                         # cap the holder list (screen scrolls). Never below what a
+                                          # card can count: at 25 a Whale Accumulation row could say
+                                          # "30 funds adding" over a 25-row list (the registry holds
+                                          # 45 13F funds; a test pins the cap above that count)
 
 
 def _norm_name(name: Any) -> str:
@@ -303,15 +335,152 @@ def _congress_member_key(row: Dict[str, Any], chamber: str) -> str:
     """Stable per-member identity so a member who files several buys of the same
     ticker is counted ONCE. Name-based (chamber-scoped), with an ``office``/
     ``district`` fallback. ``""`` when the member can't be identified (row skipped)."""
-    last = (row.get("lastName") or row.get("last_name") or "").strip().lower()
-    first = (row.get("firstName") or row.get("first_name") or "").strip().lower()
+    last = str(row.get("lastName") or row.get("last_name") or "").strip().lower()
+    first = str(row.get("firstName") or row.get("first_name") or "").strip().lower()
     if last or first:
         return f"{chamber}|{last}|{first}"
-    office = (
-        row.get("office") or row.get("representative") or row.get("senator")
-        or row.get("district") or ""
-    ).strip().lower()
-    return f"{chamber}|{office}" if office else ""
+    # Field by field, each stripped: joining them with `or` first let a whitespace-only
+    # `office` hide a real `representative`, so a member `_congress_display_name` could name
+    # was not counted. Same field order as the display name.
+    for field in ("office", "representative", "senator", "district"):
+        value = str(row.get(field) or "").strip().lower()
+        if value:
+            return f"{chamber}|{value}"
+    return ""
+
+
+def _congress_display_name(row: Dict[str, Any], chamber: str) -> str:
+    """The name the drill-down shows for a member, from the SAME fields as
+    ``_congress_member_key`` — so every member the card counts has a row to show. The
+    drill-down used to need first/last or ``office`` and skipped anyone else, so a member
+    the card counted by ``representative`` / ``senator`` / ``district`` was missing from it."""
+    first = str(row.get("firstName") or row.get("first_name") or "").strip()
+    last = str(row.get("lastName") or row.get("last_name") or "").strip()
+    full = f"{first} {last}".strip()
+    if full:
+        return full
+    for field in ("office", "representative", "senator"):
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    district = str(row.get("district") or "").strip()
+    return _congress_role(district, chamber) if district else ""
+
+
+def _congress_is_purchase(row: Dict[str, Any]) -> bool:
+    """A congressional BUY: "Purchase" / "buy". NOT "Exchange" — a STOCK Act exchange is a
+    share swap (a spinoff distribution, a fund conversion) where no money moved and no view
+    was expressed. It counted as a buy here until 2026-10-15, long after
+    ``holders_service`` dropped it for exactly that reason (three "Exchange" rows from the
+    Honeywell Aerospace spinoff made HONA read as congressional buying)."""
+    ttype = str(row.get("type") or "").lower()
+    return "purchase" in ttype or "buy" in ttype
+
+
+def _congress_disclosure_str(row: Dict[str, Any]) -> str:
+    """The row's disclosure date as filed (``YYYY-MM-DD`` prefix), falling back the way the
+    feeds name it. May be unparseable; callers parse it."""
+    return str(
+        row.get("disclosureDate") or row.get("dateReceived")
+        or row.get("date") or row.get("transactionDate") or ""
+    )[:10]
+
+
+class _CongressBuy(NamedTuple):
+    """One congressional PURCHASE that passed the shared filter (card AND drill-down)."""
+
+    chamber: str
+    member: str          # `_congress_member_key` (chamber-scoped)
+    symbol: str          # canonical (BRK.B → BRK-B)
+    name: str            # `_congress_display_name` — never "" for a non-empty member key
+    asset: str           # the filing's asset description (the card's company name)
+    disclosure: str      # parseable YYYY-MM-DD, or "" (kept only when NO buy is dated)
+    row: Dict[str, Any]
+
+
+def _congress_buy_rows(
+    senate: Any,
+    house: Any,
+    *,
+    now: datetime,
+    window_days: int = _CONGRESS_WINDOW_DAYS,
+) -> List[_CongressBuy]:
+    """The congressional buys behind Congressional Buys — ONE filter for the card's count and
+    for the drill-down's list, so "N members buying" always opens onto N members.
+
+    A purchase (``_congress_is_purchase``) of a real symbol by an identifiable member,
+    windowed on the DISCLOSURE date (−2 … ``window_days`` days). If no buy in the WHOLE feed
+    carries a parseable date (a degenerate feed), every buy is kept so the card stays alive;
+    otherwise an undated row is dropped. The rule is decided over the whole feed, never per
+    ticker, so the card and the drill-down cannot disagree about it (they used to: the
+    drill-down kept undated rows the card had dropped).
+    """
+    candidates: List[Tuple[_CongressBuy, Optional[datetime]]] = []
+    dated = False
+    for chamber, trades in (("senate", senate), ("house", house)):
+        if not isinstance(trades, list):
+            continue
+        for row in trades:
+            if not isinstance(row, dict) or not _congress_is_purchase(row):
+                continue
+            sym = _canonical_symbol(row.get("symbol"))
+            if sym in _BAD_SYMBOLS:
+                continue
+            member = _congress_member_key(row, chamber)
+            if not member:
+                continue
+            dstr = _congress_disclosure_str(row)
+            dobj = _parse_iso_date(dstr)
+            if dobj is not None:
+                dated = True
+            candidates.append((
+                _CongressBuy(
+                    chamber=chamber,
+                    member=member,
+                    symbol=sym,
+                    name=_congress_display_name(row, chamber),
+                    asset=str(row.get("assetDescription") or "").strip(),
+                    disclosure=dstr if dobj is not None else "",
+                    row=row,
+                ),
+                dobj,
+            ))
+    if not dated:
+        return [buy for buy, _ in candidates]
+    return [
+        buy for buy, dobj in candidates
+        if dobj is not None and -2 <= (now - dobj).days <= window_days
+    ]
+
+
+def _congress_coverage_gaps(
+    senate: Any,
+    house: Any,
+    *,
+    now: datetime,
+    window_days: int = _CONGRESS_WINDOW_DAYS,
+) -> List[Tuple[str, str]]:
+    """``(chamber, oldest date)`` for each chamber whose feed's oldest disclosure is still
+    inside the window — the window was not covered, so the card's member counts may be short.
+    Whatever the row count: these are "latest N" feeds over years of filings, so a feed that
+    stops inside 30 days was cut — by our row cap, or by a page size the provider quietly
+    lowered (then it comes back SHORT, which a "full feed only" rule never noticed). Rows of
+    every type count: they all share the feed."""
+    start = now - timedelta(days=window_days)
+    gaps: List[Tuple[str, str]] = []
+    for chamber, trades in (("senate", senate), ("house", house)):
+        if not isinstance(trades, list) or not trades:
+            continue
+        dates = [
+            d for d in (
+                _parse_iso_date(_congress_disclosure_str(r))
+                for r in trades if isinstance(r, dict)
+            )
+            if d is not None
+        ]
+        if dates and min(dates) > start:
+            gaps.append((chamber, min(dates).strftime("%Y-%m-%d")))
+    return gaps
 
 
 def _aggregate_congress(
@@ -324,63 +493,26 @@ def _aggregate_congress(
 ) -> Optional[SignalGroupResponse]:
     """Rank tickers by DISTINCT congress members who bought them (disclosure window).
 
-    BUY-side only (mirrors ``holders_service._build_congress_activities``: purchase /
-    buy / exchange). Windowed on the disclosure date; if NO row carries a parseable
-    date (degenerate feed), keep all buys so the card stays alive. Returns ``None``
-    (card omitted) when there are no qualifying buys, nothing in the window, or the
-    top ticker is below the ``_CONGRESS_MIN_MEMBERS`` floor — honest, never padded.
+    The rows are ``_congress_buy_rows`` — purchases only, the same filter the drill-down
+    lists (so the count and the list always agree). Returns ``None`` (card omitted) when
+    there are no qualifying buys, nothing in the window, or the top ticker is below the
+    ``_CONGRESS_MIN_MEMBERS`` floor — honest, never padded.
     """
     if now is None:
         now = datetime.now(timezone.utc)
 
-    buys: List[Tuple[str, str, str, str, Optional[datetime]]] = []  # sym, member, name, date_str, date_obj
-    dates_seen = 0
-    for chamber, trades in (("senate", senate), ("house", house)):
-        if not isinstance(trades, list):
-            continue
-        for row in trades:
-            if not isinstance(row, dict):
-                continue
-            ttype = (row.get("type") or "").lower()
-            if not ("purchase" in ttype or "buy" in ttype or "exchange" in ttype):
-                continue
-            sym = _canonical_symbol(row.get("symbol"))
-            if sym in _BAD_SYMBOLS:
-                continue
-            member = _congress_member_key(row, chamber)
-            if not member:
-                continue
-            date_str = str(
-                row.get("disclosureDate") or row.get("dateReceived")
-                or row.get("date") or row.get("transactionDate") or ""
-            )[:10]
-            date_obj = _parse_iso_date(date_str)
-            if date_obj is not None:
-                dates_seen += 1
-            name = (row.get("assetDescription") or "").strip()
-            buys.append((sym, member, name, date_str, date_obj))
-
+    buys = _congress_buy_rows(senate, house, now=now, window_days=window_days)
     if not buys:
-        return None
-
-    if dates_seen:
-        windowed = [
-            b for b in buys
-            if b[4] is not None and -2 <= (now - b[4]).days <= window_days
-        ]
-        if not windowed:
-            return None  # dates exist but nothing recent → honest empty
-    else:
-        windowed = buys  # degenerate: no parseable dates anywhere → keep card alive
+        return None  # no purchases, or dates exist but nothing recent → honest empty
 
     agg: Dict[str, Dict[str, Any]] = {}
-    for sym, member, name, date_str, _ in windowed:
-        e = agg.setdefault(sym, {"members": set(), "name": "", "date": ""})
-        e["members"].add(member)
-        if name and not e["name"]:
-            e["name"] = name
-        if date_str and date_str > e["date"]:
-            e["date"] = date_str
+    for buy in buys:
+        e = agg.setdefault(buy.symbol, {"members": set(), "name": "", "date": ""})
+        e["members"].add(buy.member)
+        if buy.asset and not e["name"]:
+            e["name"] = buy.asset
+        if buy.disclosure > e["date"]:
+            e["date"] = buy.disclosure
 
     ranked = sorted(agg.items(), key=lambda kv: (-len(kv[1]["members"]), kv[0]))
     if not ranked or len(ranked[0][1]["members"]) < _CONGRESS_MIN_MEMBERS:
@@ -1080,10 +1212,46 @@ def redact_signals(
     })
 
 
+def _iso_epoch(value: Any) -> Optional[float]:
+    """Epoch seconds of an ISO-8601 timestamp (``Z`` or an offset; naive is UTC), else None.
+
+    Reads the Tier-2 ``computed_at`` / ``expires_at`` that PostgREST returns as text."""
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        ts = dt.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return ts if math.isfinite(ts) else None
+
+
 def _has_any_group(result: SignalsGroupResponse) -> bool:
     """≥1 card present — iterates the model's fields so a new card is counted without
     anyone remembering to add it here (the old check named the three by hand)."""
     return any(getattr(result, f) is not None for f in SignalsGroupResponse.model_fields)
+
+
+class SignalDetailUnavailable(Exception):
+    """A per-ticker drill-down could not be built (a source failed or came back incomplete).
+
+    Raised — never an empty holder list — so the endpoint answers 503
+    ``SIGNAL_DETAIL_UNAVAILABLE`` and iOS shows Retry. An empty list used to come back as a
+    200, and the app said "No congress members bought MSFT…" beside a card claiming four.
+    An empty list now only ever means nothing qualified."""
+
+    def __init__(self, kind: str, symbol: str) -> None:
+        super().__init__(f"signal detail {kind}/{symbol} unavailable")
+        self.kind = kind
+        self.symbol = symbol
 
 
 # ── Service ─────────────────────────────────────────────────────────────
@@ -1092,12 +1260,21 @@ def _has_any_group(result: SignalsGroupResponse) -> bool:
 class SignalsService:
     """Builds the four App-Exclusive Signal cards from FMP + the whale registry."""
 
-    # Class-level so the cache/dedup are shared across requests (mirrors scanners).
+    # Class-level so the cache/dedup are shared across requests (mirrors scanners). An entry
+    # is (CONTENT stamp, payload): the epoch the build that produced the payload finished — a
+    # Tier-2 reload keeps the row's `computed_at`, never "now" (that was the once-a-day bug).
     _cache: Dict[str, Tuple[float, SignalsGroupResponse]] = {}
     _inflight: Dict[str, asyncio.Future] = {}
     # Keys whose in-memory entry came from a DEGRADED build (a branch raised): they use
     # `_SIGNALS_DEGRADED_TTL_SECONDS` and were never written to Tier 2.
     _degraded_keys: Set[str] = set()
+    # Keys whose GOOD entry is being HELD past its TTL because the rebuild failed: served until
+    # this epoch (the retry gate — a request or the warmer rebuilds after it) while its content
+    # is under `_SIGNALS_STALE_SERVE_CEILING_SECONDS`. Cleared by the next good entry.
+    _held_until: Dict[str, float] = {}
+    # Background refreshes a request kicked while it served a stale good copy (see
+    # `get_signals`). Held here only so the task is referenced until it finishes.
+    _background: Set["asyncio.Task[Any]"] = set()
     # Per-(kind, ticker) drill-down cache + dedup.
     _detail_cache: Dict[str, Tuple[float, SignalTickerDetailResponse]] = {}
     _detail_inflight: Dict[str, asyncio.Future] = {}
@@ -1108,26 +1285,36 @@ class SignalsService:
     # ── Public API ────────────────────────────────────────────────────
 
     async def get_signals(self, *, force: bool = False) -> SignalsGroupResponse:
-        """Signals, cache-aside (45-min in-mem → 24h Supabase) + in-flight dedup.
+        """Signals, cache-aside (12 h of content in memory → 24 h Supabase) + in-flight dedup.
 
-        Never re-raises: a build failure returns empty groups and is NOT cached, so
-        the next request retries (keeps awaiters unpoisoned and the shielded
-        background build — see ``get_signals_guarded`` — from leaking an exception).
+        Never re-raises: a build failure returns the held good payload or empty groups and
+        is NOT cached, so the next request retries (keeps awaiters unpoisoned and the
+        shielded background build — see ``get_signals_guarded`` — from leaking an exception).
 
         ``force`` (the Home warmers) skips ONLY the in-memory freshness check. A build
-        already in flight is still joined, so a forced call never starts a second one,
-        and the Supabase tier is still read first: a fresh Tier-2 row is reloaded rather
-        than rebuilt (the sources move daily/quarterly, so that is the right answer).
+        already in flight is still joined, so a forced call never starts a second one, and
+        the Supabase tier is still read first — but its row is reused only while its CONTENT
+        is younger than ``_SIGNALS_TIER2_REUSE_SECONDS`` (see ``_refresh``).
+
+        A request never WAITS on a rebuild while a good copy under the stale-serve ceiling is
+        in memory (past its TTL, or held past its retry epoch): it is answered with that copy
+        at once and the refresh runs in the background (stale-while-revalidate). Otherwise
+        every Home request during a failing retry sat out the whole build guard (8 s) only to
+        be handed the same held cards by the guard's fallback.
         """
-        cached = None if force else self._cache.get(_SIGNALS_CACHE_KEY)
-        ttl = (
-            _SIGNALS_DEGRADED_TTL_SECONDS
-            if _SIGNALS_CACHE_KEY in self._degraded_keys
-            else _SIGNALS_MEM_TTL_SECONDS
-        )
-        if cached is not None and (time.time() - cached[0]) < ttl:
-            logger.debug("Signals served from in-memory cache")
-            return cached[1]
+        if not force:
+            now = time.time()
+            hit = self._servable_from_memory(now)
+            if hit is not None:
+                logger.debug("Signals served from in-memory cache")
+                return hit
+            stale = self._good_copy(now)
+            if stale is not None:
+                self._refresh_in_background()
+                logger.debug(
+                    "Signals served stale (content %.0fs old) while they refresh", now - stale[0]
+                )
+                return stale[1]
 
         inflight = self._inflight.get(_SIGNALS_CACHE_KEY)
         if inflight is not None:
@@ -1138,63 +1325,7 @@ class SignalsService:
         fut: asyncio.Future = loop.create_future()
         self._inflight[_SIGNALS_CACHE_KEY] = fut
         try:
-            # Tier 2: a fresh Supabase row (survives restarts) BEFORE a rebuild. A
-            # read failure is a cache MISS (→ proceed to rebuild), NOT a reason to
-            # blank the card — keep the two tiers' failures independent.
-            try:
-                result = await asyncio.to_thread(self._read_supabase_cache)
-            except Exception as exc:  # noqa: BLE001 — read failure → miss, then rebuild
-                logger.warning(
-                    "Signals Tier-2 read failed: %s: %s", type(exc).__name__, exc
-                )
-                result = None
-
-            if result is not None:
-                logger.debug("Signals served from Supabase cache")
-                self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
-                self._degraded_keys.discard(_SIGNALS_CACHE_KEY)
-            else:
-                try:
-                    result, failed = await self._build()
-                    kept = (
-                        self._still_good_signals()
-                        if force and (failed or not _has_any_group(result)) else None
-                    )
-                    # Cache ONLY a build that produced ≥1 group — never pin a transient
-                    # total failure (all-None). PERSIST only a build in which no branch
-                    # raised: Tier 2 is read before every rebuild, so a persisted partial
-                    # build would hide the failed card for up to 24 h.
-                    if kept is not None:
-                        # A forced refresh runs AHEAD of the memory TTL, so the good cards
-                        # it would replace are still valid: keep them until they expire
-                        # rather than swap in a degraded (or empty) build early.
-                        logger.warning(
-                            "Signals refresh came back degraded (failed: %s) — keeping the "
-                            "good cards (%.0fs old) until they expire",
-                            ", ".join(sorted(failed)) or "every card empty",
-                            time.time() - kept[0],
-                        )
-                        result = kept[1]
-                    elif _has_any_group(result):
-                        self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
-                        if failed:
-                            self._degraded_keys.add(_SIGNALS_CACHE_KEY)
-                            logger.warning(
-                                "Signals build DEGRADED (failed: %s) — serving the other "
-                                "cards from memory for %ds; NOT persisting to Tier 2",
-                                ", ".join(sorted(failed)), _SIGNALS_DEGRADED_TTL_SECONDS,
-                            )
-                        else:
-                            self._degraded_keys.discard(_SIGNALS_CACHE_KEY)
-                            await asyncio.to_thread(self._write_supabase_cache, result)
-                except Exception as exc:  # noqa: BLE001 — build failed → empty (not cached)
-                    logger.warning(
-                        "Signals build failed: %s: %s", type(exc).__name__, exc
-                    )
-                    kept = self._still_good_signals() if force else None
-                    # Empty and NOT cached → retries. A forced (early) refresh hands its
-                    # joiners the still-valid cards instead of an empty section.
-                    result = kept[1] if kept is not None else SignalsGroupResponse()
+            result = await self._refresh()
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1206,22 +1337,192 @@ class SignalsService:
         finally:
             self._inflight.pop(_SIGNALS_CACHE_KEY, None)
 
-    def _still_good_signals(self) -> Optional[Tuple[float, SignalsGroupResponse]]:
-        """The in-memory entry when it is good (not degraded) AND inside its TTL, else None."""
+    def _refresh_in_background(self) -> None:
+        """Start a forced refresh without waiting on it, unless one is already running (its
+        result lands in memory for the next request). Never raises: ``get_signals`` swallows
+        a build failure, and a hold it sets is what gates the next retry."""
+        if _SIGNALS_CACHE_KEY in self._inflight:
+            return
+        task = asyncio.get_running_loop().create_task(self.get_signals(force=True))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _servable_from_memory(self, now: float) -> Optional[SignalsGroupResponse]:
+        """The in-memory payload when it may be served without a rebuild, else None.
+
+        A degraded entry for ``_SIGNALS_DEGRADED_TTL_SECONDS``; a good one while its content
+        is under ``_SIGNALS_MEM_TTL_SECONDS``; a HELD good one (its rebuild failed) until its
+        retry epoch, bounded by the stale-serve ceiling. A stamp in the future is clock skew
+        or a bad row, never "fresh" — it is rebuilt.
+        """
+        entry = self._cache.get(_SIGNALS_CACHE_KEY)
+        if entry is None:
+            return None
+        age = now - entry[0]
+        if age <= -_SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS:
+            return None
+        if _SIGNALS_CACHE_KEY in self._degraded_keys:
+            return entry[1] if age < _SIGNALS_DEGRADED_TTL_SECONDS else None
+        if age < _SIGNALS_MEM_TTL_SECONDS:
+            return entry[1]
+        if (
+            now < self._held_until.get(_SIGNALS_CACHE_KEY, 0.0)
+            and age < _SIGNALS_STALE_SERVE_CEILING_SECONDS
+        ):
+            return entry[1]
+        return None
+
+    async def _refresh(self) -> SignalsGroupResponse:
+        """Tier 2 first, then a real build. Runs inside the in-flight future (one at a time).
+
+        A Tier-2 row is reused only while its content is younger than
+        ``_SIGNALS_TIER2_REUSE_SECONDS``: a restart, or another process that just built it.
+        An older (still unexpired) row goes into memory under its own stamp FIRST — so a
+        request the guard times out on during the rebuild is served it instead of an empty
+        section, and so a failing rebuild has it to hold — and then the cards are rebuilt.
+        A read failure is a MISS (→ rebuild), never a reason to blank the card: the two
+        tiers fail independently.
+        """
+        try:
+            row = await asyncio.to_thread(self._read_supabase_cache)
+        except Exception as exc:  # noqa: BLE001 — read failure → miss, then rebuild
+            logger.warning(
+                "Signals Tier-2 read failed: %s: %s", type(exc).__name__, exc
+            )
+            row = None
+
+        if row is not None:
+            tier2, computed_at = row
+            age = time.time() - computed_at
+            if age <= -_SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS:
+                logger.warning(
+                    "Signals Tier-2 row is stamped %.0fs in the future (clock skew?) — "
+                    "ignored, rebuilding",
+                    -age,
+                )
+            else:
+                self._adopt(computed_at, tier2)
+                if age < _SIGNALS_TIER2_REUSE_SECONDS:
+                    logger.debug(
+                        "Signals served from Supabase cache (content %.0fs old)", age
+                    )
+                    return self._cache[_SIGNALS_CACHE_KEY][1]
+                logger.info(
+                    "Signals Tier-2 row is %.0fs old (reused under %ds) — kept as the "
+                    "fallback, rebuilding",
+                    age, _SIGNALS_TIER2_REUSE_SECONDS,
+                )
+
+        try:
+            result, failed = await self._build()
+        except Exception as exc:  # noqa: BLE001 — build failed → held copy or empty (not cached)
+            logger.warning(
+                "Signals build failed: %s: %s", type(exc).__name__, exc
+            )
+            return self._hold_or(SignalsGroupResponse(), reason=type(exc).__name__, stamp=None)
+
+        built_at = time.time()
+        if not failed and _has_any_group(result):
+            # PERSIST only a build in which no branch raised: Tier 2 is read before every
+            # rebuild, so a persisted partial build would hide the failed card for hours.
+            self._store(built_at, result)
+            try:
+                await asyncio.to_thread(self._write_supabase_cache, result, built_at)
+            except Exception as exc:  # noqa: BLE001 — best-effort; memory still serves
+                logger.warning(
+                    "Signals Tier-2 write failed: %s: %s", type(exc).__name__, exc
+                )
+            return result
+        return self._hold_or(
+            result,
+            reason=", ".join(sorted(failed)) or "every card empty",
+            stamp=built_at,
+        )
+
+    def _store(self, stamp: float, result: SignalsGroupResponse) -> None:
+        """Put a GOOD payload in memory under its content stamp: clears the degraded mark
+        and any hold."""
+        self._cache[_SIGNALS_CACHE_KEY] = (stamp, result)
+        self._degraded_keys.discard(_SIGNALS_CACHE_KEY)
+        self._held_until.pop(_SIGNALS_CACHE_KEY, None)
+
+    def _adopt(self, computed_at: float, result: SignalsGroupResponse) -> None:
+        """A Tier-2 row into memory under its own content stamp — never over a NEWER good
+        entry: an old row read on a cold path must not replace fresher cards. A degraded
+        entry, or one stamped in the future, always gives way."""
         current = self._cache.get(_SIGNALS_CACHE_KEY)
         if (
-            current is not None
-            and _SIGNALS_CACHE_KEY not in self._degraded_keys
-            and 0 <= time.time() - current[0] < _SIGNALS_MEM_TTL_SECONDS
+            current is None
+            or _SIGNALS_CACHE_KEY in self._degraded_keys
+            or current[0] < computed_at
+            or current[0] - time.time() >= _SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS
         ):
+            self._store(computed_at, result)
+
+    def _good_copy(self, now: float) -> Optional[Tuple[float, SignalsGroupResponse]]:
+        """The in-memory entry when it is good (not degraded) and its content is under the
+        stale-serve ceiling, else None. (It replaced `_still_good_signals`, which allowed only
+        the memory TTL: with a 12 h TTL, the first request after it would have swapped a
+        degraded build over cards that were still fine to show.)"""
+        current = self._cache.get(_SIGNALS_CACHE_KEY)
+        if current is None or _SIGNALS_CACHE_KEY in self._degraded_keys:
+            return None
+        age = now - current[0]
+        if -_SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS < age < _SIGNALS_STALE_SERVE_CEILING_SECONDS:
             return current
         return None
+
+    def _hold_or(
+        self,
+        result: SignalsGroupResponse,
+        *,
+        reason: str,
+        stamp: Optional[float],
+    ) -> SignalsGroupResponse:
+        """A rebuild that raised, came back degraded, or came back with every card empty.
+
+        With a good payload in memory whose content is under the stale-serve ceiling, HOLD it:
+        serve it unchanged (never mixed with the partial build), persist nothing, and let a
+        request or the warmer retry after ``_SIGNALS_DEGRADED_TTL_SECONDS`` (``_held_until``
+        is the retry gate, so an outage is not rebuilt back to back). Without one, a degraded
+        build that still has cards is cached in memory only, marked degraded; an empty build
+        or a raise is not cached at all, so the next request retries.
+        """
+        now = time.time()
+        good = self._good_copy(now)
+        if good is not None:
+            self._held_until[_SIGNALS_CACHE_KEY] = now + _SIGNALS_DEGRADED_TTL_SECONDS
+            logger.warning(
+                "Signals refresh came back degraded (failed: %s) — holding the last good "
+                "cards (content %.0fs old, ceiling %ds), retrying in %ds; NOT persisting",
+                reason, now - good[0], _SIGNALS_STALE_SERVE_CEILING_SECONDS,
+                _SIGNALS_DEGRADED_TTL_SECONDS,
+            )
+            return good[1]
+        if stamp is not None and _has_any_group(result):
+            self._cache[_SIGNALS_CACHE_KEY] = (stamp, result)
+            self._degraded_keys.add(_SIGNALS_CACHE_KEY)
+            self._held_until.pop(_SIGNALS_CACHE_KEY, None)
+            logger.warning(
+                "Signals build DEGRADED (failed: %s) — serving the other cards from memory "
+                "for %ds; NOT persisting to Tier 2",
+                reason, _SIGNALS_DEGRADED_TTL_SECONDS,
+            )
+            return result
+        logger.warning(
+            "Signals refresh produced no cards (%s) and no good copy is under %ds — nothing "
+            "cached; the next request retries",
+            reason, _SIGNALS_STALE_SERVE_CEILING_SECONDS,
+        )
+        return SignalsGroupResponse()
 
     async def get_signals_guarded(self) -> SignalsGroupResponse:
         """Await signals up to a hard timeout. ``asyncio.shield`` ensures a timeout
         never CANCELS the shared build (it keeps running and caches for the next
         request) — we just ship the dashboard without signals this round, serving
-        the last cached value while it is under `_SIGNALS_STALE_SERVE_CEILING_SECONDS`.
+        the last cached value while its CONTENT is under
+        `_SIGNALS_STALE_SERVE_CEILING_SECONDS` (memory is stamped with the build time, a
+        reloaded Tier-2 row with its `computed_at`, so this is the cards' real age).
         The cards carry no price and no day change (counts, a surprise %, a dollar
         total, each with its own as-of date), so no trading-session check applies."""
         try:
@@ -1289,8 +1590,8 @@ class SignalsService:
 
     async def _build_congress(self) -> Optional[SignalGroupResponse]:
         senate, house = await asyncio.gather(
-            self.fmp.get_senate_latest(1000),
-            self.fmp.get_house_latest(1000),
+            self.fmp.get_senate_latest(_CONGRESS_FEED_ROWS),
+            self.fmp.get_house_latest(_CONGRESS_FEED_ROWS),
             return_exceptions=True,
         )
         # `return_exceptions` so ONE chamber failing cannot leave the other's
@@ -1314,7 +1615,16 @@ class SignalsService:
         if not senate and not house:
             logger.info("Congressional Buys: no disclosures returned — omitting card")
             return None
-        return _aggregate_congress(senate or [], house or [])
+        now = datetime.now(timezone.utc)
+        # Loud, not fatal: a full feed that stops inside the window may under-count members,
+        # but the counts it has are real. If this fires regularly, raise _CONGRESS_FEED_ROWS.
+        for chamber, oldest in _congress_coverage_gaps(senate or [], house or [], now=now):
+            logger.warning(
+                "Congressional Buys: the %s feed (%d requested) reaches back only to %s — "
+                "the %d-day window is not fully covered, member counts may be short",
+                chamber, _CONGRESS_FEED_ROWS, oldest, _CONGRESS_WINDOW_DAYS,
+            )
+        return _aggregate_congress(senate or [], house or [], now=now)
 
     async def _build_whale(self) -> Optional[SignalGroupResponse]:
         # Supabase SDK is sync → run the whole query+aggregate off the event loop.
@@ -1603,14 +1913,20 @@ class SignalsService:
 
     # ── Supabase Tier-2 (best-effort) ─────────────────────────────────
 
-    def _read_supabase_cache(self) -> Optional[SignalsGroupResponse]:
-        """Return a fresh cached payload, or ``None`` (miss / stale / parse error)."""
+    def _read_supabase_cache(self) -> Optional[Tuple[SignalsGroupResponse, float]]:
+        """``(payload, computed_at epoch)`` for an unexpired row, or ``None`` (miss /
+        expired / parse error).
+
+        The stamp is the CONTENT's age: ``computed_at``. A row whose ``computed_at`` cannot
+        be read is dated ``expires_at`` minus the Tier-2 TTL (every row is written with both
+        from the same instant); with neither readable it is a miss, so the cards are rebuilt
+        rather than served under a made-up age."""
         try:
             sb = get_supabase()
             now_iso = datetime.now(timezone.utc).isoformat()
             res = (
                 sb.table(_SIGNALS_TABLE)
-                .select("data, expires_at")
+                .select("data, computed_at, expires_at")
                 .eq("cache_key", _SIGNALS_CACHE_KEY)
                 .gt("expires_at", now_iso)
                 .limit(1)
@@ -1619,7 +1935,22 @@ class SignalsService:
             rows = res.data or []
             if not rows:
                 return None
-            return SignalsGroupResponse.model_validate(rows[0]["data"])
+            row = rows[0]
+            payload = SignalsGroupResponse.model_validate(row["data"])
+            stamp = _iso_epoch(row.get("computed_at"))
+            if stamp is None:
+                expires = _iso_epoch(row.get("expires_at"))
+                if expires is None:
+                    logger.warning(
+                        "Signals Tier-2 row has no readable computed_at or expires_at — "
+                        "treated as a miss"
+                    )
+                    return None
+                stamp = expires - _SIGNALS_SUPABASE_TTL_HOURS * 3600
+                logger.warning(
+                    "Signals Tier-2 row has no readable computed_at — dated from expires_at"
+                )
+            return payload, stamp
         except ValidationError as exc:
             # A row that no longer matches the schema is likely real corruption / a
             # schema drift — surface at ERROR (not the transient-failure WARNING) so
@@ -1635,17 +1966,20 @@ class SignalsService:
             )
             return None
 
-    def _write_supabase_cache(self, result: SignalsGroupResponse) -> None:
-        """Best-effort write-through; a failure only warns (in-mem tier still serves)."""
+    def _write_supabase_cache(self, result: SignalsGroupResponse, computed_at: float) -> None:
+        """Best-effort write-through; a failure only warns (in-mem tier still serves).
+
+        ``computed_at`` is the build's own stamp — the same float memory holds — so a
+        restart or a second process reads back exactly the content age this process has."""
         try:
             sb = get_supabase()
-            now = datetime.now(timezone.utc)
-            expires = now + timedelta(hours=_SIGNALS_SUPABASE_TTL_HOURS)
+            computed = datetime.fromtimestamp(computed_at, timezone.utc)
+            expires = computed + timedelta(hours=_SIGNALS_SUPABASE_TTL_HOURS)
             sb.table(_SIGNALS_TABLE).upsert(
                 {
                     "cache_key": _SIGNALS_CACHE_KEY,
                     "data": json.loads(result.model_dump_json()),
-                    "computed_at": now.isoformat(),
+                    "computed_at": computed.isoformat(),
                     "expires_at": expires.isoformat(),
                 },
                 on_conflict="cache_key",
@@ -1661,8 +1995,9 @@ class SignalsService:
         self, kind: str, ticker: str
     ) -> SignalTickerDetailResponse:
         """WHO bought/added `ticker` behind the whale/congress/ceo signal, WHEN, HOW
-        MUCH. Cache-aside (10 min) + in-flight dedup. Never raises: any failure
-        degrades to an empty holder list (iOS shows an honest empty state)."""
+        MUCH. Cache-aside (10 min) + in-flight dedup. A build failure raises
+        ``SignalDetailUnavailable`` (uncached, so the next tap retries; joiners get the
+        same error) — never an empty holder list, which iOS shows as "nobody bought it"."""
         kind = (kind or "").strip().lower()
         sym = _canonical_symbol(ticker)
         key = f"{kind}:{sym}"
@@ -1681,13 +2016,13 @@ class SignalsService:
         try:
             try:
                 result = await self._build_ticker_detail(kind, sym)
-                self._detail_cache[key] = (time.time(), result)
-            except Exception as exc:  # noqa: BLE001 — drill-down must never 500 the screen
+            except Exception as exc:  # noqa: BLE001 — typed for the endpoint's 503
                 logger.warning(
                     "Signal detail %s/%s failed: %s: %s",
                     kind, sym, type(exc).__name__, exc,
                 )
-                result = SignalTickerDetailResponse(symbol=sym, kind=kind)
+                raise SignalDetailUnavailable(kind, sym) from exc
+            self._detail_cache[key] = (time.time(), result)
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1696,6 +2031,18 @@ class SignalsService:
             raise
         finally:
             self._detail_inflight.pop(key, None)
+
+    def _card_content_time(self) -> datetime:
+        """When the signal cards in memory were built (their content stamp), or now when
+        there is no usable copy — the anchor every drill-down windows on."""
+        entry = self._cache.get(_SIGNALS_CACHE_KEY)
+        now = time.time()
+        if entry is not None and (
+            -_SIGNALS_FUTURE_STAMP_TOLERANCE_SECONDS < now - entry[0]
+            < _SIGNALS_STALE_SERVE_CEILING_SECONDS
+        ):
+            return datetime.fromtimestamp(entry[0], timezone.utc)
+        return datetime.fromtimestamp(now, timezone.utc)
 
     async def _build_ticker_detail(
         self, kind: str, sym: str
@@ -1717,12 +2064,19 @@ class SignalsService:
                 "Signal detail profile %s failed: %s: %s", sym, type(exc).__name__, exc
             )
 
+        # Every list is windowed on the moment the CARD on screen was built, not the tap: the
+        # card can be ~12 h old (up to 24 h while held), and re-windowing at the tap let a
+        # "2 members buying" row open onto members aged out of the 30 days — or a 13F quarter
+        # flip — in between.
+        anchor = self._card_content_time()
         if kind == "whale":
-            holders, as_of = await asyncio.to_thread(self._detail_whale_rows, sym)
+            holders, as_of = await asyncio.to_thread(self._detail_whale_rows, sym, now=anchor)
         elif kind == "congress":
-            holders, as_of = await self._detail_congress_rows(sym)
+            holders, as_of = await self._detail_congress_rows(sym, now=anchor)
         elif kind == "ceo":
-            holders, as_of = await self._detail_ceo_rows(sym, ref_price=price, market_cap=market_cap)
+            holders, as_of = await self._detail_ceo_rows(
+                sym, ref_price=price, market_cap=market_cap, now=anchor
+            )
         else:
             holders, as_of = [], None
 
@@ -1830,8 +2184,8 @@ class SignalsService:
             return rows[:_DETAIL_ROWS], as_of
         except Exception as exc:  # noqa: BLE001
             # RE-RAISE (don't swallow to []): a Supabase failure must propagate so
-            # get_ticker_detail returns an UNCACHED empty response and the next tap
-            # retries — swallowing to [] here would pin an empty screen for the 10-min
+            # get_ticker_detail raises SignalDetailUnavailable (uncached → a 503 the app
+            # offers Retry on) and the next tap retries — swallowing to [] here would pin an empty screen for the 10-min
             # cache TTL even after Supabase recovers. A genuine "no funds adding"
             # returns [] normally above (and is legitimately cached).
             logger.warning(
@@ -1840,15 +2194,15 @@ class SignalsService:
             raise
 
     async def _detail_congress_rows(
-        self, sym: str
+        self, sym: str, *, now: Optional[datetime] = None
     ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
         """Members who bought this ticker — SAME FMP feed + 30d disclosure window as
         the card. ONE row per DISTINCT MEMBER (so the count matches the card's
         "N members buying"), showing their most recent filing. Tappable only for
         the ~8 politicians in our registry."""
         senate, house = await asyncio.gather(
-            self.fmp.get_senate_latest(1000),
-            self.fmp.get_house_latest(1000),
+            self.fmp.get_senate_latest(_CONGRESS_FEED_ROWS),
+            self.fmp.get_house_latest(_CONGRESS_FEED_ROWS),
             return_exceptions=True,
         )
         # This list must match the card's distinct-member count. A truncated feed
@@ -1863,77 +2217,63 @@ class SignalsService:
                 )
                 # RAISE, not `return [], None`: get_ticker_detail caches a normal
                 # return for the 10-min TTL, so a transient FMP failure would pin
-                # "no members bought" on screen. Raising yields an UNCACHED empty
-                # response and the next tap retries (same contract as whale / ceo).
+                # "no members bought" on screen. Raising yields an uncached
+                # SignalDetailUnavailable (a 503 with Retry) and the next tap retries
+                # (same contract as whale / ceo).
                 raise res
         reg = await asyncio.to_thread(self._congress_registry_map)
-        now = datetime.now(timezone.utc)
+        now = now if now is not None else datetime.now(timezone.utc)
 
-        # Keep the most-recent-disclosure row PER MEMBER (chamber+identity) — mirrors
-        # the card's distinct-member count, so the drill-down never shows a member twice.
-        best: Dict[Tuple[str, str], Tuple[str, SignalHolderResponse]] = {}
-        for chamber, trades in (("senate", senate), ("house", house)):
-            if not isinstance(trades, list):
+        # The card's own rows (`_congress_buy_rows`: purchases only, same window, same
+        # undated-row rule, same member key), narrowed to this ticker — then ONE row per
+        # member, their most recent filing. So the list length IS the card's "N members".
+        best: Dict[str, _CongressBuy] = {}
+        for buy in _congress_buy_rows(senate, house, now=now):
+            if buy.symbol != sym:
                 continue
-            for row in trades:
-                if not isinstance(row, dict):
-                    continue
-                if _canonical_symbol(row.get("symbol")) != sym:
-                    continue
-                ttype = (row.get("type") or "").lower()
-                if not ("purchase" in ttype or "buy" in ttype or "exchange" in ttype):
-                    continue
-                dstr = str(
-                    row.get("disclosureDate") or row.get("dateReceived")
-                    or row.get("date") or row.get("transactionDate") or ""
-                )[:10]
-                dobj = _parse_iso_date(dstr)
-                if dobj is not None and not (-2 <= (now - dobj).days <= _CONGRESS_WINDOW_DAYS):
-                    continue
-                member = _congress_member_key(row, chamber)
-                if not member:
-                    continue
-                mkey = (chamber, member)
-                prev = best.get(mkey)
-                if prev is not None and dstr <= prev[0]:
-                    continue  # keep the member's most recent filing (first-seen on ties)
-                first = (row.get("firstName") or row.get("first_name") or "").strip()
-                last = (row.get("lastName") or row.get("last_name") or "").strip()
-                name = (f"{first} {last}".strip()) or (row.get("office") or "").strip()
-                if not name:
-                    continue
-                tdate = str(row.get("transactionDate") or "")[:10]
-                low, high = parse_congress_amount_bounds(row.get("amount") or "")
-                amount_range = format_amount_range(low, high) if (low or high) else None
-                best[mkey] = (dstr, SignalHolderResponse(
-                    whale_id=reg.get((chamber, _norm_name(name))),
-                    name=name,
-                    subtitle=_congress_role((row.get("district") or "").strip(), chamber),
-                    transaction_date=tdate or None,
-                    disclosure_date=dstr or None,
-                    amount_range=amount_range,
-                    owner=((row.get("owner") or "").strip() or None),
-                    action="BOUGHT",
-                ))
+            prev = best.get(buy.member)
+            if prev is not None and buy.disclosure <= prev.disclosure:
+                continue  # keep the member's most recent filing (first-seen on ties)
+            best[buy.member] = buy
 
-        entries = [row for _, row in best.values()]
+        entries: List[SignalHolderResponse] = []
+        for buy in best.values():
+            row = buy.row
+            tdate = str(row.get("transactionDate") or "")[:10]
+            low, high = parse_congress_amount_bounds(row.get("amount") or "")
+            amount_range = format_amount_range(low, high) if (low or high) else None
+            entries.append(SignalHolderResponse(
+                whale_id=reg.get((buy.chamber, _norm_name(buy.name))),
+                name=buy.name,
+                subtitle=_congress_role(str(row.get("district") or "").strip(), buy.chamber),
+                transaction_date=tdate or None,
+                disclosure_date=buy.disclosure or None,
+                amount_range=amount_range,
+                owner=(str(row.get("owner") or "").strip() or None),
+                action="BOUGHT",
+            ))
         entries.sort(key=lambda r: (r.disclosure_date or ""), reverse=True)
         as_of = max((r.disclosure_date for r in entries if r.disclosure_date), default=None)
         return entries[:_DETAIL_ROWS], as_of
 
     async def _detail_ceo_rows(
-        self, sym: str, *, ref_price: Optional[float] = None, market_cap: Optional[float] = None
+        self,
+        sym: str,
+        *,
+        ref_price: Optional[float] = None,
+        market_cap: Optional[float] = None,
+        now: Optional[datetime] = None,
     ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
         """The CEO purchases behind this ticker's CEO Buys row — the SAME filters and
         price band as the card, so the rows add up to the card's dollar figure. One row
         per (CEO, trade day), summed across that day's fills.
 
         No try/except on purpose (the same contract as the whale and congress branches):
-        an FMP failure must propagate so ``get_ticker_detail`` returns an UNCACHED empty
-        response and the next tap retries. A genuine "no CEO buys" returns ``[]`` and is
-        legitimately cached.
+        an FMP failure must propagate so ``get_ticker_detail`` raises an uncached
+        ``SignalDetailUnavailable`` (a 503 with Retry) and the next tap retries. A genuine
+        "no CEO buys" returns ``[]`` and is legitimately cached.
         """
-        now = datetime.now(timezone.utc)
+        now = now if now is not None else datetime.now(timezone.utc)
         since = (now - timedelta(days=_CEO_WINDOW_DAYS)).strftime("%Y-%m-%d")
         rows = await self.fmp.get_insider_trades_since(
             since,

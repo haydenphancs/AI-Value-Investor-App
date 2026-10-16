@@ -5,8 +5,8 @@
 //  ViewModel for the redesigned Home dashboard — MVVM + Repository.
 //
 //  Owns data fetching via `HomeRepositoryProtocol` and exposes view-ready state.
-//  Defaults to `MockHomeRepository` (UI only, no backend) but accepts any
-//  conforming repository via init for testing / a future live implementation.
+//  Defaults to the live `HomeRepository` (`GET /home/dashboard`) but accepts any
+//  conforming repository via init — `MockHomeRepository` for previews / tests.
 //  Matches the codebase convention: `ObservableObject` + `@Published`, with
 //  boolean loading / error flags (see HomeViewModel).
 //
@@ -81,10 +81,10 @@ final class HomeDashboardViewModel: ObservableObject {
     /// with no isolated initializer. Same lever as `APIConfig.researchPollInterval`.
     nonisolated static let stalenessWindow: TimeInterval = 60
 
-    /// Poll cadence. Deliberately shorter than `stalenessWindow` so the
-    /// market-status header (recomputed fresh on every backend request, never
-    /// cached) flips within a minute of an open/close boundary, while the tile
-    /// prices still cost at most one upstream fan-out per 5 minutes.
+    /// Poll cadence — the same 60 s as `stalenessWindow` and the backend's pulse cache, so
+    /// the market-status header (recomputed fresh on every backend request, never cached)
+    /// flips within a minute of an open/close boundary, while the tile prices still cost
+    /// at most one upstream fan-out per cache life: a request inside it is served from it.
     private static let refreshInterval: UInt64 = 60_000_000_000  // 60s
 
     deinit {
@@ -299,9 +299,9 @@ final class HomeDashboardViewModel: ObservableObject {
     ///
     /// `loadIfStale()` cannot serve this. It is keyed on AGE, and the data is not old, it
     /// belongs to somebody else: a load made as a guest stamps `lastLoadedAt` like any other,
-    /// so signing in left the guest's watchlist on screen for up to 5 minutes. In the sign-out
-    /// direction it is worse — the next person to open the app would see the previous
-    /// account's watchlist and holdings.
+    /// so signing in left the guest's watchlist on screen for the whole staleness window. In
+    /// the sign-out direction it is worse — the next person to open the app would see the
+    /// previous account's watchlist and holdings.
     ///
     /// Clearing before the fetch is deliberate: the reload can be slow or fail, and stale
     /// account data must not sit on screen while it does.
@@ -312,6 +312,14 @@ final class HomeDashboardViewModel: ObservableObject {
         data = nil
         snapshotSavedAt = nil
         lastLoadedAt = nil
+        // Fence off a load still in flight from the PREVIOUS identity. It keeps running, but
+        // `performLoad` drops its answer (the generation moved), and with the registration
+        // cleared the new identity starts its own load instead of joining that one — joining
+        // painted the previous account's dashboard, unlocked signal tickers included, for the
+        // next user until the 60 s poll replaced it.
+        loadGeneration &+= 1
+        loadTask = nil
+        loadTaskID = nil
         errorMessage = nil
         // The previous identity's fast retry must not fire into the new one, and the new
         // identity gets its own first load: a full retry budget and, with no snapshot, the
@@ -346,6 +354,17 @@ final class HomeDashboardViewModel: ObservableObject {
     /// `/home/dashboard` three times.
     private var loadTask: Task<Void, Never>?
 
+    /// Which registration `loadTask` is. A task clears `loadTask` only while it is still the
+    /// registered one: `handleIdentityChange` drops the previous identity's task and a new
+    /// load registers, so the old task finishing later must not unregister the new one (the
+    /// next trigger would then start a duplicate load instead of joining).
+    private var loadTaskID: UUID?
+
+    /// Bumped by `handleIdentityChange`. `performLoad` captures it before the request and
+    /// drops an answer that comes back under a different value: that answer was fetched with
+    /// the PREVIOUS identity's token, and the previous account's dashboard must never land.
+    private var loadGeneration = 0
+
     /// A watchlist row was added or removed elsewhere (a detail-screen star, Tracking,
     /// Updates). Visible tab → reload ORDERED BEHIND any load already running: `load()`
     /// joins a running load, and one started before the write (the 60 s tick keeps them
@@ -368,6 +387,7 @@ final class HomeDashboardViewModel: ObservableObject {
             await running.value
             return
         }
+        let id = UUID()
         let task = Task { [weak self] in
             guard let self else { return }
             await self.performLoad()
@@ -375,12 +395,19 @@ final class HomeDashboardViewModel: ObservableObject {
             // task.value` below. Between a task finishing and its awaiting caller
             // being resumed, a THIRD caller can run and observe a completed-but-still
             // -registered task: it would "join" something already done and return
-            // instantly without ever loading. That is a silently skipped refresh —
-            // and for `handleIdentityChange` it would mean adopting a load that
-            // completed under the PREVIOUS identity.
-            self.loadTask = nil
+            // instantly without ever loading. That is a silently skipped refresh.
+            //
+            // Only while this task is still the registered one: `handleIdentityChange`
+            // unregisters the previous identity's task, and a load registered since then
+            // belongs to the new identity — clearing it would let the next trigger start
+            // a duplicate instead of joining.
+            if self.loadTaskID == id {
+                self.loadTask = nil
+                self.loadTaskID = nil
+            }
         }
         loadTask = task
+        loadTaskID = id
         await task.value
     }
 
@@ -390,6 +417,9 @@ final class HomeDashboardViewModel: ObservableObject {
         // Captured BEFORE the request. If the account changes while it is in flight, the store
         // has moved on and refuses to save this answer under the next owner.
         let snapshotEpoch = snapshotStore.epoch
+        // Same instant, for the screen: an answer that returns after `handleIdentityChange`
+        // belongs to the previous identity and is dropped below without touching any state.
+        let generation = loadGeneration
 
         // THREE outcomes, not two — decided from the OUTCOME of the request, never from a
         // pre-flight read of `auth.status`.
@@ -411,6 +441,13 @@ final class HomeDashboardViewModel: ObservableObject {
         // APIClient's own answer to "is a token armed?"; asking anything else is a guess.
         do {
             let fetched = try await repository.fetchHomeDashboard()
+            // The identity changed while this was in flight: not `data`, not the flags, not
+            // the trailing `isLoading` / `hasAttemptedLoad` — the new identity's load owns all
+            // of them. (The snapshot save is fenced separately, on `snapshotEpoch`.)
+            guard generation == loadGeneration else {
+                Self.log.info("home: dropped a dashboard answer fetched under the previous identity")
+                return
+            }
             data = fetched.data
             snapshotSavedAt = nil
             lastLoadedAt = Date()
@@ -425,6 +462,9 @@ final class HomeDashboardViewModel: ObservableObject {
             // (after an identity change) gets the full budget again.
             cancelFirstLoadRetry(resetBudget: true)
         } catch {
+            // Same fence: the previous identity's failure (or refusal) must not raise the
+            // banner, the account gate or a fast retry over the new identity's screen.
+            guard generation == loadGeneration else { return }
             // Route through AppError like every other surface — a single
             // hardcoded string can't tell "you're offline" from "you're signed
             // out" from "we're rate-limited", and the user gets no actionable
@@ -467,8 +507,16 @@ final class HomeDashboardViewModel: ObservableObject {
         hasAttemptedLoad = true
     }
 
-    /// Pull-to-refresh — always re-fetches, regardless of staleness.
+    /// Pull-to-refresh, and the post-purchase reload (`entitlementGeneration`) — always
+    /// re-fetches, regardless of staleness.
+    ///
+    /// Ordered BEHIND a running load, never joined, exactly like `reloadForWatchlistChange`:
+    /// a poll already in flight was sent before the purchase (or before the pull), and
+    /// joining it handed back the pre-upgrade dashboard — signals still locked after paying.
     func refresh() async {
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+        }
         await load()
     }
 
@@ -483,7 +531,7 @@ final class HomeDashboardViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Self.refreshInterval)
                 guard !Task.isCancelled, let self else { break }
-                // Cheap when nothing has aged out: the backend's 5-minute pulse
+                // Cheap when nothing has aged out: the backend's 60 s pulse
                 // cache absorbs it, and the market-status header is recomputed
                 // fresh server-side on every request.
                 await self.load()

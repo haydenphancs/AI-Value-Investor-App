@@ -60,6 +60,7 @@ _EXPECTED_KINDS = {
     "plan_period": KIND_GRANT,  # one allocation per Apple paid period (migration 196)
     "plan_reinstated": KIND_GRANT,  # a refunded period back after REFUND_REVERSED (196)
     "tester_grant": KIND_GRANT,
+    "feedback_reward": KIND_GRANT,  # a confirmed issue report, granted by hand (migration 199)
     "tier_revoked": KIND_REVOKE,
     "monthly_expired": KIND_EXPIRE,  # ensure_credit_period's expiry row (migration 194)
     "pack_purchase": KIND_PURCHASE,
@@ -252,6 +253,25 @@ def test_a_pack_purchase_states_the_compliance_fact():
     assert _pool_note(0, 540, KIND_PURCHASE) == "Never expires"
 
 
+def test_a_grant_into_the_purchased_pool_says_it_never_expires():
+    """`feedback_reward` / `tester_grant` land wholly in the never-expiring pool. "20 purchased"
+    would tell the user they bought credits they were given."""
+    assert _pool_note(0, 20, KIND_GRANT) == "Never expires"
+    assert _pool_note(0, 1000, KIND_GRANT) == "Never expires"
+
+
+def test_a_granted_pool_grant_still_says_nothing():
+    """The monthly grants move only the granted pool: still silent, so the new branch did not
+    start labelling every monthly allocation."""
+    assert _pool_note(50, 0, KIND_GRANT) is None
+
+
+def test_a_purchased_only_movement_that_is_not_a_grant_is_still_named():
+    """Anti-vacuity for the branch above: it is keyed on the KIND, not on the split alone."""
+    assert _pool_note(0, -20, KIND_SPEND) == "20 purchased"
+    assert _pool_note(0, -20, KIND_REVOKE) == "20 purchased"
+
+
 @pytest.mark.parametrize("bad", ["x", None, [], {}])
 def test_pool_note_survives_junk_deltas(bad):
     assert _pool_note(bad, bad, KIND_SPEND) is None
@@ -353,3 +373,29 @@ def test_the_expire_kind_is_listed_on_the_wire_description():
 
     description = CreditTransactionResponse.model_fields["kind"].description or ""
     assert "expire" in {k.strip() for k in description.split("|")}
+
+
+# ── migration 199: the issue report reward ───────────────────────────────────────────
+
+
+def test_the_issue_report_reward_reads_as_a_grant():
+    from app.services.credit_history_service import _REF_NONE
+
+    assert describe_reason("feedback_reward") == (KIND_GRANT, "Issue report reward", _REF_NONE)
+
+
+@pytest.mark.parametrize("ref_id", ["R-7K2Q9M", "R-ABCDEF", "AAPL", None])
+def test_a_reward_row_renders_as_a_never_expiring_grant_without_its_ref(ref_id):
+    """grant_feedback_reward writes granted_delta 0, purchased_delta = delta, ref_id = the report
+    code. The code is the owner's idempotency key: it must never be rendered at the user — not
+    even one that happens to look like a ticker ("R-ABCDEF" would pass the symbol pattern)."""
+    row = {"id": 77, "delta": 20, "granted_delta": 0, "purchased_delta": 20,
+           "reason": "feedback_reward", "ref_id": ref_id}
+    described = describe_transaction(row)
+    assert described.kind == KIND_GRANT
+    assert described.delta == 20
+    assert described.title == "Issue report reward"
+    assert described.subtitle is None
+    assert described.pool_note == "Never expires"
+    if ref_id:
+        assert ref_id not in described.title + (described.subtitle or "") + (described.pool_note or "")

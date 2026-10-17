@@ -2,7 +2,7 @@
 //  AppInfo.swift
 //  ios
 //
-//  Build and device facts, in ONE place, plus the support address.
+//  Build and device facts, in ONE place, plus the support address and the feedback report code.
 //
 //  WHY THIS EXISTS
 //  ---------------
@@ -127,6 +127,23 @@ enum AppInfo {
         return identifier.isEmpty ? UIDevice.current.model : identifier
     }
 
+    /// The report code's alphabet: no 0/O and no 1/I/L, so a code retyped from an email or
+    /// read aloud cannot turn into a different one. Must match `REPORT_CODE_ALPHABET` in
+    /// `backend/scripts/grant_feedback_reward.py`, which normalises the code the owner types.
+    private static let reportCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+    /// A short code naming ONE report ("R-7K2Q9M").
+    ///
+    /// It is the `--ref` the owner passes to `grant_feedback_reward.py` after confirming the
+    /// issue, and the database refuses a second reward for the same account and code — so a
+    /// report forwarded twice cannot be credited twice. Random rather than sequential, so it says
+    /// nothing about how many reports exist. It is not a secret and proves nothing on its own:
+    /// granting stays a manual decision, and the code only makes that decision idempotent.
+    static func newReportCode() -> String {
+        let alphabet = Array(reportCodeAlphabet)
+        return "R-" + String((0..<6).compactMap { _ in alphabet.randomElement() })
+    }
+
     /// The block appended to a support report.
     ///
     /// Deliberately plain text and deliberately **visible in the composer** — the user reads it,
@@ -134,15 +151,39 @@ enum AppInfo {
     /// silently, and app version / device type are already disclosed in the privacy policy's
     /// "Device information" bullet.
     ///
+    /// `reportCode` and `accountId` are what let a confirmed report be credited: the code names
+    /// the report and the account ID names who to credit. The email's sender cannot do that job —
+    /// it is often a Hide My Email relay that matches no account. `Account ID` is written only
+    /// when there IS an account, never as a blank line for a guest. With both nil the block is
+    /// exactly what it always was.
+    ///
+    /// No reward wording in here, on purpose: this block is also sent from the path that starts
+    /// at the "Rate Caydex" prompt, where the reward must never be mentioned. FeedbackView's
+    /// caption carries that explanation on the paths where it applies.
+    ///
     /// Takes its state as parameters rather than reaching for `AppState`: this is a `Core`
     /// utility, and `.claude/rules/ios-swiftui.md` keeps global state injected, not looked up.
-    static func diagnosticsBlock(tier: String, isSignedIn: Bool) -> String {
-        """
-        ---
-        Please keep the details below — they tell us exactly which build to look at.
-        App: Caydex \(appVersion) (\(buildNumber))
-        Device: \(deviceModel), \(osVersion)
-        Account: \(isSignedIn ? "signed in" : "signed out") · \(tier)
-        """
+    static func diagnosticsBlock(
+        tier: String,
+        isSignedIn: Bool,
+        accountId: String? = nil,
+        reportCode: String? = nil
+    ) -> String {
+        var lines = [
+            "---",
+            "Please keep the details below — they tell us exactly which build to look at."
+        ]
+        if let reportCode {
+            lines.append("Report: \(reportCode)")
+        }
+        lines += [
+            "App: Caydex \(appVersion) (\(buildNumber))",
+            "Device: \(deviceModel), \(osVersion)",
+            "Account: \(isSignedIn ? "signed in" : "signed out") · \(tier)"
+        ]
+        if let accountId {
+            lines.append("Account ID: \(accountId)")
+        }
+        return lines.joined(separator: "\n")
     }
 }

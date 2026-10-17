@@ -2156,6 +2156,28 @@ expression is written out, and must stay that way.)*
 > `ref_id` NULL so no refund can ever pair with it) before the reset row; the history shows it as
 > "Unused monthly credits expired". Migration 196 builds on 194's body and keeps that row.
 
+> **Migration 199 adds a third function that writes the purchased pool** (2026-10-17). Until then
+> `add_purchased_credits` (a verified consumable purchase) raised `purchased_total` and
+> `revoke_purchased_credits` (an Apple refund) lowered it. `grant_feedback_reward` raises it for a
+> Help Us Improve report the owner has confirmed by hand ("Report an issue · earn free credits").
+> - **Manual only.** Its one caller is `scripts/grant_feedback_reward.py`, and only with `--apply`
+>   (the default is a dry run that makes no call). Nothing in `app/` or the iOS app calls it, and
+>   EXECUTE is granted to `service_role` alone. The app promises credits only for an issue the owner
+>   has confirmed, so a grant that fired on its own would make that copy false.
+> - **Idempotent per `(user_id, ref_id)`**, where `ref_id` is the report code from the email. The
+>   replay lookup runs under the balance row's `FOR UPDATE` lock (taken by `ensure_credit_period`),
+>   so two concurrent grants of one report serialise. A partial unique index on
+>   `credit_transactions (user_id, ref_id) WHERE reason = 'feedback_reward'` is the second line of
+>   defence. A repeat returns `replay` and changes nothing.
+> - **One `feedback_reward` ledger row** (`granted_delta` 0, `purchased_delta` N), which Credit
+>   History shows as "Issue report reward". **No `credit_purchases` row**: a reward is not revenue.
+> - The purchased pool, not the granted one, because `ensure_credit_period` overwrites the granted
+>   pool at every reset. A reward therefore never expires.
+>
+> `scripts/seed_testflight_testers.py` also writes `purchased_total`, by an unlocked
+> read-then-overwrite, so a grant that lands between its read and its write is lost. Never run the
+> two at the same time. Source: `database/migrations/199_feedback_reward_credits.sql`.
+
 ### 9b.2 Spend order and refund order are not inverses
 
 Migration **118** teaches `spend_credits` / `refund_credits` about both pools.

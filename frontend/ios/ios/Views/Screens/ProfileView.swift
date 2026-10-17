@@ -604,13 +604,18 @@ struct ProfileView: View {
                 // Was a bare `mailto:` with a fixed subject and no body: it did nothing at all
                 // on a device with no mail client, and where it did work it dropped the user
                 // into an empty compose window, so the reports that arrived were untriageable.
+                //
+                // An account holder sees the reward on the row (gift icon, "earn free credits");
+                // a guest keeps the plain row, since credits can only be added to an account.
+                // The screen itself says a report is reviewed first — nothing is automatic.
                 NavigationLink {
                     FeedbackView()
                 } label: {
                     ProfileSettingsRowContent(
-                        icon: "bubble.left.and.bubble.right.fill",
-                        iconColor: AppColors.textSecondary,
-                        title: "Help Us Improve"
+                        icon: canEarnFeedbackReward ? "gift.fill" : "bubble.left.and.bubble.right.fill",
+                        iconColor: canEarnFeedbackReward ? AppColors.gain : AppColors.textSecondary,
+                        title: "Help Us Improve",
+                        subtitle: canEarnFeedbackReward ? FeedbackRewardCopy.rowSubtitle : nil
                     )
                 }
             }
@@ -764,6 +769,13 @@ struct ProfileView: View {
         if viewModel.creditUsagePercent > 0.9 { return AppColors.bearish }
         if viewModel.creditUsagePercent > 0.7 { return AppColors.neutral }
         return AppColors.primaryBlue
+    }
+
+    /// Whether the Help Us Improve row advertises the feedback reward — the Sign Out section's
+    /// gate. Restoring counts: a reconnecting user still has an account (`.claude/rules/auth.md`
+    /// §5 — not a guest). FeedbackView decides for itself from the profile it would credit.
+    private var canEarnFeedbackReward: Bool {
+        viewModel.isAuthenticated || viewModel.isRestoring
     }
 
     // Both come from `AppInfo`, not a local copy: these were byte-identical in two screens

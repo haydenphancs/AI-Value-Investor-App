@@ -15,7 +15,8 @@ Migration 118 then taught `spend_credits` / `refund_credits` about both pools.
 These tests MODEL THE SQL rather than stub it, in the same spirit as
 `test_iap_entitlement.FakeSupabase`: a fake that returns bland success for every RPC makes a
 credit test pass no matter what the balance does, which is exactly how a money bug survives a
-green suite. **If you change the SQL in 100/112/114/117/118/196, change `_Credits` below.**
+green suite. **If you change the SQL in 100/112/114/117/118/196/198/199, change `_Credits`
+below.**
 
 The weight here is on the ways this goes wrong:
   * a purchased balance surviving every granted-pool mutation (the 3.1.1 property),
@@ -43,6 +44,9 @@ _ENTITLING = frozenset({"active", "grace_period", "billing_retry"})
 _ET = ZoneInfo("America/New_York")
 _USER_IDS = itertools.count(1)
 _PERIOD_IDS = itertools.count(1)   # subscription_credit_periods.id
+# migration 199: grant_feedback_reward's guest sentinel and `_MAX`.
+_GUEST_USER_ID = "00000000-0000-4000-8000-00000000dead"
+_FEEDBACK_REWARD_MAX = 200
 
 
 def _minus_one_month(ts: datetime) -> datetime:
@@ -79,6 +83,9 @@ class _Credits:
     upserts one lineage's row. `register` models `subscription_transactions` (share one dict
     like `periods`), and the three keyed RPCs are `record_subscription_transaction`,
     `revoke_paid_period` and `reinstate_paid_carry`.
+
+    Migration 199 adds `grant_feedback_reward`, the owner's manual reward for a confirmed
+    issue report: the purchased pool, once per (user, report code).
     """
 
     def __init__(self, total=0, used=0, purchased_total=0, purchased_used=0, tier="free",
@@ -667,6 +674,31 @@ class _Credits:
         if delta:
             self._ledger(delta, 0, delta, "pack_revoked", txn)
         return {"outcome": "revoked", "spendable": self.spendable, "reclaimed": -delta}
+
+    # ── migration 199 ───────────────────────────────────────────────────────
+    def grant_feedback_reward(self, credits, ref_id, *, user_id="self", user_exists=True) -> dict:
+        """Check for check in 199's order. `user_id` "self" is this account; pass None or the
+        guest sentinel to model those callers, and `user_exists=False` for an id with no
+        `public.users` row. No credit_purchases row: a reward is not revenue."""
+        if user_id is None or user_id == _GUEST_USER_ID:
+            return {"outcome": "invalid", "reason": "guest_or_null_user"}
+        if credits is None or credits < 1 or credits > _FEEDBACK_REWARD_MAX:
+            return {"outcome": "invalid", "reason": "credits_out_of_range"}
+        ref = (ref_id or "").strip(" ") or None    # NULLIF(btrim(p_ref_id), ''): spaces only
+        if ref is None or len(ref) > 64:
+            return {"outcome": "invalid", "reason": "bad_ref"}
+        if not user_exists:
+            return {"outcome": "invalid", "reason": "unknown_user"}
+        # The lock (and any due roll) comes BEFORE the replay lookup, as in the SQL.
+        self.ensure_credit_period()
+        prior = next((r for r in self.ledger
+                      if r["reason"] == "feedback_reward" and r["ref_id"] == ref), None)
+        if prior is not None:
+            return {"outcome": "replay", "credits": prior["delta"], "spendable": self.spendable}
+        self.purchased_total += credits
+        self._check()
+        self._ledger(credits, 0, credits, "feedback_reward", ref)
+        return {"outcome": "granted", "credits": credits, "spendable": self.spendable}
 
 
 # ── The 3.1.1 property: purchased credits survive every granted-pool mutation ──────────────
@@ -1582,3 +1614,174 @@ def test_an_expiry_row_can_never_be_paired_by_a_refund():
     for ref in (None, "", "2026-10"):
         c.refund_credits(30, ref_id=ref)
     assert expiry["id"] not in {r["reverses_id"] for r in c.ledger if r["reverses_id"]}
+
+
+# ── Migration 199: the issue report reward (manual-only, purchased pool) ───────────────
+#
+# The owner grants it by hand after confirming a report (scripts/grant_feedback_reward.py
+# --apply). It lands in the PURCHASED pool because ensure_credit_period overwrites the granted
+# one at every reset — a reward parked there would vanish before the user saw it.
+
+
+def _rewards(c: _Credits) -> list[dict]:
+    return [r for r in c.ledger if r["reason"] == "feedback_reward"]
+
+
+def test_a_reward_survives_the_monthly_reset():
+    c = _Credits(total=50, used=50, tier="free")
+    assert c.grant_feedback_reward(20, "R-7K2Q9M")["outcome"] == "granted"
+    assert (c.purchased_total, c.remaining) == (20, 0)
+
+    c.period_due = True
+    c.ensure_credit_period()
+    assert c.remaining == 50, "the granted pool refilled"
+    assert c.purchased_remaining == 20, "the reward was wiped by the reset"
+    assert c.spendable == 70
+
+
+def test_the_same_report_twice_is_a_replay_with_one_ledger_row():
+    c = _Credits(total=50, used=10, tier="free")
+    first = c.grant_feedback_reward(20, "R-7K2Q9M")
+    before = (c.total, c.used, c.purchased_total, c.purchased_used, len(c.ledger))
+
+    again = c.grant_feedback_reward(20, "R-7K2Q9M")
+    assert first["outcome"] == "granted"
+    assert again == {"outcome": "replay", "credits": 20, "spendable": c.spendable}
+    assert (c.total, c.used, c.purchased_total, c.purchased_used, len(c.ledger)) == before
+    assert len(_rewards(c)) == 1
+
+
+def test_a_replay_is_keyed_on_the_report_not_on_the_amount():
+    """A second --apply with a different --credits for the SAME report must not top it up: the
+    report was rewarded once, at whatever was granted first."""
+    c = _Credits(total=50, tier="free")
+    c.grant_feedback_reward(20, "R-7K2Q9M")
+    out = c.grant_feedback_reward(40, "R-7K2Q9M")
+    assert out["outcome"] == "replay" and out["credits"] == 20
+    assert c.purchased_total == 20
+
+
+def test_a_padded_report_code_is_the_same_key():
+    """btrim in the SQL: a code pasted with spaces must not be a second key for one report."""
+    c = _Credits(total=50, tier="free")
+    c.grant_feedback_reward(20, "R-7K2Q9M")
+    assert c.grant_feedback_reward(20, "  R-7K2Q9M ")["outcome"] == "replay"
+    assert len(_rewards(c)) == 1
+
+
+def test_a_different_report_grants_again():
+    c = _Credits(total=50, tier="free")
+    assert c.grant_feedback_reward(20, "R-7K2Q9M")["outcome"] == "granted"
+    assert c.grant_feedback_reward(20, "R-ABC234")["outcome"] == "granted"
+    assert c.purchased_total == 40
+    assert [r["ref_id"] for r in _rewards(c)] == ["R-7K2Q9M", "R-ABC234"]
+
+
+def test_one_report_code_on_two_accounts_rewards_each():
+    """The key is (user, ref): another account's reward never makes this one a replay."""
+    a, b = _Credits(total=50, tier="free"), _Credits(total=50, tier="free")
+    assert a.grant_feedback_reward(20, "R-7K2Q9M")["outcome"] == "granted"
+    assert b.grant_feedback_reward(20, "R-7K2Q9M")["outcome"] == "granted"
+
+
+def test_spending_after_a_reward_drains_the_granted_pool_first():
+    """The reward never expires, so it is the last thing a spend touches."""
+    c = _Credits(total=50, used=0, tier="free")
+    c.grant_feedback_reward(20, "R-7K2Q9M")
+    c.spend_credits(20, ref_id="AAPL:r1")
+    assert (c.used, c.purchased_used) == (20, 0)
+    c.spend_credits(40, ref_id="NVDA:r2")           # 30 granted + 10 of the reward
+    assert (c.used, c.purchased_used) == (50, 10)
+    assert c.spendable == 10
+
+
+def test_a_refund_can_never_pair_with_the_reward_row():
+    """refund_credits matches only debits (delta = -amount). The reward's delta is positive, so
+    no refund — on its report code, its amount, or anything else — can reverse it."""
+    c = _Credits(total=50, used=0, tier="free")
+    c.grant_feedback_reward(20, "R-7K2Q9M")
+    reward = _rewards(c)[0]
+    before = (c.used, c.purchased_used, c.spendable)
+    for ref in ("R-7K2Q9M", None, ""):
+        out = c.refund_credits(20, ref_id=ref)
+        assert out["refunded"] == 0, f"a refund on ref {ref!r} moved credits"
+    assert (c.used, c.purchased_used, c.spendable) == before
+    assert reward["id"] not in {r["reverses_id"] for r in c.ledger if r["reverses_id"]}
+
+
+@pytest.mark.parametrize("credits", [0, -1, -20, _FEEDBACK_REWARD_MAX + 1, 2000, None])
+def test_an_amount_outside_the_cap_is_refused_without_mutating(credits):
+    c = _Credits(total=50, used=5, purchased_total=30, purchased_used=10, tier="free")
+    before = (c.total, c.used, c.purchased_total, c.purchased_used, len(c.ledger))
+    out = c.grant_feedback_reward(credits, "R-7K2Q9M")
+    assert out == {"outcome": "invalid", "reason": "credits_out_of_range"}
+    assert (c.total, c.used, c.purchased_total, c.purchased_used, len(c.ledger)) == before
+
+
+@pytest.mark.parametrize("credits", [1, 20, _FEEDBACK_REWARD_MAX])
+def test_the_cap_is_inclusive(credits):
+    c = _Credits(total=50, tier="free")
+    assert c.grant_feedback_reward(credits, "R-7K2Q9M")["outcome"] == "granted"
+    assert c.purchased_total == credits
+
+
+@pytest.mark.parametrize("kwargs,reason", [
+    ({"user_id": None}, "guest_or_null_user"),
+    ({"user_id": _GUEST_USER_ID}, "guest_or_null_user"),
+    ({"user_exists": False}, "unknown_user"),
+])
+def test_a_guest_null_or_unknown_user_is_refused_without_mutating(kwargs, reason):
+    c = _Credits(total=50, used=5, tier="free")
+    c.period_due = True              # a refusal must come before ensure_credit_period's roll
+    before = (c.total, c.used, c.purchased_total, len(c.ledger))
+    assert c.grant_feedback_reward(20, "R-7K2Q9M", **kwargs) == {"outcome": "invalid", "reason": reason}
+    assert (c.total, c.used, c.purchased_total, len(c.ledger)) == before
+
+
+@pytest.mark.parametrize("ref", [None, "", "   ", "R" * 65])
+def test_a_blank_or_oversized_report_code_is_refused(ref):
+    c = _Credits(total=50, tier="free")
+    assert c.grant_feedback_reward(20, ref) == {"outcome": "invalid", "reason": "bad_ref"}
+    assert c.purchased_total == 0 and not c.ledger
+
+
+def test_a_64_character_ref_is_accepted():
+    c = _Credits(total=50, tier="free")
+    assert c.grant_feedback_reward(20, "R" * 64)["outcome"] == "granted"
+
+
+def test_the_reward_row_carries_an_honest_split_and_the_ledger_sums_to_the_balance():
+    """granted_delta 0, purchased_delta = delta, and SUM(delta) == spendable across a reward, a
+    spend straddling both pools, its refund, and a month roll."""
+    c = _Credits(total=0, used=0, tier="free")
+    c.period_due = True
+    c.ensure_credit_period()                         # ledgered origin: +50 monthly_reset
+    c.grant_feedback_reward(20, "R-7K2Q9M")
+    c.spend_credits(60, ref_id="AAPL:r1")            # 50 granted + 10 of the reward
+    c.refund_credits(60, ref_id="AAPL:r1")
+    c.spend_credits(30, ref_id="NVDA:r2")
+    c.period_due = True
+    c.ensure_credit_period()                         # 20 granted expire, +50
+    c.grant_feedback_reward(20, "R-7K2Q9M")          # replay: no row
+
+    reward = _rewards(c)
+    assert len(reward) == 1
+    assert (reward[0]["delta"], reward[0]["granted_delta"], reward[0]["purchased_delta"]) == (20, 0, 20)
+    assert reward[0]["ref_id"] == "R-7K2Q9M"
+    for row in c.ledger:
+        assert row["delta"] == row["granted_delta"] + row["purchased_delta"], row
+    assert sum(r["delta"] for r in c.ledger) == c.spendable
+    assert c.purchased_remaining == 20
+
+
+def test_the_model_cap_is_the_sql_cap():
+    """The model mirrors migration 199's `_MAX`; drift here would test a cap the SQL lacks."""
+    import re
+    from pathlib import Path
+
+    sql = (Path(__file__).resolve().parents[1] / "database" / "migrations"
+           / "199_feedback_reward_credits.sql").read_text(encoding="utf-8")
+    m = re.search(r"_MAX\s+CONSTANT\s+INTEGER\s*:=\s*(\d+)\s*;", sql)
+    assert m, "199 no longer declares _MAX"
+    assert int(m.group(1)) == _FEEDBACK_REWARD_MAX
+    assert _GUEST_USER_ID in sql

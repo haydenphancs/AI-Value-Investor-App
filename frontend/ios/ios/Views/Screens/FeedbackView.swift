@@ -40,17 +40,58 @@
 //  `NSPhotoLibraryUsageDescription`. That is about ACCESS, not collection — the image still
 //  reaches us by email, and that is what the filing is about.
 //
+//  THE REWARD, THE REPORT CODE AND THE ACCOUNT ID
+//  ----------------------------------------------
+//  A signed-in user can earn free credits for a report we CONFIRM. Nothing on this screen
+//  grants anything: credits move only when the owner checks the report by hand and then runs
+//  `backend/scripts/grant_feedback_reward.py --apply`. So the report carries two things the
+//  owner needs for that: a random report code (the script's `--ref`; the same account cannot be
+//  credited twice for one code) and, for an account, its Account ID — the sender address is
+//  often a Hide My Email relay that matches no account. Guests can still report; they are told
+//  the reward needs an account. Every reward string lives in `FeedbackRewardCopy`, and the path
+//  from the "Rate Caydex" prompt opens this screen with `showsReward: false`, because Apple
+//  forbids rewarding ratings.
+//
 
 import SwiftUI
 import PhotosUI
 
+/// Every user-facing string that mentions the reward, in one place.
+///
+/// Credits are NEVER automatic: the owner confirms a report by hand and only then grants them
+/// with a script. So this copy promises a review, not a reward — no amount, no time frame, and
+/// it says plainly that not every report qualifies. It is never tied to ratings or reviews
+/// either (App Store Guideline 3.2.2), which is why `FeedbackView(showsReward: false)` shows
+/// none of it on the path that starts at the rating prompt.
+///
+/// `test_ios_feedback_flow.py` pins the required phrases, the banned ones (numbers, "instantly",
+/// "rating", …) and that no other literal in this file mentions credits.
+enum FeedbackRewardCopy {
+    static let rowSubtitle = "Report an issue · earn free credits"
+    static let callout = "Earn free credits. We review every report. If we can confirm the issue, we'll add credits to your account and get back to you as soon as we've reviewed it. Not every report qualifies — for example, duplicates or issues we can't reproduce."
+    static let guestNote = "Confirmed reports from signed-in accounts can earn free credits. We add them to an account, so sign in before you send if you'd like to be eligible."
+    static let reviewStepTitle = "We review it"
+    static let reviewStepDetail = "If we can confirm the issue, we'll add free credits to your account and get back to you as soon as we've reviewed it. Duplicates and issues we can't reproduce don't qualify."
+    static let thankYou = "Your report is on its way. We review every report. If we can confirm the issue, we'll add credits to your account and get back to you as soon as we've reviewed it."
+    static let composerCaption = "We'll include your app version, device model, account ID and a report code, so we know which build to look at and which account to credit. You can see and edit all of it before it sends."
+}
+
 struct FeedbackView: View {
     @Environment(\.appState) private var appState
+
+    /// Whether this screen may mention the reward at all. False on the path from the "Rate
+    /// Caydex" prompt: a reward offered one tap after a rating prompt reads as paying for a
+    /// rating, which Apple forbids.
+    private let showsReward: Bool
 
     @State private var message = ""
     @State private var showingComposer = false
     @State private var didSend = false
     @FocusState private var isEditorFocused: Bool
+
+    /// Names this report in the subject and the body, so a confirmed report can be credited
+    /// exactly once. A new one after every successful send — two reports never share a code.
+    @State private var reportCode = AppInfo.newReportCode()
 
     /// The picked screenshot. `PhotosPicker` runs OUT OF PROCESS, so choosing one grants access
     /// to that single image and nothing else — which is why this needs no
@@ -59,6 +100,22 @@ struct FeedbackView: View {
     @State private var screenshot: Data?
     @State private var screenshotPreview: UIImage?
     @State private var attachmentFailed = false
+
+    /// Explicit because a memberwise init would be PRIVATE here (the `@State` properties are), and
+    /// the call sites need `showsReward`. Defaults to true: Profile's row is the ordinary way in.
+    init(showsReward: Bool = true) {
+        self.showsReward = showsReward
+    }
+
+    /// The account a confirmed report would be credited to, or nil for a guest. The same source as
+    /// `AppActions.currentAccountId`: the profile is kept through a mid-session `.restoring`
+    /// window, so a reconnecting user is not mistaken for a guest. (A cold launch that is still
+    /// reconnecting has no profile yet, so it reads as a guest until the profile arrives — the
+    /// report would carry no Account ID, and the copy must not promise what we couldn't credit.)
+    private var accountId: String? { appState.user.profile?.id }
+
+    /// The reward copy needs both: a path where it may appear, and an account to add credits to.
+    private var canEarnReward: Bool { showsReward && accountId != nil }
 
     /// Enough to be worth sending. Guards against an accidental empty tap, not against short
     /// reports — "chart is blank on AAPL" is a perfectly good bug report.
@@ -90,7 +147,7 @@ struct FeedbackView: View {
         .sheet(isPresented: $showingComposer) {
             MailComposeView(
                 recipient: AppInfo.supportEmail,
-                subject: "Caydex feedback",
+                subject: "Caydex feedback · \(reportCode)",
                 body: reportBody,
                 attachments: screenshot.map { [MailComposeView.Attachment.image($0)] } ?? []
             ) { sent in
@@ -98,6 +155,7 @@ struct FeedbackView: View {
                     didSend = true
                     message = ""
                     clearScreenshot()
+                    reportCode = AppInfo.newReportCode()
                 }
             }
             .ignoresSafeArea()
@@ -105,7 +163,9 @@ struct FeedbackView: View {
         .alert("Thank you", isPresented: $didSend) {
             Button("You're welcome", role: .cancel) {}
         } message: {
-            Text("Your report is on its way. We read every one, and we'll get to work on it.")
+            Text(canEarnReward
+                 ? FeedbackRewardCopy.thankYou
+                 : "Your report is on its way. We read every one, and we'll get to work on it.")
         }
         .alert("Couldn't attach that", isPresented: $attachmentFailed) {
             Button("OK", role: .cancel) {}
@@ -150,11 +210,27 @@ struct FeedbackView: View {
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            ArticleCalloutBox(
-                icon: "heart.fill",
-                text: "We read every report, and we fix what we can as fast as we can. Thank you for helping us build this properly.",
-                style: .success
-            )
+            if canEarnReward {
+                ArticleCalloutBox(
+                    icon: "gift.fill",
+                    text: FeedbackRewardCopy.callout,
+                    style: .success
+                )
+            } else {
+                ArticleCalloutBox(
+                    icon: "heart.fill",
+                    text: "We read every report, and we fix what we can as fast as we can. Thank you for helping us build this properly.",
+                    style: .success
+                )
+                // A guest on the ordinary path is told why there is no reward for them, rather
+                // than finding out after sending. Never on the rating path (`showsReward`).
+                if showsReward {
+                    Text(FeedbackRewardCopy.guestNote)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
         .padding(.horizontal, AppSpacing.lg)
     }
@@ -167,7 +243,7 @@ struct FeedbackView: View {
         let detail: String
     }
 
-    private static let stepList: [Step] = [
+    private static let baseSteps: [Step] = [
         Step(
             title: "Take a screenshot",
             detail: "Press the side button and volume up together while the problem is on screen. You'll attach it below — it shows us far more than words can."
@@ -182,6 +258,28 @@ struct FeedbackView: View {
         )
     ]
 
+    /// The last step says what happens AFTER sending: the reward version only where
+    /// `canEarnReward`, a neutral one everywhere else (guests, and the path from the rating
+    /// prompt). Two fixed lists rather than one built in `body`, because `Step.id` is a fresh
+    /// UUID — a list rebuilt per render would hand `ForEach` new identities every time.
+    private static let rewardStepList: [Step] = baseSteps + [
+        Step(
+            title: FeedbackRewardCopy.reviewStepTitle,
+            detail: FeedbackRewardCopy.reviewStepDetail
+        )
+    ]
+
+    private static let neutralStepList: [Step] = baseSteps + [
+        Step(
+            title: "We review it",
+            detail: "We read every report, fix what we can, and get back to you as soon as we've reviewed it."
+        )
+    ]
+
+    private var stepList: [Step] {
+        canEarnReward ? Self.rewardStepList : Self.neutralStepList
+    }
+
     private var steps: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("How to report it")
@@ -189,7 +287,7 @@ struct FeedbackView: View {
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                ForEach(Array(Self.stepList.enumerated()), id: \.element.id) { index, step in
+                ForEach(Array(stepList.enumerated()), id: \.element.id) { index, step in
                     HStack(alignment: .top, spacing: AppSpacing.md) {
                         // Explicit tokens: NumberedBadge's DEFAULTS are `textPrimary` on
                         // `primaryBlue`, which is a text token on a fill — white on #60A5FA is
@@ -254,7 +352,7 @@ struct FeedbackView: View {
 
             screenshotPicker
 
-            Text("We'll include your app version and device model so we know which build to look at. You can see and edit all of it before it sends.")
+            Text(composerCaption)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -274,6 +372,20 @@ struct FeedbackView: View {
             }
         }
         .padding(.horizontal, AppSpacing.lg)
+    }
+
+    /// Says what the diagnostics block will contain, so it must track `reportBody`: the account ID
+    /// is named exactly when there is one to send. Only the reward path says why ("which account
+    /// to credit"); a signed-in user who came from the rating prompt sends an Account ID too, but
+    /// must not be told about the reward.
+    private var composerCaption: String {
+        if canEarnReward {
+            return FeedbackRewardCopy.composerCaption
+        }
+        if accountId != nil {
+            return "We'll include your app version, device model, account ID and a report code so we know which build to look at. You can see and edit all of it before it sends."
+        }
+        return "We'll include your app version, device model and a report code so we know which build to look at. You can see and edit all of it before it sends."
     }
 
     // MARK: - Screenshot
@@ -350,8 +462,9 @@ struct FeedbackView: View {
 
     /// The mail body: the user's own words, then the diagnostics.
     ///
-    /// Built in exactly one place and used by both the composer and the copy-to-pasteboard
-    /// fallback, so the two can never say different things.
+    /// Built in exactly one place and used by both the composer and the share fallback, so the
+    /// two can never say different things — including the report code and Account ID a
+    /// confirmed report is credited by.
     private var reportBody: String {
         let written = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
@@ -360,7 +473,9 @@ struct FeedbackView: View {
 
         \(AppInfo.diagnosticsBlock(
             tier: appState.user.tier.rawValue,
-            isSignedIn: appState.auth.isAuthenticated
+            isSignedIn: appState.auth.isAuthenticated,
+            accountId: accountId,
+            reportCode: reportCode
         ))
         """
     }

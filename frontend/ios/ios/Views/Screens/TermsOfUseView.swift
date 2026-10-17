@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "October 12, 2026",
+            lastUpdated: "October 17, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -58,6 +58,7 @@ struct TermsOfUseView: View {
             paragraphs: [
                 "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Free accounts receive a monthly allowance of credits that resets at the start of each calendar month, US Eastern Time. Paid subscription tiers provide an allowance for each billing period: when your subscription starts, and each time it renews, your allowance is set to the tier's full amount. Unused allowance credits do not roll over into the next billing period, and they end when your subscription ends, after which the free allowance applies. If you upgrade from one paid tier to a higher one, your allowance is set to the new tier's full amount immediately, and your unused credits carry over on top of it, up to the share of the current billing period that has already passed (the App Store refunds the rest of that period). Credits already spent remain spent.",
                 "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are never reset when an allowance renews. Your allowance is spent first, so a pack is only drawn on once your current allowance is used up.",
+                "Reward credits. We may add free credits to your account at our sole discretion \u{2014} for example, as a thank-you when you report an issue through Help Us Improve and we can confirm it. We review every report, but not every report qualifies (for example, duplicates or issues we cannot reproduce), and we add reward credits only after that review. Reward credits are promotional: they have no cash value, cannot be transferred, sold, or exchanged, and are never given for App Store ratings or reviews. They are held in the same balance as credit-pack credits and do not expire, but we may remove reward credits granted in error or obtained through misuse, and we may change or end this program at any time.",
                 "Subscriptions are billed through your Apple App Store account. Payment is charged at confirmation of purchase, and subscriptions renew automatically for the same period and price unless canceled at least 24 hours before the end of the current period. You can manage or cancel subscriptions in your App Store account settings; deleting the App does not cancel a subscription.",
                 "Except where required by applicable law or the App Store\u{2019}s policies, purchases and credits are non-refundable. Prices and allocations may change prospectively; changes will not affect a billing period already paid for."
             ]

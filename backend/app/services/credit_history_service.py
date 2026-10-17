@@ -89,6 +89,9 @@ _REPORT_CHAT_PREFIX = "report_chat:"
 #:                            revoke_tier_credits()
 #:   pack_purchase/_revoked   SQL: add_purchased_credits(), revoke_purchased_credits()
 #:   tester_grant             scripts/seed_testflight_testers.py  ← outside app/, easy to miss
+#:   feedback_reward          SQL: grant_feedback_reward() (migration 199), called ONLY by
+#:                            scripts/grant_feedback_reward.py --apply after the owner confirms
+#:                            a Help Us Improve report — nothing in app/ ever grants it
 _REASONS: Dict[str, Tuple[str, str, str]] = {
     # spends
     "report_charge": (KIND_SPEND, "Deep research report", _REF_REPORT),
@@ -130,6 +133,10 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     # what the refund removed (migration 196). `ref_id` is the original transaction id.
     "plan_reinstated": (KIND_GRANT, "Plan credits restored", _REF_NONE),
     "tester_grant": (KIND_GRANT, "TestFlight credits", _REF_NONE),
+    # The owner confirmed a Help Us Improve report and granted credits by hand (migration 199).
+    # `ref_id` is the report code ("R-7K2Q9M"): an internal key for the owner, read as nothing
+    # here, so it never reaches the title or subtitle.
+    "feedback_reward": (KIND_GRANT, "Issue report reward", _REF_NONE),
     # removals
     "tier_revoked": (KIND_REVOKE, "Plan credits removed", _REF_NONE),
     # expiries — GRANTED credits only (purchased credits never expire, App Store 3.1.1). Each
@@ -262,6 +269,11 @@ def _pool_note(granted_delta: Any, purchased_delta: Any, kind: str) -> Optional[
         return None
     if kind == KIND_PURCHASE:
         # Guideline 3.1.1 is the reason the second pool exists; say so where it lands.
+        return "Never expires"
+    if kind == KIND_GRANT and granted == 0:
+        # A grant that landed wholly in the never-expiring pool (`feedback_reward`,
+        # `tester_grant`). "20 purchased" would tell the user they bought credits they were
+        # given; what they need to know is that these, unlike the monthly ones, stay.
         return "Never expires"
     if granted == 0:
         return f"{purchased} purchased"

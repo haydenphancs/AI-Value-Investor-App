@@ -43,7 +43,7 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 |---|---|---|---|
 | Contact Info → **Email Address** | Yes | App Functionality | Sign-up/sign-in; `public.users.email` |
 | Contact Info → **Name** | Yes | App Functionality | Optional profile display name; `public.users.display_name` |
-| Identifiers → **User ID** | Yes | App Functionality | Account UUID |
+| Identifiers → **User ID** | Yes | App Functionality | Account UUID. Since 2026-10-17 a signed-in Help Us Improve report also carries it (`Account ID: <uuid>` in the email body), so a confirmed report can be credited to that account — see the note below |
 | Identifiers → **Device ID** | Yes | App Functionality | Random per-install UUID in the Keychain, sent as `X-Guest-Id` (`GuestIdentity.swift`). Rate limiting + pre-sign-in learning progress |
 | Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_items.shares`, `market_value`) |
 | User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback. Since 2026-10-02, when Cay AI runs a web search, a short query the AI writes from that message (company, ticker, topic, a time period; amounts and percentages in digits or words, links and email addresses removed by `sanitize_web_query`; no identity sent with it) goes to Brave Search, a service provider (Privacy Policy §3/§4). Today: when the user asks, in a report chat (app ≥ 1.1). The backend built 2026-10-09 can also search in any chat, when asked or automatically when Caydex's data cannot answer — only once its switches (`CHAT_WEB_SEARCH_ALL_CHATS_ENABLED`, `CHAT_AUTO_WEB_SEARCH_MODE`) are on AND the user has accepted AI consent v3 (`X-AI-Consent-Version` ≥ 3, the 1.01 permission screen); never for prices or other market data. No new data type: the query is derived from User Content already declared |
@@ -70,15 +70,42 @@ Notes on the non-obvious ones:
   permission prompt and no `NSPhotoLibraryUsageDescription` — but the image still
   reaches us by email, which is why it is declared.
 
+- **Help Us Improve reports now carry the User ID and a report code — no new data type**
+  (2026-10-17, "Report an issue · earn free credits"). A signed-in user's report adds
+  `Account ID: <uuid>` to the diagnostics block, and every report adds `Report: R-XXXXXX` to the
+  body and the subject. Both are visible, and editable, in the mail composer before it sends.
+  They exist so the owner can credit a report after confirming it by hand
+  (`backend/scripts/grant_feedback_reward.py`, manual only; the sender address is often a Hide My
+  Email relay that matches no account). The account UUID is the **User ID** already declared
+  above (Linked, App Functionality — Apple lists customer support under App Functionality), so
+  nothing new is collected. The report code is a random six-character reference made on the
+  device for each report (`AppInfo.newReportCode()`) and replaced after every send. It is derived
+  from neither the device nor the account, so it is a reference number, not a Device ID. Privacy
+  Policy §1 discloses both, and §6 says support emails are not deleted with the account.
+
 ### Do NOT select these — verified absent
 
 Payment Info · Credit Info · Precise Location · Coarse Location · Physical Address ·
 Phone Number · Other Contact Info · Health · Fitness · Sensitive Info · Contacts ·
-Audio Data · Gameplay Content · Customer Support · Emails or Text
-Messages · Browsing History · Advertising Data · Performance Data ·
+Audio Data · Gameplay Content · Customer Support *(your decision pending — see the note
+below)* · Emails or Text Messages · Browsing History · Advertising Data · Performance Data ·
 Other Diagnostic Data
 
 Notes on the non-obvious ones:
+
+- **Customer Support — your decision (open since 2026-10-17).** Help Us Improve reports are
+  emails to support@ that, when the user is signed in, now name their account (the User ID note
+  above), and a confirmed one can earn reward credits. Decide whether to also select
+  **User Content → Customer Support** (Linked: Yes, App Functionality, not tracking). For not
+  selecting it: each report is infrequent, optional and user-initiated, and the user reads and
+  sends every field themselves from their own mail app — close to the feedback-form case Apple's
+  optional-disclosure criteria describe (re-read those criteria against the composer before
+  relying on them). For selecting it: the reports now name an account and outlive account
+  deletion, and the label would then say so plainly instead of leaning on an exemption. Until you
+  decide, leave it under "Do NOT select" here and leave `PrivacyInfo.xcprivacy` unchanged. If you
+  select it, change both on the same day: move it out of this list into the §3 table, and add
+  `NSPrivacyCollectedDataTypeCustomerSupport` (linked, App Functionality, not tracking) to the
+  manifest. Apple compares the two.
 
 - **Payment Info** — still absent, and it is NOT the same as Purchase History. Apple handles
   payment; the app receives only Apple's signed transaction. No card number, no billing
@@ -141,9 +168,13 @@ account's rows survive, which the privacy policy says they do not.
 *(Corrected 2026-08-14: this said "the four tables" and named `user_book_progress`, which
 migration 116 dropped. It had missed six tables added since.)*
 
-If a reviewer asks what survives: only error-monitoring records at Sentry, for that provider's
+If a reviewer asks what survives: error-monitoring records at Sentry, for that provider's
 retention period, containing diagnostic data and a pseudonymous account identifier — no name
-or email.
+or email. And emails the user sent to support@, including Help Us Improve reports, which since
+2026-10-17 carry the account ID: they stay in the support mailbox until the user asks for them to
+be deleted (Privacy Policy §6 says so). The database never holds the email: a reward's
+`credit_transactions` row keeps only the report code, and goes with the account like the rest of
+the credit history.
 
 ---
 

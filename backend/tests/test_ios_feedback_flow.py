@@ -8,7 +8,7 @@ usually untriageable.
 
 It is now a native screen that composes in-app via `MFMailComposeViewController`.
 
-Three things here are load-bearing enough to pin:
+Four things here are load-bearing enough to pin:
 
 1. **`canSendMail()` is consulted BEFORE the Send button is offered.** That is the entire
    advantage the composer has over `mailto:`, whose only signal is a failed open. Lose it and
@@ -17,12 +17,18 @@ Three things here are load-bearing enough to pin:
    that text. If the composer also opened with a "What happened: / What I expected:" template,
    the user would see empty prompts beneath text they had already written and conclude they
    had to type it twice.
-3. **No Photos API, anywhere.** The screenshot is attached with Mail's own Insert Photo control
-   inside the compose sheet. The moment this app reads the photo library itself, "Photos or
-   Videos" must be added to `documents/legal/app-privacy-answers.md`, `PrivacyInfo.xcprivacy`,
-   the privacy policy and the App Store Connect answers — four surfaces that currently declare
-   it absent, where a wrong answer is a review rejection. This guard is what stops a future
-   session adding a picker and silently invalidating the filing.
+3. **The screenshot picker and the privacy filing agree.** The screen ships a `PhotosPicker`,
+   so "Photos or Videos" is a declared collected data type in `PrivacyInfo.xcprivacy`,
+   `documents/legal/app-privacy-answers.md`, the privacy policy and the App Store Connect
+   answers. The guard runs both ways: a picker without the declaration fails, and so does a
+   declaration left behind after the picker is removed.
+4. **The reward promises a review, never credits.** Signed-in users can earn free credits for a
+   report the owner confirms by hand (`scripts/grant_feedback_reward.py --apply` is the only
+   thing that moves them). So the copy must say "we review every report" and "if we can confirm
+   the issue", must not name an amount or a time, and must never mention ratings — the path
+   from the "Rate Caydex" prompt opens the screen with the reward hidden. The report carries a
+   report code and, for an account, its Account ID, because the sender address alone (often a
+   Hide My Email relay) cannot say which account to credit.
 
 Source-scan, per `project_source_scan_guard_vacuity`: comments stripped so this file's own prose
 cannot satisfy an assertion, windows brace-bounded rather than anchored on the token under test,
@@ -31,6 +37,7 @@ and every assertion mutation-tested before being believed.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -40,6 +47,7 @@ _IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
 _FEEDBACK = _IOS / "Views/Screens/FeedbackView.swift"
 _PROFILE = _IOS / "Views/Screens/ProfileView.swift"
 _APP_INFO = _IOS / "Core/Utilities/AppInfo.swift"
+_GRANT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts/grant_feedback_reward.py"
 
 
 def _code_only(src: str) -> str:
@@ -268,4 +276,305 @@ def test_the_detector_is_not_vacuous():
     src = _source(_FEEDBACK)
     assert "MailComposeView" in src and "NumberedBadge" in src, (
         "comment-stripping ate the file body"
+    )
+
+
+# ── The reward: promised as a review, granted only by hand ────────────────────
+#
+# Credits are NEVER automatic: the owner confirms a report, then runs
+# `scripts/grant_feedback_reward.py --apply`. These pin the app's half of that. The copy says
+# exactly that and no more, the reward never shows on the path from a rating prompt (Guideline
+# 3.2.2), and the report carries what the owner needs to credit the right account exactly once.
+
+_REWARD_KEYS = ("rowSubtitle", "callout", "guestNote", "reviewStepTitle", "reviewStepDetail",
+                "thankYou", "composerCaption")
+
+# Each must be said somewhere across the reward copy (after ’ → ' normalisation).
+_REWARD_REQUIRED = ("we review every report", "if we can confirm the issue",
+                    "as soon as we've reviewed it", "duplicates", "can't reproduce")
+
+# Never said by any reward string. An amount or a time frame is a promise a manual review may
+# not keep, and any mention of ratings would make the reward read as payment for one, which
+# Guideline 3.2.2 forbids. "review" on its own stays legal: "we review every report" is the promise.
+_REWARD_BANNED = (
+    (r"\d", "a number (no amount, no time frame)"),
+    (r"right away", "a time promise"),
+    (r"instantly", "a time promise"),
+    (r"immediately", "a time promise"),
+    (r"automatic", "automation (credits are granted by hand)"),
+    (r"guarantee", "a guarantee"),
+    (r"\brat(e|es|ed|ing|ings)\b", "ratings"),
+    (r"\bstars?\b", "star ratings"),
+    (r"app store", "the App Store"),
+    (r"\breviews\b", "App Store reviews"),
+    (r"\b(a|your) review\b", "a review the user writes"),
+)
+
+_ONE_LINE_LITERAL = r'"((?:[^"\\\n]|\\.)*)"'
+
+
+def _string_literals(src: str) -> list[str]:
+    """The text of every Swift string literal in `src`, with ’ normalised to '.
+
+    Triple-quoted blocks are taken first and blanked, so their delimiters cannot pair up with
+    the one-line literals around them. Escapes stay inside the literal they belong to. Known
+    blind spot: a literal nested inside an interpolation splits in two — no copy here is built
+    that way. Run it on `_source()` output so commented-out strings are not read as live ones.
+    """
+    found: list[str] = []
+
+    def _take(match: re.Match) -> str:
+        found.append(match.group(1))
+        return " "
+
+    rest = re.sub(r'"""(.*?)"""', _take, src, flags=re.S)
+    found.extend(m.group(1) for m in re.finditer(_ONE_LINE_LITERAL, rest))
+    return [text.replace("\u2019", "'") for text in found]
+
+
+def _copy_violations(texts: list[str]) -> list[str]:
+    return [
+        f"{why}: {pattern!r} in {text!r}"
+        for text in texts
+        for pattern, why in _REWARD_BANNED
+        if re.search(pattern, text.lower())
+    ]
+
+
+def _missing_phrases(texts: list[str]) -> list[str]:
+    joined = " ".join(texts).lower()
+    return [phrase for phrase in _REWARD_REQUIRED if phrase not in joined]
+
+
+def test_the_reward_copy_promises_a_review_not_credits():
+    src = _source(_FEEDBACK)
+    enum = _balanced(src, "enum FeedbackRewardCopy {")
+    for key in _REWARD_KEYS:
+        assert re.search(rf"\bstatic let {key} = \"", enum), (
+            f"FeedbackRewardCopy.{key} is gone or no longer a plain literal"
+        )
+    literals = _string_literals(enum)
+    assert len(literals) >= len(_REWARD_KEYS), f"the reward copy was not read: {literals}"
+
+    missing = _missing_phrases(literals)
+    assert not missing, (
+        f"the reward copy no longer says {missing} — it must promise a REVIEW, say a confirmed "
+        f"issue is what earns credits, and say that not every report qualifies"
+    )
+    bad = _copy_violations(literals)
+    assert not bad, (
+        "the reward copy promises what a manual review cannot, or ties the reward to ratings "
+        f"(Guideline 3.2.2): {bad}"
+    )
+
+
+def test_the_row_subtitle_is_the_agreed_wording():
+    enum = _balanced(_source(_FEEDBACK), "enum FeedbackRewardCopy {")
+    m = re.search(r"static let rowSubtitle = " + _ONE_LINE_LITERAL, enum)
+    assert m, "FeedbackRewardCopy.rowSubtitle is gone"
+    assert m.group(1) == "Report an issue · earn free credits", (
+        f"the Profile row's subtitle changed to {m.group(1)!r} — the owner chose this wording"
+    )
+
+
+def test_the_copy_guards_are_not_vacuous():
+    """The extractor, the bans and the requirements must fire on copy that breaks them —
+    otherwise the copy test above passes on anything, including an empty enum."""
+    sample = (
+        'let a = "Earn 20 credits instantly"\n'
+        'let b = """\nThanks for the 5-star rating on the App Store\n"""\n'
+        '        // "a commented-out credit"\n'
+        'let c = "we can\u2019t say \\"why\\" \\(x)"\n'
+    )
+    literals = _string_literals(_code_only(sample))
+    assert "Earn 20 credits instantly" in literals, "one-line literals are not collected"
+    assert any("5-star rating" in s for s in literals), "triple-quoted blocks are not collected"
+    assert not any("commented-out" in s for s in literals), "comments leak into the literals"
+    assert 'we can\'t say \\"why\\" \\(x)' in literals, "escapes or ’ normalisation broke"
+
+    flagged = " ".join(_copy_violations(literals))
+    for why in ("a number", "a time promise", "ratings", "star ratings", "the App Store"):
+        assert why in flagged, f"the {why!r} ban did not fire"
+    assert _copy_violations(["Leave a review"]) and _copy_violations(["Your reviews help"])
+    assert not _copy_violations(["We review every report and reply once we've reviewed it."]), (
+        "'review' on its own is the promise itself and must stay legal"
+    )
+    assert _missing_phrases(["Thanks!"]) == list(_REWARD_REQUIRED)
+
+
+def test_no_other_literal_on_the_screen_mentions_credits():
+    """Every reward string lives in `FeedbackRewardCopy`, where the copy test can see it. A
+    "credits" string typed straight into a `Text(...)` would dodge that test entirely."""
+    src = _source(_FEEDBACK)
+    enum = _balanced(src, "enum FeedbackRewardCopy {")
+    outside = _string_literals(src.replace(enum, "", 1))
+    assert any("Help Us Improve" in s for s in outside), "positive anchor — no literals were read"
+    offenders = [s for s in outside if "credit" in s.lower()]
+    assert not offenders, (
+        f"reward copy outside FeedbackRewardCopy, beyond the copy guard's reach: {offenders}"
+    )
+
+
+def test_the_reward_needs_both_a_reward_path_and_an_account():
+    src = _source(_FEEDBACK)
+    assert "self.showsReward = showsReward" in _balanced(src, "init(showsReward: Bool = true) {"), (
+        "the call sites need an internal init that takes showsReward (the memberwise one is "
+        "private) and it must default to true for Profile's row"
+    )
+    gate = _balanced(src, "private var canEarnReward: Bool {")
+    assert "showsReward" in gate, (
+        "canEarnReward ignores showsReward, so the reward would show on the path from the "
+        "rating prompt (Guideline 3.2.2)"
+    )
+    assert "accountId" in gate, "a guest has no account to credit — the reward needs one"
+    assert re.search(
+        r"private var accountId: String\? \{\s*appState\.user\.profile\?\.id\s*\}", src
+    ), "accountId must be the signed-in profile's id — the same source as currentAccountId"
+
+
+def test_every_reward_string_on_the_screen_is_gated():
+    """Not just defined behind a flag — USED behind one. Each reference to the reward copy
+    sits in a branch that only `canEarnReward` (or, for the guest note, `showsReward`) opens."""
+    src = _source(_FEEDBACK)
+    outside = src.replace(_balanced(src, "enum FeedbackRewardCopy {"), "", 1)
+    used = set(re.findall(r"FeedbackRewardCopy\.(\w+)", outside))
+    assert used == set(_REWARD_KEYS) - {"rowSubtitle"}, (
+        f"the screen's reward strings changed ({sorted(used)}) — gate any new one, then update this"
+    )
+    for key in sorted(used):
+        assert outside.count(f"FeedbackRewardCopy.{key}") == 1, (
+            f"FeedbackRewardCopy.{key} is used more than once — only one use is checked as gated"
+        )
+
+    intro = _balanced(src, "private var intro: some View {")
+    assert "FeedbackRewardCopy.callout" in _balanced(intro, "if canEarnReward {")
+    assert "FeedbackRewardCopy.guestNote" in _balanced(intro, "if showsReward {")
+    caption = _balanced(src, "private var composerCaption: String {")
+    assert "FeedbackRewardCopy.composerCaption" in _balanced(caption, "if canEarnReward {")
+    assert re.search(r"Text\(\s*canEarnReward\s*\?\s*FeedbackRewardCopy\.thankYou\b", src), (
+        "the thank-you alert must use the reward copy only when canEarnReward"
+    )
+    rewarded = _balanced(src, "private static let rewardStepList: [Step] = baseSteps + [")
+    assert "FeedbackRewardCopy.reviewStepDetail" in rewarded
+    assert "FeedbackRewardCopy.reviewStepTitle" in rewarded
+    chooser = re.sub(r"\s+", " ", _balanced(src, "private var stepList: [Step] {"))
+    assert "canEarnReward ? Self.rewardStepList : Self.neutralStepList" in chooser, (
+        f"the reward step must be chosen by canEarnReward. Got: {chooser}"
+    )
+
+
+def test_the_reward_copy_is_used_only_by_the_feedback_screen_and_its_row():
+    """A new reference (a rating prompt, a paywall) would put the reward somewhere none of
+    the gating above reaches."""
+    users = sorted(
+        str(path.relative_to(_IOS)) for path in _IOS.rglob("*.swift")
+        if "FeedbackRewardCopy" in _code_only(path.read_text(encoding="utf-8"))
+    )
+    assert users == ["Views/Screens/FeedbackView.swift", "Views/Screens/ProfileView.swift"], users
+
+
+def test_the_profile_row_offers_the_reward_only_to_an_account():
+    src = _source(_PROFILE)
+    after = src[src.index("FeedbackView()"):]
+    label = re.sub(r"\s+", " ", _balanced(after, "} label: {"))
+    assert '"Help Us Improve"' in label, "positive anchor — this is not the feedback row's label"
+    assert re.search(
+        r"subtitle: canEarnFeedbackReward \? FeedbackRewardCopy\.rowSubtitle : nil", label
+    ), f"the row must show FeedbackRewardCopy.rowSubtitle to account holders only. Got: {label}"
+    gate = _balanced(src, "private var canEarnFeedbackReward: Bool {")
+    assert "viewModel.isAuthenticated" in gate, "an account holder must see the reward"
+    assert "viewModel.isRestoring" in gate, (
+        "a reconnecting user still has an account (auth.md §5) and must not be shown the guest row"
+    )
+
+
+# ── The report says which report, and which account ───────────────────────────
+
+
+def test_the_report_names_the_account_only_when_there_is_one():
+    info = _source(_APP_INFO)
+    decl = info[info.index("static func diagnosticsBlock("):]
+    signature = re.sub(r"\s+", " ", _balanced(decl, "diagnosticsBlock("))
+    assert "accountId: String? = nil" in signature, signature
+    assert "reportCode: String? = nil" in signature, signature
+    body = _balanced(decl, "-> String {")
+
+    guarded = _balanced(body, "if let accountId {")
+    assert "Account ID:" in guarded, "the Account ID line is gone — confirmed reports can't be credited"
+    assert "Account ID:" not in info.replace(guarded, "", 1), (
+        "`Account ID:` is written outside `if let accountId {` — a guest would get a blank line"
+    )
+    assert "Report: " in _balanced(body, "if let reportCode {"), (
+        "the report code line is gone — the owner needs it as the grant script's --ref"
+    )
+    for line in ("Please keep the details below", "App: Caydex", "Device: ", "Account: "):
+        assert line in body, f"the diagnostics block lost {line!r}"
+
+
+def test_the_report_body_carries_the_account_and_the_code():
+    src = _source(_FEEDBACK)
+    body = re.sub(r"\s+", " ", _balanced(src, "private var reportBody: String {"))
+    assert "accountId: accountId" in body, "the report must name the account to credit"
+    assert "reportCode: reportCode" in body, "the report must carry its report code"
+
+
+def test_each_report_gets_its_own_code():
+    src = _source(_FEEDBACK)
+    assert re.search(r"@State private var reportCode = AppInfo\.newReportCode\(\)", src), (
+        "the code must be @State: a plain property would be re-rolled on every re-render"
+    )
+    composer = _balanced(src, "MailComposeView(")
+    assert re.search(r'subject:\s*"[^"\n]*\\\(reportCode\)[^"\n]*"', composer), (
+        "the report code must be in the subject, where the owner sees it in the inbox"
+    )
+    assert "reportCode = AppInfo.newReportCode()" in _balanced(src, "if sent {"), (
+        "a sent report must retire its code, or the next report would share it and be refused "
+        "as a replay when the owner credits it"
+    )
+
+
+def _swift_report_code_alphabet(info: str) -> str:
+    m = re.search(r"private static let reportCodeAlphabet = " + _ONE_LINE_LITERAL, info)
+    assert m, "AppInfo.reportCodeAlphabet is gone or no longer one literal"
+    return m.group(1)
+
+
+def test_the_report_code_avoids_confusable_characters():
+    info = _source(_APP_INFO)
+    alphabet = _swift_report_code_alphabet(info)
+    assert len(alphabet) >= 20, f"the alphabet is suspiciously small: {alphabet!r}"
+    assert not set("0O1IL") & set(alphabet), (
+        f"the report code alphabet has 0/O/1/I/L in it — codes get mistyped: {alphabet!r}"
+    )
+    assert len(set(alphabet)) == len(alphabet), "a repeated character skews the code"
+    assert re.fullmatch(r"[A-Z2-9]+", alphabet), "uppercase letters and digits only"
+    maker = _balanced(info, "static func newReportCode() -> String {")
+    assert '"R-"' in maker and "reportCodeAlphabet" in maker and "0..<6" in maker, maker
+
+
+def test_the_report_code_matches_the_grant_script():
+    """The owner pastes the code from the email into `--ref`; the script normalises and checks
+    it with its own copy of the format. The two copies must agree."""
+    if not _GRANT_SCRIPT.exists():
+        pytest.skip(f"{_GRANT_SCRIPT} not present")
+    tree = ast.parse(_GRANT_SCRIPT.read_text(encoding="utf-8"))
+    constants = {
+        target.id: node.value
+        for node in tree.body if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    for name in ("REPORT_CODE_ALPHABET", "REPORT_CODE_PREFIX", "REPORT_CODE_LENGTH"):
+        assert name in constants, f"{name} is missing from {_GRANT_SCRIPT.name}"
+    script = {name: ast.literal_eval(constants[name]) for name in
+              ("REPORT_CODE_ALPHABET", "REPORT_CODE_PREFIX", "REPORT_CODE_LENGTH")}
+    info = _source(_APP_INFO)
+    maker = _balanced(info, "static func newReportCode() -> String {")
+    assert script["REPORT_CODE_ALPHABET"] == _swift_report_code_alphabet(info), (
+        "the app and the grant script disagree on the report code alphabet"
+    )
+    assert f'"{script["REPORT_CODE_PREFIX"]}"' in maker, (
+        f"the app's report code prefix is not the script's {script['REPORT_CODE_PREFIX']!r}"
+    )
+    assert f"0..<{script['REPORT_CODE_LENGTH']}" in maker, (
+        f"the app's report code length is not the script's {script['REPORT_CODE_LENGTH']}"
     )

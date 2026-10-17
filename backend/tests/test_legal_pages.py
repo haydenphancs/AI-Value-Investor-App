@@ -1291,3 +1291,80 @@ def test_the_consent_clause_is_enforced_by_the_backend_gate():
     field = Settings.model_fields["CHAT_WEB_SEARCH_MIN_CONSENT_VERSION"]
     assert field.default >= 3
     assert any(getattr(m, "ge", None) is not None and m.ge >= 3 for m in field.metadata)
+
+
+# ── Reward credits for a confirmed issue report (migration 199, 2026-10-17) ──
+#
+# Profile → Help Us Improve now reads "Report an issue · earn free credits". The owner checks each
+# report by hand and only then grants (`scripts/grant_feedback_reward.py --apply`); nothing in the
+# app or the backend grants on its own. Terms §5 is what makes that binding — sole discretion, not
+# every report qualifies, no cash value, and never for a rating or review (App Store Guideline
+# 3.2.2 forbids rewarding them). Privacy §1/§6 disclose what the report now carries and where it
+# stays: the account ID, so a reward can reach the right account, and the email itself, which
+# account deletion does not reach. Website and in-app mirror are pinned TOGETHER, for the same
+# reason as the credit-period clauses: the 2026-08-13 carve-out shipped on the website and was
+# forgotten in the app.
+#
+# No phrase carries an apostrophe, on purpose: the HTML writes `&rsquo;` and the Swift literals a
+# straight `'` or `\u{2019}`, so an apostrophe would pin the encoding rather than the meaning.
+_REWARD_CLAUSES = {
+    "terms": (
+        "terms.html",
+        "TermsOfUseView.swift",
+        [
+            "reward credits",
+            "at our sole discretion",
+            "not every report qualifies",
+            "have no cash value",
+            "cannot be transferred",
+            "never given for app store ratings or reviews",
+            "change or end this program at any time",
+        ],
+    ),
+    "privacy": (
+        "privacy.html",
+        "PrivacyPolicyView.swift",
+        [
+            "includes your account id",
+            "add reward credits to that account",
+            "not deleted with your account",
+        ],
+    ),
+}
+# What Privacy §1 said before reports could earn credits. It is false now that a confirmed report
+# is also used to credit the account it names — kept beside the new clause, the two contradict.
+_RETIRED_SUPPORT_REPORT_PURPOSE = "solely to reproduce and fix the problem"
+
+
+@pytest.mark.parametrize("doc", sorted(_REWARD_CLAUSES))
+def test_the_website_and_the_app_state_the_same_reward_credit_clauses(doc):
+    html_name, screen, clauses = _REWARD_CLAUSES[doc]
+    # Both HTML copies: the served one always, the authored one when this checkout carries it
+    # (it is outside the deploy context). Byte-equality is pinned above; this keeps the clause
+    # check honest even if that test is ever skipped.
+    htmls = [_SERVED / html_name] + [p for p in (_AUTHORED / html_name,) if p.is_file()]
+    prose = _copy_prose(_IOS_SCREENS_DIR / screen)
+    assert len(prose) > 1000, f"{screen} scan returned {len(prose)} chars — extractor drifted"
+    for html_path in htmls:
+        html = _copy_prose(html_path)
+        for clause in clauses:
+            assert clause in html, (
+                f"{html_path.relative_to(_BACKEND.parent)} no longer states {clause!r}"
+            )
+    for clause in clauses:
+        assert clause in prose, f"{screen} does not state {clause!r}, but {html_name} does"
+
+
+@pytest.mark.parametrize("path", _PRIVACY_COPIES, ids=lambda p: str(p.relative_to(_BACKEND.parent)))
+def test_no_privacy_copy_still_says_reports_are_used_solely_to_fix_the_problem(path):
+    """The other direction. A copy carrying the old purpose beside the new one publishes two
+    contradictory promises, and the narrower one is what a reader would rely on."""
+    if not path.is_file():
+        pytest.skip(f"{path} not present (expected outside the repo checkout)")
+    prose = _copy_prose(path)
+    # Positive anchor first, so an empty or mis-parsed haystack cannot pass the ban below.
+    assert "add reward credits to that account" in prose, f"{path.name} lost the new purpose"
+    assert _RETIRED_SUPPORT_REPORT_PURPOSE not in prose, (
+        f"{path.name} still says support reports are used {_RETIRED_SUPPORT_REPORT_PURPOSE!r}, "
+        f"but a confirmed report is now also used to add reward credits to the account it names"
+    )

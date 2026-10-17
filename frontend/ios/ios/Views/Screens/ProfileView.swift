@@ -348,20 +348,21 @@ struct ProfileView: View {
                     .frame(height: 8)
                     .accessibilityHidden(true)
 
-                    // Purchased credits, when there are any.
+                    // The never-expiring balance, when there is any.
                     //
                     // Shown as its own row rather than folded into the bar above, because the
                     // two behave differently and the difference is the whole point: the bar and
-                    // its reset date describe the MONTHLY allowance, while these were bought
-                    // with real money and — per App Store Guideline 3.1.1 — never expire.
-                    // Counting them in "Monthly Credits N/M · Resets on <date>" told the user
-                    // the opposite.
+                    // its reset date describe the MONTHLY allowance, while these — credit packs
+                    // bought with real money (App Store Guideline 3.1.1) and reward credits for
+                    // a confirmed issue report — never expire. Counting them in "Monthly Credits
+                    // N/M · Resets on <date>" told the user the opposite. Labelled by what they
+                    // DO, not "purchased": a reward is in this balance too, and was not bought.
                     if viewModel.purchasedCredits > 0 {
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "infinity")
                                 .font(AppTypography.iconTiny)
                                 .foregroundColor(AppColors.gain)
-                            Text("+\(viewModel.purchasedCredits) purchased · never expire")
+                            Text("+\(viewModel.purchasedCredits) never expire")
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.gain)
                             Spacer()
@@ -771,11 +772,12 @@ struct ProfileView: View {
         return AppColors.primaryBlue
     }
 
-    /// Whether the Help Us Improve row advertises the feedback reward — the Sign Out section's
-    /// gate. Restoring counts: a reconnecting user still has an account (`.claude/rules/auth.md`
-    /// §5 — not a guest). FeedbackView decides for itself from the profile it would credit.
+    /// Whether the Help Us Improve row advertises the feedback reward: only when there is a
+    /// profile to credit, the same gate FeedbackView applies. Not `isAuthenticated ||
+    /// isRestoring` — a cold launch that is still reconnecting has no profile yet, so its report
+    /// would carry no Account ID, and the row would promise what the screen then cannot offer.
     private var canEarnFeedbackReward: Bool {
-        viewModel.isAuthenticated || viewModel.isRestoring
+        viewModel.hasAccountProfile
     }
 
     // Both come from `AppInfo`, not a local copy: these were byte-identical in two screens

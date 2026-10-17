@@ -90,8 +90,16 @@ struct FeedbackView: View {
     @FocusState private var isEditorFocused: Bool
 
     /// Names this report in the subject and the body, so a confirmed report can be credited
-    /// exactly once. A new one after every successful send — two reports never share a code.
+    /// exactly once. Replaced every time a report leaves the screen — the composer closing for
+    /// any reason (a saved draft is a report that may still be sent), or the share sheet
+    /// closing — so two reports never share a code.
     @State private var reportCode = AppInfo.newReportCode()
+
+    /// Whether the report that just went out was offered the reward, frozen when the composer
+    /// opened. The thank-you alert reads this rather than `canEarnReward`, which could flip if
+    /// the profile arrived while the composer was up — and promise credits for a report that
+    /// left without an Account ID.
+    @State private var sentWithReward = false
 
     /// The picked screenshot. `PhotosPicker` runs OUT OF PROCESS, so choosing one grants access
     /// to that single image and nothing else — which is why this needs no
@@ -101,21 +109,26 @@ struct FeedbackView: View {
     @State private var screenshotPreview: UIImage?
     @State private var attachmentFailed = false
 
-    /// Explicit because a memberwise init would be PRIVATE here (the `@State` properties are), and
-    /// the call sites need `showsReward`. Defaults to true: Profile's row is the ordinary way in.
+    /// Explicit because `showsReward` is private with no default, which makes the memberwise
+    /// init private too, and the call sites need it. Defaults to true: Profile's row is the
+    /// ordinary way in.
     init(showsReward: Bool = true) {
         self.showsReward = showsReward
     }
 
     /// The account a confirmed report would be credited to, or nil for a guest. The same source as
-    /// `AppActions.currentAccountId`: the profile is kept through a mid-session `.restoring`
-    /// window, so a reconnecting user is not mistaken for a guest. (A cold launch that is still
-    /// reconnecting has no profile yet, so it reads as a guest until the profile arrives — the
-    /// report would carry no Account ID, and the copy must not promise what we couldn't credit.)
+    /// `AppActions.currentAccountId` and Profile's row gate: the profile is kept through a
+    /// mid-session `.restoring` window, so a reconnecting user is not mistaken for a guest. A cold
+    /// launch that is still reconnecting has no profile yet — no Account ID to send, so no reward
+    /// copy, and no "sign in" note either (see `isReconnecting`).
     private var accountId: String? { appState.user.profile?.id }
 
     /// The reward copy needs both: a path where it may appear, and an account to add credits to.
     private var canEarnReward: Bool { showsReward && accountId != nil }
+
+    /// Signed in, but the session is still healing. Not a guest: telling them to sign in would be
+    /// wrong (`.claude/rules/auth.md` §5), so with no profile yet the screen is simply neutral.
+    private var isReconnecting: Bool { appState.auth.status == .restoring }
 
     /// Enough to be worth sending. Guards against an accidental empty tap, not against short
     /// reports — "chart is blank on AAPL" is a perfectly good bug report.
@@ -151,11 +164,13 @@ struct FeedbackView: View {
                 body: reportBody,
                 attachments: screenshot.map { [MailComposeView.Attachment.image($0)] } ?? []
             ) { sent in
+                // Sent, saved as a draft, cancelled or failed: a fresh code either way, so a draft
+                // finished later in Mail and the next report from here never share one.
+                reportCode = AppInfo.newReportCode()
                 if sent {
                     didSend = true
                     message = ""
                     clearScreenshot()
-                    reportCode = AppInfo.newReportCode()
                 }
             }
             .ignoresSafeArea()
@@ -163,7 +178,7 @@ struct FeedbackView: View {
         .alert("Thank you", isPresented: $didSend) {
             Button("You're welcome", role: .cancel) {}
         } message: {
-            Text(canEarnReward
+            Text(sentWithReward
                  ? FeedbackRewardCopy.thankYou
                  : "Your report is on its way. We read every one, and we'll get to work on it.")
         }
@@ -223,8 +238,9 @@ struct FeedbackView: View {
                     style: .success
                 )
                 // A guest on the ordinary path is told why there is no reward for them, rather
-                // than finding out after sending. Never on the rating path (`showsReward`).
-                if showsReward {
+                // than finding out after sending. Never on the rating path (`showsReward`), and
+                // never to a signed-in user whose profile has not loaded yet (`isReconnecting`).
+                if showsReward && !isReconnecting {
                     Text(FeedbackRewardCopy.guestNote)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
@@ -367,7 +383,10 @@ struct FeedbackView: View {
                     payload: reportBody,
                     message: "This device has no email app set up. Send your report to us however you like — pick Mail, Messages, or anything else. Nothing you typed is lost.",
                     action: .share(label: "Share report"),
-                    shareAttachments: screenshotPreview.map { [$0] } ?? []
+                    shareAttachments: screenshotPreview.map { [$0] } ?? [],
+                    // The share sheet cannot say whether anything was sent, so retire the code
+                    // whenever it closes: a second report shared from here gets its own.
+                    onShareDismissed: { reportCode = AppInfo.newReportCode() }
                 )
             }
         }
@@ -442,6 +461,7 @@ struct FeedbackView: View {
     private var sendButton: some View {
         Button {
             isEditorFocused = false
+            sentWithReward = canEarnReward
             showingComposer = true
         } label: {
             Label("Send Report", systemImage: "paperplane.fill")

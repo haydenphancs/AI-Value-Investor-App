@@ -79,7 +79,8 @@ Notes on the non-obvious ones:
   Email relay that matches no account). The account UUID is the **User ID** already declared
   above (Linked, App Functionality — Apple lists customer support under App Functionality), so
   nothing new is collected. The report code is a random six-character reference made on the
-  device for each report (`AppInfo.newReportCode()`) and replaced after every send. It is derived
+  device for each report (`AppInfo.newReportCode()`) and replaced every time a report leaves the
+  screen (the mail composer or the share sheet closing). It is derived
   from neither the device nor the account, so it is a reference number, not a Device ID. Privacy
   Policy §1 discloses both, and §6 says support emails are not deleted with the account.
 

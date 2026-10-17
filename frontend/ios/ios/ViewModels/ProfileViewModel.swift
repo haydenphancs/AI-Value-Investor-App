@@ -86,7 +86,8 @@ class ProfileViewModel: BaseViewModel {
     }
 
     /// VoiceOver's reading of the "Monthly Credits used/total" row, e.g. "4 of 50 used.
-    /// Renews on Nov 1. Plus 120 purchased credits that never expire".
+    /// Renews on Nov 1. Plus 120 credits that never expire". Not "purchased": that balance also
+    /// holds reward credits for a confirmed issue report, which nobody paid for.
     ///
     /// The row's visual stays "4/50" (owner, 2026-10-12: "4/50 is correct way" — USED of the
     /// monthly total), but spoken it was "4 slash 50", which reads as either used or left. This
@@ -97,7 +98,7 @@ class ProfileViewModel: BaseViewModel {
         var parts = ["\(creditsUsed) of \(creditsTotal) used", creditResetLabel]
         if purchasedCredits > 0 {
             let tail = purchasedCredits == 1 ? "credit that never expires" : "credits that never expire"
-            parts.append("Plus \(purchasedCredits) purchased \(tail)")
+            parts.append("Plus \(purchasedCredits) \(tail)")
         }
         return parts.joined(separator: ". ")
     }
@@ -188,6 +189,15 @@ class ProfileViewModel: BaseViewModel {
     /// this is the ordinary case, not an edge one.
     var isRestoring: Bool {
         appState?.auth.status == .restoring
+    }
+
+    /// Whether there is an account profile a confirmed Help Us Improve report could be credited
+    /// to. The same source FeedbackView reads the report's Account ID from, so the row never
+    /// advertises the reward to someone whose report would go out without one: true when signed
+    /// in and through a mid-session `.restoring`, false for a guest and on a cold launch that has
+    /// not fetched the profile yet.
+    var hasAccountProfile: Bool {
+        appState?.user.profile != nil
     }
 
     // MARK: - Activity Stats

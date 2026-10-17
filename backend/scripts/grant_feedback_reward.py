@@ -66,9 +66,18 @@ PRIOR_LIMIT = 50
 # Postgres's own undefined_function (42883) when the cache is fresh but the function is not.
 _MISSING_FUNCTION_CODES = ("PGRST202", "42883")
 
-_REPORT_CODE_RE = re.compile(
-    rf"^{re.escape(REPORT_CODE_PREFIX)}[{REPORT_CODE_ALPHABET}]{{{REPORT_CODE_LENGTH}}}$"
-)
+# A ref for a report that arrived without a code (an older build, a hand-written email). It must
+# say so explicitly: anything else that is not a recognisable code is refused, so a code copied
+# in an unexpected shape can never become a second idempotency key for the same report.
+MANUAL_REF_PREFIX = "manual:"
+
+_CODE_CHARS = f"[{REPORT_CODE_ALPHABET}]{{{REPORT_CODE_LENGTH}}}"
+# The whole input is one code, however it was copied: "R-7K2Q9M", "R7K2Q9M", "R 7K2Q9M", or
+# "7K2Q9M" (what a double-click selects in Mail, where the hyphen ends the word).
+_BARE_CODE_RE = re.compile(rf"^(?:R[-\s]?)?({_CODE_CHARS})$")
+# A code inside a longer line: "Report: R-7K2Q9M", or the subject "Caydex feedback · R-7K2Q9M".
+# The hyphen is required here, or "CAYDEX" in the subject would read as a code.
+_CODE_IN_TEXT_RE = re.compile(rf"(?<![A-Z0-9])R-({_CODE_CHARS})(?![A-Z0-9])")
 
 
 # ── pure helpers (no database; unit-tested) ──────────────────────────────────
@@ -92,27 +101,47 @@ def parse_user_id(value: Any) -> str:
 
 
 def normalize_ref(value: Any) -> str:
-    """The report code, as the idempotency key. ValueError when it cannot be one.
+    """The report code, as the idempotency key: always "R-XXXXXX". ValueError otherwise.
 
-    An `R-` code is uppercased (a code copied as "r-7k2q9m" must not be a second key for the
-    same report) and must be exactly the app's shape, so a mistyped code is refused rather
-    than granted under a key no real report carries. Any other ref (a report that arrived
-    without a code) is kept as typed, bounded by the SQL's 64-character limit.
+    The SQL guards one reward per (account, ref) by exact match, so every way of copying the
+    same code must land on the SAME key — "7K2Q9M", "r-7k2q9m", the whole "Report: R-7K2Q9M"
+    line and the subject line all become "R-7K2Q9M". Anything that looks like a code but is not
+    one (wrong length, 0/O/1/I/L, two different codes) is refused rather than granted under a
+    key no real report carries. A report that arrived without a code takes an explicit
+    "manual:<anything>" ref, bounded by the SQL's 64-character limit.
     """
     if not isinstance(value, str) or not value.strip():
         raise ValueError("--ref is required: the report code from the email (R-XXXXXX)")
     ref = value.strip()
-    if ref.upper().startswith(REPORT_CODE_PREFIX):
-        code = ref.upper()
-        if not _REPORT_CODE_RE.match(code):
-            raise ValueError(
-                f"{ref!r} is not a report code: expected {REPORT_CODE_PREFIX} plus "
-                f"{REPORT_CODE_LENGTH} of {REPORT_CODE_ALPHABET} (no 0, O, 1, I or L)"
-            )
-        return code
-    if len(ref) > MAX_REF_LENGTH:
-        raise ValueError(f"--ref is {len(ref)} characters; the limit is {MAX_REF_LENGTH}")
-    return ref
+    upper = ref.upper()
+    expected = (f"expected {REPORT_CODE_PREFIX} plus {REPORT_CODE_LENGTH} of "
+                f"{REPORT_CODE_ALPHABET} (no 0, O, 1, I or L)")
+
+    bare = _BARE_CODE_RE.match(upper)
+    if bare:
+        return REPORT_CODE_PREFIX + bare.group(1)
+
+    found = set(_CODE_IN_TEXT_RE.findall(upper))
+    if len(found) == 1:
+        return REPORT_CODE_PREFIX + found.pop()
+    if len(found) > 1:
+        raise ValueError(f"{ref!r} holds more than one report code: pass the one being rewarded")
+
+    if upper.startswith(MANUAL_REF_PREFIX.upper()):
+        note = ref[len(MANUAL_REF_PREFIX):].strip()
+        if not note:
+            raise ValueError(f"{ref!r}: say which report after {MANUAL_REF_PREFIX!r}")
+        manual = MANUAL_REF_PREFIX + note
+        if len(manual) > MAX_REF_LENGTH:
+            raise ValueError(f"--ref is {len(manual)} characters; the limit is {MAX_REF_LENGTH}")
+        return manual
+
+    if REPORT_CODE_PREFIX in upper:
+        raise ValueError(f"{ref!r} is not a report code: {expected}")
+    raise ValueError(
+        f"{ref!r} is not a report code ({expected}). For a report that arrived without one, "
+        f"pass --ref {MANUAL_REF_PREFIX}<a note naming it>"
+    )
 
 
 def validate_credits(value: Any) -> int:
@@ -184,7 +213,9 @@ def _parser() -> argparse.ArgumentParser:
     who = ap.add_mutually_exclusive_group(required=True)
     who.add_argument("--user-id", help="the Account ID from the report email")
     who.add_argument("--email", help="the account's email (only if the user wrote from it)")
-    ap.add_argument("--ref", required=True, help="the report code from the email, e.g. R-7K2Q9M")
+    ap.add_argument("--ref", required=True,
+                    help="the report code from the email, e.g. R-7K2Q9M "
+                         f"({MANUAL_REF_PREFIX}<note> for a report without one)")
     ap.add_argument("--credits", type=int, default=DEFAULT_CREDITS,
                     help=f"credits to grant (default {DEFAULT_CREDITS}, max {MAX_CREDITS})")
     ap.add_argument("--apply", action="store_true", help="grant (default: dry run, no RPC call)")

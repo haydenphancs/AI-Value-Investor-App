@@ -291,8 +291,17 @@ def test_parse_user_id_refuses_junk_and_the_guest(value):
     ("r-7k2q9m", "R-7K2Q9M"),
     ("  R-7K2Q9M  ", "R-7K2Q9M"),
     ("R-ZZ2345", "R-ZZ2345"),
-    ("testflight-2026-10-04", "testflight-2026-10-04"),   # a report without a code: kept as typed
-    ("X" * 64, "X" * 64),
+    # Every way the SAME code gets copied lands on the same key, or one report pays twice.
+    ("7K2Q9M", "R-7K2Q9M"),                         # a double-click in Mail stops at the hyphen
+    ("R7K2Q9M", "R-7K2Q9M"),
+    ("R 7K2Q9M", "R-7K2Q9M"),
+    ("Report: R-7K2Q9M", "R-7K2Q9M"),               # the whole body line
+    ("Caydex feedback · R-7K2Q9M", "R-7K2Q9M"),     # the subject: "CAYDEX" is not a code
+    ("R-7K2Q9M and again R-7K2Q9M", "R-7K2Q9M"),
+    # A report without a code says so explicitly.
+    ("manual:testflight-2026-10-04", "manual:testflight-2026-10-04"),
+    ("MANUAL:  old build, chart bug ", "manual:old build, chart bug"),
+    ("manual:" + "x" * 57, "manual:" + "x" * 57),   # exactly the SQL's 64
 ])
 def test_normalize_ref(value, expected):
     assert gfr.normalize_ref(value) == expected
@@ -308,7 +317,13 @@ def test_normalize_ref(value, expected):
     "R-LK2Q9M",      # L
     "R-0K2Q9M",      # 0
     "R-7K 2Q9",      # inner space
-    "X" * 65,        # over the SQL's limit
+    "Report: R-7K2Q9",                  # a truncated code inside a line
+    "R-7K2Q9M R-ABCDEF",                # two different codes: which one?
+    "Caydex feedback",                  # no code at all
+    "testflight-2026-10-04",            # free text without "manual:" could be a mangled code
+    "X" * 64,
+    "manual:",                          # says nothing
+    "manual:" + "x" * 58,               # over the SQL's limit
 ])
 def test_normalize_ref_refuses(value):
     with pytest.raises(ValueError):

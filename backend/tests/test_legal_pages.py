@@ -1319,6 +1319,10 @@ _REWARD_CLAUSES = {
             "cannot be transferred",
             "never given for app store ratings or reviews",
             "change or end this program at any time",
+            # The balance is shared with credit packs, so an Apple pack refund can take reward
+            # credits with it (revoke_purchased_credits). Said, so the clause above is not the
+            # only way the Terms say they can go.
+            "if apple refunds a credit pack",
         ],
     ),
     "privacy": (
@@ -1328,6 +1332,7 @@ _REWARD_CLAUSES = {
             "includes your account id",
             "add reward credits to that account",
             "not deleted with your account",
+            "to reply to you",
         ],
     ),
 }
@@ -1367,4 +1372,16 @@ def test_no_privacy_copy_still_says_reports_are_used_solely_to_fix_the_problem(p
     assert _RETIRED_SUPPORT_REPORT_PURPOSE not in prose, (
         f"{path.name} still says support reports are used {_RETIRED_SUPPORT_REPORT_PURPOSE!r}, "
         f"but a confirmed report is now also used to add reward credits to the account it names"
+    )
+    # The summary's old promise. Support mail, which now carries the account ID, survives an
+    # in-app account deletion (§6), so "everything" overstated it. The Swift summary is one
+    # multi-line literal the prose extractor does not read, so the raw text is checked too.
+    raw = re.sub(r"\s+", " ", path.read_text(encoding="utf-8").lower())
+    for text in (prose, raw):
+        assert "you can delete everything" not in text, (
+            f"{path.name}'s summary still says 'You can delete everything', but §6 says support "
+            f"emails are kept until the user asks"
+        )
+    assert "emails you send to support are kept until you ask us to delete them" in raw, (
+        f"{path.name}'s summary no longer says support emails outlive an in-app deletion"
     )

@@ -434,7 +434,9 @@ def test_the_reward_needs_both_a_reward_path_and_an_account():
 
 def test_every_reward_string_on_the_screen_is_gated():
     """Not just defined behind a flag — USED behind one. Each reference to the reward copy
-    sits in a branch that only `canEarnReward` (or, for the guest note, `showsReward`) opens."""
+    sits in a branch that only `canEarnReward` (or, for the guest note, `showsReward` and not
+    reconnecting) opens; the thank-you alert reads `sentWithReward`, frozen from `canEarnReward`
+    when the composer opened."""
     src = _source(_FEEDBACK)
     outside = src.replace(_balanced(src, "enum FeedbackRewardCopy {"), "", 1)
     used = set(re.findall(r"FeedbackRewardCopy\.(\w+)", outside))
@@ -448,12 +450,21 @@ def test_every_reward_string_on_the_screen_is_gated():
 
     intro = _balanced(src, "private var intro: some View {")
     assert "FeedbackRewardCopy.callout" in _balanced(intro, "if canEarnReward {")
-    assert "FeedbackRewardCopy.guestNote" in _balanced(intro, "if showsReward {")
+    assert "FeedbackRewardCopy.guestNote" in _balanced(intro, "if showsReward && !isReconnecting {"), (
+        "the guest note must never reach the rating path, nor a signed-in user still reconnecting"
+    )
+    assert re.search(r"isReconnecting: Bool \{\s*appState\.auth\.status == \.restoring\s*\}", src)
     caption = _balanced(src, "private var composerCaption: String {")
     assert "FeedbackRewardCopy.composerCaption" in _balanced(caption, "if canEarnReward {")
-    assert re.search(r"Text\(\s*canEarnReward\s*\?\s*FeedbackRewardCopy\.thankYou\b", src), (
-        "the thank-you alert must use the reward copy only when canEarnReward"
+    assert re.search(r"Text\(\s*sentWithReward\s*\?\s*FeedbackRewardCopy\.thankYou\b", src), (
+        "the thank-you alert must use the reward copy only for a report that was offered it"
     )
+    # Frozen when the composer opens, from the same gate as the rest of the copy: a live read
+    # could flip to true if the profile arrived mid-compose, promising credits to a report that
+    # left without an Account ID.
+    send = _balanced(src, "private var sendButton: some View {")
+    assert "sentWithReward = canEarnReward" in send, "sentWithReward must be frozen from canEarnReward"
+    assert send.index("sentWithReward = canEarnReward") < send.index("showingComposer = true")
     rewarded = _balanced(src, "private static let rewardStepList: [Step] = baseSteps + [")
     assert "FeedbackRewardCopy.reviewStepDetail" in rewarded
     assert "FeedbackRewardCopy.reviewStepTitle" in rewarded
@@ -481,11 +492,17 @@ def test_the_profile_row_offers_the_reward_only_to_an_account():
     assert re.search(
         r"subtitle: canEarnFeedbackReward \? FeedbackRewardCopy\.rowSubtitle : nil", label
     ), f"the row must show FeedbackRewardCopy.rowSubtitle to account holders only. Got: {label}"
+    # The SAME source FeedbackView reads the Account ID from. `isAuthenticated || isRestoring`
+    # advertised the reward on a cold launch still reconnecting, with no profile — whose report
+    # then went out with no Account ID, under a screen that offered no reward.
     gate = _balanced(src, "private var canEarnFeedbackReward: Bool {")
-    assert "viewModel.isAuthenticated" in gate, "an account holder must see the reward"
-    assert "viewModel.isRestoring" in gate, (
-        "a reconnecting user still has an account (auth.md §5) and must not be shown the guest row"
-    )
+    assert "viewModel.hasAccountProfile" in gate, f"the row must be gated on the profile. Got: {gate}"
+    vm = _source(_IOS / "ViewModels/ProfileViewModel.swift")
+    assert re.search(
+        r"var hasAccountProfile: Bool \{\s*appState\?\.user\.profile != nil\s*\}", vm
+    ), "hasAccountProfile must read the profile FeedbackView credits"
+    feedback = _source(_FEEDBACK)
+    assert re.search(r"accountId: String\? \{\s*appState\.user\.profile\?\.id\s*\}", feedback)
 
 
 # ── The report says which report, and which account ───────────────────────────
@@ -527,9 +544,25 @@ def test_each_report_gets_its_own_code():
     assert re.search(r'subject:\s*"[^"\n]*\\\(reportCode\)[^"\n]*"', composer), (
         "the report code must be in the subject, where the owner sees it in the inbox"
     )
-    assert "reportCode = AppInfo.newReportCode()" in _balanced(src, "if sent {"), (
-        "a sent report must retire its code, or the next report would share it and be refused "
-        "as a replay when the owner credits it"
+    # Retired on EVERY hand-off, not only a confirmed send: a saved draft may still be sent from
+    # Mail, and the share sheet cannot say whether anything went. Otherwise two reports share a
+    # code and the owner's grant for the second is refused as a replay.
+    after_composer = src[src.index("MailComposeView("):]
+    completion = _balanced(after_composer, ") {")
+    assert completion.lstrip("{ \n").startswith("sent in"), "positive anchor — not the completion"
+    assert "reportCode = AppInfo.newReportCode()" in completion, (
+        "the composer closing must retire the code whatever the result"
+    )
+    assert "reportCode = AppInfo.newReportCode()" not in _balanced(completion, "if sent {"), (
+        "the code is retired only on a send — a saved draft would keep it for the next report"
+    )
+    fallback = _balanced(src, "MailUnavailableCard(")
+    assert re.search(r"onShareDismissed:\s*\{\s*reportCode = AppInfo\.newReportCode\(\)\s*\}", fallback), (
+        "a report shared without Mail must retire its code too"
+    )
+    card = _source(_IOS / "Views/Molecules/MailUnavailableCard.swift")
+    assert ".sheet(isPresented: $isSharing, onDismiss: onShareDismissed)" in card, (
+        "MailUnavailableCard no longer calls onShareDismissed when the share sheet closes"
     )
 
 

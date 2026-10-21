@@ -75,7 +75,10 @@ _CACHE_TTL = 300  # 5 minutes
 #     industry's median (a lenders' yardstick): no peer line, `peer_group_levels` empty,
 #     no benchmark read (`comparable_peer_metrics`). A v5 row of MA drew the lenders'
 #     +24.6% operating-income line under its +15.7%.
-_GROWTH_PAYLOAD_VERSION = 6
+# 7 (2026-10-21): the Financial Services peer rule (own industry line from 10 companies per
+#     period, else no line — never the sector's; owner decision 2026-10-20). A v6 row of a
+#     small FS industry drew the Financial Services sector's growth line.
+_GROWTH_PAYLOAD_VERSION = 7
 _VERSION_KEY = "payload_version"
 
 

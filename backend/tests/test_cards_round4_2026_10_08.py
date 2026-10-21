@@ -249,9 +249,11 @@ async def test_the_rebuilt_shell_and_exchange_sector_median_is_still_refused(
     """The guard does not expire with the producer's rebuild: a mature (n=33) FS sector
     cell that holds no bank is refused exactly like the bank-pooled one. Mutation: making
     `_bank_pooled_sector_cell` answer False compares SPGI's 0.9 current ratio with a
-    shell-dominated 6.5 ("well below sector average")."""
+    shell-dominated 6.5 ("well below sector average"). Since 2026-10-21 the real lookup
+    never answers an FS company with a sector cell when an industry is named, so the cell
+    comes from `r2._PreRuleLookup` (the backstop stays tested)."""
     monkeypatch.setattr(sbl, "_cache", {})
-    lookup = r2._RowLookup(_rebuilt_rows(industry_n=10))
+    lookup = r2._PreRuleLookup(_rebuilt_rows(industry_n=10))
     cells = lookup.get_current_benchmarks(industry, "Financial Services", sorted(_GATED))
     assert all(c["level"] == "sector" and c["n"] == 33 for c in cells.values()), cells
 

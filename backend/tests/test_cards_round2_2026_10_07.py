@@ -223,6 +223,19 @@ _FS_SECTOR_TTM = {"current_ratio": (0.5, 2000), "quick_ratio": (0.4, 2000),
                   "pe_ratio": (14.0, 2000), "roe": (0.10, 2000)}
 
 
+class _PreRuleLookup(_RowLookup):
+    """The lookup as it answered BEFORE the Financial Services rule (2026-10-21): an FS
+    company whose industry was under the floor got the sector cell. The real lookup no
+    longer answers that (own industry from 10 companies, else none —
+    tests/test_benchmarks_fs_peer_rule_2026_10_21.py), so this double is how the
+    Health Check's backstop guard (`_bank_pooled_sector_cell`) stays tested: a sector-level
+    cell for an FS company is the same direct sector read an FS company FMP gives no
+    industry still gets."""
+
+    def get_current_benchmarks(self, industry, sector, metrics):
+        return super().get_current_benchmarks("", sector, metrics)
+
+
 def _exchange_rows(industry_n: int) -> Dict[tuple, Dict[str, tuple]]:
     industry = {m: (v * 3, industry_n) for m, (v, _n) in _FS_SECTOR_TTM.items()}
     return {("sector", sbl.TTM_PERIOD_TYPE): dict(_FS_SECTOR_TTM),
@@ -235,8 +248,8 @@ async def test_a_thin_exchange_industry_is_not_compared_with_the_bank_pooled_sec
     monkeypatch, raw_sector,
 ):
     monkeypatch.setattr(sbl, "_cache", {})
-    lookup = _RowLookup(_exchange_rows(industry_n=10))
-    # Precondition: the real picker hands back the SECTOR cell for every metric.
+    lookup = _PreRuleLookup(_exchange_rows(industry_n=10))
+    # Precondition: the (pre-rule) picker hands back the SECTOR cell for every metric.
     cells = lookup.get_current_benchmarks(
         "Financial - Data & Stock Exchanges", "Financial Services", sorted(_FS_SECTOR_TTM))
     assert all(c["level"] == "sector" and c["n"] == 2000 for c in cells.values()), cells

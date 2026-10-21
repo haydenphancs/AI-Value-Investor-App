@@ -53,7 +53,9 @@ from app.services.sector_benchmark_lookup import (
     MATURE_SAMPLE_FLOOR,
     TTM_PERIOD_TYPE,
     BenchmarkLookupFailed,
+    fs_industry_only,
     lookup_failed,
+    peer_floor,
 )
 from app.utils.margins import revenue_backed_margin
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
@@ -1159,14 +1161,17 @@ def _read_ttm_peer_cells(
 _NO_TTM_POINT_SUFFIXES = ("_yoy", "_qoq", "_growth")
 
 
-def _mature_ttm_value(metric: str, cell: Any) -> Optional[float]:
+def _mature_ttm_value(
+    metric: str, cell: Any, floor: int = MATURE_SAMPLE_FLOOR,
+) -> Optional[float]:
     """The TTM median the drill-down pins as the current year's peer point, or None.
 
     Exactly the first two tiers of `SectorBenchmarkLookup.get_current_benchmarks` (the
-    merged TTM cell, used only when it holds at least MATURE_SAMPLE_FLOOR companies), so
-    the chart's newest peer point is the Overview card's value whenever the card shows a
-    TTM median. A thin TTM cell (KO: Beverages, n=13) is never injected; the card then
-    falls back to a complete annual year, which the chart already draws at that year.
+    merged TTM cell, used only when it holds at least `floor` companies — the lookup's
+    `peer_floor`: MATURE_SAMPLE_FLOOR, or 10 for a Financial Services industry), so the
+    chart's newest peer point is the Overview card's value whenever the card shows a TTM
+    median. A thin TTM cell (KO: Beverages, n=13) is never injected; the card then falls
+    back to a complete annual year, which the chart already draws at that year.
     """
     if any(metric.endswith(suffix) for suffix in _NO_TTM_POINT_SUFFIXES):
         return None
@@ -1176,7 +1181,7 @@ def _mature_ttm_value(metric: str, cell: Any) -> Optional[float]:
     n = _finite_or_none(cell.get("n"))
     if value is None or n is None:
         return None
-    return value if n >= MATURE_SAMPLE_FLOOR else None
+    return value if n >= floor else None
 
 
 def _ttm_point_fits_line(
@@ -2326,8 +2331,9 @@ class TickerReportDataCollector:
         from datetime import datetime, timezone
         cur_year = str(datetime.now(timezone.utc).year)
         other_group: List[str] = []
+        ttm_floor = peer_floor(industry, sector)
         for metric, cell in ttm_cells.items():
-            value = _mature_ttm_value(metric, cell)
+            value = _mature_ttm_value(metric, cell, ttm_floor)
             if value is None:
                 continue
             reason = _withheld_peer_line_reason(metric, cell.get("level"), industry, sector)
@@ -2957,6 +2963,10 @@ class TickerReportDataCollector:
             peer_group_level=peer_group_level,
             non_lender_member=non_lender_member,
             listed_non_lender=listed_non_lender,
+            per_row_peers=fs_industry_only(
+                (out.profile or {}).get("industry") or "",
+                (out.profile or {}).get("sector") or "",
+            ),
         )
 
     # ── Phase 4: merge with AI output into final TickerReportResponse ─
@@ -5648,6 +5658,7 @@ def _snapshot_to_card(
     *,
     non_lender_member: bool = False,
     listed_non_lender: bool = False,
+    per_row_peers: bool = False,
 ) -> Dict[str, Any]:
     """Map a SnapshotItemResponse onto a FundamentalMetricCardResponse dict.
 
@@ -5662,6 +5673,12 @@ def _snapshot_to_card(
     (`listed_non_lender` without `non_lender_member`): the surfaces judged it differently
     (the list alone where no quarters are read, the quarters elsewhere), so each card's
     verdict reads its own rows, peer-free when none printed a median.
+
+    `per_row_peers` (the Financial Services rule, 2026-10-20: own industry from 10
+    companies, else no peer): rows of one card can be judged differently — a Data & Stock
+    Exchanges P/E on its absolute bands beside a P/B against the industry — so every card
+    reads its own rows (Growth: whether any row drew a peer line), and a "{peer}" phrase is
+    peer-free for each row that printed no median ("Low P/E", never "Cheaper Than Industry").
 
     Honest fallback when the snapshot is missing: star_rating=0, empty
     metrics, quality_label="Data unavailable" — Pydantic still validates
@@ -5718,18 +5735,29 @@ def _snapshot_to_card(
     rows_compared = any(
         getattr(m, "peer_level", None) in ("industry", "sector") for m in snap.metrics
     )
+    peer_free_metrics: Optional[set] = None
     if non_lender_member is True:
         peer_compared = False
-    elif listed_non_lender is True or title == "Health":
+    elif per_row_peers and title == "Growth":
+        # Growth rows carry no `peer_level` (their names print no median); the card
+        # compared something exactly when a row drew a peer line.
+        peer_compared = any(md.get("sector_annual_history") for md in metrics)
+    elif listed_non_lender is True or title == "Health" or per_row_peers:
         peer_compared = rows_compared
     else:
         peer_compared = True
+    if per_row_peers:
+        peer_free_metrics = {
+            m.metric_key for m in snap.metrics
+            if m.metric_key and getattr(m, "peer_level", None) not in ("industry", "sector")
+        }
     label, sentiment = generate_card_verdict(
         title,
         int(snap.rating or 0),
         peer_group_level,
         [(m.metric_key, m.score) for m in snap.metrics],
         peer_compared=peer_compared,
+        peer_free_metrics=peer_free_metrics,
     )
     return {
         "title": title,
@@ -5751,6 +5779,7 @@ def _build_fundamental_metrics_from_snapshots(
     *,
     non_lender_member: bool = False,
     listed_non_lender: bool = False,
+    per_row_peers: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build the 4 fundamental cards from the same snapshot services
     TickerDetailView's Financials tab uses, so the values match exactly.
@@ -5762,11 +5791,13 @@ def _build_fundamental_metrics_from_snapshots(
     `peer_group_level` ("industry"/"sector") is uniform per ticker (the industry
     either has benchmark rows or it doesn't), so the same value labels all 4 cards.
     `non_lender_member` makes all four verdicts peer-free; `listed_non_lender` (a listed
-    ticker vetoed as a lender) makes each verdict read its own rows (`_snapshot_to_card`).
+    ticker vetoed as a lender) makes each verdict read its own rows (`_snapshot_to_card`);
+    so does `per_row_peers` (a Financial Services company with an industry, 2026-10-20).
     """
     kwargs = dict(
         history_lookup=history_lookup, peer_group_level=peer_group_level,
         non_lender_member=non_lender_member, listed_non_lender=listed_non_lender,
+        per_row_peers=per_row_peers,
     )
     return [
         _snapshot_to_card("Profitability", profitability, **kwargs),

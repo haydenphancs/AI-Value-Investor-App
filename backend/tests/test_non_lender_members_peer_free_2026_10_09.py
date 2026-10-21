@@ -269,22 +269,38 @@ async def test_a_lenders_price_card_still_compares_and_rates(monkeypatch, caplog
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boom", [True, False])
-async def test_a_non_members_price_card_keeps_its_rating_without_medians(
-    monkeypatch, caplog, boom,
+async def test_a_non_members_price_card_keeps_its_rating_when_the_lookup_fails(
+    monkeypatch, caplog,
 ):
-    """The two-judged rule is network-SCOPED at the call site: a lender whose lookup fails
-    (or answers no usable medians) is scored as before — P/E on bands, the rest unscored —
-    and keeps a rating, with no `[valuation-unrated]` line. Mutation: passing
+    """A lender whose lookup FAILS is scored as before — P/E on bands, the rest unscored —
+    and keeps a rating, with no `[valuation-unrated]` line: an outage says nothing about
+    whether peers exist, and the build is served degraded, never stored. Mutation: passing
     `peers_withheld=True` at the call site unrates AXP here (it survived every other test)."""
-    lookup = _Recorder(boom=RuntimeError("supabase down")) if boom else _Recorder(value=None)
+    lookup = _Recorder(boom=RuntimeError("supabase down"))
     svc = _val_svc(monkeypatch, "AXP", lookup)
     with caplog.at_level(logging.INFO, logger=vss.logger.name):
         snap, degraded = await svc._compute_with_status("AXP")
     assert lookup.calls() == 1
-    assert ("benchmarks" in degraded) is boom
+    assert "benchmarks" in degraded
     assert snap.rating > 0 and snap.weighted_score is not None
     assert not [r for r in caplog.records if "[valuation-unrated]" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_financial_services_card_without_usable_medians_is_unrated(
+    monkeypatch, caplog,
+):
+    """Since 2026-10-21 (the Financial Services rule: own industry from 10 companies, else no
+    peer — never the sector) the two-judged rule covers every FS company with an industry: a
+    lender whose lookup answers no usable median has only P/E on its own bands, one multiple,
+    so the card is unrated (`[valuation-unrated]`), not P/E plus four neutral votes."""
+    lookup = _Recorder(value=None)
+    svc = _val_svc(monkeypatch, "AXP", lookup)
+    with caplog.at_level(logging.INFO, logger=vss.logger.name):
+        snap, degraded = await svc._compute_with_status("AXP")
+    assert lookup.calls() == 1 and degraded == []
+    assert snap.rating == 0 and snap.weighted_score is None
+    assert [r for r in caplog.records if "[valuation-unrated]" in r.getMessage()]
 
 
 def _price(fr, bench=None, *, withheld=True) -> SnapshotItemResponse:
@@ -535,7 +551,7 @@ async def test_vs_health_check_judges_pe_and_roe_on_absolute_bands(monkeypatch, 
         assert row.peer_level is None and row.comparison_value is None, row.type
         text = hcd._rendered(row)
         assert "industry" not in text and "sector" not in text, text
-    assert hc._HC_PAYLOAD_VERSION == 9
+    assert hc._HC_PAYLOAD_VERSION == 10
 
 
 @pytest.mark.asyncio
@@ -649,8 +665,12 @@ def _sections(monkeypatch, *, ticker: str, member: bool, ratios_rows=None):
                         snap_health=_snap("Financial Health", {"debt_to_equity": 3}))
     out.ticker = ticker
     out.non_lender_member = member
-    out.snap_profitability = _snap("Profitability", {"gross_margin": 5, "net_margin": 3})
-    out.snap_valuation = _snap("Price", {"pe": 1, "pb": 3})
+    # A lender's rows are compared with its industry's (lenders') median and print it, so
+    # they carry `peer_level` "industry"; a member's rows print none.
+    level = None if member else "industry"
+    out.snap_profitability = _snap("Profitability", {"gross_margin": 5, "net_margin": 3},
+                                   level=level)
+    out.snap_valuation = _snap("Price", {"pe": 1, "pb": 3}, level=level)
     out.snap_growth = _snap("Growth", {"revenue_growth": 3})
     if ratios_rows is not None:
         out.ratios = ratios_rows
@@ -1017,37 +1037,39 @@ def test_the_overview_response_passes_its_quarters_to_the_snapshots():
 
 
 @pytest.mark.asyncio
-async def test_growth_payload_version_is_6_and_older_rows_rebuild(monkeypatch):
+async def test_growth_payload_version_is_7_and_older_rows_rebuild(monkeypatch):
     """Growth v6 (2026-10-09, NET-4): a v5 row of MA drew the lenders' +24.6% operating-
-    income line under its +15.7%. Mutation: the constant left at 5 serves that row."""
-    assert gmod._GROWTH_PAYLOAD_VERSION == 6
+    income line under its +15.7%; v7 (2026-10-21): a v6 row of a small Financial Services
+    industry drew the sector's line. Mutation: the constant left at 5 serves that row."""
+    assert gmod._GROWTH_PAYLOAD_VERSION == 7
     lookup = gd._yoy_metrics_lookup()
     fmp = gd._FakeFMP(profile={"symbol": "MA", "sector": FS, "industry": CREDIT})
     resp, _degraded = await gd._service(monkeypatch, fmp, lookup)._build_growth("MA")
     body = resp.model_dump()
     svc = gmod.GrowthService.__new__(gmod.GrowthService)
-    for old in (None, 4, 5):
+    for old in (None, 4, 5, 6):
         stale = dict(body) if old is None else {**body, gmod._VERSION_KEY: old}
         svc.supabase = sph._Supabase([sph._row(stale)[0]])
         assert svc._check_supabase_cache("MA") is None, f"a v{old} Growth row was served"
-    svc.supabase = sph._Supabase([sph._row({**body, gmod._VERSION_KEY: 6})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, gmod._VERSION_KEY: 7})[0]])
     assert svc._check_supabase_cache("MA") is not None
 
 
-def test_growth_snapshot_payload_version_is_4_and_older_rows_rebuild():
+def test_growth_snapshot_payload_version_is_5_and_older_rows_rebuild():
     """Growth snapshot v4 (2026-10-09, NET-4): a v3 row of MA scored its growth 2/5 against
-    the lenders' median. Mutation: the constant left at 3 serves that score."""
+    the lenders' median; v5 (2026-10-21): the Financial Services peer rule. Mutation: the
+    constant left at 3 serves that score."""
     from app.services import growth_snapshot_service as gss
 
-    assert gss._SNAPSHOT_PAYLOAD_VERSION == 4
+    assert gss._SNAPSHOT_PAYLOAD_VERSION == 5
     body = SnapshotItemResponse(category="Growth", rating=2, metrics=[],
                                 computed_at="2026-10-08T09:15:00Z").model_dump()
     svc = gss.GrowthSnapshotService.__new__(gss.GrowthSnapshotService)
-    for old in (None, 2, 3):
+    for old in (None, 2, 3, 4):
         stale = dict(body) if old is None else {**body, gss._VERSION_KEY: old}
         svc.supabase = sph._Supabase([sph._row(stale)[0]])
         assert svc._check_supabase_cache("MA") is None, f"a v{old} growth snapshot was served"
-    svc.supabase = sph._Supabase([sph._row({**body, gss._VERSION_KEY: 4})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, gss._VERSION_KEY: 5})[0]])
     assert svc._check_supabase_cache("MA") is not None
 
 

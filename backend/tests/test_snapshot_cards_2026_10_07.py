@@ -450,7 +450,7 @@ def test_valuation_cache_hit_keeps_the_original_build_time(monkeypatch):
     (payload,) = writer.supabase.upserts
     # 7 (2026-10-09, NET-4): a listed non-lender member's Price card is peer-free.
     # 8 (2026-10-09): Earnings Yield = 1 / the card's displayed P/E.
-    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 8
+    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 9
     assert payload["response_json"]["computed_at"] == "2026-10-07T10:00:00Z"
     assert payload["response_json"]["metrics"][0]["peer_level"] is None   # the key travels
 

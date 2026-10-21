@@ -160,7 +160,10 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     row scores on the absolute bands with a bare label and `peer_level` None, and no
 #     lookup is made (`comparable_peer_metrics`). A v3 row of such a company compared its
 #     margins, ROE and ROA with lenders.
-_SNAPSHOT_PAYLOAD_VERSION = 4
+# 5 (2026-10-21): the Financial Services peer rule (own industry from 10 companies, else
+#     no peer — never the sector median; owner decision 2026-10-20). A v4 row of a small FS
+#     industry compared its margins and ROE with the bank-dominated sector.
+_SNAPSHOT_PAYLOAD_VERSION = 5
 _VERSION_KEY = "_schema_v"
 
 # ── Ticker validation ────────────────────────────────────────────

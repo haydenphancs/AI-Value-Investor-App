@@ -1453,13 +1453,21 @@ out to compute peer medians per request:
   `MATURE_SAMPLE_FLOOR` (20) companies, else the **same period's** sector row when that one
   does, else whichever exists. A period never borrows another period's median (2026-10-07: the
   old "hold back to the last mature period" froze small industries' lines at one old sector value).
+  **Financial Services is the exception** (owner decision 2026-10-20; `fs_industry_only` /
+  `peer_floor`, `financials_metric_gate.FS_INDUSTRY_PEER_FLOOR`): an FS company with an industry
+  is compared with its OWN industry's median from **10** companies, and with **no peer** below
+  that — never with the FS SECTOR median, a bank-dominated pool (exchanges read "richly valued"
+  against banks' P/E of 12.35; JPM's EV/EBITDA at n=19 fell to it and decided its Price rating).
+  Only the industry layer is read; a direct sector read (`industry = ''`: competitor scoring, the
+  moat scorer, an FS company FMP gives no industry) is unchanged.
   That per-period pick serves single values. CHART LINES (Growth, Profit Power, the report
   drill-down — whose metrics carry their line's level, `sector_annual_level` /
   `sector_quarterly_level`; Profit Power's `peer_group_levels` names the net-margin line per tab
   plus one key per margin, e.g. `annual.fcf_margin`) read `get_benchmark_series` instead: every point of a metric's line comes from ONE
   peer group — the industry when it has a mature cell at the newest period, else the sector — so
   the line never steps between populations where n crosses 20, and its legend, tooltip and Cay
-  AI's peer sentence name the group every point belongs to.
+  AI's peer sentence name the group every point belongs to. An FS industry's line keeps only its
+  own periods from 10 companies (none → no line).
 - **Three live `period_type` kinds:**
   - `annual` + `calendar_quarter` — **history** (the chart lines + the growth series). Annual rows
     are keyed by the year of the period end (`period_labels.annual_benchmark_key`: an end on
@@ -1482,11 +1490,19 @@ out to compute peer medians per request:
   value — never an earlier period's. The producer applies the same gate before writing. A `ttm` row
   older than 21 days (`TTM_MAX_AGE_DAYS`: its group fell below 5 companies, or the weekly job
   stopped) is not current and is not served; historical rows have no age limit (the producer
-  fetches 16 annual records, so the oldest years legitimately stop being rewritten).
+  fetches 16 annual records, so the oldest years legitimately stop being rewritten). A **margin
+  median of exactly 0** (`MARGIN_METRICS` in `app/utils/margins.py`) is never served, in any period type
+  (2026-10-21): it is FMP's "0 when there is no revenue" counted as a figure. The producers drop
+  that 0 since 2026-10-11, but the 2026-10-04 fiscal rows held 1,113 of them — Healthcare's sector
+  net margin read 0.0% for every year 2016-2025 on the Profit Power line, the report drill-down,
+  Stage B and Cay AI's grounding (only the Profitability card had a guard) — and rows no later run
+  rewrites keep theirs. Negative medians are real and kept.
 - **Read path** (`sector_benchmark_lookup.py`, 1-hour in-memory cache): `get_current_benchmarks()`
   answers the single-value "vs avg" comparisons: the industry TTM median when it has ≥ 20
   companies → the sector TTM median when it does → the newest complete annual year with a mature
-  median → **none** (no comparison is shown; a thin cell never decides one).
+  median → **none** (no comparison is shown; a thin cell never decides one). Financial Services:
+  the industry TTM median from 10 companies → the industry's NEWEST complete year when it pools
+  10 (never an older year) → none.
 - **Write path** (`industry_benchmark_service.py`): each recompute covers the **top 300** constituents
   per industry by market cap (`TOP_TICKERS_PER_INDUSTRY`) — medians stabilise well below that and it
   bounds the FMP budget; the **median** (not mean) protects against 1–2 outlier reporters. Values are
@@ -1501,7 +1517,7 @@ out to compute peer medians per request:
 
 | Job | Cadence | Writes | Why separate |
 |-----|---------|--------|--------------|
-| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~04:00 UTC | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
+| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~03:30 UTC (before the moat phase, which scores peers against these medians) | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
 | TTM refresh | Weekly — Sunday 06:00 UTC | `ttm` rows + the `''` sector aggregate for the TTM period | price ÷ TTM earnings drifts daily for every company, so the current-snapshot median goes stale as a whole |
 
 Operational invariants:
@@ -1517,7 +1533,8 @@ Operational invariants:
   `calendar_quarter` (migration 184 unapplied), those rows are skipped for the run with an ERROR
   and `calendar_quarter_blocked: true` in the summary, while the annual rows are still written.
 - Both jobs **survive a redeploy inside their window** (2026-09-18). Each phase of the quarterly
-  chain (dossier → IP intel → moat → benchmarks; the competitor-intel phase was retired 2026-10-02)
+  chain (dossier → IP intel → benchmarks → moat; the competitor-intel phase was retired 2026-10-02;
+  medians before moat since 2026-10-21, and the moat phase waits while the medians are unsettled)
   and the weekly TTM run holds
   its own durable, day-keyed claim in `notification_job_state` (migration 147's
   `claim_scheduled_job`, via `main._run_claimed_phase`, with a 3 h stale window that outlasts the
@@ -1673,7 +1690,7 @@ whether any of it runs:
 | social snapshot | one per UTC day, hourly retry | — |
 | Home dashboard warmer: pulse, screener universe, scanners, themes, signals, Trillion, each rebuilt before its TTL (§3.4). FMP cost: in the regular session ~6 small sparkline calls a minute plus the universe sweeps (~1 a minute, 2 calls each); outside it a pulse rebuild costs ~0 FMP chart calls (a finished session's bars are memoized), and in a closed window the universe lives 15 min | a tick every `HOME_WARM_TICK_SECONDS` (10 s), all hours; due at 40 s / 45 s (840 s in a closed window: overnight, weekends, holidays) / 900 s / 480 s / 2400 s / 480 s; starts once the boot warm opens the gate | `SCANNER_PREWARM_ENABLED` (on; off = it idles) |
 | news / report / index pre-warmers | 2 h / 1 h / 30 min | `*_PREWARM_ENABLED` (on) |
-| quarterly chain: dossier → competitor → IP → moat → industry benchmarks | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC, +30 min each | per-phase claim |
+| quarterly chain: dossier → IP → industry benchmarks → moat (competitor retired 2026-10-02; medians before moat since 2026-10-21) | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC; IP +60, medians +90, moat +120 min | per-phase claim |
 | TTM benchmarks | Sunday 06:00 UTC | claim |
 | volatility precompute | daily 08:00 UTC | — |
 | whale hydration | politicians every 6 h; full sweep daily ≥ 02:00 UTC (3 h claim) | claim |
@@ -1724,7 +1741,10 @@ lenders). Readers go further, permanently: a financial company's current ratio, 
 interest coverage are never compared with the Financial Services SECTOR median at all (what remains
 of it is shell companies, exchanges and developers) — only with a mature industry median, else
 judged on absolute bands (`health_check_service._bank_pooled_sector_cell`, also applied to the
-report drill-down lines). One industry is MIXED: `Financial - Credit Services` holds card networks
+report drill-down lines). Since 2026-10-20 the lookup itself goes further for every metric: an FS
+company with an industry gets its own industry's median from 10 companies or none, never the FS
+sector's (see the dimensions bullet above); `_bank_pooled_sector_cell` stays as the backstop for a
+direct sector read. One industry is MIXED: `Financial - Credit Services` holds card networks
 and fee businesses beside lenders, so every member is gated as a lender except a CURATED non-lender
 (`financials_metric_gate.NON_LENDER_MEMBERS`: the payment networks V, MA, PYPL, WU, GPN and the fee
 businesses TREE, PMTS — owner decisions 2026-10-08/09; the list is the only way in, and a member is

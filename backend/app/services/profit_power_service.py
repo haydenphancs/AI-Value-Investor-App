@@ -91,9 +91,11 @@ _DEGRADED_CACHE_TTL = 60
 # no benchmark read (`comparable_peer_metrics`) — so Cay AI's peer net-margin sentence is
 # gone for them too. A v7 row of V drew the lenders' margins beside V's.
 # v9 (2026-10-21): the lookup never serves a margin median of exactly 0 (the fiscal rows of
-#     2026-10-04 held 1,113 — Healthcare's sector net margin read 0.0% for 2016-2025), and a
-#     zero-filled free cash flow is no reading (HSBC's quarters drew a flat 0.0% FCF line). A
-#     v8 row drew LLY's peer net margin as a flat 0.0% line.
+#     2026-10-04 held 1,113 — Healthcare's sector net margin read 0.0% for 2016-2025), a
+#     zero-filled free cash flow is no reading (HSBC's quarters drew a flat 0.0% FCF line), and
+#     a Financial Services company with an industry gets its OWN industry's line from 10
+#     companies per period, or no line — never the sector's (owner decision 2026-10-20). A v8
+#     row drew LLY's peer net margin as a flat 0.0% line.
 _PP_PAYLOAD_VERSION = 9
 _VERSION_KEY = "payload_version"
 

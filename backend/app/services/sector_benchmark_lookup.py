@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.margins import MARGIN_METRICS, is_zero_median
 from app.utils.period_labels import benchmark_period_complete
 from app.utils.supabase_errors import (
     is_transient_supabase_error,
@@ -67,6 +68,13 @@ def _cache_set(key: str, value: Any) -> None:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
 
+def clear_cache() -> None:
+    """Forget every cached lookup (the 1 h tier). For a run that just rewrote the medians
+    it is about to read: the quarterly moat phase scores every peer against the stored
+    annual sector medians, which the medians phase rewrites before it (2026-10-21), and a
+    copy read earlier in the hour would otherwise outlive the rewrite."""
+    _cache.clear()
+
 
 # ── Transient-error retry (Supabase/httpx blips) ─────────────────────────
 # A "Server disconnected" mid-query is an infra hiccup, not a bug — retry a few
@@ -95,8 +103,8 @@ def _is_transient(exc: BaseException) -> bool:
 
 # ── Which stored rows may be SERVED ──────────────────────────────────────
 #
-# Two gates, both on the row's own `computed_at`, applied to every read in
-# `_fetch_rows` so no caller can skip them:
+# Three gates, applied to every read in `_fetch_rows` so no caller can skip them (the
+# first two on the row's own `computed_at`):
 #
 # 1. An ANNUAL or CALENDAR-QUARTER row is served only when it was computed at least
 #    BENCHMARK_REPORTING_LAG_DAYS (75) after its period ended. Before that its cell holds
@@ -111,6 +119,15 @@ def _is_transient(exc: BaseException) -> bool:
 #    longer anyone's current median. Historical annual / quarterly rows have no age limit:
 #    the producer fetches only 16 annual records, so the oldest years legitimately stop
 #    being rewritten and remain correct history.
+# 3. A MARGIN median (`app.utils.margins.MARGIN_METRICS`) of exactly 0 is never served, in
+#    any period type: it is FMP's "0 when there is no revenue" counted as a figure. The
+#    producers drop that 0 since 2026-10-11 (`revenue_backed_margin`), but the fiscal rows the
+#    2026-10-04 run wrote held 1,113 such medians, and rows no later run rewrites (an industry
+#    that left the universe, an old year whose cell fell below MIN_SAMPLE_SIZE) keep theirs.
+#    The guard used to exist only in the Profitability card (`_usable_median`), so the Profit
+#    Power line, the report drill-down, Stage B and Cay AI's grounding printed "0.0%" for every
+#    Healthcare sector year (review 2026-10-20). A negative median is real (Biotechnology's
+#    net margin is about -75%) and is kept.
 TTM_MAX_AGE_DAYS = 21
 _SERVE_LOG_EVERY_SECONDS = 6 * 3600
 _serve_log_last: Dict[Tuple[str, str, str], float] = {}
@@ -137,7 +154,7 @@ def servable_benchmark_rows(
     now: Optional[datetime] = None,
 ) -> Tuple[List[Dict[str, Any]], Counter]:
     """Split stored benchmark rows into the ones a screen may show and a count of the
-    ones held back, by reason (``incomplete_period`` / ``stale_ttm``).
+    ones held back, by reason (``incomplete_period`` / ``stale_ttm`` / ``zero_margin``).
 
     A row with no readable ``computed_at`` is judged as if computed NOW: an incomplete
     period stays hidden, and a TTM row is kept (its age is unknown, not known to be old).
@@ -157,6 +174,9 @@ def servable_benchmark_rows(
             if benchmark_period_complete(period_type, row.get("period_label"), as_of) is False:
                 dropped["incomplete_period"] += 1
                 continue
+        if row.get("metric_name") in MARGIN_METRICS and is_zero_median(row.get("median_value")):
+            dropped["zero_margin"] += 1
+            continue
         kept.append(row)
     return kept, dropped
 
@@ -164,7 +184,8 @@ def servable_benchmark_rows(
 def _log_held_back_rows(group: str, period_type: str, dropped: Counter) -> None:
     """At most one line per (peer group, period type, reason) per 6 h. An incomplete
     period is expected for months every year (INFO); a stale TTM row means a peer group
-    shrank below MIN_SAMPLE_SIZE or the weekly TTM job stopped (WARNING)."""
+    shrank below MIN_SAMPLE_SIZE or the weekly TTM job stopped (WARNING); a zero margin is
+    a known leftover of the pre-2026-10-11 fiscal rows (INFO)."""
     now = time.monotonic()
     for reason, count in dropped.items():
         key = (group, period_type, reason)

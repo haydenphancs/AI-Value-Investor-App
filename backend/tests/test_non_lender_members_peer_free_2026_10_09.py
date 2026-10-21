@@ -1052,17 +1052,19 @@ def test_growth_snapshot_payload_version_is_4_and_older_rows_rebuild():
 
 
 @pytest.mark.asyncio
-async def test_profit_power_payload_version_is_8_and_older_rows_rebuild(monkeypatch):
+async def test_profit_power_payload_version_is_9_and_older_rows_rebuild(monkeypatch):
     """Profit Power v8 (2026-10-09, NET-4): a v7 row of V drew the lenders' margin lines
-    beside V's. Mutation: the constant left at 7 serves that row."""
-    assert pp._PP_PAYLOAD_VERSION == 8
+    beside V's; v9 (2026-10-21): a v8 row drew a 0.0% peer margin line (the pre-fix fiscal
+    rows) or a small FS industry's sector line. Mutation: the constant left at 7 serves
+    that row."""
+    assert pp._PP_PAYLOAD_VERSION == 9
     resp, _next, _degraded = await _pp_service(
         monkeypatch, "V", _Recorder())._build_profit_power("V")
     body = resp.model_dump()
     svc = pp.ProfitPowerService.__new__(pp.ProfitPowerService)
-    for old in (None, 6, 7):
+    for old in (None, 6, 7, 8):
         stale = dict(body) if old is None else {**body, pp._VERSION_KEY: old}
         svc.supabase = sph._Supabase([sph._row(stale)[0]])
         assert svc._check_supabase_cache("V") is None, f"a v{old} Profit Power row was served"
-    svc.supabase = sph._Supabase([sph._row({**body, pp._VERSION_KEY: 8})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, pp._VERSION_KEY: 9})[0]])
     assert svc._check_supabase_cache("V") is not None

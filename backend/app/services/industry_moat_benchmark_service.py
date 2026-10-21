@@ -57,7 +57,11 @@ from app.services.moat_scoring_service import (
     PillarResult,
     score_moat_dimensions,
 )
-from app.services.sector_benchmark_lookup import BenchmarkLookupFailed, lookup_failed
+from app.services.sector_benchmark_lookup import (
+    BenchmarkLookupFailed,
+    clear_cache as clear_benchmark_cache,
+    lookup_failed,
+)
 from app.utils.supabase_errors import is_transient_supabase_error, retry_idempotent_sync
 
 logger = logging.getLogger(__name__)
@@ -526,6 +530,11 @@ class IndustryMoatBenchmarkService:
         """
         run_id = run_id or str(uuid.uuid4())
         started = time.time()
+        # Every peer is scored against the stored annual SECTOR medians. The quarterly chain
+        # rewrites them just before this phase (2026-10-21), and the admin route can run
+        # right after a manual medians refresh, so a copy the lookup cached earlier in the
+        # hour must not outlive that rewrite.
+        clear_benchmark_cache()
         universe = _load_universe_industries()
         if not universe:
             # `load_universe` already logged the Storage/parse reason at ERROR when the file

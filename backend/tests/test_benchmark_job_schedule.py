@@ -44,15 +44,18 @@ def test_ttm_handles_month_and_year_boundary():
 
 
 def test_ttm_never_collides_with_quarterly_fiscal_recompute():
-    # On each quarter-start Sunday the fiscal recompute runs at dossier(02:00) + 120min
-    # = 04:00 UTC, with the moat-job tail up to ~05:00. The TTM run must clear that.
+    # On each quarter-start Sunday the fiscal recompute runs at dossier(02:00) + 90min
+    # = 03:30 UTC and the moat job after it at + 120min = 04:00 UTC, its tail up to
+    # ~05:00-05:30 (2026-10-21: medians before moat). The TTM run must clear that.
     for year, month in [(2026, 1), (2026, 4), (2026, 7), (2026, 10)]:
         base = datetime(year, month, 1, 0, 0, tzinfo=timezone.utc)
         dossier = _next_quarterly_dossier_run(base)           # first Sunday 02:00 UTC
-        fiscal_recompute = dossier + timedelta(minutes=120)   # 04:00 UTC
+        fiscal_recompute = dossier + timedelta(minutes=90)    # 03:30 UTC
+        moat = dossier + timedelta(minutes=120)               # 04:00 UTC
         ttm = _next_weekly_ttm_run(dossier.replace(hour=0, minute=0))
         assert ttm.date() == fiscal_recompute.date()          # same Sunday
-        assert (ttm - fiscal_recompute) >= timedelta(hours=2)  # clears moat tail too
+        assert (ttm - fiscal_recompute) >= timedelta(hours=2)
+        assert (ttm - moat) >= timedelta(hours=2)             # clears the moat tail too
 
 
 # ── F24-6: a restart inside a run's day re-enters it; every phase is durably claimed ──
@@ -316,7 +319,8 @@ async def test_a_cancelled_phase_propagates_cancellation(monkeypatch):
 def test_every_chain_phase_is_claimed_under_its_own_job_name():
     """Source-scan, bound to the two job bodies: four distinct quarterly claims + one
     weekly, each through `_run_claimed_phase`; no phase runs bare. (The competitor-intel
-    phase was retired with Google Search grounding, 2026-10-02.)"""
+    phase was retired with Google Search grounding, 2026-10-02.) The medians run BEFORE
+    the moat phase, which scores peers against them (2026-10-21)."""
     import inspect
     import re
     src = inspect.getsource(m._run_industry_dossier_job)
@@ -324,8 +328,8 @@ def test_every_chain_phase_is_claimed_under_its_own_job_name():
     jobs = re.findall(r"_run_claimed_phase\(\s*(JOB_[A-Z_]+)", src)
     assert jobs == [
         "JOB_INDUSTRY_DOSSIER_QUARTERLY",
-        "JOB_IP_INTEL_QUARTERLY", "JOB_INDUSTRY_MOAT_QUARTERLY",
-        "JOB_INDUSTRY_BENCHMARK_QUARTERLY",
+        "JOB_IP_INTEL_QUARTERLY", "JOB_INDUSTRY_BENCHMARK_QUARTERLY",
+        "JOB_INDUSTRY_MOAT_QUARTERLY",
     ], jobs
     # No phase awaits its service bare, outside a claimed body (docstring stripped too).
     body = src.split('"""', 2)[-1] if src.count('"""') >= 2 else src
@@ -441,6 +445,64 @@ async def test_one_failed_quarterly_phase_re_enters_the_chain(monkeypatch):
     assert runs.count(m.JOB_IP_INTEL_QUARTERLY) == 2
     assert runs.count(m.JOB_INDUSTRY_BENCHMARK_QUARTERLY) == 2, "the chain re-entered once"
     assert sleeps.count(m._PHASE_RETRY_SECONDS) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_moat_phase_waits_for_the_medians_it_scores_against(monkeypatch, caplog):
+    """2026-10-21: the moat scorer reads the stored annual sector medians, so it runs only
+    after the medians phase settled on this pass. A failed medians pass defers the moat
+    (WARNING) and the same-day retry runs both, the moat once, after the second medians
+    pass. Mutation: the old unconditional moat phase runs it twice (or before the medians)."""
+    import logging
+    runs, sleeps = _drive_loop(
+        monkeypatch, anchor_fn_name="_last_quarterly_dossier_run",
+        phase_results={m.JOB_INDUSTRY_BENCHMARK_QUARTERLY: [False, True]},
+    )
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        with pytest.raises(_StopLoop):
+            await m._run_industry_dossier_job()
+    assert runs.count(m.JOB_INDUSTRY_BENCHMARK_QUARTERLY) == 2
+    assert runs.count(m.JOB_INDUSTRY_MOAT_QUARTERLY) == 1, runs
+    second_medians = len(runs) - 1 - runs[::-1].index(m.JOB_INDUSTRY_BENCHMARK_QUARTERLY)
+    assert runs.index(m.JOB_INDUSTRY_MOAT_QUARTERLY) > second_medians, runs
+    assert sleeps.count(m._PHASE_RETRY_SECONDS) == 1
+    assert any("deferred" in r.getMessage() and "moat" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_a_settled_medians_phase_lets_the_moat_run_once(monkeypatch):
+    runs, sleeps = _drive_loop(
+        monkeypatch, anchor_fn_name="_last_quarterly_dossier_run", phase_results={},
+    )
+    with pytest.raises(_StopLoop):
+        await m._run_industry_dossier_job()
+    assert runs == [
+        m.JOB_INDUSTRY_DOSSIER_QUARTERLY, m.JOB_IP_INTEL_QUARTERLY,
+        m.JOB_INDUSTRY_BENCHMARK_QUARTERLY, m.JOB_INDUSTRY_MOAT_QUARTERLY,
+    ], runs
+    assert m._PHASE_RETRY_SECONDS not in sleeps
+
+
+def test_the_moat_recompute_clears_the_benchmark_cache_first(monkeypatch):
+    """A medians copy cached earlier in the hour must not outlive the medians phase's
+    rewrite: `recompute_all` clears the lookup's in-memory tier before it reads anything.
+    Mutation: drop the clear and the stale entry survives."""
+    import app.services.industry_moat_benchmark_service as imb
+    import app.services.sector_benchmark_lookup as sbl
+
+    sbl._cache_set("with_n:Healthcare:annual:gross_margin", {"gross_margin": {"2025": {"median": 0.0, "n": 443}}})
+    seen = []
+
+    def _universe():
+        seen.append(sbl._cache_get("with_n:Healthcare:annual:gross_margin"))
+        return {}
+
+    monkeypatch.setattr(imb, "_load_universe_industries", _universe)
+    svc = imb.IndustryMoatBenchmarkService.__new__(imb.IndustryMoatBenchmarkService)
+    with pytest.raises(imb.IndustryMoatBenchmarkRecomputeSkipped):
+        asyncio.run(svc.recompute_all())
+    assert seen == [None], "the cache was not cleared before the run read anything"
 
 
 def test_the_retry_budget_is_per_anchor():

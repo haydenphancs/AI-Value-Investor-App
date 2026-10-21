@@ -225,13 +225,20 @@ async def test_a_crypto_pair_never_reaches_fmp_on_any_range(monkeypatch, range_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("range_code,expected_days", [("1D", 1), ("1W", 7)])
+@pytest.mark.parametrize("range_code,expected_days", [("1D", 1), ("1W", 16)])
 async def test_intraday_ranges_ask_for_their_own_window(monkeypatch, range_code, expected_days):
+    """The VISIBLE window (`_INTRADAY_RANGES`, pinned above) plus the indicator warm-up
+    in front of it (`_INTRADAY_WARMUP_DAYS`): 1W = 7 + 9 = 16 days of hourly bars, so the
+    default 1W view's MA(200) has ≥ 210 bars behind it. 1D stays days=1 — CoinGecko's
+    5-minute bars exist only there (days=2 turns the series hourly)."""
+    from app.services.crypto_service import _INTRADAY_RANGES, _INTRADAY_WARMUP_DAYS
+
     cg = _RecordingCoinGecko().install(monkeypatch)
     await fetch_chart_data(_ExplodingFMP(), "BTCUSD", range_code, None)
     base, days, interval = cg.calls[-1]
     assert base == "BTC", f"CoinGecko takes the BARE base, got {base!r}"
     assert days == expected_days
+    assert days == _INTRADAY_RANGES[range_code] + _INTRADAY_WARMUP_DAYS[range_code]
     assert interval is None, "intraday must not force interval=daily"
 
 

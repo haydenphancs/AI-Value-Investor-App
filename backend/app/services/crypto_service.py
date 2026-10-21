@@ -512,6 +512,16 @@ _AVG_VOLUME_DAYS = 30
 
 _INTRADAY_RANGES = {"1D": 1, "1W": 7}
 
+# Extra days of intraday history fetched IN FRONT of each range's visible window, so the
+# chart's indicators are warm (≥ 210 bars, `chart_helper._WARMUP_DATA_POINTS`) from the
+# first visible bar. Kept APART from `_INTRADAY_RANGES`, which stays the visible window.
+#   * 1W: 7 + 9 = 16 days of HOURLY bars, ~384 points (CoinGecko stays hourly up to 90
+#     days). With 7 days the default 1W view had no warm-up at all: MA(200) could never
+#     draw and MA(50) started two days in.
+#   * 1D: none. CoinGecko serves 5-minute bars ONLY at days=1 — days=2 already turns the
+#     series hourly — so 1D's indicators draw where those 24 hours allow.
+_INTRADAY_WARMUP_DAYS = {"1D": 0, "1W": 9}
+
 # Ranges that ask for more history than CoinGecko Basic can serve (2 years). They are
 # clamped to the cap and logged; iOS stops offering them for crypto in favour of 2Y.
 _OVER_CAP_RANGES = frozenset({"5Y", "ALL"})
@@ -639,6 +649,69 @@ def _round_close(v: float) -> float:
     if mag >= 0.0001:
         return round(v, 6)
     return round(v, 10)
+
+
+def _series_is_capped(
+    rows: List[Dict], cap_days: int, today: Optional[date_type] = None
+) -> bool:
+    """True when a daily series starts at the PLAN cap rather than at the coin's listing:
+    its first row sits within two days of ``today - cap_days``."""
+    if not rows:
+        return False
+    first = rows[0].get("date") if isinstance(rows[0], dict) else None
+    if not isinstance(first, str) or len(first) < 10:
+        return False
+    try:
+        first_day = date_type.fromisoformat(first[:10])
+    except ValueError:
+        return False
+    today = today or datetime.now(tz=timezone.utc).date()
+    return first_day <= today - timedelta(days=cap_days) + timedelta(days=2)
+
+
+def crypto_chart_rows(
+    series: List[Dict],
+    chart_range: str,
+    resolved_interval: str,
+    *,
+    cap_days: int,
+) -> List[Dict]:
+    """Chart rows for one crypto range from its CoinGecko series — the ONE builder.
+
+    Shared by the detail screen (`get_crypto_detail`), the light chart route
+    (`get_crypto_chart`) and the shared fetcher (`chart_helper._fetch_crypto_chart_data`,
+    behind `/stocks/{t}/chart`), so every surface draws byte-identical rows.
+
+    * intraday (1D/1W, by RANGE — see `_INTRADAY_RANGES`): sanitized as served;
+    * weekly / monthly: bucketed from the WHOLE series, then windowed with the interval's
+      warm-up kept. Bucketing the daily window (range + 320 days) started the first
+      bucket mid-week and left weekly MA(50) short of the visible start. When the series
+      starts at the plan cap, its first bucket holds only part of a period and is
+      dropped (`drop_partial_leading_bucket`);
+    * daily: the visible window plus the MA(200) warm-up (`_extract_chart_data`'s rule).
+    """
+    from app.services.chart_helper import (
+        daily_range_days,
+        drop_partial_leading_bucket,
+        window_by_range,
+    )
+
+    if chart_range in _INTRADAY_RANGES:
+        return CryptoService._chart_rows_from(series)
+    if resolved_interval in AGGREGATED_INTERVALS:
+        clean = CryptoService._chart_rows_from(series)
+        bars = _aggregate_prices(clean, resolved_interval)
+        if _series_is_capped(clean, cap_days):
+            bars = drop_partial_leading_bucket(bars, clean, resolved_interval)
+        if chart_range != "ALL":
+            bars = window_by_range(bars, chart_range, resolved_interval)
+        return bars
+    cutoff = (
+        datetime.now(tz=timezone.utc).date() - timedelta(days=daily_range_days(chart_range))
+    ).isoformat()
+    return CryptoService._chart_rows_from(
+        [p for p in series or [] if isinstance(p, dict) and (p.get("date") or "") >= cutoff]
+    )
 
 
 def _cache_get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
@@ -1282,6 +1355,48 @@ class CryptoService:
             ).execute()
         except Exception as e:
             logger.warning(f"Crypto DB cache write failed for {symbol}: {e}")
+
+    async def get_crypto_chart(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """`{symbol, prices}` for one range — the chart alone, for a range tap.
+
+        The crypto screen used to refetch the WHOLE detail (fundamentals, benchmark,
+        snapshots) to move its chart, because no light route served one: `/core` never
+        carries bars, crypto has no `/quote`, and `/stocks/{t}/chart` refuses the
+        crypto-only 2-year range. Same series and the same builder as the detail
+        (`crypto_chart_rows`), so the bars match whichever surface drew them first.
+
+        Raises on an upstream failure (the route maps it to a typed error); an empty
+        series is a real answer and comes back as ``prices: []``.
+        """
+        from app.services.chart_helper import fetch_chart_data, resolve_interval
+
+        resolved = resolve_interval(chart_range, interval)
+        if self._fmp_crypto_enabled():
+            # Preserved for `CRYPTO_PRICE_SOURCE=fmp`, exactly as the detail's FMP branch.
+            rows = await fetch_chart_data(
+                self.fmp, f"{symbol}USD", chart_range, interval, extended_hours=True
+            )
+            return {"symbol": symbol, "prices": rows}
+        cap_days = self._history_days_cap()
+        if chart_range in _INTRADAY_RANGES:
+            series = await self._cg_history(
+                symbol,
+                _INTRADAY_RANGES[chart_range] + _INTRADAY_WARMUP_DAYS.get(chart_range, 0),
+                intraday=True,
+            )
+        else:
+            if chart_range in _OVER_CAP_RANGES:
+                logger.info(
+                    "crypto chart: %s requested for %s — CoinGecko Basic caps history at "
+                    "%d days, serving the capped window", chart_range, symbol, cap_days,
+                )
+            series = await self._cg_history(symbol, cap_days)
+        return {
+            "symbol": symbol,
+            "prices": crypto_chart_rows(series, chart_range, resolved, cap_days=cap_days),
+        }
 
     async def get_crypto_core(
         self,
@@ -2043,7 +2158,9 @@ class CryptoService:
             # maps 5Y→"weekly" and ALL→"monthly", so an interval test sends both of those
             # down here too and serves SEVEN DAYS of hourly bars under a "5Y" label —
             # plausible, confidently wrong, and worse than the exception it replaced.
-            _days = _INTRADAY_RANGES[chart_range]
+            # The visible window plus its indicator warm-up (`_INTRADAY_WARMUP_DAYS`),
+            # the same days `chart_helper._fetch_crypto_chart_data` asks for.
+            _days = _INTRADAY_RANGES[chart_range] + _INTRADAY_WARMUP_DAYS.get(chart_range, 0)
             try:
                 intraday_rows = await self._cg_history(symbol, _days, intraday=True)
             except Exception as e:
@@ -2058,7 +2175,9 @@ class CryptoService:
                     symbol, chart_range, type(e).__name__, e,
                 )
                 intraday_rows = []
-            chart_data = self._chart_rows_from(intraday_rows)
+            chart_data = crypto_chart_rows(
+                intraday_rows, chart_range, resolved, cap_days=self._history_days_cap()
+            )
         else:
             # DAILY and long-horizon. `historical` is the CoinGecko series, already
             # capped at CRYPTO_HISTORY_YEARS, and `_extract_chart_data` windows it.
@@ -2074,15 +2193,15 @@ class CryptoService:
                     chart_range, symbol, settings.CRYPTO_HISTORY_YEARS,
                     settings.CRYPTO_HISTORY_YEARS,
                 )
-            chart_data = self._extract_chart_data(historical, chart_range)
-            if resolved in AGGREGATED_INTERVALS:
-                # The FMP branch honoured `interval` via `fetch_chart_data`; this branch
-                # ignored it, so a user picking "Weekly" or "Monthly" on a crypto 1Y/2Y
-                # chart got daily bars under a weekly label (and MA(20) over 20 days
-                # while the label implied 20 months). Resample the daily series the same
-                # way every other asset class does. Close-only rows aggregate to a
-                # close-only bar (open/high/low stay None — nothing is invented).
-                chart_data = _aggregate_prices(chart_data, resolved)
+            # Weekly/monthly: the FMP branch honoured `interval` via `fetch_chart_data`;
+            # this branch used to ignore it, so a user picking "Weekly" or "Monthly" on a
+            # crypto 1Y/2Y chart got daily bars under a weekly label (and MA(20) over 20
+            # days while the label implied 20 months). The shared builder resamples the
+            # WHOLE capped series the same way every other asset class does. Close-only
+            # rows aggregate to a close-only bar (open/high/low stay None).
+            chart_data = crypto_chart_rows(
+                historical, chart_range, resolved, cap_days=self._history_days_cap()
+            )
 
         # ── Step 5: Build key statistics ──────────────────────────
         key_stats = self._build_key_statistics(

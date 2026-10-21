@@ -130,7 +130,7 @@ def test_adx_and_atr_compute_from_the_merged_tail():
     svc = object.__new__(TechnicalAnalysisService)
     _, _, _, oscs = svc._compute_timeframe_signal(_mixed_frame(700, 30))
     by_name = {o.name: o for o in oscs}
-    for name in ("Stoch(14,3)", "Williams %R", "CCI(14)", "ADX(14)", "ATR(14)"):
+    for name in ("Stoch(14,3,3)", "Williams %R", "CCI(14)", "ADX(14)", "ATR(14)"):
         assert by_name[name].value is not None, f"{name} should compute from a 30-bar range"
 
 

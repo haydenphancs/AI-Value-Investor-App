@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import os
 
 @MainActor
 class TickerDetailViewModel: ObservableObject {
@@ -126,8 +127,26 @@ class TickerDetailViewModel: ObservableObject {
     /// The ONE place this screen names its asset class: the screen passes it to
     /// `TickerChartView`, and init resolves the remembered range/interval against it.
     let chartAssetContext: ChartAssetContext = .stock
+    /// Moves ONLY when the bars on screen are for a different (range, interval, extended
+    /// hours) than the previous write's, or are the first bars for their stamp — the chart
+    /// then resets to the range's default window. A live tick, the core→full swap and a
+    /// pull-to-refresh keep the stamp, so they keep the user's pan position. It used to bump
+    /// on core, on full and on "count changed", which threw the user back to the right edge
+    /// every time a 30 s tick added a candle.
     @Published var chartDataVersion: Int = 0
     @Published var chartEventDates: ChartEventDates?
+    /// The range / interval the bars on screen were REQUESTED for (captured at request time,
+    /// never the pill at landing time). The pill flips on the tap and the bars arrive later;
+    /// the chart maps the bars by these, not by the pill.
+    @Published var chartDataRange: ChartTimeRange?
+    @Published var chartDataInterval: ChartInterval?
+    /// True only when a fetch for a NEW range / interval / session FAILED (an empty answer is
+    /// not a failure), so the chart shows "Couldn't load this range" instead of the previous
+    /// range's bars under the new pill (`chartPlaceholder`). Reset by the next chart write.
+    @Published private(set) var chartLoadFailed: Bool = false
+    /// Older bars, paged in as the user pans left. The screen hands its plain `state` to
+    /// `TickerChartView`; every chart write below is `absorb`ed so the store stays contiguous.
+    let chartHistory: ChartHistoryLoader
 
     // Analysis tab toggles (6M/1Y, 24H/7D) are NOT here: they are device preferences held
     // in `@AppStorage` by `TickerDetailView`. A per-ViewModel copy reset them on every pushed
@@ -163,6 +182,20 @@ class TickerDetailViewModel: ObservableObject {
     /// two chart requests when the range crosses an interval boundary).
     private var suppressIntervalReload = false
 
+    /// What a set of chart bars was fetched FOR. Extended hours is part of it: the toggle
+    /// refetches a different session, and the chart must reset its window for it.
+    private struct ChartBarsStamp: Equatable {
+        let range: ChartTimeRange
+        let interval: ChartInterval
+        let extendedHours: Bool
+    }
+
+    /// The stamp of the bars on screen (the last chart write). nil before the first one.
+    private var lastChartStamp: ChartBarsStamp?
+    /// Whether that write carried any bars (see `recordChartWrite`).
+    private var lastChartWriteHadBars = false
+    private let log = Logger(subsystem: "com.caydex.ios", category: "TickerDetailViewModel")
+
     // MARK: - Initialization
 
     /// `initialTab` / `initialHoldersSection` seed the screen for a NOTIFICATION DEEP
@@ -179,7 +212,11 @@ class TickerDetailViewModel: ObservableObject {
         initialHoldersSection: RecentActivitiesTab? = nil
     ) {
         self.tickerSymbol = tickerSymbol
-        self.stockRepository = stockRepository ?? .shared
+        let repository = stockRepository ?? StockRepository.shared
+        self.stockRepository = repository
+        // Same repository as every other fetch here, so an injected one serves the older
+        // pages too.
+        self.chartHistory = ChartHistoryLoader(asset: .stocks, repository: repository)
         self.selectedTab = initialTab
         self.initialHoldersSection = initialHoldersSection
 
@@ -198,7 +235,7 @@ class TickerDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] range in
                 guard let self = self else { return }
-                print("📈 TickerDetailVM: Chart range changed to \(range.rawValue)")
+                self.log.debug("chart range changed to \(range.rawValue, privacy: .public)")
                 // Assigning the interval fires the interval observer SYNCHRONOUSLY;
                 // suppress its re-fetch so a range change drives exactly one chart
                 // request (not two when the range crosses an interval boundary).
@@ -257,6 +294,12 @@ class TickerDetailViewModel: ObservableObject {
                     await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)
                 }
             }
+            .store(in: &cancellables)
+
+        // The screen reads `chartHistory.state` through this view model, so the loader's
+        // changes must re-render it.
+        chartHistory.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
 
@@ -340,15 +383,22 @@ class TickerDetailViewModel: ObservableObject {
             // aggregation. Guarded so a late core never overwrites the full model.
             Task { [weak self] in
                 guard let self else { return }
+                // What core's bars are FOR, captured before the await (see `recordChartWrite`).
+                let coreRange = self.selectedChartRange
+                let coreInterval = self.chartSettings.selectedInterval
                 let ext = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
                 guard let core = try? await self.stockRepository.getStockOverviewCore(
-                    ticker: ticker, range: self.selectedChartRange.rawValue,
-                    interval: self.chartSettings.selectedInterval.rawValue,
+                    ticker: ticker, range: coreRange.rawValue,
+                    interval: coreInterval.rawValue,
                     extendedHours: ext
                 ) else { return }
                 if self.tickerData == nil {
-                    self.coreData = core.toCoreData()
-                    self.chartDataVersion += 1
+                    let coreData = core.toCoreData()
+                    self.coreData = coreData
+                    self.recordChartWrite(
+                        coreData.chartPricePoints,
+                        stamp: ChartBarsStamp(range: coreRange, interval: coreInterval, extendedHours: ext)
+                    )
                 }
             }
 
@@ -365,23 +415,42 @@ class TickerDetailViewModel: ObservableObject {
                     interval: requestedInterval.rawValue,
                     extendedHours: useExtendedHours
                 )
-                self.tickerData = response.toDisplayModel()
-                self.chartDataVersion += 1
                 // If the user changed the range, the interval, OR the extended-hours
                 // toggle while the (slow) overview was loading — now possible because
                 // the fast-core chart is interactive — the overview's chart is for the
                 // OLD selection. Re-fetch so the chart matches the current selection
-                // instead of silently reverting (the tickerData write above is not
+                // instead of silently reverting (the tickerData write below is not
                 // gen-guarded).
                 let currentExtended = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
-                if self.selectedChartRange != requestedRange
+                let selectionChanged = self.selectedChartRange != requestedRange
                     || self.chartSettings.selectedInterval != requestedInterval
-                    || currentExtended != requestedExtended {
+                    || currentExtended != requestedExtended
+                let requestedStamp = ChartBarsStamp(range: requestedRange, interval: requestedInterval, extendedHours: requestedExtended)
+                let shownBars = self.tickerData?.chartPricePoints ?? self.coreData?.chartPricePoints ?? []
+                var display = response.toDisplayModel()
+                // Keep the bars already on screen (their stamps already describe them, so this
+                // is not a chart write) when
+                //  - the selection changed during the load: the overview's chart is for the
+                //    OLD selection, and stepping back to it would flash an old range (or a
+                //    third one) under the veil; the catch-up below fetches the current one;
+                //  - the overview came back with NO bars for the stamp already on screen (a
+                //    pull-to-refresh blip): no reason to blank a good chart.
+                let keepShownBars = self.lastChartStamp != nil
+                    && (selectionChanged
+                        || (display.chartPricePoints.isEmpty && self.lastChartStamp == requestedStamp && !shownBars.isEmpty))
+                if keepShownBars {
+                    display.chartPricePoints = shownBars
+                    self.tickerData = display
+                } else {
+                    self.tickerData = display
+                    self.recordChartWrite(display.chartPricePoints, stamp: requestedStamp)
+                }
+                if selectionChanged {
                     await self.fetchChartData(ticker, range: self.selectedChartRange)
                 }
-                print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
+                self.log.debug("overview loaded for \(ticker, privacy: .public)")
             } catch {
-                print("⚠️ TickerDetailVM: Overview failed, falling back to separate calls: \(error)")
+                self.log.error("overview failed for \(ticker, privacy: .public), falling back to separate calls: \(String(describing: error), privacy: .public)")
                 // Fallback: use existing separate API calls + sample data for missing sections
                 await withTaskGroup(of: Void.self) { group in
                     group.addTask { await self.fetchStockDetail(ticker) }
@@ -394,7 +463,7 @@ class TickerDetailViewModel: ObservableObject {
                 // property: the only write in this file was `= nil`.)
                 if self.stockDetail == nil && self.stockQuote == nil {
                     self.errorMessage = AppError.from(error).message
-                    print("⚠️ TickerDetailVM: fallback yielded NO data for \(ticker) — surfacing error")
+                    self.log.error("fallback yielded NO data for \(ticker, privacy: .public) — surfacing the load error")
                     self.isLoading = false
                     // Phase 2 is skipped on this path, so nothing else would ever settle its
                     // flags: the Financials tab shimmered forever with no message and no
@@ -404,15 +473,10 @@ class TickerDetailViewModel: ObservableObject {
                     self.settlePhaseTwoAfterFailedLoad(message: self.errorMessage)
                     return
                 }
+                // Carries the bars already on screen (core's, already stamped and absorbed),
+                // so this is not a new chart write; the fetch below is.
                 self.tickerData = self.buildTickerDetailData()
-                print("📊 TickerDetailVM: Built fallback TickerDetailData for \(ticker)")
-                print("📊 Fallback data sources: stockDetail=\(self.stockDetail != nil), stockQuote=\(self.stockQuote != nil)")
-                if let d = self.stockDetail {
-                    print("  profile: price=\(d.price as Any), beta=\(d.beta as Any), marketCap=\(d.marketCap as Any), lastDiv=\(d.lastDiv as Any), 52wkH=\(d.high52Week as Any)")
-                }
-                if let q = self.stockQuote {
-                    print("  quote: price=\(q.price as Any), pe=\(q.pe as Any), eps=\(q.eps as Any), open=\(q.open as Any), vol=\(q.volume as Any)")
-                }
+                self.log.debug("built fallback detail for \(ticker, privacy: .public): stockDetail=\(self.stockDetail != nil), stockQuote=\(self.stockQuote != nil)")
                 // Fetch real chart data for the fallback path
                 await self.fetchChartData(ticker, range: self.selectedChartRange)
             }
@@ -495,7 +559,8 @@ class TickerDetailViewModel: ObservableObject {
             // 120s quote cache it advanced the header price at most once every two
             // minutes while presenting as a 15-second live feed.
             let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol, maxAge: 0)
-            guard var data = self.tickerData, let price = quote.price else { return }
+            guard let shown = self.tickerData, let price = quote.price else { return }
+            var data = shown
 
             data.currentPrice = price
             if let change = quote.change {
@@ -514,8 +579,10 @@ class TickerDetailViewModel: ObservableObject {
                 data.marketStatus = live
             }
 
-            // Update last chart candle for intraday ranges
-            if self.chartSettings.selectedInterval.isIntraday,
+            // Update the last candle when the bars ON SCREEN are intraday — the interval they
+            // were fetched for, not the pill: right after a 3M→1D tap the bars are still
+            // daily, and the live price must not be written into a daily candle.
+            if (self.chartDataInterval ?? self.chartSettings.selectedInterval).isIntraday,
                !data.chartPricePoints.isEmpty {
                 let lastIndex = data.chartPricePoints.count - 1
                 let last = data.chartPricePoints[lastIndex]
@@ -530,11 +597,30 @@ class TickerDetailViewModel: ObservableObject {
                 data.chartPricePoints[lastIndex] = updatedPoint
             }
 
+            // Every `tickerData` write re-renders the whole screen, chart included; a quiet
+            // tape answers the same quote tick after tick. Write only what someone would see.
+            guard Self.pollChangesWhatIsShown(from: shown, to: data) else { return }
             self.tickerData = data
-            print("📡 TickerDetailVM: REST poll updated price to \(price)")
+            log.debug("REST poll updated \(self.tickerSymbol, privacy: .public) price to \(price)")
         } catch {
-            print("⚠️ TickerDetailVM: REST poll failed: \(error)")
+            guard !Task.isCancelled else { return }
+            log.error("REST poll failed for \(self.tickerSymbol, privacy: .public): \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// What the 15 s poll can change on screen: the header (price, change, change %, the
+    /// change-known state, the market badge) and the patched last candle.
+    /// One comparison per statement: a long `||` chain of `!=` over mixed types is the shape
+    /// that makes the type checker slow.
+    private static func pollChangesWhatIsShown(from old: TickerDetailData, to new: TickerDetailData) -> Bool {
+        if old.currentPrice != new.currentPrice { return true }
+        if old.priceChange != new.priceChange { return true }
+        if old.priceChangePercent != new.priceChangePercent { return true }
+        if old.changeKnown != new.changeKnown { return true }
+        if old.marketStatus.displayText != new.marketStatus.displayText { return true }
+        let oldLast: StockPricePoint? = old.chartPricePoints.last
+        let newLast: StockPricePoint? = new.chartPricePoints.last
+        return oldLast != newLast
     }
 
     // MARK: - Chart Refresh Timer
@@ -629,9 +715,10 @@ class TickerDetailViewModel: ObservableObject {
         do {
             let events = try await stockRepository.getChartEvents(ticker: ticker)
             self.chartEventDates = events
-            print("✅ TickerDetailVM: Got chart events for \(ticker) — \(events.earningsDates.count) earnings, \(events.dividendDates.count) dividends")
+            log.debug("chart events for \(ticker, privacy: .public): \(events.earningsDates.count) earnings, \(events.dividendDates.count) dividends")
         } catch {
-            print("⚠️ TickerDetailVM: Chart events failed for \(ticker): \(error)")
+            // Non-fatal: the chart simply draws no event markers.
+            log.error("chart events failed for \(ticker, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -1477,43 +1564,163 @@ class TickerDetailViewModel: ObservableObject {
 
     // MARK: - Chart Data Fetching
 
+    /// Fetches the bars for `range` and the CURRENT interval / extended-hours flag. Shared by
+    /// the range / interval / extended-hours sinks, the overview's catch-up refetch, the
+    /// fallback load and the 30 s chart refresh.
     private func fetchChartData(_ ticker: String, range: ChartTimeRange) async {
         let rangeString = range.rawValue  // e.g. "3M", "1Y", "1D"
-        print("📈 TickerDetailVM: Fetching chart data for \(ticker), range=\(rangeString)")
         chartRequestGen += 1
         let gen = chartRequestGen
+        // What these bars are FOR, captured before the await: the stamps describe the
+        // request, never the pill at landing time.
+        let requestedInterval = chartSettings.selectedInterval
+        let intervalString = requestedInterval.rawValue
+        let useExtendedHours = chartSettings.showExtendedHours && chartSettings.selectedInterval.isIntraday
+        let requested = ChartBarsStamp(range: range, interval: requestedInterval, extendedHours: useExtendedHours)
+        // A failed selection is on screen and the pills just moved on: re-render, so
+        // `chartPlaceholder` turns from the error into the shimmer. The interval and the
+        // session live in the nested `chartSettings`, whose changes do not re-render the
+        // screen on their own (a range tap does, through `selectedChartRange`).
+        if chartLoadFailed, requested != lastChartStamp { objectWillChange.send() }
+        log.debug("fetching chart for \(ticker, privacy: .public) range=\(rangeString, privacy: .public) interval=\(intervalString, privacy: .public) ext=\(useExtendedHours)")
         do {
-            let intervalString = chartSettings.selectedInterval.rawValue
-            let useExtendedHours = chartSettings.showExtendedHours && chartSettings.selectedInterval.isIntraday
             let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString, extendedHours: useExtendedHours)
             // Drop a stale chart response so rapid range/interval switching can't
             // apply a chart for a no-longer-selected range (last-write-wins).
             guard gen == self.chartRequestGen else { return }
             let pricePoints = chartResponse.prices
-            print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
-            if !pricePoints.isEmpty {
-                if var currentData = self.tickerData {
-                    let previousCount = currentData.chartPricePoints.count
-                    // Update chart prices in-place
-                    currentData.chartPricePoints = pricePoints
-                    self.tickerData = currentData
-                    // Only reset viewport when new candles appeared (not just values updated)
-                    if pricePoints.count != previousCount {
-                        self.chartDataVersion += 1
-                    }
-                } else if var core = self.coreData {
-                    // Still on the fast-core placeholder (full overview not in yet):
-                    // keep its chart in sync with the selected range pill so a range
-                    // change during this window isn't silently dropped.
-                    core.chartPricePoints = pricePoints
-                    self.coreData = core
-                    self.chartDataVersion += 1
-                }
+            log.debug("got \(pricePoints.count) chart bars for \(ticker, privacy: .public) range=\(rangeString, privacy: .public)")
+            guard !pricePoints.isEmpty else {
+                // An empty answer is not a failed load: the canvas says "No chart data".
+                chartFetchFailed(requested, ticker: ticker, reason: "no bars", failed: false)
+                return
             }
+            writeChartBars(pricePoints, stamp: requested, failed: false)
         } catch {
-            print("⚠️ TickerDetailVM: Failed to fetch chart data for \(ticker): \(error)")
-            // Non-fatal: keep existing chart data
+            // A superseded request's failure says nothing about the bars a newer one wrote.
+            guard gen == self.chartRequestGen else {
+                log.debug("superseded chart fetch for \(ticker, privacy: .public) range=\(rangeString, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                return
+            }
+            // APIClient wraps cancellation into `.networkError`: a cancelled timer tick is
+            // not a failed load.
+            guard !Task.isCancelled else { return }
+            chartFetchFailed(requested, ticker: ticker, reason: String(describing: error), failed: true)
         }
+    }
+
+    /// A chart fetch for `requested` failed (`failed`) or came back empty.
+    ///
+    /// When the bars on screen are ALREADY for `requested` (a 30 s tick, a pull-to-refresh,
+    /// 1D→1W→1D before the 1W bars landed) they stay: a blip is no reason to blank a good
+    /// chart. When they are for ANOTHER range / interval / session — the user just switched
+    /// — they must not stay under the new pill: the chart is emptied and stamped with the
+    /// request, and `chartPlaceholder` says why. Judged on the stamp rather than on who
+    /// asked, so a timer tick that superseded the user's own fetch is held to the same rule.
+    private func chartFetchFailed(_ requested: ChartBarsStamp, ticker: String, reason: String, failed: Bool) {
+        let what = "\(requested.range.rawValue)/\(requested.interval.rawValue) ext=\(requested.extendedHours)"
+        let shownBars = tickerData?.chartPricePoints ?? coreData?.chartPricePoints ?? []
+        if lastChartStamp == requested, !shownBars.isEmpty {
+            log.warning("chart fetch for \(ticker, privacy: .public) \(what, privacy: .public) failed (\(reason, privacy: .public)) — keeping the bars on screen")
+            return
+        }
+        let shown = lastChartStamp.map { "\($0.range.rawValue)/\($0.interval.rawValue)" } ?? "no"
+        log.error("chart fetch for \(ticker, privacy: .public) \(what, privacy: .public) failed (\(reason, privacy: .public)) — clearing \(shown, privacy: .public) bars from under the new selection")
+        writeChartBars([], stamp: requested, failed: failed)
+    }
+
+    /// Puts `bars` on whichever model the screen draws its chart from (the full one, else the
+    /// fast core) and records the write. Neither model yet → nothing draws them; dropped.
+    private func writeChartBars(_ bars: [StockPricePoint], stamp: ChartBarsStamp, failed: Bool) {
+        // A same-stamp refresh that changed nothing (a quiet 30 s tick): no write, so no
+        // screen re-render and no series rebuild. The loader already holds these exact bars.
+        if stamp == lastChartStamp, failed == chartLoadFailed,
+           (tickerData?.chartPricePoints ?? coreData?.chartPricePoints) == bars {
+            return
+        }
+        if var currentData = self.tickerData {
+            currentData.chartPricePoints = bars
+            self.tickerData = currentData
+        } else if var core = self.coreData {
+            // Still on the fast-core placeholder (full overview not in yet):
+            // keep its chart in sync with the selected range pill so a range
+            // change during this window isn't silently dropped.
+            core.chartPricePoints = bars
+            self.coreData = core
+        } else {
+            return
+        }
+        recordChartWrite(bars, stamp: stamp, failed: failed)
+    }
+
+    /// EVERY write of the chart bars ends here: the stamps the chart maps them by, the
+    /// history loader's contiguous store, and `chartDataVersion` — bumped only when the
+    /// stamp differs from the previous write's, or when bars arrive for a stamp whose last
+    /// write had none (core carries no daily bars, so a remembered 3M opens on an EMPTY
+    /// 3M write and then the full overview's 3M bars: the chart committed its window over
+    /// zero bars, and without the bump it kept that 10-bar minimum instead of the range's
+    /// default window).
+    private func recordChartWrite(_ bars: [StockPricePoint], stamp: ChartBarsStamp, failed: Bool = false) {
+        if chartDataRange != stamp.range { chartDataRange = stamp.range }
+        if chartDataInterval != stamp.interval { chartDataInterval = stamp.interval }
+        if chartLoadFailed != failed { chartLoadFailed = failed }
+        chartHistory.absorb(bars, symbol: tickerSymbol, range: stamp.range, interval: stamp.interval, extendedHours: stamp.extendedHours)
+        let firstBarsForStamp = !bars.isEmpty && !lastChartWriteHadBars
+        lastChartWriteHadBars = !bars.isEmpty
+        guard stamp != lastChartStamp || firstBarsForStamp else { return }
+        lastChartStamp = stamp
+        chartDataVersion += 1
+    }
+
+    /// The (range, interval, extended hours) the pills ask for right now.
+    private var selectedChartStamp: ChartBarsStamp {
+        let currentExtended = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
+        return ChartBarsStamp(range: selectedChartRange, interval: chartSettings.selectedInterval, extendedHours: currentExtended)
+    }
+
+    /// What the chart frame shows while it has NO bars (`TickerChartView` draws it only then).
+    /// - A fetch for the selection on the pills failed: say so, instead of keeping the
+    ///   previous range's bars under the new pill.
+    /// - That failure is for an earlier selection: the pills have moved on and every pill
+    ///   change fetches, so the current request is on its way — a shimmer, not a stale error.
+    /// - Otherwise: the fast core carries bars on 1D/1W only, and the screen can OPEN on a
+    ///   remembered 3M+ — so the frame would sit empty for the 2–5 s until the full overview
+    ///   lands. Gated on `isLoading` so a failed load never leaves a shimmer that cannot
+    ///   resolve (nil → the canvas's own "No chart data").
+    var chartPlaceholder: ChartPlaceholder? {
+        if chartLoadFailed {
+            return lastChartStamp == selectedChartStamp ? ChartPlaceholder.note("Couldn't load this range") : .loading
+        }
+        return isLoading ? .loading : nil
+    }
+
+    /// The chart is panning toward its left floor (or the user tapped Retry on its marker).
+    func loadOlderChartBars(userInitiated: Bool) {
+        chartHistory.requestOlder(force: userInitiated)
+    }
+
+    /// The 1D chart's dashed baseline: the previous session's close. Neither stock payload
+    /// carries a `previous_close`, but both carry the quote's price and day change, and the
+    /// quote's change IS price − previous close — the same derivation the ETF / index /
+    /// crypto models use (`chartPreviousClose`). nil when the change is unknown (the 0.0
+    /// placeholder would put the baseline ON the price). The model the header shows decides
+    /// (full, else core — never a stale core under the full model), then the fallback
+    /// path's quote. `stockQuote` alone used to feed this, and it is set only on the
+    /// overview-failed fallback, so the baseline fell back to the first bar every time.
+    var chartPreviousClose: Double? {
+        func derived(price: Double, change: Double) -> Double? {
+            let close = price - change
+            return close.isFinite && close > 0 ? close : nil
+        }
+        if let data = tickerData {
+            if data.changeKnown, let close = derived(price: data.currentPrice, change: data.priceChange) {
+                return close
+            }
+        } else if let core = coreData, core.changeKnown,
+                  let close = derived(price: core.currentPrice, change: core.priceChange) {
+            return close
+        }
+        return stockQuote?.previousClose
     }
 
     // MARK: - Build TickerDetailData from API
@@ -1567,8 +1774,10 @@ class TickerDetailViewModel: ObservableObject {
         // Determine market status based on current time
         let marketStatus = determineMarketStatus()
 
-        // Use existing chart data if available, otherwise empty (will be fetched separately)
-        let existingChart = self.tickerData?.chartPricePoints ?? []
+        // Keep the bars already on screen — the previous full model's, else the fast core's
+        // (whose stamp `lastChartStamp` already records) — otherwise empty (fetched
+        // separately). Starting from [] blanked a chart core had already painted.
+        let existingChart = self.tickerData?.chartPricePoints ?? self.coreData?.chartPricePoints ?? []
 
         return TickerDetailData(
             symbol: tickerSymbol,

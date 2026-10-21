@@ -287,6 +287,10 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # The search-screen chips (2026-09-26): FMP-derived names, and a pick needs an account
         # by product decision — born gated.
         "getSearchTrending", "recordSearchPick",
+        # The chart scroll-back pages (`/{asset}/{symbol}/chart/history`, all five routers)
+        # and the crypto range-switch chart (`/crypto/{symbol}/chart`), 2026-10-20: FMP /
+        # CoinGecko price history behind the router-level strict dependency — born gated.
+        "getChartHistory", "getCryptoChart",
     ],
 )
 def test_account_only_endpoints_are_gated(case_name):

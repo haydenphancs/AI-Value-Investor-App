@@ -33,6 +33,9 @@ test red:
   * drop the sheet's `type != effectiveChartType` guard                       → test_the_smaller_fixes…
   * draw the placeholder ON TOP of MainChartCanvas again                      → test_the_smaller_fixes…
   * restore the commodity slice's bare `!light.chartData.isEmpty` guard       → test_the_smaller_fixes…
+  * put a second TickerChartView back in TickerDetailView's core branch      → test_each_detail_screen_restores… / test_the_smaller_fixes…
+  * drop `isLoading ?` from TickerDetailViewModel.chartPlaceholder           → test_the_smaller_fixes…
+  * show the failure note whatever the pills say (drop the stamp check)      → test_the_smaller_fixes…
 """
 from __future__ import annotations
 
@@ -47,9 +50,11 @@ _RANGES = _IOS / "Models" / "TickerDetailModels.swift"
 _CHART = _IOS / "Views" / "Molecules" / "TickerChartView.swift"
 _SHEET = _IOS / "Views" / "Molecules" / "Chart" / "ChartSettingsSheet.swift"
 
-# (ViewModel, Screen, ChartAssetContext case, TickerChartView call sites on the screen)
+# (ViewModel, Screen, ChartAssetContext case, TickerChartView call sites on the screen).
+# The stock screen had two (one per header branch) until the chart-continuity change: the
+# core→full swap then built a NEW chart and lost the user's pan and paged-in history.
 _SCREENS = [
-    ("TickerDetailViewModel", "TickerDetailView", "stock", 2),
+    ("TickerDetailViewModel", "TickerDetailView", "stock", 1),
     ("ETFDetailViewModel", "ETFDetailView", "etf", 1),
     ("CryptoDetailViewModel", "CryptoDetailView", "crypto", 1),
     ("IndexDetailViewModel", "IndexDetailView", "index", 1),
@@ -111,6 +116,23 @@ def _observer(body: str, prop: str) -> str | None:
 
 def _squash(s: str) -> str:
     return re.sub(r"\s+", "", s)
+
+
+def _call(src: str, opener: str) -> str:
+    """The paren-balanced `opener(` … `)` call at the first `opener` in `src`."""
+    i = src.find(opener)
+    assert i != -1, f"guard is stale — {opener!r} not found"
+    start = i + len(opener) - 1
+    assert src[start] == "(", opener
+    depth = 0
+    for j in range(start, len(src)):
+        if src[j] == "(":
+            depth += 1
+        elif src[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return src[start: j + 1]
+    raise AssertionError("unbalanced parens")
 
 
 def _settings() -> str:
@@ -286,6 +308,7 @@ def test_each_detail_screen_restores_before_its_sinks(vm_name, screen_name, ctx,
     assert "rememberUser" not in vm, f"{vm_name} writes the range memory — only a tap may"
 
     screen = _code(_IOS / "Views" / "Screens" / f"{screen_name}.swift")
+    assert screen.count("TickerChartView(") == sites, screen_name
     assert screen.count("assetContext: viewModel.chartAssetContext") == sites, screen_name
     assert not re.search(r"assetContext:\s*\.(stock|etf|crypto|index|commodity)\b", screen), screen_name
 
@@ -437,11 +460,38 @@ def test_the_smaller_fixes_stay_in():
     ), "the placeholder must replace MainChartCanvas, not overlay it"
     assert chart.count("chartPlaceholderView(placeholder)") == 1
 
+    # The stock screen draws ONE chart for both models (the fast core, then the full
+    # overview), gated on either having landed and kept OUT of the header branches, so the
+    # swap never rebuilds it. Its one placeholder is the ViewModel's: a shimmer while the
+    # load runs (the core carries bars on 1D/1W only, so a remembered 3M+ waits for the
+    # overview), the failure note only for the selection on the pills, and nil once the
+    # load is over — so a failed load never leaves a shimmer that cannot resolve.
     ticker = _code(_IOS / "Views" / "Screens" / "TickerDetailView.swift")
-    core = ticker[ticker.index("else if let core = viewModel.coreData"):]
-    core = core[: core.index("else if let errorMessage")]
-    assert "placeholder: viewModel.isLoading ? .loading : nil" in core
-    assert ticker.count("placeholder:") == 1, "only the fast-core chart waits on a later response"
+    assert ticker.count("TickerChartView(") == 1, "a second chart is rebuilt on the core→full swap"
+    gate = _block(ticker, "if viewModel.tickerData != nil || viewModel.coreData != nil")
+    assert "TickerChartView(" in gate, "the chart is no longer gated on either model"
+    # The two header branches, found by the header they draw (the screen has other
+    # `if let tickerData` blocks, e.g. the chart helpers and the tab gates).
+    branches = []
+    for opener in ("if let tickerData = viewModel.tickerData {", "else if let core = viewModel.coreData {"):
+        found = [b for b in (_walk(ticker, m.end() - 1) for m in re.finditer(re.escape(opener), ticker))
+                 if "TickerPriceHeader(" in b]
+        assert len(found) == 1, f"guard is stale — no single header branch `{opener}`"
+        branches.append(found[0])
+    for branch in branches:
+        assert "TickerChartView(" not in branch, "the chart moved back into a header branch"
+    call = _call(gate, "TickerChartView(")
+    assert "placeholder: viewModel.chartPlaceholder," in call
+    assert ticker.count("placeholder:") == 1, "the stock chart has exactly one placeholder source"
+    placeholder = _block(vm, "var chartPlaceholder: ChartPlaceholder?")
+    failed = _block(placeholder, "if chartLoadFailed")
+    assert re.search(
+        r"return\s+lastChartStamp\s*==\s*selectedChartStamp\s*\?\s*ChartPlaceholder\.note\(\"[^\"]+\"\)\s*:\s*\.loading",
+        failed,
+    ), "the failure note must be judged on the selection the pills show, else a stale error stays up"
+    rest = placeholder[placeholder.index(failed) + len(failed):]
+    assert "return isLoading ? .loading : nil" in rest, \
+        "the shimmer must be gated on the load, or a failed load shimmers forever"
 
     commodity = _code(_IOS / "Views" / "Screens" / "CommodityDetailView.swift")
     assert "placeholder: viewModel.selectedChartRange.defaultInterval.isIntraday" in commodity

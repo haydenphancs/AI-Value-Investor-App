@@ -1418,7 +1418,9 @@ values; there is no `CachePolicy` or `CacheKey` type.
 | Class | TTL | Rationale |
 |---|---|---|
 | volatile (quote, header) | 120 s | a price is only ever briefly true |
-| chart | 25 s | redraw cadence, not data cadence |
+| chart (intraday interval) | 25 s | redraw cadence, not data cadence |
+| chart (daily / weekly / monthly) | 300 s | only the last bar moves, and no timer refreshes these ranges |
+| chart history page | 3600 s | settled bars; kept in their own bounded store (`chartHistoryPages`, 64 pages), never in the shared dict, and dropped as soon as a page arrives under a new `settled_through` |
 | news | 60 s | the backend already caches it for hours; this only collapses tab-flipping |
 | analysis | 1800 s | recomputed on the server far less often than that |
 | fundamental | 86400 s | quarterly data |
@@ -1435,6 +1437,50 @@ Eviction drops the 20 oldest **by insertion time** once the entry cap is reached
 LRU — `getCached` does not touch the timestamp — and the code comment saying "LRU" is wrong. It has
 not mattered, because the cap is generous relative to a session's working set; if it ever does, the
 fix is one line in `getCached`.
+
+### 7.2a Asset-detail chart history (scroll back to the first trading day)
+
+The shared detail chart (`TickerChartView`, on the stock, ETF, index, crypto and commodity
+screens) opens on the range the user picked and pages in older bars only once the user pans or
+pinches toward its left edge. First paint is unchanged.
+
+- **Route.** `GET /{stocks|etfs|indices|commodities|crypto}/{symbol}/chart/history` lives on each
+  of the five guarded routers, so it is account-only (auth.md §1a). It takes `interval`,
+  `before` (exclusive), `limit` (≤ 5,000) and `extended_hours` (stocks only), and answers
+  bars oldest first plus `has_more`, `settled_through` and `reached_start`. The shared handler is
+  `app/api/chart_history_http.py` and the schema is `app/schemas/chart_history.py`.
+  `has_more: false` means paging has nothing older to give. `reached_start: true` means more: the
+  page holds the symbol's FIRST bar. That is false at the intraday look-back bound, at
+  CoinGecko's plan cap, and in the 90-day hourly crypto series. An intraday page ending on empty
+  windows counts only when the stock's daily history begins that same day. A failed or empty
+  source is a typed 502 (`FMP_UNAVAILABLE`, or `COINGECKO_UNAVAILABLE` on crypto) and never reads
+  as "start of history".
+- **Service.** `price_history_service.py` keeps one settled daily history per symbol. Weekly and
+  monthly bars are aggregated from that full history BEFORE windowing, so the first bucket is
+  complete. Intraday pages come from calendar-grid windows that every user shares, and crypto
+  hourly bars come from one 90-day series. Every tier is in process memory, bounded by bytes,
+  with `_inflight` dedup (the §10 row explains why there is no Supabase tier).
+  `chart_helper.fetch_chart_data` reads the same history, which gives every range its warm-up:
+  at least 210 bars before the first visible bar, including intraday and crypto 1W.
+- **Client.** `ChartHistoryLoader` (one per detail ViewModel) keeps a contiguous, date-ordered
+  store of the bars older than the current payload, with these rules:
+  - a strict "older than the payload's first bar" merge;
+  - a seam check that drops the store on a split or a `settled_through` change;
+  - single flight, with a 10 s back-off after a failure.
+
+  `ChartSeries` merges the store and the payload and computes every indicator ONCE over the
+  merged bars (off the main thread past 4,000 bars). `ChartViewportState` holds a right-anchored,
+  fractional window, so a prepended page never moves the chart.
+- **Correctness floor.** Unless the backend said `reached_start`, the window cannot go further
+  left than `ChartWarmup.bars` (210). Every visible value then matches the full-history value: SMA
+  and Bollinger exactly, and the EMA/Wilder seeds (MACD, RSI) to about 1e-7. Paging that merely
+  stopped (a bound, a cap, a refused page) keeps the floor. At the symbol's first bar, the window
+  reaches it, and each indicator starts at its textbook first index. The floor is read from the
+  series that was BUILT, so a long merge still building in the background never re-floors the
+  bars on screen. Decimation (one min/max envelope per pixel column) is for drawing only; readouts
+  use full-resolution bars.
+- **1D** stays one session laid out by time, with pan and pinch off. **1W** pages back through
+  older intraday bars.
 
 ### 7.3 Benchmark & report caching
 
@@ -4130,6 +4176,7 @@ What follows is the set with no other home.
 | Gap | Real state | Why it is this way |
 |---|---|---|
 | No backend repository / data-access layer | Services call `supabase.table(...)` directly | Deliberate — Appendix B, Feb 2026. Still holds; the cost is that service math is harder to unit-test without a live client. |
+| The full daily price history behind chart scroll-back is memory-only | `price_history_service` keeps one settled history per symbol in a byte-bounded in-process LRU with `_inflight` dedup; a stock seeds from the overview bundle's already-fetched history when it is in memory, else pages FMP (1-3 calls per symbol per close cycle). ETF / index / commodity reuse their services' own histories. No Supabase tier | The same call the ETF and index services made (§7.1): reading a multi-MB raw history back from Supabase is slower than re-fetching it from FMP, and the overview bundle already persists the newest 5,000 stock rows. The cost is one paged FMP fetch per symbol after a deploy. |
 | No Redis | Tier 1 in-process dict + Tier 2 Supabase `*_cache` (§7.1) | Sufficient today. **The condition that changes it is horizontal scale:** the Tier-1 dict is per-process, so a second Railway instance stops sharing it and the cache-hit rate halves per instance added. |
 | Request correlation is partial | The middleware stack is exactly **five** entries — CORS, GZip, `_security_headers`, `cap_json_body`, `add_process_time`. (`_security_headers` was added 2026-09-12: the privacy, terms and support pages and the AASA file are real browser-reachable responses on this host and carried no `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` or HSTS. The same block documents why `allow_credentials` is now dropped whenever `ALLOWED_ORIGINS` is its `["*"]` default — Starlette answers that spec-illegal pair by echoing the caller's Origin back as trusted, verified live against production.) The last sets `request.state.request_id` and emits `X-Request-ID`, but the id is a millisecond timestamp (collides under concurrency), is read nowhere else, is absent from log records, and is not forwarded upstream | Enough to correlate a client report with one response; not enough to trace a request through the logs. Fixing it is a small, well-bounded change. |
 | Report status is polled while chat streams | SSE ships for chat; report status is a 3s poll with a 300s client deadline | Not an oversight. Per §5.4 the client deadline is deliberately *not* a failure — the server keeps generating and a list poll reconciles — which a stream would complicate rather than simplify. |

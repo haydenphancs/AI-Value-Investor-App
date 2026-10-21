@@ -35,6 +35,9 @@ struct TickerDetailView: View {
     @StateObject private var chatViewModel = ChatViewModel()
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Where the chart is on screen, written by the chart and read by `.backSwipe`: a pan
+    /// that starts on the chart scrolls back in time and must never also pop the screen.
+    @State private var chartTouchRegion = ChartTouchRegion()
 
     let tickerSymbol: String
 
@@ -90,6 +93,27 @@ struct TickerDetailView: View {
         return ShareContent.items(body)
     }
 
+    // MARK: - Chart (one view for both models)
+
+    // ONE `TickerChartView` draws the fast core's bars and then the full overview's. It used
+    // to be two call sites, one per header branch, so the core→full swap built a NEW chart:
+    // the user's pan, pinch and paged-in history were thrown away the moment the overview
+    // landed. These pick the model; the chart keeps its identity.
+
+    /// The full model's bars once it has landed, else the fast core's.
+    private var chartPricePoints: [StockPricePoint] {
+        if let tickerData = viewModel.tickerData { return tickerData.chartPricePoints }
+        if let core = viewModel.coreData { return core.chartPricePoints }
+        return []
+    }
+
+    /// Chart tint — from the series itself when the day change is unknown (see each model).
+    private var chartIsPositive: Bool {
+        if let tickerData = viewModel.tickerData { return tickerData.chartIsPositive }
+        if let core = viewModel.coreData { return core.chartIsPositive }
+        return true
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             // Background
@@ -139,19 +163,6 @@ struct TickerDetailView: View {
                             changeKnown: tickerData.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
-
-                        // Chart
-                        TickerChartView(
-                            pricePoints: tickerData.chartPricePoints,
-                            isPositive: tickerData.chartIsPositive,
-                            selectedRange: $viewModel.selectedChartRange,
-                            chartSettings: viewModel.chartSettings,
-                            assetContext: viewModel.chartAssetContext,
-                            chartDataVersion: viewModel.chartDataVersion,
-                            chartEventDates: viewModel.chartEventDates,
-                            previousClose: viewModel.stockQuote?.previousClose
-                        )
-                        .padding(.top, AppSpacing.lg)
                     } else if let core = viewModel.coreData {
                         // Fast core: real price + chart, before the full overview lands.
                         TickerPriceHeader(
@@ -165,23 +176,6 @@ struct TickerDetailView: View {
                             changeKnown: core.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
-
-                        TickerChartView(
-                            pricePoints: core.chartPricePoints,
-                            isPositive: core.chartIsPositive,
-                            selectedRange: $viewModel.selectedChartRange,
-                            chartSettings: viewModel.chartSettings,
-                            assetContext: viewModel.chartAssetContext,
-                            chartDataVersion: viewModel.chartDataVersion,
-                            chartEventDates: viewModel.chartEventDates,
-                            previousClose: viewModel.stockQuote?.previousClose,
-                            // The fast core carries bars on 1D/1W only, and the screen can
-                            // now OPEN on a remembered 3M+ — so this frame would sit empty for
-                            // the 2–5 s until the full overview lands. Gated on `isLoading` so a
-                            // failed load never leaves a shimmer that cannot resolve.
-                            placeholder: viewModel.isLoading ? .loading : nil
-                        )
-                        .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {
                         DetailLoadFailureCard(
                             message: errorMessage,
@@ -191,6 +185,30 @@ struct TickerDetailView: View {
                     } else {
                         DetailHeaderChartSkeleton(symbol: tickerSymbol)
                             .padding(.top, AppSpacing.sm)
+                    }
+
+                    // Chart — outside the header branches on purpose, so it is the SAME view
+                    // before and after the core→full swap (see `chartPricePoints`).
+                    if viewModel.tickerData != nil || viewModel.coreData != nil {
+                        TickerChartView(
+                            pricePoints: chartPricePoints,
+                            isPositive: chartIsPositive,
+                            selectedRange: $viewModel.selectedChartRange,
+                            chartSettings: viewModel.chartSettings,
+                            assetContext: viewModel.chartAssetContext,
+                            chartDataVersion: viewModel.chartDataVersion,
+                            chartEventDates: viewModel.chartEventDates,
+                            previousClose: viewModel.chartPreviousClose,
+                            // Drawn only while there are no bars: a failed switch to a new
+                            // range, or the 2–5 s a remembered 3M+ waits for the full overview
+                            // (the fast core carries bars on 1D/1W only). See the VM property.
+                            placeholder: viewModel.chartPlaceholder,
+                            history: viewModel.chartHistory.state,
+                            onNeedOlderBars: { viewModel.loadOlderChartBars(userInitiated: $0) },
+                            dataRange: viewModel.chartDataRange,
+                            dataInterval: viewModel.chartDataInterval
+                        )
+                        .padding(.top, AppSpacing.lg)
                     }
                 } tabs: {
                     TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
@@ -247,6 +265,8 @@ struct TickerDetailView: View {
             viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
+        // OUTSIDE `.backSwipe`, so the modifier and the chart inside read the same box.
+        .environment(\.chartTouchRegion, chartTouchRegion)
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }

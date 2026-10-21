@@ -64,9 +64,12 @@ _cache: Dict[str, tuple] = {}
 _CACHE_TTL_SECONDS = 300  # default when a caller declares nothing
 
 # Per-section TTLs, ordered by how fast the underlying data really moves.
-#: FRED depth for a commodity screen. ~10y of daily prints covers the ALL range
-#: (DCOILWTICO starts 1986, DHHNGSP 1997) without a per-range cache miss.
-_FRED_OBSERVATION_LIMIT: int = 4000
+#: FRED depth for a commodity screen: the NEWEST this-many daily prints. 12,000 business
+#: days is ~46 years, so CL/NG reach their series' first print (DCOILWTICO starts 1986,
+#: DHHNGSP 1997) and the ALL range / monthly MA(200) have their whole history. The old
+#: 4,000 claimed to "cover ALL" and reached only ~2011. A constant: `limit` is part of
+#: FRED's cache key, shared with the quote path.
+_FRED_OBSERVATION_LIMIT: int = 12000
 _QUOTE_TTL = 45          # live price / intraday key-stat rows
 _RELATED_TTL = 60        # sibling commodity quotes — same data class, less prominent
 _INTRADAY_CHART_TTL = 60 # 1D/1W bars; the only genuinely per-range fetch
@@ -878,7 +881,28 @@ class CommodityService:
 
         Costs 1-2 paged calls once per symbol per 12h, replacing one 972 KB call per
         range per 5 minutes.
+
+        A failed fetch is `[]` here (the screen degrades section by section); the paged
+        chart history calls `_get_history_strict`, which raises instead.
         """
+        try:
+            return await self._get_history_strict(fmp_symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Commodity history fetch failed for %s (%s:%s): %s: %s",
+                fmp_symbol, _source_of(fmp_symbol), _ref_of(fmp_symbol),
+                type(e).__name__, e,
+            )
+            return []
+
+    async def _get_history_strict(self, fmp_symbol: str) -> List[Dict[str, Any]]:
+        """`_get_history` without the swallow — a failure RAISES — and with the shared
+        in-flight fetch it never had. `_get_derived` and `_get_chart` are gathered in one
+        build, so on a cold symbol both missed this key at the same instant and fetched
+        the full history TWICE (the ETF/index services fixed the same measured double
+        fetch); the cache is written only after the fetch returns, so it cannot help."""
         key = f"com:hist:{fmp_symbol}"
         # Served RAW (the price-recovery fallback legitimately wants the partial bar), but
         # a list pulled in the previous cycle is a miss so the settled bar lands on time.
@@ -886,26 +910,36 @@ class CommodityService:
         cached = _cache_get_settled(key)
         if cached is not None:
             return cached
-        source, ref = _source_of(fmp_symbol), _ref_of(fmp_symbol)
+        if key in _inflight:
+            return await asyncio.shield(_inflight[key])
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        _inflight[key] = fut
         try:
+            source, ref = _source_of(fmp_symbol), _ref_of(fmp_symbol)
             if source == _COMMODITY_SOURCE_FRED:
                 historical = await self._fred_history(ref)
             else:
                 from app.services.chart_helper import _fetch_all_daily
                 historical = await _fetch_all_daily(self.fmp, ref)
+            if historical:
+                # `date` may be an explicit JSON null (not just absent); `or ""` avoids
+                # a None<str TypeError when sorting a malformed FMP row.
+                historical.sort(key=lambda p: p.get("date") or "")
+                _cache_set(key, historical, _HISTORY_TTL)
+            if not fut.done():
+                fut.set_result(historical)
+            return historical
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException and would leave the future unresolved,
+            # hanging every joiner for the life of the process.
+            fail_shared_future(fut, RuntimeError("Commodity history fetch was cancelled"))
+            raise
         except Exception as e:
-            logger.warning(
-                "Commodity history fetch failed for %s (%s:%s): %s: %s",
-                fmp_symbol, source, ref, type(e).__name__, e,
-            )
-            return []
-        if not historical:
-            return []
-        # `date` may be an explicit JSON null (not just absent); `or ""` avoids a
-        # None<str TypeError when sorting a malformed FMP row.
-        historical.sort(key=lambda p: p.get("date") or "")
-        _cache_set(key, historical, _HISTORY_TTL)
-        return historical
+            fail_shared_future(fut, e)
+            raise
+        finally:
+            _inflight.pop(key, None)
 
     async def _fred_observations(self, series_id: str):
         """Raw FRED observations, oldest-first, or [] when FRED is unconfigured/down.
@@ -974,21 +1008,43 @@ class CommodityService:
         cached = _cache_get_settled(key)
         if cached is not None:
             return cached
+        # Shared fetch: every cold commodity build asks for SPY at the same moment.
+        if key in _inflight:
+            try:
+                return await asyncio.shield(_inflight[key])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return []  # the leader logged it; the benchmark degrades the same way
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        _inflight[key] = fut
         try:
-            from app.services.chart_helper import _fetch_all_daily
-            spy = await _fetch_all_daily(self.fmp, "SPY")
+            try:
+                from app.services.chart_helper import _fetch_all_daily
+                spy = await _fetch_all_daily(self.fmp, "SPY")
+            except Exception as e:
+                logger.warning(
+                    "Commodity SPY benchmark history fetch failed: %s: %s",
+                    type(e).__name__, e,
+                )
+                spy = []
+            if not spy:
+                logger.warning("Commodity SPY benchmark history came back empty")
+            else:
+                spy.sort(key=lambda p: p.get("date") or "")
+                _cache_set(key, spy, _HISTORY_TTL)
+            if not fut.done():
+                fut.set_result(spy)
+            return spy
+        except asyncio.CancelledError:
+            fail_shared_future(fut, RuntimeError("Commodity SPY history fetch was cancelled"))
+            raise
         except Exception as e:
-            logger.warning(
-                "Commodity SPY benchmark history fetch failed: %s: %s",
-                type(e).__name__, e,
-            )
-            return []
-        if not spy:
-            logger.warning("Commodity SPY benchmark history came back empty")
-            return []
-        spy.sort(key=lambda p: p.get("date") or "")
-        _cache_set(key, spy, _HISTORY_TTL)
-        return spy
+            fail_shared_future(fut, e)
+            raise
+        finally:
+            _inflight.pop(key, None)
 
     async def _get_derived(self, fmp_symbol: str) -> Dict[str, Any]:
         """Everything computed FROM the daily history, cached in both tiers.
@@ -1415,10 +1471,11 @@ class CommodityService:
         # response as its schema default `[]` because the iOS DTO is non-optional.
         related_symbols = meta.get("related", [])
 
-        # `_get_derived` and `_get_chart` may both want the daily history; `_get_history`
-        # is itself cached, so the second caller gets the first one's list rather than a
-        # second 972 KB fetch. On a Tier-2 derived HIT with a non-daily range, the history
-        # is never fetched at all.
+        # `_get_derived` and `_get_chart` may both want the daily history; the shared
+        # in-flight fetch in `_get_history_strict` hands the second caller the first one's
+        # list rather than a second 972 KB fetch (the cache alone could not: it is written
+        # only after the fetch returns). On a Tier-2 derived HIT with a non-daily range,
+        # the history is never fetched at all.
         quote, derived, chart_points, related_quotes, session_ohl = await asyncio.gather(
             self._get_quote(fmp_symbol),
             self._get_derived(fmp_symbol),

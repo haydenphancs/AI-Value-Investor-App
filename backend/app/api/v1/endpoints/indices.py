@@ -10,7 +10,19 @@ Frontend:
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from app.dependencies import StandardRateLimit, get_current_user_id, MarketRateLimit
+from app.dependencies import (
+    MarketFanoutRateLimit,
+    MarketRateLimit,
+    StandardRateLimit,
+    get_current_user_id,
+)
+from app.api.chart_history_http import (
+    BEFORE_MAX_LENGTH,
+    FMP_HISTORY_INTERVAL_PATTERN,
+    chart_history_response,
+)
+from app.schemas.chart_history import ChartHistoryResponse
+from app.services.price_history_service import ASSET_INDEX, MAX_PAGE_LIMIT
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -182,6 +194,32 @@ def _normalize_index_symbol(symbol: str) -> str:
     if not symbol.startswith("^") and not symbol.startswith("%5E"):
         symbol = f"^{symbol}"
     return symbol.replace("%5E", "^").upper()
+
+
+@router.get("/{symbol}/chart/history", response_model=ChartHistoryResponse)
+async def get_index_chart_history(
+    symbol: str,
+    interval: str = Query(..., pattern=FMP_HISTORY_INTERVAL_PATTERN),
+    before: str = Query(..., max_length=BEFORE_MAX_LENGTH),
+    limit: Optional[int] = Query(None, ge=1, le=MAX_PAGE_LIMIT),
+    _fanout: None = MarketFanoutRateLimit,
+):
+    """Older bars for the index chart — the PROXY ETF's own history (`_proxy_for`), as
+    every index chart is, regular session only. Contract:
+    `GET /stocks/{ticker}/chart/history`."""
+    raw_symbol = symbol
+    symbol = _normalize_index_symbol(symbol)
+    if not _INDEX_SYMBOL_RE.match(symbol):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=422,
+            message=f"Invalid index symbol for chart history: {raw_symbol[:32]!r}",
+            user_message="That symbol isn't valid.",
+            details={"symbol": raw_symbol[:32]},
+        )
+    return await chart_history_response(
+        ASSET_INDEX, symbol, interval=interval, before=before, limit=limit
+    )
 
 
 @router.get("/{symbol}/core", response_model=IndexCoreResponse)

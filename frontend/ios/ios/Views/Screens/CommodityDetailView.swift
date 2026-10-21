@@ -28,6 +28,9 @@ struct CommodityDetailView: View {
     @State private var selectedSearchResult: SearchSelection?
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Where the chart is on screen, shared by `.backSwipe` and the chart: a pan that starts
+    /// on the chart scrolls back in time and must never also pop the screen.
+    @State private var chartTouchRegion = ChartTouchRegion()
 
     let commoditySymbol: String
 
@@ -63,6 +66,17 @@ struct CommodityDetailView: View {
         \(commodityData.formattedPrice) \(commodityData.formattedChange) \(commodityData.formattedChangePercent)
         """
         return ShareContent.items(body)
+    }
+
+    /// What the chart frame shows on a DAILY range while it has no bars (the chart draws a
+    /// placeholder only then): the failed answer to the user's range / interval change — the
+    /// view model clears the previous selection's bars rather than leave them under the new
+    /// pill. Otherwise nil, and the canvas says "No chart data". An intraday range keeps its
+    /// own note above, whose wording already covers a failed fetch.
+    private var failedRangePlaceholder: ChartPlaceholder? {
+        viewModel.chartLoadFailed
+            ? .note("Chart unavailable for this range. Pull to refresh to try again.")
+            : nil
     }
 
     var body: some View {
@@ -133,7 +147,11 @@ struct CommodityDetailView: View {
                             // both cases — never "no intraday prices" about gold.
                             placeholder: viewModel.selectedChartRange.defaultInterval.isIntraday
                                 ? .note("Intraday chart unavailable for this commodity. Try 3M or longer.")
-                                : nil
+                                : failedRangePlaceholder,
+                            history: viewModel.chartHistory.state,
+                            onNeedOlderBars: { viewModel.loadOlderChartBars(userInitiated: $0) },
+                            dataRange: viewModel.chartDataRange,
+                            dataInterval: viewModel.chartDataInterval
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {
@@ -200,6 +218,8 @@ struct CommodityDetailView: View {
             viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
+        // OUTSIDE `.backSwipe`, so the modifier and the chart inside read the same box.
+        .environment(\.chartTouchRegion, chartTouchRegion)
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }

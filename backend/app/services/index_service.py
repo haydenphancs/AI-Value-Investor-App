@@ -795,7 +795,25 @@ class IndexService:
 
         Deliberately Tier-1 only: reading ~1 MB back from Supabase is slower than the FMP
         call it would replace.
+
+        A failed fetch is `[]` here (the screen degrades section by section); the paged
+        chart history calls `_get_history_strict`, which raises instead — an empty list
+        must never read there as "this index has no older bars".
         """
+        try:
+            return await self._get_history_strict(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Index history fetch failed for %s (proxy %s): %s: %s",
+                symbol, _proxy_for(symbol), type(e).__name__, e,
+            )
+            return []
+
+    async def _get_history_strict(self, symbol: str) -> List[Dict]:
+        """`_get_history` without the swallow: the same cache and the same shared
+        fetch of the proxy's history, but a failure RAISES."""
         key = f"idx:hist:{symbol}"
         # Close-cycle aligned: the list is served RAW (its last row may be today's
         # in-progress bar, which the price-recovery fallback in `_build_index_detail`
@@ -816,15 +834,8 @@ class IndexService:
         fut: asyncio.Future = loop.create_future()
         _inflight[key] = fut
         try:
-            try:
-                from app.services.chart_helper import _fetch_all_daily
-                historical = await _fetch_all_daily(self.fmp, _proxy_for(symbol))
-            except Exception as e:
-                logger.warning(
-                    "Index history fetch failed for %s (proxy %s): %s: %s",
-                    symbol, _proxy_for(symbol), type(e).__name__, e,
-                )
-                historical = []
+            from app.services.chart_helper import _fetch_all_daily
+            historical = await _fetch_all_daily(self.fmp, _proxy_for(symbol))
             if historical:
                 # `date` may be an explicit JSON null; `or ""` avoids a None<str TypeError.
                 historical.sort(key=lambda p: p.get("date") or "")

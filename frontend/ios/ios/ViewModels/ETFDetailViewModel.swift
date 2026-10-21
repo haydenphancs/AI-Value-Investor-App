@@ -5,11 +5,14 @@
 //  ViewModel for the ETF Detail screen.
 //  Fetches real data from GET /api/v1/etfs/{symbol}?range=3M
 //  and maps the response DTO to display models.
+//  Range/interval taps and the 30 s refresh use the light GET /api/v1/etfs/{symbol}/quote;
+//  older bars come from GET /api/v1/etfs/{symbol}/chart/history (via ChartHistoryLoader).
 //
 
 import Foundation
 import SwiftUI
 import Combine
+import os
 
 @MainActor
 class ETFDetailViewModel: ObservableObject {
@@ -61,7 +64,27 @@ class ETFDetailViewModel: ObservableObject {
     /// The ONE place this screen names its asset class: the screen passes it to
     /// `TickerChartView`, and init resolves the remembered range/interval against it.
     let chartAssetContext: ChartAssetContext = .etf
+    /// Bumped ONLY when the bars in hand belong to a different (range, interval) than the
+    /// previous write — a user range or interval change — or when a write brings bars after
+    /// one that had none (see `ChartBarsStamp.hasBars`). Never on a timer tick, the
+    /// core→full swap or pull-to-refresh: the chart keeps the user's pan across those and
+    /// resets to the range's default window only on a bump. It used to bump on EVERY write
+    /// (and on every 30 s slice that carried bars), so a panned chart snapped back.
     @Published var chartDataVersion: Int = 0
+    /// The range / interval the bars in hand were REQUESTED for — captured before the
+    /// await, never the pill at landing time. The pill flips on the tap and the bars arrive
+    /// later; the chart maps the bars by these, and veils itself while they differ.
+    @Published var chartDataRange: ChartTimeRange?
+    @Published var chartDataInterval: ChartInterval?
+    /// The user's last range/interval change failed, so the chart holds no bars (never the
+    /// previous range's bars under the new pill) and says so. Cleared by the next write.
+    @Published var chartLoadFailed: Bool = false
+    /// A user range/interval fetch is in flight — with no bars in hand the chart shows its
+    /// loading block instead of "No chart data".
+    @Published private(set) var isChartLoading: Bool = false
+    /// Older bars for the chart, paged in as the user pans left. Fed every write of the
+    /// chart bars (`didWriteChartBars`) so its store stays contiguous with them.
+    let chartHistory: ChartHistoryLoader
 
     // MARK: - Live Price
     private var chartRefreshTask: Task<Void, Never>?
@@ -83,20 +106,40 @@ class ETFDetailViewModel: ObservableObject {
     /// re-fires the instant more rows render, so without this it cascades every
     /// remaining page in one tick (TickerDetail has the same guard).
     private var isLoadingMoreNews = false
-    /// Monotonic token for ETF-detail fetches. fetchETFDetail and fetchChartForRange
-    /// hit the same endpoint and write the whole etfData snapshot; each captures the
-    /// token before awaiting and applies its result only if still current, so a slow
-    /// earlier range can't clobber the chart the user has since switched to.
+    /// Monotonic token for the fetches that write the chart. fetchETFDetail writes the
+    /// whole etfData snapshot and fetchChartForRange merges the light slice's bars into it;
+    /// each captures the token before awaiting and applies its result only if still
+    /// current, so a slow earlier range can't clobber the chart the user has since switched to.
     private var chartRequestToken = 0
     /// True while the range sink assigns the range's default interval, so the
     /// interval sink doesn't ALSO reload (one range change would otherwise fire two
     /// identical fetches when the range crosses an interval boundary).
     private var suppressIntervalReload = false
 
+    /// What the last write of the chart bars was fetched for. The ETF routes serve the
+    /// regular session only, so no extended-hours flag. `chartDataVersion` moves only when
+    /// it changes.
+    ///
+    /// `hasBars` is part of it on purpose (as on the commodity / crypto / index VMs): a cold
+    /// daily core carries NO bars, and the chart commits its window for an empty series as
+    /// `.zero`. Without the flag the full payload lands under the SAME stamp, the chart keeps
+    /// that window, and its clamp opens 3M on the last 10 bars. Empty → bars is never a pan
+    /// the user made, so it re-commits the range's default window.
+    private struct ChartBarsStamp: Equatable {
+        let range: ChartTimeRange
+        let interval: ChartInterval
+        let hasBars: Bool
+    }
+    private var lastChartStamp: ChartBarsStamp?
+    private let log = Logger(subsystem: "com.caydex.ios", category: "ETFDetailViewModel")
+
     // MARK: - Initialization
 
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
+        // `repository` is a fixed `.shared`, not injected, so the loader takes the same
+        // default.
+        self.chartHistory = ChartHistoryLoader(asset: .etfs)
 
         // Seed the range AND interval as a resolved pair BEFORE the sinks are wired — the
         // user's remembered range and that range's interval, resolved for an ETF (a 2Y
@@ -152,6 +195,12 @@ class ETFDetailViewModel: ObservableObject {
                 Task { await self.fetchChartForRange(self.selectedChartRange) }
             }
             .store(in: &cancellables)
+
+        // The screen reads `chartHistory.state` through this view model, so the loader's
+        // changes must re-publish here — an older page landing has to redraw the chart.
+        chartHistory.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
@@ -184,21 +233,27 @@ class ETFDetailViewModel: ObservableObject {
 
     /// Fetches ETF detail from the backend and maps to display models.
     private func fetchETFDetail() async {
+        await fetchETFDetail(range: selectedChartRange, interval: chartSettings.selectedInterval)
+    }
+
+    /// The full detail for `range` / `interval`, captured by the CALLER before anything
+    /// awaits — the bars are stamped with what was requested, never the pill at landing time.
+    private func fetchETFDetail(range: ChartTimeRange, interval: ChartInterval) async {
         let startTime = CFAbsoluteTimeGetCurrent()
         chartRequestToken += 1
         let token = chartRequestToken
 
         do {
-            print("[ETFDetailVM] Fetching ETF detail for \(etfSymbol), range: \(selectedChartRange.rawValue)")
+            log.debug("ETF detail fetch for \(self.etfSymbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public)")
 
             let response = try await repository.getETFDetail(
                 symbol: etfSymbol,
-                range: selectedChartRange.rawValue,
-                interval: chartSettings.selectedInterval.rawValue
+                range: range.rawValue,
+                interval: interval.rawValue
             )
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            print("[ETFDetailVM] ✅ ETF detail loaded in \(String(format: "%.2f", elapsed))s — \(response.symbol) @ $\(response.currentPrice)")
+            log.debug("ETF detail loaded in \(String(format: "%.2f", elapsed), privacy: .public)s — \(response.symbol, privacy: .public), \(response.chartData.count) bars")
 
             // Apply only if still the latest request — a newer range change may have
             // already painted fresher data that this slower response must not clobber.
@@ -206,8 +261,13 @@ class ETFDetailViewModel: ObservableObject {
             // clear a newer request's error banner or start streaming on stale data.
             if token == self.chartRequestToken {
                 self.errorMessage = nil
-                self.etfData = response.toDisplayModel()
-                self.chartDataVersion += 1
+                let model = response.toDisplayModel()
+                self.etfData = model
+                self.isChartLoading = false
+                // Core→full and pull-to-refresh carry the same stamp, so this keeps the
+                // user's window; it bumps when the full payload is for a new range, or brings
+                // the first bars after a bar-less core (there was no window to keep).
+                self.didWriteChartBars(model.chartPricePoints, range: range, interval: interval)
                 // News now comes from the SHARED cache via `fetchETFNews()`, not
                 // this detail payload — so ETF news matches the Updates feed and
                 // gets AI enrichment. (The payload still carries `news_articles`;
@@ -220,11 +280,7 @@ class ETFDetailViewModel: ObservableObject {
 
         } catch {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            print("[ETFDetailVM] ❌ ETF detail failed after \(String(format: "%.2f", elapsed))s — \(error)")
-
-            if let apiError = error as? APIError {
-                print("[ETFDetailVM] API Error detail: \(apiError)")
-            }
+            log.error("ETF detail failed for \(self.etfSymbol, privacy: .public) range \(range.rawValue, privacy: .public) after \(String(format: "%.2f", elapsed), privacy: .public)s — \(String(describing: error), privacy: .public)")
 
             self.isLoading = false
 
@@ -232,7 +288,11 @@ class ETFDetailViewModel: ObservableObject {
             // still the latest request, so a STALE fetch's failure can't clobber
             // data a newer range fetch already painted.
             if token == self.chartRequestToken {
+                self.isChartLoading = false
                 self.errorMessage = "Unable to load ETF data. Pull to refresh."
+                // This was a range change made before the full model landed (or a refresh
+                // that superseded one): the fast-core bars on screen belong to the old range.
+                self.clearChartAfterFailedRequest(range: range, interval: interval)
                 loadFallbackData()
             }
         }
@@ -243,37 +303,106 @@ class ETFDetailViewModel: ObservableObject {
         selectedChartRange = range
     }
 
-    /// Called by the Combine observer when selectedChartRange changes.
+    /// Called by the Combine observers when the range or interval changes.
+    ///
+    /// The light `/quote` slice carries the bars for any range, so a tap re-requests only
+    /// those — it used to re-download the whole ETF detail (holdings, dividends, profile,
+    /// strategy, performance) and replace the model wholesale on every pill tap.
     private func fetchChartForRange(_ range: ChartTimeRange) async {
-        print("[ETFDetailVM] Updating chart range to \(range.rawValue)")
+        let interval = chartSettings.selectedInterval
+        log.debug("ETF chart range → \(range.rawValue, privacy: .public) \(interval.rawValue, privacy: .public)")
+        // A new ask: the previous answer's failure note gives way to the loading block.
+        chartLoadFailed = false
+        isChartLoading = true
+
+        // A range/interval tap while the FULL detail is still in flight (the fast-core
+        // chart is interactive before it lands): there is no model to merge a slice into,
+        // so re-request the full payload for the new range, as before. Its token bump
+        // supersedes the first fetch, so this is now the screen's load.
+        guard etfData != nil else {
+            await fetchETFDetail(range: range, interval: interval)
+            return
+        }
+
         chartRequestToken += 1
         let token = chartRequestToken
 
         do {
-            let response = try await repository.getETFDetail(
+            let light = try await repository.getETFQuote(
                 symbol: self.etfSymbol,
                 range: range.rawValue,
-                interval: chartSettings.selectedInterval.rawValue
+                interval: interval.rawValue
             )
-
-            print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")
 
             // Drop a stale response so a slow earlier range can't overwrite the chart
             // the user has since switched to (last-write-wins).
-            guard token == self.chartRequestToken else { return }
-            self.etfData = response.toDisplayModel()
-            self.chartDataVersion += 1
+            guard token == self.chartRequestToken, let current = self.etfData else { return }
+            var model = light.merged(into: current, includeChart: true)
+            // A USER range change shows ITS answer, even an empty one: `merged` keeps the
+            // previous bars on an empty slice (right for a timer tick), but those belong to
+            // the PREVIOUS range and would sit under the new pill.
+            if light.chartData.isEmpty {
+                model.chartPricePoints = []
+            }
+            self.etfData = model
+            self.isChartLoading = false
+            self.didWriteChartBars(model.chartPricePoints, range: range, interval: interval)
+            log.debug("ETF chart range \(range.rawValue, privacy: .public) updated — \(model.chartPricePoints.count) bars")
             // News is loaded once via `fetchETFNews()` (shared cache), not
-            // re-pulled on every chart-range change.
-
-            // If a range change superseded the initial fetchETFDetail before it could
-            // connect, this is now the path that paints etfData — so ensure streaming
-            // starts here too (idempotent; no-op if already connected or market closed).
-            self.maybeStartStreaming()
+            // re-pulled on every chart-range change. No re-arm here: a model already
+            // existed, so the path that painted it armed the 30-second refresh, and the
+            // range sink re-arms it on every tap anyway.
 
         } catch {
-            print("[ETFDetailVM] ⚠️ Chart range update failed, keeping existing data — \(error)")
+            guard token == self.chartRequestToken else { return }
+            log.error("ETF chart range \(range.rawValue, privacy: .public) \(interval.rawValue, privacy: .public) failed for \(self.etfSymbol, privacy: .public) — \(String(describing: error), privacy: .public)")
+            self.isChartLoading = false
+            self.clearChartAfterFailedRequest(range: range, interval: interval)
         }
+    }
+
+    // MARK: - Chart bars bookkeeping
+
+    /// Call at EVERY write of the chart bars, with the range / interval those bars were
+    /// REQUESTED for. Feeds the history loader (so its older pages stay contiguous with the
+    /// bars in hand), stamps the bars, and bumps `chartDataVersion` only on a new stamp.
+    private func didWriteChartBars(
+        _ bars: [StockPricePoint],
+        range: ChartTimeRange,
+        interval: ChartInterval,
+        failed: Bool = false
+    ) {
+        // Written only on a change: `@Published` re-publishes an equal value, and this runs
+        // on every 30 s tick that carries bars.
+        if chartDataRange != range { chartDataRange = range }
+        if chartDataInterval != interval { chartDataInterval = interval }
+        if chartLoadFailed != failed { chartLoadFailed = failed }
+        // The ETF routes are regular-session only: never extended hours here.
+        chartHistory.absorb(bars, symbol: etfSymbol, range: range, interval: interval, extendedHours: false)
+        let stamp = ChartBarsStamp(range: range, interval: interval, hasBars: !bars.isEmpty)
+        if stamp != lastChartStamp {
+            lastChartStamp = stamp
+            chartDataVersion += 1
+        }
+    }
+
+    /// A chart request for `range` / `interval` failed. When the bars on screen belong to
+    /// ANOTHER selection they must not stay under this pill: clear them and stamp the
+    /// request, so the chart shows "Couldn't load this range". When they already ARE this
+    /// selection's bars (the user tapped away and back, a refresh failed) they stay — and
+    /// if there are none, the note still says the load failed.
+    private func clearChartAfterFailedRequest(range: ChartTimeRange, interval: ChartInterval) {
+        if let shown = lastChartStamp, shown.range == range, shown.interval == interval {
+            if !shown.hasBars { chartLoadFailed = true }
+            return
+        }
+        // The header + chart render `etfData ?? coreData`: clear the one on screen.
+        if etfData != nil {
+            etfData?.chartPricePoints = []
+        } else {
+            coreData?.chartPricePoints = []
+        }
+        didWriteChartBars([], range: range, interval: interval, failed: true)
     }
 
     /// Light refresh: merge the volatile slice into `etfData` IN PLACE.
@@ -298,22 +427,26 @@ class ETFDetailViewModel: ObservableObject {
         // discipline as `CryptoDetailViewModel.refreshChartOnly`. A tick that lands after
         // a newer user fetch still drops itself (the token moved).
         let token = chartRequestToken
+        // What this tick asks for, captured before the await: its bars are stamped with it.
         let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
         do {
             let light = try await repository.getETFQuote(
                 symbol: etfSymbol,
                 range: includeChart ? range.rawValue : nil,
-                interval: includeChart ? chartSettings.selectedInterval.rawValue : nil
+                interval: includeChart ? interval.rawValue : nil
             )
             // Drop a stale response so rapid range switching can't clobber a newer range.
             guard token == self.chartRequestToken, let current = self.etfData else { return }
 
-            self.etfData = light.merged(into: current, includeChart: includeChart)
+            let model = light.merged(into: current, includeChart: includeChart)
+            self.etfData = model
             if includeChart, !light.chartData.isEmpty {
-                self.chartDataVersion += 1
+                // A tail merge with the same stamp: the chart keeps the user's window.
+                self.didWriteChartBars(model.chartPricePoints, range: range, interval: interval)
             }
         } catch {
-            print("⚠️ [ETFDetailVM] Live slice refresh failed: \(error)")
+            log.error("ETF live slice refresh failed for \(self.etfSymbol, privacy: .public) — \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -352,17 +485,29 @@ class ETFDetailViewModel: ObservableObject {
     /// deliberately does NOT touch `errorMessage` or bump any request token, both of
     /// which belong to the full fetch.
     private func loadCore() async {
+        // What this request asks for, captured before the await: its bars are stamped with it.
+        let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
         guard let core = try? await StockRepository.shared.getETFCore(
             symbol: etfSymbol,
-            range: selectedChartRange.rawValue,
-            interval: chartSettings.selectedInterval.rawValue
+            range: range.rawValue,
+            interval: interval.rawValue
         ) else { return }
         // The race guard. A core response landing AFTER the full one must be dropped, or
         // the screen would visibly step backwards from the complete model to the
         // header-only one.
         guard etfData == nil else { return }
-        coreData = core.toCoreData()
-        chartDataVersion += 1
+        var model = core.toCoreData()
+        guard range == selectedChartRange, interval == chartSettings.selectedInterval else {
+            // The user picked another range/interval while core was in flight, and that
+            // fetch owns the chart now: paint the header only. Core's bars belong to the OLD
+            // selection and would sit under the new pill (or over its failure note).
+            model.chartPricePoints = []
+            coreData = model
+            return
+        }
+        coreData = model
+        didWriteChartBars(model.chartPricePoints, range: range, interval: interval)
     }
 
     // MARK: - Fallback Data
@@ -378,7 +523,15 @@ class ETFDetailViewModel: ObservableObject {
         // Cay AI context. Stay in the honest empty/skeleton state — errorMessage drives
         // the banner + pull-to-refresh. Mirrors the Crypto/Commodity VMs.
         guard etfData == nil else { return }
-        print("[ETFDetailVM] ETF load failed — honest empty state (no sample seed)")
+        log.debug("ETF load failed for \(self.etfSymbol, privacy: .public) — honest empty state (no sample seed)")
+    }
+
+    // MARK: - Older chart history
+
+    /// The chart is at (or panning toward) its left floor; `userInitiated` = the user tapped
+    /// Retry on the "Couldn't load older prices" marker.
+    func loadOlderChartBars(userInitiated: Bool) {
+        chartHistory.requestOlder(force: userInitiated)
     }
 
     // MARK: - Live Price

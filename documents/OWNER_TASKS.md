@@ -596,6 +596,12 @@ admin recomputes, and marketing script generation.
   4. **Next app build** carries the iOS half (older builds keep working; a drill-down failure there shows the generic error with the same Retry).
   - Follow-ups (not done): check whether "PLD +106%" on Earnings Shockers is a REIT GAAP-vs-FFO artefact; `_whale_common` still maps congress "exchange" to BOUGHT on politician portfolios.
 
+- [ ] **Asset-detail chart: continuous indicators, scroll back to the first trading day, less lag (built 2026-10-20, NOT committed).** Your decisions: "1D one session, 1W scrolls", load older bars "When I start panning left", slow "Stochastic (14,3,3)" in the chart AND the Technical Meter, "all the calculation correctly". MA/RSI/MACD/Stoch no longer start partway in. Panning left on 1W and longer pages back to the first trading day (INTC to 1972). Pinch, fling and scrub are rebuilt for speed. Design: SYSTEM_DESIGN_GUIDELINES §7.2a.
+  1. **Order:** deploy the backend first (web only, no migration, no new variable), then ship the app build. Older builds keep working: the meter row now reads "Stoch(14,3,3)", and the app shows whatever name the server sends. A new build against the OLD backend cannot scroll back, because the history route 404s, which the app treats as start of history. Nothing breaks.
+  2. **On a ProMotion iPhone (Release build):** Xcode › Product › Profile › Animation Hitches. Fling INTC 1Y back to 1972, then pinch out to the whole history; aim for no hitch over 8.3 ms. Only the Debug Simulator was measured here (main thread ~72% idle during a fling).
+  3. **FMP intraday depth (open):** how far back 1W pages go per interval is a placeholder, `_INTRADAY_MAX_LOOKBACK_DAYS` in `backend/app/services/price_history_service.py` (5min 1 y, 15min 2 y, 30min 3 y, 1hour 5 y). It was not probed against live FMP. Too short stops a pan early. Too long only costs a few empty calls at the end, which the route turns into "start of history".
+  4. **Railway logs after the deploy:** `/chart/history` requests come only from panning, so expect a few per active user. A `502 FMP_UNAVAILABLE` on that route shows a "Couldn't load older prices · Retry" marker at the chart's left edge, not a blank chart.
+
 ### 2.2 Recurring
 
 | Cadence | Task | How |

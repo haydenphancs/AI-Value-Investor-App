@@ -243,11 +243,53 @@ def test_ios_equity_dtos_and_models_carry_the_flag():
     assert src.count("changeKnown: changeKnown ?? true") >= 2
 
 
+def _call_args(src: str, opener: str) -> list[str]:
+    """Every `opener(` … `)` call in `src`, paren-balanced (the arguments, parens included)."""
+    calls = []
+    start = src.find(opener)
+    while start != -1:
+        open_paren = start + len(opener) - 1
+        assert src[open_paren] == "(", opener
+        depth = 0
+        for i in range(open_paren, len(src)):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(src[open_paren:i + 1])
+                    break
+        else:
+            raise AssertionError(f"unbalanced parens after {opener!r}")
+        start = src.find(opener, start + 1)
+    return calls
+
+
 def test_ios_equity_screen_hands_the_flag_to_both_headers_and_charts():
-    src = _strip((_IOS / "Views/Screens/TickerDetailView.swift").read_text())
+    screen = _IOS / "Views/Screens/TickerDetailView.swift"
+    src = _strip(screen.read_text())
+    # Each header takes the flag from ITS model: the full overview's header and the fast
+    # core's header are separate branches, and the core can land with change unknown.
+    headers = _call_args(src, "TickerPriceHeader(")
+    assert len(headers) == 2, f"expected the full and the core header, found {len(headers)}"
     for model_var in ("tickerData", "core"):
-        assert f"changeKnown: {model_var}.changeKnown" in src, model_var
-        assert f"isPositive: {model_var}.chartIsPositive" in src, model_var
+        mine = [h for h in headers if f"changeKnown: {model_var}.changeKnown" in h]
+        assert len(mine) == 1, f"no header takes changeKnown from {model_var}"
+        assert f"isPositive: {model_var}.isPositive" in mine[0], model_var
+    # ONE chart draws both models (two call sites rebuilt the chart on the core→full swap and
+    # threw the user's pan and paged-in history away), so its tint comes from a helper that
+    # reads the model the header shows: the full overview first, else the fast core. Each
+    # model's `chartIsPositive` is what falls back to the series when the change is unknown.
+    charts = _call_args(src, "TickerChartView(")
+    assert len(charts) == 1, f"expected ONE chart for both models, found {len(charts)}"
+    assert re.search(r"\bisPositive: chartIsPositive,", charts[0]), charts[0]
+    tint = _block(screen, "private var chartIsPositive: Bool")
+    full_at = tint.find("if let tickerData = viewModel.tickerData { return tickerData.chartIsPositive }")
+    core_at = tint.find("if let core = viewModel.coreData { return core.chartIsPositive }")
+    assert full_at != -1, "the chart tint no longer reads the full model's chartIsPositive"
+    assert core_at != -1, "the chart tint no longer falls back to the core's chartIsPositive"
+    assert full_at < core_at, "the core would tint the chart over the full model the header shows"
+    assert ".isPositive" not in tint, "the chart tint must use chartIsPositive, never the day-change sign"
     # And a live tick that carries a change clears the placeholder state.
     vm = _strip((_IOS / "ViewModels/TickerDetailViewModel.swift").read_text())
     poll = _block(_IOS / "ViewModels/TickerDetailViewModel.swift", "private func pollQuotePrice()")

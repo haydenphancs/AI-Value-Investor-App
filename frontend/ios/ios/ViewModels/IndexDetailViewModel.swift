@@ -7,10 +7,15 @@
 //  Fetches aggregated index data from GET /api/v1/indices/{symbol}.
 //  Falls back to local sample data when the backend is unreachable.
 //
+//  Chart: range / interval changes and the 30 s live tick use the light
+//  GET /api/v1/indices/{symbol}/quote slice; older bars are paged in from
+//  GET /api/v1/indices/{symbol}/chart/history (via ChartHistoryLoader) as the user pans left.
+//
 
 import Foundation
 import SwiftUI
 import Combine
+import os
 
 @MainActor
 class IndexDetailViewModel: ObservableObject {
@@ -67,8 +72,25 @@ class IndexDetailViewModel: ObservableObject {
     /// The ONE place this screen names its asset class: the screen passes it to
     /// `TickerChartView`, and init resolves the remembered range/interval against it.
     let chartAssetContext: ChartAssetContext = .index
+    /// Bumped ONLY when the bars in hand belong to a different stamp than the previous
+    /// write's (`didWriteChartBars`) — a user range or interval change. Never on the 30 s
+    /// tick, the core→full swap or pull-to-refresh: the chart keeps the user's pan across
+    /// those and resets to the range's default window only on a bump. It used to bump on
+    /// EVERY write, so a panned or pinched 1D/1W chart snapped back every 30 s.
     @Published var chartDataVersion: Int = 0
     @Published var chartEventDates: ChartEventDates?
+    /// The range / interval the bars in hand were REQUESTED for — captured before the
+    /// await, never the pill at landing time. The pill flips on the tap and the bars arrive
+    /// later; the chart maps the bars by these, and veils itself while they differ.
+    @Published var chartDataRange: ChartTimeRange?
+    @Published var chartDataInterval: ChartInterval?
+    /// The user's last range / interval change failed or came back with no bars. Its own
+    /// answer is then shown (an empty chart with a note), never the PREVIOUS range's bars
+    /// under the new pill. Cleared by the next write that carries bars.
+    @Published private(set) var chartLoadFailed = false
+    /// Older bars for the chart, paged in as the user pans left. Fed every write of the
+    /// chart bars (`didWriteChartBars`) so its store stays contiguous with them.
+    let chartHistory: ChartHistoryLoader
 
     // News pagination
     @Published var isNewsLoading: Bool = false
@@ -87,20 +109,36 @@ class IndexDetailViewModel: ObservableObject {
     private let indexSymbol: String
     private var cancellables = Set<AnyCancellable>()
     private var chartRefreshTask: Task<Void, Never>?
-    /// Monotonic token for index-detail fetches. Both fetchIndexDetail and
-    /// loadChartData hit the same endpoint and write the whole indexData snapshot;
-    /// each captures the token before awaiting and only applies its result if still
-    /// current, so a slow earlier response can't clobber a newer range's chart.
+    /// Monotonic token for the requests that write the chart. fetchIndexDetail (the whole
+    /// snapshot) and loadChartData (the light slice's bars + header) each capture it
+    /// before awaiting and only apply their result if still current, so a slow earlier
+    /// response can't clobber a newer range's chart. The 30 s tick only OBSERVES it.
     private var chartRequestToken = 0
     /// True while the range sink is assigning the range's default interval, so the
     /// interval sink doesn't ALSO reload (a single range change would otherwise fire
     /// two identical fetches when the range crosses an interval boundary).
     private var suppressIntervalReload = false
 
+    /// What the last write of the chart bars was fetched for. An index has no extended
+    /// session, so (range, interval) is the request; `hasBars` is part of the stamp because
+    /// an EMPTY write (a fast core without bars, a failed range change) leaves no window
+    /// worth keeping — the first bars after it must open on the range's default window, not
+    /// on one committed against zero bars. `chartDataVersion` moves only when it changes.
+    private struct ChartBarsStamp: Equatable {
+        let range: ChartTimeRange
+        let interval: ChartInterval
+        let hasBars: Bool
+    }
+    private var lastChartStamp: ChartBarsStamp?
+    private let log = Logger(subsystem: "com.caydex.ios", category: "IndexDetailViewModel")
+
     // MARK: - Initialization
 
     init(indexSymbol: String) {
         self.indexSymbol = indexSymbol
+        // No repository is injected into this view model (it reads `StockRepository.shared`
+        // throughout), so the loader takes the same default.
+        self.chartHistory = ChartHistoryLoader(asset: .indices)
 
         // Seed the range AND interval as a resolved pair BEFORE the sinks are wired — the
         // user's remembered range and that range's interval, resolved for an index (a 2Y
@@ -162,6 +200,11 @@ class IndexDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // The screen reads `chartHistory.state` through this view model, so a page landing
+        // (or its loading / failed marker) must redraw the screen too.
+        chartHistory.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Methods
@@ -329,6 +372,12 @@ class IndexDetailViewModel: ObservableObject {
         selectedChartRange = range
     }
 
+    /// The chart has panned to within a screen of its left floor (or the user tapped Retry
+    /// on the "Couldn't load older prices" marker): page in the next older bars.
+    func loadOlderChartBars(userInitiated: Bool) {
+        chartHistory.requestOlder(force: userInitiated)
+    }
+
     // MARK: - Live Price
 
     /// Was `connectLivePrice()`. Its comment claimed "the stream is public for these
@@ -488,27 +537,36 @@ class IndexDetailViewModel: ObservableObject {
     /// deliberately does NOT touch `errorMessage` or bump `chartRequestToken`, both of
     /// which belong to the full fetch.
     private func loadCore() async {
+        // Captured BEFORE the await: the stamp is what these bars were fetched for, even
+        // if the pill moves while they are in flight.
+        let requestedRange = selectedChartRange
+        let requestedInterval = chartSettings.selectedInterval
         guard let core = try? await StockRepository.shared.getIndexCore(
             symbol: indexSymbol,
-            range: selectedChartRange.rawValue,
-            interval: chartSettings.selectedInterval.rawValue
+            range: requestedRange.rawValue,
+            interval: requestedInterval.rawValue
         ) else { return }
         // The race guard. A core response landing AFTER the full one must be dropped, or
         // the screen would visibly step backwards from the complete model to the
         // header-only one.
         guard indexData == nil else { return }
-        coreData = core.toCoreData()
-        chartDataVersion += 1
+        let slice = core.toCoreData()
+        coreData = slice
+        didWriteChartBars(slice.chartPricePoints, range: requestedRange, interval: requestedInterval)
     }
 
     private func fetchIndexDetail() async {
         let startTime = CFAbsoluteTimeGetCurrent()
-        let range = selectedChartRange.rawValue
+        // Captured BEFORE the await: the stamp is what these bars were fetched for, even
+        // if the pill moves while they are in flight (see `chartDataRange`).
+        let requestedRange = selectedChartRange
+        let requestedInterval = chartSettings.selectedInterval
+        let symbol = indexSymbol
         chartRequestToken += 1
         let token = chartRequestToken
-        let endpoint = APIEndpoint.getIndexDetail(symbol: indexSymbol, range: range, interval: chartSettings.selectedInterval.rawValue)
+        let endpoint = APIEndpoint.getIndexDetail(symbol: symbol, range: requestedRange.rawValue, interval: requestedInterval.rawValue)
 
-        print("📡 [IndexDetailVM] Fetching index detail for \(indexSymbol) (range: \(range)) from \(APIConfig.baseURL.absoluteString)\(endpoint.path) ...")
+        log.debug("index detail fetch \(symbol, privacy: .public) range \(requestedRange.rawValue, privacy: .public) interval \(requestedInterval.rawValue, privacy: .public)")
 
         do {
             let response = try await APIClient.shared.request(
@@ -524,33 +582,33 @@ class IndexDetailViewModel: ObservableObject {
             // newer request's error banner or start streaming on a superseded load.
             if token == self.chartRequestToken {
                 self.errorMessage = nil
-                self.indexData = response.toDisplayModel()
-                self.chartDataVersion += 1
+                let model = response.toDisplayModel()
+                self.indexData = model
+                // The core→full swap and pull-to-refresh land here under the SAME stamp,
+                // so the chart keeps the user's window and the loader its older bars.
+                didWriteChartBars(model.chartPricePoints, range: requestedRange, interval: requestedInterval)
                 // NOTE: live-price connect + refresh timer are started once in
                 // loadIndexData (independent of this request token), so a range change
                 // that supersedes this fetch can't leave the index unstreamed.
+
+                let snap = model.snapshotsData
+                let pe = snap.valuation.peDisplay
+                let level = snap.valuation.level?.rawValue ?? "unknown"
+                let sectors = snap.sectorPerformance.sectors.count
+                let macro = snap.macroForecast.indicators.count
+                log.debug("index detail \(symbol, privacy: .public) snapshots: P/E \(pe, privacy: .public), level \(level, privacy: .public), \(sectors) sectors, \(macro) macro indicators")
             }
 
             // News and technical analysis are fetched via separate concurrent tasks
 
             self.isLoading = false
 
-            print("✅ [IndexDetailVM] Index detail loaded in \(elapsed)s")
-            print("   💰 Price: \(response.currentPrice) | Change: \(response.priceChange) (\(response.priceChangePercent)%)")
-            print("   📊 Chart points: \(response.chartData.count)")
-            print("   🏢 Profile: \(response.indexName) (\(response.indexProfile.numberOfConstituents) constituents)")
-            if let snap = indexData?.snapshotsData {
-                print("   📈 Valuation: P/E \(snap.valuation.peDisplay) | Level: \(snap.valuation.level?.rawValue ?? "unknown")")
-                print("   🌍 Sectors: \(snap.sectorPerformance.sectors.count) sectors loaded")
-                print("   🏛️ Macro: \(snap.macroForecast.indicators.count) indicators")
-            }
+            let constituents = response.indexProfile.numberOfConstituents
+            log.debug("index detail \(symbol, privacy: .public) loaded in \(elapsed, privacy: .public)s: price \(response.currentPrice), change \(response.priceChange) (\(response.priceChangePercent)%), \(response.chartData.count) chart points, \(constituents) constituents")
 
         } catch {
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
-            print("❌ [IndexDetailVM] Fetch failed after \(elapsed)s: \(error)")
-            if let apiError = error as? APIError {
-                print("   🔍 API Error detail: \(apiError)")
-            }
+            log.error("index detail fetch failed for \(symbol, privacy: .public) range \(requestedRange.rawValue, privacy: .public) after \(elapsed, privacy: .public)s: \(String(describing: error), privacy: .public)")
 
             // Don't let a STALE request's failure clobber data a newer range fetch
             // already painted (or is about to) — only surface the error/fallback if
@@ -558,6 +616,18 @@ class IndexDetailViewModel: ObservableObject {
             if token == self.chartRequestToken {
                 self.errorMessage = "Unable to load index data. Pull to refresh."
                 loadFallbackData()
+                // A range / interval change made before the full detail first landed is
+                // re-requested here (see `loadChartData`). When THAT fails, the fast-core
+                // bars still on screen belong to the PREVIOUS range: show this request's
+                // answer (no bars, a note) under the new pill, never the old range's bars
+                // behind an "awaiting" veil that nothing would ever lift.
+                if indexData == nil, var core = coreData,
+                   chartDataRange != requestedRange || chartDataInterval != requestedInterval {
+                    core.chartPricePoints = []
+                    coreData = core
+                    didWriteChartBars([], range: requestedRange, interval: requestedInterval)
+                    chartLoadFailed = true
+                }
             }
             self.isLoading = false
         }
@@ -581,52 +651,121 @@ class IndexDetailViewModel: ObservableObject {
         // discipline as `CryptoDetailViewModel.refreshChartOnly`. A tick that lands after
         // a newer user fetch still drops itself (the token moved).
         let token = chartRequestToken
+        // Captured BEFORE the await, together: the stamp of any bars this tick writes.
         let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
+        let symbol = indexSymbol
         do {
             let light = try await StockRepository.shared.getIndexQuote(
-                symbol: indexSymbol,
+                symbol: symbol,
                 range: includeChart ? range.rawValue : nil,
-                interval: includeChart ? chartSettings.selectedInterval.rawValue : nil
+                interval: includeChart ? interval.rawValue : nil
             )
             // Drop a stale response so rapid range switching can't clobber a newer range.
             guard token == self.chartRequestToken, let current = self.indexData else { return }
 
-            self.indexData = light.merged(into: current, includeChart: includeChart)
+            let merged = light.merged(into: current, includeChart: includeChart)
+            self.indexData = merged
+            // A tick that carried bars is a TAIL MERGE under the same stamp: no version bump,
+            // so a window the user panned or pinched stays put, and the loader keeps the
+            // older bars before it. An empty answer kept the previous bars (`merged`), so
+            // it wrote none.
             if includeChart, !light.chartData.isEmpty {
-                self.chartDataVersion += 1
+                didWriteChartBars(merged.chartPricePoints, range: range, interval: interval)
             }
         } catch {
-            print("⚠️ [IndexDetailVM] Live slice refresh failed: \(error)")
+            // Handled and degraded: the next tick tries again, the screen keeps what it has.
+            log.warning("index live slice refresh failed for \(symbol, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 
-    /// Reload only the chart data when the user changes time range.
+    /// Reload only the chart when the user changes time range (or interval).
+    ///
+    /// The LIGHT slice (`getIndexQuote(symbol:range:interval:)`, cached in StockRepository),
+    /// not the whole detail. This used to re-request `getIndexDetail` — no client cache, the
+    /// AI snapshot graph included — and replace the entire model, so every tap paid the full
+    /// build's latency plus a main-thread `toDisplayModel()` of all of it. Only the bars and
+    /// the header move with a range; every other section is range-independent and stays.
     private func loadChartData(range: ChartTimeRange) async {
+        // A range/interval tap before the full detail has landed (the core chart is
+        // interactive first): there is no model to merge a slice into, so re-request the
+        // full payload for the new range instead. Bumping the token here and then finding
+        // no model would discard the in-flight full response, and nothing would ever set
+        // `indexData` — the Overview tab would shimmer for the life of the screen.
+        guard indexData != nil else {
+            await fetchIndexDetail()
+            return
+        }
         let startTime = CFAbsoluteTimeGetCurrent()
-        print("📡 [IndexDetailVM] Reloading chart for \(indexSymbol) range: \(range.rawValue)")
+        // Captured BEFORE the await (see `chartDataRange`). The range sink assigns the
+        // range's interval synchronously before it starts this Task, so this is the pair.
+        let interval = chartSettings.selectedInterval
+        let symbol = indexSymbol
+        log.debug("index chart reload \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public)")
         chartRequestToken += 1
         let token = chartRequestToken
 
         do {
-            let response = try await APIClient.shared.request(
-                endpoint: .getIndexDetail(symbol: indexSymbol, range: range.rawValue, interval: chartSettings.selectedInterval.rawValue),
-                responseType: IndexDetailResponse.self
+            let light = try await StockRepository.shared.getIndexQuote(
+                symbol: symbol,
+                range: range.rawValue,
+                interval: interval.rawValue
             )
 
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
 
             // Drop a stale response so a slow earlier range can't overwrite the chart
             // the user has since switched to (last-write-wins).
-            guard token == self.chartRequestToken else { return }
-            // Update all data — the backend returns a fresh snapshot
-            self.indexData = response.toDisplayModel()
-            self.chartDataVersion += 1
+            guard token == self.chartRequestToken, let current = self.indexData else { return }
 
-            print("✅ [IndexDetailVM] Chart reloaded in \(elapsed)s — \(response.chartData.count) data points")
+            // The slice's own fields (header, key stats, bars) through the same merge as the
+            // 30 s tick, with ONE difference: the new range's OWN answer replaces the bars
+            // even when it is empty. `merged` keeps the previous bars on an empty answer
+            // (right for a tick), which drew the old range under the new pill.
+            var data = light.merged(into: current, includeChart: true)
+            if light.chartData.isEmpty { data.chartPricePoints = [] }
+            let bars = data.chartPricePoints
+            self.indexData = data
+            didWriteChartBars(bars, range: range, interval: interval)
+
+            if bars.isEmpty {
+                chartLoadFailed = true
+                log.warning("index chart reload for \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public) returned no bars")
+            } else {
+                log.debug("index chart reloaded in \(elapsed, privacy: .public)s: \(bars.count) bars")
+            }
 
         } catch {
-            print("❌ [IndexDetailVM] Chart reload failed: \(error)")
-            // Keep existing data — don't wipe the screen on a chart range failure
+            // `AppError.from` is the one classification of a failure; the user sees the
+            // screen's own fixed note, never the backend's string.
+            let reason = AppError.from(error).message
+            log.error("index chart reload failed for \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public): \(String(describing: error), privacy: .public) (\(reason, privacy: .public))")
+            guard token == self.chartRequestToken, var data = self.indexData else { return }
+            // The failure IS this range's answer: show it under the new pill instead of the
+            // previous range's bars (which also left the chart veiled as "awaiting" forever).
+            data.chartPricePoints = []
+            self.indexData = data
+            didWriteChartBars([], range: range, interval: interval)
+            chartLoadFailed = true
+        }
+    }
+
+    // MARK: - Chart Writes
+
+    /// The bookkeeping after EVERY write of the chart bars — core, full detail, range or
+    /// interval change, 30 s tick. `range` / `interval` are what the bars were REQUESTED
+    /// for (captured before the await), never the pill at landing time.
+    private func didWriteChartBars(_ bars: [StockPricePoint], range: ChartTimeRange, interval: ChartInterval) {
+        if chartDataRange != range { chartDataRange = range }
+        if chartDataInterval != interval { chartDataInterval = interval }
+        // The backend's chart routes take the index symbol (`^GSPC`) and map it to its
+        // proxy, so the loader pages by the same symbol. An index has no extended session.
+        chartHistory.absorb(bars, symbol: indexSymbol, range: range, interval: interval, extendedHours: false)
+        if !bars.isEmpty, chartLoadFailed { chartLoadFailed = false }
+        let stamp = ChartBarsStamp(range: range, interval: interval, hasBars: !bars.isEmpty)
+        if stamp != lastChartStamp {
+            lastChartStamp = stamp
+            chartDataVersion += 1
         }
     }
 

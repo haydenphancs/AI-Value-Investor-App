@@ -143,6 +143,15 @@ _MIN_GAUGE_INDICATORS = 5
 # synthetic walks) and makes it comparable between a coin and an equity.
 _OBV_WINDOW_BARS = 252
 
+# The meter's stochastic row is the SLOW (14,3,3) oscillator — %K = SMA3(raw 14-bar %K) —
+# the same one the asset-detail chart's "Stoch(14,3,3)" pane draws, so the two agree on
+# the last bar. ONE name: the row label is also a lookup KEY (`_needs_high_low` drops the
+# five range oscillators by name on a close-only source), so a label edited in one place
+# only would let a close-only coin ship a stochastic computed from fabricated ranges.
+STOCH_INDICATOR_NAME = "Stoch(14,3,3)"
+# Slow %K's first value: 14 bars for raw %K, then a 3-bar SMA of it → index 15 (16 bars).
+_STOCH_MIN_BARS = 16
+
 # NOTE: there is deliberately no TOTAL_INDICATORS constant. The indicator count is
 # per-frame (see `computed_total` in _compute_signals) because a source without
 # intraday high/low ships fewer rows, and a constant denominator both miscounts them
@@ -697,13 +706,17 @@ class TechnicalAnalysisService:
             ta_lib.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
         ) if len(df) >= 15 else None
 
-        # Stochastic
+        # Stochastic — the SLOW (14,3,3) %K, the one the chart's "Stoch(14,3,3)" pane draws:
+        # raw %K over 14 bars, smoothed by a 3-bar SMA. `ta`'s `stoch()` is the FAST raw
+        # %K and `stoch_signal()` is its 3-bar SMA (verified: equal to
+        # `stoch().rolling(3).mean()`), so the slow %K is `stoch_signal()`. Its first value
+        # needs 14 + 3 - 1 = 16 bars; with fewer the row is listed with "—" and not counted.
         stoch_k: Optional[float] = None
-        if len(range_df) >= 14:
+        if len(range_df) >= _STOCH_MIN_BARS:
             stoch = ta_lib.momentum.StochasticOscillator(
                 range_high, range_low, range_close, window=14, smooth_window=3
             )
-            stoch_k = _safe_float(stoch.stoch().iloc[-1])
+            stoch_k = _safe_float(stoch.stoch_signal().iloc[-1])
 
         # StochRSI
         stochrsi_k: Optional[float] = None
@@ -764,7 +777,7 @@ class TechnicalAnalysisService:
                 signal=self._classify_rsi(rsi_val),
             ),
             OscillatorIndicator(
-                name="Stoch(14,3)",
+                name=STOCH_INDICATOR_NAME,
                 value=_safe_round(stoch_k),
                 signal=self._classify_stoch(stoch_k),
             ),
@@ -807,7 +820,7 @@ class TechnicalAnalysisService:
         # high/low would invent a range that was never observed; emitting them as
         # NEUTRAL would be worse still (see the gauge note below). They are removed.
         if not _has_high_low:
-            _needs_high_low = {"Stoch(14,3)", "ADX(14)", "Williams %R", "CCI(14)", "ATR(14)"}
+            _needs_high_low = {STOCH_INDICATOR_NAME, "ADX(14)", "Williams %R", "CCI(14)", "ATR(14)"}
             dropped = [o.name for o in osc_list if o.name in _needs_high_low]
             osc_list = [o for o in osc_list if o.name not in _needs_high_low]
             logger.info(

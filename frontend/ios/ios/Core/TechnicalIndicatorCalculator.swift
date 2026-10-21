@@ -5,11 +5,14 @@
 //  Pure computation utility for technical indicator calculations.
 //  Operates on arrays of price data and returns indicator results.
 //
+//  Called ONCE per data change by `ChartSeries.build` (off the main actor for long
+//  histories), never per frame — so every function is allocation-free inside its loop.
+//  `IndicatorSelfCheck` (DEBUG launch) re-derives each one naively and asserts equality.
+//
 
 import Foundation
-import SwiftUI
 
-enum TechnicalIndicatorCalculator {
+nonisolated enum TechnicalIndicatorCalculator {
 
     // MARK: - Simple Moving Average
 
@@ -61,6 +64,8 @@ enum TechnicalIndicatorCalculator {
         // Calculate price changes
         var gains = [Double]()
         var losses = [Double]()
+        gains.reserveCapacity(closes.count - 1)
+        losses.reserveCapacity(closes.count - 1)
         for i in 1..<closes.count {
             let change = closes[i] - closes[i - 1]
             gains.append(max(change, 0))
@@ -170,12 +175,19 @@ enum TechnicalIndicatorCalculator {
         var upper = [Double?](repeating: nil, count: count)
         var lower = [Double?](repeating: nil, count: count)
 
+        // Exact two-pass variance per window (population, ÷ period — the TradingView
+        // convention), read in place: no per-bar slice copy. A rolling sum of squares would
+        // be O(n) but cancels catastrophically on a high-priced, low-variance series
+        // (a 1e5 coin) and can go negative on a flat one; O(n·period) is ~1 ms per 25k bars.
         for i in (period - 1)..<count {
             guard let mid = middle[i] else { continue }
-            let slice = Array(closes[(i - period + 1)...i])
-            let mean = mid
-            let variance = slice.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(period)
-            let stdDev = sqrt(variance)
+            var sumSq = 0.0
+            for j in (i - period + 1)...i {
+                let d = closes[j] - mid
+                sumSq += d * d
+            }
+            let stdDev = sqrt(max(0, sumSq / Double(period)))
+            guard stdDev.isFinite else { continue }
             upper[i] = mid + stdDevMultiplier * stdDev
             lower[i] = mid - stdDevMultiplier * stdDev
         }
@@ -202,13 +214,21 @@ enum TechnicalIndicatorCalculator {
             )
         }
 
-        // %K
+        // %K (raw). Read in place — no per-bar slice copies. A non-finite high/low (a bar
+        // whose source has no range, passed as NaN) makes the WHOLE window nil: an
+        // oscillator built from substituted closes would be a fabricated value.
         var kValues = [Double?](repeating: nil, count: count)
         for i in (kPeriod - 1)..<count {
-            let highSlice = Array(highs[(i - kPeriod + 1)...i])
-            let lowSlice = Array(lows[(i - kPeriod + 1)...i])
-            let highestHigh = highSlice.max() ?? 0
-            let lowestLow = lowSlice.min() ?? 0
+            var highestHigh = -Double.infinity
+            var lowestLow = Double.infinity
+            var complete = closes[i].isFinite
+            for j in (i - kPeriod + 1)...i {
+                let h = highs[j], l = lows[j]
+                guard h.isFinite, l.isFinite else { complete = false; break }
+                if h > highestHigh { highestHigh = h }
+                if l < lowestLow { lowestLow = l }
+            }
+            guard complete else { continue }
             let range = highestHigh - lowestLow
             if range > 0 {
                 kValues[i] = ((closes[i] - lowestLow) / range) * 100
@@ -247,6 +267,58 @@ enum TechnicalIndicatorCalculator {
             }
         }
 
+        return StochasticData(kValues: kValues, dValues: dValues)
+    }
+
+    // MARK: - Slow Stochastic (14,3,3)
+
+    /// The slow stochastic the chart labels "Stoch(14,3,3)": %K = SMA(smoothK) of the raw
+    /// %K, %D = SMA(dPeriod) of that %K. Built ON `stochastic(...)` — whose %D is exactly
+    /// SMA(3) of the raw %K — so the pinned short-series guards there stay on the live path.
+    ///
+    /// First values in a series that starts at bar 0: %K at `kPeriod - 1 + smoothK - 1`
+    /// (15), %D at `kStart + dPeriod - 1` (17). Both are bounds-checked before they become a
+    /// Range: a `17..<16` Range traps at runtime (the C13 crash class).
+    static func slowStochastic(
+        highs: [Double],
+        lows: [Double],
+        closes: [Double],
+        kPeriod: Int = 14,
+        smoothK: Int = 3,
+        dPeriod: Int = 3
+    ) -> StochasticData {
+        let count = closes.count
+        var kValues = [Double?](repeating: nil, count: count)
+        var dValues = [Double?](repeating: nil, count: count)
+        guard kPeriod > 0, smoothK > 0, dPeriod > 0 else {
+            return StochasticData(kValues: kValues, dValues: dValues)
+        }
+
+        let kStart = kPeriod - 1 + smoothK - 1
+        guard kStart < count else {
+            return StochasticData(kValues: kValues, dValues: dValues)
+        }
+        let raw = stochastic(highs: highs, lows: lows, closes: closes, kPeriod: kPeriod, dPeriod: smoothK)
+        guard raw.dValues.count == count else {
+            return StochasticData(kValues: kValues, dValues: dValues)
+        }
+        kValues = raw.dValues
+
+        let dStart = kStart + dPeriod - 1
+        guard dStart < count else {
+            return StochasticData(kValues: kValues, dValues: dValues)
+        }
+        for i in dStart..<count {
+            var sum = 0.0
+            var complete = true
+            for j in (i - dPeriod + 1)...i {
+                guard let k = kValues[j] else { complete = false; break }
+                sum += k
+            }
+            if complete {
+                dValues[i] = sum / Double(dPeriod)
+            }
+        }
         return StochasticData(kValues: kValues, dValues: dValues)
     }
 }

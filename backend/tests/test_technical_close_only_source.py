@@ -35,7 +35,7 @@ from app.schemas.technical_analysis import IndicatorSignal, TechnicalSignal
 
 
 # Indicators that genuinely require an intraday range.
-NEEDS_HIGH_LOW = {"Stoch(14,3)", "ADX(14)", "Williams %R", "CCI(14)", "ATR(14)"}
+NEEDS_HIGH_LOW = {"Stoch(14,3,3)", "ADX(14)", "Williams %R", "CCI(14)", "ATR(14)"}
 # Oscillators computable from close alone.
 CLOSE_ONLY_OSCILLATORS = {"RSI(14)", "StochRSI(14)", "MACD(12,26)"}
 

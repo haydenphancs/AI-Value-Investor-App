@@ -241,12 +241,15 @@ enum ChartDateFormatters {
         return f
     }()
 
-    /// Parse both "yyyy-MM-dd" and "yyyy-MM-dd HH:mm:ss" date strings
+    /// Parse both "yyyy-MM-dd" and "yyyy-MM-dd HH:mm:ss" date strings.
+    ///
+    /// Routed by LENGTH: trying the date-only formatter first made every intraday string pay
+    /// one guaranteed-failed parse before the real one.
     static func parseDate(_ string: String) -> Date? {
-        if let date = inputFormatter.date(from: string) {
-            return date
+        if isIntraday(string) {
+            return inputDateTimeFormatter.date(from: string) ?? inputFormatter.date(from: string)
         }
-        return inputDateTimeFormatter.date(from: string)
+        return inputFormatter.date(from: string) ?? inputDateTimeFormatter.date(from: string)
     }
 
     /// Check if a date string contains a time component (intraday data)

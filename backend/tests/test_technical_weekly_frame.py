@@ -137,7 +137,7 @@ def test_crypto_weekly_ships_the_same_eighteen_rows_as_daily():
     result, gauge, mas, oscs = _svc()._compute_timeframe_signal(weekly)
     assert len(mas) == 10 and len(oscs) == 8, "the weekly tab ships all 18 rows"
     by_name = {i.name: i for i in (*mas, *oscs)}
-    for name in ("SMA(100)", "EMA(100)", "Stoch(14,3)", "ADX(14)",
+    for name in ("SMA(100)", "EMA(100)", "Stoch(14,3,3)", "ADX(14)",
                  "Williams %R", "CCI(14)", "ATR(14)"):
         assert by_name[name].value is not None, f"{name} must compute on 104 weekly bars"
     for name in ("SMA(200)", "EMA(200)"):

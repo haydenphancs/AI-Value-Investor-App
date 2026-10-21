@@ -37,6 +37,10 @@ struct CryptoDetailView: View {
     @State private var selectedSearchResult: SearchSelection?
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Where the chart is on screen, shared by the chart (which writes it) and `.backSwipe`
+    /// (which skips a drag that starts on the chart — dragging right there scrolls back in
+    /// time). A plain reference box, never published.
+    @State private var chartTouchRegion = ChartTouchRegion()
 
     let cryptoSymbol: String
 
@@ -134,7 +138,16 @@ struct CryptoDetailView: View {
                             chartSettings: viewModel.chartSettings,
                             assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
-                            previousClose: cryptoData.chartPreviousClose
+                            previousClose: cryptoData.chartPreviousClose,
+                            // Drawn only while the frame has no bars: the fast core carries
+                            // none, so this shimmers until the bars-only route answers, and a
+                            // range tap that failed or came back empty says so instead of
+                            // leaving the previous range's bars under the new pill.
+                            placeholder: chartPlaceholder(hasBars: !cryptoData.chartPricePoints.isEmpty),
+                            history: viewModel.chartHistory.state,
+                            onNeedOlderBars: { viewModel.loadOlderChartBars(userInitiated: $0) },
+                            dataRange: viewModel.chartDataRange,
+                            dataInterval: viewModel.chartDataInterval
                         )
                         .padding(.top, AppSpacing.lg)
 
@@ -205,6 +218,8 @@ struct CryptoDetailView: View {
             viewModel.stopLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
+        // OUTSIDE `.backSwipe`, so the modifier and the chart inside read the same box.
+        .environment(\.chartTouchRegion, chartTouchRegion)
         .confirmationDialog("Options", isPresented: $showMoreOptions) {
             Button("Share") {
                 handleShare()
@@ -287,6 +302,20 @@ struct CryptoDetailView: View {
                 viewModel.pendingTickerNavigation = nil
             }
         }
+    }
+
+    // MARK: - Chart Placeholder
+
+    /// What an EMPTY chart frame shows. A note when the last range / interval tap (or the
+    /// first load) ended without bars — worded to be true both for a failure and for an
+    /// empty answer — and a shimmer while bars are on their way. nil once bars are in hand
+    /// (the chart only draws a placeholder over no bars anyway).
+    private func chartPlaceholder(hasBars: Bool) -> ChartPlaceholder? {
+        guard !hasBars else { return nil }
+        if viewModel.chartLoadFailed {
+            return .note("Chart unavailable for this range right now. Pull to refresh or try another range.")
+        }
+        return viewModel.isChartLoading ? .loading : nil
     }
 
     // MARK: - Tab Content

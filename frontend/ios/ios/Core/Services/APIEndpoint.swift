@@ -247,6 +247,10 @@ enum APIEndpoint: Sendable {
     case getCryptoSentiment(symbol: String)
     case getCryptoTechnicalAnalysis(symbol: String)
     case getCryptoTechnicalAnalysisDetail(symbol: String)
+    /// Bars only — `{symbol, prices}`, the `StockChartResponse` shape. A range or interval
+    /// switch needs nothing else, so it no longer re-sends the whole detail build. 2Y is
+    /// allowed here (crypto is the one screen that offers it).
+    case getCryptoChart(symbol: String, range: String, interval: String?)
 
     // MARK: - ETFs
     case getETFDetail(symbol: String, range: String, interval: String? = nil)
@@ -282,6 +286,14 @@ enum APIEndpoint: Sendable {
     case getCommodityCore(symbol: String, range: String, interval: String? = nil)
     case getCommodityNews(symbol: String, limit: Int)
     case enrichCommodityNews(symbol: String, articleIds: [String])
+
+    // MARK: - Chart history (all five detail screens)
+    /// One page of bars strictly OLDER than `before`, for the chart's pan-left scroll-back
+    /// (`ChartHistoryLoader`). `before` is EXCLUSIVE: the oldest loaded bar's `date`, sent
+    /// exactly as received. `limit` and `extendedHours` are sent only when set, and
+    /// `extended_hours` only on the stocks route — the other four backends fetch the regular
+    /// session only (`ChartAssetContext.supportsExtendedHours`).
+    case getChartHistory(asset: ChartHistoryAsset, symbol: String, interval: String, before: String, limit: Int?, extendedHours: Bool)
 
     // MARK: - Watchlist
     case getWatchlist
@@ -577,6 +589,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/crypto/\(symbol)/technical-analysis"
         case .getCryptoTechnicalAnalysisDetail(let symbol):
             return "/api/v1/crypto/\(symbol)/technical-analysis/detail"
+        case .getCryptoChart(let symbol, _, _):
+            return "/api/v1/crypto/\(symbol)/chart"
 
         // Indices
         case .getIndexDetail(let symbol, _, _):
@@ -619,6 +633,11 @@ enum APIEndpoint: Sendable {
             return "/api/v1/commodities/\(symbol)/news"
         case .enrichCommodityNews(let symbol, _):
             return "/api/v1/commodities/\(symbol)/news/enrich"
+
+        // Chart history. The asset's raw value IS the router prefix; the symbol goes in raw,
+        // like every detail path above (`URLComponents.path` percent-encodes `^GSPC`).
+        case .getChartHistory(let asset, let symbol, _, _, _, _):
+            return "/api/v1/\(asset.rawValue)/\(symbol)/chart/history"
 
         // Watchlist
         case .getWatchlist:
@@ -912,6 +931,19 @@ enum APIEndpoint: Sendable {
         case .getCryptoDetail(_, let range, let interval):
             var params = ["range": range]
             if let interval = interval { params["interval"] = interval }
+            return params
+
+        case .getCryptoChart(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
+
+        case .getChartHistory(let asset, _, let interval, let before, let limit, let extendedHours):
+            var params = ["interval": interval, "before": before]
+            // Omitted when nil so the server's own page size applies.
+            if let limit { params["limit"] = String(limit) }
+            // Stocks only: the other four routes take no such parameter.
+            if extendedHours, case .stocks = asset { params["extended_hours"] = "true" }
             return params
 
         case .getIndexDetail(_, let range, let interval):
@@ -1245,7 +1277,14 @@ enum APIEndpoint: Sendable {
              .enrichETFNews, .getETFQuote, .getIndexQuote,
              .getCommodityDetail, .getCommodityQuote, .getCommodityNews,
              .enrichCommodityNews,
-             .getIndexCore, .getETFCore, .getCommodityCore, .getCryptoCore:
+             .getIndexCore, .getETFCore, .getCommodityCore, .getCryptoCore,
+             .getCryptoChart:
+            return .signInRequired
+
+        // Older chart bars for all five detail screens. Every one of the five routers is
+        // strict at the router level (`get_current_user_id`), and the bars are the same
+        // licensed price data as the detail payloads they extend.
+        case .getChartHistory:
             return .signInRequired
 
         // Home, Updates, themes, and the research meta lists.
